@@ -12,8 +12,11 @@ here:
   MITRE-sourced duplicate, never a canonical that is not on the graph, never an ambiguous or
   never_merge name;
 * conflicts between the two rules and chains are skipped and counted;
+* the reference checks the ATT&CK-alias pairs: a name it blocks is skipped, a name it gives to
+  another actor (or keeps as its own) is a conflict;
 * APPLY accepts a canonical the reference named, and still never a MITRE-sourced duplicate;
-* the dry run lists the reference pairs; the job end to end on a fake session.
+* the dry run lists the reference pairs; the job end to end on a fake session, with APOC missing,
+  a failed batch and the per-run cap.
 """
 
 from __future__ import annotations
@@ -167,6 +170,12 @@ class TestLoader:
             (reference_doc(actors=[{**actor("x"), "synonyms": "y"}]), "no synonym list"),
             (reference_doc(ambiguous=[{"key": "lazarus"}]), "belongs to actor"),
             (reference_doc(ambiguous=None), "no ambiguous list"),
+            (reference_doc(schema_version=2), "schema_version 2 is not 1"),
+            (reference_doc(schema_version=True), "schema_version True is not 1"),
+            (reference_doc(schema_version="1"), "schema_version '1' is not 1"),
+            ({k: v for k, v in reference_doc().items() if k != "schema_version"}, "schema_version None"),
+            (reference_doc(version="2026.10.15\n"), "not CalVer"),
+            (reference_doc(version="٢٠٢٦.10.15"), "not CalVer"),  # Arabic-Indic digits
         ],
     )
     def test_inconsistent_files_are_refused(self, tmp_path, doc, reason):
@@ -177,6 +186,19 @@ class TestLoader:
     def test_missing_file(self, tmp_path):
         with pytest.raises(cta.ReferenceUnavailable, match="not found"):
             cta.load_canonical_reference(tmp_path / "nope.json")
+
+    def test_a_directory_is_refused(self, tmp_path):
+        with pytest.raises(cta.ReferenceUnavailable, match="not a regular file"):
+            cta.load_canonical_reference(tmp_path)
+
+    def test_an_oversized_file_is_refused_before_it_is_read(self, tmp_path, monkeypatch):
+        path = write_reference(tmp_path, reference_doc())
+        monkeypatch.setattr(cta, "MAX_REFERENCE_BYTES", path.stat().st_size - 1)
+        with pytest.raises(cta.ReferenceUnavailable, match="bytes, more than"):
+            cta.load_canonical_reference(path)
+
+    def test_the_shipped_file_is_well_under_the_size_limit(self):
+        assert cta.DEFAULT_REFERENCE_PATH.stat().st_size < cta.MAX_REFERENCE_BYTES / 4
 
 
 # --------------------------------------------------------------------------- reference candidates
@@ -205,6 +227,19 @@ class TestReferenceCandidates:
             graph_row("apt29", ("mitre_attck",))
         ]
         assert cta.reference_merge_candidates(reference, rows) == []
+
+    def test_odd_source_values_hold_no_source(self, reference):
+        # An APOC merge can leave odd types behind; they must not raise.
+        rows = [
+            {"name": "lazarus", "source": 7},
+            {"name": "sandworm", "source": {"x": 1}},
+            {"name": "lazarus group", "source": "mitre_attck"},
+            {"name": "sandworm team", "source": ["mitre_attck", 3]},
+        ]
+        assert cta.reference_merge_candidates(reference, rows) == [
+            ("lazarus", "lazarus group"),
+            ("sandworm", "sandworm team"),
+        ]
 
 
 # --------------------------------------------------------------------------- planning
@@ -249,6 +284,45 @@ class TestPlan:
         plan = cta.plan_alias_merges(ATTACK_ROWS, [("dark halo", "apt29")])
         assert ("dark halo", ["apt29", "unc2452"]) in plan.ambiguous
         assert all(d != "dark halo" for _, d in plan.pairs)
+
+
+class TestReferenceChecksTheAttackRule:
+    """A canonical's ``aliases`` hold every name merged into it, so the ATT&CK rule alone would
+    keep folding a name a reviewer has since marked never_merge or given to another actor."""
+
+    def test_a_name_the_reference_blocks_is_not_merged(self, reference):
+        rows = [
+            {"duplicate_name": "medusa", "canonical_names": ["medusa group"]},  # never_merge
+            {"duplicate_name": "uac-0056", "canonical_names": ["apt29"]},  # ambiguous in the reference
+        ]
+        plan = cta.plan_alias_merges(rows, [], reference=reference)
+        assert plan.pairs == []
+        assert plan.blocked == [("medusa", "medusa group"), ("uac-0056", "apt29")]
+        assert plan.candidates == 2
+
+    def test_a_name_the_reference_gives_to_another_actor_is_a_conflict(self, reference):
+        # "lazarus" is the reference's lazarus group, even when that node is not on the graph.
+        rows = [{"duplicate_name": "lazarus", "canonical_names": ["andariel"]}]
+        plan = cta.plan_alias_merges(rows, [], reference=reference)
+        assert plan.pairs == [] and plan.conflicts == [("lazarus", ["andariel", "lazarus group"])]
+
+    def test_a_name_the_reference_keeps_as_an_actor_is_a_conflict(self, reference):
+        rows = [{"duplicate_name": "clop", "canonical_names": ["ta505"]}]
+        plan = cta.plan_alias_merges(rows, [], reference=reference)
+        assert plan.pairs == [] and plan.conflicts == [("clop", ["clop", "ta505"])]
+
+    def test_agreement_and_unknown_names_keep_the_attack_pair(self, reference):
+        rows = [
+            {"duplicate_name": "nobelium", "canonical_names": ["apt29"]},  # the reference agrees
+            {"duplicate_name": "reddelta", "canonical_names": ["mustang panda"]},  # unknown to it
+        ]
+        plan = cta.plan_alias_merges(rows, [], reference=reference)
+        assert plan.pairs == [("apt29", "nobelium"), ("mustang panda", "reddelta")]
+        assert plan.blocked == [] and plan.conflicts == [] and plan.from_attack == 2
+
+    def test_without_the_reference_the_attack_rule_is_unchanged(self):
+        rows = [{"duplicate_name": "medusa", "canonical_names": ["medusa group"]}]
+        assert cta.plan_alias_merges(rows, []).pairs == [("medusa group", "medusa")]
 
 
 # --------------------------------------------------------------------------- the job
@@ -334,18 +408,80 @@ class TestJob:
         res = enrichment_jobs.merge_alias_duplicate_actors(client)
         assert res["merged"] == 0 and _applies(calls) == []
 
-    def test_conflict_and_chain_are_skipped_and_counted(self, reference_file, caplog):
+    def test_conflicts_are_skipped_and_counted(self, reference_file, caplog):
         attack = [
             {"duplicate_name": "lazarus", "canonical_names": ["andariel"]},  # reference: lazarus group
-            {"duplicate_name": "clop", "canonical_names": ["ta505"]},  # clop is the reference canonical of cl0p
+            {"duplicate_name": "clop", "canonical_names": ["ta505"]},  # the reference keeps clop as an actor
         ]
         client, calls = _fake_client(attack, GRAPH)
         res = enrichment_jobs.merge_alias_duplicate_actors(client)
-        assert (res["skipped_conflict"], res["skipped_chain"]) == (1, 1)
+        # Before the reference checked the ATT&CK rule, clop was skipped as a chain (it is the
+        # reference canonical of cl0p in this run); it is a conflict now, and chains cannot occur.
+        assert (res["skipped_conflict"], res["skipped_chain"], res["skipped_blocked"]) == (2, 0, 0)
         merged = {(g["canonical"], d) for kw in _applies(calls) for g in kw["groups"] for d in g["duplicates"]}
         assert ("andariel", "lazarus") not in merged and ("lazarus group", "lazarus") not in merged
         assert ("ta505", "clop") not in merged and ("clop", "cl0p") in merged
-        assert "(conflict)" in caplog.text and "(chain)" in caplog.text
+        assert caplog.text.count("(conflict)") == 2
+
+    def test_a_name_the_reference_blocks_is_skipped_end_to_end(self, reference_file, caplog):
+        caplog.set_level(logging.INFO, logger="enrichment_jobs")
+        attack = ATTACK_ROWS + [{"duplicate_name": "medusa", "canonical_names": ["medusa group"]}]
+        client, calls = _fake_client(attack, GRAPH)
+        res = enrichment_jobs.merge_alias_duplicate_actors(client)
+        assert res["skipped_blocked"] == 1 and res["merged"] == 5
+        merged = {(g["canonical"], d) for kw in _applies(calls) for g in kw["groups"] for d in g["duplicates"]}
+        assert ("medusa group", "medusa") not in merged
+        assert "skipping 'medusa' -> 'medusa group'" in caplog.text and "(blocked)" in caplog.text
+        assert "skipped_blocked=1" in caplog.text
+
+    def test_reference_data_that_cannot_be_applied_falls_back_with_one_warning(
+        self, reference_file, monkeypatch, caplog
+    ):
+        def boom(*args, **kwargs):
+            raise TypeError("odd graph data")
+
+        monkeypatch.setattr(enrichment_jobs, "reference_merge_candidates", boom)
+        client, calls = _fake_client(ATTACK_ROWS, GRAPH)
+        res = enrichment_jobs.merge_alias_duplicate_actors(client)
+        warnings = [r.getMessage() for r in caplog.records if "canonical reference unavailable" in r.getMessage()]
+        assert warnings == [
+            "[ACTOR-ALIAS-MERGE] canonical reference unavailable (TypeError: odd graph data); "
+            "merging by MITRE aliases only"
+        ]
+        (apply,) = _applies(calls)
+        assert apply["groups"] == [{"canonical": "mustang panda", "duplicates": ["reddelta"]}]
+        assert apply["reference_canonicals"] == []
+        assert res["merged"] == 1 and res["reference_candidates"] == 0
+
+    def test_apoc_missing_with_the_reference_is_a_warning_and_merges_nothing(self, reference_file, caplog):
+        class ProcedureNotFound(Exception):
+            code = "Neo.ClientError.Procedure.ProcedureNotFound"
+
+        client, calls = _fake_client(ATTACK_ROWS, GRAPH, apply_exc=ProcedureNotFound("apoc.refactor.mergeNodes"))
+        res = enrichment_jobs.merge_alias_duplicate_actors(client)
+        assert (res["apoc_missing"], res["merged"], res["errors"]) == (1, 0, 0)
+        assert "APOC unavailable" in caplog.text
+        assert not any("AS restamped" in q for q, _ in calls)
+
+    def test_a_failed_batch_with_the_reference_is_counted_and_the_next_batch_runs(
+        self, reference_file, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(enrichment_jobs, "_ACTOR_ALIAS_MERGE_BATCH_SIZE", 2)
+        client, calls = _fake_client(ATTACK_ROWS, GRAPH, apply_exc=RuntimeError("Can't coerce String to List"))
+        res = enrichment_jobs.merge_alias_duplicate_actors(client)
+        assert res["errors"] == 3 and res["merged"] == 0  # 5 pairs in batches of 2
+        assert caplog.text.count("FAILED (") == 3
+
+    def test_the_per_run_cap_with_the_reference(self, reference_file, monkeypatch, caplog):
+        monkeypatch.setattr(enrichment_jobs, "_ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN", 2)
+        monkeypatch.setattr(enrichment_jobs, "_ACTOR_ALIAS_MERGE_BATCH_SIZE", 1)
+        client, calls = _fake_client(ATTACK_ROWS, GRAPH)
+        res = enrichment_jobs.merge_alias_duplicate_actors(client)
+        applies = _applies(calls)
+        assert res["merged"] == 2 and len(applies) == 2
+        assert [g["canonical"] for kw in applies for g in kw["groups"]] == ["clop", "lazarus group"]
+        assert all(kw["reference_canonicals"] == ["clop", "lazarus group", "sandworm team"] for kw in applies)
+        assert "exceed the per-run cap 2" in caplog.text
 
     def test_dry_run_lists_the_reference_pairs(self, reference_file, monkeypatch, caplog):
         monkeypatch.setenv(FLAG, "false")

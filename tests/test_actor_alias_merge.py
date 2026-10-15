@@ -206,11 +206,14 @@ class TestMergeBehaviour:
     def test_apply_cypher_shape(self):
         client, calls = _fake_client(MUSTANG_PANDA_ROWS)
         enrichment_jobs.merge_alias_duplicate_actors(client)
-        query = next(q for q, _ in calls if _is_apply_query(q))
+        query, kwargs = next((q, kw) for q, kw in calls if _is_apply_query(q))
 
         # Canonical-side / duplicate-side MITRE guards re-checked at merge time
-        # so two canonical actors can never be merged.
-        assert "WHERE $mitre_source IN coalesce(c.source, [])" in query
+        # so two canonical actors can never be merged. Without the reference the
+        # second branch of the canonical guard names no node: only a MITRE-sourced
+        # canonical can be merged into.
+        assert "WHERE $mitre_source IN coalesce(c.source, []) OR c.name IN $reference_canonicals\n" in query
+        assert kwargs["reference_canonicals"] == []
         assert "NOT $mitre_source IN coalesce(d.source, [])" in query
         assert "d <> c" in query
         # Aliases gain the duplicate names BEFORE mergeNodes.
@@ -222,8 +225,21 @@ class TestMergeBehaviour:
         assert "properties: $strategy" in query
         assert "mergeRels: true" in query
         assert "produceSelfRel: false" in query
-        # Post-merge dedup of the combined lists.
-        assert "node.aliases = apoc.coll.toSet(coalesce(node.aliases, []))" in query
+        assert "singleElementAsArray" not in query  # it would turn SOURCED_FROM's scalar r.source into a list
+
+    def test_every_list_property_is_wrapped_back_into_a_list_in_the_merge_statement(self):
+        # 2026-10: "combine" stores equal values as one string (two OTX nodes of one actor both hold
+        # source ["alienvault_otx"]), and apoc.coll.toSet on that string fails the whole batch.
+        query = enrichment_jobs._ACTOR_ALIAS_MERGE_APPLY_CYPHER
+        after_merge = query[query.index("YIELD node") :]
+        list_props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
+        assert {"aliases", "source", "zone"} <= set(list_props)
+        for prop in list_props:
+            wrapped = enrichment_jobs._list_or_wrapped(f"node.{prop}")
+            assert f"node.{prop} = {wrapped}" in after_merge
+            assert f'apoc.meta.cypher.type(node.{prop}) STARTS WITH "LIST"' in wrapped
+            assert f"ELSE [node.{prop}] END" in wrapped
+        assert "apoc.coll.toSet(coalesce(node." not in after_merge
 
     def test_restamp_queries_follow_each_merge_batch(self):
         client, calls = _fake_client(MUSTANG_PANDA_ROWS, restamped=1)
@@ -265,6 +281,7 @@ class TestMergeBehaviour:
             "reference_candidates": 0,
             "skipped_conflict": 0,
             "skipped_chain": 0,
+            "skipped_blocked": 0,
         }
         # Without the reference there is no second read of the graph.
         assert len(calls) == 1 and _is_candidate_query(calls[0][0])

@@ -100,11 +100,18 @@ def build(gen, *records, ovr=None, revocations=None, loaded=()):
     )
 
 
-def node(name, aliases=(), source=("mitre_attck",), relationships=0, attack_id=None, malware=()):
-    """One row of a graph export (``--export-graph-actors``)."""
+_DELIVERED = object()  # node(): the delivered aliases default to the node's aliases on an ATT&CK row
+
+
+def node(name, aliases=(), source=("mitre_attck",), relationships=0, attack_id=None, malware=(), delivered=_DELIVERED):
+    """One row of a graph export (``--export-graph-actors``). ``delivered`` is ``attack_aliases``,
+    the aliases MITRE delivered for an ATT&CK node (``None``: no delivered record)."""
+    if delivered is _DELIVERED:
+        delivered = list(aliases) if "mitre_attck" in source else None
     return {
         "name": name,
         "aliases": list(aliases),
+        "attack_aliases": delivered,
         "source": list(source),
         "relationships": relationships,
         "pulses": 0,
@@ -285,12 +292,26 @@ class TestPrimaryNameJoin:
         assert "unc2452" not in a["apt29"]["synonyms"]
 
     def test_unmatched_records_with_one_name_form_one_actor_named_by_galaxy_priority(self, gen):
-        ref, _ = build(gen, ms("RAZOR TIGER"), rec("360net-threat-actor", "razor tiger"), ta("Razor Tiger"))
+        ref, _ = build(gen, ms("RAZOR TIGER"), rec("mitre-ics-groups", "razor tiger"), ta("Razor Tiger"))
         a = actors(ref)
         assert list(a) == ["razor tiger"]
         assert a["razor tiger"]["name"] == "Razor Tiger"  # the threat-actor galaxy value
         assert a["razor tiger"]["mitre_attack"] is None
         assert len(a["razor tiger"]["records"]) == 3
+
+    def test_a_threesixty_record_that_joins_no_attack_actor_is_left_out(self, gen):
+        # Its key would be a name no feed writes, and its English synonyms belong to other actors.
+        ref, stats = build(
+            gen,
+            mitre("APT28", "G0007", ["Sofacy"]),
+            rec("360net-threat-actor", "奇幻熊 - APT-C-20", ["Sofacy Group"]),
+            rec("360net-threat-actor", "Razor Tiger - APT-C-09"),
+            ta("Razor Tiger"),
+        )
+        assert set(actors(ref)) == {"apt28", "razor tiger"}
+        assert len(actors(ref)["razor tiger"]["records"]) == 1  # 360net records join ATT&CK actors only
+        assert owner(ref, "sofacy group") == "apt28"  # the suffix variant of ATT&CK's "Sofacy"
+        assert [i["name"] for i in stats.unjoined_360net] == ["奇幻熊 - APT-C-20", "Razor Tiger - APT-C-09"]
 
 
 # --------------------------------------------------------------------------- rules 3 and 4
@@ -327,13 +348,33 @@ class TestSynonymsAndAmbiguity:
         assert stats.actor_keys_claimed_elsewhere == 1
 
     def test_attack_alias_outranks_a_galaxy_synonym_of_another_actor(self, gen):
-        ref, stats = build(
-            gen,
-            mitre("APT28", "G0007", ["Fancy Bear"]),
-            rec("360net-threat-actor", "Fancy-Bear-CN - APT-C-20", ["Fancy Bear"]),
-        )
+        ref, stats = build(gen, mitre("APT28", "G0007", ["Fancy Bear"]), ta("Fancy Bear CN", ["Fancy Bear"]))
         assert owner(ref, "fancy bear") == "apt28"
-        assert stats.contested_resolved[0]["over"] == ["fancy-bear-cn - apt-c-20"]
+        assert stats.contested_resolved[0]["over"] == ["fancy bear cn"]
+
+    def test_spellings_of_one_name_held_by_two_actors_stay_with_the_strongest(self, gen):
+        # "deputy dog" is an ATT&CK alias of APT17, "DeputyDog" a galaxy synonym of Heart Typhoon.
+        ref, stats = build(gen, mitre("APT17", "G0025", ["Deputy Dog"]), ms("Heart Typhoon", ["DeputyDog"]))
+        assert owner(ref, "deputy dog") == "apt17"
+        assert owner(ref, "deputydog") == "AMBIGUOUS"
+        entry = next(e for e in ref["ambiguous"] if e["key"] == "deputydog")
+        assert entry["actors"] == ["apt17", "heart typhoon"]
+        assert [(i["name"], i["kept_by"]) for i in stats.spelling_variants_ambiguous] == [("deputydog", "apt17")]
+
+    def test_spellings_of_one_name_with_equal_claims_are_all_ambiguous(self, gen):
+        ref, _ = build(gen, ta("Lazarus Group", ["Dark Seoul"]), ms("Andariel", ["DarkSeoul"]))
+        assert owner(ref, "dark seoul") == owner(ref, "darkseoul") == "AMBIGUOUS"
+
+    def test_an_actor_key_keeps_its_spelling_and_the_other_spelling_is_ambiguous(self, gen):
+        ref, _ = build(gen, ta("TempTick"), ta("Bronze Butler", ["TEMP.Tick"]))
+        assert owner(ref, "temptick") == "temptick"
+        assert owner(ref, "temp.tick") == "AMBIGUOUS"
+        assert "temp.tick" not in actors(ref)["bronze butler"]["synonyms"]
+
+    def test_spellings_one_actor_holds_are_kept(self, gen):
+        ref, stats = build(gen, ta("Sandworm Team", ["Voodoo Bear", "VoodooBear"]))
+        assert owner(ref, "voodoo bear") == owner(ref, "voodoobear") == "sandworm team"
+        assert stats.spelling_variants_ambiguous == []
 
     def test_two_attack_groups_listing_one_alias_make_it_ambiguous(self, gen):
         ref, _ = build(gen, mitre("APT29", "G0016", ["Dark Halo"]), mitre("UNC2452", "G0118", ["Dark Halo"]))
@@ -374,6 +415,22 @@ class TestSuffixRule:
     def test_variant_two_actors_would_get_is_ambiguous(self, gen):
         ref, _ = build(gen, ta("Daixin Team"), ms("Daixin Group"))
         assert owner(ref, "daixin") == "AMBIGUOUS"
+
+    def test_variant_another_actor_holds_by_a_galaxy_synonym_is_ambiguous(self, gen):
+        # "winnti" of ATT&CK's "Winnti Group" against a galaxy synonym of APT41.
+        ref, stats = build(
+            gen, mitre("Winnti Group", "G0044"), mitre("APT41", "G0096"), ta("APT41", ["Winnti"], attack="G0096")
+        )
+        entry = next(e for e in ref["ambiguous"] if e["key"] == "winnti")
+        assert entry["actors"] == ["apt41", "winnti group"]
+        assert entry["origins"]["winnti group"] == ["suffix_rule"]
+        assert "winnti" not in actors(ref)["apt41"]["synonyms"]
+        assert stats.suffix_contested == [{"name": "winnti", "held_by": "apt41", "variant_of": ["winnti group"]}]
+
+    def test_variant_another_actor_holds_by_an_attack_alias_stays_with_it(self, gen):
+        ref, stats = build(gen, mitre("Winnti Group", "G0044"), mitre("APT41", "G0096", ["Winnti"]))
+        assert owner(ref, "winnti") == "apt41"
+        assert stats.suffix_contested == [] and stats.suffix_blocked >= 1
 
     def test_existing_synonym_gains_the_origin(self, gen):
         # Aqua Blizzard joins Gamaredon Group (an ATT&CK alias) and brings the synonym "Gamaredon".
@@ -706,6 +763,55 @@ class TestLoadedAttack:
         assert "attack_description" not in rows[0]
         assert rows[1]["attack_id"] is None
 
+    def test_export_rows_read_the_record_mitre_delivered(self, gen):
+        delivered = json.dumps(
+            {"aliases": ["APT28", "Fancy Bear", 7], "description": "[APT28](https://attack.mitre.org/groups/G0007) is"}
+        )
+        rows = gen.export_rows(
+            [
+                # the node's aliases hold a merged name and another feed overwrote its description
+                {
+                    "name": "apt28",
+                    "aliases": ["APT28", "Fancy Bear", "uac-0001"],
+                    "source": ["mitre_attck", "alienvault_otx"],
+                    "attack_description": "Cyber threats targeting the aviation sector ...",
+                    "attack_raw": delivered,
+                },
+                {
+                    "name": "apt34",
+                    "aliases": None,
+                    "source": ["mitre_attck"],
+                    "attack_description": "[OilRig](https://attack.mitre.org/groups/G0049) is",
+                    "attack_raw": "{not json",
+                },
+                {"name": "x", "aliases": None, "source": ["alienvault_otx"], "attack_raw": None},
+            ]
+        )
+        assert (rows[0]["attack_aliases"], rows[0]["attack_id"]) == (["APT28", "Fancy Bear"], "G0007")
+        assert (rows[1]["attack_aliases"], rows[1]["attack_id"]) == (None, "G0049")  # falls back to the node
+        assert rows[2]["attack_aliases"] is None and "attack_raw" not in rows[0]
+
+    def test_merged_names_on_a_node_are_no_attack_claims(self, gen):
+        # The actor alias merge wrote "uac-0001" into apt28's aliases; ATT&CK never listed it.
+        attack = loaded(gen, node("apt28", ["APT28", "Fancy Bear", "uac-0001"], delivered=["APT28", "Fancy Bear"]))
+        assert attack[0].aliases == ("fancy bear",)
+        ref, _ = build(gen, mitre("APT28", "G0007"), ms("Forest Blizzard", ["UAC-0001"]), loaded=attack)
+        assert owner(ref, "uac-0001") == "forest blizzard"
+        assert "uac-0001" not in actors(ref)["apt28"]["synonym_origins"].get("mitre_loaded", [])
+
+    def test_a_node_without_a_delivered_record_gives_its_name_only(self, gen):
+        (group,) = loaded(gen, node("monsoon", ["Monsoon", "Patchwork"], delivered=None))
+        assert (group.key, group.aliases) == ("monsoon", ())
+
+    def test_an_export_without_delivered_aliases_is_refused(self, gen):
+        row = node("apt28", ["APT28"])
+        del row["attack_aliases"]
+        with pytest.raises(gen.ReferenceInputError, match="re-export"):
+            gen.load_graph_actors([row])
+        other = node("clop", source=("alienvault_otx",))
+        del other["attack_aliases"]
+        assert gen.load_graph_actors([other])[0]["attack_aliases"] is None  # only ATT&CK rows need it
+
 
 # --------------------------------------------------------------------------- never_merge with an actor
 
@@ -800,14 +906,26 @@ class TestReport:
     def test_graph_resolution_duplicates_and_mismatches(self, gen):
         ref, stats = build(gen, *_sample(gen))
         graph = [
-            {"name": "sandworm team", "source": ["mitre_attck"], "relationships": 118, "pulses": 24},
+            {
+                "name": "sandworm team",
+                "source": ["mitre_attck"],
+                "relationships": 118,
+                "pulses": 24,
+                "attack_aliases": [],
+            },
             {"name": "sandworm", "source": ["alienvault_otx"], "relationships": 105, "pulses": 7},
-            {"name": "lazarus group", "source": ["mitre_attck"], "relationships": 297, "pulses": 20},
-            {"name": "andariel", "source": ["mitre_attck"], "relationships": 15, "pulses": 0},
+            {
+                "name": "lazarus group",
+                "source": ["mitre_attck"],
+                "relationships": 297,
+                "pulses": 20,
+                "attack_aliases": [],
+            },
+            {"name": "andariel", "source": ["mitre_attck"], "relationships": 15, "pulses": 0, "attack_aliases": []},
             {"name": "aurora panda", "source": ["alienvault_otx"], "relationships": 9, "pulses": 1},
             {"name": "clop", "source": ["alienvault_otx"], "relationships": 93, "pulses": 4},
             {"name": "qilin", "source": ["alienvault_otx"], "relationships": 71, "pulses": 7},
-            {"name": "new group", "source": ["mitre_attck"], "relationships": 3, "pulses": 0},
+            {"name": "new group", "source": ["mitre_attck"], "relationships": 3, "pulses": 0, "attack_aliases": None},
         ]
         report = gen.build_report(ref, stats, gen.load_graph_actors({"actors": graph}), top=1)
         g = report["graph"]

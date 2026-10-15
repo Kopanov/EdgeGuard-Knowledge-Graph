@@ -10,8 +10,12 @@ Every name in the file has one place: the key of one actor, a synonym of one act
 ``ambiguous`` (a name that points to more than one actor, or was marked never_merge). A name is
 looked up by the key EdgeGuard writes for it (``node_identity.canonicalize_merge_key``).
 
-``EDGEGUARD_CANONICAL_THREAT_ACTORS`` overrides the path. A file that is missing, unreadable or
-inconsistent raises ``ReferenceUnavailable``; the merge then runs on ATT&CK aliases alone.
+``EDGEGUARD_CANONICAL_THREAT_ACTORS`` overrides the path. A file that is missing, unreadable,
+larger than ``MAX_REFERENCE_BYTES``, of another ``schema_version`` or inconsistent raises
+``ReferenceUnavailable``; the merge then runs on ATT&CK aliases alone.
+
+The reference is the reviewed authority on the names it lists: an ATT&CK-alias pair whose duplicate
+it marks ambiguous or never_merge, or gives to another actor (or to itself), is not merged.
 """
 
 from __future__ import annotations
@@ -29,8 +33,10 @@ from node_identity import canonicalize_merge_key, is_placeholder_name
 REFERENCE_PATH_ENV = "EDGEGUARD_CANONICAL_THREAT_ACTORS"
 DEFAULT_REFERENCE_PATH = Path(__file__).resolve().parent / "reference" / "canonical_threat_actors.json"
 MITRE_SOURCE = "mitre_attck"  # SOURCE_TAGS["mitre"]: ATT&CK-sourced nodes are never duplicates
+SCHEMA_VERSION = 1  # the file layout this module reads
+MAX_REFERENCE_BYTES = 16 * 1024 * 1024  # the shipped file is about 0.7 MB
 
-_VERSION_RE = re.compile(r"^(\d{4})\.(\d{2})\.(\d{2})$")
+_VERSION_RE = re.compile(r"([0-9]{4})\.([0-9]{2})\.([0-9]{2})")  # used with fullmatch: ASCII digits only
 
 
 class ReferenceUnavailable(Exception):
@@ -75,8 +81,13 @@ def _normalised(value: Any) -> bool:
 def validate_reference(doc: Any, path: str = "") -> CanonicalReference:
     """Check the reference's structure and that every name has exactly one place."""
     _require(isinstance(doc, Mapping), "not a JSON object")
+    schema = doc.get("schema_version")
+    _require(
+        type(schema) is int and schema == SCHEMA_VERSION,
+        f"schema_version {schema!r} is not {SCHEMA_VERSION}",
+    )
     version = doc.get("version")
-    match = _VERSION_RE.match(version) if isinstance(version, str) else None
+    match = _VERSION_RE.fullmatch(version) if isinstance(version, str) else None
     _require(match is not None, f"version {version!r} is not CalVer YYYY.MM.DD")
     assert match is not None
     try:
@@ -131,6 +142,13 @@ def load_canonical_reference(path: Union[str, Path, None] = None) -> CanonicalRe
     the file shipped in ``src/reference/``). Raises ``ReferenceUnavailable``."""
     chosen = Path(path or os.getenv(REFERENCE_PATH_ENV) or DEFAULT_REFERENCE_PATH)
     try:
+        if not chosen.is_file():
+            if chosen.exists():
+                raise ReferenceUnavailable(f"{chosen} is not a regular file")
+            raise FileNotFoundError(chosen)
+        size = chosen.stat().st_size
+        if size > MAX_REFERENCE_BYTES:
+            raise ReferenceUnavailable(f"{chosen} has {size} bytes, more than {MAX_REFERENCE_BYTES}")
         with chosen.open(encoding="utf-8") as fh:
             doc = json.load(fh)
     except FileNotFoundError:
@@ -144,9 +162,13 @@ def load_canonical_reference(path: Union[str, Path, None] = None) -> CanonicalRe
 
 
 def _sources(value: Any) -> List[str]:
+    """A node's ``source`` as a list of strings: a scalar string is one source; any other value
+    (an APOC merge can leave odd types) holds none."""
     if isinstance(value, str):
         return [value]
-    return [s for s in (value or []) if isinstance(s, str)]
+    if isinstance(value, (list, tuple)):
+        return [s for s in value if isinstance(s, str)]
+    return []
 
 
 def reference_merge_candidates(
@@ -188,14 +210,17 @@ class MergePlan:
     ambiguous: List[Tuple[str, List[str]]] = field(default_factory=list)  # (duplicate, canonicals)
     conflicts: List[Tuple[str, List[str]]] = field(default_factory=list)  # (duplicate, canonicals)
     chains: List[Tuple[str, str]] = field(default_factory=list)  # (duplicate, canonical) skipped
+    blocked: List[Tuple[str, str]] = field(default_factory=list)  # (duplicate, ATT&CK canonical) skipped
 
     @property
     def candidates(self) -> int:
-        return len(self.pairs) + len(self.ambiguous) + len(self.conflicts) + len(self.chains)
+        return len(self.pairs) + len(self.ambiguous) + len(self.conflicts) + len(self.chains) + len(self.blocked)
 
 
 def plan_alias_merges(
-    attack_rows: Iterable[Mapping[str, Any]], reference_pairs: Sequence[Tuple[str, str]]
+    attack_rows: Iterable[Mapping[str, Any]],
+    reference_pairs: Sequence[Tuple[str, str]],
+    reference: Optional[CanonicalReference] = None,
 ) -> MergePlan:
     """Combine the two rules' candidates into the pairs to merge.
 
@@ -203,9 +228,17 @@ def plan_alias_merges(
     duplicate that is an alias of more than one ATT&CK node is ambiguous. ``reference_pairs`` come
     from ``reference_merge_candidates``. A duplicate the two rules give different canonicals is a
     conflict, and a node that would be both a canonical and a duplicate in this run is not merged
-    as a duplicate (no chains, no cycles). Skipped pairs are listed, never merged."""
+    as a duplicate (no chains, no cycles). Skipped pairs are listed, never merged.
+
+    With ``reference``, the reviewed reference also checks the ATT&CK-alias pairs. A canonical's
+    ``aliases`` hold ATT&CK's aliases and every name merged into it, so the ATT&CK rule alone
+    would keep folding a name a reviewer has since marked never_merge. A pair whose duplicate the
+    reference marks ambiguous or never_merge is ``blocked``. A pair whose duplicate it gives to
+    another actor, or keeps as an actor of its own, is a conflict. A name the reference does not
+    list is left to the ATT&CK rule."""
     proposals: Dict[str, Dict[str, Set[str]]] = {}  # duplicate -> canonical -> rules
     ambiguous: List[Tuple[str, List[str]]] = []
+    blocked: List[Tuple[str, str]] = []
     for row in attack_rows:
         duplicate = row.get("duplicate_name")
         canonicals = sorted({c for c in (row.get("canonical_names") or []) if c})
@@ -214,7 +247,17 @@ def plan_alias_merges(
         if len(canonicals) > 1:
             ambiguous.append((duplicate, canonicals))
             continue
-        proposals.setdefault(duplicate, {}).setdefault(canonicals[0], set()).add("attack")
+        canonical = canonicals[0]
+        if reference is not None:
+            duplicate_key = name_key(duplicate)
+            if duplicate_key in reference.blocked:
+                blocked.append((duplicate, canonical))
+                continue
+            owner = reference.owners.get(duplicate_key)
+            if owner is not None and owner != name_key(canonical):
+                # The reference's own answer competes with the ATT&CK rule's: a conflict below.
+                proposals.setdefault(duplicate, {}).setdefault(owner, set()).add("reference")
+        proposals.setdefault(duplicate, {}).setdefault(canonical, set()).add("attack")
     ambiguous_names = {d for d, _ in ambiguous}
     for duplicate, canonical in reference_pairs:
         if duplicate in ambiguous_names:
@@ -239,13 +282,16 @@ def plan_alias_merges(
         ambiguous=sorted(ambiguous),
         conflicts=conflicts,
         chains=chains,
+        blocked=sorted(blocked),
     )
 
 
 __all__ = [
     "DEFAULT_REFERENCE_PATH",
+    "MAX_REFERENCE_BYTES",
     "MITRE_SOURCE",
     "REFERENCE_PATH_ENV",
+    "SCHEMA_VERSION",
     "CanonicalReference",
     "MergePlan",
     "ReferenceUnavailable",

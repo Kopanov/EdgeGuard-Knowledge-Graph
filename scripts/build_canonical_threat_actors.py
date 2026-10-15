@@ -16,9 +16,9 @@ Inputs
                          ``aliases``, ``external_ids.mitre_attack`` and ``provenance``).
 ``--attack-galaxy-raw``  the raw mitre-intrusion-set galaxy dump that export was built from; its
                          ``revoked-by`` relations say which ATT&CK groups were revoked into which.
-``--graph-actors``       an export made by ``--export-graph-actors``. Its ATT&CK-sourced nodes are
-                         the ATT&CK version EdgeGuard loaded (newer than the galaxy copy); the
-                         rest of it feeds the report.
+``--graph-actors``       an export made by ``--export-graph-actors``. Its ATT&CK-sourced nodes, with
+                         the aliases MITRE delivered for them, are the ATT&CK version EdgeGuard
+                         loaded (newer than the galaxy copy); the rest of it feeds the report.
 ``--overrides``          hand-reviewed decisions (``src/reference/canonical_threat_actor_overrides.json``),
                          applied last so that a rebuild keeps them.
 
@@ -36,8 +36,11 @@ name on write: NFC, trimmed, lower-case. The ``name_key`` of the input is not us
    * A group ATT&CK revoked into another (``revoked-by``) is folded into its successor. Its key,
      name and aliases become synonyms of the successor (origin ``mitre_revoked``).
    * The ATT&CK version EdgeGuard loaded is anchored too. For each ATT&CK-sourced graph node, its
-     name and aliases are ATT&CK claims, the strongest after an actor key (origin
-     ``mitre_loaded``). A node whose name is no galaxy group's key does one of three things:
+     name and the aliases MITRE delivered for it are ATT&CK claims, the strongest after an actor
+     key (origin ``mitre_loaded``). The delivered aliases are read from the node's SOURCED_FROM
+     edge to the ATT&CK source, not from the node: the node's ``aliases`` also hold every name the
+     actor alias merge folded into it, which must not come back as ATT&CK claims. A node whose name
+     is no galaxy group's key does one of three things:
      - it goes to its successor when it is a revoked group;
      - it renames the galaxy group whose ATT&CK id its description carries;
      - otherwise it becomes an anchor by name.
@@ -48,7 +51,9 @@ name on write: NFC, trimmed, lower-case. The ``name_key`` of the input is not us
    ("SaintBear" is ATT&CK's "Saint Bear"); the exact name is tried first. A 360net-threat-actor
    name is also tried without its `` - APT-C-NN`` id ("Darkhotel - APT-C-06"). Otherwise records
    with the same name form an actor of their own. It is named after the threat-actor galaxy
-   value, else the microsoft-activity-group, the 360net-threat-actor or the mitre-ics-groups value.
+   value, else the microsoft-activity-group or the mitre-ics-groups value. A 360net-threat-actor
+   record that joins no ATT&CK actor is left out: its key (a Chinese name or "<name> - APT-C-NN")
+   is a name no feed writes, and its English synonyms belong to other actors.
 3. Synonyms are the names the records give for their actor (aliases, and the names of joined
    records). They never merge two actors.
 4. A synonym claimed by more than one actor goes to the actor whose own name it is. In order:
@@ -56,17 +61,22 @@ name on write: NFC, trimmed, lower-case. The ``name_key`` of the input is not us
    - then a loaded ATT&CK alias;
    - then a galaxy ATT&CK alias, a revoked group's name or a record's own name;
    - then a plain galaxy synonym.
-   If no single actor holds the strongest claim, the name is ambiguous and is never merged.
+   If no single actor holds the strongest claim, the name is ambiguous and is never merged. The
+   spellings of one name (rule 2: they differ only in spaces, hyphens, dots or underscores) are
+   settled together after rule 5: when they belong to different actors, the actor holding the
+   strongest spelling keeps its spellings, and the other spellings are ambiguous; on a tie every
+   spelling is ambiguous ("dark seoul" / "darkseoul").
    Some names are never synonyms: ATT&CK group ids (the id is ``mitre_attack``), placeholder names
    (``node_identity.is_placeholder_name``) and lists of names. A synonym is taken as EdgeGuard's
    actor-name hygiene writes it (``actor_name_hygiene.clean_actor_names``: a trailing parenthetical
    is dropped).
 5. Suffix rule. Applies to every actor key, ATT&CK alias and revoked name: the variant with a
    trailing `` group`` / `` team`` removed (or added, when the name has neither) becomes a
-   synonym when no actor claims it yet. A variant two actors would get is ambiguous. A shortened
-   name keeps at least three characters and a letter. Nothing is added to a name that already
-   has the word ``group`` or ``team`` in it. Shortened names can be common words; the report lists
-   them for review.
+   synonym when no actor claims it yet. A variant two actors would get is ambiguous, and so is a
+   variant another actor holds only by a plain galaxy synonym ("winnti": ATT&CK's "Winnti Group"
+   against a galaxy synonym of APT41). A shortened name keeps at least three characters and a
+   letter. Nothing is added to a name that already has the word ``group`` or ``team`` in it.
+   Shortened names can be common words; the report lists them for review.
 6. Overrides are applied last, in this order:
    - ``never_merge`` with an ``actor`` takes the names away from that actor and never gives them
      back to it;
@@ -94,8 +104,10 @@ The build prints the counts, the rule effects and every override decision. With
   with ``--unresolved-out``.
 
 ``--export-graph-actors PATH`` reads every ``ThreatActor`` node over the Neo4j HTTP Query API v2
-in read mode: name, aliases, sources, relationship count, pulse count, malware names, and the
-ATT&CK group id an ATT&CK node's description links to. It uses the same settings as
+in read mode: name, aliases, sources, relationship count, pulse count and malware names. For an
+ATT&CK node it also reads the record MITRE delivered (its SOURCED_FROM edge to the ATT&CK source):
+the delivered aliases (``attack_aliases``) and the ATT&CK group id the delivered description links
+to (else the id the node's own description links to). It uses the same settings as
 ``scripts/verify_fresh_baseline.py``: ``NEO4J_HTTP_URL`` or ``NEO4J_HTTP``, ``NEO4J_DATABASE``,
 ``NEO4J_USER``, ``NEO4J_PASSWORD``. Graph-derived files must be written outside the
 repository; the script refuses a path inside it.
@@ -189,21 +201,26 @@ RULES: Tuple[str, ...] = (
     "Records with the same ATT&CK id are one actor named after the ATT&CK group; a record whose own "
     "name is the ATT&CK name of a different group is not anchored by its id. A group ATT&CK revoked "
     "into another is folded into its successor (origin mitre_revoked). The ATT&CK version EdgeGuard "
-    "loaded anchors too: its names and aliases are the strongest claims after an actor key (origin "
-    "mitre_loaded), and a group the galaxy copy does not have is anchored by its name.",
+    "loaded anchors too: its names and the aliases MITRE delivered for them are the strongest claims "
+    "after an actor key (origin mitre_loaded), and a group the galaxy copy does not have is anchored "
+    "by its name.",
     "A record without an ATT&CK id joins an anchored actor only when its name (for the "
     "360net-threat-actor galaxy also the name without its ' - APT-C-NN' id) is that actor's key, an "
     "ATT&CK alias or revoked name of it or the name of a record anchored to it, for exactly one "
     "actor; names that differ only in spaces, hyphens, dots or underscores are the same name. "
-    "Otherwise records with the same name form an actor of their own.",
+    "Otherwise records with the same name form an actor of their own; a 360net-threat-actor record "
+    "that joins no ATT&CK actor is left out.",
     "Synonyms never merge two actors.",
     "A name claimed by several actors goes to the actor whose own name it is (actor key, then loaded "
     "ATT&CK alias, then galaxy ATT&CK alias, revoked name or record name, then galaxy synonym); a tie "
-    "makes it ambiguous. ATT&CK ids, placeholder names and lists of names are not synonyms; a synonym "
-    "is taken as EdgeGuard's actor-name hygiene writes it.",
+    "makes it ambiguous. Spellings of one name held by different actors stay with the actor holding "
+    "the strongest spelling and are ambiguous for the others (all of them on a tie). ATT&CK ids, "
+    "placeholder names and lists of names are not synonyms; a synonym is taken as EdgeGuard's "
+    "actor-name hygiene writes it.",
     "Suffix rule: the variant with or without a trailing ' group' / ' team' of an actor key or "
-    "ATT&CK name is a synonym when no other actor claims it (a shortened name keeps at least three "
-    "characters and a letter; nothing is added to a name that already contains 'group' or 'team').",
+    "ATT&CK name is a synonym when no other actor claims it, and ambiguous when another actor holds "
+    "it only by a galaxy synonym (a shortened name keeps at least three characters and a letter; "
+    "nothing is added to a name that already contains 'group' or 'team').",
     "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name.",
 )
 ATTRIBUTION: Tuple[Dict[str, str], ...] = (
@@ -335,8 +352,8 @@ class LoadedAttackGroup:
 
     key: str
     name: str  # display name: the alias spelled like the key, else the key
-    attack_id: Optional[str]  # from the node's description link, when it has one
-    aliases: Tuple[str, ...]  # synonym keys (``clean_synonym``), without the key
+    attack_id: Optional[str]  # from the delivered (else the node's) description link, when it has one
+    aliases: Tuple[str, ...]  # synonym keys (``clean_synonym``) of the delivered aliases, without the key
 
 
 @dataclass
@@ -358,6 +375,7 @@ class BuildStats:
     joined: Dict[str, int] = field(default_factory=dict)
     joined_by_spacing: List[Dict[str, str]] = field(default_factory=list)
     join_ambiguous: List[Dict[str, Any]] = field(default_factory=list)
+    unjoined_360net: List[Dict[str, str]] = field(default_factory=list)  # left out (rule 2)
     standalone_actors: int = 0
     dropped_placeholder_names: int = 0
     dropped_attack_id_synonyms: int = 0
@@ -370,8 +388,10 @@ class BuildStats:
     suffix_also_existing: int = 0
     suffix_blocked: int = 0
     suffix_ambiguous: List[str] = field(default_factory=list)
+    suffix_contested: List[Dict[str, Any]] = field(default_factory=list)  # held by a plain synonym: ambiguous
     suffix_shortened: List[Dict[str, str]] = field(default_factory=list)  # added by the rule
     suffix_short_forms: List[Dict[str, str]] = field(default_factory=list)  # every short form it derived
+    spelling_variants_ambiguous: List[Dict[str, Any]] = field(default_factory=list)  # rule 4, by compact name
     overrides: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -521,7 +541,11 @@ def load_revocations(raw_doc: Mapping[str, Any]) -> Dict[str, str]:
 def load_loaded_attack(
     graph_rows: Iterable[Mapping[str, Any]], mitre_source: str = MITRE_SOURCE
 ) -> List[LoadedAttackGroup]:
-    """The ATT&CK groups EdgeGuard loaded: the ATT&CK-sourced rows of a graph export."""
+    """The ATT&CK groups EdgeGuard loaded: the ATT&CK-sourced rows of a graph export (``load_graph_actors``).
+
+    The aliases are those MITRE delivered (``attack_aliases``), never the node's ``aliases``: those
+    also hold the names the actor alias merge folded in, which are not ATT&CK claims. A node without
+    a delivered record contributes its name only."""
     groups: Dict[str, LoadedAttackGroup] = {}
     for row in graph_rows:
         if mitre_source not in (row.get("source") or []):
@@ -529,7 +553,7 @@ def load_loaded_attack(
         key = actor_key(row.get("name"))
         if not _usable(key):
             continue
-        aliases = [a for a in (row.get("aliases") or []) if isinstance(a, str)]
+        aliases = [a for a in (row.get("attack_aliases") or []) if isinstance(a, str)]
         display = next((a.strip() for a in aliases if actor_key(a) == key), str(row.get("name")).strip())
         keys = sorted({k for status, k in map(clean_synonym, aliases) if status in ("ok", "rewritten") and k != key})
         attack_id = row.get("attack_id")
@@ -695,6 +719,11 @@ class _Claims:
 
     def items(self) -> Iterable[Tuple[str, Dict[str, Tuple[int, Set[str]]]]]:
         return sorted(self._by_key.items())
+
+    def tier(self, synonym: str, actor: str) -> Optional[int]:
+        """The strongest tier of ``actor``'s claim on ``synonym``; ``None`` when it has none."""
+        claim = self._by_key.get(synonym, {}).get(actor)
+        return claim[0] if claim is not None else None
 
 
 def _anchor_attack_groups(
@@ -866,6 +895,13 @@ def _join_or_standalone(
             continue
         if len(hits) > 1:
             stats.join_ambiguous.append({"record": r.source_record, "name": r.name, "candidates": sorted(hits)})
+        if r.galaxy == _THREE_SIXTY_GALAXY:
+            # The 360net-threat-actor galaxy names known groups in Chinese or by its own id
+            # ("摩诃草 - APT-C-09"). A record that joins no ATT&CK actor would only add a key no
+            # feed writes, and take English synonyms from the actors that own them ("sofacy group",
+            # "hangover"); it is left out and listed in the report.
+            stats.unjoined_360net.append({"record": r.source_record, "name": r.name})
+            continue
         standalone_records[compact_key(r.key)].append(r)
     stats.joined = dict(sorted(joined.items()))
 
@@ -925,15 +961,18 @@ def _resolve_claims(actors: Mapping[str, _Actor], claims: _Claims, stats: BuildS
 
 
 def _apply_suffix_rule(
-    actors: Mapping[str, _Actor], ambiguous: Dict[str, Dict[str, Set[str]]], stats: BuildStats
+    actors: Mapping[str, _Actor], ambiguous: Dict[str, Dict[str, Set[str]]], claims: _Claims, stats: BuildStats
 ) -> None:
-    """Rule 5."""
+    """Rule 5. A variant that another actor holds only by a plain galaxy synonym is ambiguous: the
+    ATT&CK name it derives from and that synonym disagree ("winnti" of ATT&CK's "Winnti Group"
+    against a galaxy synonym of APT41)."""
     owner: Dict[str, str] = {}
     for actor in actors.values():
         owner[actor.key] = actor.key
         for synonym in actor.synonyms:
             owner[synonym] = actor.key
     proposals: Dict[str, Set[str]] = defaultdict(set)
+    contested: Dict[str, Set[str]] = defaultdict(set)  # variant -> the actors whose names give it
     for key in sorted(actors):
         actor = actors[key]
         bases = [actor.key] + sorted(a for a in actor.attack_names() if a in actor.synonyms)
@@ -949,12 +988,27 @@ def _apply_suffix_rule(
                         if shortened:
                             stats.suffix_short_forms.append({"name": variant, "actor": actor.key, "rule": "already"})
                     continue
+                holder = owner.get(variant)
+                if holder is not None and holder != variant and claims.tier(variant, holder) == TIER_SYNONYM:
+                    contested[variant].add(actor.key)
+                    continue
                 if variant in owner or variant in ambiguous:
                     stats.suffix_blocked += 1
                     if shortened:
                         stats.suffix_short_forms.append({"name": variant, "actor": actor.key, "rule": "blocked"})
                     continue
                 proposals[variant].add(actor.key)
+    for variant in sorted(contested):
+        holder = owner[variant]
+        claimants: Dict[str, Set[str]] = {holder: actors[holder].synonyms.pop(variant)}
+        for proposer in sorted(contested[variant]):
+            claimants[proposer] = {ORIGIN_SUFFIX}
+        ambiguous[variant] = claimants
+        stats.suffix_contested.append({"name": variant, "held_by": holder, "variant_of": sorted(contested[variant])})
+        if not variant.endswith(NAME_SUFFIXES):
+            stats.suffix_short_forms.extend(
+                {"name": variant, "actor": p, "rule": "contested"} for p in sorted(contested[variant])
+            )
     for variant in sorted(proposals):
         proposers = sorted(proposals[variant])
         shortened = not variant.endswith(NAME_SUFFIXES)
@@ -970,6 +1024,61 @@ def _apply_suffix_rule(
             stats.suffix_ambiguous.append(variant)
             if shortened:
                 stats.suffix_short_forms.extend({"name": variant, "actor": p, "rule": "ambiguous"} for p in proposers)
+
+
+_KEY_STRENGTH = -1  # an actor key: stronger than every claim
+_SUFFIX_STRENGTH = TIER_SYNONYM + 1  # a name only the suffix rule gives
+
+
+def _settle_spelling_variants(
+    actors: Mapping[str, _Actor], ambiguous: Dict[str, Dict[str, Set[str]]], claims: _Claims, stats: BuildStats
+) -> None:
+    """Rule 4 for names that differ only in spaces, hyphens, dots or underscores: rule 2 treats them
+    as one name ("dark seoul" / "darkseoul"), so they cannot belong to two actors. When they do, the
+    actor holding the strongest spelling keeps its spellings (an actor key, then a loaded ATT&CK
+    alias, then a galaxy ATT&CK alias, revoked name or record name, then a galaxy synonym, then a
+    suffix-rule name). Every other actor's spelling is ambiguous, and so is every spelling when no
+    single actor holds the strongest one. An actor key always stays with its actor."""
+    owner: Dict[str, str] = {}
+    for actor in actors.values():
+        owner[actor.key] = actor.key
+        for synonym in actor.synonyms:
+            owner[synonym] = actor.key
+
+    def strength(name: str) -> int:
+        holder = owner[name]
+        if name == holder:
+            return _KEY_STRENGTH
+        tier = claims.tier(name, holder)
+        return tier if tier is not None else _SUFFIX_STRENGTH
+
+    def origins(name: str) -> Set[str]:
+        holder = owner[name]
+        return set(actors[holder].origins) if name == holder else set(actors[holder].synonyms[name])
+
+    by_compact: Dict[str, List[str]] = defaultdict(list)
+    for name in owner:
+        by_compact[compact_key(name)].append(name)
+    for compact in sorted(by_compact):
+        names = sorted(by_compact[compact])
+        holders = {owner[n] for n in names}
+        if len(holders) < 2:
+            continue
+        best = min(strength(n) for n in names)
+        best_holders = {owner[n] for n in names if strength(n) == best}
+        keep = next(iter(best_holders)) if len(best_holders) == 1 else None
+        claimants: Dict[str, Set[str]] = defaultdict(set)
+        for n in names:
+            claimants[owner[n]] |= origins(n)
+        for n in names:
+            holder = owner[n]
+            if n == holder or holder == keep:
+                continue
+            actors[holder].synonyms.pop(n)
+            ambiguous[n] = {a: set(o) for a, o in sorted(claimants.items())}
+            stats.spelling_variants_ambiguous.append(
+                {"name": n, "held_by": holder, "spellings": {m: owner[m] for m in names}, "kept_by": keep}
+            )
 
 
 def _apply_overrides(
@@ -1200,7 +1309,8 @@ def build_reference(
 
     claims = _collect_claims(actors)
     ambiguous = _resolve_claims(actors, claims, stats)
-    _apply_suffix_rule(actors, ambiguous, stats)
+    _apply_suffix_rule(actors, ambiguous, claims, stats)
+    _settle_spelling_variants(actors, ambiguous, claims, stats)
     never_merge: Dict[str, Dict[str, Any]] = {}
     pairs: List[Dict[str, Any]] = []
     _apply_overrides(actors, ambiguous, never_merge, pairs, decisions, stats)
@@ -1299,7 +1409,9 @@ def resolve(index: Mapping[str, Resolution], name: Any) -> Resolution:
     return index.get(actor_key(name), Resolution(None, "unresolved"))
 
 
-def load_graph_actors(doc: Any) -> List[Dict[str, Any]]:
+def load_graph_actors(doc: Any, mitre_source: str = MITRE_SOURCE) -> List[Dict[str, Any]]:
+    """The rows of a graph export. ``attack_aliases`` (the aliases MITRE delivered) is required on
+    every ATT&CK row; it is ``None`` when the node has no delivered record."""
     rows = doc.get("actors") if isinstance(doc, Mapping) else doc
     if not isinstance(rows, list):
         raise ReferenceInputError("graph actors: expected a list or an object with 'actors'")
@@ -1307,12 +1419,23 @@ def load_graph_actors(doc: Any) -> List[Dict[str, Any]]:
     for row in rows:
         if not isinstance(row, Mapping) or not isinstance(row.get("name"), str):
             raise ReferenceInputError("graph actors: every row needs a 'name'")
+        source = row.get("source")
+        sources = [source] if isinstance(source, str) else [s for s in (source or []) if isinstance(s, str)]
+        if mitre_source in sources and "attack_aliases" not in row:
+            raise ReferenceInputError(
+                f"graph actors: ATT&CK node {row['name']!r} has no 'attack_aliases'; the export predates "
+                "them, re-export with --export-graph-actors"
+            )
         attack_id = row.get("attack_id")
+        attack_aliases = row.get("attack_aliases")
         out.append(
             {
                 "name": row["name"],
                 "aliases": [a for a in (row.get("aliases") or []) if isinstance(a, str)],
-                "source": [s for s in (row.get("source") or []) if isinstance(s, str)],
+                "attack_aliases": (
+                    [a for a in attack_aliases if isinstance(a, str)] if isinstance(attack_aliases, list) else None
+                ),
+                "source": sources,
                 "relationships": int(row.get("relationships") or 0),
                 "pulses": int(row.get("pulses") or 0),
                 "malware": sorted({m for m in (row.get("malware") or []) if isinstance(m, str)}),
@@ -1323,7 +1446,7 @@ def load_graph_actors(doc: Any) -> List[Dict[str, Any]]:
 
 
 def graph_input_metadata(doc: Any, file_name: str, sha256: str, mitre_source: str = MITRE_SOURCE) -> Dict[str, Any]:
-    rows = load_graph_actors(doc)
+    rows = load_graph_actors(doc, mitre_source)
     attack = [r for r in rows if mitre_source in r["source"]]
     return {
         "role": "loaded_attack",
@@ -1333,7 +1456,9 @@ def graph_input_metadata(doc: Any, file_name: str, sha256: str, mitre_source: st
         "threat_actor_nodes": len(rows),
         "attack_nodes": len(attack),
         "attack_nodes_with_id": sum(1 for r in attack if r["attack_id"]),
-        "used": "the names and aliases of the ATT&CK-sourced ThreatActor nodes (the ATT&CK version EdgeGuard loaded)",
+        "attack_nodes_with_delivered_aliases": sum(1 for r in attack if r["attack_aliases"] is not None),
+        "used": "the names of the ATT&CK-sourced ThreatActor nodes, and the aliases and group ids of the "
+        "records MITRE delivered for them (the ATT&CK version EdgeGuard loaded)",
     }
 
 
@@ -1394,6 +1519,7 @@ def build_report(
             "joined_by_name": stats.joined,
             "joined_by_spacing_variant": stats.joined_by_spacing,
             "join_ambiguous_records": stats.join_ambiguous,
+            "unjoined_360net_records_left_out": stats.unjoined_360net,
             "dropped_placeholder_names": stats.dropped_placeholder_names,
             "dropped_attack_id_synonyms": stats.dropped_attack_id_synonyms,
             "attack_id_synonyms_naming_another_group": stats.dropped_attack_id_synonyms_of_other_groups,
@@ -1406,8 +1532,10 @@ def build_report(
                 "already_synonyms": stats.suffix_also_existing,
                 "blocked_claimed_elsewhere": stats.suffix_blocked,
                 "ambiguous": stats.suffix_ambiguous,
+                "contested_by_a_galaxy_synonym": stats.suffix_contested,
                 "shortened_names": stats.suffix_shortened,
             },
+            "spelling_variants_made_ambiguous": stats.spelling_variants_ambiguous,
         },
         "overrides": stats.overrides,
     }
@@ -1667,6 +1795,9 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
         )
     for item in r["join_ambiguous_records"]:
         lines.append(f"  join ambiguous (own actor): {item['name']!r} matches {', '.join(item['candidates'])}")
+    if r["unjoined_360net_records_left_out"]:
+        names = ", ".join(repr(i["name"]) for i in r["unjoined_360net_records_left_out"])
+        lines.append(f"  360net-threat-actor records that join no ATT&CK actor, left out: {names}")
     if r["attack_ids_without_mitre_record"]:
         lines.append(f"  ATT&CK ids without a mitre-intrusion-set record: {r['attack_ids_without_mitre_record']}")
     lines.append(
@@ -1686,6 +1817,15 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
     if s["shortened_names"]:
         shortened = ", ".join(f"{i['name']} ({i['actor']})" for i in s["shortened_names"])
         lines.append(f"  suffix rule, shortened names to review (a short name can be a common word): {shortened}")
+    for item in s["contested_by_a_galaxy_synonym"]:
+        lines.append(
+            f"  suffix rule, ambiguous: {item['name']!r} is a galaxy synonym of {item['held_by']!r} and a variant "
+            f"of {', '.join(repr(a) for a in item['variant_of'])}"
+        )
+    for item in r["spelling_variants_made_ambiguous"]:
+        kept = f"kept by {item['kept_by']!r}" if item["kept_by"] else "no single actor holds the strongest spelling"
+        spellings = ", ".join(f"{name!r} ({holder})" for name, holder in sorted(item["spellings"].items()))
+        lines.append(f"  spelling variant ambiguous: {item['name']!r} of {item['held_by']!r} — {spellings}; {kept}")
     lines.append("")
     lines.append(f"Override decisions ({len(report['overrides'])}):")
     for d in report["overrides"]:
@@ -1766,13 +1906,21 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
 
 # --------------------------------------------------------------------------- graph export (read-only)
 
+# An ATT&CK node's ``aliases`` are not ATT&CK's alone: the sync accumulates every source's aliases
+# on the node and the actor alias merge adds the names it folds in, and another feed can overwrite
+# its ``description``. The record MITRE delivered is kept on the node's SOURCED_FROM edge to the
+# ATT&CK source (``raw_data``, written when the edge is created): its aliases and the group link
+# in its description are ATT&CK's own.
 _EXPORT_CYPHER = """
 MATCH (a:ThreatActor)
+OPTIONAL MATCH (a)-[sf:SOURCED_FROM]->(:Source {source_id: $mitre_source})
+WITH a, head(collect(sf.raw_data)) AS attack_raw
 RETURN a.name AS name, a.aliases AS aliases, a.source AS source,
        COUNT { (a)--() } AS relationships,
        COUNT { UNWIND coalesce(a.pulse_ids, []) AS p RETURN DISTINCT p } AS pulses,
        [(m:Malware)-[:ATTRIBUTED_TO]->(a) | m.name] + [(a)-[:USES_MALWARE]->(m:Malware) | m.name] AS malware,
-       CASE WHEN $mitre_source IN coalesce(a.source, []) THEN left(coalesce(a.description, ''), 300) END AS attack_description
+       CASE WHEN $mitre_source IN coalesce(a.source, []) THEN left(coalesce(a.description, ''), 300) END AS attack_description,
+       CASE WHEN $mitre_source IN coalesce(a.source, []) THEN attack_raw END AS attack_raw
 ORDER BY name
 """
 
@@ -1806,16 +1954,40 @@ def _http_query(
     return url, [dict(zip(data["fields"], row, strict=True)) for row in data["values"]]
 
 
+def attack_delivery(raw_data: Any) -> Tuple[Optional[List[str]], str]:
+    """``(aliases, description)`` of the record MITRE delivered for an ATT&CK node (the JSON in its
+    SOURCED_FROM edge's ``raw_data``); ``(None, "")`` when there is none or it is not readable."""
+    if not isinstance(raw_data, str):
+        return None, ""
+    try:
+        doc = json.loads(raw_data)
+    except ValueError:
+        return None, ""
+    if not isinstance(doc, Mapping):
+        return None, ""
+    aliases = doc.get("aliases")
+    description = doc.get("description")
+    return (
+        [a for a in aliases if isinstance(a, str)] if isinstance(aliases, list) else None,
+        description if isinstance(description, str) else "",
+    )
+
+
 def export_rows(raw_rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Export rows from the query rows: malware names de-duplicated, and the ATT&CK group id an
-    ATT&CK node's description links to (the description itself is not kept)."""
+    """Export rows from the query rows: malware names de-duplicated; for an ATT&CK node the aliases
+    MITRE delivered (``attack_aliases``) and the ATT&CK group id its delivered description links to,
+    else the id the node's description links to (no description is kept)."""
     rows = []
     for raw in raw_rows:
-        match = _ATTACK_GROUP_URL_RE.search(raw.get("attack_description") or "")
+        attack_aliases, delivered_description = attack_delivery(raw.get("attack_raw"))
+        match = _ATTACK_GROUP_URL_RE.search(delivered_description) or _ATTACK_GROUP_URL_RE.search(
+            raw.get("attack_description") or ""
+        )
         rows.append(
             {
                 "name": raw.get("name"),
                 "aliases": raw.get("aliases"),
+                "attack_aliases": attack_aliases,
                 "source": raw.get("source"),
                 "relationships": raw.get("relationships"),
                 "pulses": raw.get("pulses"),
