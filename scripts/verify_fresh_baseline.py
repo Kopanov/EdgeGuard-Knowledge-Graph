@@ -709,9 +709,11 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     except ReferenceUnavailable as exc:
         actor_reference = None
         reference_error = str(exc)
-    several = reports_naming_several_actors(_post(REPORT_ACTORS_QUERY), actor_reference)
+    report_actors = _one(REPORT_ACTORS_QUERY)
+    several = reports_naming_several_actors(report_actors.get("reports") or [], actor_reference)
     r = _one(
-        "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) WHERE r.match_type = 'otx_pulse' "
+        "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
+        "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true "
         "WITH r, " + attribution_reports_cypher("r") + " AS reports "
         "RETURN count(r) AS links, "
         "sum(CASE WHEN size(reports) > 0 AND all(p IN reports WHERE p IN $several) "
@@ -721,8 +723,13 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
         {"several": several, "otx_ref_prefix": OTX_REPORT_REF_PREFIX, "feeds": list(REPORT_ATTRIBUTION_FEEDS)},
     )
     r["reports_naming_several_actors"] = len(several)
+    r["pulses_recorded_on_actors"] = report_actors.get("pulses") or 0
     if actor_reference is None:
         r["reference"] = f"unavailable ({reference_error})"
+        attribution_ok = None
+    elif not r["pulses_recorded_on_actors"]:
+        # No actor records a pulse: there is nothing to judge, and a pass would be vacuous.
+        r["reference"] = actor_reference.version
         attribution_ok = None
     else:
         r["reference"] = actor_reference.version

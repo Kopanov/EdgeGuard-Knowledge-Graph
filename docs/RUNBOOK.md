@@ -465,7 +465,7 @@ A successful baseline should always emit this line:
 
 ```bash
 docker logs edgeguard_airflow 2>&1 | grep -E '\[BUILD_RELATIONSHIPS SUMMARY\]'
-# expected: total_edges=N failures=0/22 per_query=[...]
+# expected: total_edges=N failures=0/20 per_query=[...]
 ```
 
 Absence of this line = silent subprocess death (the exact scenario the

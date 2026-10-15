@@ -103,6 +103,7 @@ from canonical_threat_actors import (  # noqa: E402
     CanonicalReference,
     ReferenceUnavailable,
     attribution_reports_cypher,
+    canonical_actor_names,
     load_canonical_reference,
     reports_naming_several_actors,
 )
@@ -259,13 +260,13 @@ def _assert_no_unsafe_empty_string_literal_in_outer_queries() -> None:
 _assert_no_unsafe_empty_string_literal_in_outer_queries()
 
 
-def _safe_run(client, label: str, query: str, stats: dict, stat_key: str, params: Optional[dict] = None) -> bool:
+def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> bool:
     """Run a single relationship query with fault tolerance.
 
     Returns True on success, False on failure (logged, not raised).
     """
     try:
-        result = client.run(query, params) if params is not None else client.run(query)
+        result = client.run(query)
         stats[stat_key] = result[0].get("count", 0) if result else 0
         logger.info(f"  [OK] {label}: {stats[stat_key]}")
         return True
@@ -510,8 +511,80 @@ def _load_actor_reference() -> Optional[CanonicalReference]:
 
 def _reports_naming_several_actors(client, reference: Optional[CanonicalReference]) -> List[str]:
     """The OTX pulse ids whose actors are several actors after resolution (sorted). Raises when the
-    graph cannot be read: step 2d then neither links nor removes anything."""
-    return reports_naming_several_actors(client.run(REPORT_ACTORS_QUERY) or [], reference)
+    graph cannot be read (``Neo4jClient.run`` answers ``[]`` on a terminal error, and the query always
+    answers one row): step 2d then neither links nor removes anything."""
+    rows = client.run(REPORT_ACTORS_QUERY)
+    if not rows:
+        raise RuntimeError("the actors' pulses could not be read")
+    return reports_naming_several_actors(rows[0].get("reports") or [], reference)
+
+
+def _attribution_params(several_actor_reports: List[str], reference: Optional[CanonicalReference]) -> dict:
+    """The parameters of the step 2d statements: the pulses naming several actors (as pulse ids and as
+    ``source_refs`` entries), the OTX ``source_refs`` prefix, the feeds whose same-pulse attributions
+    step 2d may remove, and the reference's synonyms (name key -> canonical key)."""
+    return {
+        "several_actor_reports": list(several_actor_reports),
+        "several_actor_refs": [OTX_REPORT_REF_PREFIX + pid for pid in several_actor_reports],
+        "otx_ref_prefix": OTX_REPORT_REF_PREFIX,
+        "report_feeds": list(REPORT_ATTRIBUTION_FEEDS),
+        "canonical_actor_names": canonical_actor_names(reference),
+    }
+
+
+# Step 2d, second part (2026-10): the same-pulse attributions resting only on pulses that name several
+# actors are removed (a graph built before the rule holds them), unless another feed asserts the link
+# too; such pulses are then dropped from the provenance of the links that remain. Both provenance
+# forms are read (``canonical_threat_actors.attribution_reports_cypher``).
+_q2d_remove_outer = (
+    "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
+    'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
+    "WITH r, " + attribution_reports_cypher("r") + " AS reports "
+    "WHERE size(reports) > 0 AND all(p IN reports WHERE p IN $several_actor_reports) "
+    "AND all(s IN coalesce(r.sources, []) WHERE s IN $report_feeds) "
+    "RETURN r"
+)
+_q2d_remove_inner = "WITH $r AS r DELETE r"
+_q2d_trim_outer = (
+    "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
+    'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
+    "AND (any(x IN coalesce(r.source_refs, []) WHERE x IN $several_actor_refs) "
+    "OR any(p IN coalesce(r.report_ids, []) WHERE p IN $several_actor_reports)) "
+    "RETURN r"
+)
+_q2d_trim_inner = (
+    "WITH $r AS r "
+    "SET r.source_refs = CASE WHEN r.source_refs IS NULL THEN null "
+    "ELSE [x IN r.source_refs WHERE NOT x IN $several_actor_refs] END, "
+    "r.report_ids = CASE WHEN r.report_ids IS NULL THEN null "
+    "ELSE [p IN r.report_ids WHERE NOT p IN $several_actor_reports] END"
+)
+
+
+def _remove_several_actor_attributions(client, stats: dict, params: dict) -> bool:
+    """Remove, then trim (step 2d). The trim runs only after a complete removal: trimmed first, or
+    after a partly failed removal, a link resting only on such pulses would keep no pulse to be judged
+    by and could never be removed. Returns False when a statement failed; the next run repeats both
+    (each is idempotent)."""
+    if not _safe_run_batched(
+        client,
+        "Malware → ThreatActor (same pulse): removed, resting on pulses naming several actors",
+        _q2d_remove_outer,
+        _q2d_remove_inner,
+        stats,
+        "attributed_to_several_actor_pulses_removed",
+        params=params,
+    ):
+        return False
+    return _safe_run_batched(
+        client,
+        "Malware → ThreatActor (same pulse): pulses naming several actors dropped from provenance",
+        _q2d_trim_outer,
+        _q2d_trim_inner,
+        stats,
+        "attributed_to_several_actor_pulses_trimmed",
+        params=params,
+    )
 
 
 def build_relationships():
@@ -779,11 +852,15 @@ def build_relationships():
 
         # 2d. Malware → ThreatActor (ATTRIBUTED_TO) — pairs named by the SAME OTX pulse, carried on the
         # pulse's indicators as "family::adversary" strings (see 9b for why the indicator carries them).
-        # 2026-10: a pulse that names several actors attributes nothing (``canonical_threat_actors``):
-        # a pair is linked only when a pulse naming both ends names one actor, or when no such pulse is
-        # recorded on the nodes; such pulses are left out of the link's provenance. Links an earlier run
-        # made from them are removed below, and they are dropped from the provenance of links that a
-        # pulse naming one actor supports.
+        # 2026-10: a pulse that names several actors attributes nothing (``canonical_threat_actors``).
+        # The OTX collector writes pairs only for a pulse whose adversaries are one actor, as
+        # "family::adversary::pulse"; the pulse is the link's provenance. A pair written before carries
+        # no pulse: it is linked only when a pulse naming both ends names one actor, or when no such
+        # pulse is recorded on the nodes, and such pulses are left out of its provenance. The adversary
+        # also finds its canonical actor (a name the actor alias merge folded away). Links an earlier
+        # run made from pulses naming several actors are removed, and such pulses are dropped from the
+        # provenance of links that a pulse naming one actor supports
+        # (``_remove_several_actor_attributions``).
         # Bugbot on PR #145: two flat lists unioned across pulses on a shared IOC would cross-link a
         # family from pulse A with an actor from pulse B — the exact cross-report attribution this work
         # replaces; the pair encoding keeps the same-pulse guarantee. Report-scoped evidence:
@@ -801,39 +878,40 @@ def build_relationships():
                 type(e).__name__,
                 e,
             )
-            failures += 1
-        attribution_params = {
-            "several_actor_reports": several_actor_reports or [],
-            "several_actor_refs": [OTX_REPORT_REF_PREFIX + pid for pid in several_actor_reports or []],
-            "otx_ref_prefix": OTX_REPORT_REF_PREFIX,
-            "report_feeds": list(REPORT_ATTRIBUTION_FEEDS),
-        }
+        attribution_params = _attribution_params(several_actor_reports or [], actor_reference)
         _q2d_outer = (
             "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_actor_pairs, [])) > 0 "
             "UNWIND i.pulse_malware_actor_pairs AS pair RETURN DISTINCT pair"
         )
         _q2d_inner = (
-            'WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) = 2 '
-            "WITH toLower(trim(parts[0])) AS fname, toLower(trim(parts[1])) AS aname "
+            # 2026-10: a pair is "family::adversary::pulse" (the OTX collector writes pairs only for a
+            # pulse whose adversaries are one actor) or, written before, "family::adversary".
+            'WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) IN [2, 3] '
+            "WITH toLower(trim(parts[0])) AS fname, toLower(trim(parts[1])) AS aname, "
+            '     CASE WHEN size(parts) = 3 AND trim(parts[2]) <> "" THEN trim(parts[2]) END AS pid '
             f'WHERE fname <> "" AND aname <> "" AND NOT fname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} '
             f"AND NOT aname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "MATCH (m:Malware {name: fname}) MATCH (a:ThreatActor {name: aname}) "
-            # 2026-10: the pulses naming both ends; none of them may be a pulse naming several actors.
-            "WITH m, a, [p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared "
-            "WHERE size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports) "
-            # Provenance: the OTX pulses (and MISP events) that listed BOTH ends — the
-            # intersection of the two nodes' OTX ``SOURCED_FROM`` records. Empty when a later
-            # pulse's malware / actor attributes were de-duplicated away; the link still
-            # names the feed.
-            'WITH m, a, [(m)-[_msf:SOURCED_FROM]->(:Source {source_id: "alienvault_otx"}) | _msf] AS _msfs, '
+            "AND (pid IS NULL OR NOT pid IN $several_actor_reports) "
+            # The adversary as named, or its canonical actor (a name the alias merge folded away).
+            "MATCH (m:Malware {name: fname}) "
+            "MATCH (a:ThreatActor) WHERE a.name IN [aname, coalesce($canonical_actor_names[aname], aname)] "
+            # A pair without a pulse: the pulses naming both ends; not only pulses naming several actors.
+            "WITH m, a, pid, [p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared "
+            "WHERE pid IS NOT NULL OR size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports) "
+            # Provenance: the pair's pulse; for a pair without one, the OTX pulses (and MISP events) that
+            # listed BOTH ends — the intersection of the two nodes' OTX ``SOURCED_FROM`` records, empty
+            # when a later pulse's malware / actor attributes were de-duplicated away (the link still
+            # names the feed).
+            'WITH m, a, pid, [(m)-[_msf:SOURCED_FROM]->(:Source {source_id: "alienvault_otx"}) | _msf] AS _msfs, '
             '     [(a)-[_asf:SOURCED_FROM]->(:Source {source_id: "alienvault_otx"}) | _asf] AS _asfs '
-            "WITH m, a, "
+            "WITH m, a, pid, "
             "     reduce(_acc = [], _x IN _msfs | _acc + coalesce(_x.source_refs, [])) AS _mrefs, "
             "     reduce(_acc = [], _x IN _asfs | _acc + coalesce(_x.source_refs, [])) AS _arefs, "
             "     reduce(_acc = [], _x IN _msfs | _acc + coalesce(_x.misp_event_ids, [])) AS _mevents, "
             "     reduce(_acc = [], _x IN _asfs | _acc + coalesce(_x.misp_event_ids, [])) AS _aevents "
             "WITH m, a, " + _OTX_FEEDS + " AS _feeds, "
-            "     [_x IN _mrefs WHERE _x IN _arefs AND NOT _x IN $several_actor_refs] AS _prov_refs, "
+            "     CASE WHEN pid IS NOT NULL THEN [$otx_ref_prefix + pid] "
+            "     ELSE [_x IN _mrefs WHERE _x IN _arefs AND NOT _x IN $several_actor_refs] END AS _prov_refs, "
             f"     [_x IN _mevents WHERE _x IN _aevents][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}] AS _prov_events "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
             'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() '
@@ -841,8 +919,11 @@ def build_relationships():
             + _prov_set()
             + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
         )
+        # Step 2d counts once in ``failures``, whichever of its parts failed (the pulses not readable,
+        # the link, the removal of the attributions a pulse naming several actors gave).
+        step_2d_ok = several_actor_reports is not None
         if several_actor_reports is not None:
-            if not _safe_run_batched(
+            step_2d_ok = _safe_run_batched(
                 client,
                 "Malware → ThreatActor (same pulse)",
                 _q2d_outer,
@@ -850,59 +931,14 @@ def build_relationships():
                 stats,
                 "attributed_to_pulse",
                 params=attribution_params,
-            ):
-                failures += 1
+            )
+            # Never without the reference: it must not remove a link because the aliases of one actor
+            # count as several.
+            if several_actor_reports and actor_reference is not None:
+                step_2d_ok = _remove_several_actor_attributions(client, stats, attribution_params) and step_2d_ok
             query_pause()
-        # Same-pulse attributions resting only on pulses that name several actors are removed (a graph
-        # built before this rule holds them), unless another feed asserts the link too; such pulses
-        # are then dropped from the provenance of the links that remain. The removal runs first, so a
-        # link that rests only on such pulses is removed, not left without provenance. Never without
-        # the reference: it must not remove a link because the aliases of one actor count as several.
-        _q2d_remove_outer = (
-            "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
-            'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
-            "WITH r, " + attribution_reports_cypher("r") + " AS reports "
-            "WHERE size(reports) > 0 AND all(p IN reports WHERE p IN $several_actor_reports) "
-            "AND all(s IN coalesce(r.sources, []) WHERE s IN $report_feeds) "
-            "RETURN r"
-        )
-        _q2d_remove_inner = "WITH $r AS r DELETE r"
-        _q2d_trim_outer = (
-            "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
-            'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
-            "AND (any(x IN coalesce(r.source_refs, []) WHERE x IN $several_actor_refs) "
-            "OR any(p IN coalesce(r.report_ids, []) WHERE p IN $several_actor_reports)) "
-            "RETURN r"
-        )
-        _q2d_trim_inner = (
-            "WITH $r AS r "
-            "SET r.source_refs = CASE WHEN r.source_refs IS NULL THEN null "
-            "ELSE [x IN r.source_refs WHERE NOT x IN $several_actor_refs] END, "
-            "r.report_ids = CASE WHEN r.report_ids IS NULL THEN null "
-            "ELSE [p IN r.report_ids WHERE NOT p IN $several_actor_reports] END"
-        )
-        if several_actor_reports and actor_reference is not None:
-            if not _safe_run_batched(
-                client,
-                "Malware → ThreatActor (same pulse): removed, resting on pulses naming several actors",
-                _q2d_remove_outer,
-                _q2d_remove_inner,
-                stats,
-                "attributed_to_several_actor_pulses_removed",
-                params=attribution_params,
-            ):
-                failures += 1
-            if not _safe_run_batched(
-                client,
-                "Malware → ThreatActor (same pulse): pulses naming several actors dropped from provenance",
-                _q2d_trim_outer,
-                _q2d_trim_inner,
-                stats,
-                "attributed_to_several_actor_pulses_trimmed",
-                params=attribution_params,
-            ):
-                failures += 1
-            query_pause()
+        if not step_2d_ok:
+            failures += 1
 
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/20 Indicator → Vulnerability (exact CVE match)...")
@@ -1653,16 +1689,27 @@ def build_relationships():
         # Always emitted (even on full success) so absence in logs is a clear
         # "build_relationships didn't reach the end" signal rather than just
         # "no failures, must have worked."
-        total_rels = sum(v for k, v in stats.items() if k != "multi_zone_indicators")
+        # Counts that are not edges written: indicators in several zones, and the attributions step 2d
+        # removed or trimmed (2026-10).
+        total_rels = sum(
+            v
+            for k, v in stats.items()
+            if k
+            not in (
+                "multi_zone_indicators",
+                "attributed_to_several_actor_pulses_removed",
+                "attributed_to_several_actor_pulses_trimmed",
+            )
+        )
         per_query = ", ".join(f"{k}={v}" for k, v in sorted(stats.items()) if k != "multi_zone_indicators")
         logger.info(
-            "[BUILD_RELATIONSHIPS SUMMARY] total_edges=%d failures=%d/22 per_query=[%s]",
+            "[BUILD_RELATIONSHIPS SUMMARY] total_edges=%d failures=%d/20 per_query=[%s]",
             total_rels,
             failures,
             per_query,
         )
         if failures:
-            logger.warning("Relationship types failed: %d/22 — partial success", failures)
+            logger.warning("Relationship types failed: %d/20 — partial success", failures)
 
         if _METRICS_AVAILABLE:
             try:

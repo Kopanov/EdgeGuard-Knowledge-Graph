@@ -192,7 +192,7 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
     if "UNWIND a.pulse_ids AS pid" in s:
-        return [dict(x) for x in _REPORT_ACTOR_ROWS]
+        return [{"reports": [dict(x) for x in _REPORT_ACTOR_ROWS], "pulses": 1530}]
     if "AS resting_on_several_actor_reports" in s:
         return [dict(_ATTRIBUTION_ROW)]
     if "AS unattributed" in s:
@@ -1020,6 +1020,15 @@ class TestAttributionFromSingleActorReports:
         )
         assert [c["check"] for c in rep.failed] == ["campaign_malware_attributed"]
 
+    def test_no_pulse_recorded_on_any_actor_is_informational(self, vfb, monkeypatch):
+        # Nothing to judge: a pass would be vacuous.
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [{"reports": [], "pulses": 0}] if "UNWIND a.pulse_ids AS pid" in st else rows,
+        )
+        assert _check(rep, "attribution_from_single_actor_reports")["ok"] is None
+
     def test_no_malware_member_is_informational(self, vfb, monkeypatch):
         rep = _run(
             vfb,
@@ -1042,7 +1051,7 @@ class TestAttributionFromSingleActorReports:
 
         _run(vfb, monkeypatch, override=capture)
         assert canonical_threat_actors.attribution_reports_cypher("r") in seen["attribution"]
-        assert "WHERE r.match_type = 'otx_pulse'" in seen["attribution"]
+        assert "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true" in seen["attribution"]
         assert "all(s IN coalesce(r.sources, []) WHERE s IN $feeds)" in seen["attribution"]
         assert "(m)-[:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})" in seen["campaign"]
 

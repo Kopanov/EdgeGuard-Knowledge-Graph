@@ -2163,7 +2163,10 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         cleanup_result.single.return_value = {"count": 0}
         reactivated_result = MagicMock()
         reactivated_result.single.return_value = {"count": 0}
+        now_result = MagicMock()
+        now_result.single.return_value = {"now": "2026-10-15T12:00:00Z"}
         sess.run.side_effect = [
+            now_result,  # 0 — the database's clock (2026-10)
             actors_result,  # 1
             create_result,  # 2
             backfill_result,  # 3

@@ -5,9 +5,13 @@ A graph as an earlier run left it: same-pulse attributions from a pulse that nam
 (``p1``), from one that names two groups (``p2``, Gamaredon and Turla) and from one that names two
 names of one actor (``p3``, The Gentlemen and Storm-2697), in the current provenance form
 (``r.source_refs``) and in the form of graphs built before 2026-10-14 (``r.sources = ['otx_pulse']``,
-``r.report_ids``). Step 2d runs as production runs it (its statements, through
-``_safe_run_batched``, with the pulses ``_reports_naming_several_actors`` reads and the committed
-reference), twice. The campaign builder then drops the malware membership whose attribution is gone.
+``r.report_ids``). The indicators carry pairs in both forms: ``family::adversary::pulse`` (the OTX
+collector since 2026-10, which writes them only for a pulse naming one actor; ``p5`` is a later pulse
+the nodes do not record, naming Turla as Venomous Bear, a name the actor alias merge folds into Turla)
+and ``family::adversary`` (written before). Step 2d runs as production runs it (its statements, through
+``_safe_run_batched``, with the pulses ``_reports_naming_several_actors`` reads, the committed reference
+and ``_attribution_params``), twice. The campaign builder then drops the malware membership whose
+attribution is gone.
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``,
 writes only nodes labelled ``EdgeGuardIT``, refuses any other node.
 """
@@ -63,11 +67,12 @@ CREATE (gent)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: [
 CREATE (norefs)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: []}}]->(gam)
 CREATE (partner)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', source_refs: ['alienvault_otx:p2']}}]->(gam)
 CREATE (i1:Indicator:{LABEL} {{indicator_type: 'domain', value: 'one.it.example', uuid: 'u-i1', active: true,
-        pulse_malware_actor_pairs: ['kazuar::turla']}})
+        pulse_malware_actor_pairs: ['kazuar::turla::p1']}})
 CREATE (i2:Indicator:{LABEL} {{indicator_type: 'domain', value: 'two.it.example', uuid: 'u-i2', active: true,
         pulse_malware_actor_pairs: ['kazuar::turla', 'kazuar::gamaredon group', 'pterolnk::turla',
-                                    'pterolnk::gamaredon group']}})
-CREATE (i3:Indicator:{LABEL} {{indicator_type: 'domain', value: 'three.it.example', uuid: 'u-i3', active: true}})
+                                    'pterolnk::gamaredon group', 'pterolnk::gamaredon group::p2']}})
+CREATE (i3:Indicator:{LABEL} {{indicator_type: 'domain', value: 'three.it.example', uuid: 'u-i3', active: true,
+        pulse_malware_actor_pairs: ['lockbit::venomous bear::p5']}})
 CREATE (i1)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(kaz)
 CREATE (i2)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(ptero)
 CREATE (i3)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(lb)
@@ -98,23 +103,17 @@ def _step_2d(client) -> dict:
     """Step 2d as ``build_relationships`` runs it: link, remove, trim."""
     reference = canonical_threat_actors.load_canonical_reference()
     several = build_relationships._reports_naming_several_actors(client, reference)
-    params = {
-        "several_actor_reports": several,
-        "several_actor_refs": [canonical_threat_actors.OTX_REPORT_REF_PREFIX + pid for pid in several],
-        "otx_ref_prefix": canonical_threat_actors.OTX_REPORT_REF_PREFIX,
-        "report_feeds": list(canonical_threat_actors.REPORT_ATTRIBUTION_FEEDS),
-    }
+    params = build_relationships._attribution_params(several, reference)
     stats: dict = {}
-    for outer, inner, key in (
-        ("_q2d_outer", "_q2d_inner", "linked"),
-        ("_q2d_remove_outer", "_q2d_remove_inner", "removed"),
-        ("_q2d_trim_outer", "_q2d_trim_inner", "trimmed"),
-    ):
-        assert build_relationships._safe_run_batched(
-            client, key, assigned_query(outer), assigned_query(inner), stats, key, params=params
-        )
-    stats["several"] = several
-    return stats
+    assert build_relationships._safe_run_batched(
+        client, "linked", assigned_query("_q2d_outer"), assigned_query("_q2d_inner"), stats, "linked", params=params
+    )
+    assert build_relationships._remove_several_actor_attributions(client, stats, params)
+    return {
+        "several": several,
+        "removed": stats["attributed_to_several_actor_pulses_removed"],
+        "trimmed": stats["attributed_to_several_actor_pulses_trimmed"],
+    }
 
 
 def _attributions(driver) -> dict:
@@ -152,6 +151,9 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
         assert gone not in links, gone
     # ... and leave the provenance of the links a pulse naming one actor supports (p1).
     assert links[("kazuar", "turla")] == (["alienvault_otx:p1"], None)
+    # A pair with its pulse: linked to the canonical actor, the pair's pulse as provenance.
+    assert links[("lockbit", "turla")] == (["alienvault_otx:p5"], None)
+    assert not any(a == "venomous bear" for _m, a in links)
     # Kept: another feed asserts it (p2 dropped from its provenance), two names of one actor, no
     # pulse recorded, a partner's link.
     assert links[("lockbit", "gamaredon group")] == (["threatfox:1"], None)
@@ -161,10 +163,12 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     assert links[("partner tool", "gamaredon group")] == (["alienvault_otx:p2"], None)
 
     second = _step_2d(client)
+    # Nothing to remove the second time: neither the pairs written before (their pulses all name
+    # several actors) nor the pair carrying p2 links again.
     assert (second["removed"], second["trimmed"]) == (0, 0), "a second run changes nothing"
     assert _attributions(raw_driver) == links, "the pairs on the indicators bring nothing back"
 
     # Campaign membership follows: malware no longer attributed to an actor leaves its campaign.
     after = _campaign_malware(client, raw_driver)
     assert ("pterolnk", "turla") not in after and ("kazuar", "gamaredon group") not in after
-    assert ("kazuar", "turla") in after and ("lockbit", "gamaredon group") in after
+    assert ("kazuar", "turla") in after and ("lockbit", "gamaredon group") in after and ("lockbit", "turla") in after

@@ -316,6 +316,8 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
       ``m`` / ``s`` — ``uses_malware`` / ``uses_tools`` (2026-10, R6): malware names and tool
                 ATT&CK ids MITRE's explicit ``uses`` relationships attach to a group, so the
                 sync can write ``USES_MALWARE`` / ``USES_TOOL`` (actors only).
+      ``sap`` — ``several_actor_pulses`` (2026-10): those of the entity's pulses whose
+                adversaries are several actors; the sync attributes no malware from them.
     Lists are capped so the comment stays within MISP field limits.
     """
     meta: Dict[str, Any] = {}
@@ -331,6 +333,9 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     report_ids = [str(x)[:64] for x in (item.get("report_ids") or []) if x]
     if report_ids:
         meta["rids"] = report_ids[:_MAX_REPORT_IDS]
+    several_actor_pulses = [str(x)[:64] for x in (item.get("several_actor_pulses") or []) if x]
+    if several_actor_pulses:
+        meta["sap"] = several_actor_pulses[:_MAX_REPORT_IDS]
     # 2026-10 (R6): MITRE group → software ``uses`` (actors only)
     uses_malware = [str(x)[:128] for x in (item.get("uses_malware") or []) if x]
     if uses_malware:
@@ -1607,6 +1612,7 @@ class MISPWriter:
                 "report_ids",
                 "pulse_malware_families",
                 "pulse_malware_actor_pairs",
+                "several_actor_pulses",
             )
         )
         has_tf_meta = (
@@ -1664,8 +1670,11 @@ class MISPWriter:
                 # below when empty. Kept last: test_pr_n13 pins the key order inside a fixed window.
                 "mf": [str(x)[:128] for x in (indicator.get("pulse_malware_families") or []) if x][:20],
                 "pa": [str(x)[:260] for x in (indicator.get("pulse_malware_actor_pairs") or []) if x][:50],
+                # 2026-10: the pulses that listed this IOC whose adversaries are several actors (the
+                # sync attributes no malware from them; never shrunk away, it is a few short ids).
+                "sap": [str(x)[:64] for x in (indicator.get("several_actor_pulses") or []) if x][:_MAX_REPORT_IDS],
             }
-            for _k in ("mf", "pa"):
+            for _k in ("mf", "pa", "sap"):
                 if not otx_meta.get(_k):
                     otx_meta.pop(_k, None)
             comment = _fit_meta_comment("OTX_META:", otx_meta)

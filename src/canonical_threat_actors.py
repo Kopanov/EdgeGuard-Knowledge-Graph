@@ -92,13 +92,17 @@ def actor_identities(names: Iterable[Any], reference: Optional[CanonicalReferenc
     return frozenset(actors)
 
 
-# 2026-10: the OTX pulses whose actors are several actors. A pulse's actors are the ThreatActor nodes
-# whose ``pulse_ids`` hold it (``build_relationships`` step 2d, the acceptance check); only pulses
-# naming two or more nodes are read.
+# 2026-10: the OTX pulses whose actors are several actors, as the graph records them: a pulse's actors
+# are the ThreatActor nodes whose ``pulse_ids`` hold it (``build_relationships`` step 2d, the acceptance
+# check). This finds the pulses a baseline wrote; on regular updates MISP drops an actor it already
+# holds, so the OTX collector decides it per pulse instead (``several_actor_pulses``). One row always:
+# ``reports`` (the pulses naming two or more nodes, with the names) and ``pulses`` (how many pulses any
+# actor records), so an empty answer is a failed read, not "no such pulse".
 REPORT_ACTORS_QUERY = (
     "MATCH (a:ThreatActor) WHERE size(coalesce(a.pulse_ids, [])) > 0 "
     "UNWIND a.pulse_ids AS pid WITH pid, collect(DISTINCT a.name) AS names "
-    "WHERE size(names) > 1 RETURN pid, names"
+    "WITH collect(CASE WHEN size(names) > 1 THEN {pid: pid, names: names} END) AS reports, count(pid) AS pulses "
+    "RETURN reports, pulses"
 )
 # The ``r.source_refs`` entry of an OTX pulse (``source_registry.format_source_ref``).
 OTX_REPORT_REF_PREFIX = "alienvault_otx:"
@@ -110,7 +114,8 @@ REPORT_ATTRIBUTION_FEEDS = ("alienvault_otx", "otx_pulse")
 def reports_naming_several_actors(
     rows: Iterable[Mapping[str, Any]], reference: Optional[CanonicalReference]
 ) -> List[str]:
-    """The pulse ids of ``REPORT_ACTORS_QUERY`` rows whose names are several actors (sorted)."""
+    """The pulse ids of ``{pid, names}`` entries (``REPORT_ACTORS_QUERY``'s ``reports``) whose names are
+    several actors (sorted)."""
     return sorted(
         {
             str(row["pid"])
@@ -118,6 +123,15 @@ def reports_naming_several_actors(
             if row.get("pid") and len(actor_identities(row.get("names") or [], reference)) > 1
         }
     )
+
+
+def canonical_actor_names(reference: Optional[CanonicalReference]) -> Dict[str, str]:
+    """Name key -> canonical key for every name the reference gives to another actor (its synonyms),
+    so a name the actor alias merge folded into its canonical node still finds that node. Empty without
+    a reference."""
+    if reference is None:
+        return {}
+    return {name: key for name, key in reference.owners.items() if name != key and name not in reference.blocked}
 
 
 def attribution_reports_cypher(rel: str) -> str:

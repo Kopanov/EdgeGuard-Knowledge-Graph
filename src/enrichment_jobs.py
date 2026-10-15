@@ -275,6 +275,16 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
+            # 2026-10: the prunes (Steps 2b and 3b) compare ``r.updated_at``, which the server's
+            # ``datetime()`` stamps, with ``run_start_at``: read it from the same clock, so a worker
+            # clock ahead of the database's can never make this run's edges look stale.
+            now_record = session.run("RETURN toString(datetime()) AS now", timeout=NEO4J_READ_TIMEOUT).single()
+            try:
+                server_now = now_record["now"] if now_record is not None else None
+            except (KeyError, TypeError):
+                server_now = None
+            if isinstance(server_now, str) and server_now:
+                run_start_at = server_now
             # Pre-fetch the names of every qualifying ThreatActor so we can
             # compute deterministic Campaign uuids in Python (Campaign name is
             # ``"<actor> Campaign"``). Without this, the MERGE below would

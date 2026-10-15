@@ -6,6 +6,10 @@ naming 2 to 7 actors, e.g. the "Indonesian Banking Sector Threat Landscape" puls
 families (ValleyRAT, LOTUSLITE, ...) went to each of its 8 actors. The rule, with the aliases of one
 actor counted as one (canonical threat-actor reference), is applied by:
 
+* the OTX collector, on the pulse's whole adversary list: it writes ``family::adversary::pulse`` pairs
+  only for a pulse naming one actor, and records a pulse naming several in ``several_actor_pulses`` on
+  every item of it (``OTX_META.sap`` / ``MITRE_USES_TECHNIQUES.sap`` in MISP). MISP drops an actor it
+  already holds, so after the baseline an event may carry only some of a pulse's actors;
 * the sync, when it pairs the items of one pulse (``_build_cross_item_relationships``);
 * ``build_relationships`` step 2d: it links the pairs carried on indicators only when a pulse naming
   one actor supports them, removes the links an earlier run made from pulses naming several actors,
@@ -33,12 +37,17 @@ for _p in (_SRC, _TESTS):
 os.environ.setdefault("NEO4J_PASSWORD", "test")
 os.environ.setdefault("MISP_API_KEY", "test")
 
+import json  # noqa: E402
+
+import test_pulse_scoped_linking as _pulse_scoped  # noqa: E402  (its collector harness)
 from build_rel_queries import assigned_query  # noqa: E402
 
 import build_relationships  # noqa: E402
 import canonical_threat_actors as cta  # noqa: E402
 import run_misp_to_neo4j  # noqa: E402
-from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
+from collectors import otx_collector as oc  # noqa: E402
+from collectors.misp_writer import MISPWriter  # noqa: E402
+from run_misp_to_neo4j import MISPToNeo4jSync, _dedupe_parsed_items  # noqa: E402
 
 # OTX pulse 6a4fdf500b5e6dffde939998, "Indonesian Banking Sector Threat Landscape" (public, read
 # 2026-10-15): its adversary field and malware families.
@@ -107,6 +116,121 @@ class TestActorIdentities:
         assert "r.source_refs" in fragment and "r.report_ids" in fragment and "$otx_ref_prefix" in fragment
 
 
+# --------------------------------------------------------------------------- the collector and MISP
+_HARNESS = _pulse_scoped.TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators()
+_pulse = _HARNESS._pulse
+
+
+class TestTheCollector:
+    def test_a_pulse_naming_several_actors_writes_no_pair_and_marks_every_item(self):
+        items = _HARNESS._collect(
+            [_pulse(LANDSCAPE_PULSE, LANDSCAPE_FAMILIES[:3], ", ".join(LANDSCAPE_ACTORS), ["203.0.113.5"])]
+        )
+        ioc = next(i for i in items if i.get("value") == "203.0.113.5")
+        assert ioc["pulse_malware_actor_pairs"] == [], "the pulse does not say which family is whose"
+        assert ioc["pulse_malware_families"] == LANDSCAPE_FAMILIES[:3], "INDICATES is unaffected"
+        marked = {(i.get("type") or "indicator"): i["several_actor_pulses"] for i in items}
+        assert marked == {"indicator": [LANDSCAPE_PULSE], "malware": [LANDSCAPE_PULSE], "actor": [LANDSCAPE_PULSE]}
+
+    def test_a_pulse_naming_one_actor_pairs_with_its_pulse_id(self):
+        items = _HARNESS._collect([_pulse("p-alias", ["Gentlemen"], "The Gentlemen, Storm-2697", ["203.0.113.6"])])
+        ioc = next(i for i in items if i.get("value") == "203.0.113.6")
+        assert ioc["pulse_malware_actor_pairs"] == [
+            "Gentlemen::The Gentlemen::p-alias",
+            "Gentlemen::Storm-2697::p-alias",
+        ], "two names of one actor (canonical reference)"
+        assert all(i["several_actor_pulses"] == [] for i in items)
+
+    def test_the_whole_adversary_list_is_judged_before_the_cap(self, monkeypatch):
+        monkeypatch.setattr(oc, "_MAX_PULSE_ADVERSARIES", 1)
+        items = _HARNESS._collect([_pulse("p-two", ["Kazuar"], "Gamaredon, Turla", ["203.0.113.7"])])
+        ioc = next(i for i in items if i.get("value") == "203.0.113.7")
+        assert ioc["pulse_malware_actor_pairs"] == [] and ioc["several_actor_pulses"] == ["p-two"]
+
+    def test_an_ioc_in_two_pulses_keeps_the_pairs_of_one_and_the_mark_of_the_other(self):
+        items = _HARNESS._collect(
+            [
+                _pulse("p-one", ["Emotet"], "TA542", ["203.0.113.8"]),
+                _pulse("p-two", ["Kazuar"], "Gamaredon, Turla", ["203.0.113.8"]),
+            ]
+        )
+        shared = [i for i in items if i.get("value") == "203.0.113.8"]
+        assert len(shared) == 1
+        assert shared[0]["pulse_malware_actor_pairs"] == ["Emotet::TA542::p-one"]
+        assert shared[0]["several_actor_pulses"] == ["p-two"]
+        assert shared[0]["pulse_malware_families"] == ["Emotet", "Kazuar"]
+
+    def test_the_pair_encoder(self):
+        assert oc._pulse_actor_pairs(["Emotet"], ["apt28"], "p1") == ["Emotet::apt28::p1"]
+        assert oc._pulse_actor_pairs(["Emotet"], ["apt28"], " ") == ["Emotet::apt28"]
+        assert oc._pulse_actor_pairs(["Emotet"], ["apt28"], "a::b") == ["Emotet::apt28"], "never four parts"
+        assert oc._pulse_actor_pairs(["Emotet"], ["apt28"]) == ["Emotet::apt28"]
+
+
+def _writer():
+    return MISPWriter(url="http://127.0.0.1:9", api_key="dummy", verify_ssl=False)
+
+
+def _meta(comment, prefix):
+    return json.loads(comment.split("\n", 1)[0][len(prefix) :])
+
+
+_EVENT = {"id": 7, "info": "EdgeGuard-alienvault_otx-2026-10-15", "date": "2026-10-15", "Tag": []}
+_OTX = {"tag": "alienvault_otx", "source": ["alienvault_otx"], "zone": ["global"], "confidence_score": 0.5}
+
+
+class TestMispRoundTrip:
+    def test_the_mark_travels_on_indicators_malware_and_actors(self):
+        writer = _writer()
+        syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
+        indicator = writer.create_attribute(
+            {
+                **_OTX,
+                "indicator_type": "ipv4",
+                "value": "203.0.113.5",
+                "pulse_id": "p-two",
+                "several_actor_pulses": ["p-two"],
+            }
+        )
+        assert _meta(indicator["comment"], "OTX_META:")["sap"] == ["p-two"]
+        malware = writer.create_malware_attribute(
+            {**_OTX, "type": "malware", "name": "Kazuar", "pulse_id": "p-two", "several_actor_pulses": ["p-two"]}
+        )
+        actor = writer.create_actor_attribute(
+            {**_OTX, "type": "actor", "name": "Turla", "pulse_id": "p-two", "several_actor_pulses": ["p-two"]}
+        )
+        for attr in (malware, actor):
+            assert _meta(attr["comment"], "MITRE_USES_TECHNIQUES:")["sap"] == ["p-two"]
+        for attr in (indicator, malware, actor):
+            item, _ = syncer.parse_attribute({**attr, "uuid": "20000000-0000-0000-0000-00000000abcd"}, _EVENT)
+            assert item["several_actor_pulses"] == ["p-two"], attr["type"]
+
+    def test_no_mark_no_key(self):
+        writer = _writer()
+        indicator = writer.create_attribute(
+            {**_OTX, "indicator_type": "ipv4", "value": "203.0.113.5", "pulse_id": "p1"}
+        )
+        malware = writer.create_malware_attribute({**_OTX, "type": "malware", "name": "Emotet", "pulse_id": "p1"})
+        assert "sap" not in _meta(indicator["comment"], "OTX_META:")
+        assert "sap" not in _meta(malware["comment"], "MITRE_USES_TECHNIQUES:")
+
+    def test_one_event_unions_the_marks_of_its_duplicates(self):
+        items = _dedupe_parsed_items(
+            [
+                {"type": "indicator", "indicator_type": "ipv4", "value": "203.0.113.5", "pulse_id": "p-one"},
+                {
+                    "type": "indicator",
+                    "indicator_type": "ipv4",
+                    "value": "203.0.113.5",
+                    "pulse_id": "p-two",
+                    "several_actor_pulses": ["p-two"],
+                },
+            ]
+        )
+        assert len(items) == 1
+        assert items[0]["report_ids"] == ["p-two"] and items[0]["several_actor_pulses"] == ["p-two"]
+
+
 # --------------------------------------------------------------------------- the sync
 def _items(pulse, actors, families, indicators=("203.0.113.5",)):
     items = [{"type": "indicator", "indicator_type": "ipv4", "value": v, "pulse_id": pulse} for v in indicators]
@@ -130,7 +254,24 @@ class TestTheSync:
         assert "ATTRIBUTED_TO" not in rels
         assert len(rels["INDICATES"]) == len(LANDSCAPE_FAMILIES), "the indicator side is unchanged"
         assert syncer.stats["reports_with_several_actors"] == 1
-        assert f"report {LANDSCAPE_PULSE} names 8 actors" in caplog.text
+        assert f"report {LANDSCAPE_PULSE} names several actors" in caplog.text
+
+    def test_the_collector_mark_holds_when_the_event_carries_one_of_the_actors(self):
+        # After the baseline MISP drops an actor it already holds: this event carries only Turla of
+        # a pulse naming Gamaredon and Turla. Items written before the mark existed are judged by the
+        # actors the event carries.
+        syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
+        items = _items("p-two", ["Turla"], ["Kazuar"])
+        assert len(_rels(syncer, items)["ATTRIBUTED_TO"]) == 1, "unmarked: one actor in the event"
+        items[0]["several_actor_pulses"] = ["p-two"]
+        assert "ATTRIBUTED_TO" not in _rels(syncer, items)
+        malware_marked = _items("p-two", ["Turla"], ["Kazuar"], indicators=())
+        malware_marked[0]["several_actor_pulses"] = ["p-two"]
+        assert "ATTRIBUTED_TO" not in _rels(syncer, malware_marked)
+        other_pulse = _items("p-one", ["Turla"], ["Kazuar"])
+        other_pulse[0]["several_actor_pulses"] = ["p-two"]
+        assert len(_rels(syncer, other_pulse)["ATTRIBUTED_TO"]) == 1, "the mark is per pulse"
+        assert syncer.stats["reports_with_several_actors"] == 2
 
     def test_one_actor_and_the_aliases_of_one_actor_attribute(self):
         syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
@@ -177,7 +318,9 @@ _REPORT_ACTOR_ROWS = [
 ]
 
 
-def _run_build(monkeypatch, *, report_rows=_REPORT_ACTOR_ROWS, reference_ok=True, read_fails=False):
+def _run_build(
+    monkeypatch, *, report_rows=_REPORT_ACTOR_ROWS, reference_ok=True, read_fails=False, read_empty=False, failing=None
+):
     calls: list = []
 
     class _Client:
@@ -192,8 +335,12 @@ def _run_build(monkeypatch, *, report_rows=_REPORT_ACTOR_ROWS, reference_ok=True
             if query == cta.REPORT_ACTORS_QUERY:
                 if read_fails:
                     raise RuntimeError("graph not readable")
-                return [dict(r) for r in report_rows]
+                if read_empty:
+                    return []  # ``Neo4jClient.run`` on a terminal error
+                return [{"reports": [dict(r) for r in report_rows], "pulses": 1530}]
             if "apoc.periodic.iterate" in query:
+                if failing and assigned_query(failing) in query:
+                    return [dict(_APOC_ROW, errorMessages={"neo4j down": 1}, failedBatches=1)]
                 return [dict(_APOC_ROW)]
             return [{"c": 0, "count": 0}]
 
@@ -226,7 +373,10 @@ class TestStep2d:
             "several_actor_refs": ["alienvault_otx:p-groups"],
             "otx_ref_prefix": "alienvault_otx:",
             "report_feeds": ["alienvault_otx", "otx_pulse"],
+            "canonical_actor_names": cta.canonical_actor_names(cta.load_canonical_reference()),
         }
+        assert expected["canonical_actor_names"]["storm-2697"] == "the gentlemen"
+        assert "the gentlemen" not in expected["canonical_actor_names"], "a canonical key is not a synonym"
         assert _step(iterate, "_q2d_outer") == expected, "Storm-2697 is The Gentlemen: p-alias attributes"
         assert _step(iterate, "_q2d_remove_outer") == expected
         assert _step(iterate, "_q2d_trim_outer") == expected
@@ -247,17 +397,39 @@ class TestStep2d:
         assert ok is True and _step(iterate, "_q2d_outer")["several_actor_reports"] == []
         assert _step(iterate, "_q2d_remove_outer") is None
 
-    def test_an_unreadable_graph_skips_the_step_and_fails_the_run(self, monkeypatch):
-        ok, iterate = _run_build(monkeypatch, read_fails=True)
+    @pytest.mark.parametrize("failure", ["read_fails", "read_empty"])
+    def test_an_unreadable_graph_skips_the_step_and_fails_the_run(self, monkeypatch, failure):
+        ok, iterate = _run_build(monkeypatch, **{failure: True})
         assert ok is False
         for name in ("_q2d_outer", "_q2d_remove_outer", "_q2d_trim_outer"):
             assert _step(iterate, name) is None
 
+    def test_a_failed_removal_is_not_followed_by_the_trim(self, monkeypatch):
+        # Trimmed after a partly failed removal, a link resting only on such pulses would keep no
+        # pulse to be judged by; the next run repeats the removal, then trims.
+        ok, iterate = _run_build(monkeypatch, failing="_q2d_remove_outer")
+        assert ok is False
+        assert _step(iterate, "_q2d_remove_outer") is not None and _step(iterate, "_q2d_trim_outer") is None
+
+    def test_step_2d_counts_once_in_the_summary(self, monkeypatch, caplog):
+        with caplog.at_level("INFO", logger="build_relationships"):
+            ok, _iterate = _run_build(monkeypatch, failing="_q2d_trim_outer")
+        assert ok is False
+        assert "failures=1/20" in caplog.text
+
     def test_the_statements(self):
         inner = assigned_query("_q2d_inner")
-        assert "[p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared" in inner
-        assert "WHERE size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports)" in inner
-        assert "[_x IN _mrefs WHERE _x IN _arefs AND NOT _x IN $several_actor_refs] AS _prov_refs" in inner
+        for fragment in (
+            'WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) IN [2, 3] ',
+            'CASE WHEN size(parts) = 3 AND trim(parts[2]) <> "" THEN trim(parts[2]) END AS pid ',
+            "AND (pid IS NULL OR NOT pid IN $several_actor_reports) ",
+            "MATCH (a:ThreatActor) WHERE a.name IN [aname, coalesce($canonical_actor_names[aname], aname)] ",
+            "[p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared ",
+            "WHERE pid IS NOT NULL OR size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports) ",
+            "CASE WHEN pid IS NOT NULL THEN [$otx_ref_prefix + pid] ",
+            "ELSE [_x IN _mrefs WHERE _x IN _arefs AND NOT _x IN $several_actor_refs] END AS _prov_refs",
+        ):
+            assert fragment in inner, fragment
         remove = assigned_query("_q2d_remove_outer")
         for fragment in (
             'r.match_type = "otx_pulse" AND r.edgeguard_managed = true',
