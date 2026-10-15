@@ -469,7 +469,7 @@ class TestImportScript:
         assert [t["name"] for t in event["Tag"]] == ["EdgeGuard", "source:CoreIdeas", "tlp:amber"]
         actor, malware = event["Attribute"]
         assert (actor["type"], actor["value"], actor["to_ids"]) == ("threat-actor", "apt29", False)
-        assert actor["Tag"] == [{"name": "source:CoreIdeas"}]
+        assert actor["Tag"] == [{"name": "source:CoreIdeas"}, {"name": "tlp:amber"}], "the package TLP on the attribute"
         assert actor["comment"].startswith(CURATED_CLAIMS_PREFIX)
         # every claim names its source (the package's when the claim gives none)
         assert _parse_curated_claims(actor["comment"]) == [
@@ -494,7 +494,7 @@ class TestImportScript:
         """The sync maps an unknown ``source:*`` tag to ``misp``; the claims carry the name."""
         package = _package(source="partner_pkg")
         attr = dict(importer.build_event(package)["Event"]["Attribute"][0], uuid="u-2")
-        assert attr["Tag"] == [{"name": "source:partner_pkg"}]
+        assert attr["Tag"] == [{"name": "source:partner_pkg"}, {"name": "tlp:amber"}]
         event = {"id": "8", "info": package["name"], "Tag": [{"name": "EdgeGuard"}]}
         item, rels = _syncer().parse_attribute(attr, event)
         assert item["tag"] == "misp", "unknown source tags still map to misp at the attribute level"
@@ -699,3 +699,75 @@ class TestClaimsThatDoNotAttach:
         (line,) = [r for r in caplog.records if r.getMessage().startswith("[CURATED]")]
         assert line.levelno == logging.INFO and "1 of 1 curated claim(s) attached" in line.getMessage()
         assert sync.stats["curated_claims_unattached"] == 0
+
+
+# --------------------------------------------------------------------------- TLP of curated links
+class TestCuratedLinkTlp:
+    """TLP fix (2026-10): the package's TLP marks every claim's link. The level was on the MISP
+    event only, the sync blanked it for curated attributes, and an SRO takes its marking from
+    its endpoints only — so curated links exported as TLP:WHITE."""
+
+    @pytest.mark.parametrize("tlp", [None, "", "  "])
+    def test_importer_requires_a_tlp_level(self, importer, tlp):
+        package = _package()
+        if tlp is None:
+            del package["tlp"]
+        else:
+            package["tlp"] = tlp
+        errors, _, _ = importer.validate(package)
+        assert any("missing 'tlp'" in e for e in errors), errors
+
+    def test_importer_tags_every_attribute_with_the_package_tlp(self, importer):
+        event = importer.build_event(_package(tlp=" Amber+Strict "))["Event"]
+        assert {"name": "tlp:amber+strict"} in event["Tag"]
+        assert event["Attribute"] and all({"name": "tlp:amber+strict"} in a["Tag"] for a in event["Attribute"])
+
+    def test_sync_carries_the_attribute_tlp_into_the_claim_rows(self, importer):
+        attr = dict(importer.build_event(_package(tlp="red"))["Event"]["Attribute"][0], uuid="u-1")
+        event = {"id": "7", "info": "2026-10-20_EdgeGuard_CoreIdeas_package", "Tag": [{"name": "EdgeGuard"}]}
+        item, rels = _syncer().parse_attribute(attr, event)
+        assert item["tlp"] == "", "the node's own TLP is still not touched"
+        assert rels and {r["tlp"] for r in rels} == {"red"}
+
+    def test_an_event_tagged_before_attributes_were_tagged_gives_its_level(self):
+        """Events imported before 2026-10 carry the TLP on the event only."""
+        comment = _claims_comment([{"p": "uses_technique", "o": "T1566"}])
+        attr = _attr("threat-actor", "apt29", comment)
+        attr["Tag"] = [{"name": "source:CoreIdeas"}]
+        event = {"id": "9", "info": "x_EdgeGuard_y", "Tag": [{"name": "EdgeGuard"}, {"name": "tlp:amber"}]}
+        _, rels = _syncer().parse_attribute(attr, event)
+        assert [r["tlp"] for r in rels] == ["amber"]
+
+    def test_the_attribute_level_wins_over_the_event_level(self):
+        comment = _claims_comment([{"p": "implements_technique", "o": "T1486"}])
+        attr = _attr("malware-type", "lockbit", comment)  # tagged tlp:amber
+        event = {"id": "9", "info": "x_EdgeGuard_y", "Tag": [{"name": "tlp:green"}]}
+        _, rels = _syncer().parse_attribute(attr, event)
+        assert [r["tlp"] for r in rels] == ["amber"]
+
+    def test_writer_sends_the_level_and_every_curated_template_writes_r_tlp(self):
+        rows = [dict(r, tlp="AMBER") for r in _one_claim_of_each_kind()]
+        _, captured = _client_and_run(rows)
+        assert len(captured) == 6
+        for query, batch in captured:
+            assert {row["tlp"] for row in batch} == {"amber"}
+            _on_create, set_ = _merge_clauses(query)
+            assert set_["tlp"].startswith("CASE WHEN CASE toLower(toString(row.tlp))"), "most restrictive wins"
+            assert set_["tlp"].endswith("THEN row.tlp ELSE r.tlp END")
+            # an existing link is marked too: the provenance the claim adds is as restricted
+            assert _after_write(TestCuratedClaimsNeverRelabel.OTX_LINK, query, created=False)["tlp"] == "<written>"
+
+    def test_feed_templates_write_no_relationship_tlp(self):
+        """Control: only curated links carry ``r.tlp``."""
+        rel = {
+            "rel_type": "INDICATES",
+            "from_type": "Indicator",
+            "from_key": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "to_type": "Malware",
+            "to_key": {"name": "emotet"},
+            "confidence": 0.6,
+            "match_type": "otx_pulse",
+            "tlp": "red",
+        }
+        ((query, _rows),) = _client_and_run([rel])[1]
+        assert "tlp" not in _merge_clauses(query)[1]

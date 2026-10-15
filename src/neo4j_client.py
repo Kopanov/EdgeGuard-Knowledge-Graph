@@ -4705,6 +4705,9 @@ class Neo4jClient:
             # ``r.sources`` / ``r.source_refs``.
             row_source = source_registry.canonical_source_id(rel.get("source") or source_id) or "misp"
             row_refs = [str(x) for x in (rel.get("source_refs") or []) if x is not None and str(x).strip()]
+            # 2026-10 (curated packages): the package's TLP level, which the curated templates
+            # write to ``r.tlp`` (most restrictive wins); the feed templates do not read it.
+            row_tlp = str(rel.get("tlp") or "").strip().lower() or None
             # NOTE: edge src_uuid / trg_uuid are NO LONGER pre-computed in the
             # dispatch loop. Each Cypher template SETs them directly from the
             # MATCHed node's bound-variable .uuid (Mechanism B), e.g. for
@@ -4755,6 +4758,7 @@ class Neo4jClient:
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
+                                "tlp": row_tlp,
                             }
                         )
                     else:
@@ -4789,6 +4793,7 @@ class Neo4jClient:
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
+                                "tlp": row_tlp,
                             }
                         )
                     else:
@@ -4937,6 +4942,7 @@ class Neo4jClient:
                             "confidence": conf,
                             "misp_event_id": mev,
                             "match_type": rel.get("match_type"),
+                            "tlp": row_tlp,
                         }
                     )
                 else:
@@ -5034,7 +5040,11 @@ class Neo4jClient:
                 on_create + f"SET r.sources = {sources_dedup},\n"
                 f"            r.source_refs = {refs_dedup},\n"
                 + (
-                    ""
+                    # 2026-10 (curated packages, TLP fix): the link carries the package's TLP level,
+                    # most restrictive wins (as ``n.tlp`` on nodes) — on an existing link too, since
+                    # the provenance the claim adds is as restricted as the package. The STIX SRO
+                    # takes the most restrictive of its endpoints' markings and ``r.tlp``.
+                    f"            r.tlp = {_tlp_most_restrictive_clause('r.tlp', 'row.tlp')},\n"
                     if curated
                     # 2026-10 (aging logic check): a weaker later row never lowers an edge — the label
                     # follows the stronger evidence and the confidence keeps the maximum (same rule as

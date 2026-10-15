@@ -18,18 +18,21 @@ for example ``2026-10-20_EdgeGuard_CoreIdeas_package.json``::
 
 ``name`` must contain "EdgeGuard" (the MISP→Neo4j sync discovers EdgeGuard events by title).
 ``source`` is the package's source (a registered curated source such as ``coreideas``; any
-other name is imported with the label ``curated_other``). ``name`` of an entity is the
-canonical name of the existing node (the package builder aligns names). Each claim's ``src``
-is the source that asserts it (defaults to the package's source) and ``id`` that source's
-record id. Predicates per subject: see ``relationship_provenance.CURATED_PREDICATES``.
+other name is imported with the label ``curated_other``). ``tlp`` is required: the package's
+TLP level marks the link of every claim (``r.tlp``) and the STIX relationship exported from it.
+``name`` of an entity is the canonical name of the existing node (the package builder aligns
+names). Each claim's ``src`` is the source that asserts it (defaults to the package's source)
+and ``id`` that source's record id. Predicates per subject: see
+``relationship_provenance.CURATED_PREDICATES``.
 
 The event is created unpublished, for the creating organisation only, with the tags
-``EdgeGuard`` and the package source's ``source:*`` tag (plus ``tlp:<level>`` when given). Each
-entity becomes one ``threat-actor`` / ``malware-type`` attribute whose comment carries its
-claims (``CURATED_CLAIMS:{...}``). The sync turns every claim into a relationship labelled
-with the package's curated label at confidence 0.85, MATCHing both ends; the attribute itself
-is not merged as a node, so a package never creates nodes and never changes the node it names. Removing the layer later = deleting the
-event and re-feeding.
+``EdgeGuard``, the package source's ``source:*`` tag and ``tlp:<level>``. Each entity becomes one
+``threat-actor`` / ``malware-type`` attribute, tagged with the same source and TLP, whose comment
+carries its claims (``CURATED_CLAIMS:{...}``). The sync turns every claim into a relationship,
+MATCHing both ends: a link the claim creates gets the package's curated label at confidence
+0.85, an existing link keeps its label and confidence and gains the claim's provenance. The
+attribute itself is not merged as a node, so a package never creates nodes and never changes
+the node it names. Removing the layer: see ``docs/RUNBOOK.md``, "Importing a curated package".
 
 Usage::
 
@@ -63,6 +66,11 @@ TLP_LEVELS = ("clear", "white", "green", "amber", "amber+strict", "red")
 COMMENT_BUDGET = 60_000
 
 
+def _tlp_level(package: Dict[str, Any]) -> str:
+    """The package's TLP level, lower-case (``""`` when it states none)."""
+    return str(package.get("tlp") or "").strip().lower()
+
+
 def _claim_ok(claim: Any, subject_label: str) -> Tuple[bool, str]:
     if not isinstance(claim, dict):
         return False, "not an object"
@@ -94,7 +102,11 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
     elif registered.source_type != "curated":
         errors.append(f"source {source!r} is a feed ({registered.source_type}), not a curated source")
     tlp = package.get("tlp")
-    if tlp is not None and str(tlp).lower() not in TLP_LEVELS:
+    # 2026-10: the level is required — it marks every claim's link (``r.tlp``) and the STIX
+    # relationship built from it, so a package without one would export as the default.
+    if tlp is None or not str(tlp).strip():
+        errors.append(f"missing 'tlp': a curated package must state its TLP level ({', '.join(TLP_LEVELS)})")
+    elif _tlp_level(package) not in TLP_LEVELS:
         errors.append(f"tlp {tlp!r} is not one of {', '.join(TLP_LEVELS)}")
     entities = package.get("entities")
     if not isinstance(entities, list) or not entities:
@@ -191,8 +203,12 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
     registered = get_source(source) if source else None
     source_tag = registered.misp_tag if registered else f"source:{source}"
     event_tags = [{"name": "EdgeGuard"}, {"name": source_tag}]
-    if package.get("tlp"):
-        event_tags.append({"name": f"tlp:{str(package['tlp']).lower()}"})
+    # 2026-10: the TLP tag goes on every attribute as well as on the event — the sync reads an
+    # attribute's own tags, and the level marks each claim's link (``r.tlp``) and its STIX SRO.
+    attribute_tags = [{"name": source_tag}]
+    if _tlp_level(package):
+        event_tags.append({"name": f"tlp:{_tlp_level(package)}"})
+        attribute_tags.append({"name": f"tlp:{_tlp_level(package)}"})
     attributes = []
     for entity in package.get("entities") or []:
         kind = entity.get("kind")
@@ -207,7 +223,7 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
                 "value": str(entity["name"]).strip(),
                 "comment": _comment(good, source),
                 "to_ids": False,
-                "Tag": [{"name": source_tag}],
+                "Tag": [dict(tag) for tag in attribute_tags],
             }
         )
     return {

@@ -538,10 +538,29 @@ def _parse_curated_claims(raw_comment: str) -> Optional[List[Dict]]:
     return [c for c in claims[:_CURATED_MAX_CLAIMS_PER_ATTRIBUTE] if isinstance(c, dict)]
 
 
+def _curated_claims_tlp(tags: List[Dict[str, Any]], event_info: Dict, ref: str = "") -> str:
+    """The TLP level of a curated attribute's claims (2026-10): its own ``tlp:`` tag, else the event's.
+
+    The importer tags every curated attribute with the package's level; an event imported
+    before that carries the level on the event only. With neither, the deployment default
+    applies (``_extract_tlp_tag``). The level marks each claim's link (``r.tlp``), so the STIX
+    relationship is as restricted as the package.
+    """
+    return _extract_tlp_tag(list(tags) + normalize_misp_tag_list(event_info.get("Tag", [])), ref)
+
+
 def _curated_claim_rows(
-    claims: List[Dict], subject_type: str, subject_key: Dict[str, str], package_source: str, evt_id: str
+    claims: List[Dict],
+    subject_type: str,
+    subject_key: Dict[str, str],
+    package_source: str,
+    evt_id: str,
+    tlp: str = "",
 ) -> List[Dict]:
-    """Relationship rows for one curated subject's claims (see ``CURATED_CLAIMS_PREFIX``)."""
+    """Relationship rows for one curated subject's claims (see ``CURATED_CLAIMS_PREFIX``).
+
+    ``tlp`` is the package's TLP level (``_curated_claims_tlp``), carried on every row.
+    """
     label = curated_label_for(package_source)
     rows: List[Dict] = []
     skipped = 0
@@ -575,6 +594,7 @@ def _curated_claim_rows(
                 "misp_event_id": evt_id,
                 # exact canonical names on both ends — never alias matching (see the writer)
                 "exact_names": True,
+                "tlp": tlp or None,
             }
         )
     if skipped:
@@ -3182,7 +3202,14 @@ class MISPToNeo4jSync:
             if curated_claims is not None:
                 actor_description = ""
                 relationships.extend(
-                    _curated_claim_rows(curated_claims, "ThreatActor", {"name": actor_name}, source_id, _evt_id)
+                    _curated_claim_rows(
+                        curated_claims,
+                        "ThreatActor",
+                        {"name": actor_name},
+                        source_id,
+                        _evt_id,
+                        tlp=_curated_claims_tlp(tags, event_info, attr_misp_uuid),
+                    )
                 )
 
             # Build EMPLOYS_TECHNIQUE relationships to techniques.
@@ -3289,7 +3316,14 @@ class MISPToNeo4jSync:
                 description = ""
                 malware_types = []
                 relationships.extend(
-                    _curated_claim_rows(curated_claims, "Malware", {"name": malware_name}, source_id, _evt_id)
+                    _curated_claim_rows(
+                        curated_claims,
+                        "Malware",
+                        {"name": malware_name},
+                        source_id,
+                        _evt_id,
+                        tlp=_curated_claims_tlp(tags, event_info, attr_misp_uuid),
+                    )
                 )
 
             # Build ATTRIBUTED_TO relationship to threat actor
