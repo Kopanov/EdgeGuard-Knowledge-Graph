@@ -100,6 +100,25 @@ class TestActorIdentities:
     def test_names_without_a_key_are_left_out(self, reference):
         assert cta.actor_identities(["", None, 7, " APT28 "], reference) == {"apt28"}
 
+    def test_several_actor_reports_is_the_union_with_the_indicator_marks(self, reference):
+        # 2026-10: the graph-derived pulses are judged with the reference; a mark is the OTX collector's
+        # judgement of the pulse's whole adversary list and is taken as it is.
+        rows = [
+            {"pid": "p-groups", "names": ["gamaredon", "turla"]},
+            {"pid": "p-alias", "names": ["the gentlemen", "storm-2697"]},
+        ]
+        assert cta.several_actor_reports(rows, [], reference) == ["p-groups"]
+        assert cta.several_actor_reports(rows, ["p-edited", "p-groups"], reference) == ["p-edited", "p-groups"]
+        assert cta.several_actor_reports(rows, ["p-alias"], reference) == ["p-alias", "p-groups"], "not re-judged"
+        assert cta.several_actor_reports([], [" p-edited ", "", None, 7], reference) == ["p-edited"]
+        assert cta.several_actor_reports(rows, ["p-edited"], None) == ["p-alias", "p-edited", "p-groups"]
+
+    def test_the_marks_query_answers_one_row(self):
+        query = cta.INDICATOR_MARKED_REPORTS_QUERY
+        assert query.startswith("MATCH (i:Indicator) WHERE i.several_actor_pulses IS NOT NULL ")
+        assert query.endswith("RETURN collect(DISTINCT pid) AS pulses, count(DISTINCT i) AS indicators")
+        assert "'" not in query
+
     def test_reports_naming_several_actors(self, reference):
         rows = [
             {"pid": "p-groups", "names": ["gamaredon", "turla"]},
@@ -221,6 +240,47 @@ class TestMispRoundTrip:
         for attr in (indicator, malware, actor):
             item, _ = syncer.parse_attribute({**attr, "uuid": "20000000-0000-0000-0000-00000000abcd"}, _EVENT)
             assert item["several_actor_pulses"] == ["p-two"], attr["type"]
+
+    def test_the_sync_carries_the_mark_into_the_indicator_batch_rows(self):
+        # 2026-10: the mark is stored on the Indicator node (accumulated like the pairs), where step 2d
+        # and the acceptance check read it: the actor nodes miss a pulse edited to name several actors.
+        from neo4j_client import Neo4jClient
+
+        attr = _writer().create_attribute(
+            {
+                **_OTX,
+                "indicator_type": "ipv4",
+                "value": "203.0.113.5",
+                "pulse_id": "p-one",
+                "report_ids": ["p-edited"],
+                "pulse_malware_actor_pairs": ["Kazuar::Turla::p-one"],
+                "several_actor_pulses": ["p-edited"],
+            }
+        )
+        item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+            {**attr, "uuid": "20000000-0000-0000-0000-00000000abcd"}, _EVENT
+        )
+        client = Neo4jClient.__new__(Neo4jClient)
+        client.driver = MagicMock()
+        client._connection_healthy = True
+        session = MagicMock()
+        session.run.return_value.single.return_value = None
+        client.driver.session.return_value.__enter__ = MagicMock(return_value=session)
+        client.driver.session.return_value.__exit__ = MagicMock(return_value=False)
+        client.merge_indicators_batch([item], source_id="alienvault_otx")
+        rows = [
+            v
+            for call in session.run.call_args_list
+            for v in list(call.kwargs.values()) + list(call.args[1:])
+            if isinstance(v, list) and v and isinstance(v[0], dict) and "value" in v[0]
+        ]
+        assert rows and rows[0][0]["several_actor_pulses"] == ["p-edited"]
+        assert rows[0][0]["pulse_malware_actor_pairs"] == ["Kazuar::Turla::p-one"]
+        cypher = "\n".join(call.args[0] for call in session.run.call_args_list if call.args)
+        assert (
+            "n.several_actor_pulses = apoc.coll.toSet(coalesce(n.several_actor_pulses, []) "
+            "+ coalesce(item.several_actor_pulses, []))"
+        ) in cypher, "accumulated across pulses and runs, never overwritten"
 
     def test_a_pair_too_long_for_its_pulse_id_is_left_out_not_cut(self):
         pair = "Emotet::" + "x" * 320 + "::6a4fdf500b5e6dffde939998"
@@ -384,7 +444,15 @@ _REPORT_ACTOR_ROWS = [
 
 
 def _run_build(
-    monkeypatch, *, report_rows=_REPORT_ACTOR_ROWS, reference_ok=True, read_fails=False, read_empty=False, failing=None
+    monkeypatch,
+    *,
+    report_rows=_REPORT_ACTOR_ROWS,
+    marked=(),
+    reference_ok=True,
+    read_fails=False,
+    read_empty=False,
+    marks_empty=False,
+    failing=None,
 ):
     calls: list = []
 
@@ -403,6 +471,10 @@ def _run_build(
                 if read_empty:
                     return []  # ``Neo4jClient.run`` on a terminal error
                 return [{"reports": [dict(r) for r in report_rows], "pulses": 1530}]
+            if query == cta.INDICATOR_MARKED_REPORTS_QUERY:
+                if marks_empty:
+                    return []  # ``Neo4jClient.run`` on a terminal error
+                return [{"pulses": list(marked), "indicators": 7 * len(marked)}]
             if "apoc.periodic.iterate" in query:
                 names = (failing,) if isinstance(failing, str) else (failing or ())
                 if any(assigned_query(n) in query for n in names):
@@ -467,7 +539,38 @@ class TestStep2d:
         assert ok is True and _step(iterate, "_q2d_outer")["several_actor_reports"] == []
         assert _step(iterate, "_q2d_remove_outer") is None
 
-    @pytest.mark.parametrize("failure", ["read_fails", "read_empty"])
+    def test_a_pulse_marked_only_on_indicators_names_several_actors(self, monkeypatch, caplog):
+        # 2026-10: "p-edited" named one actor when its pairs were written and was edited to name several;
+        # MISP held its actors already, so no actor node records it. The OTX collector's mark on the
+        # indicators makes step 2d skip its pairs and remove the links resting on it.
+        with caplog.at_level("INFO", logger="build_relationships"):
+            ok, iterate = _run_build(monkeypatch, marked=["p-edited", "p-groups"])
+        assert ok is True
+        for name in ("_q2d_outer", "_q2d_remove_outer", "_q2d_trim_outer"):
+            params = _step(iterate, name)
+            assert params["several_actor_reports"] == ["p-edited", "p-groups"], name
+            assert params["several_actor_refs"] == ["alienvault_otx:p-edited", "alienvault_otx:p-groups"], name
+        assert "2 pulse(s) name several actors (2 marked on 14 indicator(s) by the OTX collector)" in caplog.text
+
+    def test_a_mark_is_the_collectors_judgement_taken_as_it_is(self, monkeypatch):
+        # The reference makes p-alias one actor on the actor nodes; a mark on it is not re-judged.
+        ok, iterate = _run_build(monkeypatch, marked=["p-alias"])
+        assert ok is True
+        assert _step(iterate, "_q2d_outer")["several_actor_reports"] == ["p-alias", "p-groups"]
+
+    def test_marks_alone_trigger_the_cleanup(self, monkeypatch):
+        ok, iterate = _run_build(monkeypatch, report_rows=[], marked=["p-edited"])
+        assert ok is True
+        assert _step(iterate, "_q2d_remove_outer")["several_actor_reports"] == ["p-edited"]
+        assert _step(iterate, "_q2d_trim_outer") is not None
+
+    def test_without_the_reference_marks_skip_pairs_but_nothing_is_removed(self, monkeypatch):
+        ok, iterate = _run_build(monkeypatch, reference_ok=False, report_rows=[], marked=["p-edited"])
+        assert ok is True
+        assert _step(iterate, "_q2d_outer")["several_actor_reports"] == ["p-edited"]
+        assert _step(iterate, "_q2d_remove_outer") is None and _step(iterate, "_q2d_trim_outer") is None
+
+    @pytest.mark.parametrize("failure", ["read_fails", "read_empty", "marks_empty"])
     def test_an_unreadable_graph_skips_the_step_and_fails_the_run(self, monkeypatch, failure):
         ok, iterate = _run_build(monkeypatch, **{failure: True})
         assert ok is False

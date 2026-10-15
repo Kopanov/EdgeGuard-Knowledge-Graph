@@ -105,12 +105,12 @@ Collectors embed structured metadata as JSON in MISP attribute comments using th
 
 | Prefix | Source | Fields |
 |--------|--------|--------|
-| `OTX_META:` | AlienVault OTX | attack_ids, targeted_countries, tags, references, author_name, adversary, TLP, industries, the indicator's own description (not the pulse's) |
+| `OTX_META:` | AlienVault OTX | attack_ids, targeted_countries, tags, references, author_name, adversary, TLP, industries, the indicator's own description (not the pulse's); the pulses that listed the IOC (`pulse_id`, `report_ids`), their families (`mf`), their `family::adversary::pulse` pairs (`pa`, one per family and adversary) and those of them naming several actors (`sap`) |
 | `TF_META:` | ThreatFox | malware_malpedia, reference, reporter, tags, threat_type_desc, last_seen, confidence_level |
 | `MITRE_USES_TECHNIQUES:` | MITRE ATT&CK; AlienVault OTX (malware families, adversaries) | Technique IDs from STIX uses relationships (`t`), an OTX pulse's ATT&CK ids and pulse id (`rt`, `pid`); ATT&CK's description of the entity follows on the next line. The block is never a description (2026-10), and the sync takes no description from an OTX attribute: one written before 2026-10 carries the pulse's description there |
 | `NVD_META:` | NVD | CVSS data, CWE, references, affected products |
 
-These are parsed by `run_misp_to_neo4j.py` during the MISP→Neo4j sync to populate enrichment fields on Neo4j nodes. Maximum comment length: 4000 chars (truncated with warning if exceeded).
+These are parsed by `run_misp_to_neo4j.py` during the MISP→Neo4j sync to populate enrichment fields on Neo4j nodes. Maximum comment length: 4000 characters. A longer `OTX_META` or `TF_META` block is shortened with a warning, never cut mid-token, so the JSON always parses: lists first, in a fixed order, then long strings, then optional keys. Since 2026-10 `OTX_META.pa` is shortened before `report_ids` and `mf`, `sap` keeps the marks of the pulses still in `pulse_id` + `report_ids` (the sync reads no other), and each shortened list keeps the longest part that fits. Before, an IOC that many pulses list kept few of its report ids and families: 120 pulses naming several actors and 10 naming one kept 1 of 129 report ids and 1 of 8 families.
 
 ---
 
@@ -158,4 +158,4 @@ Early prototypes discussed skipping MISP. **Current product path** is **collecto
 
 ---
 
-_Last updated: 2026-10-15 — Metadata Comment Prefixes: `OTX_META` carries the indicator's own description, not the pulse's; `MITRE_USES_TECHNIQUES` is written for OTX families and adversaries too, the text after it is ATT&CK's description, and neither the block nor an OTX attribute's text is a description. Prior: 2026-04-26 — PR-N33 docs audit: documented PR-N29 fallback hardening (paginated restSearch + `_MispFallbackHardError` sentinel + safety cap) and PR-N31 observability (Counter + 2 Prometheus alerts). Prior: 2026-03-28._
+_Last updated: 2026-10-16 — `OTX_META` within its 4000 characters: one pair per family and adversary, `pa` shortened before `report_ids` and `mf`, `sap` kept to the pulses still listed, each shortened list as long as fits. Prior: 2026-10-15 — Metadata Comment Prefixes: `OTX_META` carries the indicator's own description, not the pulse's; `MITRE_USES_TECHNIQUES` is written for OTX families and adversaries too, the text after it is ATT&CK's description, and neither the block nor an OTX attribute's text is a description. Prior: 2026-04-26 — PR-N33 docs audit: documented PR-N29 fallback hardening (paginated restSearch + `_MispFallbackHardError` sentinel + safety cap) and PR-N31 observability (Counter + 2 Prometheus alerts). Prior: 2026-03-28._

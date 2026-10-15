@@ -263,10 +263,14 @@ _MAX_PAIR_CHARS = 128 + 2 + 128 + 2 + 64
 # (longest-first, halving), then long strings, then drop optional keys; the result is always valid
 # JSON. The budget stays 4000 (MISP renders comments inline); the TEXT column itself holds 64 KB.
 _META_COMMENT_BUDGET = 4000
+# 2026-10: ``pa`` is shrunk before ``report_ids`` and ``mf``. A pair carries its pulse, so an IOC listed
+# by many pulses carried one pair per pulse and the halving cut ``report_ids`` first: 120 pulses naming
+# several actors and 10 naming one kept 1 of 129 report ids and 1 of 8 families. ``pa`` is de-duplicated
+# by family and adversary (``_otx_meta_pairs``); ``sap`` follows ``report_ids`` (``_fit_meta_comment``).
 _META_SHRINK_LISTS = (
+    "pa",
     "report_ids",
     "mf",
-    "pa",
     "attack_ids",
     "targeted_countries",
     "otx_industries",
@@ -288,34 +292,109 @@ _TF_META_MAX_ITEM_CHARS = 200
 _META_SHRINK_STRINGS = ("description", "pulse_name", "reference")
 
 
+def _sap_within_reports(meta: Dict[str, Any], marks: Any) -> None:
+    """Set ``meta["sap"]`` to the pulses of *marks* still in ``pulse_id`` + ``report_ids`` (2026-10).
+
+    The sync reads the mark per pulse bucket of the item (``[pulse_id] + report_ids``), so the mark of a
+    pulse whose id was shrunk away from ``report_ids`` is never read. The key is left out when no mark
+    remains; *marks* that are not a list leave ``meta`` unchanged.
+    """
+    if not isinstance(marks, list):
+        return
+    reports = {str(meta.get("pulse_id") or "")} | {str(x) for x in (meta.get("report_ids") or [])}
+    kept = [x for x in marks if str(x) in reports]
+    if kept:
+        meta["sap"] = kept
+    else:
+        meta.pop("sap", None)
+
+
 def _fit_meta_comment(prefix: str, meta: Dict[str, Any], budget: int = _META_COMMENT_BUDGET) -> str:
-    """``prefix + json.dumps(meta)``, shrunk until it fits *budget* without ever breaking the JSON."""
+    """``prefix + json.dumps(meta)``, shrunk until it fits *budget* without ever breaking the JSON.
+
+    2026-10: ``sap`` keeps the marks of the pulses still in ``pulse_id`` + ``report_ids`` after each
+    step (``_sap_within_reports``), so it shrinks with ``report_ids``. Halving stops at the first length
+    that fits and could leave a quarter of the budget unused, so at the end each shrunk list takes back,
+    from the last shrunk to the first, the longest part of what it held that still fits.
+    """
     comment = prefix + json.dumps(meta, default=str)
     if len(comment) <= budget:
         return comment
     original_len = len(comment)
+    original = dict(meta)
     meta = dict(meta)
+
+    def _render() -> str:
+        _sap_within_reports(meta, original.get("sap"))
+        return prefix + json.dumps(meta, default=str)
+
+    comment = _render()
     for key in _META_SHRINK_LISTS:
         while len(comment) > budget and isinstance(meta.get(key), list) and len(meta[key]) > 1:
             meta[key] = meta[key][: max(1, len(meta[key]) // 2)]
-            comment = prefix + json.dumps(meta, default=str)
+            comment = _render()
     for key in _META_SHRINK_STRINGS:
         while len(comment) > budget and isinstance(meta.get(key), str) and len(meta[key]) > 32:
             meta[key] = meta[key][: max(32, len(meta[key]) // 2)]
-            comment = prefix + json.dumps(meta, default=str)
+            comment = _render()
     for key in _META_SHRINK_LISTS + _META_SHRINK_STRINGS:
         if len(comment) <= budget:
             break
         if key in meta:
             meta.pop(key)
-            comment = prefix + json.dumps(meta, default=str)
+            comment = _render()
+    if len(comment) <= budget:
+        for key in reversed(_META_SHRINK_LISTS):
+            full, kept = original.get(key), meta.get(key)
+            if not isinstance(full, list) or not isinstance(kept, list) or len(kept) >= len(full):
+                continue
+            fits, too_long = len(kept), len(full) + 1
+            while too_long - fits > 1:
+                mid = (fits + too_long) // 2
+                meta[key] = full[:mid]
+                if len(_render()) <= budget:
+                    fits = mid
+                else:
+                    too_long = mid
+            meta[key] = full[:fits]
+            comment = _render()
     logger.warning(
-        "%s comment shrunk to fit MISP: %d -> %d chars (lists halved / optional keys dropped, JSON intact)",
+        "%s comment shrunk to fit MISP: %d -> %d chars (lists shortened / optional keys dropped, JSON intact)",
         prefix.rstrip(":"),
         original_len,
         len(comment),
     )
     return comment
+
+
+_MAX_OTX_META_PAIRS = 50
+
+
+def _otx_meta_pairs(pairs: Any) -> List[str]:
+    """``OTX_META.pa``: the IOC's ``"family::adversary::pulse"`` pairs, one per family and adversary
+    (2026-10).
+
+    The pair of the first pulse that named them is kept (the collector folds later pulses after the
+    first; family and adversary compared case-insensitively, trimmed). The same pair from N pulses was
+    N entries and crowded ``report_ids`` and ``mf`` out of the comment budget; build_relationships step
+    2d links a family and an adversary once, so a further pulse adds only provenance, which the other
+    IOCs of that pulse carry. A pair longer than ``_MAX_PAIR_CHARS`` is left out, never cut: a cut pair
+    would name another actor or another pulse.
+    """
+    out: List[str] = []
+    seen: set = set()
+    for raw in pairs or []:
+        pair = str(raw) if raw else ""
+        if not pair or len(pair) > _MAX_PAIR_CHARS:
+            continue
+        key = tuple(part.strip().lower() for part in pair.split("::")[:2])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(pair)
+        if len(out) >= _MAX_OTX_META_PAIRS:
+            break
+    return out
 
 
 def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1810,16 +1889,12 @@ class MISPWriter:
                 # the "family::adversary::pulse" pairs of the SAME pulse (Q9b / Q2d link from the indicator
                 # side; the family attribute itself is a cross-event duplicate and is never re-pushed).
                 # Pruned below when empty. Kept last: test_pr_n13 pins the key order inside a fixed window.
-                # A pair longer than _MAX_PAIR_CHARS is left out, never cut: a cut pair would name
-                # another actor or another pulse.
+                # One pair per family and adversary (``_otx_meta_pairs``).
                 "mf": [str(x)[:128] for x in (indicator.get("pulse_malware_families") or []) if x][:20],
-                "pa": [
-                    str(x)
-                    for x in (indicator.get("pulse_malware_actor_pairs") or [])
-                    if x and len(str(x)) <= _MAX_PAIR_CHARS
-                ][:50],
+                "pa": _otx_meta_pairs(indicator.get("pulse_malware_actor_pairs")),
                 # 2026-10: the pulses that listed this IOC whose adversaries are several actors (the
-                # sync attributes no malware from them; never shrunk away, it is a few short ids).
+                # sync attributes no malware from them). When the comment is shrunk, only the marks of
+                # the pulses still in pulse_id + report_ids are kept (``_fit_meta_comment``).
                 "sap": [str(x)[:64] for x in (indicator.get("several_actor_pulses") or []) if x][:_MAX_REPORT_IDS],
             }
             for _k in ("mf", "pa", "sap"):

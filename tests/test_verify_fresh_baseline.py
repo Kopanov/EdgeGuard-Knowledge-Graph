@@ -180,6 +180,10 @@ _REPORT_ACTOR_ROWS = [
     {"pid": "68cd617b3eb5b1212d11643d", "names": ["gamaredon", "turla"]},
     {"pid": "6a189defc88ad66cd0a9d87d", "names": ["the gentlemen", "storm-2697"]},
 ]
+# 2026-10: the pulses the OTX collector marked on indicators as naming several actors. The first is
+# also on two actor nodes; the second ("Indonesian Banking Sector Threat Landscape", 8 actors) is on no
+# actor node as a pulse of several: MISP held its actors already and did not push them again.
+_MARKED_PULSES = ["68cd617b3eb5b1212d11643d", "6a4fdf500b5e6dffde939998"]
 _ATTRIBUTION_ROW = {
     "links": 3212,
     "resting_on_several_actor_reports": 0,
@@ -225,6 +229,8 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     s = statement
     if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in s:
         return [{"reports": [dict(x) for x in _REPORT_ACTOR_ROWS], "pulses": 1530}]
+    if "UNWIND i.several_actor_pulses AS pid" in s:
+        return [{"pulses": list(_MARKED_PULSES), "indicators": 412}]
     if "AS resting_on_several_actor_reports" in s:
         return [dict(_ATTRIBUTION_ROW)]
     if "AS unattributed" in s:
@@ -1017,10 +1023,38 @@ class TestAttributionFromSingleActorReports:
         rep = vfb.run_checks(False, False)
         c = _check(rep, "attribution_from_single_actor_reports")
         assert c["ok"] is True and c["mandatory"] is True
-        assert c["detail"]["reports_naming_several_actors"] == 1
-        assert seen["params"]["several"] == ["68cd617b3eb5b1212d11643d"], "Storm-2697 is The Gentlemen"
+        assert c["detail"]["reports_naming_several_actors"] == 2
+        assert c["detail"]["pulses_marked_on_indicators"] == 2
+        # Storm-2697 is The Gentlemen; the second pulse is marked on indicators only.
+        assert seen["params"]["several"] == ["68cd617b3eb5b1212d11643d", "6a4fdf500b5e6dffde939998"]
         assert seen["params"]["feeds"] == ["alienvault_otx", "otx_pulse"]
         assert _check(rep, "campaign_malware_attributed")["ok"] is True
+
+    def test_the_pulses_are_step_2ds_union_of_the_actor_nodes_and_the_indicator_marks(self, vfb, monkeypatch):
+        """2026-10: the set is the one step 2d uses (``canonical_threat_actors.several_actor_reports``).
+        A pulse marked only on indicators counts; a mark is the collector's judgement, taken as it is,
+        while the pulses on the actor nodes are judged with the reference."""
+        import canonical_threat_actors
+
+        seen: dict = {}
+        marks = ["6a189defc88ad66cd0a9d87d", " 6a4fdf500b5e6dffde939998 "]
+
+        def marked(st, rows):
+            if st == canonical_threat_actors.INDICATOR_MARKED_REPORTS_QUERY:
+                seen["read"] = True
+                return [{"pulses": marks, "indicators": 3}]
+            return rows
+
+        monkeypatch.setattr(vfb, "_post", lambda st, params=None, timeout=180: _record(seen, st, params, marked))
+        rep = vfb.run_checks(False, False)
+        assert seen["read"] is True
+        # The alias pulse is not several on the actor nodes, but the collector marked it: it counts.
+        assert seen["params"]["several"] == [
+            "68cd617b3eb5b1212d11643d",
+            "6a189defc88ad66cd0a9d87d",
+            "6a4fdf500b5e6dffde939998",
+        ]
+        assert _check(rep, "attribution_from_single_actor_reports")["detail"]["pulses_marked_on_indicators"] == 2
 
     @pytest.mark.parametrize("column", ["resting_on_several_actor_reports", "naming_several_actor_reports"])
     def test_an_attribution_resting_on_or_naming_such_a_pulse_fails(self, vfb, monkeypatch, column):
@@ -1060,16 +1094,37 @@ class TestAttributionFromSingleActorReports:
         )
         assert [c["check"] for c in rep.failed] == ["campaign_malware_attributed"]
 
-    def test_no_pulse_recorded_on_any_actor_is_informational(self, vfb, monkeypatch):
+    def test_no_pulse_recorded_on_any_actor_and_no_mark_is_informational(self, vfb, monkeypatch):
         # Nothing to judge: a pass would be vacuous.
+        def unrecorded(marks):
+            def override(st, rows):
+                if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in st:
+                    return [{"reports": [], "pulses": 0}]
+                if "UNWIND i.several_actor_pulses AS pid" in st:
+                    return [{"pulses": marks, "indicators": len(marks)}]
+                return rows
+
+            return override
+
+        rep = _run(vfb, monkeypatch, override=unrecorded([]))
+        assert _check(rep, "attribution_from_single_actor_reports")["ok"] is None
+        # 2026-10: the collector's marks alone are something to judge.
+        rep = _run(vfb, monkeypatch, override=unrecorded(["6a4fdf500b5e6dffde939998"]))
+        assert _check(rep, "attribution_from_single_actor_reports")["ok"] is True
+
+    def test_no_same_pulse_attribution_is_informational(self, vfb, monkeypatch):
+        # 2026-10: with no same-pulse ATTRIBUTED_TO at all the check passed as mandatory; there is nothing
+        # to judge (a graph without OTX, or one whose attributions were all removed), as for 13c.
         rep = _run(
             vfb,
             monkeypatch,
             override=lambda st, rows: (
-                [{"reports": [], "pulses": 0}] if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in st else rows
+                [dict(rows[0], links=0, without_reports=0)] if "AS resting_on_several_actor_reports" in st else rows
             ),
         )
-        assert _check(rep, "attribution_from_single_actor_reports")["ok"] is None
+        c = _check(rep, "attribution_from_single_actor_reports")
+        assert c["ok"] is None and c["mandatory"] is True and rep.failed == []
+        assert c["detail"]["links"] == 0
 
     def test_no_malware_member_is_informational(self, vfb, monkeypatch):
         rep = _run(
