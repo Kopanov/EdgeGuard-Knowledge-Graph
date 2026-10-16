@@ -121,7 +121,7 @@ def test_the_incremental_default_no_longer_applies(source):
 
     assert config.get_effective_limit(source) is None, "the collector applies its own per-run cap"
     assert config.resolve_collection_limit(None, source, baseline=False) is None
-    assert config.get_effective_limit("feodo") == 200, "other sources keep the incremental default"
+    assert config.get_effective_limit("otx") == 200, "other sources keep the incremental default"
 
 
 def test_the_global_override_still_applies():
@@ -256,6 +256,8 @@ def test_urlhaus_lower_regular_limit_wins_and_zero_cap_means_no_cap(monkeypatch)
 
 
 def test_rows_without_a_usable_date_go_last():
+    from collectors.collector_utils import feed_time, newest_first
+
     rows = [["1", "not a date"], ["2", "2026-10-01 00:00:00"], ["3"], ["4", "2026-10-02 00:00:00"]]
-    ordered = gfc._newest_first(rows, lambda p: gfc._abusech_time(p[1]) if len(p) > 1 else None)
+    ordered = newest_first(rows, lambda p: feed_time(p[1]) if len(p) > 1 else None)
     assert [r[0] for r in ordered] == ["4", "2", "1", "3"], "dated rows newest first, undated in feed order"

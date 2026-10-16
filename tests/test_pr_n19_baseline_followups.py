@@ -84,6 +84,7 @@ if str(SRC) not in sys.path:
 os.environ.setdefault("NEO4J_PASSWORD", "test-pw-pr-n19")
 os.environ.setdefault("MISP_API_KEY", "test-key-pr-n19")
 
+from description_ranking import CVE_DESCRIPTIONS  # noqa: E402  (2026-10-16: the description's source ranking)
 
 # ===========================================================================
 # Fix #1 — merge_cve promotes published + last_modified
@@ -92,17 +93,18 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n19")
 
 class TestFix1CvePublishedLastModified:
     """2026-10: the dates reach the node from NVD's record (``nvd_record``) through ``extra_props``,
-    and from any other record only where the node has none (``fill_props``); see
+    and from any other record only where the node has none (``fill_props``); the description goes with
+    its source and rank to the source ranking (``description``, 2026-10-16); see
     ``tests/test_cve_description_source.py``."""
 
     @staticmethod
-    def _merge(data: dict) -> dict:
+    def _merge(data: dict, source_id: str = "nvd") -> dict:
         from neo4j_client import Neo4jClient
 
         c = Neo4jClient.__new__(Neo4jClient)
         c.driver = MagicMock()
         c.merge_node_with_source = MagicMock(return_value=True)
-        assert c.merge_cve(data) is True
+        assert c.merge_cve(data, source_id=source_id) is True
         return c.merge_node_with_source.call_args.kwargs
 
     _DATA = {
@@ -123,17 +125,18 @@ class TestFix1CvePublishedLastModified:
         )
         assert extra_props.get("last_modified") == "2024-04-03T17:02:49.887"
         assert not kwargs.get("fill_props")
+        assert kwargs["description"] == CVE_DESCRIPTIONS.record("Log4Shell", "nvd")
 
     def test_merge_cve_other_record_fills_published_and_last_modified(self):
         """Behavioral pin: a record that is not NVD's passes both dates to fill_props only."""
-        kwargs = self._merge(dict(self._DATA))
+        kwargs = self._merge(dict(self._DATA), source_id="cisa_ics")
         assert kwargs["fill_props"] == {
-            "description": "Log4Shell",
             "published": "2021-12-10T10:15:09.143",
             "last_modified": "2024-04-03T17:02:49.887",
         }
         extra_props = kwargs.get("extra_props") or {}
         assert not {"description", "published", "last_modified"} & set(extra_props)
+        assert kwargs["description"] == CVE_DESCRIPTIONS.record("Log4Shell", "cisa_ics")
 
 
 # ===========================================================================

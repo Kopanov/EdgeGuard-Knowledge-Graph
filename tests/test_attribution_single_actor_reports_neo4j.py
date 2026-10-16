@@ -13,9 +13,10 @@ folded yet: a pair naming it is judged by that node's pulses, not by Turla's. ``
 alone when its pair ``crutch::turla::p6`` was written and an earlier run linked ``tinyturla`` to Turla from
 it; it was then edited to name several actors. MISP held those actors already, so no actor node records
 ``p6``: only the OTX collector's mark says so, on another indicator of the pulse (``four.it.example``,
-``several_actor_pulses``; the MISP writer adds the mark to the stored copies of up to three held IOCs of
-the pulse, so the indicator carrying the pair need not carry the mark). ``unc-it-test``
-loses its only attribution, and with it its campaign's ``RUNS``. ``strmal`` / ``strmal2`` and ``unc-it-test`` hold
+``several_actor_pulses``: a new IOC of the edited pulse, whose pushed attribute carries the mark; the MISP
+writer adds no mark to a stored copy, 2026-10, so the indicator carrying the pair does not carry it).
+``unc-it-test``
+loses its only attribution, and with it its campaign (2026-10-16; its ``RUNS`` before). ``strmal`` / ``strmal2`` and ``unc-it-test`` hold
 lists as plain strings, as the actor alias merge's APOC ``combine`` leaves them until its normalising
 statement runs. Step 2d runs as production runs it (its statements, through
 ``_safe_run_batched``, with the pulses ``_reports_naming_several_actors`` reads from the actor nodes and
@@ -288,8 +289,12 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     assert ("tinyturla", "turla") not in after
     assert ("kazuar", "turla") in after and ("lockbit", "gamaredon group") in after and ("lockbit", "turla") in after
     assert ("carbon", "turla") in after
-    # An actor with no attribution left keeps no RUNS (its campaign retires).
+    # An actor with no attribution left keeps no RUNS; 2026-10-16: its campaign, resting on nothing,
+    # is deleted with its links (it was kept, inactive, before).
     assert "unc-it-test" not in _runs(raw_driver) and "turla" in _runs(raw_driver)
+    with raw_driver.session() as session:
+        actors = {r["a"] for r in session.run("MATCH (c:Campaign) RETURN c.actor_name AS a")}
+    assert "unc-it-test" not in actors and "turla" in actors
     # ... and the campaign links name only the evidence that remains (replaced, not added to).
     refs = _campaign_refs(raw_driver)
     assert refs[("turla", "RUNS")] == ["alienvault_otx:p1", "alienvault_otx:p5"]

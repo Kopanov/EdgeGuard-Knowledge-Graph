@@ -12,7 +12,13 @@ audit (multi-agent, adversarially challenged):
    Fix: stamp the sync START time + subtract a tolerance
    (``EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN``, default 60) in
    ``should_run_neo4j_sync``, and derive the incremental ``since`` from the
-   state file (+1d overlap) so coverage survives skips/pauses/outages.
+   state file (minus ``EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS``, default 1 h,
+   at least 60 s, at most 720 h; 2026-10, was 1 day) so coverage survives
+   skips/pauses/outages.
+   2026-10: the DAG runs every 72 h (``NEO4J_SYNC_EVERY``, a timedelta
+   schedule) and the guard skips a run only when the last sync started less
+   than 24 h ago (``NEO4J_SYNC_MIN_GAP``): the tolerance and the
+   ``NEO4J_SYNC_INTERVAL`` Variable are no longer read.
 
 2. **Backup gate on the DAG wipe path.** The PR-F2 backup-timestamp gate ran
    only inside ``edgeguard fresh-baseline`` (CLI). A UI/API trigger with
@@ -108,59 +114,48 @@ def _write_state(state_dir, last_sync: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Fix 1a — should_run_neo4j_sync tolerance (the deterministic-skip regression)
+# Fix 1a — should_run_neo4j_sync guard (the deterministic-skip regression; 24 h since 2026-10)
 # ---------------------------------------------------------------------------
 
 
 class TestShouldRunNeo4jSyncCadence:
     def test_runs_when_elapsed_is_interval_minus_drift(self, dag_module, isolated_state):
-        """THE regression: cron fires 72h after the previous fire, but the
-        stamp lags the fire by preflight+startup drift. Pre-fix this skipped
+        """THE 2026-06 regression: a run is due 72h after the previous one, but the
+        stamp lags it by preflight+startup drift. Pre-fix this skipped
         (71.5h < 72h) — every other scheduled sync died deterministically."""
         _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=71, minutes=30))
         assert dag_module.should_run_neo4j_sync() is True
 
-    def test_skips_well_within_interval(self, dag_module, isolated_state):
-        """A genuinely-early fire (e.g. the 24h month-boundary gap of a
-        ``*/3`` day-of-month cron) must still be suppressed."""
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=24))
-        assert dag_module.should_run_neo4j_sync() is False
-
-    def test_skips_just_inside_tolerance_boundary(self, dag_module, isolated_state):
-        """Elapsed clearly below interval−tolerance (60min default) → skip."""
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=69))
-        assert dag_module.should_run_neo4j_sync() is False
-
-    def test_tolerance_env_override(self, dag_module, isolated_state, monkeypatch):
-        """A widened tolerance window admits an earlier elapsed."""
-        monkeypatch.setenv("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN", "300")
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=68))
+    def test_runs_after_a_sync_that_started_on_its_third_attempt(self, dag_module, isolated_state):
+        """2026-10: the previous sync may start 16 h 42 min after its run was due (two failed 8 h attempts,
+        two retry delays, the attempts of the two tasks before it), so the next run sees 55 h 18 min. The
+        former 71 h guard skipped it, and the sync after it came 144 h after the previous run."""
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=55, minutes=18))
         assert dag_module.should_run_neo4j_sync() is True
 
-    def test_tolerance_clamped_to_half_interval(self, dag_module, isolated_state, monkeypatch):
-        """An absurd tolerance (e.g. 1 week) must not disable the skip check
-        entirely — clamp at interval/2 (36h for the 72h default)."""
-        monkeypatch.setenv("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN", str(7 * 24 * 60))
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=12))
+    def test_skips_a_run_within_24_hours_of_the_last_sync_start(self, dag_module, isolated_state):
+        """A run right after a baseline's full sync or a forced sync (both stamp the state file) is
+        skipped; from 24 h on it syncs (the next scheduled sync is then at most 96 h after it)."""
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=23, minutes=59))
         assert dag_module.should_run_neo4j_sync() is False
-
-    def test_invalid_tolerance_falls_back_to_default(self, dag_module, isolated_state, monkeypatch):
-        monkeypatch.setenv("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN", "not-a-number")
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=71, minutes=30))
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=24, minutes=1))
         assert dag_module.should_run_neo4j_sync() is True
 
-    def test_empty_string_tolerance_is_silent_default(self, dag_module, isolated_state, monkeypatch, caplog):
-        """docker-compose passes `${EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN:-}`
-        through, so an unconfigured deployment sees the var SET but EMPTY.
-        That must behave exactly like unset (60min default) WITHOUT logging
-        the 'invalid config' warning on every scheduled check."""
-        monkeypatch.setenv("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN", "")
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=71, minutes=30))
-        with caplog.at_level(logging.WARNING):
-            assert dag_module.should_run_neo4j_sync() is True
-        assert not any("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN" in r.message for r in caplog.records), (
-            "set-but-empty (the stock compose deployment) must not emit a spurious invalid-config warning"
-        )
+    def test_the_former_settings_are_not_read(self, dag_module, isolated_state, monkeypatch):
+        """``NEO4J_SYNC_INTERVAL`` (Airflow Variable) and ``EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN`` set the
+        former guard; the bound is now fixed (the alert thresholds are derived from it)."""
+
+        class _Interval(_StubVariable):
+            @staticmethod
+            def get(key, default=None):
+                return "144" if key == "NEO4J_SYNC_INTERVAL" else default
+
+        monkeypatch.setattr(dag_module, "Variable", _Interval)
+        monkeypatch.setenv("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN", "0")
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=30))
+        assert dag_module.should_run_neo4j_sync() is True
+        assert dag_module.NEO4J_SYNC_MIN_GAP == timedelta(hours=24)
+        assert dag_module.NEO4J_SYNC_EVERY == timedelta(days=3)
 
     def test_runs_when_no_state_file(self, dag_module, isolated_state):
         assert dag_module.should_run_neo4j_sync() is True
@@ -176,9 +171,11 @@ class _FakeSync:
     measurably later than the start-time stamp the fix requires."""
 
     captured: dict = {}
+    init_args: tuple | None = None
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self._last_sync_failure_reason = None
+        _FakeSync.init_args = (args, kwargs)
 
     def run(self, incremental=True, since=None, sector=None):
         _FakeSync.captured = {
@@ -222,7 +219,123 @@ class TestRunNeo4jSyncWindowAndStamp:
             "window covers everything since the last successful sync — the fixed "
             "3d+1d window silently drops the excess after skips/pauses/outages"
         )
-        assert captured["since"] == last_sync - timedelta(days=1), "window must be last_sync − 1d overlap"
+        assert captured["since"] == last_sync - timedelta(hours=1), "window must be last_sync − 1h default overlap"
+
+    def test_overlap_env_override(self, dag_module, isolated_state, fake_sync_module, monkeypatch):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "6")
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=6)
+
+    @pytest.mark.parametrize("raw", ["abc", "-2", "nan", "inf"])
+    def test_invalid_overlap_env_falls_back_to_default(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert any(
+            "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() and raw in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_overlap_env_is_silent_default(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """Set but empty (a deployment outside docker-compose.yml, which itself sets ``1``)
+        behaves like unset: the 1 h default, without an invalid-value warning on every run."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert not any("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() for r in caplog.records), (
+            "an empty value must not emit a spurious invalid-value warning"
+        )
+
+    @pytest.mark.parametrize("raw", ["721", "2e7", "1e400"])
+    def test_overlap_above_bound_warns_and_does_not_fail_the_run(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """A huge value (2e7 h) used to raise OverflowError on ``last_sync − overlap`` and
+        fail every run; above 720 h it is invalid, logged and replaced by the default."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert any(
+            "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() and raw in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_overlap_at_bound_is_used(self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "720")
+
+        with caplog.at_level(logging.INFO):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=720)
+        # The log states whole seconds, not exponent form ("2.592e+06 s").
+        assert any("− 2592000 s overlap" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("raw", ["0", "0.0", "-0", "0.01", "1e-9"])
+    def test_overlap_below_floor_is_raised_to_60_seconds(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """0 (or anything under 60 s) removed the margin: MISP timestamps are whole seconds, so
+        an attribute stamped in the second the previous sync started was never read."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(seconds=60)
+        assert any("below the minimum of 60 s" in r.getMessage() for r in caplog.records)
+
+    def test_overlap_of_exactly_60_seconds_is_kept_without_warning(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog
+    ):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", str(1 / 60))
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(seconds=60)
+        assert not any("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() for r in caplog.records)
+
+    def test_state_date_at_datetime_minimum_falls_back_to_fixed_window(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch
+    ):
+        """``last_sync − overlap`` below ``datetime.min`` raises OverflowError; the run falls
+        back to the fixed window like any unreadable state file instead of failing."""
+        _write_state(isolated_state, datetime(1, 1, 1, 0, 30, tzinfo=timezone.utc))
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["incremental"] is True
+        assert _FakeSync.captured["since"] is None
 
     def test_state_file_stamped_with_start_time_not_completion(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
@@ -244,6 +357,63 @@ class TestRunNeo4jSyncWindowAndStamp:
             f"got {stamped.isoformat()} vs run() entry {entered.isoformat()} — "
             "a completion-time stamp re-introduces the every-other-run skip"
         )
+
+    def test_the_sync_and_the_job_of_a_run_are_given_no_time(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch
+    ):
+        """2026-10-16: the indicator aging is evaluated at the database's current time, lifted to a
+        node's ``aging_evaluated_at`` (``indicator_aging``), so the DAG passes no time of the run: the
+        sync is built without one and the enrichment runner gets the client only, for a newer run and
+        an older run cleared after it alike, and no Airflow Variable is read or set for the aging."""
+        monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
+        monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
+        monkeypatch.setattr(dag_module, "record_neo4j_node_counts", lambda: True)
+        keys: list = []
+
+        class _Variable(_StubVariable):
+            @staticmethod
+            def get(key, default=None):
+                keys.append(key)
+                return default
+
+            @staticmethod
+            def set(key, value):
+                keys.append(key)
+
+        monkeypatch.setattr(dag_module, "Variable", _Variable)
+        jobs: list = []
+
+        def run_all_enrichment_jobs(*args, **kwargs):
+            jobs.append((args, kwargs))
+            return {}
+
+        class _Client:
+            def connect(self):
+                return True
+
+            def close(self):
+                return None
+
+        monkeypatch.setitem(
+            sys.modules, "enrichment_jobs", SimpleNamespace(run_all_enrichment_jobs=run_all_enrichment_jobs)
+        )
+        monkeypatch.setitem(sys.modules, "neo4j_client", SimpleNamespace(Neo4jClient=_Client))
+
+        # A newer run, then an older run cleared and re-run.
+        for due in (
+            datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 10, 3, 0, tzinfo=timezone.utc),
+        ):
+            _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
+            _FakeSync.init_args = None
+            dag_module.run_neo4j_sync(data_interval_end=due)
+            dag_module.run_enrichment_jobs(data_interval_end=due)
+            assert _FakeSync.init_args == ((), {}), due
+            (args, kwargs) = jobs[-1]
+            assert len(args) == 1 and isinstance(args[0], _Client) and kwargs == {}, due
+        assert not [k for k in keys if "AGING" in str(k).upper()], keys
 
     def test_corrupt_state_file_falls_back_to_fixed_window(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
@@ -664,9 +834,12 @@ class TestSourcePins:
             "backup gate to be satisfiable on UI/API triggers"
         )
 
-    def test_env_example_documents_tolerance_knob(self):
+    def test_env_example_says_the_tolerance_knob_is_no_longer_read(self):
+        # 2026-10: the sync guard is a fixed 24 h; the knob is gone from compose and documented as unread.
         src = _read(".env.example")
-        assert "EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN" in src
+        assert "EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN and the Airflow Variable" in src
+        assert "# EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN=" not in src
+        assert "EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN" not in _read("docker-compose.yml")
 
     def test_dag_module_emits_no_syntax_warning(self):
         """The bash_command comment used to contain a literal backslash-space

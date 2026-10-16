@@ -1,6 +1,6 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Last Updated:** 2026-10-15 (FIRST EPSS row 15 added; CISA's SSVC decision points come with the NVD records, row 2; measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
+**Last Updated:** 2026-10-16 (§ 9 AbuseIPDB: at most one blacklist request per run, none when a run reuses the same day's answer; AbuseIPDB row 7: the daily blacklist quota and the reused answer; per-run caps of AbuseIPDB, Feodo Tracker and SSL Blacklist, rows 7, 9 and 10, § 2, § 8, § 9; 2026-10-15: FIRST EPSS row 15 added; CISA's SSVC decision points come with the NVD records, row 2; measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
 **Total Sources:** 15 (10 active + 2 placeholders + 2 flag-guarded, off by default + 1 post-sync enrichment feed, on by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
@@ -17,10 +17,10 @@
 | 4 | MITRE ATT&CK | ~300 | N/A | TTPs & relationships | ✅ Active |
 | 5 | VirusTotal | grows by ≤ 400 lookups/day (free-tier budget) | ✅ Auto-tagged | Enrichment of hashes already in MISP (lookups, not a feed) | ✅ Active |
 | 6 | ThreatFox | the IOCs of the last 7 days (7,398 on the 730-day baseline; about 1,100 new per day), ≤ 10,000 per run | ✅ Auto-tagged | Malware IOCs | ✅ Active |
-| 7 | AbuseIPDB | TBD | ✅ Auto-tagged | IP reputation | ✅ Active |
+| 7 | AbuseIPDB | the blacklist: at most one request per run of at most 10,000 addresses (the free plan's maximum per request; 10,000 on the 730-day baseline); 5 blacklist requests per UTC day on the free plan: an answer is reused for the rest of its UTC day, and a 429 fails the task (2026-10, [COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector)) | ✅ Auto-tagged | IP reputation | ✅ Active |
 | 8 | URLhaus | the URLs of the last 30 days (34,003 on the 730-day baseline; about 1,130 new per day), ≤ 50,000 per run | ✅ Auto-tagged | Malware URLs | ✅ Active |
-| 9 | Feodo Tracker | 7,607 servers on a baseline (complete history; feed not updated by abuse.ch since 2026-03-04) | ✅ Auto-tagged (keyword detector; Global in practice) | Botnet C&C IPs with malware family | ✅ Active |
-| 10 | SSL Blacklist | ~11,000 (10,964 on 2026-10-12) | ✅ Auto-tagged (keyword detector; Global in practice) | Malware SSL certs | ✅ Active |
+| 9 | Feodo Tracker | 7,607 servers on a baseline (complete history; feed not updated by abuse.ch since 2026-03-04), ≤ 15,000 per run | ✅ Auto-tagged (keyword detector; Global in practice) | Botnet C&C IPs with malware family | ✅ Active |
+| 10 | SSL Blacklist | ~11,000 (10,964 on 2026-10-12), the whole list per run, ≤ 20,000 | ✅ Auto-tagged (keyword detector; Global in practice) | Malware SSL certs | ✅ Active |
 | 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
 | 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
 | 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
@@ -66,7 +66,7 @@
 ---
 
 ### 2. SSL Blacklist (abuse.ch)
-**Items:** 500 | **Zone Distribution:** Global 72%, Finance 28%
+**Items:** the whole blacklist (10,964 rows on 2026-10-12), at most `EDGEGUARD_SSLBL_MAX_PER_RUN` (20,000) per run | **Zone Distribution:** Global (all 10,964 rows on 2026-10-12, see Method 2 below)
 
 | Attribute | Value |
 |-----------|-------|
@@ -82,8 +82,9 @@
 - Listing reason
 
 **How classified:**
-- Malware family names mapped to finance sector
-- e.g., "Vidar C&C" → finance
+- Keyword detector on the listing reason; no malware family is mapped to a sector by name (Method 2 below), so the rows are tagged Global
+
+**Per-run cap (2026-10):** each run, daily or baseline, reads the whole blacklist. Until 2026-10 a daily run was cut at `EDGEGUARD_INCREMENTAL_LIMIT` (200), so the other certificates were never reported again and their stored copies aged while the list named them. The cap `EDGEGUARD_SSLBL_MAX_PER_RUN` (default 20,000, about twice the list) covers the whole list; a run whose list is longer keeps the newest by `Listingdate` and logs a warning ([COLLECTORS.md § 7](COLLECTORS.md#7-finance-feed-collector)).
 
 ---
 
@@ -259,6 +260,8 @@
 - Malware family (QakBot, BumbleBee, TrickBot, Emotet, Dridex, Pikabot) — carried to MISP and Neo4j, where it links the indicator to the `Malware` node (`INDICATES`)
 - Last-online date as `Indicator.last_online` and as the source-reported last-seen time; ports and status kept with the source record. Servers not seen online in the last 30 days are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
 
+**Per-run cap (2026-10):** a run reports every server of the list it reads (the 30-day list daily, the complete history on a baseline), up to `EDGEGUARD_FEODO_MAX_PER_RUN` (default 15,000 servers, about twice the history); until 2026-10 a daily run was cut at `EDGEGUARD_INCREMENTAL_LIMIT` (200). A run whose list is longer keeps the servers seen online most recently and logs a warning.
+
 ---
 
 ### 8b. FIRST EPSS (Exploit Prediction Scoring System) — post-sync enrichment, added 2026-10
@@ -269,7 +272,7 @@
 | URL | `https://epss.empiricalsecurity.com/epss_scores-current.csv.gz` (the address FIRST documents; it redirects to the day's file; override `EPSS_URL`) — per `src/cve_feed_enrichment.py` |
 | Format | gzip CSV, first line `#model_version:...,score_date:...`, header `cve,epss,percentile` (~2.7 MB) |
 | Auth | None (public) |
-| Update | FIRST publishes a file every day. The enrichment job `enrich_cve_epss` reads the current file after every Neo4j sync (`edgeguard_neo4j_sync`, every 72 hours by default, `NEO4J_SYNC_INTERVAL`) and after the baseline, when `EDGEGUARD_ENABLE_EPSS=true` (default). The download is bounded by `EPSS_MAX_BYTES` (64 MiB) and `EPSS_DOWNLOAD_DEADLINE_SEC` (300 s) |
+| Update | FIRST publishes a file every day. The enrichment job `enrich_cve_epss` reads the current file after every Neo4j sync (`edgeguard_neo4j_sync`, every 72 hours) and after the baseline, when `EDGEGUARD_ENABLE_EPSS=true` (default). The download is bounded by `EPSS_MAX_BYTES` (64 MiB) and `EPSS_DOWNLOAD_DEADLINE_SEC` (300 s) |
 | Classification | n/a |
 
 **What we get:**
@@ -283,6 +286,24 @@
 **How classified:** n/a — no sector logic; properties only.
 
 **Terms:** FIRST publishes the scores daily, free of charge and without registration; its EPSS pages state no licence or attribution requirement (checked 2026-10-15). The scores are generated by Empirical Security for FIRST.
+
+---
+
+### 9. AbuseIPDB
+**Items:** the addresses of the blacklist (`abuseConfidenceScore` ≥ 90 requested), at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (10,000) per run; the 730-day baseline of 2026-10-13 received 10,000 | **Zone:** keyword detector on the fields the answer carries (country code; ISP, usage type and domain when present)
+
+| Attribute | Value |
+|-----------|-------|
+| URL | `https://api.abuseipdb.com/api/v2/blacklist` (per `src/collectors/abuseipdb_collector.py`) |
+| Format | JSON API |
+| Auth | API key (`ABUSEIPDB_API_KEY`; optional source, skipped without it) |
+| Update | Daily (`edgeguard_daily` → `collect_abuseipdb`) and baseline tier 2 |
+| Classification | ✅ `detect_zones_from_text()` on country code, ISP, usage type and domain |
+
+**What we get:**
+- IP addresses with AbuseIPDB's confidence score (`confidence_score` = score / 100), country and `lastReportedAt` (the source-reported last-seen time; the endpoint gives no first-seen date)
+
+**Plan limits and the per-run cap (2026-10):** the collector makes at most one blacklist request per run, as before: the daily run at most one, a baseline at most one more, and none when a run reuses the answer fetched earlier on the same UTC day (the free plan allows 5 blacklist requests per UTC day; the daily and the baseline runs share one cache key, [COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector), "Blacklist quota and cached answer"). Until 2026-10 the request's `limit` was `EDGEGUARD_INCREMENTAL_LIMIT` (200), so the stored copies of the other addresses were never reported again and aged while the blacklist listed them. The cap `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (default 10,000) is now that `limit`; it changes the size of the answer, not the number of requests. 10,000 is the most one request returns on the free plan (`AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST`), so a larger value has no effect until that ceiling is raised for a plan that returns more. AbuseIPDB chooses which addresses fill the request; an answer longer than the request keeps the addresses reported most recently. The live source key check uses the `check` endpoint (1,000 a day on the free plan), not the blacklist ([COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector)).
 
 ---
 
@@ -326,4 +347,4 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-15 — § 1 OTX: a pulse's description is stored on no item (it was given to the pulse's families and adversaries as their description) and still feeds sector classification, which scans the whole pulse and adds OTX's `industries` (the section named only tags and name). Same day: ThreatFox and URLhaus rows and § 3: the whole window per run, up to `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) / `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000), the newest kept when a cap is reached. Same day: FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._
+_Last updated: 2026-10-16 — § 9 AbuseIPDB: at most one blacklist request per run, none when a run reuses the answer fetched earlier on the same UTC day (it said one per run, the daily run one and a baseline one more); the daily and the baseline runs share one cache key. Same day: AbuseIPDB row 7: the blacklist's size on the 730-day baseline, the free plan's 5 blacklist requests per UTC day, the answer reused for the rest of its UTC day and the failed task on a 429. Same day: the AbuseIPDB run reports at most 10,000 blacklist addresses, which AbuseIPDB chooses; only the Feodo Tracker and SSL Blacklist runs report the whole list they read. Same day: rows 7, 9 and 10, § 2, § 8 and the new § 9 AbuseIPDB: per-run caps of SSL Blacklist (20,000), Feodo Tracker (15,000) and AbuseIPDB (10,000, one blacklist request per run, the most one request returns on the free plan); each run reports the whole list, the newest kept when a cap is reached; § 2 classification as measured (keyword detector, Global); § 8b: the sync runs every 72 hours. Prior: 2026-10-15 — § 1 OTX: a pulse's description is stored on no item (it was given to the pulse's families and adversaries as their description) and still feeds sector classification, which scans the whole pulse and adds OTX's `industries` (the section named only tags and name). Same day: ThreatFox and URLhaus rows and § 3: the whole window per run, up to `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) / `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000), the newest kept when a cap is reached. Same day: FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

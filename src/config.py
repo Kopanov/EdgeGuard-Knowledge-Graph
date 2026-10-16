@@ -664,7 +664,11 @@ MISP_CROSS_EVENT_DEDUP = _env_bool("EDGEGUARD_MISP_CROSS_EVENT_DEDUP", "true")
 # the source reports the indicator again and MISP last wrote it longer ago than the interval
 # below; the edit moves MISP's timestamp and keeps the source's dates (see
 # ``MISPWriter._refresh_stored_copies``). Read per call so Airflow tasks and tests pick up the
-# environment at run time.
+# environment at run time. Since 2026-10-16 an indicator ages from its source's own last-report date
+# capped at MISP's timestamp (``indicator_aging``; the timestamp when the source gives no date), so
+# the edit moves the indicator's age only when the source's date moved, or, without one, to the
+# time of the edit; an indicator re-reported within the interval keeps its older date until the
+# interval has passed.
 
 
 def misp_refresh_last_seen_days() -> int:
@@ -673,7 +677,7 @@ def misp_refresh_last_seen_days() -> int:
     ago is edited once: its ``last_seen`` becomes the source's claim when that is later than the
     stored one and otherwise stays as it is, and MISP stamps the attribute anew. The edit resets
     the timestamp the decision reads, so a copy is edited at most once per interval; 30 days stays
-    well inside decay's first tier (90 days)."""
+    well inside the first aging tier (90 days, ``EDGEGUARD_AGING_TIER_DAYS``)."""
     return max(0, _env_int("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", 30))
 
 
@@ -787,7 +791,12 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   (URLhaus csv_recent) window holding about 1,100 new entries per day each; cut at 200, about
 #   80% of them were never collected (neither feed has a cursor). EDGEGUARD_THREATFOX_MAX_PER_RUN
 #   and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap to the whole window (see their definitions).
-OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd", "threatfox", "urlhaus"})
+#   feodo, sslbl (2026-10): each run reads the whole list the source publishes; abuseipdb: at most
+#   one blacklist request of at most 10,000 addresses, which AbuseIPDB chooses. Cut at 200, the other
+#   entries were never reported again and aged while still listed. EDGEGUARD_FEODO_MAX_PER_RUN and
+#   EDGEGUARD_SSLBL_MAX_PER_RUN size the cap to the list, EDGEGUARD_ABUSEIPDB_MAX_PER_RUN is the
+#   request's limit (see their definitions).
+OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb"})
 
 
 def get_effective_limit(source: str = None, default_limit: int = None) -> Optional[int]:
@@ -1257,8 +1266,9 @@ SOURCE_TAGS = _source_registry.cli_to_canonical_tag_map_legacy_subset()
 MISP_REFRESH_INTERVAL = 8  # Default: 8 hours (best practice for slower sources)
 MISP_ACTIVE_FEED_INTERVAL = 0.5  # 30 minutes for OTX (high-frequency live feed)
 
-# Phase 2: MISP → Neo4j sync interval
-NEO4J_SYNC_INTERVAL = 72  # Default: 72 hours (3 days)
+# Phase 2: MISP → Neo4j sync interval, informational: the edgeguard_neo4j_sync DAG runs every 72 hours
+# (``NEO4J_SYNC_EVERY`` in dags/edgeguard_pipeline.py, 2026-10; no setting changes it).
+NEO4J_SYNC_INTERVAL = 72
 
 # Source-specific collection intervals (must match the DAG schedule_interval values)
 # OTX:         every 30 min  (edgeguard_pipeline DAG — */30 * * * *)
@@ -1365,6 +1375,37 @@ MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
 # removes the cap.
 THREATFOX_MAX_PER_RUN = _env_int("EDGEGUARD_THREATFOX_MAX_PER_RUN", 10000)
 URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 50000)
+
+# ---------------------------------------------------------------------------
+# Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10)
+# ---------------------------------------------------------------------------
+# The three are lists, not windows: an entry stays on a list as long as the source lists it. A Feodo
+# Tracker or SSL Blacklist run reads the whole list the source publishes; an AbuseIPDB run reads one
+# blacklist answer of at most 10,000 addresses, which AbuseIPDB chooses (below). Cut at the generic
+# incremental default (200), a daily run reported the first 200 entries only, so the stored copies of
+# the others were never reported again, never refreshed (``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS``)
+# and aged while the source still listed them. The Feodo Tracker and SSL Blacklist caps cover the
+# whole list; a run whose list is longer keeps the newest entries and logs a warning.
+# ``EDGEGUARD_MAX_ENTRIES`` and an explicit baseline limit still apply when lower; ``0`` removes the
+# cap.
+#   Feodo Tracker: servers, after the rows are merged per address. A baseline reads the complete C2
+#   history (7,980 rows, 7,607 servers on 2026-10-12), a daily run the servers active in the last
+#   30 days (5 rows on that day; the feed has not been updated since 2026-03-04). 15,000 is about
+#   twice the history, which grows when the feed moves again. Newest = latest ``last_online``.
+#   SSL Blacklist: certificate fingerprints; both modes read the whole blacklist (10,964 rows on
+#   2026-10-12). 20,000 is about twice that. Newest = latest ``Listingdate``.
+#   AbuseIPDB: addresses of the blacklist, at most one ``GET /blacklist`` request per run as before
+#   (the daily run and a baseline), and none when the run reuses the answer fetched earlier on the
+#   same UTC day (``EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS``): with the defaults the two runs ask
+#   for the same parameters, so on a day with both the run that collects second, within that age of
+#   the first, sends no request. The cap sets the request's ``limit``, not the number of requests.
+#   10,000 is the most one request returns on the free plan, the ceiling the collector already
+#   applied (``AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST``; the 730-day baseline of 2026-10-13
+#   received 10,000), so a larger value has no effect until that ceiling is raised for a plan that
+#   returns more. AbuseIPDB chooses which addresses fill the request.
+FEODO_MAX_PER_RUN = _env_int("EDGEGUARD_FEODO_MAX_PER_RUN", 15000)
+SSLBL_MAX_PER_RUN = _env_int("EDGEGUARD_SSLBL_MAX_PER_RUN", 20000)
+ABUSEIPDB_MAX_PER_RUN = _env_int("EDGEGUARD_ABUSEIPDB_MAX_PER_RUN", 10000)
 
 # ---------------------------------------------------------------------------
 # ThreatActor alias-duplicate merge (2026-10, fresh-baseline PR)

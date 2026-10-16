@@ -2124,6 +2124,7 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         #   (1) qualifying_actors_query           — returns iter of actors
         #   (2) create_cypher (Step 1)            — .single() = {campaigns: N}
         #   (3) backfill_cypher                   — .single() = {backfilled: N}
+        #   (3b) delete_without_evidence (Step 1b, 2026-10-16) — .single() = {deleted: N, ...}
         #   (4) link_malware (Step 2)             — .single() = {links: N}
         #   (4b) prune_malware (Step 2b, 2026-10) — .single() = {pruned: N}
         #   (4c) settle_runs (Step 2c, 2026-10)   — .single() = {removed: N}
@@ -2139,6 +2140,8 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         create_result.single.return_value = {"campaigns": 1}
         backfill_result = MagicMock()
         backfill_result.single.return_value = {"backfilled": 7}
+        delete_result = MagicMock()
+        delete_result.single.return_value = {"deleted": 0, "runs_removed": 0, "members_removed": 0, "names": []}
         link_m_result = MagicMock()
         link_m_result.single.return_value = {"links": 0}
         malware_prune_result = MagicMock()
@@ -2173,6 +2176,7 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
             actors_result,  # 1
             create_result,  # 2
             backfill_result,  # 3
+            delete_result,  # 3b — 2026-10-16 campaigns without evidence deleted
             link_m_result,  # 4
             malware_prune_result,  # 4b — 2026-10 malware membership prune
             runs_result,  # 4c — 2026-10 RUNS follows attribution

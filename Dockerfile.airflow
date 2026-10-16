@@ -33,6 +33,8 @@
 # tini as PID 1: improves signal forwarding and zombie reaping (helpful on Docker Desktop / constrained VMs).
 # docker-compose.yml must NOT use `command: standalone` alone — that would run `tini -- standalone` (invalid).
 # Either omit `command` (use CMD below) or set `command: ["airflow", "standalone"]`.
+# 2026-10: docker-compose.yml sets a `bash -c` command that starts the collector pool setup in a
+# detached background loop and ends in `exec airflow standalone`, so tini still runs standalone.
 #
 FROM apache/airflow:3.3.2-python3.12
 

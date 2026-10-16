@@ -56,6 +56,7 @@ from config import (
     misp_http_headers_for_pymisp,
 )
 from cvss_selection import CVSS_VERSIONS, cvss_attack_vector, select_cvss
+from indicator_aging import BASIS_MISP_RECORDED, BASIS_SOURCE_DATE
 from ioc_normalize import MISP_IP_ATTRIBUTE_TYPES, ip_address_type
 from misp_health import MISPHealthCheck
 from neo4j_client import (
@@ -78,8 +79,9 @@ from source_registry import (
     is_curated_source,
     misp_tag_to_canonical_map,
 )
+from source_trust import is_attribute_creator_trusted
 from source_truthful_timestamps import coerce_iso as _coerce_to_iso
-from source_truthful_timestamps import extract_source_truthful_timestamps
+from source_truthful_timestamps import earliest_allowed_date, extract_source_truthful_timestamps
 
 try:
     from metrics_server import (
@@ -180,14 +182,16 @@ NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 500  # 500 keeps lock hold time manageable durin
 NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
 
-# Substring matched against event metadata in MISP restSearch (not exact event title).
-# PyMISP/MISP ``eventinfo=`` filtering is unreliable on some 2.4.x builds (e.g. 2.4.123);
-# ``search`` maps to the server-side substring / full-text style filter our events need
-# (titles look like ``EdgeGuard-{source}-{date}``).
+# Substring of the event title that marks an EdgeGuard event (titles look like
+# ``EdgeGuard-{source}-{date}``), matched case-insensitively by ``_is_edgeguard_index_event``.
+# 2026-10: the restSearch fallback sends it as ``eventinfo: "%<needle>%"`` (a LIKE filter on
+# ``Event.info``). MISP honours ``eventinfo`` from 2.4.177 on and an older MISP ignores it, so the
+# fallback also keeps only the rows ``_is_edgeguard_index_event`` accepts. The ``search`` key used
+# before is not a restSearch parameter: MISP dropped it and answered every event of the store.
 MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "EdgeGuard").strip() or "EdgeGuard"
 
-# Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
-# time out / 500 on very large events (e.g. URLhaus, SSL blacklist).
+# Lightweight event list (no attribute scan). restSearch without ``metadata`` answers full events with
+# all of their attributes and can time out / 500 on very large events (e.g. URLhaus, SSL blacklist).
 try:
     MISP_EVENTS_INDEX_PAGE_SIZE = int(os.getenv("EDGEGUARD_MISP_PAGE_SIZE", "500"))
 except (ValueError, TypeError):
@@ -216,6 +220,30 @@ def _is_edgeguard_index_event(ev: Dict[str, Any]) -> bool:
     if isinstance(org, dict) and (org.get("name") or "").strip() == "EdgeGuard":
         return True
     return False
+
+
+def _fallback_search_filters() -> Dict[str, Any]:
+    """Filters of the ``fetch_edgeguard_events`` restSearch fallback (PyMISP and requests, 2026-10).
+
+    ``metadata`` asks for event headers only: the caller reads id, info and attribute_count and
+    fetches each event's attributes separately, and a page of 500 full events is the whole store
+    with every attribute. ``eventinfo`` narrows to EdgeGuard titles on MISP 2.4.177 or later.
+    """
+    return {"metadata": True, "eventinfo": f"%{MISP_EDGEGUARD_DISCOVERY_SEARCH}%"}
+
+
+def _edgeguard_fallback_rows(rows: List[Any]) -> List[Any]:
+    """Rows of a fallback restSearch page whose event ``_is_edgeguard_index_event`` accepts (2026-10).
+
+    A MISP older than 2.4.177 ignores ``eventinfo`` and answers every event of the store; the index
+    path applies the same filter to its rows.
+    """
+    kept: List[Any] = []
+    for row in rows:
+        ev = _unwrap_single_misp_event_row(row)
+        if ev is not None and _is_edgeguard_index_event(ev):
+            kept.append(row)
+    return kept
 
 
 def _event_covers_since(ev: Dict[str, Any], since: Optional[datetime]) -> bool:
@@ -254,19 +282,118 @@ def _event_covers_since(ev: Dict[str, Any], since: Optional[datetime]) -> bool:
     return True
 
 
+def _misp_attribute_time(attr: Dict[str, Any]) -> Optional[datetime]:
+    """``Attribute.timestamp`` (when MISP recorded the attribute; an edit bumps it) as an aware UTC
+    datetime, or None when it is missing or unparsable.
+
+    PyMISP ``to_dict()`` returns datetimes (naive ones are UTC), the raw JSON epoch strings.
+    """
+    ts = attr.get("timestamp")
+    if isinstance(ts, datetime):
+        return (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    if ts is None or isinstance(ts, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _attribute_changed_since(attr: Dict[str, Any], since: datetime) -> bool:
     """Incremental sync: True when the attribute was written to MISP on/after ``since``.
 
     ``Attribute.timestamp`` is MISP's write-time epoch; an edit bumps it. A missing or
     unparsable timestamp counts as changed, so such rows keep the whole-event behaviour.
     """
-    ts = attr.get("timestamp")
-    if isinstance(ts, datetime):  # PyMISP ``to_dict()`` returns datetimes, raw JSON returns epochs
-        ts = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).timestamp()
-    try:
-        return float(ts) >= since.timestamp()
-    except (TypeError, ValueError):
+    recorded = _misp_attribute_time(attr)
+    if recorded is None:
         return True
+    return recorded.timestamp() >= since.timestamp()
+
+
+def _source_last_report_date(attr: Dict[str, Any], event_info: Optional[Dict[str, Any]]) -> Optional[datetime]:
+    """The source's own last-report date of one MISP attribute: its native ``last_seen`` (what the
+    collector stored as the source's last report, ``MISPWriter``), as an aware UTC datetime.
+
+    None when the attribute has none, when it is unparsable or earlier than
+    ``EDGEGUARD_EARLIEST_IOC_DATE`` (a sentinel must not retire an indicator), and when the trust
+    check refuses the event's creator (``source_trust``; the source's other dates are refused
+    then too). Read for every source, not through the first-seen allowlist: the date only ever
+    makes an indicator older than its MISP record time, never newer.
+    """
+    iso = _coerce_to_iso(attr.get("last_seen"))
+    if not iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    parsed = (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    if parsed < earliest_allowed_date():
+        return None
+    if event_info is not None and not is_attribute_creator_trusted(event_info)[0]:
+        return None
+    return parsed
+
+
+def misp_report_times(attr: Dict[str, Any], event_info: Optional[Dict[str, Any]] = None) -> Dict[str, Optional[str]]:
+    """The report one MISP attribute makes of an indicator (2026-10-16, ``indicator_aging``).
+
+    ``recorded_at`` is T, the attribute's MISP timestamp (UTC). ``reported_at`` is
+    ``min(T, coalesce(L, T))`` with L the source's own last-report date
+    (``_source_last_report_date``): a date later than T is capped at T. ``reported_basis`` says
+    which it is (``source_date`` when L dates the report, ``misp_recorded`` otherwise) and
+    ``report_ref`` is the attribute uuid, the record an expert reads in MISP. Without a usable
+    timestamp the attribute dates nothing (both times None). Both sync paths (in-memory and
+    paged) build their items with ``parse_attribute``, which calls this, so a full sync, an
+    incremental one and the paged path carry the same values.
+    """
+    ref = str(attr.get("uuid") or "").strip() or None
+    times: Dict[str, Optional[str]] = {
+        "recorded_at": None,
+        "reported_at": None,
+        "report_ref": ref,
+        "reported_basis": None,
+    }
+    recorded = _misp_attribute_time(attr)
+    if recorded is None:
+        return times
+    times["recorded_at"] = recorded.isoformat()
+    source_date = _source_last_report_date(attr, event_info)
+    if source_date is not None and source_date <= recorded:
+        times["reported_at"] = source_date.isoformat()
+        times["reported_basis"] = BASIS_SOURCE_DATE
+    else:
+        times["reported_at"] = recorded.isoformat()
+        times["reported_basis"] = BASIS_MISP_RECORDED
+    return times
+
+
+def _report_key(item: Dict[str, Any]) -> Optional[Tuple[datetime, str, str]]:
+    """Sort key of an item's report for ``_dedupe_parsed_items``: the report time, then the
+    reference and source (the smaller wins a tie, as in ``indicator_aging._newer_report``)."""
+    reported = item.get("reported_at")
+    if not reported:
+        return None
+    try:
+        when = datetime.fromisoformat(str(reported).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when, str(item.get("report_ref") or ""), str(item.get("tag") or "")
+
+
+def _later_iso(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """The later of two ISO-8601 times (either may be None)."""
+    if not a or not b:
+        return a or b
+    try:
+        return (
+            a
+            if datetime.fromisoformat(a.replace("Z", "+00:00")) >= datetime.fromisoformat(b.replace("Z", "+00:00"))
+            else b
+        )
+    except ValueError:
+        return a
 
 
 def _item_report_ids(item: Dict[str, Any]) -> set:
@@ -493,9 +620,10 @@ _METADATA_COMMENT_RE = re.compile(
 # 2026-10: plain vulnerability comments that say where a CVE was seen, not what it is: the OTX
 # collector's pulse reference ("Referenced in OTX pulse: <name>", a ``cve_references`` item) and
 # MISPWriter's placeholder for a CVE item without text ("CVE from <source>"). Neither is a description:
-# taken as one, the first of them to reach a CVE without an NVD record would stay there, since any record
-# but NVD's only fills (``Neo4jClient.merge_cve``), and CISA's KEV text would never replace it. The
-# note stays the comment of the MISP attribute, which the node's ``misp_attribute_ids`` name.
+# taken as one, OTX's note would describe a CVE that no NVD, KEV or CISA ICS record describes (OTX ranks
+# below them, ``description_ranking``, 2026-10-16; until then the first such note to reach a CVE without
+# an NVD record stayed there and CISA's KEV text never replaced it). The note stays the comment of the
+# MISP attribute, which the node's ``misp_attribute_ids`` name.
 # The placeholder names a source id (lowercase, as MISPWriter writes the item's tag), so a text such as
 # "CVE from Microsoft" is kept (2026-10, the rule the entity placeholders follow).
 _CVE_PROVENANCE_NOTE_RE = re.compile(r"^\s*(?:Referenced in OTX pulse:.*|CVE from [a-z0-9_-]+\s*)$", re.DOTALL)
@@ -539,7 +667,8 @@ def _vulnerability_comment_description(raw_comment: Any) -> Optional[str]:
 # 2026-10: MISPWriter's comment for a malware, actor, technique, tactic or tool item without text — "Malware
 # from <source>", "Threat actor from <source>", "MITRE ATT&CK technique from <source>", "MITRE ATT&CK
 # tactic", "MITRE ATT&CK tool: <name>". It names the writer, not the entity; taken as a description it would
-# keep any later record's text off a node that MITRE does not describe, since such a record only fills.
+# describe a node no other record describes, and keep a lower-ranked source's text off it (the source
+# ranking, ``description_ranking``, 2026-10-16; until then any record but MITRE's only filled).
 # <source> is the item's tag, a lowercase source id ("alienvault_otx", "mitre_attck", "unknown"), so a
 # partner's or a MISP-native text such as "Threat actor from Iran" or "Malware from APT28" stays a description.
 _ENTITY_PLACEHOLDER_COMMENT_RE = re.compile(
@@ -789,6 +918,22 @@ def _curated_claim_rows(
     return rows
 
 
+def _merge_duplicate_report(kept: Dict[str, Any], dup: Dict[str, Any]) -> None:
+    """Fold the report of ``dup`` (the same indicator and source as ``kept``) into ``kept``: the
+    later report time with its reference and kind (an equal time goes to the smaller reference),
+    the later MISP record time, and the higher confidence (2026-10-16)."""
+    dup_key, kept_key = _report_key(dup), _report_key(kept)
+    if dup_key is not None and (
+        kept_key is None or dup_key[0] > kept_key[0] or (dup_key[0] == kept_key[0] and dup_key[1:] < kept_key[1:])
+    ):
+        for field in ("reported_at", "report_ref", "reported_basis"):
+            kept[field] = dup.get(field)
+    kept["recorded_at"] = _later_iso(kept.get("recorded_at"), dup.get("recorded_at"))
+    dup_conf, kept_conf = dup.get("confidence_score"), kept.get("confidence_score")
+    if isinstance(dup_conf, (int, float)) and (not isinstance(kept_conf, (int, float)) or dup_conf > kept_conf):
+        kept["confidence_score"] = dup_conf
+
+
 def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
     """
     Deduplicate parsed items within a single MISP event (keys match former global dedupe).
@@ -853,6 +998,11 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
                         kept_several = kept.setdefault(marks_field, [])
                         if pid not in kept_several:
                             kept_several.append(pid)
+                # 2026-10-16 (indicator aging): the latest report of the same source and the highest
+                # confidence, whichever duplicate came first, so either order writes the same node
+                # (``indicator_aging``). A duplicate of another source is dropped as before.
+                if item.get("indicator_type") and kept.get("indicator_type") and item.get("tag") == kept.get("tag"):
+                    _merge_duplicate_report(kept, item)
     _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
@@ -1673,7 +1823,9 @@ class MISPToNeo4jSync:
 
         Prefers paginated ``/events/index`` (or ``/events``): lightweight list rows without scanning
         all attributes (avoids restSearch timeouts on huge events). Falls back to PyMISP/restSearch
-        if index endpoints are unavailable.
+        if index endpoints are unavailable. 2026-10: the fallback asks for event headers only
+        (``metadata``), narrows with ``eventinfo`` and keeps the rows ``_is_edgeguard_index_event``
+        accepts (see ``_fallback_search_filters``).
 
         Args:
             since: Only fetch events modified since this datetime
@@ -1742,7 +1894,7 @@ class MISPToNeo4jSync:
                     search_kwargs: dict = {
                         "limit": _FALLBACK_PAGE_SIZE,
                         "page": page,
-                        "search": MISP_EDGEGUARD_DISCOVERY_SEARCH,
+                        **_fallback_search_filters(),
                     }
                     if since:
                         search_kwargs["timestamp"] = int(since.timestamp())
@@ -1787,11 +1939,14 @@ class MISPToNeo4jSync:
                         )
                     if not page_rows:
                         break
-                    events.extend(page_rows)
+                    # 2026-10: keep EdgeGuard events only; the short-page test below counts every row.
+                    kept_rows = _edgeguard_fallback_rows(page_rows)
+                    events.extend(kept_rows)
                     logger.info(
-                        "[MISP-FETCH-FALLBACK] PyMISP page %d returned %d row(s)",
+                        "[MISP-FETCH-FALLBACK] PyMISP page %d returned %d row(s), %d EdgeGuard event(s)",
                         page,
                         len(page_rows),
+                        len(kept_rows),
                     )
                     if len(page_rows) < _FALLBACK_PAGE_SIZE:
                         # Short read — we're at the end.
@@ -1861,7 +2016,7 @@ class MISPToNeo4jSync:
                             "returnFormat": "json",
                             "limit": _FALLBACK_PAGE_SIZE,
                             "page": page,
-                            "search": MISP_EDGEGUARD_DISCOVERY_SEARCH,
+                            **_fallback_search_filters(),
                         }
                         if since:
                             rest_body["timestamp"] = int(since.timestamp())
@@ -1939,11 +2094,14 @@ class MISPToNeo4jSync:
                             )
                         if not page_rows:
                             break
-                        events.extend(page_rows)
+                        # 2026-10: keep EdgeGuard events only; the short-page test below counts every row.
+                        kept_rows = _edgeguard_fallback_rows(page_rows)
+                        events.extend(kept_rows)
                         logger.info(
-                            "[MISP-FETCH-FALLBACK] restSearch page %d returned %d row(s)",
+                            "[MISP-FETCH-FALLBACK] restSearch page %d returned %d row(s), %d EdgeGuard event(s)",
                             page,
                             len(page_rows),
+                            len(kept_rows),
                         )
                         if len(page_rows) < _FALLBACK_PAGE_SIZE:
                             break
@@ -4137,6 +4295,9 @@ class MISPToNeo4jSync:
                 "misp_attribute_id": attr_misp_uuid,
                 "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
+                # 2026-10-16: the report this attribute makes (recorded_at, reported_at, report_ref,
+                # reported_basis), the time the indicator ages from (``indicator_aging``).
+                **misp_report_times(attr, event_info),
             }
 
             # Enrich indicator with OTX pulse metadata

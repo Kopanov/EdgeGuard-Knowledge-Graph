@@ -16,7 +16,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
-from typing import Any, Dict, FrozenSet, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
 import requests
 
@@ -154,6 +154,7 @@ def request_with_rate_limit_retries(
     max_rate_limit_retries: int = 3,
     fallback_delay_sec: float = 60.0,
     retry_on_403: bool = False,
+    retry_on_429: bool = True,
     context: str = "HTTP",
     **kwargs: Any,
 ) -> requests.Response:
@@ -176,6 +177,9 @@ def request_with_rate_limit_retries(
         fallback_delay_sec: Base delay when ``Retry-After`` is absent; also used as
             exponential backoff multiplier index
         retry_on_403: If True, treat 403 like 429 for retry purposes (use sparingly)
+        retry_on_429: If False, a 429 is returned at once without waiting (2026-10). For an
+            endpoint whose 429 means a daily quota is spent, waiting minutes cannot succeed;
+            502/503/504 are still retried.
         context: Label for log messages (e.g. ``OTX``)
         **kwargs: Passed to ``session.request`` / ``requests.request``
 
@@ -212,7 +216,7 @@ def request_with_rate_limit_retries(
             return last_response
 
         code = last_response.status_code
-        retryable = code in (429, 502, 503, 504) or (retry_on_403 and code == 403)
+        retryable = code in (502, 503, 504) or (retry_on_429 and code == 429) or (retry_on_403 and code == 403)
 
         if not retryable:
             return last_response
@@ -235,6 +239,26 @@ def request_with_rate_limit_retries(
         time.sleep(delay)
 
     return last_response  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Shared state directory
+# ---------------------------------------------------------------------------
+
+STATE_DIR_ENV = "EDGEGUARD_STATE_DIR"
+
+
+def state_dir() -> str:
+    """Directory of the state files shared across task runs: ``EDGEGUARD_STATE_DIR``, else ``<repo>/state``.
+
+    On the Compose deployment ``<repo>/state`` is the ``./state`` bind mount (``/opt/airflow/state``),
+    the directory ``dags/edgeguard_pipeline.py::get_state_file`` also uses, so the files survive
+    container restarts and every task process reads the same ones. An empty value counts as unset.
+    The directory is not created here; the writer of a file creates it. Public since 2026-10 so the
+    VirusTotal ledger and the AbuseIPDB blacklist cache resolve the directory in one place.
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return os.getenv(STATE_DIR_ENV) or os.path.join(repo_root, "state")
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +361,75 @@ def optional_api_key_effective(
     if placeholders and k in placeholders:
         return None
     return k
+
+
+# ---------------------------------------------------------------------------
+# Per-run caps of list and window feeds (2026-10)
+# ---------------------------------------------------------------------------
+# Shared by the ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist and AbuseIPDB collectors: each has
+# its own cap (``config.<SOURCE>_MAX_PER_RUN``) instead of the generic incremental default, and a
+# run whose window or list holds more entries than the cap keeps the newest.
+
+
+def source_run_cap(attr_name: str, default: int) -> int:
+    """``config.<attr_name>`` clamped at 0 (``0`` = no per-run cap); read per call so tests and
+    Airflow tasks see the current value."""
+    import config as _config
+
+    try:
+        return max(0, int(getattr(_config, attr_name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def lower_limit(limit: Optional[int], cap: int) -> Optional[int]:
+    """The lower of the regular collection ``limit`` and the source's per-run ``cap``.
+
+    ``cap`` ≤ 0 means no per-run cap; ``limit`` ``None`` means no regular limit; ``None`` = no cut.
+    """
+    effective: Optional[int] = cap if cap > 0 else None
+    if limit is not None:
+        effective = limit if effective is None else min(limit, effective)
+    return effective
+
+
+def feed_time(value: Any) -> Optional[datetime]:
+    """A feed timestamp as an aware UTC datetime; None when absent or unparseable.
+
+    ThreatFox writes ``first_seen`` as ``YYYY-MM-DD HH:MM:SS UTC``, URLhaus ``dateadded`` and the SSL
+    Blacklist ``Listingdate`` as ``YYYY-MM-DD HH:MM:SS`` (UTC), Feodo Tracker ``last_online`` as
+    ``YYYY-MM-DD``, AbuseIPDB ``lastReportedAt`` as ISO 8601 with an offset. Used only to order
+    entries before a per-run cap (2026-10).
+    """
+    text = str(value or "").strip().strip('"')
+    if text.upper().endswith(" UTC"):
+        text = text[:-4].rstrip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def newest_first(entries: List[Any], stamp: Callable[[Any], Optional[datetime]]) -> List[Any]:
+    """``entries`` ordered by ``stamp(entry)`` (an aware datetime or None), newest first.
+
+    Entries without a usable timestamp come last; entries with equal keys keep the feed's
+    order (the sort is stable, also in reverse).
+    """
+    keyed = [(stamp(entry), entry) for entry in entries]
+    keyed.sort(key=lambda pair: (pair[0] is not None, pair[0] or _EPOCH_UTC), reverse=True)
+    return [entry for _, entry in keyed]
 
 
 # ---------------------------------------------------------------------------

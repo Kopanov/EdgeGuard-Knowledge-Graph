@@ -623,17 +623,13 @@ class MISPCollector:
             # items, 0 inactive" regardless of whether the MISP backend
             # was healthy-and-empty or transiently unreachable.
             #
-            # Downstream impact: ``run_misp_to_neo4j._sync_single_item``
-            # and ``mark_inactive_nodes`` read ``active_event_ids`` to
-            # decide which indicators are currently-represented in MISP.
-            # An empty set on transient MISP outage silently SKIPS the
-            # mark-inactive step (neo4j_client.py:2753), leaving stale
-            # indicators ``active=true`` forever — the graph freezes
-            # in-place while the DAG shows green.
-            #
-            # Fix: re-raise so the DAG task fails loudly, the operator
-            # sees the actual MISP exception in the Airflow log, and
-            # the stale-indicator freeze stops before it accumulates.
+            # Fix: re-raise so the DAG task fails loudly and the operator
+            # sees the actual MISP exception in the Airflow log instead of
+            # an empty, successful collection. (The comment named
+            # ``mark_inactive_nodes`` as a reader of ``active_event_ids``;
+            # it was removed on 2026-10-16, when indicators began to age by
+            # their report time, ``indicator_aging``, and no code reads the
+            # set any more.)
             logger.error(f"[MISP-COLLECT] MISPCollector.collect FAILED: {e}", exc_info=True)
             raise
 

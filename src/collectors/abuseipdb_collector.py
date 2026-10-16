@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import logging
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -24,17 +25,43 @@ import requests
 
 from collectors.collector_utils import (
     ABUSEIPDB_API_KEY_PLACEHOLDERS,
+    feed_time,
+    lower_limit,
     make_skipped_optional_source,
     make_status,
+    newest_first,
     optional_api_key_effective,
     request_with_rate_limit_retries,
     retry_with_backoff,
+    source_run_cap,
+    state_dir,
     status_after_misp_push,
 )
 from collectors.misp_writer import MISPWriter
 from config import SSL_VERIFY, detect_zones_from_text, resolve_collection_limit
 
 logger = logging.getLogger(__name__)
+
+_CACHE_HOURS_ENV = "EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS"
+_CACHE_HOURS_DEFAULT = 20.0
+_CACHE_FILENAME = "abuseipdb_blacklist_cache.json"
+
+
+def _blacklist_cache_hours() -> float:
+    """Max age (hours) of a reusable blacklist response; 0 disables the cache."""
+    raw = os.getenv(_CACHE_HOURS_ENV)
+    if raw is None or not raw.strip():
+        return _CACHE_HOURS_DEFAULT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("AbuseIPDB: invalid %s=%r — using %sh", _CACHE_HOURS_ENV, raw, _CACHE_HOURS_DEFAULT)
+        return _CACHE_HOURS_DEFAULT
+
+
+def _blacklist_cache_path() -> str:
+    """``<EDGEGUARD_STATE_DIR or <repo>/state>/abuseipdb_blacklist_cache.json`` (the ./state bind mount)."""
+    return os.path.join(state_dir(), _CACHE_FILENAME)
 
 
 class AbuseIPDBCollector:
@@ -62,6 +89,11 @@ class AbuseIPDBCollector:
     # Rate limiting (free tier)
     REQUESTS_PER_DAY = 1000
     MIN_INTERVAL_SECONDS = 1.0  # 1 request per second to stay safe
+    # The most addresses one blacklist request returns on the free plan (the ceiling the collector
+    # applied before 2026-10 as the "API max"; the 730-day baseline of 2026-10-13 received 10,000).
+    # ``EDGEGUARD_ABUSEIPDB_MAX_PER_RUN`` sets the request's ``limit`` up to it; a plan that returns
+    # more needs this raised, never the number of requests (at most one per run).
+    BLACKLIST_MAX_PER_REQUEST = 10000
 
     def __init__(self, api_key: Optional[str] = None, misp_writer: Optional[MISPWriter] = None):
         """
@@ -145,6 +177,12 @@ class AbuseIPDBCollector:
         if not self._check_rate_limit():
             return None
 
+        # 2026-10: a 429 from the blacklist endpoint means its daily quota is spent (5 requests per
+        # UTC day on the free plan); waiting up to 3 x 10 minutes for it cannot succeed and only
+        # delays the failure (and, through the ALL_DONE gates, the baseline's full sync). The
+        # blacklist request therefore returns a 429 at once; 502/503/504 are still retried.
+        retry_on_429 = endpoint != self.BLACKLIST_ENDPOINT
+
         # Do NOT wrap in a broad try/except — transient exceptions must
         # propagate to @retry_with_backoff. Only the shape-of-response
         # error branches return None (permanent failures: auth, parse).
@@ -158,6 +196,7 @@ class AbuseIPDBCollector:
             max_rate_limit_retries=3,
             fallback_delay_sec=60.0,
             retry_on_403=False,
+            retry_on_429=retry_on_429,
             context="AbuseIPDB",
         )
 
@@ -172,7 +211,9 @@ class AbuseIPDBCollector:
                 logger.error("AbuseIPDB: Malformed JSON in 200 response")
                 return None
         elif response.status_code == 429:
-            logger.warning("AbuseIPDB: Rate limit exceeded (429) after retries")
+            logger.warning(
+                "AbuseIPDB: rate limit exceeded (429)%s", " after retries" if retry_on_429 else " (daily quota)"
+            )
             return None
         elif response.status_code == 401:
             logger.error("AbuseIPDB: Authentication failed - check API key")
@@ -270,6 +311,12 @@ class AbuseIPDBCollector:
 
         return results
 
+    @staticmethod
+    def max_per_run() -> int:
+        """``config.ABUSEIPDB_MAX_PER_RUN`` (default 10,000 addresses; ``0`` = the most one request
+        returns, ``BLACKLIST_MAX_PER_REQUEST``)."""
+        return source_run_cap("ABUSEIPDB_MAX_PER_RUN", 10000)
+
     def get_blacklist(
         self,
         confidence_minimum: int = 90,
@@ -298,23 +345,135 @@ class AbuseIPDBCollector:
             logger.warning("AbuseIPDB: No API key configured - cannot fetch blacklist")
             return []
 
+        # 2026-10: the source's own cap (``EDGEGUARD_ABUSEIPDB_MAX_PER_RUN``, default 10,000) replaces
+        # the generic incremental default, which asked for 200 addresses, so the stored copies of the
+        # others were never reported again and aged while the blacklist still listed them. Still at
+        # most one request per run (none when the answer fetched earlier on the same UTC day is
+        # reused): the cap sets its ``limit``, at most BLACKLIST_MAX_PER_REQUEST. The daily and the
+        # baseline runs therefore ask for the same parameters by default and share the cached answer.
+        cap = lower_limit(limit, self.max_per_run())
+        if cap is not None and cap > self.BLACKLIST_MAX_PER_REQUEST:
+            logger.warning(
+                "AbuseIPDB: the per-run cap of %d is above the %d addresses one blacklist request returns "
+                "(BLACKLIST_MAX_PER_REQUEST); the request asks for %d",
+                cap,
+                self.BLACKLIST_MAX_PER_REQUEST,
+                self.BLACKLIST_MAX_PER_REQUEST,
+            )
+        request_limit = self.BLACKLIST_MAX_PER_REQUEST if cap is None else min(cap, self.BLACKLIST_MAX_PER_REQUEST)
         params = {
             "confidenceMinimum": confidence_minimum,
-            "limit": min(limit, 10000) if limit is not None else 10000,  # API max is 10,000
+            "limit": request_limit,
         }
 
         self._last_http_status = None
-        data = self._make_request(self.BLACKLIST_ENDPOINT, params)
+        data = self._load_blacklist_cache(params)
+        if data is None:
+            data = self._make_request(self.BLACKLIST_ENDPOINT, params)
+            if data is None and self._last_http_status == 429:
+                # The free tier allows only a few blacklist calls per day; a 429 means
+                # today's quota is spent. Fail the task rather than report "no data".
+                logger.error(
+                    "AbuseIPDB: daily blacklist quota exhausted (429) — no cached blacklist available; "
+                    "reporting as collector failure"
+                )
+                raise requests.exceptions.HTTPError("AbuseIPDB daily blacklist quota exhausted (429)")
+            # 2026-10: only a non-empty answer is kept. An empty list reused for the rest of the
+            # day would stop a manual rerun from fetching a fresh one.
+            if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
+                self._save_blacklist_cache(params, data)
+
+        listed = data.get("data") if isinstance(data, dict) else None
+        entries: List[Dict[str, Any]] = [e for e in listed if isinstance(e, dict)] if isinstance(listed, list) else []
+        if len(entries) > request_limit:
+            # An answer longer than the request keeps the addresses reported most recently, as the
+            # other per-run caps keep the newest entries.
+            logger.warning(
+                "AbuseIPDB: the blacklist answer holds %d addresses, more than the %d requested; the %d "
+                "reported most recently (lastReportedAt) are kept",
+                len(entries),
+                request_limit,
+                request_limit,
+            )
+            entries = newest_first(entries, lambda entry: feed_time(entry.get("lastReportedAt")))[:request_limit]
+        elif entries and len(entries) == request_limit:
+            logger.info(
+                "AbuseIPDB: the blacklist answer fills the request (%d addresses, EDGEGUARD_ABUSEIPDB_MAX_PER_RUN "
+                "or the %d one request returns): the blacklist may list more, and AbuseIPDB chose which "
+                "addresses fill it",
+                request_limit,
+                self.BLACKLIST_MAX_PER_REQUEST,
+            )
 
         results = []
-        if data and "data" in data:
-            for ip_data in data["data"]:
-                indicator = self._format_blacklist_result(ip_data)
-                if indicator:
-                    results.append(indicator)
+        for ip_data in entries:
+            indicator = self._format_blacklist_result(ip_data)
+            if indicator:
+                results.append(indicator)
 
         logger.info(f"[FETCH] AbuseIPDB: Fetched {len(results)} IPs from blacklist (confidence ≥{confidence_minimum})")
         return results
+
+    def _load_blacklist_cache(self, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return the cached blacklist response for ``params`` if still reusable, else None.
+
+        Reusable (2026-10): the same request parameters, a non-empty address list, fetched on the
+        current UTC date and at most ``EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`` ago. AbuseIPDB
+        counts its daily quota per UTC day, so an answer from an earlier day is never reused: the
+        new day's quota allows a fresh request (a run at an unusual hour would otherwise make the
+        next day's scheduled run skip its refresh).
+        """
+        max_hours = _blacklist_cache_hours()
+        if max_hours <= 0:
+            return None
+        try:
+            with open(_blacklist_cache_path(), encoding="utf-8") as fh:
+                cached = json.load(fh)
+            response = cached["response"]
+            if cached["params"] != params or not isinstance(response.get("data"), list) or not response["data"]:
+                return None
+            fetched = datetime.fromtimestamp(float(cached["fetched_at"]), timezone.utc)
+        except (OSError, OverflowError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+        now = datetime.now(timezone.utc)
+        age_hours = (now - fetched).total_seconds() / 3600.0
+        if fetched.date() != now.date() or not 0 <= age_hours <= max_hours:
+            logger.info(
+                "AbuseIPDB: the cached blacklist was fetched %s (%.1fh ago), not on the current UTC quota day "
+                "within %.1fh — requesting a fresh one",
+                fetched.isoformat(timespec="seconds"),
+                age_hours,
+                max_hours,
+            )
+            return None
+        logger.info(
+            "AbuseIPDB: reusing the blacklist fetched %s (%.1fh old, same UTC quota day, max %.1fh) — "
+            "no request sent, the daily blacklist quota is preserved",
+            fetched.isoformat(timespec="seconds"),
+            age_hours,
+            max_hours,
+        )
+        return response
+
+    def _save_blacklist_cache(self, params: Dict[str, Any], response: Dict[str, Any]) -> None:
+        """Atomically persist a successful blacklist response; never fails collection."""
+        if _blacklist_cache_hours() <= 0:
+            return
+        path = _blacklist_cache_path()
+        tmp_path = None
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".abuseipdb_blacklist_", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"fetched_at": time.time(), "params": params, "response": response}, fh)
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            logger.warning("AbuseIPDB: could not write blacklist cache %s: %s", path, exc)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def _format_ip_result(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -498,7 +657,7 @@ class AbuseIPDBCollector:
             results = self.get_blacklist(confidence_minimum=confidence_minimum, limit=limit, baseline=baseline)
         except requests.exceptions.RequestException as exc:
             logger.error(
-                "AbuseIPDB: network failure after retries (%s: %s) — reporting as collector failure",
+                "AbuseIPDB: blacklist request failed (%s: %s) — reporting as collector failure",
                 type(exc).__name__,
                 exc,
             )
