@@ -2976,7 +2976,8 @@ class MISPWriter:
             #    the count we already paid for during dedup.
             push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
 
-        if not push_queue and total_items > 0:
+        # Only a true dedup skip: groups whose event lookup/creation failed are already counted as failed.
+        if not push_queue and total_items > 0 and total_failed == 0:
             logger.warning(
                 "[DEDUP] All %d items were already present in MISP — nothing new to push. "
                 "This is normal on re-runs. Use --fresh-baseline to force re-collection.",
