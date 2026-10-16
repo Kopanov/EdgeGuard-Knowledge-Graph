@@ -751,7 +751,7 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 
 | Topic | Description | Status (2026-10) |
 |-------|-------------|------------------|
-| `resilmesh.alerts.zone.*` (`healthcare`, `energy`, `finance`, `global`) | Zone alerts → `alert_processor.handle_resilmesh_alert` | **Implemented** as a wildcard subscription. No deployable consumer service yet (no compose service, DAG task or CLI command); `demo/mock_resilmesh_publisher.py` is a self-contained mock. |
+| `resilmesh.alerts.zone.*` (`healthcare`, `energy`, `finance`, `global`) | Zone alerts → `alert_processor.handle_resilmesh_alert` | **Implemented** as a wildcard subscription. No deployable consumer service yet (no compose service, DAG task or CLI command); `demo/alert_enrichment_demo.py` runs the enrichment read-only against the configured Neo4j, without NATS ([DEMO.md](DEMO.md)). |
 | `resilmesh.threats.zone.{zone}` | Zone-specific threat intel | Planned — nothing subscribes or publishes |
 | `resilmesh.cve.kev` | Known Exploited Vulnerabilities | Planned — nothing subscribes or publishes |
 
@@ -796,42 +796,50 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 
 The response is the `EnrichedAlert` dataclass of `src/alert_processor.py` serialised with
 `to_dict()`. Publishing it back to NATS is not implemented yet (the processor returns it to its
-caller); the schema is:
+caller). The schema, with placeholders in angle brackets (2026-10: the list entries are objects,
+as the code builds them; the sample showed plain strings):
 
 ```json
 {
   "alert_id": "wazuh-001",
   "enriched": true,
   "edgeguard_version": "<CalVer from pyproject.toml>",
-  "latency_ms": 120,
+  "latency_ms": "<milliseconds>",
   "query_metadata": {
-    "indicator_found": true,
-    "malware_found": true,
-    "actor_found": true,
-    "techniques_found": 3
+    "indicator_found": "<true | false>",
+    "malware_found": "<true | false>",
+    "actor_found": "<true | false>",
+    "techniques_found": "<count>",
+    "cves_found": "<count>",
+    "assets_found": 0,
+    "users_found": 0
   },
   "enrichment": {
-    "indicator": "192.168.1.100",
-    "indicator_type": "ip",
-    "known_malware": ["TrickBot", "Emotet"],
-    "threat_actors": ["Wizard Spider"],
-    "techniques": [
-      {"mitre_id": "T1071", "name": "Application Layer Protocol", "tactic": "Command and Control"}
-    ],
-    "cves": ["CVE-2021-43297"],
-    "confidence": 0.85,
-    "first_seen": "2025-01-15",
-    "last_updated": "2026-03-07",
-    "sectors_affected": ["healthcare", "finance"],
-    "cross_zone_detected": true,
-    "recommendations": [
-      "Block indicator 192.168.1.100 at perimeter",
-      "Check hospital-server-01 for compromise indicators"
-    ]
+    "indicator": "<canonical indicator value>",
+    "indicator_type": "<graph type: ipv4, ipv6, domain, url, hash, ...>",
+    "known_malware": [{"name": "<malware>", "family": "<family or null>", "malware_types": ["<type>"], "description": "<text or null>"}],
+    "threat_actors": [{"name": "<actor>", "aliases": ["<alias>"], "description": "<text or null>"}],
+    "techniques": [{"mitre_id": "<T####>", "name": "<technique>", "description": "<text or null>"}],
+    "cves": [{"cve_id": "<CVE id>", "cvss_score": "<score or null>", "severity": "<severity or null>"}],
+    "assets": [],
+    "users": [],
+    "confidence": "<the indicator's confidence_score>",
+    "first_seen": "<earliest first seen a source reports, else the first import>",
+    "last_updated": "<latest last seen a source reports, else the last update>",
+    "sectors_affected": ["<zone>"],
+    "cross_zone_detected": "<true when more than one zone>",
+    "recommendations": ["<generated from the fields above>"]
   },
   "original_alert": { "...": "copy of the incoming alert" }
 }
 ```
+
+What the enrichment reads: `(Indicator)-[:INDICATES]->(Malware)`, `(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)`,
+`(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` and `(Indicator)-[:EXPLOITS]->` a `CVE` or
+`Vulnerability` node (one entry per CVE id, the `CVE` node's score and severity first; 2026-10: the
+query read `INDICATES` to a `Vulnerability`, which no code path writes, and `cves` held only a CVE
+the alert named). A CVE the alert names is listed with `"source": "alert"`. `assets` and `users`
+stay empty: no code path writes `(Alert)-[:TARGETS]->(Asset)` or `(Alert)-[:INVOLVES_USER]->(User)`.
 
 ---
 
@@ -945,4 +953,4 @@ type is compared as given.
 
 ---
 
-_Last updated: 2026-10-15 — `Malware`, `ThreatActor` and `Tool` `description`: set by MITRE's record, only filled by any other. Same day: `Malware`: named without an ATT&CK software id suffix, `aliases`, `merged_from` (Malware twin merge; steps 9b / 2d resolve these names); `pulse_malware_families` and the family side of `pulse_malware_actor_pairs` without the suffix, how steps 9b / 2d look older entries up. Same day: an OTX pulse reference is never a CVE description. Same day: CVE `description`, `published` and `last_modified`: set by NVD's record, only filled by any other record. Same day: API Endpoints table: `/search/indicator` returns the indicator of the resolved type and that indicator's related nodes; the STIX export row names extension definition 1.4.0 (it said 1.2.0). Same day: API Endpoints table brought in line with the code: REST `/health` answers 503 while degraded (the table documented HTTP 200 in every state); the actor summary returns campaigns (the table said indicators); the `/admin/query` body field is `cypher` (with `parameters`); `/stix/types` names the 2026-10 relationships and lists `relationship_mappings`; `/search/indicator` returns related nodes in a stable order with `relationships`; md5 / sha1 / sha256 / sha512 indicator filters select `hash` indicators by length; the Wazuh CDB export keeps the newest entries under its cap and reports a cut list in `X-EdgeGuard-Truncated`; the Graph Explorer's default view is `(Indicator)-[:INDICATES]->(Malware)`. Same day: CVE properties: FIRST EPSS (`epss_*`) and CISA's SSVC decision points (`ssvc_*`, from NVD's record). Same day: `attack_vector`: NVD's word for the attack vector of the CVSS that gives the score (CVSS 3.x `attack_vector`, CVSS 2 `access_vector`, the `AV` metric of a CVSS 4.0 vector), null without CVSS, set on `:CVE` by `merge_cve` from the CVSS sub-nodes; indicator types: MISP `ip-src` / `ip-dst` resolve to `ipv4` or `ipv6` by the address (IPv6 addresses were stored as `ipv4`); SSL Blacklist fingerprints are `x509-fingerprint-sha1` (were file hashes); the Type Mapping table lists the graph types the code stores (`hash` for every file digest); relationship table: the provenance sentence moved below the table (it had split it), `INVOLVES` and `SOURCED_FROM` named as the exceptions, rows added for `USES_MALWARE`, `USES_TOOL`, `SUBTECHNIQUE_OF`, `IN_TACTIC`, `TARGETS`, `AFFECTS` and `SOURCED_FROM`; ThreatIntel node schemas name the node properties `source` (list) and `first_imported_at` as written (relationships carry `sources`); `CVE` schema lists the score fields, `status`, `reference_urls`, `affected_products` and the KEV fields that `merge_cve` writes; STIX export row states the relationship provenance (extension definition 1.1.0; 1.2.0 since #191); the three bridge relationships are marked as planned (no writer exists); the technique and `USES_MALWARE` rows refer to the curated-package paragraph below the table. Prior: 2026-10-14 — CVE score fields: `cvss_score` / `severity` come from the CVE's first CVSS (v3.1 → v3.0 → v2 → v4.0), new `cvss_version` and `known_ransomware_use`; no CVSS → null score, severity UNKNOWN; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-10-10 — sample `edgeguard_version` bumped 2026.6.11 → 2026.10.10 (CalVer release for the October 2026 fresh re-feed). Prior: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-16 — alert enrichment: CVEs read as `(Indicator)-[:EXPLOITS]->` a `CVE` or `Vulnerability` node (the query read `INDICATES` to a `Vulnerability`, which no code path writes); the Output sample shows the objects the code builds, with placeholders, and what the enrichment reads; the NATS row names `demo/alert_enrichment_demo.py` (read-only enrichment, no NATS) instead of the removed mock. Prior: 2026-10-15 — `Malware`, `ThreatActor` and `Tool` `description`: set by MITRE's record, only filled by any other. Same day: `Malware`: named without an ATT&CK software id suffix, `aliases`, `merged_from` (Malware twin merge; steps 9b / 2d resolve these names); `pulse_malware_families` and the family side of `pulse_malware_actor_pairs` without the suffix, how steps 9b / 2d look older entries up. Same day: an OTX pulse reference is never a CVE description. Same day: CVE `description`, `published` and `last_modified`: set by NVD's record, only filled by any other record. Same day: API Endpoints table: `/search/indicator` returns the indicator of the resolved type and that indicator's related nodes; the STIX export row names extension definition 1.4.0 (it said 1.2.0). Same day: API Endpoints table brought in line with the code: REST `/health` answers 503 while degraded (the table documented HTTP 200 in every state); the actor summary returns campaigns (the table said indicators); the `/admin/query` body field is `cypher` (with `parameters`); `/stix/types` names the 2026-10 relationships and lists `relationship_mappings`; `/search/indicator` returns related nodes in a stable order with `relationships`; md5 / sha1 / sha256 / sha512 indicator filters select `hash` indicators by length; the Wazuh CDB export keeps the newest entries under its cap and reports a cut list in `X-EdgeGuard-Truncated`; the Graph Explorer's default view is `(Indicator)-[:INDICATES]->(Malware)`. Same day: CVE properties: FIRST EPSS (`epss_*`) and CISA's SSVC decision points (`ssvc_*`, from NVD's record). Same day: `attack_vector`: NVD's word for the attack vector of the CVSS that gives the score (CVSS 3.x `attack_vector`, CVSS 2 `access_vector`, the `AV` metric of a CVSS 4.0 vector), null without CVSS, set on `:CVE` by `merge_cve` from the CVSS sub-nodes; indicator types: MISP `ip-src` / `ip-dst` resolve to `ipv4` or `ipv6` by the address (IPv6 addresses were stored as `ipv4`); SSL Blacklist fingerprints are `x509-fingerprint-sha1` (were file hashes); the Type Mapping table lists the graph types the code stores (`hash` for every file digest); relationship table: the provenance sentence moved below the table (it had split it), `INVOLVES` and `SOURCED_FROM` named as the exceptions, rows added for `USES_MALWARE`, `USES_TOOL`, `SUBTECHNIQUE_OF`, `IN_TACTIC`, `TARGETS`, `AFFECTS` and `SOURCED_FROM`; ThreatIntel node schemas name the node properties `source` (list) and `first_imported_at` as written (relationships carry `sources`); `CVE` schema lists the score fields, `status`, `reference_urls`, `affected_products` and the KEV fields that `merge_cve` writes; STIX export row states the relationship provenance (extension definition 1.1.0; 1.2.0 since #191); the three bridge relationships are marked as planned (no writer exists); the technique and `USES_MALWARE` rows refer to the curated-package paragraph below the table. Prior: 2026-10-14 — CVE score fields: `cvss_score` / `severity` come from the CVE's first CVSS (v3.1 → v3.0 → v2 → v4.0), new `cvss_version` and `known_ransomware_use`; no CVSS → null score, severity UNKNOWN; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-10-10 — sample `edgeguard_version` bumped 2026.6.11 → 2026.10.10 (CalVer release for the October 2026 fresh re-feed). Prior: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._

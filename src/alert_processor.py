@@ -6,7 +6,12 @@ Processes incoming alerts from ResilMesh and returns enriched threat intelligenc
 This module aligns EdgeGuard's Neo4j schema with ResilMesh alert format:
 - Receives alerts on NATS topics: resilmesh.alerts.zone.<zone_id>
 - Queries Neo4j for enrichment data
-- Returns enriched responses on: resilmesh.enriched.alerts
+- Builds the enriched response; publishing it on resilmesh.enriched.alerts is planned and not
+  wired (the handler returns it to its caller)
+
+``AlertProcessor.enrich_alert_read_only`` (2026-10) computes the same enrichment without writing
+to the graph; ``demo/alert_enrichment_demo.py`` uses it to demonstrate the enrichment against a
+deployment.
 """
 
 import copy
@@ -17,6 +22,8 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from neo4j import READ_ACCESS
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,7 +44,9 @@ from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 @dataclass
 class ResilMeshAlert:
     """
-    ResilMesh Alert Schema (as defined in mock_resilmesh_publisher.py)
+    ResilMesh alert schema: the payload ``process_alert`` accepts. ``_invalid_payload_reason``
+    names what is rejected (no non-empty ``alert_id``, a ``threat`` that is not an object); every
+    other field is optional.
 
     {
       "alert_id": "wazuh-001",
@@ -100,6 +109,25 @@ def _invalid_payload_reason(alert_data: Dict) -> Optional[str]:
     if threat is not None and not isinstance(threat, dict):
         return "threat is not an object"
     return None
+
+
+def _graph_cves(rows: List[Optional[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """One ``{cve_id, cvss_score, severity}`` entry per CVE id the indicator EXPLOITS (2026-10).
+
+    The graph can link an indicator to two nodes of one id, the ``CVE`` node (NVD's record; its
+    score and severity come from the CVSS sub-nodes, ``merge_cve``) and a ``Vulnerability`` node.
+    The ``CVE`` node's values are taken first and the ``Vulnerability`` node fills only a value
+    the ``CVE`` node lacks. Entries are ordered by CVE id.
+    """
+    present = [row for row in rows if row and row.get("cve_id")]
+    present.sort(key=lambda row: 0 if row.get("node_label") == "CVE" else 1)
+    merged: Dict[str, Dict[str, Any]] = {}
+    for row in present:
+        entry = merged.setdefault(row["cve_id"], {"cve_id": row["cve_id"], "cvss_score": None, "severity": None})
+        for field in ("cvss_score", "severity"):
+            if entry[field] is None and row.get(field) is not None:
+                entry[field] = row[field]
+    return [merged[cve_id] for cve_id in sorted(merged)]
 
 
 @dataclass
@@ -174,31 +202,23 @@ class AlertProcessor:
       - Asset context: hostname, device_type
       - Multi-zone: tags array
 
-    EdgeGuard stores (Full ResilMesh Schema):
-      - Alert nodes (individual security events)
-      - Indicator nodes (IP, Domain, Hash)
-      - Asset nodes (hostname, device_type)
-      - User nodes (username, domain)
-      - NetworkContext nodes (source/dest IP pairs)
-      - Zone nodes (for cross-zone tracking)
-      - Malware nodes
-      - ThreatActor nodes
-      - Technique nodes (MITRE ATT&CK)
-      - Vulnerability nodes (CVE)
-
-    Relationships:
+    What ``process_alert`` writes (``Neo4jClient.process_complete_resilmesh_alert``):
+      - the Alert node (alert fields as properties, ``enriched`` and the enrichment once done)
+      - the alert's Indicator node (MERGE on ``indicator_type`` + ``value``; the alert's zones)
       - (Alert)-[:INVOLVES]->(Indicator)
-      - (Alert)-[:TARGETS]->(Asset)
-      - (Alert)-[:INVOLVES_USER]->(User)
-      - (Alert)-[:HAS_CONTEXT]->(NetworkContext)
-      - (Alert)-[:AFFECTS]->(Zone)
-      - (Asset)-[:LOCATED_IN]->(Zone)
-      - (Asset)-[:HAS_IP]->(Indicator)
+
+    What ``_enrich_indicator`` reads (2026-10: every pattern checked against the relationships
+    the MISP → Neo4j sync and ``build_relationships`` write):
+      - (Indicator)-[:SOURCED_FROM]->(Source): first / last seen as the sources report them
       - (Indicator)-[:INDICATES]->(Malware)
       - (Malware)-[:ATTRIBUTED_TO]->(ThreatActor)
       - (ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)
-      - (Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)
-      - (Indicator)-[:INDICATES]->(Vulnerability)
+      - (Indicator)-[:EXPLOITS]->(CVE) and (Indicator)-[:EXPLOITS]->(Vulnerability): the CVE
+        the indicator's own CVE tag names (steps 3a / 3b; the query read ``INDICATES`` to a
+        ``Vulnerability``, which no code path writes, and found no CVE before 2026-10)
+      - the indicator's ``zone`` list
+      - (Alert)-[:TARGETS]->(Asset) and (Alert)-[:INVOLVES_USER]->(User): no code path writes
+        these, so ``assets`` and ``users`` are always empty
     """
 
     VERSION = package_version()
@@ -218,11 +238,13 @@ class AlertProcessor:
         Main entry point: Process a ResilMesh alert and return enrichment.
 
         This method:
-        1. Creates/updates all nodes (Alert, Indicator, Asset, User, NetworkContext, Zone)
-        2. Creates all relationships between nodes
-        3. Performs enrichment queries
-        4. Updates the Alert with enrichment results
-        5. Returns the enriched alert response
+        1. Records the alert: the Alert node, the alert's Indicator and
+           (Alert)-[:INVOLVES]->(Indicator)
+        2. Performs enrichment queries
+        3. Updates the Alert with enrichment results
+        4. Returns the enriched alert response
+
+        ``enrich_alert_read_only`` runs steps 2 and 4 only (2026-10).
 
         Args:
             alert_data: Raw alert JSON from ResilMesh
@@ -324,7 +346,63 @@ class AlertProcessor:
             original_alert=original_alert_snapshot,
         )
 
-    def _enrich_indicator(self, indicator: str, indicator_type: str, alert: ResilMeshAlert) -> Dict:
+    def enrich_alert_read_only(self, alert_data: Dict) -> EnrichedAlert:
+        """The response ``process_alert`` builds, computed without writing to the graph (2026-10).
+
+        ``process_alert`` records the alert before it reads (the Alert node, the alert's Indicator,
+        ``INVOLVES``) and stores the enrichment on the Alert node afterwards. This method validates
+        and canonicalizes the alert the same way and runs only ``_enrich_indicator``, whose
+        statements are MATCH / RETURN, in sessions opened in read access mode; the caller's payload
+        is not modified. ``demo/alert_enrichment_demo.py`` uses it so that a demonstration against
+        a deployment leaves the graph as it was.
+
+        Because nothing is recorded, the response describes the graph as it stands, which differs
+        from a ``process_alert`` response in two places: an indicator the graph does not hold is
+        ``indicator_found: false`` (``process_alert`` creates it first, at confidence 0.8, and then
+        finds it), and ``sectors_affected`` comes from the indicator's stored zones, to which
+        ``process_alert`` first adds the alert's zones.
+
+        A client that already holds a driver (``neo4j.driver``) is used as it is; otherwise the
+        processor connects as ``process_alert`` does.
+        """
+        start_time = datetime.now(timezone.utc)
+        original_alert_snapshot = copy.deepcopy(alert_data)
+        alert_data = copy.deepcopy(alert_data)
+        alert = ResilMeshAlert.from_dict(alert_data)
+        if alert.threat is None:
+            alert.threat = {}
+        invalid = _invalid_payload_reason(alert_data)
+        if invalid:
+            logger.warning("[ALERT-REJECTED] %s", invalid)  # reason only, never payload values
+            return self._create_error_response(alert, f"invalid payload: {invalid}", original_alert_snapshot)
+
+        if getattr(self.neo4j, "driver", None) is None and not self.connect():
+            logger.error("[ERR] Cannot enrich alert - Neo4j not connected")
+            return self._create_error_response(alert, "Neo4j connection failed", original_alert_snapshot)
+
+        # The same canonical lookup key as process_alert (see the comment there).
+        resolved_type, indicator = canonicalize_lookup(alert.threat.get("type"), alert.threat.get("indicator"))
+        indicator_type = resolved_type or "unknown"
+        alert.threat["indicator"] = indicator
+        alert.threat["type"] = indicator_type
+        if not indicator:
+            return self._create_error_response(alert, "No indicator in alert", original_alert_snapshot)
+
+        enrichment_data = self._enrich_indicator(indicator, indicator_type, alert, read_only=True)
+        latency_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+        return EnrichedAlert(
+            alert_id=alert.alert_id,
+            enriched=True,
+            edgeguard_version=self.VERSION,
+            latency_ms=round(latency_ms, 2),
+            query_metadata=enrichment_data["metadata"],
+            enrichment=enrichment_data["enrichment"],
+            original_alert=original_alert_snapshot,
+        )
+
+    def _enrich_indicator(
+        self, indicator: str, indicator_type: str, alert: ResilMeshAlert, *, read_only: bool = False
+    ) -> Dict:
         """
         Query Neo4j to enrich an indicator.
 
@@ -333,8 +411,11 @@ class AlertProcessor:
         2. Find related Malware (via INDICATES)
         3. Find related ThreatActors (via ATTRIBUTED_TO from Malware)
         4. Find Techniques (via EMPLOYS_TECHNIQUE from Actor)
-        5. Find CVEs (if mentioned in alert or linked to indicator)
+        5. Find CVEs (named in the alert, or the indicator EXPLOITS them in the graph)
         6. Find related Assets and Users from Alert context
+
+        Every statement here only reads. ``read_only`` (2026-10, ``enrich_alert_read_only``) also
+        opens the session in read access mode.
         """
         enrichment = {
             "indicator": indicator,
@@ -363,8 +444,9 @@ class AlertProcessor:
             "users_found": 0,
         }
 
+        session_kwargs: Dict[str, Any] = {"default_access_mode": READ_ACCESS} if read_only else {}
         try:
-            with self.neo4j.driver.session() as session:
+            with self.neo4j.driver.session(**session_kwargs) as session:
                 # PR (S5) (architecture redesign): per-source
                 # timestamps live on ``(i)-[r:SOURCED_FROM]->(:Source)``
                 # edges, NOT on the node. For the alert enrichment
@@ -495,13 +577,21 @@ class AlertProcessor:
                 if alert_cve:
                     cves.append({"cve_id": alert_cve, "source": "alert"})
 
-                # Also query for CVEs linked to this indicator
+                # Also query for CVEs linked to this indicator. 2026-10: the graph links an
+                # indicator to the CVE its own CVE tag names as (Indicator)-[:EXPLOITS]->, to the
+                # ``CVE`` node and, where one exists, the ``Vulnerability`` node of that id
+                # (build_relationships steps 3a / 3b, the sync's EXPLOITS rows). The one writer of
+                # INDICATES to either label, ``create_indicator_vulnerability_relationship``, has
+                # no caller, so the former ``-[:INDICATES]->(v:Vulnerability)`` never found a CVE.
+                # ``_graph_cves`` gives one entry per CVE id.
                 cve_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
-                    OPTIONAL MATCH (i)-[:INDICATES]->(v:Vulnerability)
+                    OPTIONAL MATCH (i)-[:EXPLOITS]->(v)
+                    WHERE v:CVE OR v:Vulnerability
                     RETURN collect(DISTINCT v {
-                        .cve_id, .cvss_score, .severity
+                        .cve_id, .cvss_score, .severity,
+                        node_label: CASE WHEN v:CVE THEN "CVE" ELSE "Vulnerability" END
                     }) as cves
                 """,
                     indicator=indicator,
@@ -509,7 +599,7 @@ class AlertProcessor:
 
                 cve_record = cve_result.single()
                 if cve_record:
-                    db_cves = [v for v in cve_record["cves"] if v]
+                    db_cves = _graph_cves(cve_record["cves"])
                     # Merge alert CVE with DB CVEs
                     db_cve_ids = {c["cve_id"] for c in cves if c.get("cve_id")}
                     for cve in db_cves:
