@@ -90,6 +90,7 @@ Sector-Specific (Placeholders):
 ================================================================================
 """
 
+import contextlib
 import inspect
 import logging
 import os
@@ -1474,6 +1475,30 @@ def should_run_neo4j_sync(**context):
     return True
 
 
+def _skip_while_baseline_holds_lock(task: str, context: dict) -> None:
+    """Skip a task that starts while a baseline holds the baseline lock (2026-10-16).
+
+    ``check_sync_needed`` checks the lock once, at the start of a sync DAG run; ``run_neo4j_sync``
+    (and its retries), ``build_relationships`` and ``run_enrichment_jobs`` start minutes to hours
+    later and wrote to Neo4j even when a baseline had taken the lock in between, during its wipe or
+    its collection. The task's own DAG-run identity is passed so that the baseline DAG's own
+    ``build_relationships`` (the same callable) is not skipped by the lock its run holds. A skip
+    stamps no state file and leaves ``NEO4J_FULL_SYNC`` / ``SKIP_NEXT_NEO4J_SYNC`` set; the
+    downstream tasks skip with it. Fail-open when the lock cannot be read, as
+    ``should_run_neo4j_sync``.
+    """
+    try:
+        from baseline_lock import baseline_skip_reason
+
+        reason = baseline_skip_reason(own_holder=_baseline_run_holder(context))
+    except Exception:
+        logger.debug("baseline_lock check failed in %s — proceeding without the baseline mutex", task, exc_info=True)
+        return
+    if reason is not None:
+        logger.warning("%s skipped: %s", task, reason)
+        raise AirflowSkipException(f"{task}: {reason}")
+
+
 def _clear_full_sync_request() -> None:
     """Reset the Airflow Variable ``NEO4J_FULL_SYNC`` after a requested full sync succeeded (2026-10).
 
@@ -1582,6 +1607,7 @@ def run_neo4j_sync(**context):
     """Run the Neo4j sync pipeline."""
     import json
 
+    _skip_while_baseline_holds_lock("run_neo4j_sync", context)
     state_file = get_state_file()
 
     # Ensure metrics server is running
@@ -2209,6 +2235,7 @@ def run_build_relationships(**context):
     a SIGTERM-then-SIGKILL escalation so APOC transactions get a
     chance to roll back cleanly.
     """
+    _skip_while_baseline_holds_lock("build_relationships", context)
     from subprocess_streaming import (
         SubprocessStreamTimeout,
         run_with_streaming_output,
@@ -2250,6 +2277,7 @@ def run_build_relationships(**context):
 
 def run_enrichment_jobs(**context):
     """Run the post-sync enrichment jobs (merges, indicator aging, campaigns, calibration, EPSS)."""
+    _skip_while_baseline_holds_lock("run_enrichment_jobs", context)
     from enrichment_jobs import run_all_enrichment_jobs
     from neo4j_client import Neo4jClient
 
@@ -3302,6 +3330,28 @@ def _baseline_release_lock(**context) -> None:
         logger.warning("[BASELINE] Releasing the baseline lock failed", exc_info=True)
 
 
+def _retake_baseline_lock(holder: dict, step: str, before: str) -> None:
+    """Take the baseline lock again for this DAG run before ``step`` goes on to ``before`` (2026-10-16).
+
+    A refusal of ``baseline_clean`` before the wipe releases the lock
+    (``_release_lock_on_pre_wipe_refusal``), so a run that goes on afterwards must hold it again:
+    ``baseline_clean``, cleared after an environment fix, takes it before the wipe, and
+    ``baseline_start`` takes it before the collectors and the full sync, which also covers a
+    ``baseline_clean`` marked success by hand. Idempotent while this run holds the lock; refuses
+    while another DAG run or an in-process baseline holds it. ``baseline_acquire_lock`` refuses a
+    context without a run id, so no such run reaches this step; it is a no-op there.
+    """
+    if not holder["run_id"]:
+        return
+    from baseline_lock import acquire_baseline_lock, is_baseline_running
+
+    if not acquire_baseline_lock(holder=holder):
+        raise AirflowException(
+            f"{step}: another baseline holds the baseline lock ({is_baseline_running()}); this run stops "
+            f"before {before}. Wait for that baseline to finish (or remove a stale sentinel), then clear this task."
+        )
+
+
 baseline_acquire_lock_task = PythonOperator(
     task_id="baseline_acquire_lock",
     python_callable=_baseline_acquire_lock,
@@ -3350,7 +3400,12 @@ def _baseline_start_summary(**context):
     today. PR-K1 §2-8 (the cursor-handoff design) is deferred to a
     follow-up PR; the existing "fresh-baseline = true clean slate"
     operator invariant is preserved here.
+
+    2026-10-16: the task first takes the baseline lock again for this run (``_retake_baseline_lock``):
+    after a refusal of ``baseline_clean`` before the wipe the lock is released, and a
+    ``baseline_clean`` marked success by hand would otherwise start the collectors without it.
     """
+    _retake_baseline_lock(_baseline_run_holder(context), "baseline_start", "the collectors")
     limit, baseline_days = get_baseline_config(context)
 
     # PR-C v2 audit fix (Bugbot HIGH on commit 951b163, same-pattern as
@@ -3529,6 +3584,34 @@ def _enforce_dag_backup_gate(conf: dict) -> None:
         )
 
 
+@contextlib.contextmanager
+def _release_lock_on_pre_wipe_refusal(holder: dict):
+    """Release this run's baseline lock when a check of ``baseline_clean`` refuses before the wipe (2026-10-16).
+
+    The checks (a ``fresh_baseline`` typo, ``wipe_scope``, the backup gate) run after
+    ``baseline_acquire_lock``. A refusal wipes nothing, and the fix for a conf mistake is a new run
+    (``dag_run.conf`` is fixed per run); but a failed run keeps its sentinel until the 48 h age cap,
+    so the lock refused the corrected run and stood the scheduled DAGs down meanwhile.
+    ``source_key_check`` stops before the lock for the same reason. A run that goes on after the
+    refusal takes the lock again: ``baseline_clean`` before the wipe, ``baseline_start`` before the
+    collectors (``_retake_baseline_lock``).
+    """
+    try:
+        yield
+    except AirflowException as exc:
+        try:
+            from baseline_lock import release_baseline_lock
+
+            release_baseline_lock(holder=holder)
+        except Exception:
+            logger.warning("[BASELINE] Releasing the baseline lock after a refusal failed", exc_info=True)
+        raise AirflowException(
+            f"{exc}\nNothing was wiped and this run released the baseline lock: correct the cause and "
+            "trigger the baseline again. After an environment fix (the backup timestamp), clearing "
+            "baseline_clean in this run also works: it takes the lock again before the wipe."
+        ) from exc
+
+
 def _baseline_clean(**context):
     """Optional baseline_clean step — runs the destructive 3-step wipe
     (Neo4j + MISP + checkpoints) IFF ``dag_run.conf={"fresh_baseline": true}``.
@@ -3590,7 +3673,12 @@ def _baseline_clean(**context):
     # existing WARN — non-destructive defaults are safe to recover
     # from, but a skipped wipe is not (operator MAY have intended
     # additive; cannot distinguish automatically).
-    _fail_fast_on_typo_d_fresh_baseline(conf)
+    #
+    # 2026-10-16: a refusal before the wipe releases this run's baseline lock (see
+    # ``_release_lock_on_pre_wipe_refusal``), so the corrected trigger is not refused by it.
+    holder = _baseline_run_holder(context)
+    with _release_lock_on_pre_wipe_refusal(holder):
+        _fail_fast_on_typo_d_fresh_baseline(conf)
 
     # PR-C v2 audit fix (Bug Hunter B1, comprehensive 7-agent audit):
     # ``bool(conf.get("fresh_baseline", False))`` is wrong for the Airflow
@@ -3631,10 +3719,16 @@ def _baseline_clean(**context):
         logger.info("=" * 70)
         return
 
-    # Backup-timestamp gate (2026-06): UI/API-triggered destructive wipes
-    # used to bypass the PR-F2 gate that the CLI wrapper enforces. Raises
-    # AirflowException when no recent backup is recorded (see helper).
-    _enforce_dag_backup_gate(conf)
+    # 2026-10-16: the wipe_scope check runs before the backup gate (it ran after it, inside the
+    # wipe's try block) so that both refusals release the lock like the typo check above.
+    wipe_scope = str(conf.get("wipe_scope") or "edgeguard").strip().lower()
+    with _release_lock_on_pre_wipe_refusal(holder):
+        if wipe_scope not in ("edgeguard", "all"):
+            raise AirflowException(f"wipe_scope must be 'edgeguard' or 'all', got {wipe_scope!r}")
+        # Backup-timestamp gate (2026-06): UI/API-triggered destructive wipes
+        # used to bypass the PR-F2 gate that the CLI wrapper enforces. Raises
+        # AirflowException when no recent backup is recorded (see helper).
+        _enforce_dag_backup_gate(conf)
 
     # Lazy import — keep DAG-parse-time minimal, only load the destructive
     # helper when actually used.
@@ -3643,10 +3737,11 @@ def _baseline_clean(**context):
     except ImportError as e:
         raise AirflowException(f"baseline_clean module unavailable: {e}") from e
 
+    # 2026-10-16: a refusal above released the lock; this task cleared after an environment fix
+    # takes it again before anything is wiped (idempotent while this run holds it).
+    _retake_baseline_lock(holder, "baseline_clean", "the wipe")
+
     try:
-        wipe_scope = str(conf.get("wipe_scope") or "edgeguard").strip().lower()
-        if wipe_scope not in ("edgeguard", "all"):
-            raise AirflowException(f"wipe_scope must be 'edgeguard' or 'all', got {wipe_scope!r}")
         if wipe_scope == "all":
             logger.warning(
                 "[BASELINE] wipe_scope=all — deleting EVERY node in the database, including nodes created by "
@@ -4014,11 +4109,14 @@ baseline_complete = BashOperator(
 # ``baseline_in_progress.lock`` sentinel with this DAG run as holder before the destructive
 # ``baseline_clean`` step; ``baseline_release_lock`` removes it after a successful run. A failed run
 # keeps the lock so that clearing the failed task resumes under the mutex (the liveness check keeps a
-# failed run's sentinel until the age cap and prunes it once the run state is success).
-# The scheduled DAGs skip while the sentinel is held. The earlier PID-based attempt failed
-# because the task process that writes the sentinel exits while the DAG run continues; the
-# holder's liveness is now the DAG-run state (Airflow REST API) with the sentinel age as
-# fallback — see ``src/baseline_lock.py``.
+# failed run's sentinel until the age cap and prunes it once the run state is success). A refusal of
+# ``baseline_clean`` before the wipe releases it instead; ``baseline_clean`` and ``baseline_start``
+# take it again before the run goes on (2026-10-16).
+# The scheduled DAGs skip while the sentinel is held; in ``edgeguard_neo4j_sync`` every task that
+# writes checks it at its start, not only ``check_sync_needed`` (2026-10-16). The earlier PID-based
+# attempt failed because the task process that writes the sentinel exits while the DAG run
+# continues; the holder's liveness is now the DAG-run state (Airflow REST API) with the sentinel
+# age as fallback — see ``src/baseline_lock.py``.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -4044,5 +4142,6 @@ baseline_complete = BashOperator(
 )
 # Released only after a successful run. A failed or timed-out run keeps the sentinel: clearing the
 # failed task resumes the run under the mutex; an abandoned run's sentinel is reaped by the liveness
-# check at the age cap (48 h default) or removed by the operator.
+# check at the age cap (48 h default) or removed by the operator. Exception (2026-10-16): a refusal of
+# ``baseline_clean`` before the wipe releases it (``_release_lock_on_pre_wipe_refusal``).
 baseline_complete >> baseline_release_lock_task
