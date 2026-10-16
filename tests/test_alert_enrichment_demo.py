@@ -452,6 +452,9 @@ class TestDemoSelectionQuery:
         assert "EXISTS { MATCH (i)-[:INDICATES]->(:Malware) }" in q
         assert "$zone IS NULL OR $zone IN coalesce(i.zone, [])" in q
         assert q.rstrip().endswith("LIMIT $limit")
+        # 2026-10-16: most recently reported first (indicator aging), not by the last database write.
+        assert "ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value" in q
+        assert "last_updated" not in q
         assert not _WRITE.search(q)
 
     def test_runs_in_a_read_session_with_its_parameters(self):

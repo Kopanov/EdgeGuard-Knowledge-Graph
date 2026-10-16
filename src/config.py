@@ -664,7 +664,11 @@ MISP_CROSS_EVENT_DEDUP = _env_bool("EDGEGUARD_MISP_CROSS_EVENT_DEDUP", "true")
 # the source reports the indicator again and MISP last wrote it longer ago than the interval
 # below; the edit moves MISP's timestamp and keeps the source's dates (see
 # ``MISPWriter._refresh_stored_copies``). Read per call so Airflow tasks and tests pick up the
-# environment at run time.
+# environment at run time. Since 2026-10-16 an indicator ages from its source's own last-report date
+# capped at MISP's timestamp (``indicator_aging``; the timestamp when the source gives no date), so
+# the edit moves the indicator's age only when the source's date moved, or, without one, to the
+# time of the edit; an indicator re-reported within the interval keeps its older date until the
+# interval has passed.
 
 
 def misp_refresh_last_seen_days() -> int:
@@ -673,7 +677,7 @@ def misp_refresh_last_seen_days() -> int:
     ago is edited once: its ``last_seen`` becomes the source's claim when that is later than the
     stored one and otherwise stays as it is, and MISP stamps the attribute anew. The edit resets
     the timestamp the decision reads, so a copy is edited at most once per interval; 30 days stays
-    well inside decay's first tier (90 days)."""
+    well inside the first aging tier (90 days, ``EDGEGUARD_AGING_TIER_DAYS``)."""
     return max(0, _env_int("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", 30))
 
 

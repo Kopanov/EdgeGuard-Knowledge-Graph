@@ -193,6 +193,49 @@ def _producer_created_modified(props: Dict[str, Any]) -> Dict[str, str]:
     return {"created": created, "modified": modified}
 
 
+def _indicator_created_modified(props: Dict[str, Any]) -> Dict[str, str]:
+    """``{created, modified}`` of an indicator SDO (2026-10-16, ``indicator_aging``).
+
+    ``created`` is ``first_imported_at`` as for every SDO. ``modified`` is the latest of
+    ``created``, ``last_recorded_at`` (the latest MISP record of a report) and ``aging_since``
+    (when the indicator's aging state last changed), so it moves when a source reports the
+    indicator again or its confidence or lifecycle changes, and not when a full sync merely
+    writes the node again (``last_updated``, which it read before).
+    """
+    base = _producer_created_modified(props)
+    created = base["created"]
+    latest, latest_at = created, _parse_stix_ts(created)
+    for key in ("last_recorded_at", "aging_since"):
+        ts = _stix_ts(_iso_str(props.get(key)))
+        at = _parse_stix_ts(ts) if ts else None
+        if ts and at is not None and (latest_at is None or at > latest_at):
+            latest, latest_at = ts, at
+    return {"created": created, "modified": latest}
+
+
+def _parse_stix_ts(ts: str) -> Optional[_dt.datetime]:
+    """A ``_stix_ts`` string as an aware datetime (None when unparsable)."""
+    try:
+        return _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _attach_indicator_aging(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
+    """The indicator's aging as ``x_edgeguard_*`` properties (``_INDICATOR_AGING_FIELDS``),
+    each when the node has it; ``source_confidence`` falls back to ``confidence_score``."""
+    values = dict(props)
+    if values.get("source_confidence") is None and values.get("confidence_score") is not None:
+        values["source_confidence"] = values["confidence_score"]
+    for neo_key, stix_key in _INDICATOR_AGING_FIELDS:
+        value = values.get(neo_key)
+        if value is None:
+            continue
+        if neo_key.endswith("_at"):
+            value = _iso_str(value)
+        sdo[stix_key] = value
+
+
 def _stix_ts(s: Optional[str]) -> Optional[str]:
     """Normalize an ISO-8601 timestamp string for stix2 SDK acceptance.
 
@@ -339,8 +382,11 @@ _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
 #   types a campaign link rests on: ATTRIBUTED_TO, USES_MALWARE, INDICATES).
 # 1.6.0 (2026-10-16): x_edgeguard_description_source on SDOs with a description: the source whose
 #   text the description is (``description_ranking``). ``modified`` is later than that of 1.5.0.
-_EXTENSION_MODIFIED = "2026-10-16T13:00:00.000Z"
-_EXTENSION_VERSION = "1.6.0"
+# 1.7.0 (2026-10-16): the aging of an indicator (``indicator_aging``): x_edgeguard_last_reported_at,
+#   _last_reported_source, _last_reported_ref, _source_confidence, _aging_basis, _aging_tier,
+#   _active and _retired_by on indicators. ``modified`` is later than that of 1.6.0.
+_EXTENSION_MODIFIED = "2026-10-16T18:00:00.000Z"
+_EXTENSION_VERSION = "1.7.0"
 _EXTENSION_SCHEMA_URL = (
     "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
     "#edgeguard-extension-definition"
@@ -384,38 +430,56 @@ _VULNERABILITY_PROMOTED_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("ssvc_timestamp", "x_edgeguard_ssvc_timestamp"),
 )
 
+# 2026-10-16: the aging of an indicator (``indicator_aging``), as top-level extension properties of
+# the indicator SDO (Neo4j property, STIX property). ``source_confidence`` falls back to
+# ``confidence_score`` on a node written before its writes kept it.
+_INDICATOR_AGING_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("last_reported_at", "x_edgeguard_last_reported_at"),
+    ("last_reported_source", "x_edgeguard_last_reported_source"),
+    ("last_reported_ref", "x_edgeguard_last_reported_ref"),
+    ("source_confidence", "x_edgeguard_source_confidence"),
+    ("aging_basis", "x_edgeguard_aging_basis"),
+    ("aging_tier", "x_edgeguard_aging_tier"),
+    ("active", "x_edgeguard_active"),
+    ("retired_by", "x_edgeguard_retired_by"),
+)
+
 # Every top-level ``x_edgeguard_*`` property the exporter can emit. The
 # extension definition declares this list as ``extension_properties``
 # (required for ``toplevel-property-extension``); a test asserts that no
 # emitted property is missing from it.
 EDGEGUARD_EXTENSION_PROPERTIES: Tuple[str, ...] = (
-    # Producer identity
-    "x_edgeguard_exporter",
-    "x_edgeguard_git_sha",
-    "x_edgeguard_generated_at",
-    # Source-truthful and import-wall-clock timestamps (all SDO types)
-    "x_edgeguard_first_seen_at_source",
-    "x_edgeguard_last_seen_at_source",
-    "x_edgeguard_first_imported_at",
-    "x_edgeguard_last_updated",
-    "x_edgeguard_first_seen_inferred",
-    # Zones and MISP traceability
-    "x_edgeguard_zones",
-    "x_edgeguard_misp_event_ids",
-    "x_edgeguard_misp_attribute_ids",
-    # Relationship provenance on SROs (2026-10): who asserts the link, which records, which kind of evidence
-    "x_edgeguard_match_type",
-    "x_edgeguard_sources",
-    "x_edgeguard_source_refs",
-    # Explainability (2026-10): ids the sources cited before an ATT&CK revocation moved the link,
-    # and the actor nodes folded into an intrusion-set
-    "x_edgeguard_cited_ids",
-    "x_edgeguard_merged_from",
-    # Explainability (2026-10-16): the relationship types a campaign link rests on
-    "x_edgeguard_evidence_types",
-    # Explainability (2026-10-16): the source whose text an SDO's description is
-    "x_edgeguard_description_source",
-) + tuple(stix_key for _, stix_key in _VULNERABILITY_PROMOTED_FIELDS)
+    (
+        # Producer identity
+        "x_edgeguard_exporter",
+        "x_edgeguard_git_sha",
+        "x_edgeguard_generated_at",
+        # Source-truthful and import-wall-clock timestamps (all SDO types)
+        "x_edgeguard_first_seen_at_source",
+        "x_edgeguard_last_seen_at_source",
+        "x_edgeguard_first_imported_at",
+        "x_edgeguard_last_updated",
+        "x_edgeguard_first_seen_inferred",
+        # Zones and MISP traceability
+        "x_edgeguard_zones",
+        "x_edgeguard_misp_event_ids",
+        "x_edgeguard_misp_attribute_ids",
+        # Relationship provenance on SROs (2026-10): who asserts the link, which records, which kind of evidence
+        "x_edgeguard_match_type",
+        "x_edgeguard_sources",
+        "x_edgeguard_source_refs",
+        # Explainability (2026-10): ids the sources cited before an ATT&CK revocation moved the link,
+        # and the actor nodes folded into an intrusion-set
+        "x_edgeguard_cited_ids",
+        "x_edgeguard_merged_from",
+        # Explainability (2026-10-16): the relationship types a campaign link rests on
+        "x_edgeguard_evidence_types",
+        # Explainability (2026-10-16): the source whose text an SDO's description is
+        "x_edgeguard_description_source",
+    )
+    + tuple(stix_key for _, stix_key in _VULNERABILITY_PROMOTED_FIELDS)
+    + tuple(stix_key for _, stix_key in _INDICATOR_AGING_FIELDS)
+)
 
 _EXTENSION_PREFIX = "x_edgeguard_"
 
@@ -1807,7 +1871,7 @@ class StixExporter:
             created_by_ref=EDGEGUARD_IDENTITY_ID,
             object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
-            **_producer_created_modified(props),
+            **_indicator_created_modified(props),
         )
         # PR (S5): expose source-truthful + import-wall-clock timestamps
         # as producer-specific custom properties so consumers can
@@ -1822,6 +1886,7 @@ class StixExporter:
         # automation consumers can use valid_from directly.
         if valid_from_inferred:
             sdo_dict["x_edgeguard_first_seen_inferred"] = True
+        _attach_indicator_aging(sdo_dict, props)
         return sdo_dict
 
     def _malware_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:

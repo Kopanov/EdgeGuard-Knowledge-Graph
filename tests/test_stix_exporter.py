@@ -1348,7 +1348,7 @@ def test_a_rejected_cve_exports_its_status_and_parses_strictly():
     assert vulnerability["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
     definition = next(o for o in bundle["objects"] if o["type"] == "extension-definition")
     assert "x_edgeguard_status" in definition["extension_properties"]
-    assert (definition["version"], definition["modified"][:10]) == ("1.6.0", "2026-10-16")
+    assert (definition["version"], definition["modified"][:10]) == ("1.7.0", "2026-10-16")
     parsed = stix2.parse(bundle)  # strict: allow_custom defaults to False
     assert next(o for o in parsed.objects if o.type == "vulnerability")["x_edgeguard_status"] == ["rejected"]
 

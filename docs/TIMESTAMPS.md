@@ -171,6 +171,16 @@ on its own edge.
 | `n.first_imported_at` | 3 | Cypher `ON CREATE SET ... = datetime()` | Once, never overwritten |
 | `n.last_updated`      | 4 | Cypher `SET ... = datetime()` on every MERGE | Every sync |
 
+**Indicator aging times (2026-10-16, `src/indicator_aging.py`).** An Indicator also keeps, forward
+only, the latest report of any source: `n.last_reported_at` = `min(T, coalesce(L, T))`, where T is
+the MISP attribute `timestamp` (when MISP recorded it, UTC) and L the source's own last-report date
+(the attribute's `last_seen`, concept 2, capped at T), with `n.last_reported_source`,
+`n.last_reported_ref` (the attribute uuid) and `n.aging_basis` (`source_date` / `misp_recorded`); and
+`n.last_recorded_at`, the latest T. The indicator's `SOURCED_FROM` edge keeps the same values for
+its source. The indicator ages from `coalesce(n.last_reported_at, n.first_imported_at)`;
+`n.last_updated` (concept 4) is read neither for aging nor for ordering, so a re-sync of the same
+data no longer makes an indicator look new. `n.aging_since` is when the node's aging state began.
+
 #### Edge properties (concepts 1 and 2 — source-truthful per-source)
 
 For each `(:Indicator)-[r:SOURCED_FROM]->(:Source)` edge:
@@ -214,7 +224,7 @@ mapping.
 | STIX field | Required | Maps to | Notes |
 |------------|----------|---------|-------|
 | `created`              | ✅ | Concept 3 (`n.first_imported_at`) via `_producer_created_modified` | When the SDO was created in our system |
-| `modified`             | ✅ | Concept 4 (`n.last_updated`) via `_producer_created_modified`    | When the SDO was last modified |
+| `modified`             | ✅ | 2026-10-16: the latest of `created`, `n.last_recorded_at` and `n.aging_since` (`_indicator_created_modified`; it read concept 4, `n.last_updated`, before) | When a source last reported it or its aging state last changed; never before `created` |
 | `valid_from`           | ✅ | Concept 1 (`r.source_reported_first_at`, MIN across edges) `??` Concept 3 (`n.first_imported_at`) `??` `now()` | See "valid_from fallback chain" below |
 | `valid_until`          | ⏵ | (omit unless we have a real expiry) | Don't synthesize |
 | `x_edgeguard_first_seen_at_source` | custom | Concept 1 (verbatim, MIN across edges) | Explicit preservation; absent if no source claim |
@@ -445,3 +455,5 @@ exercises:
 - Source registry: `src/source_registry.py`
 - Knowledge graph schema: [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md)
 - ResilMesh interop: [`docs/RESILMESH_INTEROPERABILITY.md`](RESILMESH_INTEROPERABILITY.md)
+
+_Last updated: 2026-10-16 — indicator aging times: `last_reported_at` (`min(T, coalesce(L, T))`, the source's `last_seen` capped at the MISP timestamp), `last_reported_source`, `last_reported_ref`, `last_recorded_at` and `aging_basis` on the Indicator and its `SOURCED_FROM` edge, forward only; the indicator ages from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX indicator's `modified` is the latest of `created`, `last_recorded_at` and `aging_since`._

@@ -55,56 +55,17 @@ class _CapDriver:
 
 
 # ---------------------------------------------------------------------------
-# mark_inactive_nodes — array-only Cypher (PR #33 round 10)
+# mark_inactive_nodes — removed 2026-10-16
 # ---------------------------------------------------------------------------
 
 
-def test_mark_inactive_nodes_uses_array_only_for_indicators():
+def test_mark_inactive_nodes_is_removed():
+    """2026-10-16 (``indicator_aging``): ``mark_inactive_nodes`` (no caller) set ``active`` from
+    whether a node's MISP events were listed, on Indicator and Vulnerability alike: a rule beside
+    the one aging rule, and a lifecycle write on a label that does not age. It is gone."""
     from neo4j_client import Neo4jClient
 
-    client = Neo4jClient.__new__(Neo4jClient)  # bypass __init__/connection
-    client.driver = _CapDriver()
-
-    client.mark_inactive_nodes(["77", "88"])
-
-    queries = [c for c, _ in client.driver.captured]
-    assert queries, "expected at least one Cypher query"
-    blob = "\n".join(queries)
-
-    # Array field is present; legacy scalar field name must NOT appear in any
-    # WHERE / SET / coalesce form (we still allow the substring ``misp_event_ids``,
-    # so we explicitly grep for the bare scalar pattern).
-    assert "misp_event_ids" in blob, "array field missing from mark_inactive_nodes Cypher"
-    assert "n.misp_event_id " not in blob and "n.misp_event_id\n" not in blob, (
-        "legacy scalar n.misp_event_id leaked back into mark_inactive_nodes Cypher"
-    )
-    assert "n.misp_event_id IS" not in blob, "legacy scalar IS NULL/NOT NULL check leaked back in"
-    assert "n.misp_event_id <>" not in blob, "legacy scalar <> '' check leaked back in"
-
-    # The any/none semantics must still be present.
-    assert "any(eid IN" in blob, "expected any(...) re-activation gate"
-    assert "none(eid IN" in blob, "expected none(...) deactivation gate"
-
-
-def test_mark_inactive_nodes_handles_vulnerabilities_with_same_semantics():
-    """Both Indicator and Vulnerability must have re-activation (any) AND
-    deactivation (none) gates against the array."""
-    from neo4j_client import Neo4jClient
-
-    client = Neo4jClient.__new__(Neo4jClient)
-    client.driver = _CapDriver()
-    client.mark_inactive_nodes(["1"])
-
-    queries = [c for c, _ in client.driver.captured]
-    vuln_queries = [q for q in queries if ":Vulnerability" in q]
-    assert len(vuln_queries) >= 2, (
-        f"expected ≥2 Vulnerability queries (re-activation + deactivation), got {len(vuln_queries)}"
-    )
-    vuln_blob = "\n".join(vuln_queries)
-    assert "any(eid IN" in vuln_blob, "Vulnerability re-activation gate (any()) is missing"
-    assert "none(eid IN" in vuln_blob, "Vulnerability deactivation gate (none()) is missing"
-    assert "misp_event_ids" in vuln_blob, "Vulnerability queries must use the array"
-    assert "retired_at" in vuln_blob, "Vulnerability re-activation must respect retired_at"
+    assert not hasattr(Neo4jClient, "mark_inactive_nodes")
 
 
 # ---------------------------------------------------------------------------

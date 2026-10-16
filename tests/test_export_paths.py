@@ -278,9 +278,11 @@ def test_exports_of_driver_datetimes_parse_strictly(monkeypatch, method):
         (indicator,) = indicators
         # valid_from = the earliest source claim (SOURCED_FROM min), nanoseconds cut.
         assert indicator["valid_from"] == "2023-01-01T00:00:00.987654Z"
+        # 2026-10-16: an indicator's modified is the latest of created, last_recorded_at and
+        # aging_since (``indicator_aging``), not last_updated, so it is never before created.
         assert (indicator["created"], indicator["modified"]) == (
             "2026-10-15T08:00:00.123456Z",
-            "2026-10-14T07:30:00.000Z",
+            "2026-10-15T08:00:00.123456Z",
         )
         assert indicator["x_edgeguard_first_imported_at"] == "2026-10-15T08:00:00.123456+00:00"
         assert "x_edgeguard_first_seen_inferred" not in indicator
@@ -828,7 +830,9 @@ class TestWazuhCap:
         assert resp.headers["X-EdgeGuard-Entries"] == "2"
         assert any("truncated" in r.getMessage() and "energy" in r.getMessage() for r in caplog.records)
         query, params = session.calls[0]
-        assert "ORDER BY (n.last_updated IS NULL), n.last_updated DESC, key LIMIT $cap + 1" in query
+        # 2026-10-16: indicators by their latest report (or when EdgeGuard created them).
+        assert query.endswith(query_api._CDB_INDICATOR_ORDER_AND_LIMIT)
+        assert "coalesce(n.last_reported_at, n.first_imported_at) DESC, key LIMIT $cap + 1" in query
         assert params["cap"] == 2
 
     def test_a_list_within_the_cap_is_complete(self, monkeypatch, caplog):

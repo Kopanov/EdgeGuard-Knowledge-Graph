@@ -56,6 +56,7 @@ from config import (
     misp_http_headers_for_pymisp,
 )
 from cvss_selection import CVSS_VERSIONS, cvss_attack_vector, select_cvss
+from indicator_aging import BASIS_MISP_RECORDED, BASIS_SOURCE_DATE
 from ioc_normalize import MISP_IP_ATTRIBUTE_TYPES, ip_address_type
 from misp_health import MISPHealthCheck
 from neo4j_client import (
@@ -78,8 +79,9 @@ from source_registry import (
     is_curated_source,
     misp_tag_to_canonical_map,
 )
+from source_trust import is_attribute_creator_trusted
 from source_truthful_timestamps import coerce_iso as _coerce_to_iso
-from source_truthful_timestamps import extract_source_truthful_timestamps
+from source_truthful_timestamps import earliest_allowed_date, extract_source_truthful_timestamps
 
 try:
     from metrics_server import (
@@ -254,19 +256,118 @@ def _event_covers_since(ev: Dict[str, Any], since: Optional[datetime]) -> bool:
     return True
 
 
+def _misp_attribute_time(attr: Dict[str, Any]) -> Optional[datetime]:
+    """``Attribute.timestamp`` (when MISP recorded the attribute; an edit bumps it) as an aware UTC
+    datetime, or None when it is missing or unparsable.
+
+    PyMISP ``to_dict()`` returns datetimes (naive ones are UTC), the raw JSON epoch strings.
+    """
+    ts = attr.get("timestamp")
+    if isinstance(ts, datetime):
+        return (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    if ts is None or isinstance(ts, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _attribute_changed_since(attr: Dict[str, Any], since: datetime) -> bool:
     """Incremental sync: True when the attribute was written to MISP on/after ``since``.
 
     ``Attribute.timestamp`` is MISP's write-time epoch; an edit bumps it. A missing or
     unparsable timestamp counts as changed, so such rows keep the whole-event behaviour.
     """
-    ts = attr.get("timestamp")
-    if isinstance(ts, datetime):  # PyMISP ``to_dict()`` returns datetimes, raw JSON returns epochs
-        ts = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).timestamp()
-    try:
-        return float(ts) >= since.timestamp()
-    except (TypeError, ValueError):
+    recorded = _misp_attribute_time(attr)
+    if recorded is None:
         return True
+    return recorded.timestamp() >= since.timestamp()
+
+
+def _source_last_report_date(attr: Dict[str, Any], event_info: Optional[Dict[str, Any]]) -> Optional[datetime]:
+    """The source's own last-report date of one MISP attribute: its native ``last_seen`` (what the
+    collector stored as the source's last report, ``MISPWriter``), as an aware UTC datetime.
+
+    None when the attribute has none, when it is unparsable or earlier than
+    ``EDGEGUARD_EARLIEST_IOC_DATE`` (a sentinel must not retire an indicator), and when the trust
+    check refuses the event's creator (``source_trust``; the source's other dates are refused
+    then too). Read for every source, not through the first-seen allowlist: the date only ever
+    makes an indicator older than its MISP record time, never newer.
+    """
+    iso = _coerce_to_iso(attr.get("last_seen"))
+    if not iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    parsed = (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    if parsed < earliest_allowed_date():
+        return None
+    if event_info is not None and not is_attribute_creator_trusted(event_info)[0]:
+        return None
+    return parsed
+
+
+def misp_report_times(attr: Dict[str, Any], event_info: Optional[Dict[str, Any]] = None) -> Dict[str, Optional[str]]:
+    """The report one MISP attribute makes of an indicator (2026-10-16, ``indicator_aging``).
+
+    ``recorded_at`` is T, the attribute's MISP timestamp (UTC). ``reported_at`` is
+    ``min(T, coalesce(L, T))`` with L the source's own last-report date
+    (``_source_last_report_date``): a date later than T is capped at T. ``reported_basis`` says
+    which it is (``source_date`` when L dates the report, ``misp_recorded`` otherwise) and
+    ``report_ref`` is the attribute uuid, the record an expert reads in MISP. Without a usable
+    timestamp the attribute dates nothing (both times None). Both sync paths (in-memory and
+    paged) build their items with ``parse_attribute``, which calls this, so a full sync, an
+    incremental one and the paged path carry the same values.
+    """
+    ref = str(attr.get("uuid") or "").strip() or None
+    times: Dict[str, Optional[str]] = {
+        "recorded_at": None,
+        "reported_at": None,
+        "report_ref": ref,
+        "reported_basis": None,
+    }
+    recorded = _misp_attribute_time(attr)
+    if recorded is None:
+        return times
+    times["recorded_at"] = recorded.isoformat()
+    source_date = _source_last_report_date(attr, event_info)
+    if source_date is not None and source_date <= recorded:
+        times["reported_at"] = source_date.isoformat()
+        times["reported_basis"] = BASIS_SOURCE_DATE
+    else:
+        times["reported_at"] = recorded.isoformat()
+        times["reported_basis"] = BASIS_MISP_RECORDED
+    return times
+
+
+def _report_key(item: Dict[str, Any]) -> Optional[Tuple[datetime, str, str]]:
+    """Sort key of an item's report for ``_dedupe_parsed_items``: the report time, then the
+    reference and source (the smaller wins a tie, as in ``indicator_aging._newer_report``)."""
+    reported = item.get("reported_at")
+    if not reported:
+        return None
+    try:
+        when = datetime.fromisoformat(str(reported).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when, str(item.get("report_ref") or ""), str(item.get("tag") or "")
+
+
+def _later_iso(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """The later of two ISO-8601 times (either may be None)."""
+    if not a or not b:
+        return a or b
+    try:
+        return (
+            a
+            if datetime.fromisoformat(a.replace("Z", "+00:00")) >= datetime.fromisoformat(b.replace("Z", "+00:00"))
+            else b
+        )
+    except ValueError:
+        return a
 
 
 def _item_report_ids(item: Dict[str, Any]) -> set:
@@ -791,6 +892,22 @@ def _curated_claim_rows(
     return rows
 
 
+def _merge_duplicate_report(kept: Dict[str, Any], dup: Dict[str, Any]) -> None:
+    """Fold the report of ``dup`` (the same indicator and source as ``kept``) into ``kept``: the
+    later report time with its reference and kind (an equal time goes to the smaller reference),
+    the later MISP record time, and the higher confidence (2026-10-16)."""
+    dup_key, kept_key = _report_key(dup), _report_key(kept)
+    if dup_key is not None and (
+        kept_key is None or dup_key[0] > kept_key[0] or (dup_key[0] == kept_key[0] and dup_key[1:] < kept_key[1:])
+    ):
+        for field in ("reported_at", "report_ref", "reported_basis"):
+            kept[field] = dup.get(field)
+    kept["recorded_at"] = _later_iso(kept.get("recorded_at"), dup.get("recorded_at"))
+    dup_conf, kept_conf = dup.get("confidence_score"), kept.get("confidence_score")
+    if isinstance(dup_conf, (int, float)) and (not isinstance(kept_conf, (int, float)) or dup_conf > kept_conf):
+        kept["confidence_score"] = dup_conf
+
+
 def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
     """
     Deduplicate parsed items within a single MISP event (keys match former global dedupe).
@@ -855,6 +972,11 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
                         kept_several = kept.setdefault(marks_field, [])
                         if pid not in kept_several:
                             kept_several.append(pid)
+                # 2026-10-16 (indicator aging): the latest report of the same source and the highest
+                # confidence, whichever duplicate came first, so either order writes the same node
+                # (``indicator_aging``). A duplicate of another source is dropped as before.
+                if item.get("indicator_type") and kept.get("indicator_type") and item.get("tag") == kept.get("tag"):
+                    _merge_duplicate_report(kept, item)
     _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
@@ -4139,6 +4261,9 @@ class MISPToNeo4jSync:
                 "misp_attribute_id": attr_misp_uuid,
                 "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
+                # 2026-10-16: the report this attribute makes (recorded_at, reported_at, report_ref,
+                # reported_basis), the time the indicator ages from (``indicator_aging``).
+                **misp_report_times(attr, event_info),
             }
 
             # Enrich indicator with OTX pulse metadata

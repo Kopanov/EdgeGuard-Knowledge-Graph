@@ -566,10 +566,13 @@ def test_the_sync_reads_the_source_claims_unchanged():
     )
 
 
-def test_the_indicator_merge_refreshes_last_updated_and_keeps_first_seen():
-    """The batch MERGE the sync runs for the edited attribute: ``last_updated`` and the decay
-    reactivation are unconditional, ``first_imported_at`` is set on create only, and the edge keeps
-    the earliest first-seen claim and the latest last-seen claim."""
+def test_the_indicator_merge_records_the_report_and_keeps_first_seen():
+    """The batch MERGE the sync runs for the edited attribute. ``last_updated`` moves on every
+    write (a database fact). Since 2026-10-16 the node no longer reactivates unconditionally: it
+    records the report forward only and applies the one aging rule, so its age moves only when the
+    report is newer (``indicator_aging``). ``first_imported_at`` is set on create only, and the edge
+    keeps the earliest first-seen claim and the latest last-seen claim."""
+    from indicator_aging import aging_set_item, node_report_items
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient.__new__(Neo4jClient)
@@ -580,29 +583,74 @@ def test_the_indicator_merge_refreshes_last_updated_and_keeps_first_seen():
     client.driver.session.return_value.__enter__ = MagicMock(return_value=session)
     client.driver.session.return_value.__exit__ = MagicMock(return_value=False)
     claimed = (NOW - timedelta(days=60)).replace(microsecond=0).isoformat()
-    client.merge_indicators_batch(
-        [
-            {
-                "indicator_type": "ipv4",
-                "value": "203.0.113.10",
-                "tag": "feodo_tracker",
-                "zone": ["global"],
-                "first_seen_at_source": "2024-05-01T10:00:00+00:00",
-                "last_seen_at_source": claimed,
-            }
-        ],
-        source_id="feodo_tracker",
+    event = {"id": 41, "info": OWN_EVENT, "date": "2026-07-01", "Tag": []}
+    item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+        _edited_row((NOW - timedelta(days=60)).replace(microsecond=0), NOW - timedelta(hours=1)), event
     )
+    client.merge_indicators_batch([item], source_id="feodo_tracker")
     cypher = next(c.args[0] for c in session.run.call_args_list if c.args and "MERGE (n:Indicator" in c.args[0])
     on_create, rest = cypher.split("ON MATCH SET", 1)
-    assert "n.first_imported_at = datetime()" in on_create and "first_imported_at" not in rest
+    assert "n.first_imported_at = datetime()" in on_create and "first_imported_at = " not in rest
     node_set = rest.split("MERGE (n)-[r:SOURCED_FROM]->(s)", 1)[0]
     assert "n.last_updated = datetime()" in node_set, "every merge of the node moves last_updated"
-    assert "n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null" in node_set
-    assert "n.last_decayed_tier = null" in node_set
+    assert node_report_items("n", "item.report", "item.source_id") in node_set
+    assert node_set.index(node_report_items("n", "item.report", "item.source_id")) < node_set.index(
+        aging_set_item("n", "datetime()")
+    ), "the rule reads the report recorded in the same write"
+    assert "retired_by, '') = 'decay' THEN null" not in node_set, "no unconditional reactivation"
+    assert "last_decayed" not in cypher
     assert "WHEN datetime(item.first_seen_at_source) < r.source_reported_first_at" in cypher, "earliest claim kept"
     assert "WHEN datetime(item.last_seen_at_source) > r.source_reported_last_at" in cypher, "latest claim taken"
     rows = next(v for c in session.run.call_args_list for v in c.kwargs.values() if isinstance(v, list) and v)
-    assert rows[0]["first_seen_at_source"] == "2024-05-01T10:00:00+00:00"
-    assert rows[0]["last_seen_at_source"] == claimed
-    assert json.loads(rows[0]["raw_data"])["last_seen_at_source"] == claimed
+    assert datetime.fromisoformat(rows[0]["first_seen_at_source"]) == datetime(2024, 5, 1, 10, tzinfo=timezone.utc)
+    assert rows[0]["last_seen_at_source"] == item["last_seen_at_source"]
+    assert datetime.fromisoformat(rows[0]["last_seen_at_source"]).isoformat() == claimed
+    assert json.loads(rows[0]["raw_data"])["last_seen_at_source"] == item["last_seen_at_source"]
+
+
+# --------------------------------------------------------------------------- the refresh and aging (2026-10-16)
+
+
+def test_a_refresh_that_keeps_the_source_date_does_not_make_the_indicator_younger():
+    """The refresh moves MISP's timestamp (T) and keeps the source's ``last_seen`` (L) unless the
+    source claims a later one. The indicator ages from ``min(T, L)``, so the edited copy still
+    reports L: re-writing the copy does not reset its age."""
+    stored_last_seen = (NOW - timedelta(days=60)).replace(microsecond=0)
+    edited_at = (NOW - timedelta(hours=1)).replace(microsecond=0)
+    event = {"id": 41, "info": OWN_EVENT, "date": "2026-07-01", "Tag": []}
+    item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(_edited_row(stored_last_seen, edited_at), event)
+    assert datetime.fromisoformat(item["recorded_at"]) == edited_at, "T: the edit"
+    assert datetime.fromisoformat(item["reported_at"]) == stored_last_seen, "the source's own date"
+    assert item["reported_basis"] == "source_date" and item["report_ref"] == "u-1"
+
+
+def test_a_refresh_with_a_later_source_claim_moves_the_report_time():
+    """The source now claims a later ``last_seen``: the refresh sends it and the indicator ages from it."""
+    copy = mw.StoredCopy(
+        written=(NOW - timedelta(days=40)).timestamp(),
+        uuid="u-1",
+        first_seen=STORED_FIRST_SEEN,
+        last_seen=(NOW - timedelta(days=60)).isoformat(),
+    )
+    later = (NOW - timedelta(days=2)).replace(microsecond=0)
+    sent = mw._refreshed_last_seen(copy, later.isoformat(), NOW.timestamp())
+    assert datetime.fromisoformat(sent) == later
+    row = _edited_row(later, NOW - timedelta(minutes=5))
+    item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+        row, {"id": 41, "info": OWN_EVENT, "date": "2026-07-01", "Tag": []}
+    )
+    assert datetime.fromisoformat(item["reported_at"]) == later and item["reported_basis"] == "source_date"
+
+
+def test_a_refresh_of_an_undated_source_reports_the_time_of_the_edit():
+    """SSL Blacklist and MalwareBazaar store no ``last_seen``: the report time is T, so a refresh (at
+    most once per EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS) brings a still-listed indicator back to tier 0,
+    and one re-reported within the window keeps its older time until the window passes (30 days,
+    well inside the first tier at 90)."""
+    edited_at = (NOW - timedelta(minutes=5)).replace(microsecond=0)
+    row = _edited_row(NOW - timedelta(days=60), edited_at)
+    row.pop("last_seen")
+    item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+        row, {"id": 41, "info": OWN_EVENT, "date": "2026-07-01", "Tag": []}
+    )
+    assert datetime.fromisoformat(item["reported_at"]) == edited_at and item["reported_basis"] == "misp_recorded"

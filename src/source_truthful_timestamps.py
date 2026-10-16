@@ -339,6 +339,16 @@ def _earliest_allowed_date() -> datetime:
         return datetime.fromisoformat(_DEFAULT_EARLIEST_IOC_DATE).replace(tzinfo=timezone.utc)
 
 
+def earliest_allowed_date() -> datetime:
+    """The floor below which a source's date counts as absent (``EDGEGUARD_EARLIEST_IOC_DATE``).
+
+    2026-10-16: also applied to the source's last-report date that dates an indicator for aging
+    (``run_misp_to_neo4j.misp_report_times``), so a sentinel such as ``0001-01-01`` cannot retire
+    an indicator.
+    """
+    return _earliest_allowed_date()
+
+
 def _clamp_future_to_now(iso: Optional[str]) -> Optional[str]:
     """Clamp a future-dated ISO timestamp to UTC now, AND reject
     implausibly-ancient timestamps via honest-NULL.

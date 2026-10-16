@@ -2091,10 +2091,23 @@ check_neo4j_quality_task = BashOperator(
 #
 #  Order matters:
 #    1. build_relationships  — link IOCs to malware/CVEs (needs fresh data)
-#    2. build_campaigns      — materialise Campaign nodes (needs relationships)
-#    3. calibrate_confidence — adjust INDICATES scores by event size
-#    4. decay_ioc_confidence — retire/reduce stale indicators (idempotent last step)
+#    2. run_enrichment_jobs  — merges, the indicator aging (one rule, evaluated at the run's
+#                              data_interval_end; 2026-10-16), campaigns (active indicators),
+#                              calibration, EPSS (enrichment_jobs.run_all_enrichment_jobs)
 # ================================================================================
+
+
+def enrichment_as_of(context) -> datetime:
+    """The time the indicator aging is evaluated at (2026-10-16): the DAG run's
+    ``data_interval_end``, or ``run_after`` for a manual run without a data interval, so re-running
+    a run gives the same graph; now only when the context has neither (a direct call)."""
+    end = context.get("data_interval_end")
+    if end is None:
+        dag_run = context.get("dag_run")
+        end = getattr(dag_run, "run_after", None) if dag_run is not None else None
+    if end is None:
+        return datetime.now(timezone.utc)
+    return end if end.tzinfo else end.replace(tzinfo=timezone.utc)
 
 
 def run_build_relationships(**context):
@@ -2152,14 +2165,14 @@ def run_build_relationships(**context):
 
 
 def run_enrichment_jobs(**context):
-    """Run IOC decay, Campaign builder, and confidence calibration after sync."""
+    """Run the post-sync enrichment jobs (merges, indicator aging, campaigns, calibration, EPSS)."""
     from enrichment_jobs import run_all_enrichment_jobs
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient()
     try:
         client.connect()
-        summary = run_all_enrichment_jobs(client)
+        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
         logger.info(f"Enrichment summary: {summary}")
     except Exception as e:
         logger.error(f"Enrichment failed: {e}")
@@ -2860,7 +2873,7 @@ def run_baseline_enrichment(**context):
     client = Neo4jClient()
     try:
         client.connect()
-        summary = run_all_enrichment_jobs(client)
+        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
         logger.info(f"[BASELINE] Enrichment complete: {summary}")
     except Exception as e:
         logger.error(f"[BASELINE] Enrichment failed: {e}")

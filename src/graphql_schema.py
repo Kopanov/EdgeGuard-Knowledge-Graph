@@ -205,7 +205,11 @@ class Vulnerability:
     description=(
         "Threat Indicator (IP, domain, hash, URL). "
         "Not yet in ISIM GraphQL schema — EdgeGuard extension. "
-        "confidence_score decays over time via enrichment jobs. "
+        "Ages by one rule for every supplier: confidence_score is source_confidence times the factor "
+        "of its aging_tier, counted from last_reported_at (the latest report of any source, dated by "
+        "the source's own last-report date capped at the MISP record time; first_imported_at when no "
+        "report dated it, aging_basis says which); retired (active false, retired_by 'decay') after "
+        "730 days without a report, reactivated by a newer one. "
         "misp_event_ids[] / misp_attribute_ids[] / misp_event_urls[] / misp_attribute_urls[] "
         "let analysts retrieve the full raw MISP context for every event/attribute that "
         "contributed to this indicator (original attributes, comments, attachments). "
@@ -253,6 +257,22 @@ class Indicator:
     last_online: Optional[str] = None
     threat_label: Optional[str] = None
     threat_category: Optional[str] = None
+    # 2026-10-16 (indicator aging, ``indicator_aging``): the latest report of any source (its time,
+    # source and MISP attribute uuid), the highest confidence a source gave (a node written before
+    # 2026-10-16 shows its confidence_score), what the age counts from (source_date,
+    # misp_recorded or first_imported), the tier reached (0 below the first tier day), the time the
+    # current aging state began, and who retired the node ('decay', or a manual decommission).
+    last_reported_at: Optional[str] = None
+    last_reported_source: Optional[str] = None
+    last_reported_ref: Optional[str] = None
+    last_recorded_at: Optional[str] = None
+    source_confidence: Optional[float] = None
+    aging_basis: Optional[str] = None
+    aging_tier: Optional[int] = None
+    aging_factor: Optional[float] = None
+    aging_since: Optional[str] = None
+    retired_by: Optional[str] = None
+    retired_at: Optional[str] = None
 
 
 @strawberry.type(description="Threat actor node — EdgeGuard-owned, planned ISIM extension.")

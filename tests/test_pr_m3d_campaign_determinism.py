@@ -138,11 +138,12 @@ class TestPartOfEdgesDeterministic:
         # outer `)` of the apoc call. Use a generous slice that
         # covers both shapes.
         link_block = body[li_start : li_start + 3000]
-        assert "ORDER BY i.first_imported_at DESC, i.value ASC" in link_block, (
+        # 2026-10-16: newest by the latest report, or when EdgeGuard created the node (indicator aging).
+        assert "ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC" in link_block, (
             "Step 3 must sort deterministically before the 100-slice"
         )
         # Ensure the ORDER BY comes BEFORE the collect
-        order_idx = link_block.find("ORDER BY i.first_imported_at")
+        order_idx = link_block.find("ORDER BY coalesce(i.last_reported_at, i.first_imported_at)")
         # 2026-10-16: the slice takes 100 distinct indicators (it took 100 paths, so an indicator
         # reached through two member malware took two places); the provenance and evidence are read
         # from every path of each indicator afterwards.
@@ -150,7 +151,10 @@ class TestPartOfEdgesDeterministic:
         collect_idx = link_block.find("collect(i)[0..100]")
         assert 0 <= distinct_idx < order_idx < collect_idx, "DISTINCT, then ORDER BY, then the 100-indicator slice"
         # The indicator key is (type, value): the type breaks a tie of date and value, so the order is total.
-        assert "ORDER BY i.first_imported_at DESC, i.value ASC, i.indicator_type ASC" in link_block
+        assert (
+            "ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC, i.indicator_type ASC"
+            in link_block
+        )
 
     def test_step3a_stamps_r_updated_at(self, source: str) -> None:
         """Every PART_OF MERGE MUST stamp ``r.updated_at = datetime()``

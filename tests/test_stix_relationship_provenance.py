@@ -244,9 +244,10 @@ class TestSro:
         # 1.1.0 (2026-10-14) added the provenance; 1.2.0 (2026-10-15) x_edgeguard_status on
         # vulnerabilities; 1.3.0 (2026-10-15) the explainability properties; 1.4.0 (2026-10-15) EPSS
         # and CISA's SSVC on vulnerabilities; 1.5.0 (2026-10-16) the evidence types of campaign links;
-        # 1.6.0 (2026-10-16) the source of an SDO's description.
-        assert definition["version"] == "1.6.0"
-        assert definition["modified"] == "2026-10-16T13:00:00.000Z"
+        # 1.6.0 (2026-10-16) the source of an SDO's description; 1.7.0 (2026-10-16) the aging of an
+        # indicator.
+        assert definition["version"] == "1.7.0"
+        assert definition["modified"] == "2026-10-16T18:00:00.000Z"
 
     def test_a_campaign_link_carries_the_types_it_rests_on(self):
         """2026-10-16: a campaign link names the relationship types it rests on; the SRO carries them

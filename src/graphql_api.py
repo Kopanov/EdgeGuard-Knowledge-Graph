@@ -354,10 +354,10 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
         conditions.append("n.cvss_score >= $min_cvss")
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
-    # 2026-10: the MISP → Neo4j sync writes every vulnerability as ``:CVE`` (``merge_cve``);
-    # ``:Vulnerability`` is written only by the per-item fallback and the alert path, so this list
-    # read a label the sync does not write and answered []. Ties on the score go by cve_id so
-    # pages are stable.
+    # 2026-10: the MISP → Neo4j sync writes every vulnerability as ``:CVE`` (``merge_cve``); no
+    # scheduled writer reaches ``:Vulnerability`` (the alert path writes none), so this list read a
+    # label the sync does not write and answered []. Ties on the score go by cve_id so pages are
+    # stable.
     query = f"""
     MATCH (n:CVE)
     {where}
@@ -479,9 +479,30 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     last_online=n.get("last_online"),
                     threat_label=n.get("threat_label"),
                     threat_category=n.get("threat_category"),
+                    # 2026-10-16: the aging properties (``indicator_aging``).
+                    last_reported_at=_str_or_none(n.get("last_reported_at")),
+                    last_reported_source=n.get("last_reported_source"),
+                    last_reported_ref=n.get("last_reported_ref"),
+                    last_recorded_at=_str_or_none(n.get("last_recorded_at")),
+                    source_confidence=(
+                        n.get("source_confidence")
+                        if n.get("source_confidence") is not None
+                        else n.get("confidence_score")
+                    ),
+                    aging_basis=n.get("aging_basis"),
+                    aging_tier=n.get("aging_tier"),
+                    aging_factor=n.get("aging_factor"),
+                    aging_since=_str_or_none(n.get("aging_since")),
+                    retired_by=n.get("retired_by"),
+                    retired_at=_str_or_none(n.get("retired_at")),
                 )
             )
     return results
+
+
+def _str_or_none(value) -> Optional[str]:
+    """A stored time as a string (the same form as ``first_imported_at``), or None."""
+    return str(value) if value is not None else None
 
 
 _MAX_GRAPHQL_LIMIT = 500

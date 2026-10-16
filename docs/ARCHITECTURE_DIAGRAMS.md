@@ -35,7 +35,7 @@ graph TB
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
         BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ provenance on every edge: sources, source_refs, misp_event_ids"]
-        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns / Calibration /<br/>Decay / Actor alias merge /<br/>Malware twin merge / EPSS]
+        ENRICH[Enrichment Jobs<br/>Bridge / Actor alias merge /<br/>Malware twin merge / Indicator aging /<br/>Campaigns / Calibration / EPSS]
     end
 
     subgraph APIs
@@ -101,12 +101,12 @@ flowchart LR
     subgraph Step 4-5: Enrich
         NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>batchSize 5000]
         REL --> BRIDGE[CVE Bridge]
-        BRIDGE --> CAMP[Campaign Builder]
+        BRIDGE --> AGING[Indicator aging]
+        AGING --> CAMP[Campaign Builder]
         CAMP --> CALIB[Legacy co-occurrence calibration (no-op since 2026-10)]
-        CALIB --> DECAY[IOC Decay]
     end
 
-    DECAY --> GRAPH[(Knowledge Graph)]
+    CALIB --> GRAPH[(Knowledge Graph)]
 ```
 
 ---
@@ -315,11 +315,12 @@ flowchart LR
         CAL2 -->|> 500| CAL6[conf = 0.30]
     end
 
-    subgraph "Job 4/4: IOC Decay (last — idempotent)"
-        D1[Indicators +<br/>Vulnerabilities] --> D2{Days since<br/>last_updated}
-        D2 -->|90-180d| D3[confidence x 0.85]
-        D2 -->|180-365d| D4[confidence x 0.70]
-        D2 -->|> 365d| D5[active = false<br/>retired_at = now]
+    subgraph "Indicator aging (before the campaigns; 2026-10-16)"
+        D1[Every Indicator,<br/>whoever supplied it] --> D2{Days since the<br/>latest report}
+        D2 -->|from 90d| D3[source_confidence x 0.85]
+        D2 -->|from 180d| D4[source_confidence x 0.70]
+        D2 -->|from 365d| D6[source_confidence x 0.55]
+        D2 -->|from 730d| D5[active = false<br/>retired_at = basis + 730d]
     end
 ```
 
@@ -342,7 +343,7 @@ flowchart LR
 
 ---
 
-*Last updated: 2026-10-15 — §5: `run_neo4j_sync` timeout 8h (was 4h). Same day: enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
+*Last updated: 2026-10-16 — enrichment: the indicator aging (one rule for every Indicator from its latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730; no Vulnerability tiers) runs before the campaign builder. Prior: 2026-10-15 — §5: `run_neo4j_sync` timeout 8h (was 4h). Same day: enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
 
 *Prior: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
 

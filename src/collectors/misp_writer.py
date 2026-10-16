@@ -789,9 +789,11 @@ class StoredCopy(NamedTuple):
     """The stored copy of a re-reported indicator that a refresh would edit (2026-10).
 
     ``written`` is the attribute's MISP ``timestamp`` (MISP's last write, epoch seconds): the
-    incremental sync re-reads an attribute only when it moves, and decay follows the node's
-    ``last_updated``, which the sync sets. ``first_seen`` / ``last_seen`` are the source's claims
-    as MISP stores them; a refresh keeps them unless the source now claims a later ``last_seen``.
+    incremental sync re-reads an attribute only when it moves. ``first_seen`` / ``last_seen`` are
+    the source's claims as MISP stores them; a refresh keeps them unless the source now claims a
+    later ``last_seen``. Since 2026-10-16 the indicator ages from ``last_seen`` capped at
+    ``written`` (``written`` when there is no ``last_seen``; ``indicator_aging``), so a refresh
+    makes it younger only when the source's date moved, or, without one, to the time of the edit.
     ``comment`` is the stored comment, kept only for an indicator that carries several-actor marks
     (``MISPWriter._carry_marks``), otherwise None.
     """
@@ -3484,9 +3486,11 @@ class MISPWriter:
         the stored value unchanged (``_refreshed_last_seen``): the field holds what a source claimed,
         never the time of a run. The edit exists for its side effect: MISP stamps the attribute and
         its event with a new timestamp, so the incremental MISP → Neo4j sync reads the attribute
-        again and refreshes ``Indicator.last_updated`` before ``decay_ioc_confidence`` lowers or
-        retires a node the feed still lists, and the next refresh of the copy is due only one
-        interval later. MISP's answer must show a timestamp later than the stored one.
+        again, and the next refresh of the copy is due only one interval later. Since 2026-10-16
+        the indicator ages from the source's ``last_seen`` capped at that timestamp
+        (``indicator_aging``): the edit moves its age when the source's date moved, or, for a source
+        without a date, to the time of the edit. MISP's answer must show a timestamp later than
+        the stored one.
 
         The longest unwritten go first, at most ``EDGEGUARD_MISP_REFRESH_MAX_PER_RUN``. The edits
         are paced like the NVD edits (``EDGEGUARD_MISP_BATCH_THROTTLE_SEC`` after every

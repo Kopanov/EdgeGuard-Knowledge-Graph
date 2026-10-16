@@ -281,17 +281,21 @@ def test_search_returns_the_related_nodes_of_the_indicator_it_returns(raw_driver
 # Wazuh CDB: newest first under the cap
 # ---------------------------------------------------------------------------
 
+# 2026-10-16: an indicator is ordered by its latest report (``last_reported_at``), or when EdgeGuard
+# created it (``first_imported_at``) when no report dated it; ``last_updated`` (the last database write,
+# which a full sync moves) is not read.
 CDB_FIXTURE = f"""
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'newest.example', edgeguard_managed: true,
-        zone: ['finance'], last_updated: datetime('2026-10-15T09:00:00Z')}})
+        zone: ['finance'], last_reported_at: datetime('2026-10-15T09:00:00Z'),
+        last_updated: datetime('2026-10-01T00:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'b-tie.example', edgeguard_managed: true,
-        zone: ['finance'], last_updated: datetime('2026-10-14T09:00:00Z')}})
+        zone: ['finance'], last_reported_at: datetime('2026-10-14T09:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'a-tie.example', edgeguard_managed: true,
-        zone: ['finance'], last_updated: datetime('2026-10-14T09:00:00Z')}})
+        zone: ['finance'], first_imported_at: datetime('2026-10-14T09:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'aaa-undated.example', edgeguard_managed: true,
-        zone: ['finance']}})
+        zone: ['finance'], last_updated: datetime('2026-10-16T00:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'retired.example', edgeguard_managed: true,
-        zone: ['finance'], active: false, last_updated: datetime('2026-10-15T10:00:00Z')}})
+        zone: ['finance'], active: false, last_reported_at: datetime('2026-10-15T10:00:00Z')}})
 """
 
 
@@ -304,7 +308,7 @@ def test_wazuh_list_keeps_the_newest_entries_and_reports_the_cut(raw_driver, res
         "newest.example",
         "a-tie.example",
         "b-tie.example",
-        "aaa-undated.example",  # no last_updated: last, not first (Cypher sorts null first descending)
+        "aaa-undated.example",  # no report time: last, not first (Cypher sorts null first descending)
     ]
     assert resp.headers["X-EdgeGuard-Truncated"] == "false"
     monkeypatch.setattr(query_api, "_CDB_EXPORT_MAX_ENTRIES", 3)

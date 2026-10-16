@@ -1,6 +1,6 @@
 # EdgeGuard Demo
 
-**Last updated:** 2026-10-16 — rewritten for `demo/alert_enrichment_demo.py`, which runs EdgeGuard's alert enrichment read-only against the configured Neo4j and prints the processor's own response; the earlier NATS mock, which printed random values as an enrichment without querying anything, was removed. New section "Workflow demonstration": the end-to-end checks a presenter can run against a deployment. Same day: the alert enrichment reads CVEs as the graph links them, `(Indicator)-[:EXPLOITS]->` a `CVE` or `Vulnerability` node (it read `INDICATES` to a `Vulnerability`, which no code path writes, and found none), with the score and severity of one node. Same day: a failed enrichment query is `enriched: false` and ends the demo with exit code 1, an alert the processor raises on is named and gives exit code 2; the prerequisites set a Bolt URI the host can reach; the comparison with `process_alert` covers confidence and last update; `stats --misp` counts every page of MISP's event index.
+**Last updated:** 2026-10-16 — the `--from-graph` selection orders the indicators by their latest report (`coalesce(last_reported_at, first_imported_at)`), not by the last database write. Same day: rewritten for `demo/alert_enrichment_demo.py`, which runs EdgeGuard's alert enrichment read-only against the configured Neo4j and prints the processor's own response; the earlier NATS mock, which printed random values as an enrichment without querying anything, was removed. New section "Workflow demonstration": the end-to-end checks a presenter can run against a deployment. Same day: the alert enrichment reads CVEs as the graph links them, `(Indicator)-[:EXPLOITS]->` a `CVE` or `Vulnerability` node (it read `INDICATES` to a `Vulnerability`, which no code path writes, and found none), with the score and severity of one node. Same day: a failed enrichment query is `enriched: false` and ends the demo with exit code 1, an alert the processor raises on is named and gives exit code 2; the prerequisites set a Bolt URI the host can reach; the comparison with `process_alert` covers confidence and last update; `stats --misp` counts every page of MISP's event index.
 
 Everything shown on this page is what the code returns from the graph it is pointed at. The
 output samples below give the **shape** only; the values in angle brackets are placeholders, not
@@ -94,7 +94,7 @@ WHERE i.active = true
   AND ($zone IS NULL OR $zone IN coalesce(i.zone, []))
   AND EXISTS { MATCH (i)-[:INDICATES]->(:Malware) }
 RETURN i.value AS value, i.indicator_type AS indicator_type, i.zone AS zone
-ORDER BY i.last_updated DESC, i.value
+ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value
 LIMIT $limit
 ```
 

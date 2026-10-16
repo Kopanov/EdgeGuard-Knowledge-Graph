@@ -132,6 +132,11 @@ x-common-env: &common-env
   EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS: ${EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS:-30}
   EDGEGUARD_MISP_REFRESH_MAX_PER_RUN: ${EDGEGUARD_MISP_REFRESH_MAX_PER_RUN:-2000}
   EDGEGUARD_MISP_REFRESH_MAX_SECONDS: ${EDGEGUARD_MISP_REFRESH_MAX_SECONDS:-600}
+  # Indicator aging (2026-10-16, src/indicator_aging.py): tier days, their confidence factors and
+  # the retirement age, for every Indicator whoever supplied it. Defaults mirror the code.
+  EDGEGUARD_AGING_TIER_DAYS: ${EDGEGUARD_AGING_TIER_DAYS:-90,180,365}
+  EDGEGUARD_AGING_FACTORS: ${EDGEGUARD_AGING_FACTORS:-0.85,0.70,0.55}
+  EDGEGUARD_AGING_RETIRE_DAYS: ${EDGEGUARD_AGING_RETIRE_DAYS:-730}
   # Incremental MISP -> Neo4j sync writes only attributes changed in the window
   # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
   EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}

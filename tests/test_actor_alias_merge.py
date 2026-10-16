@@ -516,8 +516,6 @@ class TestPropertyStrategy:
             "tlp",
             "retired_at",
             "retired_by",
-            "last_decayed_tier",
-            "last_decayed_at",
             "sophistication",
             "primary_motivation",
             "resource_level",
@@ -606,9 +604,9 @@ class TestRunnerRegistration:
             "bridge_vulnerability_cve",
             "merge_alias_duplicate_actors",
             "merge_malware_attack_twins",  # 2026-10: the Malware ATT&CK-id twin merge
+            "decay_ioc_confidence",  # 2026-10-16: before the campaigns, which link active indicators only
             "build_campaign_nodes",
             "calibrate_cooccurrence_confidence",
-            "decay_ioc_confidence",
             "enrich_cve_epss",
         ]
 
@@ -616,7 +614,7 @@ class TestRunnerRegistration:
         seen: list = []
 
         def _rec(name):
-            def _job(client):
+            def _job(client, **kwargs):
                 seen.append(name)
                 return {"n": 1}
 
@@ -635,9 +633,9 @@ class TestRunnerRegistration:
             "bridge",
             "actor_alias_merge",
             "malware_twin_merge",
+            "decay",
             "campaigns",
             "calibration",
-            "decay",
             "epss",
         ]
         assert summary["actor_alias_merge"] == {"n": 1}

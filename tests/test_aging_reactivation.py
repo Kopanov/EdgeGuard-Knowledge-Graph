@@ -1,10 +1,13 @@
 """2026-10 aging logic check (Kalin: "how the updates and aging of the weights is going on").
 
 Two fixes:
-1. Decay-retired nodes come back when re-observed. ``decay_ioc_confidence`` tags its retirements
-   ``retired_by = 'decay'``; every node write reactivates such nodes (``active = true``,
-   ``retired_at`` and the decay tier cleared). A manual decommission (``retired_at`` without the
-   tag) still wins, as before.
+1. Aging and reactivation. Since 2026-10-16 one rule ages every Indicator, whoever supplied it
+   (``indicator_aging``): every Indicator write records its report forward only and splices the
+   single definition of the rule, so a newer report reactivates a decay-retired node in the same
+   write and a re-sync of unchanged data changes nothing; a manual decommission (``retired_at``
+   without the ``'decay'`` tag) wins. No other label ages: ``active = true`` on create only, no
+   ``active`` / ``retired_*`` / decay property on MATCH. (Before 2026-10-16 every node write
+   reactivated a decay-retired node and restored its confidence, so a full sync undid the decay.)
 2. The sync's edge SET never lowers an edge: ``match_type`` follows the stronger evidence and
    ``confidence_score`` keeps the maximum (the TLP ladder rule, applied to edges).
 """
@@ -20,11 +23,14 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import indicator_aging as ia  # noqa: E402
 import neo4j_client as nc  # noqa: E402
 from enrichment_jobs import _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY as _STRATEGY  # noqa: E402
 
 _CLIENT_SRC = (_SRC / "neo4j_client.py").read_text()
 _ENRICH_SRC = (_SRC / "enrichment_jobs.py").read_text()
+
+_LIFECYCLE_PROPS = ("active", "retired_at", "retired_by", "last_decayed", "aging_", "source_confidence")
 
 
 def _client():
@@ -42,62 +48,148 @@ def _cyphers(session):
     return "\n".join(c.args[0] for c in session.run.call_args_list if c.args)
 
 
+def _node_merge(session, label):
+    return next(c.args[0] for c in session.run.call_args_list if c.args and f"MERGE (n:{label} " in c.args[0])
+
+
 class TestDecayTagsItsRetirements:
-    def test_retire_tier_sets_retired_by_decay(self):
-        block = _ENRICH_SRC[_ENRICH_SRC.index("SET n.active = false,") :][:200]
-        assert "n.retired_at = datetime()" in block and "n.retired_by = 'decay'" in block
+    def test_the_rule_tags_its_retirements_decay(self):
+        body = ia.aging_map("n", "datetime()")
+        assert "retired_by: CASE WHEN" in body and "THEN 'decay' ELSE null END" in body
+        assert "retired_at: CASE WHEN" in body and "_basis + duration({days: 730})" in body
 
     def test_alias_merge_treats_retired_by_as_a_node_local_scalar(self):
         assert _STRATEGY["retired_by"] == "discard" and _STRATEGY["retired_at"] == "discard"
+        assert "last_decayed_tier" not in _STRATEGY and "last_decayed_at" not in _STRATEGY
 
 
-class TestEveryNodeWriteReactivatesDecayRetiredNodes:
-    """The old guard ``n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END`` must be
-    gone from every write path and replaced by the helper's text (manual decommission still wins)."""
+class TestEveryIndicatorWriteAppliesTheOneRule:
+    """The old per-write reactivation (``retired_by = 'decay'`` cleared on every write, the decay tier
+    reset, confidence restored by max-wins) is gone; every Indicator write splices the one rule."""
 
-    def test_old_guard_is_gone(self):
-        assert not re.search(
-            r"\.active = CASE WHEN [ni]\.retired_at IS NOT NULL THEN [ni]\.active ELSE true END", _CLIENT_SRC
-        )
+    def test_old_reactivation_text_is_gone(self):
+        assert not hasattr(nc, "_reactivation_clauses")
+        code = "\n".join(line for line in _CLIENT_SRC.splitlines() if not line.lstrip().startswith("#"))
+        assert not re.search(r"retired_by, ''\) = 'decay' THEN null", code)
+        assert "last_decayed_tier" not in code
+        assert "last_decayed" not in _ENRICH_SRC.split("def decay_ioc_confidence", 1)[1].split("\ndef ", 1)[0]
 
-    def test_helper_text_is_spliced_at_every_site(self):
-        first_line_n = nc._reactivation_clauses("n").split("\n")[0]
-        first_line_i = nc._reactivation_clauses("i").split("\n")[0]
-        assert _CLIENT_SRC.count(first_line_n) == 5, "merge_node_with_source, two batch merges, mark_inactive_nodes ×2"
-        assert _CLIENT_SRC.count(first_line_i) == 1, "alert path"
-        for v in ("n", "i"):
-            body = nc._reactivation_clauses(v)
-            assert (
-                f"{v}.retired_at = CASE WHEN coalesce({v}.retired_by, '') = 'decay' THEN null ELSE {v}.retired_at END"
-                in body
-            )
-            assert f"{v}.last_decayed_tier = null" in body
-            # retired_by is cleared LAST so the two CASEs above still read the tag
-            assert (
-                body.index(f"{v}.retired_by = CASE")
-                > body.index(f"{v}.retired_at = CASE")
-                > body.index(f"{v}.active = CASE")
-            )
-
-    def test_manual_decommission_still_wins(self):
-        body = nc._reactivation_clauses("n")
-        assert "coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END" in body, (
-            "retired_at without the decay tag keeps the node inactive"
-        )
-
-    def test_single_merge_emits_the_clauses(self):
-        client, session = _client()
-        client.merge_actor({"name": "apt28", "tag": "mitre_attck", "zone": ["global"]}, source_id="mitre_attck")
-        cy = _cyphers(session)
-        assert nc._reactivation_clauses("n").split("\n")[0] in cy and "n.last_decayed_tier = null" in cy
-
-    def test_indicator_batch_emits_the_clauses(self):
+    def test_indicator_batch_splices_the_rule_last(self):
         client, session = _client()
         client.merge_indicators_batch(
             [{"indicator_type": "ipv4", "value": "203.0.113.5", "tag": "otx", "zone": ["global"]}], source_id="misp"
         )
         cy = _cyphers(session)
-        assert "coalesce(n.retired_by, 'manual') <> 'decay'" in cy and "n.last_decayed_tier = null" in cy
+        node_set = cy.split("MERGE (n)-[r:SOURCED_FROM]->(s)", 1)[0]
+        assert ia.source_confidence_item("n", "item.confidence") in node_set
+        assert ia.node_report_items("n", "item.report", "item.source_id") in node_set
+        assert node_set.split("WITH n, item", 1)[0].rstrip().endswith(ia.aging_set_item("n", "datetime()")), (
+            "the rule is the last node item before WITH"
+        )
+        assert "n.confidence_score = CASE" not in node_set, "confidence_score comes from the rule only"
+        assert ia.edge_report_items("r", "item.report", "item.source_id") in cy
+
+    def test_single_indicator_merge_splices_the_rule(self):
+        client, session = _client()
+        client.merge_indicator(
+            {"indicator_type": "ipv4", "value": "203.0.113.6", "tag": "stix_import", "zone": ["global"]},
+            source_id="stix_import",
+        )
+        node = _node_merge(session, "Indicator")
+        assert ia.source_confidence_item("n", "$confidence") in node
+        assert ia.node_report_items("n", "$report", "$source_id") in node
+        assert ia.aging_set_item("n", "datetime()") in node
+        assert node.index(ia.node_report_items("n", "$report", "$source_id")) < node.index(
+            ia.aging_set_item("n", "datetime()")
+        )
+        sourced = next(
+            c.args[0] for c in session.run.call_args_list if c.args and "MERGE (n)-[r:SOURCED_FROM]" in c.args[0]
+        )
+        assert ia.edge_report_items("r", "$report", "$source_id") in sourced
+
+    def test_alert_path_and_its_fallback_splice_the_rule(self):
+        client, session = _client()
+        session.run.side_effect = [RuntimeError("primary failed"), MagicMock()]
+        assert client.create_indicator_from_alert("203.0.113.9", "ipv4", "global", alert_data={"a": 1}) is True
+        primary, fallback = (c.args[0] for c in session.run.call_args_list)
+        for query in (primary, fallback):
+            assert ia.source_confidence_item("i", "$confidence_score") in query
+            assert ia.aging_set_item("i", "datetime()") in query
+            assert "last_reported_at:" not in query, "an alert records no report"
+            assert "i.confidence_score = CASE" not in query
+
+    def test_manual_decommission_still_wins(self):
+        body = ia.aging_map("n", "datetime()")
+        manual = ia.manual_decommission_expr("n")
+        assert manual == "(n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay')"
+        for key in ("active", "retired_at", "retired_by"):
+            assert f"{key}: CASE WHEN _age IS NULL OR {manual} THEN n.{key}" in body, key
+
+
+class TestOtherLabelsGetNoLifecycleOnMatch:
+    """CVE, CVSS, Vulnerability, Malware, ThreatActor, Technique, Tactic and Tool never age:
+    ``active = true`` on create only, nothing on MATCH (a CASM- or ISIM-created node keeps its own
+    lifecycle)."""
+
+    def _assert_create_only(self, query: str, var: str = "n"):
+        on_create, rest = query.split("ON MATCH SET", 1)
+        assert f"{var}.active = true" in on_create
+        for prop in _LIFECYCLE_PROPS:
+            assert f"{var}.{prop}" not in rest, prop
+
+    def test_actor_cve_malware_technique_vulnerability(self):
+        client, session = _client()
+        client.merge_actor({"name": "apt28", "tag": "mitre_attck", "zone": ["global"]}, source_id="mitre_attck")
+        self._assert_create_only(_node_merge(session, "ThreatActor"))
+        client.merge_cve({"cve_id": "CVE-2024-3400", "zone": ["global"]}, source_id="nvd")
+        self._assert_create_only(_node_merge(session, "CVE"))
+        client.merge_malware({"name": "emotet", "zone": ["global"]}, source_id="mitre_attck")
+        self._assert_create_only(_node_merge(session, "Malware"))
+        client.merge_vulnerability({"cve_id": "CVE-2024-3400"}, source_id="nvd")
+        self._assert_create_only(_node_merge(session, "Vulnerability"))
+
+    def test_vulnerability_batch(self):
+        client, session = _client()
+        nc_exec = nc._execute_batch_with_retry
+        seen = []
+        try:
+            nc._execute_batch_with_retry = lambda driver, query, **kw: seen.append(query) or (True, kw["batch_len"])
+            client.merge_vulnerabilities_batch([{"cve_id": "CVE-2024-3400", "zone": ["global"]}], source_id="nvd")
+        finally:
+            nc._execute_batch_with_retry = nc_exec
+        self._assert_create_only(seen[0])
+
+    def test_partner_label_helpers_write_no_lifecycle(self):
+        """The ResilMesh-model helpers (no caller in the pipeline) write no EdgeGuard lifecycle
+        property: an IP, Host or partner Vulnerability / CVE keeps the partner's own lifecycle."""
+        client, session = _client()
+        client.merge_ip({"address": "203.0.113.40", "version": 4, "tag": ["dmz"], "status": "known"})
+        client.merge_host({"hostname": "gw01"})
+        client.merge_resilmesh_vulnerability(
+            {"cve_id": "CVE-2023-4966", "description": "Citrix Bleed", "status": ["estimated"]}
+        )
+        client.merge_resilmesh_cve({"cve_id": "CVE-2023-4966", "description": "Citrix Bleed"})
+        writes = [c.args[0] for c in session.run.call_args_list if c.args and "MERGE" in c.args[0]]
+        assert len(writes) >= 4
+        for query in writes:
+            for prop in _LIFECYCLE_PROPS:
+                assert f".{prop}" not in query, (prop, query[:80])
+
+    def test_a_deprecated_attack_object_keeps_its_flag_and_no_lifecycle_write(self):
+        """The ATT&CK ``x_mitre_deprecated`` rule (``n.deprecated = true``, node and links kept) is a
+        lifecycle of its own and still holds; no aging property is written on the match path."""
+        client, session = _client()
+        client.merge_technique(
+            {"mitre_id": "T1086", "name": "PowerShell", "deprecated": True, "zone": ["global"]},
+            source_id="mitre_attck",
+        )
+        query = _node_merge(session, "Technique")
+        assert "n.deprecated = $deprecated" in query
+        self._assert_create_only(query)
+
+    def test_no_label_but_indicator_carries_the_rule(self):
+        assert "MATCH (n:Indicator)" in _ENRICH_SRC.split("def _aging_job_statements", 1)[1].split("\ndef ", 1)[0]
+        assert '("Vulnerability",' not in _ENRICH_SRC.split("def decay_ioc_confidence", 1)[1].split("\ndef ", 1)[0]
 
 
 class TestSyncEdgesNeverDowngrade:

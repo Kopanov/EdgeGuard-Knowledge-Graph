@@ -239,8 +239,22 @@ def _node_props(node: Any) -> Dict[str, Any]:
     2026-10: FastAPI's encoder falls back to ``vars()`` for ``neo4j.time`` objects, so every
     ``last_updated`` / ``first_imported_at`` left the REST API as a ``{"_DateTime__date": …}``
     object. Every endpoint that returns raw node properties goes through this helper.
+
+    2026-10-16 (indicator aging): an Indicator written before its writes kept
+    ``source_confidence`` shows ``coalesce(source_confidence, confidence_score)`` as
+    ``source_confidence``, like the GraphQL and STIX readers.
     """
-    return {k: _jsonable(v) for k, v in dict(node or {}).items()}
+    props = {k: _jsonable(v) for k, v in dict(node or {}).items()}
+    if "Indicator" in (getattr(node, "labels", None) or ()) and props.get("source_confidence") is None:
+        if props.get("confidence_score") is not None:
+            props["source_confidence"] = props["confidence_score"]
+    return props
+
+
+# 2026-10-16: how recent an indicator is — the latest report of any source, or, without one, when
+# EdgeGuard created the node (``indicator_aging``). ``last_updated`` (the last database write) moved
+# with every full sync, so it no longer orders indicators.
+_INDICATOR_RECENCY = "coalesce(n.last_reported_at, n.first_imported_at)"
 
 
 try:
@@ -826,12 +840,14 @@ async def get_zone_threats(
             if severity:
                 where_clause += " AND n.severity = $severity"
 
+            # 2026-10-16: newest first by the latest report, or when EdgeGuard created the node
+            # (``_INDICATOR_RECENCY``); nodes without either last, ties by uuid.
             query = f"""
                 MATCH (n)
                 WHERE (n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Campaign)
                   AND {where_clause}
                 RETURN n
-                ORDER BY n.last_updated DESC
+                ORDER BY ({_INDICATOR_RECENCY} IS NULL), {_INDICATOR_RECENCY} DESC, n.uuid
                 LIMIT $limit
             """
 
@@ -949,11 +965,13 @@ async def list_indicators(
             params = {**filter_params, "limit": limit, "offset": offset}
             where_clause = " AND ".join(conditions) if conditions else "1=1"
 
+            # 2026-10-16: newest first by the latest report (``_INDICATOR_RECENCY``), indicators
+            # without a time last, ties by type and value so pages are stable.
             query = f"""
                 MATCH (n:Indicator)
                 WHERE {where_clause}
                 RETURN n
-                ORDER BY n.last_updated DESC
+                ORDER BY ({_INDICATOR_RECENCY} IS NULL), {_INDICATOR_RECENCY} DESC, n.indicator_type, n.value
                 SKIP $offset
                 LIMIT $limit
             """
@@ -1039,9 +1057,14 @@ _CDB_EXPORT_MAX_ENTRIES = 50_000
 # line-oriented format.
 _CDB_KEY_FORBIDDEN_CHARS = (":", "\n", "\r")
 
-# 2026-10: newest first by the last sync that reported the entry (``n.last_updated``; Cypher sorts
-# null first in a descending order, hence the explicit null rank), ties by key; one row beyond the
-# cap so the route can tell a cut list from a complete one.
+# 2026-10: newest first (Cypher sorts null first in a descending order, hence the explicit null
+# rank), ties by key; one row beyond the cap so the route can tell a cut list from a complete one.
+# 2026-10-16: an indicator by its latest report, or when EdgeGuard created it (``_INDICATOR_RECENCY``),
+# so the entries the cap keeps no longer depend on when a sync last wrote them; a CVE (which does
+# not age) by the last sync that wrote it (``n.last_updated``), as before.
+_CDB_INDICATOR_ORDER_AND_LIMIT = (
+    f"ORDER BY ({_INDICATOR_RECENCY} IS NULL), {_INDICATOR_RECENCY} DESC, key LIMIT $cap + 1"
+)
 _CDB_ORDER_AND_LIMIT = "ORDER BY (n.last_updated IS NULL), n.last_updated DESC, key LIMIT $cap + 1"
 
 
@@ -1084,10 +1107,13 @@ async def export_wazuh_cdb(
         ``_CDB_KEY_FORBIDDEN_CHARS`` — excludes url/ipv6 types), count in
         the ``X-EdgeGuard-Skipped`` header.
       * At most ``_CDB_EXPORT_MAX_ENTRIES`` entries. Since 2026-10 the
-        entries are ordered newest first by ``n.last_updated`` (the last
-        sync that reported them; entries without it last), ties by key, so
-        the cap keeps the most recently updated entries and the order is
-        deterministic; before, the cap kept the alphabetically first keys.
+        entries are ordered newest first, ties by key, so the cap keeps the
+        most recent entries and the order is deterministic; before, the cap
+        kept the alphabetically first keys. Indicators are ordered by their
+        latest report, or when EdgeGuard created them
+        (``coalesce(n.last_reported_at, n.first_imported_at)``, 2026-10-16:
+        a full sync no longer reorders them); CVEs by ``n.last_updated`` (the
+        last sync that wrote them). Entries without the time come last.
         ``X-EdgeGuard-Truncated: true`` (and a log warning) says the list
         was cut; ``false`` that it is complete.
 
@@ -1106,7 +1132,7 @@ async def export_wazuh_cdb(
             match_clause = "MATCH (n:Indicator)"
             return_clause = (
                 "RETURN n.value AS key, n.indicator_type AS type, "
-                f"n.confidence_score AS confidence {_CDB_ORDER_AND_LIMIT}"
+                f"n.confidence_score AS confidence {_CDB_INDICATOR_ORDER_AND_LIMIT}"
             )
         else:
             conditions, params = _vulnerability_filter_conditions(None, zone_value)

@@ -3,9 +3,11 @@
 ``MISPWriter`` edits the stored copy of an indicator a source reports again
 (``tests/test_misp_reobserved_indicator_refresh.py``): MISP stamps it anew and the source's dates
 stay. The edited attribute is parsed as the sync parses it and merged with
-``merge_indicators_batch`` onto a node that decay retired: the node's ``last_updated`` moves, the
-decay retirement is lifted, and ``first_imported_at`` and both claims of the source stay where they
-were. The writer also adds several-actor marks to the stored copy of an OTX indicator
+``merge_indicators_batch`` onto a node that decay retired. Since 2026-10-16 the node ages from the
+source's own last-report date capped at the MISP time (``indicator_aging``): an edit that keeps an
+old source date moves ``last_updated`` but leaves the decay retirement, and an edit with a recent
+source date lifts it in the same write; ``first_imported_at`` and both claims of the source stay
+where they were. The writer also adds several-actor marks to the stored copy of an OTX indicator
 (``tests/test_attribution_single_actor_reports.py``): the edited copy merged in three runs leaves the node
 with the union of the marks, a batch row without marks clears none, and the query build_relationships
 step 2d and the acceptance check read returns them (2026-10).
@@ -39,8 +41,7 @@ CREATE (s:Source:{LABEL} {{source_id: 'feodo_tracker'}})
 CREATE (i:Indicator:{LABEL} {{indicator_type: 'ipv4', value: '203.0.113.10', uuid: 'u-i', source: ['feodo_tracker'],
         zone: ['global'], confidence_score: 0.4, edgeguard_managed: true,
         first_imported_at: datetime('2025-09-01T00:00:00Z'), last_updated: datetime('2025-09-01T00:00:00Z'),
-        active: false, retired_at: datetime('2026-09-02T00:00:00Z'), retired_by: 'decay',
-        last_decayed_tier: 'indicator-180-365'}})
+        active: false, retired_at: datetime('2026-09-02T00:00:00Z'), retired_by: 'decay'}})
 CREATE (i)-[:SOURCED_FROM {{source: 'feodo_tracker', source_reported_first_at: datetime('2024-05-01T10:00:00Z'),
         source_reported_last_at: datetime('2024-06-01T00:00:00Z')}}]->(s)
 CREATE (:Source:{LABEL} {{source_id: 'alienvault_otx'}})
@@ -70,9 +71,10 @@ def client(raw_driver):
     c.close()
 
 
-def _edited_attribute(refreshed: datetime) -> dict:
+def _edited_attribute(refreshed: datetime, last_seen: str = "2024-06-01T00:00:00.000000+00:00") -> dict:
     """The stored Feodo Tracker attribute after the refresh, as MISP 2.5 lists it: a new timestamp,
-    the source's ``first_seen`` / ``last_seen`` unchanged."""
+    the source's ``first_seen`` / ``last_seen`` unchanged (or, second case, a later ``last_seen``
+    the source now claims)."""
     return {
         "id": "1203",
         "event_id": "41",
@@ -83,36 +85,57 @@ def _edited_attribute(refreshed: datetime) -> dict:
         "timestamp": str(int(refreshed.timestamp())),
         "comment": 'TF_META:{"malware_family": "Emotet", "last_seen": "2024-06-01", "last_online": "2024-06-01"}',
         "first_seen": "2024-05-01T10:00:00.000000+00:00",
-        "last_seen": "2024-06-01T00:00:00.000000+00:00",
+        "last_seen": last_seen,
         "value": "203.0.113.10",
         "Tag": [{"name": "source:Feodo-Tracker"}, {"name": "tlp:white"}, {"name": "zone:Global"}],
     }
 
 
-def test_the_refreshed_attribute_moves_last_updated_and_lifts_the_decay_retirement(client, raw_driver):
+def _merge_refreshed(client, refreshed: datetime, last_seen: str) -> None:
     from run_misp_to_neo4j import MISPToNeo4jSync
 
-    refreshed = (datetime.now(timezone.utc) - timedelta(minutes=5)).replace(microsecond=0)
     event = {"id": 41, "info": "EdgeGuard-feodo_tracker-2025-09-01", "date": "2025-09-01", "Tag": []}
-    item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(_edited_attribute(refreshed), event)
-    before = datetime.now(timezone.utc)
+    item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(_edited_attribute(refreshed, last_seen), event)
     ok, errors = client.merge_indicators_batch([item], source_id="feodo_tracker")
     assert (ok, errors) == (1, 0)
 
+
+_NODE_AND_EDGE = (
+    f"MATCH (i:Indicator:{LABEL} {{value: '203.0.113.10'}})-[r:SOURCED_FROM]->(:Source {{source_id: 'feodo_tracker'}}) "
+    "RETURN i.last_updated AS lu, i.first_imported_at AS fi, i.active AS active, i.retired_at AS ra, "
+    "i.retired_by AS rb, i.last_decayed_tier AS tier, i.last_reported_at AS reported, "
+    "r.source_reported_first_at AS first_at, r.source_reported_last_at AS last_at"
+)
+
+
+def test_a_refresh_that_keeps_an_old_source_date_moves_last_updated_and_keeps_the_retirement(client, raw_driver):
+    refreshed = (datetime.now(timezone.utc) - timedelta(minutes=5)).replace(microsecond=0)
+    before = datetime.now(timezone.utc)
+    _merge_refreshed(client, refreshed, "2024-06-01T00:00:00.000000+00:00")
     with raw_driver.session() as session:
-        row = session.run(
-            f"MATCH (i:Indicator:{LABEL} {{value: '203.0.113.10'}})-[r:SOURCED_FROM]->(:Source {{source_id: 'feodo_tracker'}}) "
-            "RETURN i.last_updated AS lu, i.first_imported_at AS fi, i.active AS active, i.retired_at AS ra, "
-            "i.retired_by AS rb, i.last_decayed_tier AS tier, "
-            "r.source_reported_first_at AS first_at, r.source_reported_last_at AS last_at"
-        ).single()
+        row = session.run(_NODE_AND_EDGE).single()
     assert row["lu"].to_native() >= before - timedelta(seconds=5), "last_updated moves to the sync's time"
     assert row["fi"].to_native() == datetime(2025, 9, 1, tzinfo=timezone.utc), "first import stays"
-    assert row["active"] is True and row["ra"] is None and row["rb"] is None and row["tier"] is None
+    assert row["reported"].to_native() == datetime(2024, 6, 1, tzinfo=timezone.utc), "the source's own date"
+    assert (row["active"], row["rb"]) == (False, "decay"), "more than 730 days since the source's last report"
+    assert row["ra"].to_native() == datetime(2026, 6, 1, tzinfo=timezone.utc), "the source date + 730 days"
+    assert row["tier"] is None
     assert row["first_at"].to_native() == datetime(2024, 5, 1, 10, tzinfo=timezone.utc), "first-seen claim stays"
     assert row["last_at"].to_native() == datetime(2024, 6, 1, tzinfo=timezone.utc), (
         "the last-seen claim stays the source's, not the time of the refresh"
     )
+
+
+def test_a_refresh_with_a_recent_source_date_lifts_the_decay_retirement(client, raw_driver):
+    refreshed = (datetime.now(timezone.utc) - timedelta(minutes=5)).replace(microsecond=0)
+    recent = (refreshed - timedelta(days=3)).replace(hour=0, minute=0, second=0)
+    _merge_refreshed(client, refreshed, recent.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00"))
+    with raw_driver.session() as session:
+        row = session.run(_NODE_AND_EDGE).single()
+    assert (row["active"], row["ra"], row["rb"]) == (True, None, None)
+    assert row["reported"].to_native() == recent
+    assert row["fi"].to_native() == datetime(2025, 9, 1, tzinfo=timezone.utc), "first import stays"
+    assert row["last_at"].to_native() == recent, "the latest last-seen claim"
 
 
 def _otx_copy(value: str, uuid: str, comment: str) -> dict:

@@ -59,6 +59,10 @@ FORWARDED = [
     ("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", "30"),  # 2026-10 last_seen refresh of re-reported indicators
     ("EDGEGUARD_MISP_REFRESH_MAX_PER_RUN", "2000"),
     ("EDGEGUARD_MISP_REFRESH_MAX_SECONDS", "600"),
+    # 2026-10-16: indicator aging (src/indicator_aging.py); compose carries the code defaults
+    ("EDGEGUARD_AGING_TIER_DAYS", "90,180,365"),
+    ("EDGEGUARD_AGING_FACTORS", "0.85,0.70,0.55"),
+    ("EDGEGUARD_AGING_RETIRE_DAYS", "730"),
     ("EDGEGUARD_NEO4J_READ_TIMEOUT", "3600"),  # int(os.getenv(...)) — empty would raise
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
     ("EDGEGUARD_CANONICAL_THREAT_ACTORS", None),  # empty = the reference shipped in src/reference/

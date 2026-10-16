@@ -7,7 +7,9 @@ They are designed to be idempotent — safe to re-run at any time.
 
 Jobs
 ----
-1. decay_ioc_confidence   — Reduce confidence of stale indicators over time
+1. decay_ioc_confidence   — The one aging rule for Indicator nodes, every supplier alike (2026-10-16,
+                            indicator_aging): confidence by age since the last report, retirement
+                            after 730 days without one
 2. build_campaign_nodes   — Group ThreatActor / Malware / Indicator into Campaigns
 3. calibrate_cooccurrence — Adjust INDICATES/EXPLOITS confidence for large MISP feed dumps
 4. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
@@ -50,7 +52,16 @@ from canonical_threat_actors import (  # noqa: E402
 )
 from cve_feed_enrichment import enrich_cve_epss  # noqa: E402
 from description_ranking import ranking_for_label  # noqa: E402
+from indicator_aging import (  # noqa: E402
+    AGING_BASES,
+    AgingPolicy,
+    aging_map,
+    basis_expr,
+    changed_predicate,
+    load_aging_policy,
+)
 from neo4j_client import (  # noqa: E402
+    APOC_ITERATE_YIELD,
     NEO4J_READ_TIMEOUT,
     _dedup_concat_clause,
     _tlp_most_restrictive_clause,
@@ -75,117 +86,114 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def decay_ioc_confidence(neo4j_client) -> Dict:
+def aging_as_of(value=None) -> datetime:
+    """The evaluation time of the aging job as an aware UTC datetime (2026-10-16).
+
+    ``value`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run; Airflow
+    passes pendulum datetimes), an ISO-8601 string, or None for now (the command line). A naive
+    datetime is UTC.
     """
-    Time-decay confidence scores for Indicator and Vulnerability nodes.
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if not isinstance(value, datetime):
+        raise TypeError(f"aging as_of must be a datetime or an ISO-8601 string, not {type(value).__name__}")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    # A plain datetime: pendulum's subclass would otherwise reach the driver as its own type.
+    return datetime.fromtimestamp(value.timestamp(), tz=timezone.utc)
 
-    Threat intelligence has a shelf life.  An IP flagged 18 months ago
-    with no recent sightings is far less actionable than one seen yesterday.
 
-    Decay tiers (based on days since last_updated):
-      < 90 days   → no change
-      90–180 days → confidence × 0.85 (15% reduction)
-      180–365 days→ confidence × 0.70 (30% reduction)
-      > 365 days  → active = false (retired, not deleted)
+def _aging_job_statements(policy: AgingPolicy) -> Tuple[str, str, str]:
+    """The aging job's statements: the nodes it reads, the update applied to each (only where a
+    value changes) and the count of the nodes that change. Parameters: ``$as_of`` (ISO-8601)."""
+    aged = aging_map("n", "datetime($as_of)", policy)
+    outer = f"MATCH (n:Indicator) WHERE {basis_expr('n')} IS NOT NULL RETURN n"
+    inner = f"WITH n, {aged} AS aged WHERE {changed_predicate('n', 'aged')} SET n += aged"
+    count = (
+        f"MATCH (n:Indicator) WHERE {basis_expr('n')} IS NOT NULL "
+        f"WITH n, {aged} AS aged WHERE {changed_predicate('n', 'aged')} RETURN count(n) AS changed"
+    )
+    return outer, inner, count
 
-    All changes are non-destructive:
-    - Minimum confidence floor is 0.10 (node stays queryable)
-    - Retired nodes (active=false) are kept for historical queries
-    - 2026-10: retirement by this job is tagged ``retired_by = 'decay'`` so a node that
-      is observed again in a later sync is reactivated (``active = true``, ``retired_at``
-      cleared, decay tier reset) — only a manual decommission (``retired_at`` set without
-      that tag) survives a re-observation
-    - first_imported_at and source are never touched
+
+_AGING_ITERATE_CYPHER = (
+    "CALL apoc.periodic.iterate($outer, $inner, "
+    "{batchSize: 10000, parallel: false, retries: 2, params: {as_of: $as_of}}) "
+    f"YIELD {APOC_ITERATE_YIELD} RETURN {APOC_ITERATE_YIELD}"
+)
+
+# What the job logs after it ran: Indicators per tier, retired, by basis, and those with no time.
+_AGING_STATS_CYPHER = (
+    "MATCH (n:Indicator) "
+    "RETURN n.aging_tier AS tier, n.aging_basis AS basis, "
+    "coalesce(n.retired_by = 'decay', false) AS retired, "
+    "(n.last_reported_at IS NULL AND n.first_imported_at IS NULL) AS no_time, count(*) AS c"
+)
+
+
+def decay_ioc_confidence(neo4j_client, as_of=None) -> Dict:
+    """Apply the one aging rule to every Indicator at ``as_of`` (2026-10-16, ``indicator_aging``).
+
+    Threat intelligence has a shelf life, and an indicator is a time-bound claim. Each Indicator
+    ages from ``coalesce(last_reported_at, first_imported_at)`` (the latest report of any source,
+    dated by the source's own last-report date capped at the MISP record time; the time EdgeGuard
+    created a node no MISP report dated), whichever supplier reported it and whoever created the
+    node. With the defaults (``EDGEGUARD_AGING_TIER_DAYS``, ``EDGEGUARD_AGING_FACTORS``,
+    ``EDGEGUARD_AGING_RETIRE_DAYS``):
+
+      below 90 days   → confidence_score = source_confidence
+      from 90 days    → × 0.85
+      from 180 days   → × 0.70
+      from 365 days   → × 0.55 (never below 0.10)
+      from 730 days   → retired: active = false, retired_by = 'decay', retired_at = basis + 730 d
+
+    The value is recomputed from ``source_confidence`` (not multiplied step by step), so a missed
+    or repeated run gives the same graph, and a run with the same ``as_of`` writes nothing. Only
+    nodes whose aging changes are written (``apoc.periodic.iterate`` batches). Nothing is deleted;
+    a manual decommission (``retired_at`` without the ``'decay'`` tag) is kept; a newer report
+    reactivates a node in the sync's write. Every other label (CVE, CVSS, Vulnerability, Malware,
+    ThreatActor, Technique, Tactic, Tool, Sector, Source, Alert) never ages. An Indicator with
+    neither time (no EdgeGuard evidence) is counted and left untouched.
+
+    ``as_of`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run), passed
+    through ``run_all_enrichment_jobs``; None means now.
     """
     if not neo4j_client.driver:
         logger.error("decay_ioc_confidence: no Neo4j connection")
         return {}
 
-    results = {}
-
-    tiers = [
-        # (label, min_days, max_days, multiplier, retire)
-        ("Indicator", 90, 180, 0.85, False),
-        ("Indicator", 180, 365, 0.70, False),
-        ("Indicator", 365, None, 1.00, True),  # retire
-        ("Vulnerability", 90, 180, 0.90, False),
-        ("Vulnerability", 180, 365, 0.80, False),
-        ("Vulnerability", 365, None, 1.00, True),
-    ]
+    when = aging_as_of(as_of)
+    policy = load_aging_policy()
+    outer, inner, count = _aging_job_statements(policy)
+    params = {"as_of": when.isoformat()}
+    results: Dict = {"as_of": params["as_of"]}
 
     try:
         with neo4j_client.driver.session() as session:
-            for label, min_days, max_days, multiplier, retire in tiers:
-                if retire:
-                    cypher = f"""
-                    MATCH (n:{label})
-                    WHERE n.last_updated IS NOT NULL
-                      AND n.active = true
-                      AND duration.between(n.last_updated, datetime()).days > $min_days
-                    SET n.active = false,
-                        n.retired_at = datetime(),
-                        n.retired_by = 'decay'
-                    RETURN count(n) AS affected
-                    """
-                    desc = f"{label} retired (>{min_days}d)"
-                    # Retire path is idempotent via the ``n.active = true``
-                    # guard in WHERE — already-retired nodes skip. No
-                    # ``last_decayed_tier`` gating needed here.
-                    params = {"min_days": min_days, "max_days": max_days, "mult": multiplier}
-                else:
-                    # PR-M3b §8-RI-S4-Decay: gate by ``last_decayed_tier`` so
-                    # the multiplicative decay fires AT MOST ONCE per tier
-                    # transition per node.  The prior query had no idempotency
-                    # marker: every enrichment run matched the same nodes in
-                    # the same tier and re-applied the multiplier, so a
-                    # node sitting in the 180-365d tier for 100 daily runs
-                    # got ``confidence × 0.70^100`` ≈ 0 (floored at 0.10)
-                    # within ~7 runs.  All indicators in the tier collapsed
-                    # to the 0.10 floor long before aging out — losing all
-                    # discriminatory power for filtering / ranking.
-                    #
-                    # Fix: each tier gets a unique label (``"<min>-<max>"``
-                    # format, stable across runs) stored on the node as
-                    # ``n.last_decayed_tier``. The WHERE clause excludes
-                    # nodes already decayed at this tier; the SET clause
-                    # updates the marker so the next run is a no-op.  When
-                    # a node AGES INTO the next tier, ``last_decayed_tier``
-                    # differs from the new tier label → decay fires once
-                    # for the new tier and updates the marker.  Net: each
-                    # node sees at most one decay application per tier
-                    # boundary crossed, matching the semantic intent
-                    # documented in the function docstring.
-                    cypher = f"""
-                    MATCH (n:{label})
-                    WHERE n.last_updated IS NOT NULL
-                      AND n.confidence_score IS NOT NULL
-                      AND duration.between(n.last_updated, datetime()).days >= $min_days
-                      AND duration.between(n.last_updated, datetime()).days < $max_days
-                      AND (n.last_decayed_tier IS NULL OR n.last_decayed_tier <> $tier_label)
-                    SET n.confidence_score = CASE
-                            WHEN n.confidence_score * $mult < 0.10 THEN 0.10
-                            ELSE round(n.confidence_score * $mult * 100) / 100
-                        END,
-                        n.last_decayed_tier = $tier_label,
-                        n.last_decayed_at = datetime()
-                    RETURN count(n) AS affected
-                    """
-                    desc = f"{label} decayed ({min_days}–{max_days}d, ×{multiplier})"
-                    tier_label = f"{label.lower()}-{min_days}-{max_days}"
-                    params = {
-                        "min_days": min_days,
-                        "max_days": max_days,
-                        "mult": multiplier,
-                        "tier_label": tier_label,
-                    }
-
-                result = session.run(cypher, timeout=NEO4J_READ_TIMEOUT, **params)
-                record = result.single()
-                count = record["affected"] if record else 0
-                results[desc] = count
-                if count:
-                    logger.info(f"  [DECAY] {desc}: {count} nodes")
-
+            record = session.run(count, timeout=NEO4J_READ_TIMEOUT, **params).single()
+            results["changed"] = int(record["changed"]) if record else 0
+            record = session.run(
+                _AGING_ITERATE_CYPHER, outer=outer, inner=inner, timeout=NEO4J_READ_TIMEOUT, **params
+            ).single()
+            failures = apoc_iterate_failures(record) if record else []
+            if failures:
+                raise RuntimeError(f"[AGING] apoc.periodic.iterate batch failures: {failures}")
+            tiers: Dict[str, int] = {f"tier_{t}": 0 for t in range(len(policy.tier_days) + 1)}
+            by_basis: Dict[str, int] = {basis: 0 for basis in AGING_BASES}
+            retired = no_time = 0
+            for row in session.run(_AGING_STATS_CYPHER, timeout=NEO4J_READ_TIMEOUT):
+                c = int(row["c"] or 0)
+                if row["no_time"]:
+                    no_time += c
+                    continue
+                if row["tier"] is not None:
+                    tiers[f"tier_{int(row['tier'])}"] = tiers.get(f"tier_{int(row['tier'])}", 0) + c
+                if row["basis"] is not None:
+                    by_basis[str(row["basis"])] = by_basis.get(str(row["basis"]), 0) + c
+                if row["retired"]:
+                    retired += c
     except Exception as e:
         # PR-N21 BLOCKER: re-raise instead of silently returning zero
         # results. The pre-N21 ``except Exception: logger.error()`` (no
@@ -193,15 +201,34 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
         # OOM) and returned ``{}`` — which the runner happily aggregated
         # and Airflow marked SUCCESS. Operators saw a green DAG with no
         # decay actually applied, identical to a "no work needed" run.
-        # The 2026-04-22 cloud baseline showed ``Campaign = 0`` with the
-        # same root cause (the swallower in ``build_campaign_nodes``).
         # Fix: re-raise so the DAG task FAILS loudly and the operator
         # sees the actual exception in the Airflow log.
         logger.error(f"[DECAY] decay_ioc_confidence FAILED: {e}", exc_info=True)
         raise
 
-    total = sum(results.values())
-    logger.info(f"[DECAY] IOC decay complete — {total} nodes updated")
+    results.update({"tiers": tiers, "retired": retired, "by_basis": by_basis, "no_time": no_time})
+    starts = (0,) + tuple(policy.tier_days)
+    tier_text = ", ".join(
+        f"tier {t} (from {starts[t]} d, x{policy.factor(t):.2f}): {tiers.get(f'tier_{t}', 0)}"
+        for t in range(len(starts))
+    )
+    logger.info(
+        "[AGING] as_of=%s: %d Indicator(s) changed; %s; retired (from %d d): %d",
+        params["as_of"],
+        results["changed"],
+        tier_text,
+        policy.retire_days,
+        retired,
+    )
+    logger.info("[AGING] by basis: %s", ", ".join(f"{basis}={count_}" for basis, count_ in sorted(by_basis.items())))
+    if no_time:
+        logger.warning(
+            "[AGING] %d Indicator(s) have neither last_reported_at nor first_imported_at (no EdgeGuard "
+            "time; expected 0): left untouched",
+            no_time,
+        )
+    else:
+        logger.info("[AGING] Indicators with no time at all: 0")
     return results
 
 
@@ -681,6 +708,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # any member malware; the indicator type breaks a tie of date and value (the indicator
             # key is type and value), so the order is total.
             #
+            # 2026-10-16 (indicator aging): newest first by the latest report of any source, or when
+            # EdgeGuard created the node (``coalesce(i.last_reported_at, i.first_imported_at)``), so the
+            # sample follows the MISP data, not the time a sync happened to write the node.
+            #
             # PR-N21 (next-baseline robustness): wrap in
             # ``apoc.periodic.iterate`` with one Campaign per batch so the
             # cartesian explosion (Campaign × Malware × Indicator) doesn't
@@ -703,7 +734,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                MATCH (m)<-[:INDICATES]-(i:Indicator)
                WHERE i.active = true
                WITH DISTINCT c, a, i
-               ORDER BY i.first_imported_at DESC, i.value ASC, i.indicator_type ASC
+               ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC, i.indicator_type ASC
                WITH c, a, collect(i)[0..100] AS _top
                UNWIND _top AS i
                WITH c, a, i, __PATHS__ AS _paths
@@ -1288,8 +1319,6 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "edgeguard_managed": "discard",
     "retired_at": "discard",
     "retired_by": "discard",
-    "last_decayed_tier": "discard",
-    "last_decayed_at": "discard",
     "sophistication": "discard",
     "primary_motivation": "discard",
     "resource_level": "discard",
@@ -2185,24 +2214,31 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def run_all_enrichment_jobs(neo4j_client) -> Dict:
+def run_all_enrichment_jobs(neo4j_client, as_of=None) -> Dict:
     """
     Run all seven post-sync enrichment jobs in sequence.
 
     Order matters: ``merge_alias_duplicate_actors`` and ``merge_malware_attack_twins`` run
-    BEFORE ``build_campaign_nodes`` so campaigns are built on merged actors and malware.
+    BEFORE ``build_campaign_nodes`` so campaigns are built on merged actors and malware. Since
+    2026-10-16 the aging job (``decay_ioc_confidence``) runs before the campaign builder too, so a
+    campaign's indicators are those active at the run's ``as_of``.
+
+    ``as_of`` (2026-10-16) is the time the aging rule is evaluated at: the DAG run's
+    ``data_interval_end`` (``run_after`` for a manual run), so re-running a run gives the same
+    graph; None (the command line) means now, fixed once for the whole run.
 
     Returns a summary dict for logging/metrics.
     """
     summary = {}
+    when = aging_as_of(as_of)
 
     logger.info("=" * 55)
-    logger.info("Running post-sync enrichment jobs")
+    logger.info("Running post-sync enrichment jobs (aging as of %s)", when.isoformat())
     logger.info("=" * 55)
 
-    def _timed(label, fn, *args):
+    def _timed(label, fn, *args, **kwargs):
         _t0 = time.monotonic()
-        result = fn(*args)
+        result = fn(*args, **kwargs)
         if _METRICS_AVAILABLE:
             try:
                 record_enrichment_duration(label, time.monotonic() - _t0)
@@ -2221,14 +2257,15 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("\n[3/7] Malware ATT&CK-id Twin Merge...")
     summary["malware_twin_merge"] = _timed("malware_twin_merge", merge_malware_attack_twins, neo4j_client)
 
-    logger.info("\n[4/7] Campaign Node Builder...")
+    # 2026-10-16: before build_campaign_nodes, which links only active indicators.
+    logger.info("\n[4/7] Indicator Aging...")
+    summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client, as_of=when)
+
+    logger.info("\n[5/7] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)
 
-    logger.info("\n[5/7] Co-occurrence Confidence Calibration...")
+    logger.info("\n[6/7] Co-occurrence Confidence Calibration...")
     summary["calibration"] = _timed("calibration", calibrate_cooccurrence_confidence, neo4j_client)
-
-    logger.info("\n[6/7] IOC Confidence Decay...")
-    summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
     # FIRST EPSS, the one feed written straight to Neo4j. Flag-off = INFO line, no network call.
     # A feed outage is logged and skipped inside the job (never raises).
@@ -2255,7 +2292,8 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
         _sum({"merged": (summary.get("malware_twin_merge") or {}).get("merged", 0)}),
         _sum(summary.get("campaigns")),
         _sum(summary.get("calibration")),
-        _sum(summary.get("decay")),
+        # 2026-10-16: the Indicators whose aging changed, not a sum of its counts (tier counts are state).
+        _sum({"changed": (summary.get("decay") or {}).get("changed", 0)}),
         # The CVE nodes EPSS updated, not a sum of its counts: the feed's row count is not work done.
         _sum({"cves_updated": (summary.get("epss") or {}).get("cves_updated", 0)}),
     )

@@ -48,6 +48,13 @@ from description_ranking import (  # noqa: E402  — 2026-10-16: whose text a no
     RankedDescription,
     ranking_for_label,
 )
+from indicator_aging import (  # noqa: E402  — 2026-10-16: one aging rule for every Indicator
+    aging_set_item,
+    edge_report_items,
+    node_report_items,
+    report_row,
+    source_confidence_item,
+)
 from ioc_normalize import (
     canonicalize_lookup,  # noqa: E402  — alert-path (type, value) parity with the sync vocabulary (post-#126 hardening)
 )
@@ -1294,7 +1301,7 @@ def _alert_default_tlp() -> str:
 # another system created first (ResilMesh topology, a CRUSOE scanner's CVE / Vulnerability), the
 # MATCH path stamps ``edgeguard_enriched = true`` instead. ``clear_edgeguard_managed`` deletes the
 # first set and never the second; the REST / GraphQL / STIX readers expose both. The clause is
-# spliced literally into each query (same convention as ``_reactivation_clauses``); this helper is
+# spliced literally into each query (same convention as ``indicator_aging``); this helper is
 # the single definition the tests compare every splice against.
 def _enriched_on_match_clause(var: str) -> str:
     """``ON MATCH`` sub-clause marking a node EdgeGuard wrote to but did not create."""
@@ -1349,25 +1356,20 @@ def _normalise_zone_list(value: Any) -> List[str]:
     return cleaned or ["global"]
 
 
-def _reactivation_clauses(var: str, indent: str = "") -> str:
-    """The SET fragments every node write applies for the active / retired lifecycle.
-
-    2026-10 (aging logic check): ``decay_ioc_confidence`` retires a node after a year without a
-    sighting (``active = false``, ``retired_at``, ``retired_by = 'decay'``). Before this, every merge
-    kept ``active`` untouched whenever ``retired_at`` was set — meant for a manual decommission, but
-    the decay job set the same field, so an IOC that reappeared in a fresh pulse stayed inactive
-    forever and its decay tier never reset. A re-observation now reactivates a decay-retired node;
-    a manual decommission (``retired_at`` without the ``'decay'`` tag) still wins. Order matters:
-    ``active`` and ``retired_at`` read ``retired_by`` before it is cleared. The same text is spliced
-    into every node-write query (tests pin the equality).
-    """
-    v = var
-    return (
-        f"{v}.active = CASE WHEN {v}.retired_at IS NOT NULL AND coalesce({v}.retired_by, 'manual') <> 'decay' THEN {v}.active ELSE true END,\n"
-        f"{indent}{v}.retired_at = CASE WHEN coalesce({v}.retired_by, '') = 'decay' THEN null ELSE {v}.retired_at END,\n"
-        f"{indent}{v}.last_decayed_tier = null,\n"
-        f"{indent}{v}.retired_by = CASE WHEN coalesce({v}.retired_by, '') = 'decay' THEN null ELSE {v}.retired_by END"
-    )
+# 2026-10-16: lifecycle writes by label (``indicator_aging``). Before, every node write reactivated
+# a decay-retired node (``active = true``, ``retired_at`` / ``retired_by`` cleared,
+# ``last_decayed_tier = null``) whatever its label and restored a decayed confidence by max-wins, so
+# a full sync undid the decay. Now only an Indicator ages: its writes record the report
+# (``indicator_aging.node_report_items``) and apply the one rule (``indicator_aging.aging_set_item``),
+# which reactivates a node only when a newer report moves its basis. Every other label is set
+# ``active = true`` when EdgeGuard creates it (``_create_active``) and gets no ``active``,
+# ``retired_*`` or decay property when EdgeGuard matches it, so a node another system created (CASM
+# CVE / CVSS, ISIM assets) never receives an EdgeGuard lifecycle property and a manual decommission
+# is never touched.
+def _create_active(var: str) -> str:
+    """``ON CREATE`` item of a node that does not age: active from its creation, never changed by a
+    later EdgeGuard write."""
+    return f"{var}.active = true"
 
 
 def _statement_head(query: Any) -> str:
@@ -2149,6 +2151,9 @@ class Neo4jClient:
             # arrive at edges via a node match, never via a property
             # lookup on the relationship).
             "CREATE INDEX indicator_first_imported_at IF NOT EXISTS FOR (i:Indicator) ON (i.first_imported_at)",
+            # 2026-10-16: the time an indicator ages from, and the per-tier counts of the aging job.
+            "CREATE INDEX indicator_last_reported_at IF NOT EXISTS FOR (i:Indicator) ON (i.last_reported_at)",
+            "CREATE INDEX indicator_aging_tier IF NOT EXISTS FOR (i:Indicator) ON (i.aging_tier)",
             "CREATE INDEX vulnerability_first_imported_at IF NOT EXISTS FOR (v:Vulnerability) ON (v.first_imported_at)",
             "CREATE INDEX campaign_first_seen IF NOT EXISTS FOR (c:Campaign) ON (c.first_seen)",
             "CREATE INDEX campaign_last_seen IF NOT EXISTS FOR (c:Campaign) ON (c.last_seen)",
@@ -2466,35 +2471,47 @@ class Neo4jClient:
             # ``r.source_reported_last_at`` with MIN/MAX CASE semantics.
             first_seen_at_source = data.get("first_seen_at_source")
             last_seen_at_source = data.get("last_seen_at_source")
+            # 2026-10-16 (indicator aging): an Indicator keeps the highest confidence a source gave
+            # (``source_confidence``), records the report the data carries (MISP sync items carry
+            # one; the STIX import and the VirusTotal re-enrichment do not, so they never advance
+            # the basis) and gets its ``confidence_score`` and lifecycle from the one rule. Any
+            # other label keeps the max-wins confidence and gets ``active`` on create only.
+            is_indicator = label == "Indicator"
+            if is_indicator:
+                confidence_items = f"""{source_confidence_item("n", "$confidence")},
+                {node_report_items("n", "$report", "$source_id")},"""
+                create_items = ""
+            else:
+                confidence_items = """n.confidence_score = CASE
+                    WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score
+                    THEN $confidence
+                    ELSE n.confidence_score END,"""
+                create_items = f",\n                          {_create_active('n')}"
             query = f"""
             MERGE (n:{label} {{{key_set}}})
             ON CREATE SET n.first_imported_at = datetime(),
                           n.uuid = $node_uuid,
-                          n.edgeguard_managed = true
+                          n.edgeguard_managed = true{create_items}
             ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
 
             // Always accumulate sources and zones — provenance is never overwritten.
             // Use APOC to deduplicate the merged arrays in one step.
-            SET n.confidence_score = CASE
-                    WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score
-                    THEN $confidence
-                    ELSE n.confidence_score END,
+            SET {confidence_items}
                 n.source = {_dedup_concat_clause("n.source", "$source_array")},
                 {_zone_clause},
                 n.tags = {_dedup_concat_clause("n.tags", "$tag_array")},
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
-                n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                n.last_decayed_tier = null,
-                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                 // n.uuid is deterministic — coalesce so we never overwrite it.
                 // (Defensive only; same input always produces same uuid, but if a
                 // node was created before this code was deployed it will get the
                 // uuid stamped here on next MERGE.)
-                n.uuid = coalesce(n.uuid, $node_uuid)
-            """
+                n.uuid = coalesce(n.uuid, $node_uuid)"""
+            if is_indicator:
+                # Last node item: reads the report and ``source_confidence`` set above.
+                query += f""",
+                {aging_set_item("n", "datetime()")}"""
 
             # PR #33 round 10: dropped legacy scalars misp_event_id / misp_attribute_id
             # (pre-release, no real data to migrate). Multi-event provenance lives only
@@ -2720,10 +2737,16 @@ class Neo4jClient:
                     list(params_extra.keys()),
                 )
 
-            # Check existing confidence before update for audit logging
+            # Check existing confidence before update for audit logging. 2026-10-16: an Indicator's
+            # comparison value is the confidence a source gave (``source_confidence``; a node written
+            # before has only ``confidence_score``), not its aged ``confidence_score``.
+            confidence_expr = (
+                "coalesce(n.source_confidence, n.confidence_score)" if is_indicator else "n.confidence_score"
+            )
             check_query = f"""
             MATCH (n:{label} {{{key_set}}})
-            RETURN n.confidence_score as existing_confidence, n.source as existing_source, n.retired_at as retired_at
+            RETURN {confidence_expr} as existing_confidence, n.source as existing_source,
+                   n.retired_at as retired_at, n.retired_by as retired_by
             """
 
             with self.driver.session() as session:
@@ -2737,15 +2760,23 @@ class Neo4jClient:
                     key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
                     if existing_conf is not None and confidence < existing_conf:
                         logger.info(
-                            f"AUDIT: Skipping lower-confidence update for {label}({key_str}): "
+                            f"AUDIT: Keeping the higher confidence of {label}({key_str}): "
                             f"existing={existing_conf} (source={existing_src}), new={confidence} (source={source_id})"
                         )
-                    # Log when a retired node is re-imported but kept inactive
+                    # 2026-10-16: a retired node written again. A manual decommission stays; an
+                    # Indicator's decay retirement is recomputed from its report time by the aging rule.
                     existing_retired = existing_record.get("retired_at")
                     if existing_retired is not None:
-                        logger.warning(
-                            f"AUDIT: Re-imported retired node {label}({key_str}): "
-                            f"active flag preserved (retired_at={existing_retired}), source={source_id}"
+                        logger.info(
+                            "AUDIT: Re-imported retired node %s(%s): retired_by=%s, retired_at=%s, source=%s — %s",
+                            label,
+                            key_str,
+                            existing_record.get("retired_by"),
+                            existing_retired,
+                            source_id,
+                            "the aging rule decides from the report time"
+                            if is_indicator and existing_record.get("retired_by") == "decay"
+                            else "kept",
                         )
 
                 # Execute the merge
@@ -2760,6 +2791,9 @@ class Neo4jClient:
                     "node_uuid": node_uuid,
                     **params_extra,
                 }
+                if is_indicator:
+                    # 2026-10-16: the report the data carries (all None without one).
+                    params["report"] = report_row(data)
                 # PR (S5) (architecture redesign + bugbot 9e58af6 LOW):
                 # source-truthful timestamps live on the SOURCED_FROM
                 # edge (not the node), so they are NOT bound into the
@@ -2800,6 +2834,7 @@ class Neo4jClient:
                 source_reported_last_at=last_seen_at_source,
                 misp_event_id=misp_event_id,
                 source_refs=data.get("source_refs"),
+                report=report_row(data) if is_indicator else None,
             )
 
         except (
@@ -2881,9 +2916,15 @@ class Neo4jClient:
         source_reported_last_at: Optional[str] = None,
         misp_event_id: Optional[str] = None,
         source_refs: Optional[List[str]] = None,
+        report: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Create or update SOURCED_FROM relationship with raw data + per-source
         timestamps on the edge.
+
+        2026-10-16 (indicator aging): ``report`` (an Indicator write only, ``indicator_aging.report_row``)
+        records the source's report on the edge, forward only: ``r.last_recorded_at`` and, when the
+        report is newer, ``r.last_reported_at`` / ``r.last_reported_ref`` / ``r.last_reported_source``
+        (``indicator_aging.edge_report_items``).
 
         2026-10 (relationship provenance): the edge also accumulates, per source, the
         MISP events that carried this entity (``r.misp_event_ids``) and the source's own
@@ -2987,8 +3028,10 @@ class Neo4jClient:
                 WHEN datetime($source_reported_last_at) > r.source_reported_last_at
                     THEN datetime($source_reported_last_at)
                 ELSE r.source_reported_last_at
-            END
-        """
+            END"""
+        if report is not None:
+            query += f""",
+            {edge_report_items("r", "$report", "$source_id")}"""
 
         try:
             with self.driver.session() as session:
@@ -3004,6 +3047,8 @@ class Neo4jClient:
                     "misp_event_id": str(misp_event_id) if misp_event_id else None,
                     "source_refs": [str(x) for x in (source_refs or []) if x],
                 }
+                if report is not None:
+                    params["report"] = dict(report)
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             return True
         except (
@@ -3749,126 +3794,10 @@ class Neo4jClient:
             description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
-    @retry_with_backoff(max_retries=3)
-    def mark_inactive_nodes(self, active_event_ids: List[str]) -> Dict[str, int]:
-        """
-        Mark nodes as inactive if NONE of their MISP event IDs are in the active list,
-        and re-activate nodes whose events re-enter the active list.
-
-        A node is considered active if ANY event in its ``misp_event_ids[]`` array is
-        currently active. PR #33 round 10 dropped the legacy ``misp_event_id`` scalar
-        — provenance lives only in the array now.
-
-        Both Indicators and Vulnerabilities get the symmetric pair:
-
-        - re-activation gate (``any(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
-          — sets ``active = true`` unless ``retired_at`` indicates manual decommission.
-        - deactivation gate (``none(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
-          — sets ``active = false``.
-
-        Nodes without any MISP event reference are not affected.
-
-        Args:
-            active_event_ids: List of event IDs that are currently active in MISP
-
-        Returns:
-            Dict with counts of marked inactive nodes by label
-        """
-        if not self.driver:
-            logger.error("Cannot mark inactive nodes: no connection")
-            return {}
-
-        if not active_event_ids:
-            logger.warning("No active event IDs provided, skipping inactive marking")
-            return {}
-
-        results = {}
-
-        try:
-            # Convert to set for efficient lookup
-            active_ids_set = set(str(eid) for eid in active_event_ids)
-
-            # Re-activate Indicators where ANY of their MISP event IDs is currently active.
-            # ``retired_at`` (manual decommission) wins over the auto-active reset.
-            query_indicators = """
-            MATCH (n:Indicator)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                n.last_decayed_tier = null,
-                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END
-            """
-
-            query_indicators_inactive = """
-            MATCH (n:Indicator)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = false
-            RETURN count(n) as count
-            """
-
-            # Re-activate Vulnerabilities where ANY of their MISP event IDs is active.
-            # Mirrors query_indicators above so a Vulnerability that was marked inactive
-            # gets re-activated when its events re-enter the active list.
-            # ``retired_at`` (manual decommission) wins over the auto-active reset.
-            query_vulnerabilities = """
-            MATCH (n:Vulnerability)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                n.last_decayed_tier = null,
-                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END
-            """
-
-            # Mark inactive Vulnerabilities — same any-of / none-of semantics.
-            query_vulnerabilities_inactive = """
-            MATCH (n:Vulnerability)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = false
-            RETURN count(n) as count
-            """
-
-            with self.driver.session() as session:
-                # First, mark all nodes with ANY active MISP event ID as active.
-                # Indicators and Vulnerabilities both get the re-activation pass so a
-                # node previously flipped inactive comes back when its events do.
-                session.run(query_indicators, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
-                session.run(query_vulnerabilities, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
-
-                # Mark inactive Indicators
-                result = session.run(
-                    query_indicators_inactive, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT
-                )
-                record = result.single()
-                results["indicators_marked_inactive"] = record["count"] if record else 0
-
-                # Mark inactive Vulnerabilities
-                result = session.run(
-                    query_vulnerabilities_inactive, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT
-                )
-                record = result.single()
-                results["vulnerabilities_marked_inactive"] = record["count"] if record else 0
-
-            total_inactive = sum(results.values())
-            logger.info(f"Marked {total_inactive} nodes as inactive (not in {len(active_ids_set)} active MISP events)")
-            logger.info(f"   - Indicators: {results.get('indicators_marked_inactive', 0)}")
-            logger.info(f"   - Vulnerabilities: {results.get('vulnerabilities_marked_inactive', 0)}")
-
-            return results
-
-        except (
-            neo4j_exceptions.ServiceUnavailable,
-            neo4j_exceptions.TransientError,
-            ConnectionError,
-            TimeoutError,
-        ):
-            raise  # let @retry_with_backoff handle transient errors
-        except Exception as e:
-            logger.error(f"Error marking inactive nodes: {e}")
-            return {}
+    # 2026-10-16: ``mark_inactive_nodes`` (no caller) was removed. It set ``active`` from whether a
+    # node's MISP events were still listed, without a ``retired_by`` tag, on Indicator and
+    # Vulnerability nodes alike: a rule beside the one aging rule (``indicator_aging``) that a later
+    # write would have undone, and a lifecycle write on a label that does not age.
 
     def merge_indicators_batch(self, items: List[Dict], source_id: str = "misp") -> Tuple[int, int]:
         """
@@ -4029,6 +3958,9 @@ class Neo4jClient:
                         # existing value rather than overwriting with NULL.
                         "first_seen_at_source": item.get("first_seen_at_source"),
                         "last_seen_at_source": item.get("last_seen_at_source"),
+                        # 2026-10-16 (indicator aging): the report this item makes (recorded_at,
+                        # reported_at, report_ref, reported_basis; all None without one).
+                        "report": report_row(item),
                     }
 
                     # PR #34 round 17 historical context: dropped the old
@@ -4124,19 +4056,12 @@ class Neo4jClient:
                               n.uuid = item.node_uuid,
                               n.edgeguard_managed = true
                 ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
-                SET n.confidence_score = CASE
-                        WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
-                        THEN item.confidence
-                        ELSE n.confidence_score END,
+                SET {source_confidence_item("n", "item.confidence")},
                     n.source = {_dedup_concat_clause("n.source", "item.source_array")},
                     {_zone_clause},
                     n.tags = {_dedup_concat_clause("n.tags", "[item.tag]")},
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                    n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                    n.last_decayed_tier = null,
-                    n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
                     n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
@@ -4158,7 +4083,11 @@ class Neo4jClient:
                     n.hostnames = coalesce(item.hostnames, n.hostnames),
                     n.pulse_malware_families = {_dedup_concat_clause("n.pulse_malware_families", "coalesce(item.pulse_malware_families, [])")},
                     n.pulse_malware_actor_pairs = {_dedup_concat_clause("n.pulse_malware_actor_pairs", "coalesce(item.pulse_malware_actor_pairs, [])")},
-                    n.several_actor_pulses = {_dedup_concat_clause("n.several_actor_pulses", "coalesce(item.several_actor_pulses, [])")}
+                    n.several_actor_pulses = {_dedup_concat_clause("n.several_actor_pulses", "coalesce(item.several_actor_pulses, [])")},
+                    // 2026-10-16 (indicator aging): the report, forward only, then the one rule
+                    // (``indicator_aging``); a newer report reactivates the node in this write.
+                    {node_report_items("n", "item.report", "item.source_id")},
+                    {aging_set_item("n", "datetime()")}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
@@ -4191,7 +4120,9 @@ class Neo4jClient:
                         WHEN r.source_reported_last_at IS NULL THEN datetime(item.last_seen_at_source)
                         WHEN datetime(item.last_seen_at_source) > r.source_reported_last_at
                             THEN datetime(item.last_seen_at_source)
-                        ELSE r.source_reported_last_at END
+                        ELSE r.source_reported_last_at END,
+                    // 2026-10-16: this source's report times, forward only (``indicator_aging``)
+                    {edge_report_items("r", "item.report", "item.source_id")}
                 """
 
                 # PR-N15 (2026-04-21 pre-baseline audit Fix #2): run
@@ -4443,7 +4374,8 @@ class Neo4jClient:
                 ON CREATE SET n.first_imported_at = datetime(),
                     n.status = item.status,
                     n.uuid = item.node_uuid,
-                    n.edgeguard_managed = true
+                    n.edgeguard_managed = true,
+                    {_create_active("n")}
                 ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
@@ -4455,10 +4387,6 @@ class Neo4jClient:
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                    n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                    n.last_decayed_tier = null,
-                    n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                     n.tlp = {_tlp_most_restrictive_clause("n.tlp", "item.tlp")},
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
@@ -7729,23 +7657,23 @@ class Neo4jClient:
         # for any indicator that arrived via an alert. Fixed: write
         # only ``i.first_imported_at`` (ON CREATE SET, never overwritten)
         # and ``i.last_updated`` (= datetime() every MERGE).
+        # 2026-10-16 (indicator aging): the alert keeps the highest confidence a source gave
+        # (``source_confidence``) and applies the one aging rule. It records no report: an alert
+        # does not advance ``last_reported_at`` (its time and whether it is independent evidence,
+        # rather than a match of a list EdgeGuard exported to Wazuh, are to be designed with the
+        # ResilMesh alert integration; no subscriber is deployed), so a node it creates ages from
+        # ``first_imported_at`` and an existing node keeps its basis.
         query = f"""
         MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
         ON CREATE SET i.first_imported_at = datetime(), i.edgeguard_managed = true
         ON MATCH SET i.edgeguard_enriched = CASE WHEN i.edgeguard_managed = true THEN i.edgeguard_enriched ELSE true END
         SET i.last_updated = datetime(),
             i.source = {_dedup_concat_clause("i.source", "$source")},
-            i.confidence_score = CASE
-                WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
-                THEN $confidence_score
-                ELSE i.confidence_score END,
+            {source_confidence_item("i", "$confidence_score")},
             {_zone_clause_i},
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
             i.tlp = coalesce(i.tlp, $tlp),
-            i.active = CASE WHEN i.retired_at IS NOT NULL AND coalesce(i.retired_by, 'manual') <> 'decay' THEN i.active ELSE true END,
-            i.retired_at = CASE WHEN coalesce(i.retired_by, '') = 'decay' THEN null ELSE i.retired_at END,
-            i.last_decayed_tier = null,
-            i.retired_by = CASE WHEN coalesce(i.retired_by, '') = 'decay' THEN null ELSE i.retired_by END
+            {aging_set_item("i", "datetime()")}
         """
 
         try:
@@ -7761,17 +7689,16 @@ class Neo4jClient:
             # (server clock + Python clock) introduced clock-drift risk.
             # ``i.last_updated`` is a DB-local fact; the server should
             # be the single source of truth for it.
+            # 2026-10-16: the same aging rule as the primary query (the rule itself needs no APOC).
             fallback_query = f"""
             MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
             ON CREATE SET i.first_imported_at = datetime(), i.edgeguard_managed = true
             ON MATCH SET i.edgeguard_enriched = CASE WHEN i.edgeguard_managed = true THEN i.edgeguard_enriched ELSE true END
             SET i.last_updated = datetime(),
-                i.confidence_score = CASE
-                    WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
-                    THEN $confidence_score
-                    ELSE i.confidence_score END,
+                {source_confidence_item("i", "$confidence_score")},
                 {_zone_clause_i},
-                i.tlp = coalesce(i.tlp, $tlp)
+                i.tlp = coalesce(i.tlp, $tlp),
+                {aging_set_item("i", "datetime()")}
             """
             try:
                 with self.driver.session() as session:

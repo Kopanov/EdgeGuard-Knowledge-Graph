@@ -54,7 +54,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  All collectors → MISP (single source of truth) → Neo4j Knowledge Graph     │
-│                   → Post-sync enrichment (relationships, campaigns, decay)   │
+│                   → Post-sync enrichment (relationships, aging, campaigns)   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -305,24 +305,25 @@ Runs `src/enrichment_jobs.py` — **seven** jobs in sequence (`run_all_enrichmen
 1. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
 1b. **Actor alias merge** (`merge_alias_duplicate_actors`, 2026-10 — folds non-MITRE actors named by an alias of exactly one MITRE actor, or resolved by the canonical threat-actor reference to another actor on the graph, into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`, `EDGEGUARD_CANONICAL_THREAT_ACTORS`)
 1c. **Malware ATT&CK-id twin merge** (`merge_malware_attack_twins`, 2026-10 — folds a non-MITRE `Malware` node named after an ATT&CK software id, `cobalt strike - s0154` from OTX's MISP-galaxy naming, into the MITRE `Malware` node of that id or, when its id cannot be read, of that base name, or, for software without one (an ATT&CK tool), into the `Malware` node of its base name; a twin with neither is left and counted; same merge as 1b; `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`; see [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Malware named after an ATT&CK software id")
-2. **Campaign nodes** (`build_campaign_nodes`)
-3. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`; legacy — no-op since 2026-10, no `misp_cooccurrence` edges are written)
-4. **IOC confidence decay** (`decay_ioc_confidence`, idempotent)
+2. **Indicator aging** (`decay_ioc_confidence`, 2026-10-16: the one aging rule for every `Indicator`, evaluated at the DAG run's `data_interval_end` — `run_after` for a manual run — and passed through `run_all_enrichment_jobs`; writes only the nodes whose values change, so it is idempotent for a run; runs before the campaign builder, which links active indicators only)
+3. **Campaign nodes** (`build_campaign_nodes`)
+4. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`; legacy — no-op since 2026-10, no `misp_cooccurrence` edges are written)
 5. **FIRST EPSS** (`enrich_cve_epss` in `src/cve_feed_enrichment.py`, 2026-10 — the day's EPSS score and percentile on the `CVE` nodes that exist, removed from those that left the feed; `EDGEGUARD_ENABLE_EPSS`, default on; a feed outage is logged and skipped, never fails the task; the one source written to Neo4j without MISP, see [DATA_SOURCES.md § 8b](DATA_SOURCES.md)). CISA's SSVC decision points need no job: they come with the NVD records through the sync.
 
-#### IOC Confidence Decay
+#### Indicator aging (2026-10-16)
 
-Threat intelligence has a shelf life. Indicators not updated recently lose confidence automatically.
+Threat intelligence has a shelf life. Every `Indicator`, whoever supplied it, ages from its latest report (`last_reported_at`: the source's own `last_seen` capped at the MISP timestamp; `first_imported_at` when no report dated it), never from `last_updated` ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#indicator-aging-2026-10-16)). No other label ages.
 
-| Days since `last_updated` | Effect on Indicator |
+| Days since the latest report | Effect on the Indicator |
 |--------------------------|---------------------|
-| < 90 days | No change |
-| 90–180 days | confidence × 0.85 (−15%) |
-| 180–365 days | confidence × 0.70 (−30%) |
-| > 365 days | `active = false` (retired, not deleted) |
+| below 90 | `confidence_score = source_confidence` |
+| from 90 | × 0.85 |
+| from 180 | × 0.70 |
+| from 365 | × 0.55 |
+| from 730 | `active = false`, `retired_by = 'decay'`, `retired_at` = basis + 730 days (retired, not deleted) |
 | Any | Minimum floor: 0.10 |
 
-Retired nodes remain in the graph for historical queries — they are never deleted.
+The value is recomputed from `source_confidence` each time, so a missed or repeated run gives the same graph; a newer report reactivates a node in the sync's write, and a manual decommission is kept. Retired nodes remain in the graph for historical queries — they are never deleted. Settings: `EDGEGUARD_AGING_TIER_DAYS`, `EDGEGUARD_AGING_FACTORS`, `EDGEGUARD_AGING_RETIRE_DAYS`.
 
 #### Campaign Node Builder
 
@@ -361,12 +362,12 @@ Only edges with `match_type IN ['misp_cooccurrence', 'misp_correlation']` are mo
 > uses APOC's `params:` config so the event id is bound (no f-string
 > interpolation).
 
-> **Multi-event re-activation in `mark_inactive_nodes`:** a node is
-> active if ANY event in its `misp_event_ids[]` array is currently
-> active (`any(eid IN n.misp_event_ids WHERE eid IN $active_ids)`).
-> Both Indicators and Vulnerabilities have re-activation (any) AND
-> deactivation (none) gates. `retired_at` (manual decommission) wins
-> over the auto-active reset.
+> **`mark_inactive_nodes` removed (2026-10-16):** the helper (no caller)
+> set `active` from whether a node's MISP events were still listed, on
+> Indicators and Vulnerabilities alike. It was a rule beside the one
+> indicator aging rule and a lifecycle write on a label that does not
+> age; `active` now comes from the aging rule only (manual decommissions
+> are kept).
 
 ## Data Quality Targets
 
@@ -531,4 +532,4 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-16 — Campaign Node Builder: a campaign rests on `ATTRIBUTED_TO` or `USES_MALWARE`, its links name the relationship types they rest on, and a campaign without evidence is deleted; the baseline postcheck's INV-1 counts the qualifying actors by the builder's definition. Prior: 2026-10-15 — ThreatFox and URLhaus are in `OWN_RUN_CAP_SOURCES` with their own per-run caps; a value of `EDGEGUARD_INCREMENTAL_LIMIT` in `.env` does not reach the Compose deployment (not forwarded); `run_neo4j_sync` timeout 8 hours (was 4), the baseline full sync's 6 hours plus a third. Same day: post-sync enrichment: seven jobs, the Malware ATT&CK-id twin merge (`merge_malware_attack_twins`, into the ATT&CK node or the node of the base name) after the actor alias merge and before the Campaign builder. Same day: post-sync enrichment: six jobs, the sixth FIRST EPSS (`enrich_cve_epss`). Same day: co-occurrence calibration: the filter is `r.match_type` (the text still named the dropped `r.source_id`); the large-event batch statement binds `rid` as a variable (#182); `baseline_clean` timeout (60 minutes) in the timeout table; `get_effective_limit` priority includes `OWN_RUN_CAP_SOURCES` (NVD, MalwareBazaar); the NVD baseline row names the KEV sweep and the named CVE ids. Prior: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._
+_Last updated: 2026-10-16 — `run_enrichment_jobs`: the indicator aging (one rule for every Indicator, from the latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730) runs before the campaign builder at the DAG run's `data_interval_end`; `mark_inactive_nodes` removed. Same day: Campaign Node Builder: a campaign rests on `ATTRIBUTED_TO` or `USES_MALWARE`, its links name the relationship types they rest on, and a campaign without evidence is deleted; the baseline postcheck's INV-1 counts the qualifying actors by the builder's definition. Prior: 2026-10-15 — ThreatFox and URLhaus are in `OWN_RUN_CAP_SOURCES` with their own per-run caps; a value of `EDGEGUARD_INCREMENTAL_LIMIT` in `.env` does not reach the Compose deployment (not forwarded); `run_neo4j_sync` timeout 8 hours (was 4), the baseline full sync's 6 hours plus a third. Same day: post-sync enrichment: seven jobs, the Malware ATT&CK-id twin merge (`merge_malware_attack_twins`, into the ATT&CK node or the node of the base name) after the actor alias merge and before the Campaign builder. Same day: post-sync enrichment: six jobs, the sixth FIRST EPSS (`enrich_cve_epss`). Same day: co-occurrence calibration: the filter is `r.match_type` (the text still named the dropped `r.source_id`); the large-event batch statement binds `rid` as a variable (#182); `baseline_clean` timeout (60 minutes) in the timeout table; `get_effective_limit` priority includes `OWN_RUN_CAP_SOURCES` (NVD, MalwareBazaar); the NVD baseline row names the KEV sweep and the named CVE ids. Prior: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._

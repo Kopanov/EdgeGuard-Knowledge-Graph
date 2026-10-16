@@ -30,11 +30,13 @@ tier for 100 runs got ``× 0.70^100`` ≈ 0, floored at 0.10, within ~7
 runs. All indicators in a tier collapse to the 0.10 floor — losing
 all discriminatory power for filtering / ranking.
 
-Fix: add ``n.last_decayed_tier`` marker, gate the WHERE clause on it,
-set it in the SET clause. Each node decays AT MOST ONCE per tier
-crossing; subsequent runs are no-ops. When the node ages into the
-next tier, the tier label changes → decay fires once for the new
-tier.
+Fix (PR-M3b): a ``n.last_decayed_tier`` marker gated the multiply to once
+per tier crossing. Superseded 2026-10-16 (``indicator_aging``): the job
+no longer multiplies the stored value at all. It recomputes
+``confidence_score = max(0.10, round(source_confidence * factor, 2))``
+from the confidence a source gave, so a missed or repeated run gives the
+same value, and it writes only the nodes whose values change; the
+marker and ``last_decayed_at`` are gone.
 
 ## Test strategy
 
@@ -295,109 +297,48 @@ class TestSourcePinBatchDispatchCanonicalizes:
 
 
 class TestDecayIsIdempotentWithinTier:
-    """Each node should decay AT MOST ONCE per tier.  The fix uses
-    ``n.last_decayed_tier`` as an idempotency marker; this test
-    pins the marker's presence in both the WHERE and SET clauses."""
+    """The aging job is idempotent by construction (2026-10-16): the value is recomputed from
+    ``source_confidence``, never multiplied in place, and only changed nodes are written."""
 
-    @pytest.fixture(scope="class")
-    def source(self) -> str:
-        return (SRC / "enrichment_jobs.py").read_text()
+    def test_the_job_recomputes_from_source_confidence(self) -> None:
+        import enrichment_jobs
+        from indicator_aging import AgingPolicy, aging_map, changed_predicate
 
-    def test_where_clause_gates_on_last_decayed_tier(self, source: str) -> None:
-        """WHERE clause must include ``last_decayed_tier`` gate so
-        an already-decayed node in this tier is skipped on subsequent
-        runs."""
-        # Locate the decay helper's non-retire Cypher branch.
-        idx = source.find("def decay_ioc_confidence")
-        assert idx > 0
-        end = source.find("\ndef ", idx + 1)
-        body = source[idx:end]
-        assert "n.last_decayed_tier IS NULL OR n.last_decayed_tier <> $tier_label" in body, (
-            "PR-M3b §8-RI-S4-Decay: WHERE clause must gate on last_decayed_tier so "
-            "the multiplicative decay fires at most once per tier crossing"
-        )
+        outer, inner, count = enrichment_jobs._aging_job_statements(AgingPolicy())
+        assert aging_map("n", "datetime($as_of)", AgingPolicy()) in inner
+        assert "round(n.source_confidence * [1.0, 0.85, 0.7, 0.55][_tier], 2)" in inner
+        assert "n.confidence_score *" not in inner, "never the stored, already aged value"
+        assert f"WHERE {changed_predicate('n', 'aged')} SET n += aged" in inner, "only changed nodes are written"
+        assert changed_predicate("n", "aged") in count
 
-    def test_set_clause_writes_last_decayed_tier(self, source: str) -> None:
-        """SET clause must write ``n.last_decayed_tier`` so next run
-        sees it and skips."""
-        idx = source.find("def decay_ioc_confidence")
-        end = source.find("\ndef ", idx + 1)
-        body = source[idx:end]
-        assert "n.last_decayed_tier = $tier_label" in body
-        assert "n.last_decayed_at = datetime()" in body, (
-            "SET should also stamp last_decayed_at so operators can see when the marker was set"
-        )
+    def test_the_old_marker_is_gone(self) -> None:
+        src = (SRC / "enrichment_jobs.py").read_text()
+        idx = src.find("def decay_ioc_confidence")
+        body = src[idx : src.find("\ndef ", idx + 1)]
+        code = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+        assert "last_decayed_tier" not in code and "last_decayed_at" not in code
+        assert "$tier_label" not in code
 
-    def test_params_include_tier_label(self, source: str) -> None:
-        """The params dict must pass ``tier_label``."""
-        idx = source.find("def decay_ioc_confidence")
-        end = source.find("\ndef ", idx + 1)
-        body = source[idx:end]
-        assert '"tier_label": tier_label' in body, "params must include tier_label so the query can bind it"
-        # Tier label should be derived deterministically from the tier tuple
-        assert 'f"{label.lower()}-{min_days}-{max_days}"' in body
+    def test_python_rule_is_order_free(self) -> None:
+        """The Python form of the rule (``AgingPolicy.confidence``): the value at an age does not
+        depend on the ages evaluated before it, unlike the old in-place multiply."""
+        from indicator_aging import AgingPolicy
 
-    def test_old_unbounded_multiply_pattern_is_gone(self, source: str) -> None:
-        """The old query's final SET clause had no guard — just
-        ``n.confidence_score = CASE ...``.  After the fix, the SET
-        must include the tier marker.  A regression that re-wrote the
-        query without the guard would restore the non-idempotency."""
-        idx = source.find("def decay_ioc_confidence")
-        end = source.find("\ndef ", idx + 1)
-        body = source[idx:end]
-        # There must be NO decay-non-retire Cypher block that SETs
-        # ``n.confidence_score = CASE`` WITHOUT also setting
-        # ``n.last_decayed_tier``.  Simplest: verify every occurrence of
-        # the CASE expression on confidence_score is within ~400 chars of
-        # a last_decayed_tier SET.
-        pos = 0
-        while True:
-            case_idx = body.find("n.confidence_score = CASE", pos)
-            if case_idx < 0:
-                break
-            # Look 600 chars ahead for the tier marker
-            near = body[case_idx : case_idx + 800]
-            assert "n.last_decayed_tier" in near, (
-                "a SET clause writing confidence_score without also writing "
-                "last_decayed_tier was found — this is the non-idempotency bug "
-                "PR-M3b fixed"
-            )
-            pos = case_idx + 1
+        p = AgingPolicy()
+        assert p.confidence(0.8, 200) == p.confidence(0.8, 200) == 0.56
+        assert [p.confidence(0.8, d) for d in (10, 100, 200, 400)] == [0.8, 0.68, 0.56, 0.44]
+        assert p.confidence(0.15, 400) == 0.10, "floor"
 
 
 class TestRetireTierStillIdempotentViaActiveFlag:
-    """The retire tier (>365d) has its own idempotency guard via
-    ``n.active = true`` in the WHERE clause.  PR-M3b should NOT
-    add the ``last_decayed_tier`` marker to the retire branch
-    (it would be dead work and confusing)."""
+    """Retirement is a value of the rule (2026-10-16): ``active = false`` from the retire days,
+    ``retired_at`` = basis + retire days (not the time of the run), so a second run computes the
+    same values and writes nothing."""
 
-    def test_retire_branch_does_not_use_last_decayed_tier(self) -> None:
-        """The retire (>365d) branch should NOT touch ``last_decayed_tier``
-        — ``n.active = true`` in WHERE is sufficient idempotency.  Dead
-        work to also set the tier marker.
+    def test_retirement_is_derived_from_the_basis(self) -> None:
+        from indicator_aging import aging_map
 
-        We strip comment-only lines before checking so the explanatory
-        comment ("retire path is idempotent via active flag...") doesn't
-        trigger a false-positive."""
-        src = (SRC / "enrichment_jobs.py").read_text()
-        idx = src.find("def decay_ioc_confidence")
-        end = src.find("\ndef ", idx + 1)
-        body = src[idx:end]
-        retire_idx = body.find("if retire:")
-        assert retire_idx > 0
-        else_idx = body.find("else:", retire_idx)
-        retire_block = body[retire_idx:else_idx]
-
-        # Strip comment-only lines from the retire block before checking.
-        code_only_lines = [line for line in retire_block.splitlines() if not line.lstrip().startswith("#")]
-        retire_code_only = "\n".join(code_only_lines)
-        # Retire uses `n.active = true` guard (in active Cypher, not a comment).
-        assert "n.active = true" in retire_code_only
-        # Retire ACTIVE code must NOT reference last_decayed_tier — but
-        # the comment IS allowed to explain why it's not used.
-        assert "last_decayed_tier" not in retire_code_only, (
-            "retire branch's ACTIVE code does not need last_decayed_tier — "
-            "the n.active = true guard provides idempotency. Comments "
-            "explaining this are fine, but the Cypher + params must not "
-            "reference the marker."
-        )
+        body = aging_map("n", "datetime($as_of)")
+        assert "WHEN _age >= 730 THEN false ELSE true END" in body
+        assert "WHEN _age >= 730 THEN _basis + duration({days: 730}) ELSE null END" in body
+        assert "retired_at = datetime()" not in body and "datetime()" not in body
