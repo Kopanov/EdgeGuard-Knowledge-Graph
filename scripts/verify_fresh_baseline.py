@@ -34,11 +34,14 @@ for software without one, into the node of its base name. Since the campaign evi
 on (``evidence_types``). Since the sector evidence change of 2026-10-16 it fails when a link to a Sector
 names a feed whose ``SOURCED_FROM`` zones do not give that sector, when ``advisory_sector`` sits anywhere
 but on an AFFECTS link to a sector CISA's ICS advisory stated, when a sector CISA stated is not linked as
-``advisory_sector``, and when a sector link's confidence is not the one its label gives
-(``src/sector_evidence.py``); it reports the links by evidence label, what CISA ICS adds per sector and
-the node sectors no feed gave. Since the same day it also fails when a ranked description names no source
-(``description_source``) or an Indicator has no ``aging_basis`` / ``source_confidence``; on a graph built
-before those changes, ``--legacy-graph`` reports these two instead of judging them.
+``advisory_sector``, when a sector link cites a record of a feed that recorded its references per sector
+(``stated_refs``: the CISA ICS advisories) other than those of its sector, and when a sector link's
+confidence is not the one its label gives (``src/sector_evidence.py``); it reports the links by evidence
+label, what CISA ICS adds per sector and the node sectors no feed gave. Since the same day it also fails
+when a ranked description names no source (``description_source``) or an Indicator has no
+``aging_basis`` / ``source_confidence``; on a graph built before those changes, ``--legacy-graph`` reports
+these two instead of judging them, and does not require a stated CISA sector under
+``--require-cisa-ics``.
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -105,11 +108,12 @@ from canonical_threat_actors import (  # noqa: E402
 
 # 2026-10-16: the description ranking (which labels name the source of their description, check 16a),
 # the sector evidence table and the per-sector provenance rule of build_relationships steps 7a-7d
-# (checks 10d-10j). Standard library and ``source_registry`` only, like the modules above.
+# (checks 10d-10k). Standard library and ``source_registry`` only, like the modules above.
 from description_ranking import ranking_for_label  # noqa: E402
 from relationship_provenance import as_list as _as_list  # noqa: E402
 from relationship_provenance import zone_prov_with  # noqa: E402
-from sector_evidence import ADVISORY_SECTOR, LABEL_CONFIDENCE  # noqa: E402
+from sector_evidence import ADVISORY_SECTOR, LABEL_CONFIDENCE, STATED_REF_SEPARATOR  # noqa: E402
+from source_registry import SOURCE_REF_SEPARATOR  # noqa: E402
 
 # NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
 BASE = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
@@ -360,18 +364,19 @@ _SECTOR_LINKED_WHERE = "(" + " OR ".join(f"n:{label}" for label in _SECTOR_LINKE
 _N_ZONES = _as_list("n.zone")
 
 
-def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
-    """Checks 10d-10j (2026-10-16): each link to a Sector names only the feeds that gave its sector, its
-    label and confidence follow the table (``sector_evidence``), and CISA's ICS statements are linked as
-    ``advisory_sector`` on AFFECTS only. The per-source zones are on the ``SOURCED_FROM`` edges
-    (``zones``, ``stated_zones``); a graph written before them has none, so the judged checks report
-    instead of passing vacuously."""
+def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, legacy_graph: bool = False) -> None:
+    """Checks 10d-10k (2026-10-16): each link to a Sector names only the feeds that gave its sector and
+    cites only the records that gave it, its label and confidence follow the table (``sector_evidence``),
+    and CISA's ICS statements are linked as ``advisory_sector`` on AFFECTS only. The per-source zones are
+    on the ``SOURCED_FROM`` edges (``zones``, ``stated_zones``, ``stated_refs``); a graph written before
+    them has none, so the judged checks report instead of passing vacuously."""
     # 10d. A link to a Sector names only the feeds whose SOURCED_FROM zones give the sector. An edge
     #      without ``zones`` (written before 2026-10-16, or by a path that records none) is not judged.
     zoned = _one(
         "MATCH ()-[sf:SOURCED_FROM]->() RETURN count(sf) AS edges, "
         "sum(CASE WHEN sf.zones IS NOT NULL THEN 1 ELSE 0 END) AS with_zones, "
-        "sum(CASE WHEN sf.stated_zones IS NOT NULL THEN 1 ELSE 0 END) AS with_stated_zones"
+        "sum(CASE WHEN sf.stated_zones IS NOT NULL THEN 1 ELSE 0 END) AS with_stated_zones, "
+        "sum(CASE WHEN sf.stated_refs IS NOT NULL THEN 1 ELSE 0 END) AS with_stated_refs"
     )
     wrong = _post(
         "MATCH (n)-[r:AFFECTS|TARGETS]->(s:Sector) WHERE r.edgeguard_managed = true "
@@ -403,9 +408,19 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         "advisory_sector_only_where_cisa_stated", None if not r.get("advisory_links") else r.get("misplaced") == 0, r
     )
 
+    # The CISA ICS records and how many carry per-source zones (also reported by 10i). A record written
+    # before 2026-10-16 has none and so can state no sector: 10f does not judge such a graph.
+    records = _one(
+        "MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: 'cisa_ics'}) "
+        "RETURN count(sf) AS cisa_records, sum(CASE WHEN sf.zones = ['global'] THEN 1 ELSE 0 END) AS cisa_global, "
+        "sum(CASE WHEN sf.zones IS NULL THEN 1 ELSE 0 END) AS without_zones"
+    )
+    cisa_with_zones = (records.get("cisa_records") or 0) - (records.get("without_zones") or 0)
+
     # 10f. Every sector CISA's ICS advisory stated is linked as ``advisory_sector``. With
-    #      ``--require-cisa-ics`` at least one must be stated; without it, a graph without CISA ICS
-    #      statements is informational.
+    #      ``--require-cisa-ics`` at least one must be stated once the CISA ICS records carry their zones;
+    #      without the flag, or on a graph whose CISA ICS records carry none (built before 2026-10-16, or
+    #      kept and not re-read since), or with ``--legacy-graph``, no stated sector is informational.
     r = _one(
         "MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: 'cisa_ics'}) WHERE c:CVE OR c:Vulnerability "
         "UNWIND " + _as_list("sf.stated_zones") + " AS z "
@@ -415,11 +430,41 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         "THEN c.cve_id + ' ' + z END)[..10] AS examples",
         {"advisory": ADVISORY_SECTOR},
     )
-    if require_cisa_ics:
-        stated_ok: Optional[bool] = (r.get("stated") or 0) > 0 and r.get("not_labelled") == 0
+    stated_ok: Optional[bool]
+    if r.get("stated"):
+        stated_ok = r.get("not_labelled") == 0
+    elif require_cisa_ics and cisa_with_zones > 0 and not legacy_graph:
+        stated_ok = False
     else:
-        stated_ok = None if not r.get("stated") else r.get("not_labelled") == 0
-    rep.add("cisa_stated_sectors_linked_as_advisory_sector", stated_ok, r)
+        stated_ok = None
+    rep.add(
+        "cisa_stated_sectors_linked_as_advisory_sector", stated_ok, {**r, "cisa_records_with_zones": cisa_with_zones}
+    )
+
+    # 10k. A sector link cites, of a feed that records which of its records stated which sector (the
+    #      SOURCED_FROM ``stated_refs``, ``"<zone>|<ref>"``: the CISA ICS advisories), only the records
+    #      of its sector: a CISA ICS link to healthcare cites no advisory whose note does not name
+    #      Healthcare. A feed whose edge records nothing for the sector is not judged.
+    other_refs = _post(
+        "MATCH (n)-[r:AFFECTS|TARGETS]->(s:Sector) WHERE r.edgeguard_managed = true "
+        "MATCH (n)-[sf:SOURCED_FROM]->(src:Source) WHERE sf.stated_refs IS NOT NULL "
+        "WITH r, s, src, [_x IN " + _as_list("sf.stated_refs") + " WHERE _x STARTS WITH s.name + $sep "
+        "| substring(_x, size(s.name) + size($sep))] AS cited "
+        "WHERE size(cited) > 0 "
+        "UNWIND [_x IN " + _as_list("r.source_refs") + " WHERE _x STARTS WITH src.source_id + $ref_sep "
+        "AND NOT _x IN cited] AS other "
+        "RETURN type(r) AS type, src.source_id AS source, count(*) AS c, "
+        "collect(s.name + ' ' + other)[..10] AS examples ORDER BY c DESC",
+        {"sep": STATED_REF_SEPARATOR, "ref_sep": SOURCE_REF_SEPARATOR},
+    )
+    rep.add(
+        "sector_links_cite_only_records_that_gave_the_sector",
+        None if not zoned.get("with_stated_refs") else not other_refs,
+        {
+            "citing_a_record_of_another_sector": other_refs,
+            "sourced_from_with_stated_refs": zoned.get("with_stated_refs"),
+        },
+    )
 
     # 10g. The confidence of a sector link is the table's value of its label (the sync and step 7 write
     #      the same); a label outside the table (a curated or partner label) is not judged.
@@ -454,11 +499,6 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         "sum(CASE WHEN size(" + _as_list("r.sources") + ") > 1 THEN 1 ELSE 0 END) AS cisa_and_inferred "
         "ORDER BY sector",
         {"advisory": ADVISORY_SECTOR},
-    )
-    records = _one(
-        "MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: 'cisa_ics'}) "
-        "RETURN count(sf) AS cisa_records, sum(CASE WHEN sf.zones = ['global'] THEN 1 ELSE 0 END) AS cisa_global, "
-        "sum(CASE WHEN sf.zones IS NULL THEN 1 ELSE 0 END) AS without_zones"
     )
     rep.add("cisa_ics_contribution", None, {"by_sector": per_sector, **records})
 
@@ -869,7 +909,7 @@ def run_checks(
         "RETURN s.name AS sector, labels(n)[0] AS label, count(DISTINCT n) AS nodes ORDER BY sector, label"
     )
     rep.add("sector_coverage", None, cov)
-    _sector_evidence_checks(rep, require_cisa_ics)
+    _sector_evidence_checks(rep, require_cisa_ics, legacy_graph)
 
     # 11. ResilMesh-facing schema unchanged.
     types = [x["t"] for x in _post("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t")]
@@ -903,6 +943,7 @@ def run_checks(
         # 2026-10-16: the per-source zones of a SOURCED_FROM edge (step 7 reads them with ``IN``)
         "OR (r.zones IS NOT NULL AND NOT apoc.meta.cypher.type(r.zones) STARTS WITH 'LIST') "
         "OR (r.stated_zones IS NOT NULL AND NOT apoc.meta.cypher.type(r.stated_zones) STARTS WITH 'LIST') "
+        "OR (r.stated_refs IS NOT NULL AND NOT apoc.meta.cypher.type(r.stated_refs) STARTS WITH 'LIST') "
         "RETURN count(r) AS edges"
     )
     scalar_nodes = _one(
@@ -1114,7 +1155,10 @@ def main() -> int:
     ap.add_argument(
         "--legacy-graph",
         action="store_true",
-        help="a graph built before 2026-10-16: report, do not judge, the description-source and aging checks",
+        help=(
+            "a graph built before 2026-10-16: report, do not judge, the description-source and aging checks "
+            "and, with --require-cisa-ics, a graph without a stated CISA sector"
+        ),
     )
     args = ap.parse_args()
 

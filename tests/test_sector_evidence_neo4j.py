@@ -88,15 +88,20 @@ def _cve_node(driver, cve_id: str) -> None:
         session.run(f"CREATE (:CVE:{LABEL} {{cve_id: $cve, uuid: 'u-' + $cve}})", cve=cve_id)
 
 
-def _cisa_item(cve_id: str, zone: List[str], advisory_id: str = "ICSA-26-281-01") -> Dict[str, Any]:
-    """The collector's item for ``cve_id`` (from the real CSAF sample), without its CVSS payload: a CVSS
-    sub-node would be a node the test did not label."""
+def _advisory_item(cve_id: str, zone: List[str], advisory_id: str) -> Dict[str, Any]:
+    """The collector's (advisory, CVE) item for ``cve_id`` (from the real CSAF sample), without its CVSS
+    payload: a CVSS sub-node would be a node the test did not label."""
     collector = ics.CISAICSCollector(misp_writer=MagicMock())
     items, _ = collector.parse_advisory(copy.deepcopy(SAMPLE_ADVISORY), "2026/icsa-26-281-01.json")
     item = dict(items[0], cve_id=cve_id, zone=zone, advisory_id=advisory_id, advisory_ids=[advisory_id])
     for key in ("cvss_v31_data", "cvss_v30_data"):
         item[key] = None
-    return ics.merge_items_per_cve([item])[0]
+    return item
+
+
+def _cisa_item(cve_id: str, zone: List[str], advisory_id: str = "ICSA-26-281-01") -> Dict[str, Any]:
+    """The collector's item for a CVE one advisory names."""
+    return ics.merge_items_per_cve([_advisory_item(cve_id, zone, advisory_id)])[0]
 
 
 def _nvd_item(cve_id: str, zone: List[str]) -> Dict[str, Any]:
@@ -160,6 +165,16 @@ def _links(driver, cve_id: str, rel: str = "AFFECTS") -> Dict[str, Dict[str, Any
         cve=cve_id,
     )
     return {r.pop("sector"): r for r in rows}
+
+
+def _stated_refs(driver, cve_id: str) -> Optional[List[str]]:
+    (row,) = _rows(
+        driver,
+        "MATCH (:CVE {cve_id: $cve})-[sf:SOURCED_FROM]->(:Source {source_id: 'cisa_ics'}) "
+        "RETURN sf.stated_refs AS refs",
+        cve=cve_id,
+    )
+    return row["refs"]
 
 
 def _sourced_from(driver, cve_id: str) -> Dict[str, Dict[str, Optional[List[str]]]]:
@@ -230,6 +245,31 @@ class TestCisaStatementsAndInferences:
             }
         }
 
+    def test_each_sector_cites_only_the_advisories_that_name_it(self, client, raw_driver):
+        """CVE-2026-32645 as two advisories name it: ICSA-26-281-01 for Energy, ICSMA-26-283-01 for
+        Healthcare. The node is named by both; each sector link (sync row and step 7b) cites only the
+        advisory whose sector note names the sector, so its STIX reference leads to that advisory."""
+        _cve_node(raw_driver, "CVE-2026-32645")
+        item = ics.merge_items_per_cve(
+            [
+                _advisory_item("CVE-2026-32645", ["energy"], "ICSA-26-281-01"),
+                _advisory_item("CVE-2026-32645", ["healthcare", "global"], "ICSMA-26-283-01"),
+            ]
+        )[0]
+        _sync(client, item, CISA_EVENT)
+        assert _stated_refs(raw_driver, "CVE-2026-32645") == [
+            "energy|cisa_ics:ICSA-26-281-01",
+            "healthcare|cisa_ics:ICSMA-26-283-01",
+        ]
+        synced = _links(raw_driver, "CVE-2026-32645")
+        _q7b(client)
+        built = _links(raw_driver, "CVE-2026-32645")
+        assert built == synced
+        assert {s: (v["label"], v["refs"]) for s, v in built.items()} == {
+            "energy": ("advisory_sector", ["cisa_ics:ICSA-26-281-01"]),
+            "healthcare": ("advisory_sector", ["cisa_ics:ICSMA-26-283-01"]),
+        }
+
     def test_a_second_run_changes_nothing(self, client, raw_driver):
         _cve_node(raw_driver, "CVE-2026-0002")
         _sync(client, _cisa_item("CVE-2026-0002", ["energy", "healthcare"]), CISA_EVENT)
@@ -287,6 +327,36 @@ class TestLegacyAndStoredLinks:
         links = _links(raw_driver, "CVE-2024-0002")
         assert {s: v["sources"] for s, v in links.items()} == {"energy": ["misp"], "finance": ["misp", "nvd"]}
 
+    @pytest.mark.parametrize(
+        "stated_refs, expected",
+        [
+            # an edge written before 2026-10-16 records no reference per sector: every link cites all
+            (None, {"energy": ["cisa_ics:A", "cisa_ics:B"], "healthcare": ["cisa_ics:A", "cisa_ics:B"]}),
+            (["energy|cisa_ics:A", "healthcare|cisa_ics:B"], {"energy": ["cisa_ics:A"], "healthcare": ["cisa_ics:B"]}),
+            # a sector without a recorded reference cites all of the edge's references
+            (["energy|cisa_ics:A"], {"energy": ["cisa_ics:A"], "healthcare": ["cisa_ics:A", "cisa_ics:B"]}),
+        ],
+    )
+    def test_an_edge_cites_per_sector_what_it_recorded(self, client, raw_driver, stated_refs, expected):
+        _graph(
+            raw_driver,
+            f"""
+            MATCH (src:Source {{source_id: 'cisa_ics'}})
+            CREATE (c:CVE:{LABEL} {{cve_id: 'CVE-2024-0005', uuid: 'u-5', source: ['cisa_ics'],
+                    zone: ['energy', 'healthcare']}})
+            CREATE (c)-[:SOURCED_FROM {{source: 'cisa_ics', zones: ['energy', 'healthcare'],
+                    stated_zones: ['energy', 'healthcare'], source_refs: ['cisa_ics:A', 'cisa_ics:B']}}]->(src)
+            """,
+        )
+        if stated_refs is not None:
+            with raw_driver.session() as session:
+                session.run(
+                    "MATCH (:CVE {cve_id: 'CVE-2024-0005'})-[sf:SOURCED_FROM]->() SET sf.stated_refs = $refs",
+                    refs=stated_refs,
+                )
+        _q7b(client)
+        assert {s: v["refs"] for s, v in _links(raw_driver, "CVE-2024-0005").items()} == expected
+
     def test_a_node_sector_no_feed_gave_is_counted_not_linked(self, client, raw_driver):
         _graph(
             raw_driver,
@@ -333,15 +403,19 @@ class TestLegacyAndStoredLinks:
 
 # ================================================================ TARGETS and the alias merge
 class TestActorTargetsAndTheAliasMerge:
+    # ``stated_refs`` on the OTX edges stands for any source's per-sector references (only CISA ICS records
+    # them today): the alias merge folds them the same way whatever the source.
     FIXTURE = f"""
     MATCH (otx:Source {{source_id: 'alienvault_otx'}}), (mitre:Source {{source_id: 'mitre_attck'}})
     CREATE (c:ThreatActor:{LABEL} {{name: 'conti', uuid: 'u-conti', source: ['alienvault_otx', 'mitre_attck'],
             zone: ['energy', 'finance']}})
     CREATE (d:ThreatActor:{LABEL} {{name: 'conti team', uuid: 'u-team', source: ['alienvault_otx'],
             zone: $team_zones}})
-    CREATE (c)-[:SOURCED_FROM {{source: 'alienvault_otx', zones: ['finance'], source_refs: ['alienvault_otx:p1']}}]->(otx)
+    CREATE (c)-[:SOURCED_FROM {{source: 'alienvault_otx', zones: ['finance'], source_refs: ['alienvault_otx:p1'],
+            stated_refs: ['finance|alienvault_otx:p1']}}]->(otx)
     CREATE (c)-[:SOURCED_FROM {{source: 'mitre_attck', zones: ['energy'], source_refs: ['mitre_attck:G0102']}}]->(mitre)
-    CREATE (d)-[:SOURCED_FROM {{source: 'alienvault_otx', zones: $team_zones, source_refs: ['alienvault_otx:p2']}}]->(otx)
+    CREATE (d)-[:SOURCED_FROM {{source: 'alienvault_otx', zones: $team_zones, source_refs: ['alienvault_otx:p2'],
+            stated_refs: [z IN $team_zones | z + '|alienvault_otx:p2']}}]->(otx)
     """
 
     def _actor_links(self, driver) -> Dict[str, Any]:
@@ -387,10 +461,14 @@ class TestActorTargetsAndTheAliasMerge:
         (edge,) = _rows(
             raw_driver,
             "MATCH (:ThreatActor {name: 'conti'})-[sf:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'}) "
-            "RETURN sf.zones AS zones, apoc.meta.cypher.type(sf.zones) AS type",
+            "RETURN sf.zones AS zones, apoc.meta.cypher.type(sf.zones) AS type, "
+            "sf.stated_refs AS stated_refs, apoc.meta.cypher.type(sf.stated_refs) AS refs_type",
         )
         assert edge["type"].startswith("LIST"), "APOC's combine of equal values is wrapped back into a list"
         assert edge["zones"] == expected
+        # which record gave which sector survives the fold, as a sorted list
+        assert edge["refs_type"].startswith("LIST")
+        assert edge["stated_refs"] == sorted({"finance|alienvault_otx:p1", f"{team_zones[0]}|alienvault_otx:p2"})
         _step(client, build_relationships._Q7C_STATEMENTS, "actor_targets_sector")
         links = self._actor_links(raw_driver)
         for zone in expected:

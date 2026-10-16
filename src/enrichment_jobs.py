@@ -1350,10 +1350,12 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     # 2026-10 (explainability): the revoked ATT&CK ids a technique link was cited by
     "cited_ids": "combine",
     # 2026-10-16 (sector evidence): on a SOURCED_FROM edge, the zones the source's records gave the
-    # node and those it stated itself; two edges of a folded node to one Source keep the union, so a
-    # sector link still names that source (``relationship_provenance.zone_prov_with``)
+    # node, those it stated itself and which record stated which; two edges of a folded node to one
+    # Source keep the union, so a sector link still names that source and cites its records
+    # (``relationship_provenance.zone_prov_with``)
     "zones": "combine",
     "stated_zones": "combine",
+    "stated_refs": "combine",
     # everything else: keep the canonical's value, never listify
     ".*": "discard",
 }
@@ -1411,11 +1413,19 @@ _ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS: Tuple[str, ...] = (
     "misp_event_ids",
     "source_refs",
     "sources",
+    "stated_refs",
     "stated_zones",
     "zones",
 )
 # The ``combine`` lists that exist on edges only; every other ``combine`` key is a node list.
-_ALIAS_MERGE_EDGE_ONLY_PROPS: Tuple[str, ...] = ("sources", "source_refs", "cited_ids", "zones", "stated_zones")
+_ALIAS_MERGE_EDGE_ONLY_PROPS: Tuple[str, ...] = (
+    "sources",
+    "source_refs",
+    "cited_ids",
+    "zones",
+    "stated_zones",
+    "stated_refs",
+)
 _ACTOR_ALIAS_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
     sorted(
         k
@@ -1550,21 +1560,25 @@ RETURN sum(n_dups) AS merged, count(node) AS canonicals
     )
 
 
+# The zone lists of a SOURCED_FROM edge (2026-10-16, ``Neo4jClient._sourced_zone_items``).
+_SOURCED_FROM_ZONE_LISTS = frozenset({"zones", "stated_zones", "stated_refs"})
+
+
 def _edge_list_normalised(prop: str) -> str:
     """Cypher: the edge list ``r.<prop>`` as a list after a merge. The zone lists of a ``SOURCED_FROM`` edge
-    (2026-10-16) also get the writer's form back: sorted, and ``zones`` without ``global`` once a sector
-    is present (``Neo4jClient._sourced_zone_items``), so a folded edge reads as one the sync wrote."""
+    (2026-10-16) also get the writer's form back: sorted sets, and ``zones`` without ``global`` once a
+    sector is present (``Neo4jClient._sourced_zone_items``), so a folded edge reads as one the sync wrote."""
     ref = f"r.{prop}"
     wrapped = _list_or_wrapped(ref)
+    if prop not in _SOURCED_FROM_ZONE_LISTS:
+        return wrapped
     if prop == "zones":
         specifics = f'[_z IN {wrapped} WHERE _z <> "global"]'
         return (
             f"CASE WHEN {ref} IS NULL THEN NULL WHEN size({specifics}) > 0 THEN apoc.coll.sort({specifics}) "
             f"ELSE apoc.coll.sort({wrapped}) END"
         )
-    if prop == "stated_zones":
-        return f"CASE WHEN {ref} IS NULL THEN NULL ELSE apoc.coll.sort({wrapped}) END"
-    return wrapped
+    return f"CASE WHEN {ref} IS NULL THEN NULL ELSE apoc.coll.sort({wrapped}) END"
 
 
 def _alias_merge_normalise_cypher(label: str, list_props: Tuple[str, ...]) -> str:

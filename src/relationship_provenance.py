@@ -11,7 +11,8 @@ accumulating lists:
 
 A link to a ``Sector`` names only the feeds that gave that sector (2026-10-16, ``zone_prov_with``):
 the node's zones are a union over its sources, and each source's own zones are kept on its
-``SOURCED_FROM`` edge.
+``SOURCED_FROM`` edge; of a feed that records which of its records stated which sector
+(``stated_refs``), the link cites only the records that gave its sector.
 
 Each write adds to the lists and never replaces them, so no feed can erase another's
 claim, and a link can be traced from Neo4j back to the MISP event and the feed record.
@@ -29,6 +30,8 @@ All fragments use double quotes only: they run inside single-quoted
 from __future__ import annotations
 
 from typing import Dict, Sequence, Tuple, Union
+
+from sector_evidence import STATED_REF_SEPARATOR
 
 # Cap on ``r.misp_event_ids`` per edge; same value as
 # ``build_relationships.CRITICAL_MAX_EVENT_IDS_PER_EDGE`` (pinned by a test).
@@ -87,6 +90,17 @@ def _list_or_null(expr: str) -> str:
     return f'CASE WHEN {expr} IS NULL THEN null WHEN apoc.meta.cypher.type({expr}) STARTS WITH "LIST" THEN {expr} ELSE [{expr}] END'
 
 
+def _zone_refs_of(entry: str, zone: str) -> str:
+    """Cypher of ``sector_evidence.zone_refs`` for one ``_sfs`` entry: the references its ``stated_refs``
+    (``sr``) record for ``zone``, else all of its references (``refs``)."""
+    sep = STATED_REF_SEPARATOR
+    recorded = f'[_s IN {entry}.sr WHERE _s STARTS WITH {zone} + "{sep}"]'
+    return (
+        f"CASE WHEN size({recorded}) > 0 "
+        f"THEN [_t IN {recorded} | substring(_t, size({zone}) + {len(sep)})] ELSE {entry}.refs END"
+    )
+
+
 def zone_prov_with(
     node_var: str,
     zone_in_list: str,
@@ -101,7 +115,10 @@ def zone_prov_with(
     its records gave the node, ``Neo4jClient``); ``_stated_by`` are the feeds whose edge also lists it
     in ``stated_zones`` (a statement of the feed, ``sector_evidence``). ``_prov_refs`` /
     ``_prov_events`` are those feeds' record ids and MISP events, the events cut by the fixed sorted
-    rule (``capped_event_ids``).
+    rule (``capped_event_ids``). Of an edge that records its references per sector (``stated_refs``,
+    ``"<zone>|<ref>"``: the CISA ICS advisories that name each sector) only the references recorded for
+    the sector are taken, so a sector link never cites an advisory that does not name its sector; an
+    edge without one for the sector gives all of its references (``sector_evidence.zone_refs``).
 
     Legacy rule, so a graph written before the per-source zones behaves as before: a ``SOURCED_FROM``
     edge without ``zones`` counts as giving every zone of the node, and so does a feed of the node
@@ -119,13 +136,14 @@ def zone_prov_with(
         f"WITH {n}, {node_feeds(n)} AS _nf "
         f"WITH {n}, _nf, [({n})-[_sf:SOURCED_FROM]->(_src:Source) WHERE _src.source_id IN _nf | "
         f"{{f: _src.source_id, z: {_list_or_null('_sf.zones')}, sz: {as_list('_sf.stated_zones')}, "
-        f"refs: {as_list('_sf.source_refs')}, ev: {as_list('_sf.misp_event_ids')}}}] AS _sfs "
+        f"sr: {as_list('_sf.stated_refs')}, refs: {as_list('_sf.source_refs')}, "
+        f"ev: {as_list('_sf.misp_event_ids')}}}] AS _sfs "
         f'UNWIND [_z IN {as_list(f"{n}.zone")} WHERE _z IS NOT NULL AND _z <> "" AND _z <> "global" '
         f"AND _z IN {zone_in_list}] AS zone_name "
         f"WITH {n}, zone_name, _nf, _sfs, [_x IN _sfs WHERE _x.z IS NULL OR zone_name IN _x.z] AS _st "
         f"WITH {n}, zone_name, "
         "apoc.coll.toSet([_x IN _st | _x.f] + [_f IN _nf WHERE NOT _f IN [_x IN _sfs | _x.f]]) AS _feeds, "
-        "reduce(_a = [], _x IN _st | _a + _x.refs) AS _prov_refs, "
+        f"reduce(_a = [], _x IN _st | _a + {_zone_refs_of('_x', 'zone_name')}) AS _prov_refs, "
         f"{capped_event_ids('reduce(_a = [], _x IN _st | _a + _x.ev)', max_events)} AS _prov_events, "
         "[_x IN _st WHERE zone_name IN _x.sz | _x.f] AS _stated_by "
         f"WHERE size(_feeds) {feeds_filter} "

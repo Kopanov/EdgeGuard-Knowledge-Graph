@@ -24,6 +24,13 @@ the sector, as for every other link type; ``r.sources`` names every feed that ga
 statement or by inference, and only those feeds. Which feed stated a sector is recorded on that feed's
 ``SOURCED_FROM`` edge of the node (``stated_zones``), next to the zones its records gave (``zones``).
 
+``r.source_refs`` of a sector link cites only the records that gave the sector. A stating feed's records
+can each state other sectors (a CVE named by an ICS advisory for Energy and a medical advisory for
+Healthcare), so the feed's ``SOURCED_FROM`` edge also records which of its records stated which sector
+(the edge property ``stated_refs``, entries ``"<zone>|<source ref>"`` built by ``stated_refs``), and a
+sector link takes the feed's references for its sector from there (``zone_refs``). A feed that records none per sector (an inferring feed, or an
+edge written before 2026-10-16) gives all of its references.
+
 The confidence of the CISA label must stay above ``zone_classification``'s: the sync keeps the label of
 the row with the higher confidence, so an equal value would let an inferred row take the label of a
 stated link (asserted at import).
@@ -33,7 +40,7 @@ Standard library and ``source_registry`` only: the acceptance script reads the t
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from source_registry import get_source
 
@@ -60,6 +67,10 @@ STATING_FEEDS = frozenset({"cisa_ics"})
 
 # The "no sector" marker: never a sector, never stated.
 GLOBAL_ZONE = "global"
+
+# Between the zone and the record reference in ``stated_refs`` (``"healthcare|cisa_ics:ICSMA-26-283-01"``).
+# A zone never contains it, so the reference is everything after the first one.
+STATED_REF_SEPARATOR = "|"
 
 
 def _check_table() -> None:
@@ -118,6 +129,35 @@ def link_evidence(
     if label is not None and zone in set(_zone_list(list(stated or []))):
         return label, LABEL_CONFIDENCE[label]
     return ZONE_CLASSIFICATION, LABEL_CONFIDENCE[ZONE_CLASSIFICATION]
+
+
+def stated_refs(stated: Optional[Iterable[str]], refs_by_zone: Mapping[str, Iterable[str]]) -> List[str]:
+    """Which of a record's references stated which of its stated zones, as sorted ``"<zone>|<ref>"`` strings.
+
+    ``refs_by_zone`` maps a zone to the references of the records that gave it (CISA ICS: the advisories
+    whose sector note names it, ``cisa_ics:<advisory id>``); only the zones in ``stated`` are kept. The
+    writer accumulates the result on the feed's ``SOURCED_FROM`` edge (``stated_refs``), and ``zone_refs``
+    reads it back for one sector.
+    """
+    stated_set = set(_zone_list(list(stated or [])))
+    out = {
+        f"{zone}{STATED_REF_SEPARATOR}{ref}"
+        for zone, refs in refs_by_zone.items()
+        if zone in stated_set
+        for ref in refs
+        if isinstance(ref, str) and ref
+    }
+    return sorted(out)
+
+
+def zone_refs(stated: Optional[Iterable[str]], zone: str, default: Iterable[str]) -> List[str]:
+    """The references behind the sector ``zone``: those ``stated`` (``stated_refs`` entries) records for
+    the zone, in their sorted order, else ``default`` (all of the record's references: a feed that records
+    none per sector, or a record written before 2026-10-16). The Cypher of
+    ``relationship_provenance.zone_prov_with`` applies the same rule to a ``SOURCED_FROM`` edge."""
+    prefix = f"{zone}{STATED_REF_SEPARATOR}"
+    recorded = [x[len(prefix) :] for x in (stated or []) if isinstance(x, str) and x.startswith(prefix)]
+    return recorded if recorded else list(default)
 
 
 def cypher_params(rel_type: str) -> Dict[str, Any]:

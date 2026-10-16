@@ -468,8 +468,16 @@ class TestEnrichment:
         edge_props = enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
         assert {"zone", "source", "misp_event_ids", "aliases"} <= set(node_props)
         # 2026-10 (explainability): ``cited_ids`` is an edge provenance list as well; 2026-10-16 (sector
-        # evidence): so are the zones of a SOURCED_FROM edge
-        assert set(edge_props) == {"sources", "source_refs", "misp_event_ids", "cited_ids", "zones", "stated_zones"}
+        # evidence): so are the zone lists of a SOURCED_FROM edge
+        assert set(edge_props) == {
+            "sources",
+            "source_refs",
+            "misp_event_ids",
+            "cited_ids",
+            "zones",
+            "stated_zones",
+            "stated_refs",
+        }
         assert "source_ids" not in enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY
         cypher = enrichment_jobs._ACTOR_ALIAS_MERGE_NORMALISE_CYPHER
         node_part, edge_part = cypher.split("MATCH (c)-[r]-()")

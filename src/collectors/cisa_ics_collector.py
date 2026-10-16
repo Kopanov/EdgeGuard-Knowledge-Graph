@@ -5,7 +5,9 @@ EdgeGuard - CISA ICS Advisories Collector (CSAF 2.0)
 Collects ICS-CERT / ICS medical advisories that CISA publishes as CSAF 2.0
 JSON files in the public ``cisagov/CSAF`` GitHub repository
 (``csaf_files/OT/white/<year>/<advisory>.json``) and pushes one
-``vulnerability`` item per (advisory, CVE) to MISP.
+``vulnerability`` item per CVE to MISP (2026-10-16: the advisories that name
+the CVE are merged by ``merge_items_per_cve``; before, one item per
+(advisory, CVE), and MISP kept whichever came first).
 
 Why a second CISA collector next to KEV
 ---------------------------------------
@@ -14,7 +16,11 @@ critical-infrastructure sectors* a CVE touches. The sector is asserted by
 CISA in the advisory's ``"Critical infrastructure sectors"`` note — it is
 NOT guessed by the keyword detector. The sector → zone mapping is therefore
 a fixed table (``ICS_SECTOR_ZONE_MAP``) and ``detect_zones_from_text`` is
-deliberately NOT applied to these items.
+deliberately NOT applied to these items. The note names the sectors where
+the affected product is *deployed*, not the sectors an adversary targets: in
+the graph a mapped sector is the CVE's ``AFFECTS`` link labelled
+``advisory_sector`` at 0.9 (``sector_evidence``, 2026-10-16), never
+``TARGETS``.
 
 Safety contract (2026-10)
 -------------------------
@@ -50,7 +56,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -424,6 +430,25 @@ def _sorted_union(items: List[Dict[str, Any]], key: str) -> List[str]:
     return sorted(values)
 
 
+def _advisory_zones(group: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """Advisory id → the sorted specific zones (no ``global``) its sector note maps to, keys sorted.
+
+    An (advisory, CVE) item gives its own advisory and zones; an item merged before keeps its map. A key
+    shared by two items takes the union."""
+    out: Dict[str, Set[str]] = {}
+    for x in group:
+        given = x.get("advisory_zones")
+        if not isinstance(given, dict):
+            ids = x.get("advisory_ids") or [x.get("advisory_id")]
+            given = {a: x.get("zone") or [] for a in ids if a}
+        for advisory, zones in given.items():
+            if not advisory:
+                continue
+            listed = [zones] if isinstance(zones, str) else list(zones or [])
+            out.setdefault(str(advisory), set()).update(str(z) for z in listed if z and str(z) != "global")
+    return {advisory: sorted(out[advisory]) for advisory in sorted(out)}
+
+
 def merge_items_per_cve(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """One item per CVE from the (advisory, CVE) items, independent of their order (2026-10-16).
 
@@ -437,6 +462,10 @@ def merge_items_per_cve(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     * every other field (description, advisory id and title, vendor, product, affected products, CWE,
       CVSS, impacts) from the newest advisory (largest ``last_modified``, then largest advisory id);
     * the earliest ``published`` / ``first_seen`` and the latest ``last_modified`` / ``last_seen``.
+
+    The sectors are also kept per advisory (``advisory_zones``: advisory id → the specific zones its
+    sector note maps to, ``[]`` for an advisory that maps to none), so a sector link cites only the
+    advisories that name its sector (``sector_evidence.stated_refs``), not every advisory of the CVE.
 
     A CVE that one advisory names gets the same form (sorted lists). The items are returned sorted by
     CVE id.
@@ -456,6 +485,7 @@ def merge_items_per_cve(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         item["advisory_ids"] = sorted(
             {str(a) for x in group for a in (x.get("advisory_ids") or [x.get("advisory_id")]) if a}
         )
+        item["advisory_zones"] = _advisory_zones(group)
         for key, pick in (("published", min), ("first_seen", min), ("last_modified", max), ("last_seen", max)):
             dated: List[Tuple[datetime, str]] = []
             for x in group:
@@ -692,10 +722,11 @@ class CISAICSCollector:
                 "last_modified": current_iso,
                 "first_seen": initial_iso,
                 "last_seen": current_iso,
-                # Advisory provenance (2026-10-16): MISPWriter carries the advisory ids and CISA's own
-                # sector names in NVD_META, the sync puts them on the CVE's SOURCED_FROM edge
-                # (``raw_data``) and names the advisories in ``source_refs`` (``cisa_ics:<id>``).
-                # ``merge_items_per_cve`` takes the union over the advisories that name the CVE.
+                # Advisory provenance (2026-10-16): MISPWriter carries the advisory ids, CISA's own
+                # sector names and the zones of each advisory in NVD_META, the sync puts them on the
+                # CVE's SOURCED_FROM edge (``raw_data``) and names the advisories in ``source_refs``
+                # (``cisa_ics:<id>``). ``merge_items_per_cve`` takes the union over the advisories that
+                # name the CVE and keeps the zones per advisory (``advisory_zones``).
                 "advisory_id": advisory_id,
                 "advisory_ids": [advisory_id],
                 "advisory_title": title,

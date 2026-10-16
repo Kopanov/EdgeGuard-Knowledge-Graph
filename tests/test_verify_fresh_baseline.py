@@ -231,7 +231,7 @@ _GRAPH_FOLDED_MALWARE = (
 # 2026-10-16 (sector evidence, checks 10d-10j; ranked descriptions and indicator aging, check 16): what a
 # correct default baseline answers. CISA ICS is off by default (``_SOURCE_ROWS``), so no link carries
 # ``advisory_sector`` and no sector is stated; every SOURCED_FROM edge has ``zones``.
-_SOURCED_FROM_ZONES_ROW = {"edges": 380000, "with_zones": 380000, "with_stated_zones": 0}
+_SOURCED_FROM_ZONES_ROW = {"edges": 380000, "with_zones": 380000, "with_stated_zones": 0, "with_stated_refs": 0}
 _SECTOR_LABEL_ROWS = [{"label": "zone_classification", "links": 72500, "other_confidence": 0}]
 _SECTOR_BREAKDOWN_ROWS = [
     {"type": "AFFECTS", "label": "CVE", "sector": "energy", "match_type": "zone_classification", "c": 1400},
@@ -251,6 +251,8 @@ def _sector_evidence_rows(s: str) -> Optional[List[Dict[str, Any]]]:
         return []
     if "AS advisory_links" in s:
         return [{"advisory_links": 0, "misplaced": 0, "examples": []}]
+    if "] AS other RETURN" in s:
+        return []
     if "AS not_labelled" in s:
         return [{"stated": 0, "not_labelled": 0, "examples": []}]
     if "AS other_confidence" in s:
@@ -419,12 +421,10 @@ class TestHealthyBaselinePasses:
         assert _check(rep, "cisa_ics_source_present")["ok"] is None
         assert _check(rep, "cisa_stated_sectors_linked_as_advisory_sector")["ok"] is None
         rep = _run(vfb, monkeypatch, require_ics=True, require_cisa_ics=True)
-        # 2026-10-16: requiring CISA ICS also requires the sectors its advisories state
-        assert {c["check"] for c in rep.failed} == {
-            "ics_techniques_present",
-            "cisa_ics_source_present",
-            "cisa_stated_sectors_linked_as_advisory_sector",
-        }
+        # no CISA ICS record at all: the presence check fails; the stated-sector check (2026-10-16) has
+        # no record that could state a sector and does not judge
+        assert {c["check"] for c in rep.failed} == {"ics_techniques_present", "cisa_ics_source_present"}
+        assert _check(rep, "cisa_stated_sectors_linked_as_advisory_sector")["ok"] is None
 
     def test_malwarebazaar_check_is_informational_unless_required(self, vfb, monkeypatch):
         """``--require-malwarebazaar`` (2026-10): off → INFO even with no Source node; on → the Source
@@ -1771,11 +1771,14 @@ class TestSectorEvidence:
     AFFECTS links to sectors CISA stated, and on every one of them. A graph without per-source zones
     (built before) is not judged: the checks report instead of passing vacuously."""
 
-    # A graph with CISA ICS: the 2026-10-16 hosted figures (energy 2,052, finance 955, healthcare 1,119).
+    # A graph with CISA ICS: the 2026-10-16 hosted figures (energy 2,052, finance 955, healthcare 1,119;
+    # 4,164 CISA ICS records, 1,978 of them with no tracked sector).
     @staticmethod
     def _cisa_graph(st, rows):
         if "AS with_stated_zones" in st:
-            return [{"edges": 380000, "with_zones": 380000, "with_stated_zones": 4164}]
+            return [{"edges": 380000, "with_zones": 380000, "with_stated_zones": 2186, "with_stated_refs": 2186}]
+        if "AS cisa_global" in st:
+            return [{"cisa_records": 4164, "cisa_global": 1978, "without_zones": 0}]
         if "AS advisory_links" in st:
             return [{"advisory_links": 4126, "misplaced": 0, "examples": []}]
         if "AS not_labelled" in st:
@@ -1804,6 +1807,7 @@ class TestSectorEvidence:
             "sector_links_name_only_feeds_that_gave_the_sector",
             "advisory_sector_only_where_cisa_stated",
             "cisa_stated_sectors_linked_as_advisory_sector",
+            "sector_links_cite_only_records_that_gave_the_sector",
             "sector_confidence_follows_label",
         ):
             assert _check(rep, name)["ok"] is True, name
@@ -1851,6 +1855,71 @@ class TestSectorEvidence:
         rep = _run(vfb, monkeypatch, override=override)
         assert [c["check"] for c in rep.failed] == ["cisa_stated_sectors_linked_as_advisory_sector"]
 
+    @pytest.mark.parametrize("legacy_graph", [False, True])
+    def test_cisa_ics_records_without_zones_are_not_judged(self, vfb, monkeypatch, legacy_graph):
+        """The hosted graph of 2026-10-14/16: 4,164 CISA ICS records, none with ``zones`` or
+        ``stated_zones`` (written before 2026-10-16; on a kept graph unchanged attributes are not re-read).
+        No record can state a sector, so ``--require-cisa-ics`` does not fail the stated-sector check by
+        construction, with or without ``--legacy-graph``."""
+
+        def override(st, rows):
+            if "AS with_stated_zones" in st:
+                return [{"edges": 374342, "with_zones": 0, "with_stated_zones": 0, "with_stated_refs": 0}]
+            if "AS cisa_global" in st:
+                return [{"cisa_records": 4164, "cisa_global": 0, "without_zones": 4164}]
+            if "AS not_labelled" in st:
+                return [{"stated": 0, "not_labelled": 0, "examples": []}]
+            if "OPTIONAL MATCH (s:Source {source_id: 'cisa_ics'})" in st:
+                return [{"present": True, "edges": 4164}]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=override, require_cisa_ics=True, legacy_graph=legacy_graph)
+        assert _check(rep, "cisa_ics_source_present")["ok"] is True
+        check = _check(rep, "cisa_stated_sectors_linked_as_advisory_sector")
+        assert check["ok"] is None and check["detail"]["cisa_records_with_zones"] == 0
+        assert "cisa_stated_sectors_linked_as_advisory_sector" not in {c["check"] for c in rep.failed}
+
+    @pytest.mark.parametrize("legacy_graph, expected", [(False, False), (True, None)])
+    def test_cisa_ics_records_with_zones_but_no_statement(self, vfb, monkeypatch, legacy_graph, expected):
+        """CISA ICS records written by the new code (``zones`` set) and still no stated sector: with
+        ``--require-cisa-ics`` that fails, unless ``--legacy-graph`` says the graph is a kept older one."""
+
+        def override(st, rows):
+            if "AS cisa_global" in st:
+                return [{"cisa_records": 12, "cisa_global": 0, "without_zones": 0}]
+            if "AS not_labelled" in st:
+                return [{"stated": 0, "not_labelled": 0, "examples": []}]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=override, require_cisa_ics=True, legacy_graph=legacy_graph)
+        assert _check(rep, "cisa_stated_sectors_linked_as_advisory_sector")["ok"] is expected
+
+    def test_a_sector_link_citing_an_advisory_of_another_sector_fails(self, vfb, monkeypatch):
+        """CVE-2026-32645: ICSA-26-281-01 names Energy, ICSMA-26-283-01 names Healthcare; a healthcare link
+        that cites ICSA-26-281-01 sends a STIX reader to an advisory that does not name Healthcare."""
+        wrong = [
+            {
+                "type": "AFFECTS",
+                "source": "cisa_ics",
+                "c": 1,
+                "examples": ["healthcare cisa_ics:ICSA-26-281-01"],
+            }
+        ]
+
+        def override(st, rows):
+            if "] AS other RETURN" in st:
+                return wrong
+            return self._cisa_graph(st, rows)
+
+        rep = _run(vfb, monkeypatch, override=override)
+        assert [c["check"] for c in rep.failed] == ["sector_links_cite_only_records_that_gave_the_sector"]
+        detail = _check(rep, "sector_links_cite_only_records_that_gave_the_sector")["detail"]
+        assert detail["citing_a_record_of_another_sector"] == wrong
+
+    def test_no_per_sector_references_is_not_judged(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        assert _check(rep, "sector_links_cite_only_records_that_gave_the_sector")["ok"] is None
+
     def test_a_confidence_other_than_the_labels_fails(self, vfb, monkeypatch):
         # The old graph: zone_classification links at 1.0
         def override(st, rows):
@@ -1877,6 +1946,8 @@ class TestSectorEvidence:
         def fake_post(statement, params=None, timeout=180):
             if "AS other_confidence" in statement:
                 seen["params"] = params
+            if "] AS other RETURN" in statement:
+                seen["other"] = (statement, params)
             return capture(statement, _healthy_rows(statement, params or {}))
 
         monkeypatch.setattr(vfb, "_post", fake_post)
@@ -1891,6 +1962,10 @@ class TestSectorEvidence:
         assert "WHERE size(_feeds) = 0" in seen["zone_name AS sector"]
         assert "type(r) = 'AFFECTS' AND s:Sector AND (n:CVE OR n:Vulnerability)" in seen["AS advisory_links"]
         assert "sf.stated_zones" in seen["AS advisory_links"]
+        # the records of a sector are read with the writer's format, "<zone>|<source>:<id>"
+        other, params = seen["other"]
+        assert params == {"sep": "|", "ref_sep": ":"}
+        assert "STARTS WITH s.name + $sep" in other and "STARTS WITH src.source_id + $ref_sep" in other
 
 
 # --------------------------------------------------------------------------- 16. descriptions and aging

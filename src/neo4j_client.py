@@ -772,29 +772,40 @@ def _zone_override_global_expr(union: str) -> str:
     return f"CASE WHEN size({specifics}) > 0 THEN apoc.coll.sort({specifics}) ELSE apoc.coll.sort({union}) END"
 
 
-def _sourced_zone_items(rel_var: str, zones_expr: str, stated_expr: str) -> str:
+def _sourced_zone_items(rel_var: str, zones_expr: str, stated_expr: str, stated_refs_expr: str) -> str:
     """``SET`` items of a ``SOURCED_FROM`` edge (2026-10-16): the zones this source's records gave the
-    node (``zones``) and the part of them the source stated itself (``stated_zones``,
-    ``sector_evidence.stated_zones``).
+    node (``zones``), the part of them the source stated itself (``stated_zones``,
+    ``sector_evidence.stated_zones``) and which of the source's records stated which zone
+    (``stated_refs``, ``"<zone>|<source ref>"``, ``sector_evidence.stated_refs``).
 
     ``zones`` accumulates with the node's rule (``global`` dropped once a sector is present, sorted),
     so ``build_relationships`` steps 7a-7d name on a link to a Sector only the feeds that gave that
-    sector; a write without zones (``zones_expr`` null) leaves it as it is. ``stated_zones`` is written
-    only when the record states a zone, as a sorted set that only grows. Both are read back by
-    ``relationship_provenance.zone_prov_with``.
+    sector; a write without zones (``zones_expr`` null) leaves it as it is. ``stated_zones`` and
+    ``stated_refs`` are written only when the record states a zone, as sorted sets that only grow; with
+    ``stated_refs`` a sector link cites only the records that gave its sector, not every record of the
+    source (a CVE that an ICS advisory names for Energy and a medical advisory for Healthcare). All three
+    are read back by ``relationship_provenance.zone_prov_with``.
     """
     if not _PROP_NAME_RE.match(rel_var):
         raise ValueError(f"_sourced_zone_items: invalid rel_var {rel_var!r}")
     zone_rule = _zone_override_global_expr(_dedup_concat_clause(f"{rel_var}.zones", zones_expr))
+
+    def _growing_set(prop: str, expr: str) -> str:
+        return (
+            f"{rel_var}.{prop} = CASE WHEN size(coalesce({expr}, [])) = 0 THEN {rel_var}.{prop} "
+            f"ELSE apoc.coll.sort({_dedup_concat_clause(f'{rel_var}.{prop}', expr)}) END"
+        )
+
     return (
         f"{rel_var}.zones = CASE WHEN {zones_expr} IS NULL THEN {rel_var}.zones ELSE {zone_rule} END,\n"
-        f"            {rel_var}.stated_zones = CASE WHEN size(coalesce({stated_expr}, [])) = 0 THEN {rel_var}.stated_zones "
-        f"ELSE apoc.coll.sort({_dedup_concat_clause(f'{rel_var}.stated_zones', stated_expr)}) END"
+        f"            {_growing_set('stated_zones', stated_expr)},\n"
+        f"            {_growing_set('stated_refs', stated_refs_expr)}"
     )
 
 
 def _zone_param(zones: Any) -> Optional[List[str]]:
-    """Zones as a parameter list (2026-10-16): ``None`` stays ``None``, a single string becomes a list."""
+    """Zones, or ``stated_refs`` entries, as a parameter list (2026-10-16): ``None`` stays ``None``, a single
+    string becomes a list."""
     if zones is None:
         return None
     if isinstance(zones, str):
@@ -2879,6 +2890,7 @@ class Neo4jClient:
                 report=report_row(data) if is_indicator else None,
                 zones=zone,
                 stated_zones=data.get("stated_zones"),
+                stated_refs=data.get("stated_refs"),
             )
 
         except (
@@ -2963,13 +2975,15 @@ class Neo4jClient:
         report: Optional[Dict[str, Any]] = None,
         zones: Optional[List[str]] = None,
         stated_zones: Optional[List[str]] = None,
+        stated_refs: Optional[List[str]] = None,
     ) -> bool:
         """Create or update SOURCED_FROM relationship with raw data + per-source
         timestamps on the edge.
 
         2026-10-16 (sector evidence): the edge accumulates the zones this source's records gave the node
-        (``r.zones``) and the part of them the source stated itself (``r.stated_zones``), so a link to a
-        Sector names only the feeds that gave its sector (``_sourced_zone_items``).
+        (``r.zones``), the part of them the source stated itself (``r.stated_zones``) and which record
+        stated which zone (``r.stated_refs``), so a link to a Sector names only the feeds that gave its
+        sector and cites only the records that gave it (``_sourced_zone_items``).
 
         2026-10-16 (indicator aging): ``report`` (an Indicator write only, ``indicator_aging.report_row``)
         records the source's report on the edge, forward only: ``r.last_recorded_at`` and, when the
@@ -3052,7 +3066,7 @@ class Neo4jClient:
             r.source = $source_id,
             r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", "$misp_event_id", require_nonempty_string=True)},
             r.source_refs = {_dedup_concat_clause("r.source_refs", "coalesce($source_refs, [])")},
-            {_sourced_zone_items("r", "$zones", "$stated_zones")},
+            {_sourced_zone_items("r", "$zones", "$stated_zones", "$stated_refs")},
             r.updated_at = datetime(),
             r.edgeguard_managed = true,
             r.src_uuid = coalesce(r.src_uuid, $src_uuid),
@@ -3099,6 +3113,7 @@ class Neo4jClient:
                     "source_refs": [str(x) for x in (source_refs or []) if x],
                     "zones": _zone_param(zones),
                     "stated_zones": _zone_param(stated_zones) or [],
+                    "stated_refs": _zone_param(stated_refs) or [],
                 }
                 if report is not None:
                     params["report"] = dict(report)
@@ -4002,8 +4017,10 @@ class Neo4jClient:
                             source_id=source_id,
                         ),
                         "zone": zone,
-                        # 2026-10-16: the zones the source stated itself (``sector_evidence``)
+                        # 2026-10-16: the zones the source stated itself, and which record stated
+                        # which zone (``sector_evidence``)
                         "stated_zones": _zone_param(item.get("stated_zones")) or [],
+                        "stated_refs": _zone_param(item.get("stated_refs")) or [],
                         "raw_data": json.dumps(raw_data, default=str),
                         "node_uuid": node_uuid,
                         # PR (S5): source-truthful timestamps — see
@@ -4159,8 +4176,8 @@ class Neo4jClient:
                     // source's own record ids; build_relationships copies both onto built links.
                     r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", "item.misp_event_id", require_nonempty_string=True)},
                     r.source_refs = {_dedup_concat_clause("r.source_refs", "coalesce(item.source_refs, [])")},
-                    // 2026-10-16 (sector evidence): this source's zones, and those it stated
-                    {_sourced_zone_items("r", "item.zone", "item.stated_zones")},
+                    // 2026-10-16 (sector evidence): this source's zones, those it stated, and which record stated which
+                    {_sourced_zone_items("r", "item.zone", "item.stated_zones", "item.stated_refs")},
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true,
                     r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
@@ -4315,8 +4332,10 @@ class Neo4jClient:
                             source_id=source_id,
                         ),
                         "zone": zone,
-                        # 2026-10-16: the zones the source stated itself (``sector_evidence``)
+                        # 2026-10-16: the zones the source stated itself, and which record stated
+                        # which zone (``sector_evidence``)
                         "stated_zones": _zone_param(item.get("stated_zones")) or [],
+                        "stated_refs": _zone_param(item.get("stated_refs")) or [],
                         "raw_data": json.dumps(raw_data, default=str),
                         "node_uuid": node_uuid,
                         # PR (S5): source-truthful timestamps; see indicator
@@ -4494,8 +4513,8 @@ class Neo4jClient:
                     // source's own record ids; build_relationships copies both onto built links.
                     r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", "item.misp_event_id", require_nonempty_string=True)},
                     r.source_refs = {_dedup_concat_clause("r.source_refs", "coalesce(item.source_refs, [])")},
-                    // 2026-10-16 (sector evidence): this source's zones, and those it stated
-                    {_sourced_zone_items("r", "item.zone", "item.stated_zones")},
+                    // 2026-10-16 (sector evidence): this source's zones, those it stated, and which record stated which
+                    {_sourced_zone_items("r", "item.zone", "item.stated_zones", "item.stated_refs")},
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true,
                     r.src_uuid = coalesce(r.src_uuid, item.node_uuid),

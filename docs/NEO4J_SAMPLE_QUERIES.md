@@ -257,7 +257,9 @@ LIMIT 25
 
 **CISA ICS.** A sector CISA's ICS advisory states is a statement of where the affected product is
 **deployed**: the CVE's `AFFECTS` link to the sector carries `match_type = 'advisory_sector'` (0.9), and
-the `SOURCED_FROM` edge of the CVE to `cisa_ics` lists it in `stated_zones`. It is never a `TARGETS`
+the `SOURCED_FROM` edge of the CVE to `cisa_ics` lists it in `stated_zones`; the link cites in `r.source_refs`
+only the advisories whose sector note names that sector (the edge's `stated_refs`, `"<zone>|cisa_ics:<id>"`),
+not every advisory that names the CVE. It is never a `TARGETS`
 link, so it never answers "who targets energy". A sector EdgeGuard infers from text (NVD, KEV, OTX) is
 `zone_classification` (0.5): **a query that filters sector links on `match_type = 'zone_classification'`
 alone misses CISA's statements**; filter on `type(r)` instead, or on both labels. On a graph built before
@@ -275,11 +277,20 @@ ORDER BY sector
 ```
 
 ```cypher
-// The same through the per-source zones, with the advisories and CISA's own sector names
+// The same through the per-source zones, with the advisories, which advisory names which sector,
+// and CISA's own sector names
 MATCH (c:CVE)-[sf:SOURCED_FROM]->(:Source {source_id: 'cisa_ics'})
 WITH c, sf, apoc.convert.fromJsonMap(sf.raw_data) AS rec
 RETURN c.cve_id, sf.stated_zones AS stated_sectors, sf.source_refs AS advisories,
-       rec.ics_sectors AS cisa_sector_names
+       sf.stated_refs AS advisories_per_sector, rec.ics_sectors AS cisa_sector_names
+LIMIT 25
+```
+
+```cypher
+// The CISA ICS advisories a sector link cites (only those that name the sector)
+MATCH (c:CVE)-[r:AFFECTS]->(s:Sector)
+WHERE r.match_type = 'advisory_sector'
+RETURN c.cve_id, s.name AS sector, [x IN r.source_refs WHERE x STARTS WITH 'cisa_ics:'] AS advisories
 LIMIT 25
 ```
 
@@ -299,13 +310,21 @@ ORDER BY rel, label, sector, evidence
 
 **ATT&CK for ICS.** Only `Technique` and `Tactic` nodes carry `attack_domain`; a group or software item in
 both ATT&CK bundles keeps the Enterprise item, and no `ThreatActor`, `Malware` or `Tool` node carries a
-domain. Measure ICS through the links into ICS techniques:
+domain. Measure ICS through the links into ICS techniques (`IMPLEMENTS_TECHNIQUE`, `EMPLOYS_TECHNIQUE`,
+`SUBTECHNIQUE_OF`) and `IN_TACTIC` from an ICS technique to an ICS tactic:
 
 ```cypher
 // Links into ATT&CK for ICS techniques, by relationship type and start label
 MATCH (n)-[r]->(t:Technique {attack_domain: 'ics'})
 RETURN type(r) AS rel, labels(n)[0] AS label, count(*) AS links, count(DISTINCT n) AS nodes
 ORDER BY links DESC
+```
+
+```cypher
+// ICS techniques in ICS tactics (IN_TACTIC runs from a technique to a tactic, never into a technique)
+MATCH (t:Technique {attack_domain: 'ics'})-[:IN_TACTIC]->(tc:Tactic {attack_domain: 'ics'})
+RETURN tc.name AS tactic, count(t) AS ics_techniques
+ORDER BY ics_techniques DESC
 ```
 
 ```cypher
@@ -329,6 +348,6 @@ RETURN type(r) AS edge_type, count(r) AS gap
 
 ---
 
-_Last updated: 2026-10-16 — "Measuring CISA ICS and ATT&CK for ICS": CISA's sector statements by label (`advisory_sector` on `AFFECTS`) and through `SOURCED_FROM.stated_zones`, the warning that a filter on `zone_classification` alone misses them, and ATT&CK for ICS through the links into ICS techniques; a link to a `Sector` names only the feeds that gave the sector. Prior: 2026-10-15 — attack-vector note (`c.attack_vector` from the CVSS that gives the score, NVD's words, null without CVSS) and the network-exploitable CVE sample; edge-provenance section: `r.misp_event_ids[]` is on every relationship built from the sources (no longer only the four PR-N26 types); the MISP-event pivot states that events are per-source, per-day buckets, and a report-level pivot on `r.source_refs[]` was added. Prior: 2026-10-14 — score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW) and the sample for CVEs without a CVSS 3.x / 2 score; added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
+_Last updated: 2026-10-16 — "Measuring CISA ICS and ATT&CK for ICS": CISA's sector statements by label (`advisory_sector` on `AFFECTS`) and through `SOURCED_FROM.stated_zones`, the advisories a sector link cites (only those that name the sector, `stated_refs`), `IN_TACTIC` from an ICS technique to an ICS tactic, the warning that a filter on `zone_classification` alone misses them, and ATT&CK for ICS through the links into ICS techniques; a link to a `Sector` names only the feeds that gave the sector. Prior: 2026-10-15 — attack-vector note (`c.attack_vector` from the CVSS that gives the score, NVD's words, null without CVSS) and the network-exploitable CVE sample; edge-provenance section: `r.misp_event_ids[]` is on every relationship built from the sources (no longer only the four PR-N26 types); the MISP-event pivot states that events are per-source, per-day buckets, and a report-level pivot on `r.source_refs[]` was added. Prior: 2026-10-14 — score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW) and the sample for CVEs without a CVSS 3.x / 2 score; added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
 
 *Save queries to test the prototype*
