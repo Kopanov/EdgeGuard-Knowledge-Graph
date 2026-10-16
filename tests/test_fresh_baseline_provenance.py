@@ -1276,14 +1276,17 @@ class TestMergeCvePromotesResilmeshListProps:
             "ref_tags": None,
             "cpe_type": "a",  # scalar, not a list → not promoted
             "description": "keep me",
-            "nvd_record": True,  # 2026-10: NVD's record sets the description (another record fills it)
+            "nvd_record": True,
         }
         with patch.object(client, "merge_node_with_source", return_value=True) as merge:
             client.merge_cve(data, source_id="nvd")
         extra = merge.call_args.kwargs["extra_props"] or {}
         for prop in self._LIST_PROPS:
             assert prop not in extra, prop
-        assert extra["description"] == "keep me"
+        # 2026-10-16: the description goes to the source ranking with NVD as its source, never as an extra prop.
+        assert "description" not in extra
+        ranked = merge.call_args.kwargs["description"]
+        assert (ranked.text, ranked.source) == ("keep me", "nvd")
 
     def test_none_and_blank_entries_dropped_and_values_stringified(self):
         client = self._client()

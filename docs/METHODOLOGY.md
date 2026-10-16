@@ -298,14 +298,27 @@ def merge_node(existing, new):
    `misp_cooccurrence` / `misp_correlation` are touched. **2026-10:** no such
    edges are written any more — links are report-scoped (same OTX pulse,
    `match_type='otx_pulse'`, 0.6) — so this step is a no-op on a fresh baseline.
-3. **Time decay** (post-sync, `enrichment_jobs.py` `decay_ioc_confidence`):
-   tiered by label — **Indicator** ×0.85 at 90–180 days, ×0.70 at
-   180–365 days; **Vulnerability** ×0.90 at 90–180 days, ×0.80 at
-   180–365 days; both retire (`active=false`) past 365 days. Decayed
-   nodes carry `last_decayed_tier`.
+3. **Indicator aging** (2026-10-16, `src/indicator_aging.py`; applied by
+   every Indicator write and by the post-sync job `decay_ioc_confidence`):
+   one rule for every `Indicator`, whoever supplied it — the age counts
+   from the latest report of any source (the source's own `last_seen`
+   capped at the MISP timestamp; `first_imported_at` when no report dated
+   it), and `confidence_score = max(0.10, round(source_confidence × factor,
+   2))` with ×0.85 from 90 days, ×0.70 from 180 and ×0.55 from 365; from
+   730 days the indicator is retired (`active=false`, `retired_by =
+   'decay'`). `source_confidence` is the highest confidence a source gave,
+   so the factor never applies twice. No other label ages (the
+   `Vulnerability` tiers were removed). Each node carries `aging_basis`,
+   `aging_tier`, `aging_factor`, `aging_since` and `aging_evaluated_at`
+   (the time at which its aging values were last written: by a write, or
+   by a job run that changed them; a job run that changes nothing leaves
+   it unchanged). The rule runs at the database's current time, lifted to
+   `aging_evaluated_at` when that is later, so the aging never moves
+   backwards.
 
-When explaining a score, cite the layer that produced it (source prior, the
-co-occurrence calibration band, or the `last_decayed_tier`) — multi-source
+When explaining a score, cite the layer that produced it (source prior,
+`source_confidence`, the co-occurrence calibration band, or the aging tier
+with its basis) — multi-source
 corroboration is visible through per-source `SOURCED_FROM` edges and, for a
 relationship, through `r.sources[]` (`size(r.sources) >= 2` = two or more
 sources assert it; 2026-10), not folded into a single multiplier.
@@ -479,4 +492,4 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-10-15 — § 2.1 type mapping: `ipv6` from MISP `ip-src` / `ip-dst` by the address; `x509-fingerprint-sha1` for SSL Blacklist certificate fingerprints; a generic hash is typed by digest length (md5 / sha1 / sha256 / sha512); OTX non-file hashes are not collected; OTX `email` typed as e-mail; relationship corroboration visible through `r.sources[]`. Prior: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._
+_Last updated: 2026-10-16 — an indicator carries `aging_evaluated_at`, the time at which its aging values were last written (a job run that changes nothing leaves it unchanged); the rule runs at the database's current time, lifted to it when it is later. Same day: § time decay replaced by the indicator aging: one rule for every Indicator from the latest report of any source (the source's date capped at the MISP time), ×0.85 / ×0.70 / ×0.55 of `source_confidence` from 90 / 180 / 365 days, retirement from 730 days; no Vulnerability tiers; `aging_*` properties instead of `last_decayed_tier`. Prior: 2026-10-15 — § 2.1 type mapping: `ipv6` from MISP `ip-src` / `ip-dst` by the address; `x509-fingerprint-sha1` for SSL Blacklist certificate fingerprints; a generic hash is typed by digest length (md5 / sha1 / sha256 / sha512); OTX non-file hashes are not collected; OTX `email` typed as e-mail; relationship corroboration visible through `r.sources[]`. Prior: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._

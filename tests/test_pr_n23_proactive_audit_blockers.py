@@ -172,9 +172,11 @@ class TestFix2MergeVulnerabilitiesBatchPromotesEnrichment:
                 f"Cypher SET must use ``n.{field} = coalesce(item.{field}, n.{field})`` "
                 "so partial-item batches preserve existing values"
             )
-        # 2026-10: description, published and last_modified — NVD's record sets them, any other row
-        # fills them where the node has none (tests/test_cve_description_source.py).
-        assert "_batch_record_text_clauses('n', 'item')" in body  # as ast.unparse quotes it
+        # 2026-10: published and last_modified — NVD's record sets them, any other row fills them where
+        # the node has none; the description by the source ranking (2026-10-16,
+        # tests/test_cve_description_source.py).
+        assert "_batch_record_date_clauses('n', 'item')" in body  # as ast.unparse quotes it
+        assert "{_BATCH_RANKED_DESCRIPTION}" in body
 
 
 # ===========================================================================
