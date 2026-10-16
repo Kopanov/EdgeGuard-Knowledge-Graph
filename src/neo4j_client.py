@@ -1365,7 +1365,9 @@ def _normalise_zone_list(value: Any) -> List[str]:
 # a full sync undid the decay. Now only an Indicator ages: its writes record the report
 # (``indicator_aging.node_report_items``), then apply the one rule in a SET clause of its own
 # (``indicator_aging.aging_set_clause``), which reactivates a node only when a newer report moves its
-# basis. Every other label is set ``active = true`` when EdgeGuard creates it (``_create_active``)
+# basis and never evaluates a node at a time older than its ``aging_evaluated_at``; the clauses before
+# it set properties of the node, which takes the node's write lock until the write commits, so no
+# other evaluation interleaves. Every other label is set ``active = true`` when EdgeGuard creates it (``_create_active``)
 # and gets no ``active``, ``retired_*`` or decay property when EdgeGuard matches it, so a node
 # another system created (CASM CVE / CVSS, ISIM assets) never receives an EdgeGuard lifecycle
 # property and a manual decommission is never touched.
@@ -1556,10 +1558,12 @@ class Neo4jClient:
         """Evaluate the aging rule of this client's Indicator writes at ``value`` (2026-10-16).
 
         The sync of a DAG run passes the run's evaluation time (``data_interval_end``, ``run_after``
-        for a manual run, raised to the aging clock's mark when that is later: ``enrichment_as_of``
-        in the DAG), the time that run's aging job (``enrichment_jobs.decay_ioc_confidence``) uses,
-        so the sync's writes and the job agree on every node in between; None restores the time of
-        each write (the alert path, the command-line writers)."""
+        for a manual run: ``enrichment_as_of`` in the DAG), the time that run's aging job
+        (``enrichment_jobs.decay_ioc_confidence``) uses, so the sync's writes and the job agree on
+        every node in between; None restores the time of each write (the alert path, the
+        command-line writers). A node whose ``aging_evaluated_at`` is later is evaluated at that
+        time instead (``indicator_aging.evaluated_at_expr``), so an older run's write never moves
+        its aging backwards."""
         self.aging_as_of = None if value is None else evaluation_time(value).isoformat()
 
     @retry_with_backoff(max_retries=MAX_RETRIES)

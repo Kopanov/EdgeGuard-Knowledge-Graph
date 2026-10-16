@@ -1618,9 +1618,9 @@ def run_neo4j_sync(**context):
                 )
 
         # 2026-10-16: the sync's Indicator writes evaluate the aging at the run's time, the time this
-        # run's aging job uses (``enrichment_as_of``), so the two never disagree in between; the
-        # aging clock's mark is raised to it before the first write (``sync_aging_as_of``).
-        sync = MISPToNeo4jSync(aging_as_of=sync_aging_as_of(context))
+        # run's aging job uses (``enrichment_as_of``), so the two never disagree in between; a node
+        # already evaluated at a later time keeps its aging (``indicator_aging``).
+        sync = MISPToNeo4jSync(aging_as_of=enrichment_as_of(context))
         success = sync.run(incremental=incremental, since=since)
 
         if success:
@@ -2108,133 +2108,31 @@ check_neo4j_quality_task = BashOperator(
 #  Order matters:
 #    1. build_relationships  — link IOCs to malware/CVEs (needs fresh data)
 #    2. run_enrichment_jobs  — merges, the indicator aging (one rule, evaluated at the run's
-#                              data_interval_end or the later aging-clock mark, which the
-#                              run's sync and this job raise; 2026-10-16),
-#                              campaigns (active indicators), calibration, EPSS
+#                              data_interval_end, or at a node's later aging_evaluated_at;
+#                              2026-10-16), campaigns (active indicators), calibration, EPSS
 #                              (enrichment_jobs.run_all_enrichment_jobs)
 # ================================================================================
-
-
-# 2026-10-16: the high-water mark of the indicator aging clock, an Airflow Variable holding the latest
-# time a run aged the graph at (ISO-8601 UTC). The run's sync raises it to the run's aging time before
-# its first Indicator write (``sync_aging_as_of``), the enrichment task once ``decay_ioc_confidence``
-# succeeded; neither lowers it. Without it, clearing an older run's enrichment task after a newer run
-# had aged the graph (RUNBOOK) evaluated the rule at the older time: retired indicators came back,
-# tiers fell, and ``aging_since`` and the STIX ``modified`` moved backwards until the next run.
-AGING_AS_OF_VARIABLE = "EDGEGUARD_AGING_AS_OF"
-
-
-def _read_aging_as_of_mark() -> tuple[Optional[datetime], bool]:
-    """``(mark, readable)``: the aging clock's high-water mark (``AGING_AS_OF_VARIABLE``) as an aware
-    UTC datetime, None when the Variable is unset or holds no ISO-8601 time; ``readable`` is False when
-    the Variable store could not be read. Each case without a mark is logged."""
-    from indicator_aging import evaluation_time
-
-    try:
-        raw = Variable.get(AGING_AS_OF_VARIABLE, None)
-    except Exception as e:
-        logger.warning(
-            "Could not read the Airflow Variable %s (%s): the indicator aging is evaluated at the run's own time",
-            AGING_AS_OF_VARIABLE,
-            e,
-        )
-        return None, False
-    if raw is None or not str(raw).strip():
-        logger.info(
-            "The Airflow Variable %s is not set (no aging job has recorded its time yet): the indicator "
-            "aging is evaluated at the run's own time",
-            AGING_AS_OF_VARIABLE,
-        )
-        return None, True
-    try:
-        return evaluation_time(str(raw)), True
-    except (TypeError, ValueError) as e:
-        logger.warning(
-            "The Airflow Variable %s holds no ISO-8601 time (%r, %s): the indicator aging is evaluated at the "
-            "run's own time, and the next successful aging job records its time",
-            AGING_AS_OF_VARIABLE,
-            str(raw)[:64],
-            e,
-        )
-        return None, True
-
-
-def record_aging_as_of(as_of) -> None:
-    """Raise the aging clock's high-water mark to ``as_of`` (2026-10-16), the time a run ages the graph
-    at: the run's sync calls it before its first Indicator write (``sync_aging_as_of``),
-    ``run_all_enrichment_jobs`` once ``decay_ioc_confidence`` succeeded. A mark at or after ``as_of``
-    is kept, so the mark never decreases; when the Variable cannot be read nothing is written, so an
-    unknown higher mark is not lowered. A failure to write is logged and does not fail the task: the
-    sync and the aging go on, and only a later re-run of an older run could then evaluate the rule
-    at that run's own, earlier time."""
-    from indicator_aging import evaluation_time
-
-    when = evaluation_time(as_of)
-    mark, readable = _read_aging_as_of_mark()
-    if not readable:
-        logger.warning(
-            "The aging clock's mark (Airflow Variable %s) is left as it is: it could not be read", AGING_AS_OF_VARIABLE
-        )
-        return
-    if mark is not None and mark >= when:
-        return
-    try:
-        Variable.set(AGING_AS_OF_VARIABLE, when.isoformat())
-        logger.info("Aging clock: Airflow Variable %s set to %s", AGING_AS_OF_VARIABLE, when.isoformat())
-    except Exception as e:
-        logger.warning(
-            "Could not write the Airflow Variable %s=%s (%s): a later re-run of an older run may evaluate the "
-            "indicator aging at its own, earlier time",
-            AGING_AS_OF_VARIABLE,
-            when.isoformat(),
-            e,
-        )
 
 
 def enrichment_as_of(context) -> datetime:
     """The time the indicator aging is evaluated at (2026-10-16): the DAG run's
     ``data_interval_end``, or ``run_after`` for a manual run without a data interval (now only when
-    the context has neither, a direct call), raised to the aging clock's high-water mark
-    (``AGING_AS_OF_VARIABLE``) when the mark is later. The clock therefore never moves backwards: a
-    re-run of an older run evaluates the rule at the newer time a later run already aged the graph
-    at, and re-running a run gives the same graph. The run's sync (``run_neo4j_sync``,
-    ``run_baseline_full_sync``, through ``sync_aging_as_of``) and its enrichment job both call this
-    and get the same time: the sync raises the mark to that very time, which leaves the later of the
-    two unchanged, and no other run's sync or job runs in between (one active run per DAG, the
-    baseline lock between the baseline and the scheduled sync). A missing or unreadable Variable
-    leaves the run's own time (logged)."""
+    the context has neither, a direct call). The run's sync (``run_neo4j_sync``,
+    ``run_baseline_full_sync``) ages the Indicators it writes at this time and the run's enrichment
+    job evaluates the rule at it, so the two never disagree in between, and re-running a run gives
+    the same graph.
+
+    No clock is shared between runs: every evaluation applies the rule to a node at the later of
+    this time and the time stored on the node (``aging_evaluated_at``, ``indicator_aging``), so a
+    re-run of an older run, or a baseline overlapping a scheduled sync, never moves a node's aging
+    backwards, whatever order the runs write in."""
     end = context.get("data_interval_end")
     if end is None:
         dag_run = context.get("dag_run")
         end = getattr(dag_run, "run_after", None) if dag_run is not None else None
     if end is None:
-        run_time = datetime.now(timezone.utc)
-    else:
-        run_time = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
-    mark, _readable = _read_aging_as_of_mark()
-    if mark is not None and mark > run_time:
-        logger.info(
-            "Indicator aging evaluated at %s, the latest time an aging job evaluated the graph at (Airflow "
-            "Variable %s), not at this run's earlier time %s: the aging clock never moves backwards",
-            mark.isoformat(),
-            AGING_AS_OF_VARIABLE,
-            run_time.isoformat(),
-        )
-        return mark
-    return run_time
-
-
-def sync_aging_as_of(context) -> datetime:
-    """The time a run's sync ages the Indicators it writes at (2026-10-16): ``enrichment_as_of``, the
-    time the run's aging job uses, recorded as the aging clock's mark (``record_aging_as_of``) before
-    the sync's first write. A sync that then fails, or is stopped, has already aged some Indicators at
-    that time, and the run's aging job may never run: without the mark, an older run cleared before
-    the next successful aging job would age them at its earlier time (retired indicators active
-    again, ``aging_since`` and the STIX ``modified`` moved back). The run's own job still gets the
-    same time, the later of the run's time and a mark that is this time."""
-    as_of = enrichment_as_of(context)
-    record_aging_as_of(as_of)
-    return as_of
+        return datetime.now(timezone.utc)
+    return end if end.tzinfo else end.replace(tzinfo=timezone.utc)
 
 
 def run_build_relationships(**context):
@@ -2299,8 +2197,8 @@ def run_enrichment_jobs(**context):
     client = Neo4jClient()
     try:
         client.connect()
-        # 2026-10-16: the aging job's time becomes the aging clock's mark once that job succeeded.
-        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context), on_aged=record_aging_as_of)
+        # 2026-10-16: the indicator aging at the run's time, the time the run's sync wrote at.
+        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
         logger.info(f"Enrichment summary: {summary}")
     except Exception as e:
         logger.error(f"Enrichment failed: {e}")
@@ -2961,8 +2859,8 @@ def run_baseline_full_sync(**context):
     logger.info("[BASELINE] Starting full MISP→Neo4j sync (all history)")
     sync_started_at = datetime.now(timezone.utc)
     # 2026-10-16: aged at the time the baseline's enrichment evaluates the aging (``enrichment_as_of``);
-    # the aging clock's mark is raised to it before the first write (``sync_aging_as_of``).
-    sync = MISPToNeo4jSync(aging_as_of=sync_aging_as_of(context))
+    # a node already evaluated at a later time keeps its aging (``indicator_aging``).
+    sync = MISPToNeo4jSync(aging_as_of=enrichment_as_of(context))
     success = sync.run(incremental=False)
     if not success:
         detail = (
@@ -3003,8 +2901,8 @@ def run_baseline_enrichment(**context):
     client = Neo4jClient()
     try:
         client.connect()
-        # 2026-10-16: the aging job's time becomes the aging clock's mark once that job succeeded.
-        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context), on_aged=record_aging_as_of)
+        # 2026-10-16: the indicator aging at the run's time, the time the run's sync wrote at.
+        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
         logger.info(f"[BASELINE] Enrichment complete: {summary}")
     except Exception as e:
         logger.error(f"[BASELINE] Enrichment failed: {e}")

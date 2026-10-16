@@ -253,36 +253,35 @@ class TestRunNeo4jSyncWindowAndStamp:
         assert _FakeSync.init_kwargs == {"aging_as_of": due}
         assert dag_module.enrichment_as_of({"data_interval_end": due}) == due, "the job's time"
 
-    def test_the_sync_and_the_job_of_one_run_use_the_same_time(
+    def test_the_sync_and_the_job_of_one_run_use_the_run_time(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
     ):
-        """2026-10-16: the run's sync and its enrichment job evaluate the aging at one time, the later
-        of the run's time and the aging clock's mark (``EDGEGUARD_AGING_AS_OF``): a re-run of an older
-        run after a newer run aged the graph uses the newer time; a newer run uses its own time, and
-        its job raises the mark to it once the aging succeeded."""
+        """2026-10-16: the run's sync and its enrichment job evaluate the aging at the run's own time, a
+        newer run and an older run cleared after it alike; no Airflow Variable holds an aging clock. A
+        node already evaluated at a later time keeps its aging because the rule evaluates it at its
+        stored ``aging_evaluated_at`` (``indicator_aging``), not because the DAG raises the time."""
         monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
         monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
         monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
         monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
         monkeypatch.setattr(dag_module, "record_neo4j_node_counts", lambda: True)
-        mark = datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)
-        store = {dag_module.AGING_AS_OF_VARIABLE: mark.isoformat()}
+        keys: list = []
 
         class _Variable(_StubVariable):
             @staticmethod
             def get(key, default=None):
-                return store.get(key, default)
+                keys.append(key)
+                return default
 
             @staticmethod
             def set(key, value):
-                store[key] = value
+                keys.append(key)
 
         monkeypatch.setattr(dag_module, "Variable", _Variable)
         jobs: list = []
 
-        def run_all_enrichment_jobs(client, as_of=None, on_aged=None):
+        def run_all_enrichment_jobs(client, as_of=None):
             jobs.append(as_of)
-            on_aged(as_of)  # the aging job succeeded
             return {}
 
         class _Client:
@@ -297,67 +296,17 @@ class TestRunNeo4jSyncWindowAndStamp:
         )
         monkeypatch.setitem(sys.modules, "neo4j_client", SimpleNamespace(Neo4jClient=_Client))
 
-        for due, expected in (
-            (datetime(2026, 10, 10, 3, 0, tzinfo=timezone.utc), mark),  # an older run, cleared and re-run
-            (datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc), datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc)),
+        # A newer run, then an older run cleared and re-run.
+        for due in (
+            datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 10, 3, 0, tzinfo=timezone.utc),
         ):
             _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
             dag_module.run_neo4j_sync(data_interval_end=due)
             dag_module.run_enrichment_jobs(data_interval_end=due)
-            assert _FakeSync.init_kwargs == {"aging_as_of": expected}, due
-            assert jobs[-1] == expected, due
-            assert store[dag_module.AGING_AS_OF_VARIABLE] == expected.isoformat(), "the mark never decreases"
-
-    def test_the_sync_raises_the_aging_mark_before_its_first_write(
-        self, dag_module, isolated_state, fake_sync_module, monkeypatch
-    ):
-        """2026-10-16: the sync of a run raises the aging clock's mark to the run's aging time before it
-        writes (``sync_aging_as_of``). A newer run whose sync aged Indicators at its time and then
-        failed, or whose aging job never ran, leaves that time as the mark, so an older run cleared
-        afterwards evaluates the rule at the newer time rather than moving those Indicators back."""
-        monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
-        monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
-        monkeypatch.setattr(dag_module, "record_error", lambda *_a, **_k: None)
-        monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
-        older = datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)
-        newer = datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc)
-        store = {dag_module.AGING_AS_OF_VARIABLE: older.isoformat()}
-
-        class _Variable(_StubVariable):
-            @staticmethod
-            def get(key, default=None):
-                return store.get(key, default)
-
-            @staticmethod
-            def set(key, value):
-                store[key] = value
-
-        monkeypatch.setattr(dag_module, "Variable", _Variable)
-        seen_at_write: list = []
-
-        class _FailingSync(_FakeSync):
-            def run(self, incremental=True, since=None, sector=None):
-                seen_at_write.append(store.get(dag_module.AGING_AS_OF_VARIABLE))
-                return False  # the sync wrote part of its window, then failed
-
-        monkeypatch.setattr(fake_sync_module, "MISPToNeo4jSync", _FailingSync)
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
-
-        with pytest.raises(dag_module.AirflowException):
-            dag_module.run_neo4j_sync(data_interval_end=newer)
-
-        assert _FailingSync.init_kwargs == {"aging_as_of": newer}
-        assert seen_at_write == [newer.isoformat()], "the mark is the run's time before the first write"
-        assert dag_module.enrichment_as_of({"data_interval_end": older}) == newer, "an older run cleared later"
-        assert dag_module.enrichment_as_of({"data_interval_end": newer}) == newer, "the run's own job"
-
-        # An older run's sync neither lowers the mark nor ages its writes at its own, earlier time.
-        monkeypatch.setattr(fake_sync_module, "MISPToNeo4jSync", _FakeSync)
-        monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
-        monkeypatch.setattr(dag_module, "record_neo4j_node_counts", lambda: True)
-        dag_module.run_neo4j_sync(data_interval_end=older)
-        assert _FakeSync.init_kwargs == {"aging_as_of": newer}
-        assert store[dag_module.AGING_AS_OF_VARIABLE] == newer.isoformat(), "the mark never decreases"
+            assert _FakeSync.init_kwargs == {"aging_as_of": due}, due
+            assert jobs[-1] == due, due
+        assert not [k for k in keys if "AGING" in str(k).upper()], keys
 
     def test_corrupt_state_file_falls_back_to_fixed_window(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch

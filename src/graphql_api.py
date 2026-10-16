@@ -493,6 +493,7 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     aging_tier=n.get("aging_tier"),
                     aging_factor=n.get("aging_factor"),
                     aging_since=_str_or_none(n.get("aging_since")),
+                    aging_evaluated_at=_str_or_none(n.get("aging_evaluated_at")),
                     retired_by=n.get("retired_by"),
                     retired_at=_str_or_none(n.get("retired_at")),
                 )

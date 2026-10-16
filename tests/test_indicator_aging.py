@@ -19,6 +19,7 @@ import logging
 import random
 import sys
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -154,8 +155,10 @@ class TestOneDefinitionWithoutOwnership:
             assert '"' not in text, "single quotes only (the fragments run inside apoc strings)"
 
     def test_the_rule_sets_exactly_the_aging_fields(self):
-        """2026-10-16: the keys of ``aging_map`` are ``AGING_FIELDS``, and the job writes a node when any
-        of them differs from the stored value (``aging_basis`` among them, so a stale one is corrected)."""
+        """2026-10-16: the keys of ``aging_map`` are ``AGING_FIELDS`` and ``aging_evaluated_at``, and the
+        job writes a node when any of the ``AGING_FIELDS`` differs from the stored value
+        (``aging_basis`` among them, so a stale one is corrected); a later evaluation time alone is no
+        change, and a node without a stored time is written once to store it."""
         import re
 
         body = ia.aging_map("n", "datetime()")
@@ -169,12 +172,17 @@ class TestOneDefinitionWithoutOwnership:
             "active",
             "retired_at",
             "retired_by",
+            "aging_evaluated_at",
         )
-        assert set(keys) == set(ia.AGING_FIELDS)
+        assert keys == ia.AGING_MAP_KEYS == ia.AGING_FIELDS + (ia.EVALUATED_AT,)
         predicate = ia.changed_predicate("n", "aged")
-        assert predicate.startswith("any(_k IN ['aging_basis', 'aging_tier', 'aging_factor', 'aging_since', ")
-        for field in ia.AGING_FIELDS:
-            assert f"'{field}'" in predicate
+        assert predicate.startswith(
+            "((n.aging_evaluated_at IS NULL AND aged.aging_evaluated_at IS NOT NULL) "
+            "OR any(_k IN ['aging_basis', 'aging_tier', 'aging_factor', 'aging_since', "
+        )
+        listed = predicate.split("any(_k IN [", 1)[1].split("]", 1)[0]
+        assert listed == ", ".join(f"'{field}'" for field in ia.AGING_FIELDS)
+        assert "'aging_evaluated_at'" not in listed, "a later time alone does not write a node"
         _outer, inner, count = enrichment_jobs._aging_job_statements(ia.AgingPolicy())
         assert f"WHERE {predicate} SET n += aged" in inner and f"WHERE {predicate} RETURN count(n)" in count
 
@@ -192,10 +200,22 @@ class TestOneDefinitionWithoutOwnership:
         ) in body
         assert "last_reported_basis" not in ia.edge_report_items("r", "item.report", "item.source_id")
 
-    def test_the_job_reads_every_indicator_with_a_time(self):
-        outer, _inner, _count = enrichment_jobs._aging_job_statements(ia.AgingPolicy())
-        assert outer == (
-            "MATCH (n:Indicator) WHERE coalesce(n.last_reported_at, n.first_imported_at) IS NOT NULL RETURN n"
+    def test_the_job_selects_the_changing_indicators_and_locks_each_before_it_reads_it(self):
+        """2026-10-16: ``outer`` selects, without a lock, the Indicators with a time whose aging changes;
+        ``inner`` takes each node's write lock before it reads anything of the node, then evaluates the
+        rule again and writes only where a value still changes, so a write that committed while the job
+        waited is what the rule reads (``tests/test_indicator_aging_neo4j.py`` runs the race)."""
+        policy = ia.AgingPolicy()
+        outer, inner, count = enrichment_jobs._aging_job_statements(policy)
+        changed = (
+            f"WITH n, {ia.aging_map('n', 'datetime($as_of)', policy)} AS aged WHERE {ia.changed_predicate('n', 'aged')}"
+        )
+        select = f"MATCH (n:Indicator) WHERE coalesce(n.last_reported_at, n.first_imported_at) IS NOT NULL {changed}"
+        assert outer == f"{select} RETURN n"
+        assert count == f"{select} RETURN count(n) AS changed"
+        assert inner == f"CALL apoc.lock.nodes([n]) {changed} SET n += aged"
+        assert inner.index("CALL apoc.lock.nodes([n])") == 0 and "n." not in inner.split(" WITH ", 1)[0], (
+            "no property of the node is read before the lock"
         )
 
 
@@ -598,27 +618,6 @@ class TestTheJob:
         assert seen.index(("decay", as_of)) < seen.index("build_campaign_nodes")
 
 
-class _Variables:
-    """Airflow Variable stand-in backed by a dict; ``fail_get`` / ``fail_set`` make the store unreadable
-    or unwritable."""
-
-    def __init__(self, **values):
-        self.store = dict(values)
-        self.fail_get = self.fail_set = False
-        self.sets: list = []
-
-    def get(self, key, default=None):
-        if self.fail_get:
-            raise RuntimeError("the metadata database is not reachable")
-        return self.store.get(key, default)
-
-    def set(self, key, value):
-        if self.fail_set:
-            raise RuntimeError("the metadata database is not reachable")
-        self.sets.append((key, value))
-        self.store[key] = value
-
-
 class TestTheDagTime:
     @pytest.fixture(scope="class")
     def dag(self):
@@ -634,13 +633,7 @@ class TestTheDagTime:
         return module
 
     @pytest.fixture
-    def variables(self, dag, monkeypatch):
-        store = _Variables()
-        monkeypatch.setattr(dag, "Variable", store)
-        return store
-
-    @pytest.fixture
-    def as_of(self, dag, variables):
+    def as_of(self, dag):
         return dag.enrichment_as_of
 
     def test_the_data_interval_end_of_a_scheduled_run(self, as_of):
@@ -654,92 +647,100 @@ class TestTheDagTime:
     def test_now_without_either(self, as_of):
         assert abs(as_of({}) - datetime.now(UTC)) < timedelta(seconds=5)
 
-    # 2026-10-16: the aging clock never moves backwards (``EDGEGUARD_AGING_AS_OF``).
+    def test_no_clock_is_shared_between_runs(self, dag, as_of, monkeypatch):
+        """2026-10-16: the time is the run's own; the DAG keeps no aging clock of its own (the Airflow
+        Variable ``EDGEGUARD_AGING_AS_OF`` it read and raised is gone). A node is held at its latest
+        time by ``aging_evaluated_at`` on the node, whatever the order of the runs, cleared tasks and
+        the baseline (``TestTheTimeNeverMovesBackwards``)."""
 
-    def test_a_mark_later_than_the_run_time_wins(self, dag, variables, as_of, caplog):
-        """Clearing an older run's enrichment after a newer run aged the graph: the old run evaluates at
-        the newer time, so no retired indicator comes back and no tier falls."""
-        older_run = datetime(2026, 10, 10, 3, tzinfo=UTC)
-        newer = datetime(2026, 10, 13, 3, tzinfo=UTC)
-        variables.store[dag.AGING_AS_OF_VARIABLE] = newer.isoformat()
-        assert dag.AGING_AS_OF_VARIABLE == "EDGEGUARD_AGING_AS_OF"
-        with caplog.at_level(logging.INFO):
-            assert as_of({"data_interval_end": older_run}) == newer
-        assert "never moves backwards" in caplog.text
-        later_run = datetime(2026, 10, 16, 3, tzinfo=UTC)
-        assert as_of({"data_interval_end": later_run}) == later_run, "an earlier mark leaves the run's time"
+        class _NoVariables:
+            @staticmethod
+            def get(*_a, **_k):
+                raise AssertionError("the aging time reads no Airflow Variable")
 
-    def test_the_mark_never_decreases(self, dag, variables):
-        t1, t2, t3 = (datetime(2026, 10, d, 3, tzinfo=UTC) for d in (10, 13, 16))
-        dag.record_aging_as_of(t2)
-        assert variables.store[dag.AGING_AS_OF_VARIABLE] == t2.isoformat()
-        dag.record_aging_as_of(t1)
-        dag.record_aging_as_of(t2)
-        assert variables.store[dag.AGING_AS_OF_VARIABLE] == t2.isoformat() and len(variables.sets) == 1
-        dag.record_aging_as_of(datetime(2026, 10, 16, 5, tzinfo=timezone(timedelta(hours=2))))
-        assert variables.store[dag.AGING_AS_OF_VARIABLE] == t3.isoformat()
+            set = get
 
-    def test_a_missing_or_unreadable_mark_leaves_the_run_time(self, dag, variables, as_of, caplog):
-        run = datetime(2026, 10, 16, 3, tzinfo=UTC)
-        with caplog.at_level(logging.INFO):
-            assert as_of({"data_interval_end": run}) == run
-        assert "EDGEGUARD_AGING_AS_OF is not set" in caplog.text
-        variables.store[dag.AGING_AS_OF_VARIABLE] = "not a time"
-        with caplog.at_level(logging.WARNING):
-            assert as_of({"data_interval_end": run}) == run
-        assert "holds no ISO-8601 time" in caplog.text
-        dag.record_aging_as_of(run)
-        assert variables.store[dag.AGING_AS_OF_VARIABLE] == run.isoformat(), "a successful job repairs it"
-        variables.fail_get = True
-        caplog.clear()
-        with caplog.at_level(logging.WARNING):
-            assert as_of({"data_interval_end": run + timedelta(days=3)}) == run + timedelta(days=3)
-            dag.record_aging_as_of(run + timedelta(days=3))
-        assert "Could not read the Airflow Variable EDGEGUARD_AGING_AS_OF" in caplog.text
-        assert variables.store[dag.AGING_AS_OF_VARIABLE] == run.isoformat(), "an unread mark is never overwritten"
+        monkeypatch.setattr(dag, "Variable", _NoVariables)
+        older = datetime(2026, 10, 10, 3, tzinfo=UTC)
+        newer = datetime(2026, 10, 16, 3, tzinfo=UTC)
+        assert as_of({"data_interval_end": newer}) == newer
+        assert as_of({"data_interval_end": older}) == older, "an older run cleared later keeps its own time"
+        for name in ("AGING_AS_OF_VARIABLE", "record_aging_as_of", "sync_aging_as_of", "_read_aging_as_of_mark"):
+            assert not hasattr(dag, name), name
+        source = (Path(__file__).resolve().parent.parent / "dags" / "edgeguard_pipeline.py").read_text()
+        assert "EDGEGUARD_AGING_AS_OF" not in source and "on_aged" not in source
 
-    def test_a_failed_write_of_the_mark_does_not_fail_the_task(self, dag, variables, caplog):
-        variables.fail_set = True
-        with caplog.at_level(logging.WARNING):
-            dag.record_aging_as_of(datetime(2026, 10, 16, 3, tzinfo=UTC))
-        assert "Could not write the Airflow Variable EDGEGUARD_AGING_AS_OF" in caplog.text
+    def test_the_runner_takes_the_time_only(self):
+        import inspect
 
-    def test_the_runner_reports_the_time_only_after_the_aging_job_succeeded(self, monkeypatch):
-        names = (
-            "bridge_vulnerability_cve",
-            "merge_alias_duplicate_actors",
-            "merge_malware_attack_twins",
-            "calibrate_cooccurrence_confidence",
-            "enrich_cve_epss",
+        assert list(inspect.signature(enrichment_jobs.run_all_enrichment_jobs).parameters) == ["neo4j_client", "as_of"]
+
+
+class TestTheTimeNeverMovesBackwards:
+    """2026-10-16: every evaluation applies the rule at the later of its time and the node's
+    ``aging_evaluated_at`` and stores that time with the aging values; the job writes only nodes whose
+    values change. The Cypher runs on Neo4j in ``tests/test_indicator_aging_neo4j.py``; here, the
+    fragments and a Python model of the rule show why storing the time only with a change suffices."""
+
+    def test_the_evaluation_time_is_the_later_of_the_given_and_the_stored(self):
+        assert ia.EVALUATED_AT == "aging_evaluated_at"
+        assert ia.evaluated_at_expr("n", "datetime($as_of)") == (
+            "CASE WHEN n.aging_evaluated_at > datetime($as_of) THEN n.aging_evaluated_at ELSE datetime($as_of) END"
         )
-        for name in names:
-            monkeypatch.setattr(enrichment_jobs, name, lambda c: {})
-        aged: list = []
-        as_of = datetime(2026, 10, 16, 3, tzinfo=UTC)
-
-        def campaigns_fail(c):
-            assert aged == [as_of], "reported before the jobs after the aging run"
-            raise RuntimeError("campaign builder failed")
-
-        monkeypatch.setattr(enrichment_jobs, "build_campaign_nodes", campaigns_fail)
-        monkeypatch.setattr(
-            enrichment_jobs, "decay_ioc_confidence", lambda c, as_of=None: {"as_of": as_of.isoformat(), "changed": 0}
+        body = ia.aging_map("n", "datetime($as_of)")
+        assert body.startswith(f"[_at IN [{ia.evaluated_at_expr('n', 'datetime($as_of)')}] | [_basis IN [")
+        assert "duration.inDays(_basis, _at).days" in body
+        assert body.count("datetime($as_of)") == 2, "the given time is read only through the later-of"
+        assert body.endswith(
+            "aging_evaluated_at: CASE WHEN _age IS NULL THEN n.aging_evaluated_at ELSE _at END}][0]][0]][0]][0]"
         )
-        with pytest.raises(RuntimeError, match="campaign builder"):
-            enrichment_jobs.run_all_enrichment_jobs(MagicMock(), as_of=as_of, on_aged=aged.append)
-        assert aged == [as_of], "the graph is aged at as_of although a later job failed"
 
-        def decay_fails(c, as_of=None):
-            raise RuntimeError("[AGING] apoc.periodic.iterate batch failures")
+    def test_every_write_evaluates_at_the_later_time(self):
+        """The writers splice ``aging_set_clause`` with ``WRITE_AS_OF``; the clause carries the later-of."""
+        clause = ia.aging_set_clause("n", ia.WRITE_AS_OF)
+        assert ia.evaluated_at_expr("n", ia.WRITE_AS_OF) in clause
+        source = (_SRC / "neo4j_client.py").read_text()
+        assert source.count('aging_set_clause("n", WRITE_AS_OF)') == 2  # the batch and the single-item path
+        assert source.count('aging_set_clause("i", WRITE_AS_OF)') == 2  # the alert path and its fallback
 
-        aged.clear()
-        monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", decay_fails)
-        with pytest.raises(RuntimeError, match="AGING"):
-            enrichment_jobs.run_all_enrichment_jobs(MagicMock(), as_of=as_of, on_aged=aged.append)
-        monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", lambda c, as_of=None: {})
-        monkeypatch.setattr(enrichment_jobs, "build_campaign_nodes", lambda c: {})
-        enrichment_jobs.run_all_enrichment_jobs(MagicMock(), as_of=as_of, on_aged=aged.append)
-        assert aged == [], "a failed job, or one without a connection, reports no time"
+    @staticmethod
+    def _state(policy: ia.AgingPolicy, age: int) -> tuple:
+        """The rule's values for one basis at an age (Python model of ``aging_map``)."""
+        tier = policy.tier(age)
+        retired = age >= policy.retire_days
+        since = policy.retire_days if retired else policy.tier_start(tier)
+        return (tier, policy.factor(tier), policy.confidence(0.8, age), since, not retired, retired)
+
+    def test_every_value_moves_one_way_as_the_time_grows(self):
+        """For one basis the values are a step function of the time that never steps back: the tier
+        and ``aging_since`` only grow, the factor and the confidence only fall, a retired node stays
+        retired. This is what lets an older time be lifted to the stored one."""
+        p = ia.AgingPolicy()
+        states = [self._state(p, age) for age in range(-5, 1200)]
+        for before, after in pairwise(states):
+            assert after[0] >= before[0] and after[3] >= before[3]
+            assert after[1] <= before[1] and after[2] <= before[2]
+            assert before[4] or not after[4]
+
+    def test_any_order_of_evaluations_ends_in_the_latest_state_and_never_steps_back(self):
+        """Model of the job: evaluate at ``max(time, stored)``, write the values and the time only when
+        a value changes. Over random times in random orders the node never steps back and ends in the
+        state of the latest time, although the time is stored only with a change."""
+        p = ia.AgingPolicy()
+        rng = random.Random(20261016)
+        for _ in range(500):
+            times = [rng.randrange(0, 1100) for _ in range(rng.randrange(1, 7))]
+            stored_state, stored_at = None, None
+            history = []
+            for t in times:
+                at = t if stored_at is None or t > stored_at else stored_at
+                state = self._state(p, at)
+                if state != stored_state:
+                    stored_state, stored_at = state, at
+                history.append(stored_state)
+            for before, after in pairwise(history):
+                assert after[0] >= before[0] and after[3] >= before[3] and (before[4] or not after[4])
+            assert stored_state == self._state(p, max(times)), times
 
 
 # ================================================================ the readers
@@ -828,6 +829,7 @@ class TestReaders:
             "aging_tier": 3,
             "aging_factor": 0.55,
             "aging_since": "2026-06-01T00:00:00+00:00",
+            "aging_evaluated_at": "2026-10-16T03:00:00+00:00",
         }
         session = MagicMock()
         session.run.return_value = [{"n": node}]
@@ -847,6 +849,7 @@ class TestReaders:
             False,
             "decay",
         )
+        assert ind.aging_evaluated_at == "2026-10-16T03:00:00+00:00", "the time the rule last evaluated it at"
         older = dict(node, source_confidence=None)
         session.run.return_value = [{"n": older}]
         (ind,) = graphql_api._resolve_indicators(client, IndicatorFilter(active_only=False))

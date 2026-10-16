@@ -1595,10 +1595,10 @@ class MISPToNeo4jSync:
         else:
             self.neo4j = neo4j_client
         # 2026-10-16: the DAG run's evaluation time of the indicator aging (``data_interval_end``,
-        # ``run_after`` for a manual run, raised to the aging clock's mark when that is later:
-        # ``enrichment_as_of`` in the DAG), which that run's aging job uses as well: every Indicator
-        # this sync writes is aged at that time (``Neo4jClient.set_aging_as_of``). None (the command
-        # line) keeps the time of each write.
+        # ``run_after`` for a manual run: ``enrichment_as_of`` in the DAG), which that run's aging job
+        # uses as well: every Indicator this sync writes is aged at that time, or at the node's later
+        # ``aging_evaluated_at`` (``Neo4jClient.set_aging_as_of``, ``indicator_aging``). None (the
+        # command line) keeps the time of each write.
         if aging_as_of is not None and self.neo4j is not None:
             self.neo4j.set_aging_as_of(aging_as_of)
 
