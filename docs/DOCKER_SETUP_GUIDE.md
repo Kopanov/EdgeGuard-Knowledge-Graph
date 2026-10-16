@@ -243,6 +243,8 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 - MISP container OOM-killed (check `docker inspect <container> | grep OOMKilled`)
 - `dmesg | grep -i oom` on the host showing MISP processes killed
 
+**6. Collector concurrency:** all collector tasks share the Airflow pool `edgeguard_collectors` (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4). Lower it if MISP workers still get killed (HTTP 502).
+
 ---
 
 ## 6. Sanity check: is the colleague checklist “correct”?

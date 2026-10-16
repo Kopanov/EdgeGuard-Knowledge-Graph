@@ -104,6 +104,9 @@ x-common-env: &common-env
   EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET: ${EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET:-400}
   EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN: ${EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN:-60}
   EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS: ${EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS:-30}
+  # Slots of the Airflow pool every collector task runs in (dags/edgeguard_pipeline.py COLLECTOR_POOL):
+  # at most this many collectors run at once across all DAGs. The airflow service creates the pool.
+  EDGEGUARD_COLLECTOR_POOL_SLOTS: ${EDGEGUARD_COLLECTOR_POOL_SLOTS:-4}
   # Source API key check (src/source_key_check.py): switch for the live requests, and the keyed
   # sources a baseline must not start without (comma-separated; empty = none).
   EDGEGUARD_SOURCE_KEY_CHECK: ${EDGEGUARD_SOURCE_KEY_CHECK:-true}
@@ -331,7 +334,19 @@ services:
     container_name: edgeguard_airflow
     restart: unless-stopped
     # Dockerfile.airflow CMD is `airflow standalone` (tini as PID 1). Do not set `command: standalone`
-    # — that would override CMD and break the entrypoint chain.
+    # — that would override CMD and break the entrypoint chain. The command below keeps that chain
+    # (tini -> bash -> airflow standalone) and, in the background, creates/resizes the collector
+    # pool: it needs the metadata DB, which `standalone` migrates, so the set is retried until it
+    # succeeds (airflow-init has no DB access). Idempotent on every start.
+    command:
+      - bash
+      - -c
+      - |
+        (until airflow pools set edgeguard_collectors "$${EDGEGUARD_COLLECTOR_POOL_SLOTS:-4}" \
+            "Collector tasks of all DAGs (bounds MISP and container memory pressure)" >/dev/null 2>&1; do
+          sleep 10
+        done) &
+        exec airflow standalone
     # Note: in Airflow 3.x `airflow standalone` runs the scheduler + API
     # server + DAG processor + triggerer in one process, same as 2.x.
     # For a split-process production deployment, switch to separate

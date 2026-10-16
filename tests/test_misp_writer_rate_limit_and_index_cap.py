@@ -82,6 +82,12 @@ class TestEventLookup:
         )
         assert writer._restsearch_events_for_name("x") == [{"Event": {"id": "5", "info": "x"}}]
 
+    def test_lookup_asks_for_event_metadata_only(self, monkeypatch):
+        """Only id/info are read; a full event (all attributes) grew a php-fpm worker by GBs."""
+        writer, posted, _sleeps = _writer(monkeypatch, [_Resp(200, {"response": []})])
+        writer._restsearch_events_for_name("x")
+        assert posted[0][1]["metadata"] is True
+
     def test_failed_lookup_does_not_create_an_event(self, monkeypatch, caplog):
         """The event may exist; creating another one would duplicate the day's event."""
         writer, posted, _sleeps = _writer(monkeypatch, [_Resp(403, text="forbidden")])

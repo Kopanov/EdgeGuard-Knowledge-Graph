@@ -604,6 +604,12 @@ def _on_task_success(context):
         logger.warning(f"Failed to record success metric for {dag_id}: {e}")
 
 
+# Airflow pool shared by every collector task of every DAG: bounds how many collectors run at once
+# (MISP php-fpm workers and the airflow container's memory limit are the shared resources).
+# The slot count is EDGEGUARD_COLLECTOR_POOL_SLOTS (docker-compose.yml creates the pool at start);
+# a deployment without that step must create the pool by hand or the collector tasks never start.
+COLLECTOR_POOL = "edgeguard_collectors"
+
 # Default arguments
 default_args = {
     "owner": "edgeguard",
@@ -1712,6 +1718,7 @@ misp_health_check = PythonOperator(
 with TaskGroup("high_frequency_collectors", dag=dag) as high_freq_group:
     collect_otx = PythonOperator(
         task_id="collect_otx",
+        pool=COLLECTOR_POOL,
         python_callable=run_otx_collection,
         execution_timeout=timedelta(hours=1),
         dag=dag,
@@ -1768,6 +1775,7 @@ misp_health_medium = PythonOperator(
 
 collect_cisa_medium = PythonOperator(
     task_id="collect_cisa",
+    pool=COLLECTOR_POOL,
     python_callable=run_cisa_collection,
     execution_timeout=timedelta(hours=1),
     dag=medium_freq_dag,
@@ -1775,6 +1783,7 @@ collect_cisa_medium = PythonOperator(
 
 collect_vt_medium = PythonOperator(
     task_id="collect_virustotal",
+    pool=COLLECTOR_POOL,
     python_callable=run_vt_collection,
     execution_timeout=timedelta(hours=1),
     dag=medium_freq_dag,
@@ -1816,6 +1825,7 @@ misp_health_low = PythonOperator(
 
 collect_nvd_low = PythonOperator(
     task_id="collect_nvd",
+    pool=COLLECTOR_POOL,
     python_callable=run_nvd_collection,
     execution_timeout=timedelta(hours=2),
     dag=low_freq_dag,
@@ -1856,6 +1866,7 @@ misp_health_daily = PythonOperator(
 
 collect_mitre_daily = PythonOperator(
     task_id="collect_mitre",
+    pool=COLLECTOR_POOL,
     python_callable=run_mitre_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1865,6 +1876,7 @@ collect_mitre_daily = PythonOperator(
 # (default OFF → task logs "disabled by flag" and succeeds with 0 items).
 collect_cisa_ics_daily = PythonOperator(
     task_id="collect_cisa_ics",
+    pool=COLLECTOR_POOL,
     python_callable=run_cisa_ics_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1872,6 +1884,7 @@ collect_cisa_ics_daily = PythonOperator(
 
 collect_abuseipdb_daily = PythonOperator(
     task_id="collect_abuseipdb",
+    pool=COLLECTOR_POOL,
     python_callable=run_abuseipdb_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1879,6 +1892,7 @@ collect_abuseipdb_daily = PythonOperator(
 
 collect_threatfox_daily = PythonOperator(
     task_id="collect_threatfox",
+    pool=COLLECTOR_POOL,
     python_callable=run_threatfox_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1886,6 +1900,7 @@ collect_threatfox_daily = PythonOperator(
 
 collect_urlhaus_daily = PythonOperator(
     task_id="collect_urlhaus",
+    pool=COLLECTOR_POOL,
     python_callable=run_urlhaus_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1893,6 +1908,7 @@ collect_urlhaus_daily = PythonOperator(
 
 collect_feodo_daily = PythonOperator(
     task_id="collect_feodo",
+    pool=COLLECTOR_POOL,
     python_callable=run_feodo_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1900,6 +1916,7 @@ collect_feodo_daily = PythonOperator(
 
 collect_sslblacklist_daily = PythonOperator(
     task_id="collect_sslblacklist",
+    pool=COLLECTOR_POOL,
     python_callable=run_sslblacklist_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1909,6 +1926,7 @@ collect_sslblacklist_daily = PythonOperator(
 # (default OFF → task logs "disabled by flag" and succeeds with 0 items).
 collect_malwarebazaar_daily = PythonOperator(
     task_id="collect_malwarebazaar",
+    pool=COLLECTOR_POOL,
     python_callable=run_malwarebazaar_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -3647,24 +3665,28 @@ baseline_clean_task = PythonOperator(
 with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
         task_id="collect_otx",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_otx,
         execution_timeout=timedelta(hours=5),
         dag=baseline_dag,
     )
     bl_nvd = PythonOperator(
         task_id="collect_nvd",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_nvd,
         execution_timeout=timedelta(hours=5),
         dag=baseline_dag,
     )
     bl_cisa = PythonOperator(
         task_id="collect_cisa",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_cisa,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_mitre = PythonOperator(
         task_id="collect_mitre",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_mitre,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
@@ -3689,30 +3711,35 @@ with TaskGroup(
 ) as baseline_tier2:
     bl_abuseipdb = PythonOperator(
         task_id="collect_abuseipdb",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_abuseipdb,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_threatfox = PythonOperator(
         task_id="collect_threatfox",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_threatfox,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_urlhaus = PythonOperator(
         task_id="collect_urlhaus",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_urlhaus,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_feodo = PythonOperator(
         task_id="collect_feodo",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_feodo,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_sslblacklist = PythonOperator(
         task_id="collect_sslblacklist",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_sslblacklist,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
@@ -3721,6 +3748,7 @@ with TaskGroup(
     # wrapper returns a skipped status when the flag is off, so the task is inert.
     bl_cisa_ics = PythonOperator(
         task_id="collect_cisa_ics",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_cisa_ics,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
@@ -3729,6 +3757,7 @@ with TaskGroup(
     # returns a skipped status when the flag is off, so the task is inert.
     bl_malwarebazaar = PythonOperator(
         task_id="collect_malwarebazaar",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_malwarebazaar,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
