@@ -1,6 +1,6 @@
 # EdgeGuard Data Sources - API Documentation & Rate Limits
 
-**Last Updated:** 2026-03-27  
+**Last Updated:** 2026-10-16  
 **Purpose:** Complete reference for setting up a new EdgeGuard instance. For integration behaviour (e.g. NVD published-date windows), see [`DATA_SOURCES.md`](DATA_SOURCES.md).
 
 ---
@@ -14,7 +14,7 @@
 | CISA KEV | ❌ No | No limit (CSV download) | Free | JSON |
 | MITRE ATT&CK | ❌ No | No limit (STIX download) | Free | STIX 2.1 |
 | VirusTotal | ✅ Yes | 4 requests/min, 500/day (free) | Free tier used; paid plans from $50/month | JSON |
-| AbuseIPDB | ✅ Yes | 1,000 requests/day (free) | $50+/month | JSON |
+| AbuseIPDB | ✅ Yes | 1,000 `check` requests/day, 5 `blacklist` requests per UTC day (free) | $50+/month | JSON |
 | URLhaus | ❌ No | No limit (CSV) | Free | CSV |
 | Feodo Tracker | ❌ No | No limit (CSV) | Free | CSV |
 | SSL Blacklist | ❌ No | No limit (CSV) | Free | CSV |
@@ -157,7 +157,7 @@
 |--------|---------|
 | **API Required** | Yes |
 | **Registration** | Free account required |
-| **Rate Limit (Free)** | 1,000 requests/day |
+| **Rate Limit (Free)** | 1,000 `check` requests and 5 `blacklist` requests per UTC day |
 | **Rate Limit (Paid)** | 300,000+ requests/day |
 | **Data Provided** | IP reputation, abuse reports, confidence score |
 | **Update Frequency** | Real-time reports |
@@ -165,13 +165,15 @@
 **API Key获取:**
 1. Create account at https://www.abuseipdb.com/register
 2. Go to API Key section
-3. Free tier provides 1,000 lookups/day
+3. Free tier provides 1,000 `check` lookups and 5 `blacklist` downloads per UTC day
 
 **Pricing:**
-- **Free:** 1,000 lookups/day
+- **Free:** 1,000 lookups/day, 5 blacklist downloads/day
 - **Starter:** $50/month, 10,000 lookups/day
 - **Professional:** $150/month, 100,000 lookups/day
 - **Enterprise:** Custom, 300,000+ lookups/day
+
+**EdgeGuard usage (free tier):** `collect_abuseipdb` (daily DAG and baseline) downloads the blacklist with `GET /blacklist`; the source key check uses `GET /check` and spends no blacklist request. A blacklist answer of HTTP 429 means the day's 5 blacklist requests are spent: the request returns at once, without the rate-limit backoff, and the task fails (2026-10; it used to stay green with a count of 0). A fetched, non-empty answer is kept in `<EDGEGUARD_STATE_DIR or ./state>/abuseipdb_blacklist_cache.json`, and a run that asks for the same parameters reuses it without a request while it was fetched on the current UTC day and is at most `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS` (default 20) old; `0` turns the cache off. See docs/COLLECTORS.md § 5 and docs/RUNBOOK.md, "AbuseIPDB daily blacklist quota".
 
 ---
 
@@ -324,7 +326,7 @@ For production use, implement these delays:
 | NVD | ~0.6–1s between paginated requests with key; ~6.5s without | 50 req/30sec with key; 5 without ([NVD Start Here](https://nvd.nist.gov/developers/start-here)) |
 | VirusTotal (free) | 15 seconds/request | 4 req/min limit |
 | VirusTotal (paid) | 0.5 seconds/request | Higher limits |
-| AbuseIPDB (free) | 90 seconds/request | 1000/day limit |
+| AbuseIPDB (free) | 90 seconds/request | 1000/day `check` limit; the blacklist allows 5 requests per UTC day, and EdgeGuard reuses a fetched answer within that day (§ 6) |
 | MISP | 1 second/request | Depends on server |
 
 ---
@@ -352,4 +354,4 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._
+_Last updated: 2026-10-16 — § 6 AbuseIPDB, the quick reference table and the rate-limit recommendations: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests, and how EdgeGuard uses them (a blacklist 429 fails `collect_abuseipdb` at once; a fetched, non-empty answer is reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`). Prior: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._

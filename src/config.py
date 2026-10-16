@@ -791,8 +791,8 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   (URLhaus csv_recent) window holding about 1,100 new entries per day each; cut at 200, about
 #   80% of them were never collected (neither feed has a cursor). EDGEGUARD_THREATFOX_MAX_PER_RUN
 #   and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap to the whole window (see their definitions).
-#   feodo, sslbl (2026-10): each run reads the whole list the source publishes; abuseipdb: one
-#   blacklist request of at most 10,000 addresses, which AbuseIPDB chooses. Cut at 200, the other
+#   feodo, sslbl (2026-10): each run reads the whole list the source publishes; abuseipdb: at most
+#   one blacklist request of at most 10,000 addresses, which AbuseIPDB chooses. Cut at 200, the other
 #   entries were never reported again and aged while still listed. EDGEGUARD_FEODO_MAX_PER_RUN and
 #   EDGEGUARD_SSLBL_MAX_PER_RUN size the cap to the list, EDGEGUARD_ABUSEIPDB_MAX_PER_RUN is the
 #   request's limit (see their definitions).
@@ -1394,12 +1394,15 @@ URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 50000)
 #   twice the history, which grows when the feed moves again. Newest = latest ``last_online``.
 #   SSL Blacklist: certificate fingerprints; both modes read the whole blacklist (10,964 rows on
 #   2026-10-12). 20,000 is about twice that. Newest = latest ``Listingdate``.
-#   AbuseIPDB: addresses of the blacklist, one ``GET /blacklist`` request per run as before (the
-#   daily run and a baseline: at most two a day); the cap sets the request's ``limit``, not the
-#   number of requests. 10,000 is the most one request returns on the free plan, the ceiling the
-#   collector already applied (``AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST``; the 730-day baseline
-#   of 2026-10-13 received 10,000), so a larger value has no effect until that ceiling is raised
-#   for a plan that returns more. AbuseIPDB chooses which addresses fill the request.
+#   AbuseIPDB: addresses of the blacklist, at most one ``GET /blacklist`` request per run as before
+#   (the daily run and a baseline), and none when the run reuses the answer fetched earlier on the
+#   same UTC day (``EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS``): with the defaults the two runs ask
+#   for the same parameters, so on a day with both the run that collects second, within that age of
+#   the first, sends no request. The cap sets the request's ``limit``, not the number of requests.
+#   10,000 is the most one request returns on the free plan, the ceiling the collector already
+#   applied (``AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST``; the 730-day baseline of 2026-10-13
+#   received 10,000), so a larger value has no effect until that ceiling is raised for a plan that
+#   returns more. AbuseIPDB chooses which addresses fill the request.
 FEODO_MAX_PER_RUN = _env_int("EDGEGUARD_FEODO_MAX_PER_RUN", 15000)
 SSLBL_MAX_PER_RUN = _env_int("EDGEGUARD_SSLBL_MAX_PER_RUN", 20000)
 ABUSEIPDB_MAX_PER_RUN = _env_int("EDGEGUARD_ABUSEIPDB_MAX_PER_RUN", 10000)
