@@ -160,9 +160,11 @@ _DAG_START_DATE = pendulum.datetime(2025, 1, 1, tz="UTC")
 NEO4J_SYNC_EVERY = timedelta(days=3)
 # 2026-10: ``check_sync_needed`` skips a run when the last successful sync started less than this ago
 # (the state file's ``last_sync``). It exists for the run right after another sync: the baseline's full
-# sync or a manual ``force_sync`` run, both of which stamp the state file. Such a run would re-read what
-# that sync wrote (the incremental window starts a day before its start) and repeat build_relationships
-# and the enrichment jobs on the graph just built. 24 h, because:
+# sync or a manual ``force_sync`` run, both of which stamp the state file. Of what that sync read, such a
+# run re-reads only the attributes MISP stamped in the window overlap before its start
+# (``EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS``, default 1 h; the window started a day before it until
+# 2026-10), but it would also repeat build_relationships and the enrichment jobs on the graph just built,
+# which is why the guard stays. 24 h, because:
 #   * it is longer than the rest of a baseline after its full sync starts, every task at its limit
 #     (``full_neo4j_sync`` 6 h, ``build_relationships`` 5 h, ``run_enrichment_jobs`` 5 h, no retries;
 #     ``baseline_postcheck``, ``baseline_complete`` and ``baseline_release_lock`` 49 min with their
