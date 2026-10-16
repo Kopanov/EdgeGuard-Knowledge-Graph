@@ -2728,8 +2728,10 @@ class MISPWriter:
         filter runs before ``_get_or_create_event``: a group MISP already holds entirely neither
         looks up nor creates the day's event, and the refresh candidates of the group are decided
         there. With dedup off or a listing that stopped early, the order stays: event, per-event
-        filter, cross-event filter. ``[DEDUP] All N items were already present`` is logged only
-        when nothing failed or was dropped, N being the attributes found present.
+        filter, cross-event filter, because partial keys can miss the copy in today's event and the
+        refresh decision needs the copy MISP wrote last. ``[DEDUP] All N items were already
+        present`` is logged only when nothing failed or was dropped, N being the attributes found
+        present.
 
         2026-10 (several-actor marks): an OTX indicator carries the pulses that the collector judged,
         with the canonical threat-actor reference, to name several actors (``several_actor_pulses``,
@@ -2958,8 +2960,14 @@ class MISPWriter:
             # 2026-10: with cross-event dedup on and a complete listing, the cross-event filter runs
             # before the event lookup: a group MISP already holds entirely (a re-run) then neither
             # looks up nor creates the day's event. With dedup off or a listing that stopped early
-            # (partial or empty keys) the order stays per-event first, so the target event's own
-            # attributes still count as present.
+            # (an error, a non-JSON answer, the page cap) the order stays per-event first. Today's
+            # attributes count as present in either order, since the per-event filter runs after
+            # the lookup; the order matters for the refresh of re-reported indicators, which edits
+            # the copy MISP wrote last. Partial keys can hold an earlier event's stale copy of an
+            # indicator whose copy in today's event lies on a page the listing never read: checked
+            # first, the indicator would be skipped before the per-event filter and the stale copy
+            # refreshed although MISP wrote today's copy today. Only a complete listing names the
+            # copy MISP wrote last.
             checked_first = bool(MISP_CROSS_EVENT_DEDUP and cross_event_complete.get(source_tag))
 
             # PR-F7: filter in TWO explicit steps so the skip-count attribution for each layer is

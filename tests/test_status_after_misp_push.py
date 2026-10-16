@@ -102,6 +102,21 @@ class TestIssue62SuccessRateGate:
         assert st["success"] is False
         assert "0 successes" in st["error"]
 
+    def test_errors_name_conversion_failures_as_a_cause(self, monkeypatch):
+        # 2026-10: push_items counts the items it could not convert to a MISP attribute as failed,
+        # so a failure is not necessarily one MISP reported: both error texts name the writer's
+        # [CONVERT] line next to MISP.
+        monkeypatch.delenv("EDGEGUARD_MISP_MIN_SUCCESS_RATE", raising=False)
+        none_pushed = status_after_misp_push("otx", 301, 0, 1)
+        below_rate = status_after_misp_push("otx", 301, 18, 1)
+        for st in (none_pushed, below_rate):
+            assert st["success"] is False
+            assert "attributes MISP did not store" in st["error"]
+            assert "items no MISP attribute could be built from" in st["error"]
+            assert "[CONVERT]" in st["error"]
+        assert "0 successes" in none_pushed["error"]
+        assert "0.947" in below_rate["error"]
+
     def test_collector_summary_line_emitted(self, caplog):
         with caplog.at_level(logging.INFO, logger="collectors.collector_utils"):
             status_after_misp_push("nvd", 100, 97, 3)

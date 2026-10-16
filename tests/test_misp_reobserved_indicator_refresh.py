@@ -254,6 +254,118 @@ def test_a_copy_written_today_is_not_refreshed_when_the_listing_is_checked_first
     assert misp.edits == []
 
 
+class _PartialListingMisp(_Misp):
+    """``_Misp`` whose source listing stops early: page 1 is a full page of 5,000 rows (``page_one``
+    and filler rows), page 2 fails with ``failure`` (an HTTP status, or an exception raised as
+    ``requests`` raises it). The per-event request answers the stored rows of the event asked for.
+    ``calls`` records the requests in order; ``_push_partial`` adds the event lookup."""
+
+    PAGE = 5000
+
+    def __init__(self, page_one: List[dict], today: List[dict], failure: Any):
+        super().__init__(page_one + today)
+        filler = [
+            _stored(f"10.0.{i // 250}.{i % 250}", f"u-fill-{i}", last_seen=None, written=NOW - timedelta(days=2))
+            for i in range(self.PAGE - len(page_one))
+        ]
+        self.page_one = page_one + filler
+        self.failure = failure
+        self.calls: List[tuple] = []
+
+    def post(self, url: str, json: Optional[dict] = None, **kwargs: Any) -> MagicMock:
+        body = json or {}
+        r = MagicMock()
+        r.status_code = 200
+        if "attributes/restSearch" in url and "tags" in body:
+            self.calls.append(("listing", body["page"]))
+            if body["page"] == 1:
+                r.json.return_value = {"response": {"Attribute": self.page_one}}
+                return r
+            if isinstance(self.failure, Exception):
+                raise self.failure
+            r.status_code = self.failure
+            r.json.return_value = {}
+            return r
+        if "attributes/restSearch" in url and "eventid" in body:
+            self.calls.append(("per_event", body["eventid"]))
+            r.json.return_value = {
+                "response": {"Attribute": [a for a in self.stored if a["event_id"] == body["eventid"]]}
+            }
+            return r
+        if "/attributes/edit/" in url:
+            self.calls.append(("edit", url.rsplit("/", 1)[1]))
+        return super().post(url, json=json, **kwargs)
+
+
+def _push_partial(items: List[dict], misp: _PartialListingMisp):
+    writer = mw.MISPWriter(url="https://misp.test", api_key="dummy", verify_ssl=False)
+    writer.session = MagicMock()
+    writer.session.post.side_effect = misp.post
+    pushed: List[dict] = []
+
+    def lookup(_self, source, _date):
+        misp.calls.append(("lookup", source))
+        return "50"
+
+    def push_batch(_self, _event_id, batch):
+        pushed.extend(batch)
+        return len(batch), 0
+
+    with (
+        patch.object(mw.MISPWriter, "_get_or_create_event", lookup),
+        patch.object(mw.MISPWriter, "_push_batch", push_batch),
+    ):
+        result = writer.push_items(items, batch_size=50)
+    return result, pushed
+
+
+_LISTING_FAILURES = [
+    pytest.param(500, id="http-500"),
+    pytest.param(mw.requests.exceptions.ConnectionError("connection reset"), id="connection-error"),
+]
+
+
+@pytest.mark.parametrize("failure", _LISTING_FAILURES)
+def test_a_partial_listing_keeps_the_event_lookup_first_so_todays_copy_is_seen(failure):
+    """2026-10: a listing that stopped early is not checked before the event lookup. Page 1 holds
+    a stale copy of the indicator from an earlier event; its copy in today's event lies on page 2,
+    which failed. The per-event filter finds today's copy first, so nothing is refreshed: checked
+    first, the partial keys would skip the indicator and edit the stale copy although MISP wrote
+    today's copy today."""
+    today = f"EdgeGuard-feodo_tracker-{NOW.strftime('%Y-%m-%d')}"
+    misp = _PartialListingMisp(
+        page_one=[_stored("203.0.113.10", "u-old", last_seen=None, written=NOW - timedelta(days=200))],
+        today=[_stored("203.0.113.10", "u-today", last_seen=None, written=NOW, event="50", info=today)],
+        failure=failure,
+    )
+    (ok, failed), pushed = _push_partial([_feodo_item("203.0.113.10")], misp)
+    assert (ok, failed) == (0, 0) and pushed == []
+    assert misp.calls == [("listing", 1), ("listing", 2), ("lookup", "feodo_tracker"), ("per_event", "50")]
+    assert misp.edits == [], "today's copy was written today: no refresh is due"
+
+
+@pytest.mark.parametrize("failure", _LISTING_FAILURES)
+def test_a_partial_listing_still_refreshes_a_stale_copy_it_read(failure):
+    """With the event lookup first (a listing that stopped early), an indicator absent from today's
+    event and held in the partial keys is skipped by the cross-event filter after the per-event
+    one, and its stale copy read on page 1 is refreshed, as before 2026-10."""
+    misp = _PartialListingMisp(
+        page_one=[_stored("203.0.113.10", "u-old", last_seen=None, written=NOW - timedelta(days=200))],
+        today=[],
+        failure=failure,
+    )
+    (ok, failed), pushed = _push_partial([_feodo_item("203.0.113.10")], misp)
+    assert (ok, failed) == (0, 0) and pushed == []
+    assert misp.calls == [
+        ("listing", 1),
+        ("listing", 2),
+        ("lookup", "feodo_tracker"),
+        ("per_event", "50"),
+        ("edit", "u-old"),
+    ]
+    assert [uuid for uuid, _ in misp.edits] == ["u-old"]
+
+
 def test_a_later_last_seen_from_the_source_is_written():
     """AbuseIPDB's blacklist sends ``lastReportedAt``: a claim later than the stored ``last_seen`` is
     the value written (the source's own date)."""

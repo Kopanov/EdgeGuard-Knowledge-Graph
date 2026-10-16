@@ -199,6 +199,11 @@ def test_items_present_plus_a_dropped_item_do_not_log_all_already_present(monkey
     assert misp.calls == [("listing", _otx_tag(writer))]
     assert not any("[DEDUP]" in m for m in _messages(caplog)), "an item was dropped: not 'all already present'"
     assert any("otx: 1 unknown item type 'report'" in m for m in _messages(caplog))
+    # A run that pushes nothing new fails on a single unconvertible item, and its error names the
+    # [CONVERT] line as a cause next to MISP, which never saw the item.
+    status = status_after_misp_push("otx", len(items), *result)
+    assert status["success"] is False
+    assert "[CONVERT]" in status["error"]
 
 
 # --------------------------------------------------------------------------- re-runs
