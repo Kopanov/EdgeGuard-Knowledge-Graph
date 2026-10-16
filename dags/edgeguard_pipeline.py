@@ -1853,7 +1853,13 @@ daily_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (8 collectors parallel + retries) + buffer
+    # Sized as 7h (8 collectors in parallel, each with its retries) + buffer. Since 2026-10 the
+    # collectors share the collector pool (EDGEGUARD_COLLECTOR_POOL_SLOTS, default 4), so they no
+    # longer all start together: if every attempt reached its 2h execution_timeout they would need two
+    # rounds (~12h 45m) and the scheduler would mark the collectors still waiting for a slot skipped
+    # at this timeout, without a task failure callback (EdgeGuardCollectionStale reports the source).
+    # Real daily runs take minutes, so the timeout is kept.
+    dagrun_timeout=timedelta(hours=8, minutes=30),
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -2238,8 +2244,14 @@ baseline_dag = DAG(
     catchup=False,
     max_active_runs=1,  # Only one baseline at a time
     # Worst-case wall time: tier1 sequential (cisa 14s + mitre 28s + otx ~3h
-    # + nvd ~5h ≈ 8h) + tier2 parallel (~2h) + full_sync (~6h) +
+    # + nvd ~5h ≈ 8h) + tier2 (~2h) + full_sync (~6h) +
     # build_rels (~5h) + enrich (~5h) = ~26h realistic.
+    # 2026-10: the tier2 collectors take slots of the shared collector pool
+    # (EDGEGUARD_COLLECTOR_POOL_SLOTS, default 4) instead of all running at
+    # once. On 13 Oct 2026 they ran in 49 min all together, so the pool adds
+    # less than one feed's run time; in the worst case (every attempt reaching
+    # its timeout) tier2 grows from 4h 05m to 8h 10m, which uses up to 4h of
+    # the ~6h headroom below.
     #
     # PR-N29 (Holistic H1, pre-baseline audit 2026-04-23): each of the
     # critical-chain tasks (full_neo4j_sync, build_relationships,
@@ -3659,9 +3671,13 @@ baseline_clean_task = PythonOperator(
 # architectural fix tracked separately — event partitioning by date
 # range so no single event exceeds ~20K attributes (Issue #61).
 #
-# Tier2 stays parallel: those 6 feeds are individually tiny (<5K attrs
-# each), don't trigger the failure-mode-2 oversized-event problem, and
-# their parallel write pressure on MISP is negligible vs tier1's heavies.
+# Tier2 has no order inside the group: its feeds are individually small and
+# don't trigger the failure-mode-2 oversized-event problem. 2026-10: all 7 at
+# once (plus scheduled collectors of other DAGs) did exhaust MISP php-fpm
+# workers (HTTP 502) and the airflow container's memory limit, so every
+# collector, here and in the other DAGs, takes a slot of the shared Airflow
+# pool COLLECTOR_POOL and at most EDGEGUARD_COLLECTOR_POOL_SLOTS (default 4)
+# collectors run at once. Tier1 runs one collector at a time, so it holds one slot.
 with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
         task_id="collect_otx",
@@ -3701,7 +3717,7 @@ with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": Tri
     # see the comment block above the TaskGroup for full reasoning.
     bl_cisa >> bl_mitre >> bl_otx >> bl_nvd
 
-# Tier 2 — Reputation & bulk feeds (parallel after Tier 1).
+# Tier 2 — Reputation & bulk feeds (after Tier 1; as many at once as the collector pool has free slots).
 # ALL_DONE: Tier 1 tasks have no data dependency on each other; OTX (or NVD) failure must not
 # skip Tier 2 as upstream_failed (see baseline DAG notes in docs/AIRFLOW_DAGS.md).
 with TaskGroup(
@@ -3939,7 +3955,7 @@ baseline_complete = BashOperator(
 # updated PR-F4 — tier1 is now sequential, see TaskGroup comment above):
 # health → source keys (report; stops only on a blocker) → lock → clean (no-op unless
 # fresh_baseline=true conf) → start → tier1
-# (cisa→mitre→otx→nvd serial) → tier2 (parallel) → full_sync → build_rels
+# (cisa→mitre→otx→nvd serial) → tier2 (collector pool) → full_sync → build_rels
 # → enrich → done
 (
     baseline_misp_health

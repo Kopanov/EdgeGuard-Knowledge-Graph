@@ -154,6 +154,10 @@ docker compose build airflow   # after clone or Python dep changes
 docker compose up -d
 ```
 
+The `airflow` service creates the Airflow pool `edgeguard_collectors` on every start (2026-10: every collector task runs in it); `docker compose logs airflow | grep 'collector pool'` shows `[edgeguard] collector pool edgeguard_collectors set to <n> slots` once it is set.
+
+**Upgrading a running stack to the collector pool (2026-10):** `./dags` is re-parsed live, but the pool is only created when the `airflow` container is recreated, and until it exists the collectors of new DAG runs are never scheduled (no failure alert). So, in this order: (1) before pulling, `docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`; (2) pull; (3) only when no baseline is running (a recreate kills running tasks), `docker compose build airflow && docker compose up -d airflow`; (4) check with `docker exec edgeguard_airflow airflow pools list`. Details: [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10).
+
 Wait for healthchecks (often **~60s** for Neo4j/Airflow), then:
 
 ```bash
@@ -243,7 +247,7 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 - MISP container OOM-killed (check `docker inspect <container> | grep OOMKilled`)
 - `dmesg | grep -i oom` on the host showing MISP processes killed
 
-**6. Collector concurrency:** all collector tasks share the Airflow pool `edgeguard_collectors` (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4). Lower it if MISP workers still get killed (HTTP 502).
+**6. Collector concurrency:** all collector tasks share the Airflow pool `edgeguard_collectors` (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4). Lower it if MISP workers still get killed (HTTP 502). After changing the value in `.env`, run `docker compose up -d airflow`, which recreates the container; `docker compose restart airflow` keeps the old value.
 
 ---
 
@@ -272,6 +276,6 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 ---
 
-_Last updated: 2026-10-15 — wording only: the 2026-04-19 regression is described without personal names. Prior: 2026-04-26 — PR-N33 docs audit: corrected "Tiny dev" container default 4g → 8g (matches `docker-compose.yml:121` `${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`).
+_Last updated: 2026-10-16 — collector pool `edgeguard_collectors`: created by the `airflow` service on every start, the upgrade order for a running stack (pool before the pull, recreate only when no baseline runs), and resizing by `docker compose up -d airflow`. Prior: 2026-10-15 — wording only: the 2026-04-19 regression is described without personal names. Prior: 2026-04-26 — PR-N33 docs audit: corrected "Tiny dev" container default 4g → 8g (matches `docker-compose.yml:121` `${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`).
 
 Prior: 2026-04-19 — added Recommended Neo4j memory profiles table (Tiny dev / Mid box / Baseline-capable) after the 2026-04-19 overnight baseline regression. Baseline-capable profile bumped per the findings of that run: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX per Neo4j Operations Manual; eliminates GC pauses from resizing), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). Memory-math note clarifies that `tx_memory` is a CAP on transaction allocations, not additive to heap+pagecache._
