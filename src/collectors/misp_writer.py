@@ -2036,18 +2036,17 @@ class MISPWriter:
                 "otx_industries": indicator.get("otx_industries", []),
                 "description": indicator.get("description", ""),
                 "pulse_name": indicator.get("pulse_name", ""),
-                # PR-N10 Fix #3 (7-agent audit Logic Tracker B1, 2026-04-21):
-                # include ``malware_family`` and ``attributed_to`` so they
-                # survive the MISP round-trip to Neo4j. Pre-fix, OTX_META
-                # had neither field — an OTX pulse providing a malware
-                # family ("Emotet") or actor attribution ("APT29") was
-                # serialized to MISP without these keys. On read-back
-                # (``run_misp_to_neo4j.py`` _attribute_to_stix21 / the
-                # Indicator reconstruction around L2917) ``i.malware_family``
-                # was NULL, so Q9 INDICATES edges never fired for OTX.
-                # TF_META below already carries ``malware_family``; this
-                # brings OTX to parity. ``attributed_to`` is a new field
-                # in both meta blocks (TF_META extended in mirror below).
+                # PR-N10 Fix #3 (2026-04-21) added ``malware_family`` and
+                # ``attributed_to`` to OTX_META, as TF_META carries them.
+                # 2026-10: both are kept for compatibility and are always
+                # empty: the OTX collector puts neither key on an indicator.
+                # The families a pulse names travel as ``mf`` and its
+                # family/adversary pairs as ``pa`` (below); the sync reads
+                # them into ``pulse_malware_families`` /
+                # ``pulse_malware_actor_pairs``, which build_relationships
+                # steps 9b and 2d link. Q9 reads ``Indicator.malware_family``
+                # only, so OTX is no family-label feed
+                # (``relationship_provenance.FAMILY_LABEL_FEEDS``).
                 "malware_family": indicator.get("malware_family", ""),
                 "attributed_to": indicator.get("attributed_to", ""),
                 # PR-N13 (2026-04-21 pre-baseline audit Fix #5): preserve
