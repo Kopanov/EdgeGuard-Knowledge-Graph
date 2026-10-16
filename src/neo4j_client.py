@@ -4027,7 +4027,7 @@ class Neo4jClient:
                     # listed the IOC accumulate on the node (build_relationships Q9b / Q2d), and so do
                     # the pulses among them the OTX collector judged, with the canonical reference, to
                     # name several actors (step 2d attributes nothing from them; the actor nodes miss a
-                    # pulse edited to name several, whose mark MISPWriter adds to stored IOC copies).
+                    # pulse edited to name several, whose mark arrives with the pulse's new IOCs).
                     # A mark judged by name without the reference (``several_actor_pulses_by_name``)
                     # is never stored: it serves the sync's own run.
                     for _list_field in ("pulse_malware_families", "pulse_malware_actor_pairs", "several_actor_pulses"):

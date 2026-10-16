@@ -202,7 +202,7 @@ gantt
     edgeguard_daily (MITRE+6 more)  :02:00, 02:45
 
     section Neo4j Sync
-    edgeguard_neo4j_sync            :03:00, 04:00
+    edgeguard_neo4j_sync (every 72 h) :03:00, 04:00
 ```
 
 ---
@@ -217,7 +217,7 @@ flowchart LR
     D --> E[run_enrichment_jobs<br/>7 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
-    A -->|skip: last sync < 72h| SKIP[All downstream<br/>SKIPPED]
+    A -->|skip: last sync started < 24h ago| SKIP[All downstream<br/>SKIPPED]
 
     style SKIP fill:#fbbf24,stroke:#d97706,color:#000
     style A fill:#3b82f6,stroke:#2563eb,color:#fff
@@ -343,7 +343,7 @@ flowchart LR
 
 ---
 
-*Last updated: 2026-10-16 — enrichment: the indicator aging (one rule for every Indicator from its latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730; no Vulnerability tiers) runs before the campaign builder. Prior: 2026-10-15 — §5: `run_neo4j_sync` timeout 8h (was 4h). Same day: enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
+*Last updated: 2026-10-16 — § 4 and § 5: the sync DAG runs every 72 hours and skips its chain when the last sync started less than 24 hours ago. Same day: enrichment: the indicator aging (one rule for every Indicator from its latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730; no Vulnerability tiers) runs before the campaign builder. Prior: 2026-10-15 — §5: `run_neo4j_sync` timeout 8h (was 4h). Same day: enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
 
 *Prior: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
 

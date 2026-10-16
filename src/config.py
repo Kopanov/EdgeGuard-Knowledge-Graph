@@ -791,7 +791,11 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   (URLhaus csv_recent) window holding about 1,100 new entries per day each; cut at 200, about
 #   80% of them were never collected (neither feed has a cursor). EDGEGUARD_THREATFOX_MAX_PER_RUN
 #   and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap to the whole window (see their definitions).
-OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd", "threatfox", "urlhaus"})
+#   feodo, sslbl, abuseipdb (2026-10): each run reads the whole list the source publishes; cut at
+#   200, the other entries were never reported again and aged while still listed.
+#   EDGEGUARD_FEODO_MAX_PER_RUN, EDGEGUARD_SSLBL_MAX_PER_RUN and EDGEGUARD_ABUSEIPDB_MAX_PER_RUN
+#   size the cap to the list (see their definitions).
+OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb"})
 
 
 def get_effective_limit(source: str = None, default_limit: int = None) -> Optional[int]:
@@ -1261,8 +1265,9 @@ SOURCE_TAGS = _source_registry.cli_to_canonical_tag_map_legacy_subset()
 MISP_REFRESH_INTERVAL = 8  # Default: 8 hours (best practice for slower sources)
 MISP_ACTIVE_FEED_INTERVAL = 0.5  # 30 minutes for OTX (high-frequency live feed)
 
-# Phase 2: MISP → Neo4j sync interval
-NEO4J_SYNC_INTERVAL = 72  # Default: 72 hours (3 days)
+# Phase 2: MISP → Neo4j sync interval, informational: the edgeguard_neo4j_sync DAG runs every 72 hours
+# (``NEO4J_SYNC_EVERY`` in dags/edgeguard_pipeline.py, 2026-10; no setting changes it).
+NEO4J_SYNC_INTERVAL = 72
 
 # Source-specific collection intervals (must match the DAG schedule_interval values)
 # OTX:         every 30 min  (edgeguard_pipeline DAG — */30 * * * *)
@@ -1369,6 +1374,32 @@ MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
 # removes the cap.
 THREATFOX_MAX_PER_RUN = _env_int("EDGEGUARD_THREATFOX_MAX_PER_RUN", 10000)
 URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 50000)
+
+# ---------------------------------------------------------------------------
+# Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10)
+# ---------------------------------------------------------------------------
+# The three are lists, not windows: each run reads the whole list the source publishes, and an
+# entry stays on it as long as the source lists it. Cut at the generic incremental default (200),
+# a daily run reported the first 200 entries only, so the stored copies of the others were never
+# reported again, never refreshed (``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS``) and aged while the
+# source still listed them. Each cap covers the whole list; a run whose list is longer keeps the
+# newest entries and logs a warning. ``EDGEGUARD_MAX_ENTRIES`` and an explicit baseline limit still
+# apply when lower; ``0`` removes the cap.
+#   Feodo Tracker: servers, after the rows are merged per address. A baseline reads the complete C2
+#   history (7,980 rows, 7,607 servers on 2026-10-12), a daily run the servers active in the last
+#   30 days (5 rows on that day; the feed has not been updated since 2026-03-04). 15,000 is about
+#   twice the history, which grows when the feed moves again. Newest = latest ``last_online``.
+#   SSL Blacklist: certificate fingerprints; both modes read the whole blacklist (10,964 rows on
+#   2026-10-12). 20,000 is about twice that. Newest = latest ``Listingdate``.
+#   AbuseIPDB: addresses of the blacklist, one ``GET /blacklist`` request per run as before (the
+#   daily run and a baseline: at most two a day); the cap sets the request's ``limit``, not the
+#   number of requests. 10,000 is the most one request returns on the free plan, the ceiling the
+#   collector already applied (``AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST``; the 730-day baseline
+#   of 2026-10-13 received 10,000), so a larger value has no effect until that ceiling is raised
+#   for a plan that returns more. AbuseIPDB chooses which addresses fill the request.
+FEODO_MAX_PER_RUN = _env_int("EDGEGUARD_FEODO_MAX_PER_RUN", 15000)
+SSLBL_MAX_PER_RUN = _env_int("EDGEGUARD_SSLBL_MAX_PER_RUN", 20000)
+ABUSEIPDB_MAX_PER_RUN = _env_int("EDGEGUARD_ABUSEIPDB_MAX_PER_RUN", 10000)
 
 # ---------------------------------------------------------------------------
 # ThreatActor alias-duplicate merge (2026-10, fresh-baseline PR)

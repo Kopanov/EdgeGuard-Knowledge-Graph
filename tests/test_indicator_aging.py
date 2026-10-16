@@ -229,9 +229,10 @@ class TestMispReportTimes:
         item = _parse(_attr("203.0.113.14", "a-8", last_seen="2024-06-01T00:00:00+00:00"))
         assert item["reported_basis"] == "misp_recorded"
 
-    def test_an_otx_mark_carry_edit_does_not_refresh_a_dated_item(self):
-        """``MISPWriter._carry_marks`` edits the comment of a stored OTX copy: MISP stamps it anew (T
-        moves), ``last_seen`` stays, so the report time stays the pulse's date."""
+    def test_a_comment_only_edit_does_not_refresh_a_dated_item(self):
+        """An edit of a stored OTX copy's comment only (by an analyst in MISP, for example; EdgeGuard
+        makes none since 2026-10): MISP stamps it anew (T moves), ``last_seen`` stays, so the report time
+        stays the pulse's date."""
         before = _attr(
             "held.it.example",
             "a-9",
@@ -241,7 +242,7 @@ class TestMispReportTimes:
             comment='OTX_META:{"pulse_id": "p6"}',
         )
         after = dict(before, timestamp=str(int((T_RECORDED + timedelta(days=40)).timestamp())))
-        after["comment"] = 'OTX_META:{"pulse_id": "p6", "sap": ["p6"]}'
+        after["comment"] = 'OTX_META:{"pulse_id": "p6", "pulse_name": "Crutch campaign (reviewed)"}'
         assert _parse(before)["reported_at"] == _parse(after)["reported_at"] == "2026-07-01T00:00:00+00:00"
 
     def test_only_indicator_items_carry_a_report(self):

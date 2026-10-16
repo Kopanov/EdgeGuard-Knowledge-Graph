@@ -32,6 +32,9 @@ FORWARDED = [
     ("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", "500"),  # _env_int; compose carries the code default
     ("EDGEGUARD_THREATFOX_MAX_PER_RUN", "10000"),  # 2026-10 per-run cap sized to the 7-day window
     ("EDGEGUARD_URLHAUS_MAX_PER_RUN", "50000"),  # 2026-10 per-run cap sized to the 30-day csv_recent
+    ("EDGEGUARD_FEODO_MAX_PER_RUN", "15000"),  # 2026-10 per-run caps sized to each whole list
+    ("EDGEGUARD_SSLBL_MAX_PER_RUN", "20000"),
+    ("EDGEGUARD_ABUSEIPDB_MAX_PER_RUN", "10000"),  # one blacklist request per run, free-plan maximum
     ("EDGEGUARD_CISA_INCREMENTAL_DAYS", "30"),  # int(os.environ.get(...))
     ("EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET", "400"),
     ("EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN", "60"),

@@ -46,11 +46,11 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  edgeguard_neo4j_sync  (every 3 days at 3 AM)                        │    │
+│  │  edgeguard_neo4j_sync  (every 72 hours)                              │    │
 │  │  check_sync_needed → neo4j_health_check → run_neo4j_sync             │    │
 │  │    → build_relationships → run_enrichment_jobs                       │    │
 │  │    → check_neo4j_quality                                             │    │
-│  │  (ShortCircuitOperator skips entire chain when nothing new)          │    │
+│  │  (ShortCircuitOperator skips the chain within 24 h of the last sync) │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  All collectors → MISP (single source of truth) → Neo4j Knowledge Graph     │
@@ -70,7 +70,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 | `edgeguard_medium_freq` | Every 4 hours | `misp_health_check` → `collect_cisa`, `collect_virustotal` → `log_summary` |
 | `edgeguard_low_freq` | Every 8 hours | `misp_health_check` → `collect_nvd` → `log_summary` |
 | `edgeguard_daily` | Daily 2 AM | `misp_health_check` → 8 collectors (parallel; `collect_cisa_ics` and `collect_malwarebazaar` skip while their flags are off) → `log_summary` |
-| `edgeguard_neo4j_sync` | Every 3 days 3 AM | `check_sync_needed` → `neo4j_health_check` → `run_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `check_neo4j_quality` |
+| `edgeguard_neo4j_sync` | Every 72 hours (`timedelta(days=3)`, 2026-10) | `check_sync_needed` → `neo4j_health_check` → `run_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `check_neo4j_quality` |
 
 ### Execution Timeouts
 
@@ -213,7 +213,7 @@ The incremental DAGs (`edgeguard_pipeline`, `edgeguard_medium_freq`, etc.) are a
 | NVD | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back; then the records of every KEV CVE and of `EDGEGUARD_NVD_EXTRA_CVE_IDS`, whatever their age (2026-10) | Resumes from checkpoint on restart |
 | OTX | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back | Resumes from checkpoint on restart |
 | CISA / MITRE | Full catalog fetch | Already returns complete list |
-| ThreatFox / URLhaus / Feodo / etc. | Full current feed (ThreatFox: last 7 days, at most `EDGEGUARD_THREATFOX_MAX_PER_RUN`; URLhaus: `csv_recent`, at most `EDGEGUARD_URLHAUS_MAX_PER_RUN`) | Flat feeds, no history API |
+| ThreatFox / URLhaus / Feodo / etc. | Full current feed (ThreatFox: last 7 days, at most `EDGEGUARD_THREATFOX_MAX_PER_RUN`; URLhaus: `csv_recent`, at most `EDGEGUARD_URLHAUS_MAX_PER_RUN`; Feodo Tracker: the complete C2 history, at most `EDGEGUARD_FEODO_MAX_PER_RUN`; SSL Blacklist: the whole blacklist, at most `EDGEGUARD_SSLBL_MAX_PER_RUN`; AbuseIPDB: one blacklist request of at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` addresses) | Flat feeds, no history API |
 
 ---
 
@@ -223,7 +223,7 @@ Regular cron DAGs (every 30 min / 4 h / 8 h / daily) scan only the **last 2-3 da
 
 ### Configuration
 
-Set `EDGEGUARD_INCREMENTAL_LIMIT` in the environment of the Airflow worker. `src/config.py` reads the process environment, not `.env`, and `docker-compose.yml` does not forward `EDGEGUARD_INCREMENTAL_LIMIT` or `EDGEGUARD_MAX_ENTRIES` (2026-10), so on the Compose deployment a value in `.env` does not reach the container: add the variable to the `airflow` service's `environment` (or to `x-common-env`) to change it there. The per-source caps below (`EDGEGUARD_NVD_MAX_PER_RUN`, `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN`, `EDGEGUARD_THREATFOX_MAX_PER_RUN`, `EDGEGUARD_URLHAUS_MAX_PER_RUN`) are forwarded, so `.env` sets them.
+Set `EDGEGUARD_INCREMENTAL_LIMIT` in the environment of the Airflow worker. `src/config.py` reads the process environment, not `.env`, and `docker-compose.yml` does not forward `EDGEGUARD_INCREMENTAL_LIMIT` or `EDGEGUARD_MAX_ENTRIES` (2026-10), so on the Compose deployment a value in `.env` does not reach the container: add the variable to the `airflow` service's `environment` (or to `x-common-env`) to change it there. The per-source caps below (`EDGEGUARD_NVD_MAX_PER_RUN`, `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN`, `EDGEGUARD_THREATFOX_MAX_PER_RUN`, `EDGEGUARD_URLHAUS_MAX_PER_RUN`, `EDGEGUARD_FEODO_MAX_PER_RUN`, `EDGEGUARD_SSLBL_MAX_PER_RUN`, `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN`) are forwarded, so `.env` sets them.
 
 ```bash
 # Default — 200 items per source per cron run
@@ -236,7 +236,7 @@ EDGEGUARD_INCREMENTAL_LIMIT=500
 EDGEGUARD_INCREMENTAL_LIMIT=0
 ```
 
-This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox and URLhaus do not use it: each applies its own per-run cap (2026-10; ThreatFox and URLhaus read a 7-day and a 30-day window of about 1,100 new entries per day each, of which a cut at 200 lost about 80%). The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
+This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist and AbuseIPDB do not use it: each applies its own per-run cap (2026-10; ThreatFox and URLhaus read a 7-day and a 30-day window of about 1,100 new entries per day each, of which a cut at 200 lost about 80%; Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 left the stored copies of the others unreported, so they aged while still listed. AbuseIPDB stays at one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan). The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
 
 ### Priority order in `get_effective_limit()`
 
@@ -244,10 +244,13 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox and URLhaus do not
 1. NO_LIMIT_SOURCES (per-source bypass in config.py)   → None (unlimited)
 2. EDGEGUARD_MAX_ENTRIES ≠ 0 (hard global override)    → that value
 3. OWN_RUN_CAP_SOURCES (nvd, malwarebazaar,            → None here; the collector applies
-   threatfox, urlhaus; 2026-10)                          its own cap (EDGEGUARD_NVD_MAX_PER_RUN,
-                                                         EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN,
+   threatfox, urlhaus, feodo, sslbl,                     its own cap (EDGEGUARD_NVD_MAX_PER_RUN,
+   abuseipdb; 2026-10)                                   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN,
                                                          EDGEGUARD_THREATFOX_MAX_PER_RUN 10000,
-                                                         EDGEGUARD_URLHAUS_MAX_PER_RUN 50000)
+                                                         EDGEGUARD_URLHAUS_MAX_PER_RUN 50000,
+                                                         EDGEGUARD_FEODO_MAX_PER_RUN 15000,
+                                                         EDGEGUARD_SSLBL_MAX_PER_RUN 20000,
+                                                         EDGEGUARD_ABUSEIPDB_MAX_PER_RUN 10000)
 4. EDGEGUARD_INCREMENTAL_LIMIT > 0 (default: 200)      → 200
 5. EDGEGUARD_INCREMENTAL_LIMIT = 0                     → None (unlimited)
 ```
@@ -256,7 +259,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox and URLhaus do not
 
 | | Baseline | Incremental |
 |--|----------|-------------|
-| Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD, MalwareBazaar, ThreatFox and URLhaus use their own per-run caps |
+| Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist and AbuseIPDB use their own per-run caps |
 | Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | Last 72 hours |
 | Trigger | Manual (once before production) | Automatic (cron schedules) |
 | Scope | Full historical load | New / updated data only |
@@ -522,8 +525,9 @@ EdgeGuard-Knowledge-Graph/
 
 ### Key DAG Design Points
 - Each source group runs at its own cadence to respect API rate limits — no more one-DAG-for-all.
-- **`edgeguard_neo4j_sync`** uses a `ShortCircuitOperator` (`check_sync_needed` / `should_run_neo4j_sync`) so the
-  heavy sync is skipped when nothing new is available in MISP.
+- **`edgeguard_neo4j_sync`** runs every 72 hours (a timedelta schedule since 2026-10) and uses a `ShortCircuitOperator`
+  (`check_sync_needed` / `should_run_neo4j_sync`) that skips the chain when the last sync started less than 24 hours ago
+  (after a baseline's or a forced sync); a regular run is never skipped ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#neo4j-sync)).
 - All `python_callable` values are direct function references (no lambdas) — lambda functions
   cannot be serialized by Airflow's DAG serialization (the constraint persisted across the 2.x → 3.x upgrade) and cause `PicklingError` on workers.
 - Every task has an `execution_timeout` — see table above.
@@ -532,4 +536,4 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-16 — `run_enrichment_jobs`: the indicator aging (one rule for every Indicator, from the latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730) runs before the campaign builder at the DAG run's `data_interval_end`; `mark_inactive_nodes` removed. Same day: Campaign Node Builder: a campaign rests on `ATTRIBUTED_TO` or `USES_MALWARE`, its links name the relationship types they rest on, and a campaign without evidence is deleted; the baseline postcheck's INV-1 counts the qualifying actors by the builder's definition. Prior: 2026-10-15 — ThreatFox and URLhaus are in `OWN_RUN_CAP_SOURCES` with their own per-run caps; a value of `EDGEGUARD_INCREMENTAL_LIMIT` in `.env` does not reach the Compose deployment (not forwarded); `run_neo4j_sync` timeout 8 hours (was 4), the baseline full sync's 6 hours plus a third. Same day: post-sync enrichment: seven jobs, the Malware ATT&CK-id twin merge (`merge_malware_attack_twins`, into the ATT&CK node or the node of the base name) after the actor alias merge and before the Campaign builder. Same day: post-sync enrichment: six jobs, the sixth FIRST EPSS (`enrich_cve_epss`). Same day: co-occurrence calibration: the filter is `r.match_type` (the text still named the dropped `r.source_id`); the large-event batch statement binds `rid` as a variable (#182); `baseline_clean` timeout (60 minutes) in the timeout table; `get_effective_limit` priority includes `OWN_RUN_CAP_SOURCES` (NVD, MalwareBazaar); the NVD baseline row names the KEV sweep and the named CVE ids. Prior: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._
+_Last updated: 2026-10-16 — Feodo Tracker, SSL Blacklist and AbuseIPDB are in `OWN_RUN_CAP_SOURCES` with their own per-run caps (baseline behaviour, incremental limit, `get_effective_limit` priority); `edgeguard_neo4j_sync` runs every 72 hours (a timedelta schedule) and skips a run within 24 hours of the last sync start. Same day: `run_enrichment_jobs`: the indicator aging (one rule for every Indicator, from the latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730) runs before the campaign builder at the DAG run's `data_interval_end`; `mark_inactive_nodes` removed. Same day: Campaign Node Builder: a campaign rests on `ATTRIBUTED_TO` or `USES_MALWARE`, its links name the relationship types they rest on, and a campaign without evidence is deleted; the baseline postcheck's INV-1 counts the qualifying actors by the builder's definition. Prior: 2026-10-15 — ThreatFox and URLhaus are in `OWN_RUN_CAP_SOURCES` with their own per-run caps; a value of `EDGEGUARD_INCREMENTAL_LIMIT` in `.env` does not reach the Compose deployment (not forwarded); `run_neo4j_sync` timeout 8 hours (was 4), the baseline full sync's 6 hours plus a third. Same day: post-sync enrichment: seven jobs, the Malware ATT&CK-id twin merge (`merge_malware_attack_twins`, into the ATT&CK node or the node of the base name) after the actor alias merge and before the Campaign builder. Same day: post-sync enrichment: six jobs, the sixth FIRST EPSS (`enrich_cve_epss`). Same day: co-occurrence calibration: the filter is `r.match_type` (the text still named the dropped `r.source_id`); the large-event batch statement binds `rid` as a variable (#182); `baseline_clean` timeout (60 minutes) in the timeout table; `get_effective_limit` priority includes `OWN_RUN_CAP_SOURCES` (NVD, MalwareBazaar); the NVD baseline row names the KEV sweep and the named CVE ids. Prior: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._

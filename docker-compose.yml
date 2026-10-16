@@ -98,6 +98,12 @@ x-common-env: &common-env
   # replace EDGEGUARD_INCREMENTAL_LIMIT for the two sources. Defaults mirror src/config.py.
   EDGEGUARD_THREATFOX_MAX_PER_RUN: ${EDGEGUARD_THREATFOX_MAX_PER_RUN:-10000}
   EDGEGUARD_URLHAUS_MAX_PER_RUN: ${EDGEGUARD_URLHAUS_MAX_PER_RUN:-50000}
+  # Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10), sized to each whole list; they
+  # replace EDGEGUARD_INCREMENTAL_LIMIT for the three sources. AbuseIPDB stays at one blacklist
+  # request per run (at most 10,000 addresses on the free plan). Defaults mirror src/config.py.
+  EDGEGUARD_FEODO_MAX_PER_RUN: ${EDGEGUARD_FEODO_MAX_PER_RUN:-15000}
+  EDGEGUARD_SSLBL_MAX_PER_RUN: ${EDGEGUARD_SSLBL_MAX_PER_RUN:-20000}
+  EDGEGUARD_ABUSEIPDB_MAX_PER_RUN: ${EDGEGUARD_ABUSEIPDB_MAX_PER_RUN:-10000}
   EDGEGUARD_CISA_INCREMENTAL_DAYS: ${EDGEGUARD_CISA_INCREMENTAL_DAYS:-30}
   # VirusTotal free-tier budget (src/collectors/virustotal_budget.py): daily lookups, per-run cap,
   # MISP candidate window. The ledger lives in the ./state bind mount.
@@ -415,9 +421,6 @@ services:
       EDGEGUARD_ENABLE_SLACK_ALERTS: ${EDGEGUARD_ENABLE_SLACK_ALERTS:-}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       AIRFLOW__SLACK__WEBHOOK_URL: ${AIRFLOW__SLACK__WEBHOOK_URL:-}
-      # Neo4j-sync cadence guard (see should_run_neo4j_sync): tolerance window
-      # subtracted from NEO4J_SYNC_INTERVAL when deciding whether to skip.
-      EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN: ${EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN:-}
       # Minimum number of MISP events the Neo4j sync must find in its window
       # (src/run_misp_to_neo4j.py). Unset / 0 disables the guard: a zero-event
       # window is logged as a WARNING and still counts as a successful run.

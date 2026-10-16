@@ -12,8 +12,10 @@ actor counted as one (canonical threat-actor reference), is applied by:
   already holds, so after the baseline an event may carry only some of a pulse's actors. Without the
   canonical reference the mark goes to ``several_actor_pulses_by_name`` (``sapn``), which the sync uses
   for its own run and never stores (2026-10);
-* the MISP writer: an IOC MISP already holds is not pushed again, so the mark of a pulse edited to name
-  several actors is added to the stored copies of up to three of its held IOCs (``_carry_marks``);
+* the MISP writer: it writes the mark into the attributes it pushes and never into a stored copy (MISP
+  keeps what the sources said; 2026-10). An IOC MISP already holds is not pushed again, so a pulse edited
+  to name several actors, whose IOCs MISP holds and which brings no new IOC, is marked on no node (a known
+  limit, to be closed by a per-pulse MISP record); its new IOCs carry the mark;
 * the sync, when it pairs the items of one pulse (``_build_cross_item_relationships``);
 * ``build_relationships`` step 2d: it links the pairs carried on indicators only when a pulse naming
   one actor supports them, removes the links an earlier run made from pulses naming several actors,
@@ -397,7 +399,7 @@ class TestMispRoundTrip:
         assert items[0]["report_ids"] == ["p-two"] and items[0]["several_actor_pulses"] == ["p-two"]
 
 
-# --------------------------------------------------------------------------- held IOCs get the mark
+# --------------------------------------------------------------------------- held IOCs are not edited
 _OTX_MISP_TAG = "source:AlienVault-OTX"
 _HELD_EVENT = {"id": "41", "info": "EdgeGuard-alienvault_otx-2026-10-01", "org_id": "1", "distribution": "0"}
 
@@ -425,11 +427,13 @@ def _held_rows(items, written_days_ago=2):
     return rows
 
 
-class TestHeldIndicatorsGetTheMark:
-    """2026-10: MISP does not push an IOC it already holds (cross-event de-duplication), so when a pulse is
-    edited to name several actors, the collector's mark on its IOCs reached no Indicator node and step 2d
-    kept linking the pair written while the pulse named one actor. The writer adds the mark to the stored
-    copies of up to ``MARK_CARRY_COPIES_PER_PULSE`` held IOCs of the pulse."""
+class TestHeldIndicatorsAreNotEdited:
+    """2026-10: no EdgeGuard judgement is written into a stored MISP record. MISP does not push an IOC it
+    already holds (cross-event de-duplication), so when a pulse is edited to name several actors the
+    collector's mark on its held IOCs reaches no Indicator node; the writer used to add it to the stored
+    copies' ``OTX_META.sap`` (comment-only edits, ``[MARK]``). It no longer edits them: the mark travels
+    only in the attributes the run pushes, the pulse's new IOCs. A pulse whose IOCs MISP all holds stays
+    unmarked, a known limit."""
 
     P = "6a4fdf500b5e6dffde93a001"
     IOCS = ["203.0.113.21", "203.0.113.22", "203.0.113.23", "203.0.113.24"]
@@ -458,93 +462,49 @@ class TestHeldIndicatorsGetTheMark:
         result, pushed, writer = _push(items, misp)
         return misp, result, pushed, writer
 
-    def test_the_held_copy_of_an_edited_pulse_gets_the_mark(self):
-        first, second = self._runs(self.IOCS[:1])
+    def test_the_held_copies_of_an_edited_pulse_are_not_edited(self, caplog):
+        first, second = self._runs(self.IOCS)
         rows = _held_rows(first)
-        before = _meta(rows[0]["comment"], "OTX_META:")
-        assert before["pa"] == [f"Crutch::Turla::{self.P}"] and "sap" not in before
+        comments = [r["comment"] for r in rows]
+        assert "sap" not in _meta(comments[0], "OTX_META:")
         ioc = next(i for i in second if i.get("indicator_type"))
-        assert ioc["several_actor_pulses"] == [self.P] and ioc["pulse_malware_actor_pairs"] == []
+        assert ioc["several_actor_pulses"] == [self.P], "the collector still judges the edited pulse"
 
-        misp, _result, pushed, writer = self._push(second, rows)
-        assert not [a for a in pushed if a.get("value") == self.IOCS[0]], "MISP holds the IOC: not pushed"
-        assert [uuid for uuid, _body in misp.edits] == [rows[0]["uuid"]]
-        sent = misp.edits[0][1]["Attribute"]
-        assert set(sent) == {"comment"}, "the comment only"
-        after = _meta(sent["comment"], "OTX_META:")
-        assert after == {**before, "sap": [self.P]}, "the mark added, nothing else changed"
-        assert writer.stats["attributes_marked"] == 1 and writer.stats.get("attributes_mark_failed", 0) == 0
-
-        # MISP stamped the copy anew; the incremental sync reads it again and the node gets the mark next
-        # to the pair written while the pulse named one actor.
-        item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(misp.stored[0], _EVENT)
-        assert item["several_actor_pulses"] == [self.P]
+        with caplog.at_level("INFO", logger="collectors.misp_writer"):
+            misp, result, pushed, writer = self._push(second, rows)
+        assert not [a for a in pushed if a.get("type") == "ip-dst"], "MISP holds every IOC: none is pushed"
+        assert misp.edits == [], "no stored copy is edited: the mark is EdgeGuard's judgement, not the source's"
+        assert [r["comment"] for r in rows] == comments
+        assert not any(k.startswith("attributes_mark") for k in writer.stats)
+        assert "[MARK]" not in caplog.text
+        # The known limit: the stored copies, read as the sync reads them, carry no mark of the edited pulse.
+        item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(rows[0], _EVENT)
+        assert "several_actor_pulses" not in item
         assert item["pulse_malware_actor_pairs"] == [f"Crutch::Turla::{self.P}"]
 
-        # Run 3 reports the pulse again: a held copy carries the mark, nothing is edited.
-        misp_again, _r, _p, _w = self._push(second, misp.stored)
-        assert misp_again.edits == []
-
-    def test_at_most_three_held_copies_per_pulse_besides_its_new_iocs(self):
-        first, second = self._runs(self.IOCS, run_two_iocs=self.IOCS + ["203.0.113.25"])
+    def test_the_new_iocs_of_an_edited_pulse_carry_the_mark(self):
+        first, second = self._runs(self.IOCS[:2], run_two_iocs=self.IOCS[:2] + ["203.0.113.25"])
         rows = _held_rows(first)
-        misp, _result, pushed, writer = self._push(second, rows)
-        assert [a["value"] for a in pushed if a.get("type") == "ip-dst"] == ["203.0.113.25"]
-        assert _meta(next(a for a in pushed if a.get("type") == "ip-dst")["comment"], "OTX_META:")["sap"] == [self.P]
-        assert [uuid for uuid, _b in misp.edits] == [r["uuid"] for r in rows[:3]], "the first three held copies"
-        assert writer.stats["attributes_marked"] == 3
+        misp, _result, pushed, _writer = self._push(second, rows)
+        new = [a for a in pushed if a.get("type") == "ip-dst"]
+        assert [a["value"] for a in new] == ["203.0.113.25"]
+        assert _meta(new[0]["comment"], "OTX_META:")["sap"] == [self.P], "the pushed attribute holds the mark"
+        assert misp.edits == []
+        item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+            {**new[0], "uuid": "6f3c1d5e-0000-4000-8000-000000009999"}, _EVENT
+        )
+        assert item["several_actor_pulses"] == [self.P], "the sync stores it on that Indicator; step 2d reads it"
 
-    def test_a_copy_without_room_is_passed_over_for_the_next(self):
-        first, second = self._runs(self.IOCS[:2])
-        rows = _held_rows(first)
-        full = _meta(rows[0]["comment"], "OTX_META:")
-        full["description"] = "x" * (3990 - len("OTX_META:" + json.dumps(full)))
-        rows[0]["comment"] = "OTX_META:" + json.dumps(full)
-        assert 3980 <= len(rows[0]["comment"]) <= 4000
+    def test_a_due_refresh_of_a_held_copy_sends_last_seen_only(self):
+        # The #209 refresh still edits a held copy MISP last wrote more than 30 days ago: last_seen only,
+        # the source's own date; the comment and the mark stay out of the edit.
+        first, second = self._runs(self.IOCS[:1])
+        rows = _held_rows(first, written_days_ago=40)
+        comment = rows[0]["comment"]
         misp, _result, _pushed, writer = self._push(second, rows)
-        assert [uuid for uuid, _b in misp.edits] == [rows[1]["uuid"]], "nothing in the full comment is shortened"
-        assert rows[0]["comment"] == "OTX_META:" + json.dumps(full)
-
-    def test_a_copy_without_an_otx_meta_block_is_left_as_it_is(self, caplog):
-        # OTX copies written before every OTX indicator got an OTX_META block hold the pulse name as their
-        # comment: turned into a block, the sync would read that name as no pulse name.
-        first, second = self._runs(self.IOCS[:1])
-        rows = _held_rows(first)
-        rows[0]["comment"] = "pulse 6a4fdf500b5e6dffde93a001"
-        with caplog.at_level("WARNING", logger="collectors.misp_writer"):
-            misp, _result, _pushed, _writer = self._push(second, rows)
-        assert misp.edits == [] and rows[0]["comment"] == "pulse 6a4fdf500b5e6dffde93a001"
-        assert "1 pulse(s) whose held copies cannot take it" in caplog.text
-
-    def test_with_the_refresh_off_the_mark_is_still_carried(self, monkeypatch):
-        monkeypatch.setenv("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", "0")
-        first, second = self._runs(self.IOCS[:1])
-        rows = _held_rows(first, written_days_ago=400)
-        misp, _result, _pushed, writer = self._push(second, rows)
-        assert [set(body["Attribute"]) for _uuid, body in misp.edits] == [{"comment"}], "no last_seen refresh"
-        assert writer.stats["attributes_marked"] == 1 and not writer.stats.get("attributes_refreshed")
-
-    def test_a_mark_by_name_is_not_carried(self, monkeypatch):
-        first, _second = self._runs(self.IOCS[:1])
-        rows = _held_rows(first)
-
-        def unavailable(*_a, **_k):
-            raise cta.ReferenceUnavailable("test: not found")
-
-        monkeypatch.setattr(oc, "load_canonical_reference", unavailable)
-        second = _HARNESS._collect([_pulse(self.P, ["Crutch"], "Turla, Gamaredon", self.IOCS[:1])])
-        misp, _result, _pushed, _writer = self._push(second, rows)
-        assert misp.edits == [], "a judgement made by name is not stored on a node, so it is not carried"
-
-    def test_a_failed_edit_is_counted_and_is_no_failed_push(self):
-        first, second = self._runs(self.IOCS[:1])
-        rows = _held_rows(first)
-        from test_misp_reobserved_indicator_refresh import _Misp, _push
-
-        misp = _Misp(rows, tag=_OTX_MISP_TAG, edit_status=500)
-        (ok, failed), _pushed, writer = _push(second, misp)
-        assert failed == 0 and writer.stats["attributes_mark_failed"] == 1
-        assert writer.stats.get("attributes_marked", 0) == 0
+        assert [set(body["Attribute"]) for _uuid, body in misp.edits] == [{"last_seen"}]
+        assert rows[0]["comment"] == comment
+        assert writer.stats["attributes_refreshed"] == 1
 
 
 # --------------------------------------------------------------------------- the sync

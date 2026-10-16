@@ -7,10 +7,11 @@ stay. The edited attribute is parsed as the sync parses it and merged with
 source's own last-report date capped at the MISP time (``indicator_aging``): an edit that keeps an
 old source date moves ``last_updated`` but leaves the decay retirement, and an edit with a recent
 source date lifts it in the same write; ``first_imported_at`` and both claims of the source stay
-where they were. The writer also adds several-actor marks to the stored copy of an OTX indicator
-(``tests/test_attribution_single_actor_reports.py``): the edited copy merged in three runs leaves the node
-with the union of the marks, a batch row without marks clears none, and the query build_relationships
-step 2d and the acceptance check read returns them (2026-10).
+where they were. Several-actor marks travel only in the OTX attributes the writer pushes, never added to
+a stored copy (2026-10, ``tests/test_attribution_single_actor_reports.py``): the copies merged over four
+runs leave each node with the union of its marks, a batch row without marks clears none, a held IOC keeps
+the pair of a pulse later edited to name several actors while the pulse's new IOC carries the mark, and
+the query build_relationships step 2d and the acceptance check read returns the marks of every node.
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with
 ``EDGEGUARD_IT_NEO4J_URI``, writes only nodes labelled ``EdgeGuardIT``, refuses any other node.
 """
@@ -158,7 +159,7 @@ def _otx_copy(value: str, uuid: str, comment: str) -> dict:
 
 def test_several_actor_marks_accumulate_on_the_indicator_and_the_step_2d_query_reads_them(client, raw_driver):
     import canonical_threat_actors
-    from collectors.misp_writer import MISPWriter, _otx_meta_with_marks
+    from collectors.misp_writer import MISPWriter
     from run_misp_to_neo4j import MISPToNeo4jSync
 
     writer = MISPWriter(url="http://127.0.0.1:9", api_key="dummy", verify_ssl=False)
@@ -173,30 +174,33 @@ def test_several_actor_marks_accumulate_on_the_indicator_and_the_step_2d_query_r
     def stored(value: str, **fields) -> str:
         return writer.create_attribute({**otx, "indicator_type": "domain", "value": value, **fields})["comment"]
 
-    # Run 1: the copy written while p6 named Turla alone, then edited by the writer when p6 was edited to
-    # name several actors (``_carry_marks``): the pair stays, the mark is added.
-    first = stored("held.it.example", pulse_id="p6", pulse_malware_actor_pairs=["Crutch::Turla::p6"])
-    edited = _otx_meta_with_marks(first, ["p6"])
-    assert edited is not None
-    held = parsed("held.it.example", "6f3c1d5e-0000-4000-8000-000000001300", edited)
-    assert held["several_actor_pulses"] == ["p6"]
-    assert client.merge_indicators_batch([held], source_id="alienvault_otx") == (1, 0)
-    # Run 2: a later pulse naming several actors lists the IOC.
-    later = parsed(
+    # Run 1: the copy written while p6 named Turla alone; MISP keeps it as written (2026-10: the writer
+    # adds no mark to a stored copy when p6 is later edited to name several actors).
+    held = parsed(
         "held.it.example",
-        "6f3c1d5e-0000-4000-8000-000000001301",
-        stored("held.it.example", pulse_id="p7", several_actor_pulses=["p7"]),
+        "6f3c1d5e-0000-4000-8000-000000001300",
+        stored("held.it.example", pulse_id="p6", pulse_malware_actor_pairs=["Crutch::Turla::p6"]),
     )
-    assert client.merge_indicators_batch([later], source_id="alienvault_otx") == (1, 0)
-    # Run 3: one batch, the IOC in a pulse naming one actor (a row without marks) and another IOC marked.
+    assert "several_actor_pulses" not in held
+    assert client.merge_indicators_batch([held], source_id="alienvault_otx") == (1, 0)
+    # Run 2: a later pulse naming several actors lists the IOC; run 3 another one.
+    for n, pulse in ((1301, "p7"), (1302, "p10")):
+        later = parsed(
+            "held.it.example",
+            f"6f3c1d5e-0000-4000-8000-00000000{n}",
+            stored("held.it.example", pulse_id=pulse, several_actor_pulses=[pulse]),
+        )
+        assert client.merge_indicators_batch([later], source_id="alienvault_otx") == (1, 0)
+    # Run 4: one batch, the IOC in a pulse naming one actor (a row without marks) and a new IOC of the
+    # edited p6, which carries p6's mark in the attribute the writer pushed.
     unmarked = parsed(
-        "held.it.example", "6f3c1d5e-0000-4000-8000-000000001302", stored("held.it.example", pulse_id="p8")
+        "held.it.example", "6f3c1d5e-0000-4000-8000-000000001303", stored("held.it.example", pulse_id="p8")
     )
     assert "several_actor_pulses" not in unmarked
     other = parsed(
         "other.it.example",
-        "6f3c1d5e-0000-4000-8000-000000001303",
-        stored("other.it.example", pulse_id="p9", several_actor_pulses=["p9"]),
+        "6f3c1d5e-0000-4000-8000-000000001304",
+        stored("other.it.example", pulse_id="p6", several_actor_pulses=["p6"]),
     )
     assert client.merge_indicators_batch([unmarked, other], source_id="alienvault_otx") == (2, 0)
 
@@ -212,6 +216,6 @@ def test_several_actor_marks_accumulate_on_the_indicator_and_the_step_2d_query_r
             f"MATCH (i:Indicator:{LABEL} {{value: 'held.it.example'}}) RETURN i.pulse_malware_actor_pairs AS p"
         ).single()["p"]
         row = session.run(canonical_threat_actors.INDICATOR_MARKED_REPORTS_QUERY).single()
-    assert marks == {"held.it.example": ["p6", "p7"], "other.it.example": ["p9"]}, "accumulated, never overwritten"
+    assert marks == {"held.it.example": ["p10", "p7"], "other.it.example": ["p6"]}, "accumulated, never overwritten"
     assert pairs == ["Crutch::Turla::p6"], "the pair written while p6 named one actor stays; step 2d skips it"
-    assert sorted(row["pulses"]) == ["p6", "p7", "p9"] and row["indicators"] == 2
+    assert sorted(row["pulses"]) == ["p10", "p6", "p7"] and row["indicators"] == 2, "p6 through its new IOC"
