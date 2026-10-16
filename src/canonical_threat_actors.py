@@ -113,9 +113,10 @@ REPORT_ACTORS_QUERY = (
 # MISP's cross-event de-duplication leaves incomplete: MISP does not push an actor again that it already
 # holds, so a pulse that named one actor when its pairs were written and was later edited to name several
 # is on no actor's ``pulse_ids`` as a pulse of several, and its pairs stayed linkable. MISP does not push
-# an IOC it holds again either: the mark reaches the indicators through the pulse's new IOCs and through
-# the stored copies of its held IOCs, to which ``MISPWriter._carry_marks`` adds it. A mark judged by name
-# without the reference (``OTX_META.sapn``) is not stored. One row always: ``pulses`` (the marked pulse
+# an IOC it holds again either: the mark reaches the indicators through the pulse's new IOCs only. The
+# writer adds no mark to a stored copy (2026-10: MISP keeps what the sources said), so a pulse whose IOCs
+# MISP all holds is marked on no indicator, a known limit to be closed by a per-pulse MISP record. A mark
+# judged by name without the reference (``OTX_META.sapn``) is not stored. One row always: ``pulses`` (the marked pulse
 # ids) and ``indicators`` (how many indicators carry a mark), so an empty answer is a failed read.
 INDICATOR_MARKED_REPORTS_QUERY = (
     "MATCH (i:Indicator) WHERE i.several_actor_pulses IS NOT NULL "

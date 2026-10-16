@@ -30,13 +30,15 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 _SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 
 # The read-only selection of --from-graph: active indicators that INDICATE a malware family, the
-# most recently updated first. ``$zone`` is null without --zone.
+# most recently reported first (2026-10-16: by the latest report of any source, or when EdgeGuard
+# created the node, ``indicator_aging``; not by the last database write). ``$zone`` is null without
+# --zone.
 SELECTION_QUERY = """MATCH (i:Indicator)
 WHERE i.active = true
   AND ($zone IS NULL OR $zone IN coalesce(i.zone, []))
   AND EXISTS { MATCH (i)-[:INDICATES]->(:Malware) }
 RETURN i.value AS value, i.indicator_type AS indicator_type, i.zone AS zone
-ORDER BY i.last_updated DESC, i.value
+ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value
 LIMIT $limit"""
 
 SELECTION_TIMEOUT_SECONDS = 120.0

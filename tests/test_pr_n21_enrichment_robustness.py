@@ -227,9 +227,13 @@ class TestFix6BaselinePostcheck:
         src = self._dag_src()
         # The Cypher in the postcheck callable must reference both Campaign
         # and ATTRIBUTED_TO — otherwise it's not actually checking the
-        # invariant the 2026-04-22 incident exposed.
+        # invariant the 2026-04-22 incident exposed. 2026-10-16: the qualifying actors are counted
+        # by ``campaign_evidence.QUALIFYING_ACTORS_QUERY`` (ATTRIBUTED_TO or USES_MALWARE).
+        from campaign_evidence import QUALIFYING_ACTORS_QUERY
+
         post_body = _function_body(src, "assert_baseline_postconditions")
-        assert "ATTRIBUTED_TO" in post_body, "INV-1 must check ATTRIBUTED_TO edges"
+        assert "session.run(QUALIFYING_ACTORS_QUERY)" in post_body, "INV-1 must count the qualifying actors"
+        assert "ATTRIBUTED_TO" in QUALIFYING_ACTORS_QUERY, "INV-1 must check ATTRIBUTED_TO edges"
         assert ":Campaign" in post_body, "INV-1 must check Campaign nodes"
         # Must raise AirflowException on violation (not just log)
         assert "AirflowException" in post_body, "violations must raise AirflowException so DAG marks FAILED"
@@ -453,10 +457,14 @@ class TestBugbotRound1Fixes:
 
         # Pin the new shape: independent queries, each returning a
         # single count. INV-1 (qualifying actors + Campaigns) + INV-2
-        # (Indicator) + INV-3 (Source) → ≥4 ``RETURN count`` occurrences.
-        assert post_body.count("RETURN count") >= 4, (
-            "INV-1 + INV-2 + INV-3 must each use a standalone count query (≥4 ``RETURN count`` total)"
+        # (Indicator) + INV-3 (Source) → 4 standalone counts. 2026-10-16: the qualifying-actor
+        # count is ``campaign_evidence.QUALIFYING_ACTORS_QUERY``, the builder's own definition.
+        from campaign_evidence import QUALIFYING_ACTORS_QUERY
+
+        assert post_body.count("RETURN count") >= 3 and "session.run(QUALIFYING_ACTORS_QUERY)" in post_body, (
+            "INV-1 + INV-2 + INV-3 must each use a standalone count query"
         )
+        assert QUALIFYING_ACTORS_QUERY.endswith("RETURN count(a) AS qualifying_actors")
 
         # Negative: the original silently-broken pattern must NOT be present.
         assert "WITH count(*) AS attrib_edges MATCH (c:Campaign)" not in post_body, (
@@ -472,14 +480,20 @@ class TestBugbotRound1Fixes:
         indicator_total > 0``). INV-1 must mirror the actual qualifying-
         actor condition: Malware ATTRIBUTED_TO + INDICATES from active
         Indicator."""
+        from campaign_evidence import QUALIFYING_ACTORS_QUERY
+
         src = self._dag_src()
         post_body = _function_body(src, "assert_baseline_postconditions")
 
+        # 2026-10-16: INV-1 runs the builder's qualifying-actor definition (``campaign_evidence``):
+        # an ATTRIBUTED_TO or a USES_MALWARE link to a malware an active indicator INDICATES.
+        assert "session.run(QUALIFYING_ACTORS_QUERY)" in post_body
         # Positive: must reference INDICATES + active filter (qualifying-actor logic)
-        assert "INDICATES" in post_body, "INV-1 must include INDICATES traversal to mirror build_campaign_nodes filter"
-        assert "i.active = true" in post_body or "i.active=true" in post_body, (
-            "INV-1 must filter on i.active=true to match build_campaign_nodes (enrichment_jobs.py:251)"
+        assert QUALIFYING_ACTORS_QUERY.count("<-[:INDICATES]-(i:Indicator) WHERE i.active = true") == 2, (
+            "INV-1 must include INDICATES traversal and the i.active filter of build_campaign_nodes, for both links"
         )
+        assert "(a)<-[:ATTRIBUTED_TO]-(:Malware)" in QUALIFYING_ACTORS_QUERY
+        assert "(a)-[:USES_MALWARE]->(:Malware)" in QUALIFYING_ACTORS_QUERY
         # Negative: the naive ATTRIBUTED_TO-only count must NOT appear
         assert "MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) RETURN count(*)" not in post_body, (
             "INV-1 must not use the naive ATTRIBUTED_TO-only count — that's the Bugbot round 2 false-positive shape"

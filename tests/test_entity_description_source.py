@@ -8,8 +8,10 @@ was merged after MITRE's. The sync's malware branch stored a comment that was on
 (``tail or description``), every branch that reads a block stored the raw comment when the block did not
 parse, and the STIX objects of the opt-in STIX flow carried the raw comment.
 
-The rule now: MITRE's record (``mitre_attck``) sets the description; any other record fills it only where
-the node has none (``neo4j_client._entity_description_fill``). The OTX collector gives family and adversary
+The rule now: the source ranking MITRE ATT&CK > a curated source > any other source decides the description,
+and the node names its source in ``description_source`` (``description_ranking``, 2026-10-16; until then
+MITRE's record set it and any other record only filled an empty one, so on a node MITRE does not describe
+the first source to arrive kept its text; a Technique or Tactic took any record's). The OTX collector gives family and adversary
 items no description; the sync takes none from an OTX malware or actor attribute (MISP keeps the ones
 written before 2026-10, with the pulse's text after the block), none from a metadata block, a block that
 does not parse, a block after other text, or MISPWriter's placeholder for an item without text
@@ -31,7 +33,8 @@ was not captured). The case of an entity MITRE and OTX both describe uses a cons
 is built both in the form MISPWriter writes since 2026-10-10 (``rt``, ``pid``) and in the earlier one.
 All go through the collectors' own code (``MITRECollector._parse_bundle``, ``OTXCollector.collect``),
 MISPWriter's attribute builders and the sync's ``parse_attribute``, as a baseline writes and reads them.
-The same rule on a real Neo4j: ``tests/test_entity_description_neo4j.py``.
+The same rule on a real Neo4j: ``tests/test_entity_description_neo4j.py`` and
+``tests/test_description_ranking_neo4j.py``.
 """
 
 from __future__ import annotations
@@ -51,11 +54,13 @@ for _p in (TESTS.parent / "src", TESTS):
         sys.path.insert(0, str(_p))
 
 from test_attack_revoked_objects import _ext, _group, _parse, _rel, _sdo, _software, _technique  # noqa: E402
+from test_description_ranking import SINGLE_PARAMS, apply_statement  # noqa: E402  (the ranked SET)
 
 import neo4j_client  # noqa: E402
 import run_misp_to_neo4j  # noqa: E402
 from collectors import misp_writer  # noqa: E402
 from collectors import otx_collector as oc  # noqa: E402
+from description_ranking import ENTITY_DESCRIPTIONS  # noqa: E402
 from run_misp_to_neo4j import (  # noqa: E402
     _METADATA_COMMENT_RE,
     MISPToNeo4jSync,
@@ -333,11 +338,7 @@ def _recording_client():
     return client, session
 
 
-_NODE_MERGE = re.compile(r"MERGE \(n:(Malware|ThreatActor|Tool) \{(\w+): \$\w+\}\)")
-_SET = re.compile(r"n\.description = \$(\w+)")
-_FILL = re.compile(
-    r"n\.description = CASE WHEN n\.description IS NULL OR n\.description = '' THEN \$(\w+) ELSE n\.description END"
-)
+_NODE_MERGE = re.compile(r"MERGE \(n:(Malware|ThreatActor|Tool|Technique|Tactic) \{(\w+): \$\w+\}\)")
 
 
 def _node_merges(session) -> list:
@@ -351,19 +352,25 @@ def _node_merges(session) -> list:
 
 
 def _apply(node: dict, query: str, params: dict) -> None:
-    """What the statement does to ``description`` on *node*: a plain SET replaces, the set-if-absent
-    CASE fills an absent or empty value. Any other assignment of ``n.description`` fails the test."""
-    assigned = re.findall(r"n\.description = (?!'')", query)  # not the IS-empty test
-    plain, fill = _SET.findall(query), _FILL.findall(query)
-    assert len(assigned) == len(plain) + len(fill) <= 1, query
-    for param in plain:
-        node["description"] = params[param]
-    for param in fill:
-        if node.get("description") in (None, ""):
-            node["description"] = params[param]
+    """What the statement does to ``description`` and ``description_source`` on *node*: the ranked SET
+    (``apply_statement``); any other assignment of either fails the test."""
+    apply_statement(node, query, params, ENTITY_DESCRIPTIONS)
 
 
-_MERGE = {"malware": "merge_malware", "actor": "merge_actor", "tool": "merge_tool"}
+def _ranked(query: str, params: dict):
+    """The ranked description a statement carries: (text, source, rank), or None without one."""
+    if ENTITY_DESCRIPTIONS.set_cypher("n", "n", *SINGLE_PARAMS) not in query:
+        return None
+    return params["ranked_description"], params["ranked_description_source"], params["ranked_description_rank"]
+
+
+_MERGE = {
+    "malware": "merge_malware",
+    "actor": "merge_actor",
+    "tool": "merge_tool",
+    "technique": "merge_technique",
+    "tactic": "merge_tactic",
+}
 
 
 def merged(*records: tuple, stored: dict | None = None) -> dict:
@@ -594,53 +601,42 @@ class TestWhereMispWriterWritesTheText:
         assert synced(written(kind, item))["description"] == comment
 
 
-# ================================================================ merge_*: MITRE sets, any other record fills
+# ================================================================ merge_*: the source ranking decides
 class TestMergeStatements:
-    @pytest.mark.parametrize("kind", ["malware", "actor", "tool"])
-    def test_mitre_record_sets_the_description(self, kind):
+    @pytest.mark.parametrize("kind", ["malware", "actor", "tool", "technique", "tactic"])
+    def test_mitre_record_carries_its_text_at_the_top_rank(self, kind):
         client, session = _recording_client()
         item = synced(written(kind, mitre_items()[kind]))
         assert getattr(client, _MERGE[kind])(item, source_id="mitre_attck")
         _label, _key, query, params = _node_merges(session)[-1]
-        assert "n.description = $description" in query and params["description"] == item["description"]
-        assert "$fill_description" not in query
+        assert item["description"], "MISP holds ATT&CK's text (cut to the writer's length)"
+        assert _ranked(query, params) == (item["description"], "mitre_attck", ENTITY_DESCRIPTIONS.top_rank)
+        _apply({}, query, params)  # no other assignment of the description
 
-    @pytest.mark.parametrize("source_id", ["alienvault_otx", "stix_import", "misp"])
-    @pytest.mark.parametrize("kind", ["malware", "actor", "tool"])
-    def test_another_record_only_fills_it(self, kind, source_id):
+    @pytest.mark.parametrize("source_id", ["alienvault_otx", "stix_import", "misp", "coreideas"])
+    @pytest.mark.parametrize("kind", ["malware", "actor", "tool", "technique", "tactic"])
+    def test_another_record_carries_its_source_and_rank(self, kind, source_id):
         client, session = _recording_client()
         item = dict(mitre_items()[kind], description="Text from another record")
         assert getattr(client, _MERGE[kind])(item, source_id=source_id)
         _label, _key, query, params = _node_merges(session)[-1]
-        assert (
-            "n.description = CASE WHEN n.description IS NULL OR n.description = '' "
-            "THEN $fill_description ELSE n.description END"
-        ) in query
-        assert params["fill_description"] == "Text from another record"
-        assert "n.description = $description" not in query
+        rank = ENTITY_DESCRIPTIONS.rank(source_id)
+        assert rank < ENTITY_DESCRIPTIONS.top_rank
+        assert _ranked(query, params) == ("Text from another record", source_id, rank)
 
-    def test_a_tactic_node_takes_attacks_text(self):
-        # docs/RESILMESH_INTEROPERABILITY.md §3.1 Tactic row: ``description`` is ATT&CK's text (2026-10).
-        client, session = _recording_client()
-        item = synced(written("tactic", mitre_items()["tactic"]))
-        assert client.merge_tactic(item, source_id="mitre_attck")
-        statements = [(c.args[0], c.kwargs) for c in session.run.call_args_list if "MERGE (n:Tactic" in c.args[0]]
-        assert len(statements) == 1
-        query, params = statements[0]
-        assert "n.description = $description" in query and params["description"] == EXECUTION_TEXT
-
-    @pytest.mark.parametrize("kind", ["malware", "actor", "tool"])
+    @pytest.mark.parametrize("kind", ["malware", "actor", "tool", "technique", "tactic"])
     @pytest.mark.parametrize("source_id", ["mitre_attck", "alienvault_otx"])
     def test_a_record_without_text_writes_none(self, kind, source_id):
         client, session = _recording_client()
         assert getattr(client, _MERGE[kind])(dict(mitre_items()[kind], description=""), source_id=source_id)
-        _label, _key, query, _params = _node_merges(session)[-1]
-        assert not re.search(r"n\.description = (?!'')", query)
+        _label, _key, query, params = _node_merges(session)[-1]
+        assert _ranked(query, params) is None
+        assert not re.search(r"n\.description(_source)? = ", query)
 
 
 class TestMergeOrder:
     """One entity's records in both orders: the text an OTX record carried until 2026-10 (the pulse's)
-    against MITRE's."""
+    against MITRE's, and records of sources ranked below MITRE."""
 
     @pytest.mark.parametrize(("kind", "otx_name"), [("malware", "Cobalt Strike"), ("actor", "Dragonfly")])
     @pytest.mark.parametrize("first", ["mitre", "otx"])
@@ -648,21 +644,51 @@ class TestMergeOrder:
         mitre = (kind, synced(written(kind, mitre_items()[kind])), "mitre_attck")
         otx = (kind, otx_item_before_2026_10(kind, otx_name), "alienvault_otx")
         node = merged(*((mitre, otx) if first == "mitre" else (otx, mitre)))
-        assert description_of(node) == mitre[1]["description"]
+        assert node == {"description": mitre[1]["description"], "description_source": "mitre_attck"}
 
-    def test_without_mitre_the_first_text_fills_and_stays(self):
-        first = ("malware", dict(mitre_items()["malware"], description="First text"), "stix_import")
-        second = ("malware", dict(mitre_items()["malware"], description="Second text"), "misp")
-        assert description_of(merged(first, second)) == "First text"
+    @pytest.mark.parametrize("kind", ["technique", "tactic"])
+    @pytest.mark.parametrize("first", ["mitre", "misp"])
+    def test_a_technique_or_tactic_keeps_attacks_text_in_both_orders(self, kind, first):
+        # Until 2026-10-16 any record set a Technique's or Tactic's description: the one merged last won.
+        mitre = (kind, synced(written(kind, mitre_items()[kind])), "mitre_attck")
+        other = (kind, dict(mitre_items()[kind], description="A MISP-native attribute's text"), "misp")
+        node = merged(*((mitre, other) if first == "mitre" else (other, mitre)))
+        assert node == {"description": mitre[1]["description"], "description_source": "mitre_attck"}
+
+    @pytest.mark.parametrize("first", ["stix_import", "misp"])
+    def test_without_mitre_a_registered_source_wins_over_an_unregistered_one(self, first):
+        # Until 2026-10-16 the first of the two to arrive kept its text.
+        bundle = ("malware", dict(mitre_items()["malware"], description="An external bundle's text"), "stix_import")
+        native = ("malware", dict(mitre_items()["malware"], description="A MISP-native attribute's text"), "misp")
+        node = merged(*((bundle, native) if first == "stix_import" else (native, bundle)))
+        assert node == {"description": "A MISP-native attribute's text", "description_source": "misp"}
+
+    @pytest.mark.parametrize("first", ["coreideas", "misp"])
+    def test_without_mitre_a_curated_source_wins_over_another(self, first):
+        curated = ("actor", dict(mitre_items()["actor"], description="Core Ideas profile"), "coreideas")
+        native = ("actor", dict(mitre_items()["actor"], description="A MISP-native attribute's text"), "misp")
+        node = merged(*((curated, native) if first == "coreideas" else (native, curated)))
+        assert node == {"description": "Core Ideas profile", "description_source": "coreideas"}
 
     def test_an_empty_stored_description_counts_as_absent(self):
         record = ("actor", dict(mitre_items()["actor"], description="Partner text"), "stix_import")
-        assert description_of(merged(record, stored={"description": ""})) == "Partner text"
+        node = merged(record, stored={"description": ""})
+        assert node == {"description": "Partner text", "description_source": "stix_import"}
 
     def test_a_revised_mitre_text_replaces_the_earlier_one(self):
         old = ("tool", dict(mitre_items()["tool"], description="ATT&CK v17 text"), "mitre_attck")
         new = ("tool", dict(mitre_items()["tool"], description="ATT&CK v18 text"), "mitre_attck")
         assert description_of(merged(old, new)) == "ATT&CK v18 text"
+
+    def test_a_description_written_before_is_replaced_by_mitre_only(self):
+        # A node of a graph built before 2026-10-16: a description, no description_source.
+        legacy = {"description": "Text a record wrote before the ranking"}
+        native = ("malware", dict(mitre_items()["malware"], description="A MISP-native attribute's text"), "misp")
+        curated = ("malware", dict(mitre_items()["malware"], description="Core Ideas profile"), "coreideas")
+        assert merged(native, curated, stored=legacy) == legacy
+        mitre = ("malware", synced(written("malware", mitre_items()["malware"])), "mitre_attck")
+        node = merged(native, mitre, curated, stored=legacy)
+        assert node == {"description": mitre[1]["description"], "description_source": "mitre_attck"}
 
 
 class TestSyncEndToEnd:
@@ -753,8 +779,8 @@ class TestStixObjects:
 
 
 class TestStixImport:
-    """``run_pipeline.load_stix21_to_neo4j`` (MISP → STIX → Neo4j, ``--stix-flow``): the objects of a MITRE
-    event (``x_edgeguard_source`` ``mitre_attck``) set the description, any other only fills it."""
+    """``run_pipeline.load_stix21_to_neo4j`` (MISP → STIX → Neo4j, ``--stix-flow``): an object carries the
+    source of its event (``x_edgeguard_source``), and the source ranking decides as in the attribute flow."""
 
     @staticmethod
     def _import(obj: dict, source: str):
@@ -767,24 +793,23 @@ class TestStixImport:
         pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [obj]})
         return _node_merges(session)[-1]
 
-    @pytest.mark.parametrize("kind", ["actor", "malware", "tool"])
-    def test_a_mitre_object_sets_the_description(self, kind):
+    @pytest.mark.parametrize("kind", ["actor", "malware", "tool", "technique", "tactic"])
+    def test_a_mitre_object_carries_the_attribute_flows_text_at_the_top_rank(self, kind):
         attr = written(kind, mitre_items()[kind])
         _label, _key, query, params = self._import(stix(attr), "mitre_attck")
-        assert "n.description = $description" in query
-        assert params["description"] == synced(attr)["description"]
+        assert _ranked(query, params) == (synced(attr)["description"], "mitre_attck", ENTITY_DESCRIPTIONS.top_rank)
 
     @pytest.mark.parametrize("kind", ["actor", "malware", "tool"])
-    def test_another_object_only_fills_it(self, kind):
+    def test_another_object_carries_its_source_and_rank(self, kind):
         obj = dict(stix(written(kind, mitre_items()[kind])), description="An external bundle's text")
         _label, _key, query, params = self._import(obj, "stix_import")
-        assert "n.description = $description" not in query
-        assert params["fill_description"] == "An external bundle's text"
+        assert _ranked(query, params) == ("An external bundle's text", "stix_import", 0)
 
     def test_an_otx_object_writes_no_description(self):
         attr = written("actor", otx_item_before_2026_10("actor", "Dragonfly"))
-        _label, _key, query, _params = self._import(stix(attr), "alienvault_otx")
-        assert not re.search(r"n\.description = (?!'')", query)
+        _label, _key, query, params = self._import(stix(attr), "alienvault_otx")
+        assert _ranked(query, params) is None
+        assert not re.search(r"n\.description(_source)? = ", query)
 
 
 # ================================================================ the RUNBOOK repair (docs/RUNBOOK.md)

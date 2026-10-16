@@ -160,8 +160,13 @@ class TestFilters:
         session = _install(monkeypatch, [])
         resp = client.get("/export/wazuh/cdb")
         query, params = session.calls[0]
-        # 2026-10: newest first, one row beyond the cap to detect a cut list.
-        assert "ORDER BY (n.last_updated IS NULL), n.last_updated DESC, key LIMIT $cap + 1" in query
+        # 2026-10: newest first, one row beyond the cap to detect a cut list. 2026-10-16: an indicator
+        # by its latest report (or when EdgeGuard created it), not by the last database write.
+        assert (
+            "ORDER BY (coalesce(n.last_reported_at, n.first_imported_at) IS NULL), "
+            "coalesce(n.last_reported_at, n.first_imported_at) DESC, key LIMIT $cap + 1"
+        ) in query
+        assert "last_updated" not in query
         assert params["cap"] == query_api._CDB_EXPORT_MAX_ENTRIES
         assert resp.headers["X-EdgeGuard-Truncated"] == "false"
 
