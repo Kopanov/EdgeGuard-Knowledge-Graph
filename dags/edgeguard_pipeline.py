@@ -1482,7 +1482,8 @@ def _skip_while_baseline_holds_lock(task: str, context: dict) -> None:
     (and its retries), ``build_relationships`` and ``run_enrichment_jobs`` start minutes to hours
     later and wrote to Neo4j even when a baseline had taken the lock in between, during its wipe or
     its collection. The task's own DAG-run identity is passed so that the baseline DAG's own
-    ``build_relationships`` (the same callable) is not skipped by the lock its run holds. A skip
+    ``build_relationships`` (``run_baseline_build_relationships``, which first requires that lock and
+    then calls the same callable) is not skipped by the lock its run holds. A skip
     stamps no state file and leaves ``NEO4J_FULL_SYNC`` / ``SKIP_NEXT_NEO4J_SYNC`` set; the
     downstream tasks skip with it. Fail-open when the lock cannot be read, as
     ``should_run_neo4j_sync``.
@@ -2766,7 +2767,7 @@ def _require_baseline_start(context, step: str) -> None:
         )
 
 
-def _require_baseline_lock(context, step: str) -> None:
+def _require_baseline_lock(context, step: str, *, own: bool = False) -> None:
     """Refuse a baseline step that would write while no baseline holds the baseline lock (2026-10-16).
 
     A refusal of ``baseline_clean`` before the wipe releases the lock, and ``baseline_clean`` and
@@ -2775,19 +2776,28 @@ def _require_baseline_lock(context, step: str) -> None:
     (``baseline_skip_reason``) finds no sentinel: the collectors and ``full_neo4j_sync`` would write
     beside the scheduled DAGs, which the lock exists to prevent. Before 2026-10-16 the refused run
     kept its lock, so this path did not exist. The check only verifies: the tier-2 collectors run in
-    parallel and would race on the sentinel's atomic create if each took the lock. A lock held by
-    another baseline is left to the collectors' own check, which stands them down. No check without a
-    run id (no Airflow DAG run, as in ``_retake_baseline_lock``); fail-open when the lock cannot be
-    read, as the collectors' own check.
+    parallel and would race on the sentinel's atomic create if each took the lock.
+
+    ``own=False`` (the collectors): a lock held by another baseline is left to the collectors' own
+    check, which stands them down (a skip, not a failure). ``own=True`` (``full_neo4j_sync``, the
+    baseline's ``build_relationships`` and ``run_enrichment_jobs``): the step also refuses unless the
+    live sentinel names this DAG run. These tasks run whatever the collectors' outcome
+    (``ALL_DONE`` / ``NONE_FAILED_MIN_ONE_SUCCESS``) and the full sync and the enrichment have no
+    check of their own, so with another baseline's lock (or the in-process baseline's) a run whose
+    ``baseline_start`` was marked success by hand ran a full MISP→Neo4j write during that baseline's
+    wipe or refill. No check without a run id (no Airflow DAG run, as in ``_retake_baseline_lock``);
+    fail-open when the lock cannot be read, as the collectors' own check.
     """
     holder = _baseline_run_holder(context or {})
     if not holder["run_id"]:
         return
     try:
-        from baseline_lock import baseline_lock_path, is_baseline_running
+        from baseline_lock import baseline_lock_path, describe_holder, is_baseline_running, is_own_dag_run_sentinel
 
         held = is_baseline_running()
         path = baseline_lock_path()
+        held_by = describe_holder(held) if held is not None else ""
+        held_by_this_run = is_own_dag_run_sentinel(held, holder)
     except Exception:
         logger.warning("[BASELINE] %s: the baseline lock could not be read; proceeding", step, exc_info=True)
         return
@@ -2796,6 +2806,13 @@ def _require_baseline_lock(context, step: str) -> None:
             f"[BASELINE] {step}: no baseline holds the baseline lock ({path}), so this run would write beside "
             "the scheduled DAGs (a refusal of baseline_clean released it, or it was reaped at the age cap or "
             "removed by hand). Clear baseline_start, which takes the lock again for this run, then this task."
+        )
+    if own and not held_by_this_run:
+        raise AirflowFailException(
+            f"[BASELINE] {step}: the baseline lock ({path}) is held by {held_by}, not by this run "
+            f"({holder['dag_id']}/{holder['run_id']}), so this run would write during that baseline's wipe or "
+            "collection. Let that baseline finish (remove the sentinel only if it is stale); to go on with this "
+            "run, clear baseline_start, which takes the lock again for this run, then this task."
         )
 
 
@@ -2979,7 +2996,8 @@ def run_baseline_malwarebazaar(**context):
 def run_baseline_full_sync(**context):
     """Run a FULL (non-incremental) MISP→Neo4j sync after baseline collection."""
     _require_baseline_start(context, "full_neo4j_sync")
-    _require_baseline_lock(context, "full_neo4j_sync")
+    # 2026-10-16: only under this run's own lock; another baseline's lock does not suffice.
+    _require_baseline_lock(context, "full_neo4j_sync", own=True)
 
     from run_misp_to_neo4j import MISPToNeo4jSync
 
@@ -3018,8 +3036,22 @@ def run_baseline_full_sync(**context):
     return {"synced": True}
 
 
+def run_baseline_build_relationships(**context):
+    """``build_relationships`` of the baseline DAG: ``run_build_relationships`` under this run's own lock (2026-10-16).
+
+    The callable it shares with ``edgeguard_neo4j_sync`` skips while another baseline holds the lock
+    and runs while none does. In the baseline DAG the skip left the run's graph without its
+    relationships (the enrichment skipped with it), and the run without a lock wrote beside the
+    scheduled DAGs. Here the task refuses unless the lock names this DAG run (``_require_baseline_lock``).
+    """
+    _require_baseline_lock(context, "build_relationships", own=True)
+    return run_build_relationships(**context)
+
+
 def run_baseline_enrichment(**context):
     """Run all enrichment jobs after baseline sync."""
+    # 2026-10-16: only under this run's own lock (``_require_baseline_lock``).
+    _require_baseline_lock(context, "run_enrichment_jobs", own=True)
     from enrichment_jobs import run_all_enrichment_jobs
     from neo4j_client import Neo4jClient
 
@@ -3372,7 +3404,9 @@ def _retake_baseline_lock(holder: dict, step: str, before: str) -> None:
     ``baseline_clean``, cleared after an environment fix, takes it before the wipe, and
     ``baseline_start`` takes it before the collectors and the full sync, which also covers a
     ``baseline_clean`` marked success by hand. A ``baseline_start`` marked success by hand takes
-    nothing; the collectors and ``full_neo4j_sync`` then refuse (``_require_baseline_lock``).
+    nothing; the collectors then refuse while no baseline holds the lock, and ``full_neo4j_sync``,
+    ``build_relationships`` and ``run_enrichment_jobs`` unless this run holds it
+    (``_require_baseline_lock``).
     Idempotent while this run holds the lock; refuses while another DAG run or an in-process
     baseline holds it. ``baseline_acquire_lock`` refuses a context without a run id, so no such run
     reaches this step; it is a no-op there.
@@ -4002,7 +4036,7 @@ baseline_full_sync_task = PythonOperator(
 
 baseline_build_rels_task = PythonOperator(
     task_id="build_relationships",
-    python_callable=run_build_relationships,
+    python_callable=run_baseline_build_relationships,
     # 2026-04-19 (Vanko's overnight baseline regression):
     # 45min was way too short for the 730-day baseline against an
     # already-populated graph (344K nodes + 555K edges). Both the
@@ -4147,8 +4181,9 @@ baseline_complete = BashOperator(
 # keeps the lock so that clearing the failed task resumes under the mutex (the liveness check keeps a
 # failed run's sentinel until the age cap and prunes it once the run state is success). A refusal of
 # ``baseline_clean`` before the wipe releases it instead; ``baseline_clean`` and ``baseline_start``
-# take it again before the run goes on, and the collectors and ``full_neo4j_sync`` refuse while no
-# baseline holds it (2026-10-16).
+# take it again before the run goes on. The collectors refuse while no baseline holds it (another
+# run's lock stands them down), and ``full_neo4j_sync``, ``build_relationships`` and
+# ``run_enrichment_jobs`` refuse unless this run holds it (2026-10-16).
 # The scheduled DAGs skip while the sentinel is held; in ``edgeguard_neo4j_sync`` every task that
 # writes checks it at its start, not only ``check_sync_needed`` (2026-10-16). The earlier PID-based
 # attempt failed because the task process that writes the sentinel exits while the DAG run

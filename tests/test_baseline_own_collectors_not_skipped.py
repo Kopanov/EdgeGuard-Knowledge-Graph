@@ -235,7 +235,13 @@ def test_every_baseline_collector_callable_passes_its_run_context(dag, lock_path
         name
         for name in dir(dag)
         if name.startswith("run_baseline_")
-        and name not in {"run_baseline_collector", "run_baseline_full_sync", "run_baseline_enrichment"}
+        and name
+        not in {
+            "run_baseline_collector",
+            "run_baseline_full_sync",
+            "run_baseline_build_relationships",
+            "run_baseline_enrichment",
+        }
     )
     assert len(callables) >= 10, callables
     for name in callables:

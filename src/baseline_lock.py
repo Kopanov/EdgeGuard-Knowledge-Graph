@@ -52,9 +52,11 @@ The sentinel records who holds it:
   cap; a ``success`` state prunes it. Exception (2026-10-16): a refusal of
   ``baseline_clean`` before the wipe (conf typo, ``wipe_scope``, backup gate)
   releases it, and ``baseline_clean`` and ``baseline_start`` take it again
-  when they run; the collectors and the full sync refuse while no baseline
-  holds it. Acquiring again for the same run id is idempotent (task retries,
-  manual re-runs).
+  when they run; the collectors refuse while no baseline holds it, and the
+  full sync, the baseline's ``build_relationships`` and its enrichment
+  refuse unless the sentinel names their own DAG run
+  (``is_own_dag_run_sentinel``). Acquiring again for the same run id is
+  idempotent (task retries, manual re-runs).
 
   The collector tasks of that same DAG run pass their run identity to
   ``baseline_skip_reason(own_holder=...)`` and are not skipped by the sentinel

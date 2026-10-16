@@ -4,8 +4,8 @@
    ``run_neo4j_sync`` (and its retries), ``build_relationships`` and ``run_enrichment_jobs`` start
    minutes to hours later and wrote to Neo4j even when a baseline had taken the lock in between
    (during its wipe or its collection). Each now skips at its start while another run holds the
-   lock; the baseline DAG's own ``build_relationships`` (the same callable) still runs under the
-   lock of its run.
+   lock; the baseline DAG's own ``build_relationships`` (which calls the same callable) still runs
+   under the lock of its run.
 2. ``baseline_clean`` refuses before the wipe on a ``fresh_baseline`` typo, an invalid
    ``wipe_scope`` or the backup gate. The run had taken the lock in ``baseline_acquire_lock`` and,
    failed, kept it until the 48 h age cap: the corrected trigger the error message asks for was
@@ -16,6 +16,11 @@
 3. A ``baseline_start`` marked success by hand after such a refusal takes nothing, and the
    collectors' own check finds no sentinel: the collectors and ``full_neo4j_sync`` now refuse while
    no baseline holds the lock (a verify, not a re-acquire: the tier-2 collectors run in parallel).
+4. The same run with another baseline's lock (or the in-process baseline's): the collectors stand
+   down in their own check, but ``full_neo4j_sync`` (``trigger_rule=ALL_DONE``) has none and ran a
+   full MISP→Neo4j write during that baseline's wipe or refill. ``full_neo4j_sync``, the baseline's
+   ``build_relationships`` and its ``run_enrichment_jobs`` now refuse unless the lock names their own
+   run; the collectors still stand down rather than fail.
 
 The DAG module is imported as Airflow imports it, and the lock is a real sentinel file; only the
 Airflow REST lookup of the run state, the sync, the subprocess, the enrichment and the wipe are
@@ -194,13 +199,23 @@ def test_a_process_held_lock_skips_the_sync_tasks_too(dag, lock, sync_tasks):
     assert sync_tasks.ran == []
 
 
-def test_the_baseline_runs_own_build_relationships_still_runs(dag, lock, sync_tasks):
-    """``build_relationships`` of the baseline DAG is the same callable; the lock of its own run is no reason to skip."""
-    assert baseline_lock.acquire_baseline_lock(holder=BASELINE_A)
+def _baseline_task(dag, task_id: str):
+    """The callable the baseline DAG runs for *task_id*, as Airflow schedules it."""
+    return dag.baseline_dag.get_task(task_id).python_callable
 
-    assert dag.run_build_relationships(**_context(BASELINE_A)) == {"built": True, "returncode": 0}
+
+def test_the_baseline_runs_own_build_relationships_still_runs(dag, lock, sync_tasks):
+    """``build_relationships`` of the baseline DAG calls the same callable; the lock of its own run is no
+    reason to skip."""
+    assert baseline_lock.acquire_baseline_lock(holder=BASELINE_A)
+    build_relationships = _baseline_task(dag, "build_relationships")
+    assert build_relationships is dag.run_baseline_build_relationships
+
+    assert build_relationships(**_context(BASELINE_A)) == {"built": True, "returncode": 0}
     assert sync_tasks.ran == ["build_relationships"]
 
+    # The shared callable still stands down for a lock of another run (the sync DAG's case); the
+    # baseline DAG's task refuses instead (section 4 below).
     with pytest.raises(dag.AirflowSkipException):
         dag.run_build_relationships(**_context(BASELINE_B))
     assert sync_tasks.ran == ["build_relationships"], "another baseline run's task still stands down"
@@ -359,6 +374,9 @@ def test_the_collectors_and_full_sync_refuse_while_no_baseline_holds_the_lock(
         dag.run_baseline_full_sync(**context)
     with pytest.raises(dag.AirflowFailException, match="urlhaus: no baseline holds the baseline lock"):
         dag.run_baseline_collector("urlhaus", object, context=context)
+    for task_id in ("build_relationships", "run_enrichment_jobs"):
+        with pytest.raises(dag.AirflowFailException, match=f"{task_id}: no baseline holds the baseline lock"):
+            _baseline_task(dag, task_id)(**context)
     assert sync_tasks.ran == [] and collector_spy == []
     assert not lock.path.exists(), "the check only verifies; it takes no lock"
 
@@ -370,10 +388,100 @@ def test_the_collectors_and_full_sync_refuse_while_no_baseline_holds_the_lock(
 
 
 def test_a_lock_held_by_another_run_is_left_to_the_collectors_own_check(dag, lock, collector_spy):
-    """The new check refuses only a free lock; another run's lock still stands the collectors down there."""
+    """The collectors' check refuses only a free lock; another run's lock still stands them down there."""
     dag._baseline_acquire_lock(**_context(BASELINE_B, {}))
     dag.run_baseline_collector("urlhaus", object, context=_marked_success(BASELINE_A))
     assert collector_spy == [("urlhaus", BASELINE_A)]
+
+
+# ---------------------------------------------------------------------------
+# 4. The writers that run whatever the collectors' outcome need this run's own lock
+# ---------------------------------------------------------------------------
+
+WRITERS = ("full_neo4j_sync", "build_relationships", "run_enrichment_jobs")
+# What each writer starts, as the ``sync_tasks`` stand-ins record it.
+WRITES = {
+    "full_neo4j_sync": "run_neo4j_sync",
+    "build_relationships": "build_relationships",
+    "run_enrichment_jobs": "run_enrichment_jobs",
+}
+
+
+@pytest.mark.parametrize("task_id", WRITERS)
+def test_a_writer_refuses_while_another_baseline_run_holds_the_lock(dag, lock, sync_tasks, task_id):
+    """The regression: ``_require_baseline_lock`` treated any lock as enough. With run B holding it, run A's
+    ``full_neo4j_sync`` (``baseline_start`` marked success by hand, ``trigger_rule=ALL_DONE``) wrote the full
+    MISP→Neo4j sync during B's wipe or refill."""
+    dag._baseline_acquire_lock(**_context(BASELINE_B, {"fresh_baseline": True}))
+
+    with pytest.raises(dag.AirflowFailException) as refused:
+        _baseline_task(dag, task_id)(**_marked_success(BASELINE_A))
+    message = str(refused.value)
+    assert f"[BASELINE] {task_id}: the baseline lock" in message
+    assert f"held by Airflow DAG run edgeguard_baseline/{BASELINE_B['run_id']}" in message, "names the live holder"
+    assert f"not by this run (edgeguard_baseline/{BASELINE_A['run_id']})" in message
+    assert "Let that baseline finish" in message and "clear baseline_start" in message, "says what to do"
+
+    assert sync_tasks.ran == [], f"wrote under another run's lock: {sync_tasks.ran}"
+    assert not sync_tasks.state_file.exists(), "a refused full sync stamps no state file"
+    assert _holder_on_disk(lock.path) == BASELINE_B["run_id"], "the other run keeps its lock"
+
+
+@pytest.mark.parametrize("task_id", WRITERS)
+def test_a_writer_refuses_while_the_in_process_baseline_holds_the_lock(dag, lock, sync_tasks, task_id):
+    """``run_pipeline --baseline`` holds a process sentinel, which never names a DAG run."""
+    assert baseline_lock.acquire_baseline_lock()
+    try:
+        with pytest.raises(dag.AirflowFailException, match=r"held by pid=\d+ host="):
+            _baseline_task(dag, task_id)(**_marked_success(BASELINE_A))
+    finally:
+        baseline_lock.release_baseline_lock()
+    assert sync_tasks.ran == []
+
+
+def test_the_writers_run_under_this_runs_own_lock(dag, lock, sync_tasks):
+    dag._baseline_acquire_lock(**_context(BASELINE_A, {"fresh_baseline": True}))
+    context = _marked_success(BASELINE_A)
+
+    assert _baseline_task(dag, "full_neo4j_sync")(**context) == {"synced": True}
+    assert _baseline_task(dag, "build_relationships")(**context) == {"built": True, "returncode": 0}
+    assert _baseline_task(dag, "run_enrichment_jobs")(**context) == {"enriched": True}
+    assert sync_tasks.ran == [WRITES[task_id] for task_id in WRITERS]
+    assert sync_tasks.state_file.exists()
+    assert _holder_on_disk(lock.path) == BASELINE_A["run_id"], "the check only verifies; the lock stays"
+
+
+def test_the_writers_proceed_when_the_lock_cannot_be_read(dag, lock, sync_tasks, monkeypatch):
+    """Fail-open, as the collectors' own check."""
+
+    def broken():
+        raise RuntimeError("lock check failed")
+
+    monkeypatch.setattr(baseline_lock, "is_baseline_running", broken)
+    monkeypatch.setattr(dag, "_skip_while_baseline_holds_lock", lambda *_a, **_k: None)
+    context = _marked_success(BASELINE_A)
+    for task_id in WRITERS:
+        _baseline_task(dag, task_id)(**context)
+    assert sync_tasks.ran == [WRITES[task_id] for task_id in WRITERS]
+
+
+def test_the_collectors_still_stand_down_for_another_runs_lock(dag, lock, monkeypatch):
+    """No skip turns into a failure: run A's collector, with run B holding the lock, returns the
+    ``baseline_in_progress`` skip from the collector wrapper and writes nothing."""
+    built: list = []
+
+    class _Collector:
+        def __init__(self, *_a, **_k):
+            built.append("built")
+
+    monkeypatch.setattr(dag, "get_baseline_config", lambda context=None: (None, 730))
+    monkeypatch.setattr("collectors.misp_writer.MISPWriter", MagicMock())
+    monkeypatch.setattr("parent_dag_liveness.make_liveness_callback", lambda *_a, **_k: None)
+    dag._baseline_acquire_lock(**_context(BASELINE_B, {}))
+
+    result = dag.run_baseline_collector("urlhaus", _Collector, context=_marked_success(BASELINE_A))
+    assert result.get("skipped") is True and result["skip_reason_class"] == "baseline_in_progress"
+    assert built == []
 
 
 def test_the_collectors_proceed_when_the_lock_cannot_be_read(dag, lock, collector_spy, monkeypatch):
