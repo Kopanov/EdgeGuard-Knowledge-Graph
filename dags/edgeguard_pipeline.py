@@ -639,6 +639,12 @@ def _on_task_success(context):
         logger.warning(f"Failed to record success metric for {dag_id}: {e}")
 
 
+# Airflow pool shared by every collector task of every DAG: bounds how many collectors run at once
+# (MISP php-fpm workers and the airflow container's memory limit are the shared resources).
+# The slot count is EDGEGUARD_COLLECTOR_POOL_SLOTS (docker-compose.yml creates the pool at start);
+# a deployment without that step must create the pool by hand or the collector tasks never start.
+COLLECTOR_POOL = "edgeguard_collectors"
+
 # Default arguments
 default_args = {
     "owner": "edgeguard",
@@ -1783,6 +1789,7 @@ misp_health_check = PythonOperator(
 with TaskGroup("high_frequency_collectors", dag=dag) as high_freq_group:
     collect_otx = PythonOperator(
         task_id="collect_otx",
+        pool=COLLECTOR_POOL,
         python_callable=run_otx_collection,
         execution_timeout=timedelta(hours=1),
         dag=dag,
@@ -1839,6 +1846,7 @@ misp_health_medium = PythonOperator(
 
 collect_cisa_medium = PythonOperator(
     task_id="collect_cisa",
+    pool=COLLECTOR_POOL,
     python_callable=run_cisa_collection,
     execution_timeout=timedelta(hours=1),
     dag=medium_freq_dag,
@@ -1846,6 +1854,7 @@ collect_cisa_medium = PythonOperator(
 
 collect_vt_medium = PythonOperator(
     task_id="collect_virustotal",
+    pool=COLLECTOR_POOL,
     python_callable=run_vt_collection,
     execution_timeout=timedelta(hours=1),
     dag=medium_freq_dag,
@@ -1887,6 +1896,7 @@ misp_health_low = PythonOperator(
 
 collect_nvd_low = PythonOperator(
     task_id="collect_nvd",
+    pool=COLLECTOR_POOL,
     python_callable=run_nvd_collection,
     execution_timeout=timedelta(hours=2),
     dag=low_freq_dag,
@@ -1914,7 +1924,13 @@ daily_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (8 collectors parallel + retries) + buffer
+    # Sized as 7h (8 collectors in parallel, each with its retries) + buffer. Since 2026-10 the
+    # collectors share the collector pool (EDGEGUARD_COLLECTOR_POOL_SLOTS, default 4), so they no
+    # longer all start together: if every attempt reached its 2h execution_timeout they would need two
+    # rounds (~12h 45m) and the scheduler would mark the collectors still running or waiting for a
+    # slot at this timeout skipped, without a task failure callback (EdgeGuardCollectionStale reports
+    # the source). Real daily runs take minutes, so the timeout is kept.
+    dagrun_timeout=timedelta(hours=8, minutes=30),
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -1927,6 +1943,7 @@ misp_health_daily = PythonOperator(
 
 collect_mitre_daily = PythonOperator(
     task_id="collect_mitre",
+    pool=COLLECTOR_POOL,
     python_callable=run_mitre_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1936,6 +1953,7 @@ collect_mitre_daily = PythonOperator(
 # (default OFF → task logs "disabled by flag" and succeeds with 0 items).
 collect_cisa_ics_daily = PythonOperator(
     task_id="collect_cisa_ics",
+    pool=COLLECTOR_POOL,
     python_callable=run_cisa_ics_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1943,6 +1961,7 @@ collect_cisa_ics_daily = PythonOperator(
 
 collect_abuseipdb_daily = PythonOperator(
     task_id="collect_abuseipdb",
+    pool=COLLECTOR_POOL,
     python_callable=run_abuseipdb_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1950,6 +1969,7 @@ collect_abuseipdb_daily = PythonOperator(
 
 collect_threatfox_daily = PythonOperator(
     task_id="collect_threatfox",
+    pool=COLLECTOR_POOL,
     python_callable=run_threatfox_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1957,6 +1977,7 @@ collect_threatfox_daily = PythonOperator(
 
 collect_urlhaus_daily = PythonOperator(
     task_id="collect_urlhaus",
+    pool=COLLECTOR_POOL,
     python_callable=run_urlhaus_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1964,6 +1985,7 @@ collect_urlhaus_daily = PythonOperator(
 
 collect_feodo_daily = PythonOperator(
     task_id="collect_feodo",
+    pool=COLLECTOR_POOL,
     python_callable=run_feodo_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1971,6 +1993,7 @@ collect_feodo_daily = PythonOperator(
 
 collect_sslblacklist_daily = PythonOperator(
     task_id="collect_sslblacklist",
+    pool=COLLECTOR_POOL,
     python_callable=run_sslblacklist_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -1980,6 +2003,7 @@ collect_sslblacklist_daily = PythonOperator(
 # (default OFF → task logs "disabled by flag" and succeeds with 0 items).
 collect_malwarebazaar_daily = PythonOperator(
     task_id="collect_malwarebazaar",
+    pool=COLLECTOR_POOL,
     python_callable=run_malwarebazaar_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
@@ -2293,8 +2317,14 @@ baseline_dag = DAG(
     catchup=False,
     max_active_runs=1,  # Only one baseline at a time
     # Worst-case wall time: tier1 sequential (cisa 14s + mitre 28s + otx ~3h
-    # + nvd ~5h ≈ 8h) + tier2 parallel (~2h) + full_sync (~6h) +
+    # + nvd ~5h ≈ 8h) + tier2 (~2h) + full_sync (~6h) +
     # build_rels (~5h) + enrich (~5h) = ~26h realistic.
+    # 2026-10: the tier2 collectors take slots of the shared collector pool
+    # (EDGEGUARD_COLLECTOR_POOL_SLOTS, default 4) instead of all running at
+    # once. On 13 Oct 2026 they ran in 49 min all together, so the pool adds
+    # less than one feed's run time; in the worst case (every attempt reaching
+    # its timeout) tier2 grows from 4h 05m to 8h 10m, which uses up to 4h of
+    # the ~6h headroom below.
     #
     # PR-N29 (Holistic H1, pre-baseline audit 2026-04-23): each of the
     # critical-chain tasks (full_neo4j_sync, build_relationships,
@@ -3712,30 +3742,38 @@ baseline_clean_task = PythonOperator(
 # architectural fix tracked separately — event partitioning by date
 # range so no single event exceeds ~20K attributes (Issue #61).
 #
-# Tier2 stays parallel: those 6 feeds are individually tiny (<5K attrs
-# each), don't trigger the failure-mode-2 oversized-event problem, and
-# their parallel write pressure on MISP is negligible vs tier1's heavies.
+# Tier2 has no order inside the group: its feeds are individually small and
+# don't trigger the failure-mode-2 oversized-event problem. 2026-10: all 7 at
+# once pushed MISP php-fpm past its memory limit (HTTP 502), and a daily
+# catch-up run plus OTX, VT and NVD hit the airflow container's limit, so
+# every collector of every DAG takes a slot of COLLECTOR_POOL: at most
+# EDGEGUARD_COLLECTOR_POOL_SLOTS (default 4) run at once. Tier1 runs one
+# collector at a time, so it holds one slot.
 with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
         task_id="collect_otx",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_otx,
         execution_timeout=timedelta(hours=5),
         dag=baseline_dag,
     )
     bl_nvd = PythonOperator(
         task_id="collect_nvd",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_nvd,
         execution_timeout=timedelta(hours=5),
         dag=baseline_dag,
     )
     bl_cisa = PythonOperator(
         task_id="collect_cisa",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_cisa,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_mitre = PythonOperator(
         task_id="collect_mitre",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_mitre,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
@@ -3750,7 +3788,7 @@ with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": Tri
     # see the comment block above the TaskGroup for full reasoning.
     bl_cisa >> bl_mitre >> bl_otx >> bl_nvd
 
-# Tier 2 — Reputation & bulk feeds (parallel after Tier 1).
+# Tier 2 — Reputation & bulk feeds (after Tier 1; as many at once as the collector pool has free slots).
 # ALL_DONE: Tier 1 tasks have no data dependency on each other; OTX (or NVD) failure must not
 # skip Tier 2 as upstream_failed (see baseline DAG notes in docs/AIRFLOW_DAGS.md).
 with TaskGroup(
@@ -3760,30 +3798,35 @@ with TaskGroup(
 ) as baseline_tier2:
     bl_abuseipdb = PythonOperator(
         task_id="collect_abuseipdb",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_abuseipdb,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_threatfox = PythonOperator(
         task_id="collect_threatfox",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_threatfox,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_urlhaus = PythonOperator(
         task_id="collect_urlhaus",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_urlhaus,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_feodo = PythonOperator(
         task_id="collect_feodo",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_feodo,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
     bl_sslblacklist = PythonOperator(
         task_id="collect_sslblacklist",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_sslblacklist,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
@@ -3792,6 +3835,7 @@ with TaskGroup(
     # wrapper returns a skipped status when the flag is off, so the task is inert.
     bl_cisa_ics = PythonOperator(
         task_id="collect_cisa_ics",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_cisa_ics,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
@@ -3800,6 +3844,7 @@ with TaskGroup(
     # returns a skipped status when the flag is off, so the task is inert.
     bl_malwarebazaar = PythonOperator(
         task_id="collect_malwarebazaar",
+        pool=COLLECTOR_POOL,
         python_callable=run_baseline_malwarebazaar,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
@@ -3981,7 +4026,7 @@ baseline_complete = BashOperator(
 # updated PR-F4 — tier1 is now sequential, see TaskGroup comment above):
 # health → source keys (report; stops only on a blocker) → lock → clean (no-op unless
 # fresh_baseline=true conf) → start → tier1
-# (cisa→mitre→otx→nvd serial) → tier2 (parallel) → full_sync → build_rels
+# (cisa→mitre→otx→nvd serial) → tier2 (collector pool) → full_sync → build_rels
 # → enrich → done
 (
     baseline_misp_health

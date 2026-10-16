@@ -41,7 +41,8 @@ What these tests pin
   - The four tier-1 task IDs still exist (``collect_cisa``,
     ``collect_mitre``, ``collect_otx``, ``collect_nvd``)
   - The dependency edges are present in the SOURCE in the right order
-  - Tier-2 stays parallel (no edges added between tier-2 tasks)
+  - Tier-2 has no order (no edges added between tier-2 tasks; since
+    2026-10 the collector pool, not a chain, bounds how many run at once)
   - The DAG-level dependency-chain comment + module docstring still
     reference the new ordering (so future readers don't re-introduce
     the parallel pattern by accident)
@@ -121,15 +122,17 @@ class TestTier1SequentialChain:
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 stays parallel (defensive — make sure we didn't accidentally
-# serialize tier2 too)
+# Tier 2 has no order (defensive — make sure we didn't accidentally
+# serialize tier2 too; the collector pool bounds its concurrency, 2026-10)
 # ---------------------------------------------------------------------------
 
 
-class TestTier2StaysParallel:
+class TestTier2HasNoOrder:
     """Bravo's analysis: tier2 feeds (~6 collectors, each <5K attrs) are
-    individually tiny and don't trigger the oversized-event failure mode.
-    Their parallel write pressure on MISP is negligible. Keep them parallel."""
+    individually tiny and don't trigger the oversized-event failure mode,
+    so they need no order among themselves. 2026-10: all of them at once
+    did overload MISP, so their concurrency is bounded by the shared
+    collector pool (``tests/test_collector_pool.py``), not by a chain."""
 
     def test_no_sequential_chain_among_tier2_tasks(self):
         src = _read_dag_source()
@@ -159,8 +162,8 @@ class TestTier2StaysParallel:
             normalized,
         )
         assert chain is None, (
-            f"tier2 feeds should remain parallel; found a sequential edge: {chain.group(0)!r}. "
-            "PR-F4 sequenced tier1 only — tier2 stays parallel per the design."
+            f"tier2 feeds should have no order; found a sequential edge: {chain.group(0)!r}. "
+            "PR-F4 sequenced tier1 only; the collector pool bounds tier2 concurrency."
         )
 
 

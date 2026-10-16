@@ -241,7 +241,8 @@ if [ "$USE_DOCKER" = true ]; then
     echo ""
     echo -e "Next steps:"
     echo -e "  1. Edit ${BOLD}.env${NC} and add your API keys (MISP_URL, MISP_API_KEY, collector keys)"
-    echo -e "  2. ${BOLD}docker compose restart airflow${NC} after editing .env"
+    # 2026-10: a restart keeps the container's old environment, so a .env change needs a recreate.
+    echo -e "  2. ${BOLD}docker compose up -d airflow${NC} after editing .env (a restart keeps the old values)"
     echo -e "  3. Open Airflow UI → trigger ${BOLD}edgeguard_baseline${NC} DAG once for historical load"
     echo ""
     echo -e "Useful commands:"

@@ -113,6 +113,9 @@ x-common-env: &common-env
   EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN: ${EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN:-60}
   EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS: ${EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS:-30}
   EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS: ${EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS:-20}
+  # Slots of the Airflow pool every collector task runs in (dags/edgeguard_pipeline.py COLLECTOR_POOL):
+  # at most this many collectors run at once across all DAGs. The airflow service creates the pool.
+  EDGEGUARD_COLLECTOR_POOL_SLOTS: ${EDGEGUARD_COLLECTOR_POOL_SLOTS:-4}
   # Source API key check (src/source_key_check.py): switch for the live requests, and the keyed
   # sources a baseline must not start without (comma-separated; empty = none).
   EDGEGUARD_SOURCE_KEY_CHECK: ${EDGEGUARD_SOURCE_KEY_CHECK:-true}
@@ -349,7 +352,44 @@ services:
     container_name: edgeguard_airflow
     restart: unless-stopped
     # Dockerfile.airflow CMD is `airflow standalone` (tini as PID 1). Do not set `command: standalone`
-    # — that would override CMD and break the entrypoint chain.
+    # — that would override CMD and break the entrypoint chain. The command below keeps that chain
+    # (tini -> bash -> airflow standalone) and, in the background, creates/resizes the collector
+    # pool: it needs the metadata DB, which `standalone` migrates, so the set is retried until it
+    # succeeds (airflow-init has no DB access). Idempotent on every start.
+    # 2026-10: a slot value that is not a positive integer falls back to 4 with a message, because
+    # the CLI would reject it on every attempt and the collectors would never be scheduled. The
+    # result is logged (success once, the cause every 30 failed attempts) so a pool that cannot be
+    # set shows in `docker compose logs airflow`. The cause is the last exception line of the CLI
+    # output (`<module>.<Name>Error: ...`), or else its last line other than a blank line and
+    # SQLAlchemy's "(Background on this error at: ...)" link, which ends every SQLAlchemy error and
+    # names no cause. The loop is started detached (double fork) so it is reparented to the init
+    # process, which reaps it, instead of staying a child of `airflow standalone`.
+    command:
+      - bash
+      - -c
+      - |
+        slots="$${EDGEGUARD_COLLECTOR_POOL_SLOTS:-4}"
+        if ! [[ "$$slots" =~ ^0*[1-9][0-9]*$$ ]]; then
+          echo "[edgeguard] EDGEGUARD_COLLECTOR_POOL_SLOTS='$$slots' is not a positive integer; using 4" >&2
+          slots=4
+        fi
+        ( (
+          attempts=0
+          until out=$$(airflow pools set edgeguard_collectors "$$slots" \
+              "Collector tasks of all DAGs (bounds MISP and container memory pressure)" 2>&1); do
+            attempts=$$((attempts + 1))
+            if [ $$((attempts % 30)) -eq 0 ]; then
+              reason=$$(printf '%s\n' "$$out" | grep -E '^[A-Za-z_][A-Za-z0-9_.]*(Error|Exception): ' | tail -n 1)
+              if [ -z "$$reason" ]; then
+                reason=$$(printf '%s\n' "$$out" | grep -v -e '^(Background on this error' -e '^[[:space:]]*$$' | tail -n 1)
+              fi
+              echo "[edgeguard] collector pool edgeguard_collectors not set after $$attempts attempts: $$reason" >&2
+            fi
+            sleep 10
+          done
+          echo "[edgeguard] collector pool edgeguard_collectors set to $$slots slots"
+        ) & )
+        exec airflow standalone
     # Note: in Airflow 3.x `airflow standalone` runs the scheduler + API
     # server + DAG processor + triggerer in one process, same as 2.x.
     # For a split-process production deployment, switch to separate
