@@ -57,9 +57,9 @@ def _assert_rule_in_its_own_clause(query: str, var: str, recorded: tuple) -> Non
     ``SET`` clause recording ``recorded`` (``source_confidence`` and, on a report, the report items).
     A clause reads the node as the previous clause left it; items of one clause would depend on the
     order in which Neo4j applies them."""
-    clause = ia.aging_set_clause(var, ia.WRITE_AS_OF)
-    assert clause == f"SET {ia.aging_set_item(var, ia.WRITE_AS_OF)}"
-    assert query.count(ia.aging_set_item(var, ia.WRITE_AS_OF)) == 1, "the rule is applied once"
+    clause = ia.aging_set_clause(var)
+    assert clause == f"SET {ia.aging_set_item(var)}"
+    assert query.count(ia.aging_set_item(var)) == 1, "the rule is applied once"
     start = query.index(clause)
     line_start = query.rfind("\n", 0, start) + 1
     assert not query[line_start:start].strip(), "the aging clause begins its own line"
@@ -111,7 +111,7 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
                 ia.node_report_items("n", "item.report", "item.source_id"),
             ),
         )
-        assert node_set.split("WITH n, item", 1)[0].rstrip().endswith(ia.aging_set_clause("n", ia.WRITE_AS_OF)), (
+        assert node_set.split("WITH n, item", 1)[0].rstrip().endswith(ia.aging_set_clause("n")), (
             "the rule is the last node clause before WITH"
         )
         assert "n.confidence_score = CASE" not in node_set, "confidence_score comes from the rule only"
@@ -136,42 +136,47 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
         )
         assert ia.edge_report_items("r", "$report", "$source_id") in sourced
 
-    def test_alert_path_and_its_fallback_splice_the_rule(self):
+    def test_alert_path_and_its_fallback_apply_the_rule_in_a_second_statement(self):
+        """2026-10-16: the alert path applies the rule in a second statement of the same transaction,
+        after its MERGE statement (primary and fallback alike). In the MERGE statement the planner
+        reads the basis with the MERGE, before the SET takes the node's write lock; the second
+        statement reads the node under the lock the transaction holds from that SET."""
         client, session = _client()
-        session.run.side_effect = [RuntimeError("primary failed"), MagicMock()]
+        tx = session.begin_transaction.return_value.__enter__.return_value
+        tx.run.side_effect = [RuntimeError("primary failed"), MagicMock(), MagicMock()]
         assert client.create_indicator_from_alert("203.0.113.9", "ipv4", "global", alert_data={"a": 1}) is True
-        primary, fallback = (c.args[0] for c in session.run.call_args_list)
-        for call in session.run.call_args_list:
-            assert call.kwargs[ia.AS_OF_PARAM] is None, "outside a DAG run: the time of the write"
+        assert not session.run.called, "both statements run in an explicit transaction"
+        assert session.begin_transaction.call_count == 2, "the primary attempt, then the fallback"
+        primary, fallback, aging = (c.args[0] for c in tx.run.call_args_list)
+        assert tx.commit.call_count == 1, "the fallback transaction commits; the failed one does not"
         for query in (primary, fallback):
+            assert query.lstrip().startswith("MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})")
             assert ia.source_confidence_item("i", "$confidence_score") in query
-            _assert_rule_in_its_own_clause(query, "i", (ia.source_confidence_item("i", "$confidence_score"),))
+            assert "aging_" not in query, "the rule is not in the MERGE statement"
             assert "last_reported_at:" not in query, "an alert records no report"
             assert "i.confidence_score = CASE" not in query
+        assert " ".join(aging.split()) == (
+            "MATCH (i:Indicator {indicator_type: $indicator_type, value: $value}) " + ia.aging_set_clause("i")
+        )
+        assert tx.run.call_args_list[2].kwargs == {"indicator_type": "ipv4", "value": "203.0.113.9"}
+        assert "$" not in ia.aging_set_clause("i"), "the rule reads the database's current time, no parameter"
 
-    def test_a_sync_of_a_run_ages_its_writes_at_the_run_time(self):
-        """2026-10-16: the sync's writes evaluate the rule at the DAG run's time, the time that run's
-        aging job uses (``WRITE_AS_OF`` with ``$aging_as_of``); without one, at the write's own time.
-        Before, the writes used ``datetime()`` and the job the run's ``data_interval_end``: a node that
-        crossed a tier or the retirement day in between was moved forward by the write and back by
-        the job."""
-        assert ia.WRITE_AS_OF == "coalesce(datetime($aging_as_of), datetime())"
+    def test_the_writes_pass_no_aging_time(self):
+        """2026-10-16: every Indicator write evaluates the rule at the database's current time, lifted to
+        the node's ``aging_evaluated_at``; the rule in a write statement reads no parameter."""
+        assert ia.aging_set_clause("n") == f"SET n += {ia.aging_map('n', ia.DATABASE_TIME)}"
+        assert ia.DATABASE_TIME == "datetime()" and "$" not in ia.aging_set_clause("n")
         client, session = _client()
-        assert client.aging_as_of is None
-        client.set_aging_as_of("2026-10-16T03:00:00Z")
-        assert client.aging_as_of == "2026-10-16T03:00:00+00:00"
         client.merge_indicators_batch(
             [{"indicator_type": "ipv4", "value": "203.0.113.5", "tag": "otx", "zone": ["global"]}], source_id="misp"
         )
-        batch = next(c for c in session.run.call_args_list if c.args and "UNWIND $batch as item" in c.args[0])
-        assert batch.kwargs[ia.AS_OF_PARAM] == "2026-10-16T03:00:00+00:00"
         client.merge_indicator(
             {"indicator_type": "ipv4", "value": "203.0.113.6", "tag": "otx", "zone": ["global"]}, source_id="misp"
         )
-        single = next(c for c in session.run.call_args_list if c.args and "MERGE (n:Indicator " in c.args[0])
-        assert single.kwargs[ia.AS_OF_PARAM] == "2026-10-16T03:00:00+00:00"
-        client.set_aging_as_of(None)
-        assert client.aging_as_of is None
+        writes = [c for c in session.run.call_args_list if c.args and "MERGE (n:Indicator" in c.args[0]]
+        assert len(writes) == 2
+        for call in writes:
+            assert ia.aging_set_clause("n") in call.args[0]
 
     def test_a_single_merge_with_more_items_still_ends_its_clause_before_the_rule(self):
         """``merge_node_with_source`` appends the MISP ids, ``extra_props`` and ``fill_props`` to its SET
@@ -190,7 +195,7 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
             source_id="misp",
         )
         node = _node_merge(session, "Indicator")
-        assert node.index("n.misp_attribute_ids = ") < node.index(ia.aging_set_clause("n", ia.WRITE_AS_OF))
+        assert node.index("n.misp_attribute_ids = ") < node.index(ia.aging_set_clause("n"))
         _assert_rule_in_its_own_clause(node, "n", ("n.misp_event_ids = ", "n.misp_attribute_ids = "))
 
     def test_manual_decommission_still_wins(self):

@@ -49,11 +49,8 @@ from description_ranking import (  # noqa: E402  — 2026-10-16: whose text a no
     ranking_for_label,
 )
 from indicator_aging import (  # noqa: E402  — 2026-10-16: one aging rule for every Indicator
-    AS_OF_PARAM,
-    WRITE_AS_OF,
     aging_set_clause,
     edge_report_items,
-    evaluation_time,
     node_report_items,
     report_row,
     source_confidence_item,
@@ -1364,13 +1361,14 @@ def _normalise_zone_list(value: Any) -> List[str]:
 # ``last_decayed_tier = null``) whatever its label and restored a decayed confidence by max-wins, so
 # a full sync undid the decay. Now only an Indicator ages: its writes record the report
 # (``indicator_aging.node_report_items``), then apply the one rule in a SET clause of its own
-# (``indicator_aging.aging_set_clause``), which reactivates a node only when a newer report moves its
-# basis and never evaluates a node at a time older than its ``aging_evaluated_at``; the clauses before
-# it set properties of the node, which takes the node's write lock until the write commits, so no
-# other evaluation interleaves. Every other label is set ``active = true`` when EdgeGuard creates it (``_create_active``)
-# and gets no ``active``, ``retired_*`` or decay property when EdgeGuard matches it, so a node
-# another system created (CASM CVE / CVSS, ISIM assets) never receives an EdgeGuard lifecycle
-# property and a manual decommission is never touched.
+# (``indicator_aging.aging_set_clause``) at the database's current time, lifted to the node's
+# ``aging_evaluated_at`` when that is later; it reactivates a node only when a newer report moves its
+# basis. The batch and single-item writes read the node for the rule after a clause that set its
+# properties, under the node's write lock; the alert path applies the rule in a second statement of
+# its transaction (``create_indicator_from_alert``). Every other label is set ``active = true`` when
+# EdgeGuard creates it (``_create_active``) and gets no ``active``, ``retired_*`` or decay property
+# when EdgeGuard matches it, so a node another system created (CASM CVE / CVSS, ISIM assets) never
+# receives an EdgeGuard lifecycle property and a manual decommission is never touched.
 def _create_active(var: str) -> str:
     """``ON CREATE`` item of a node that does not age: active from its creation, never changed by a
     later EdgeGuard write."""
@@ -1540,11 +1538,6 @@ class _TimeoutDriver:
 class Neo4jClient:
     """Production-ready Neo4j client with retry logic and batch processing."""
 
-    # 2026-10-16: the time this client's Indicator writes evaluate the aging rule at
-    # (``indicator_aging.WRITE_AS_OF``), an ISO-8601 UTC string; None = the time of each write. A class
-    # default, so a client built without ``__init__`` reads None as well.
-    aging_as_of: Optional[str] = None
-
     def __init__(self, uri: str = None, user: str = None, password: str = None):
         from config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER
 
@@ -1553,18 +1546,6 @@ class Neo4jClient:
         self.password = password or NEO4J_PASSWORD
         self.driver = None
         self._connection_healthy = False
-
-    def set_aging_as_of(self, value: Any) -> None:
-        """Evaluate the aging rule of this client's Indicator writes at ``value`` (2026-10-16).
-
-        The sync of a DAG run passes the run's evaluation time (``data_interval_end``, ``run_after``
-        for a manual run: ``enrichment_as_of`` in the DAG), the time that run's aging job
-        (``enrichment_jobs.decay_ioc_confidence``) uses, so the sync's writes and the job agree on
-        every node in between; None restores the time of each write (the alert path, the
-        command-line writers). A node whose ``aging_evaluated_at`` is later is evaluated at that
-        time instead (``indicator_aging.evaluated_at_expr``), so an older run's write never moves
-        its aging backwards."""
-        self.aging_as_of = None if value is None else evaluation_time(value).isoformat()
 
     @retry_with_backoff(max_retries=MAX_RETRIES)
     def connect(self) -> bool:
@@ -2739,7 +2720,7 @@ class Neo4jClient:
             # 2026-10-16: an Indicator's aging, in a SET clause of its own after the one above: the rule
             # reads the report and ``source_confidence`` that clause recorded (``indicator_aging``).
             if is_indicator:
-                query += "\n            " + aging_set_clause("n", WRITE_AS_OF)
+                query += "\n            " + aging_set_clause("n")
 
             # 2026-10-16: the description and its source, by the source ranking of the label
             # (``description_ranking``), decided once after every other property is set.
@@ -2815,10 +2796,8 @@ class Neo4jClient:
                     **params_extra,
                 }
                 if is_indicator:
-                    # 2026-10-16: the report the data carries (all None without one), and the time the
-                    # aging rule is evaluated at (``set_aging_as_of``; None = this write's time).
+                    # 2026-10-16: the report the data carries (all None without one).
                     params["report"] = report_row(data)
-                    params[AS_OF_PARAM] = self.aging_as_of
                 # PR (S5) (architecture redesign + bugbot 9e58af6 LOW):
                 # source-truthful timestamps live on the SOURCED_FROM
                 # edge (not the node), so they are NOT bound into the
@@ -4113,7 +4092,7 @@ class Neo4jClient:
                     {node_report_items("n", "item.report", "item.source_id")}
                 // 2026-10-16: the one aging rule, in a SET clause of its own, so it reads the report and
                 // source_confidence recorded above; a newer report reactivates the node in this write.
-                {aging_set_clause("n", WRITE_AS_OF)}
+                {aging_set_clause("n")}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
@@ -4170,7 +4149,6 @@ class Neo4jClient:
                     query_kwargs={
                         "batch": batch_data,
                         "source_node_uuid": source_node_uuid,
-                        AS_OF_PARAM: self.aging_as_of,
                     },
                 )
                 if ok:
@@ -7667,8 +7645,6 @@ class Neo4jClient:
             "last_updated": now,
             "source": ["resilmesh"],
             "confidence_score": 0.8 if alert_data else 0.5,
-            # 2026-10-16: the alert path runs outside a DAG run: None, the rule at this write's time.
-            AS_OF_PARAM: self.aging_as_of,
         }
 
         # PR #34 round 18: dropped n.original_source SET — Neo4j property had
@@ -7702,14 +7678,28 @@ class Neo4jClient:
             {_zone_clause_i},
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
             i.tlp = coalesce(i.tlp, $tlp)
-        {aging_set_clause("i", WRITE_AS_OF)}
+        """
+        # 2026-10-16: the aging rule, in a second statement of the same transaction. In the statement
+        # above the planner reads the node's basis (``last_reported_at``, ``first_imported_at``) with
+        # the MERGE, before the SET takes the node's write lock (EXPLAIN: CacheProperties under the
+        # Merge), so the rule could miss a write committed in between. The second statement reads the
+        # node after that SET, under the write lock this transaction holds until it commits.
+        aging_query = f"""
+        MATCH (i:Indicator {{indicator_type: $indicator_type, value: $value}})
+        {aging_set_clause("i")}
         """
 
-        try:
+        def _write(statement: str) -> None:
             with self.driver.session() as session:
-                session.run(query, **data, timeout=NEO4J_READ_TIMEOUT)
-                logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
-                return True
+                with session.begin_transaction(timeout=float(NEO4J_READ_TIMEOUT)) as tx:
+                    tx.run(statement, **data).consume()
+                    tx.run(aging_query, indicator_type=normalized_type, value=normalized_value).consume()
+                    tx.commit()
+
+        try:
+            _write(query)
+            logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
+            return True
         except Exception:
             # PR (S5) (Bug Hunter v3 #3 MED): fallback Cypher
             # now uses server-side ``datetime()`` for ``i.last_updated``
@@ -7718,7 +7708,8 @@ class Neo4jClient:
             # (server clock + Python clock) introduced clock-drift risk.
             # ``i.last_updated`` is a DB-local fact; the server should
             # be the single source of truth for it.
-            # 2026-10-16: the same aging rule as the primary query (the rule itself needs no APOC).
+            # 2026-10-16: followed by the same aging statement as the primary query, in the same
+            # transaction (the rule itself needs no APOC).
             fallback_query = f"""
             MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
             ON CREATE SET i.first_imported_at = datetime(), i.edgeguard_managed = true
@@ -7727,12 +7718,10 @@ class Neo4jClient:
                 {source_confidence_item("i", "$confidence_score")},
                 {_zone_clause_i},
                 i.tlp = coalesce(i.tlp, $tlp)
-            {aging_set_clause("i", WRITE_AS_OF)}
             """
             try:
-                with self.driver.session() as session:
-                    session.run(fallback_query, **data, timeout=NEO4J_READ_TIMEOUT)
-                    return True
+                _write(fallback_query)
+                return True
             except Exception as e2:
                 logger.error(f"Failed to create indicator: {e2}")
                 return False

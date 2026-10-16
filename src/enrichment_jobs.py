@@ -54,6 +54,7 @@ from cve_feed_enrichment import enrich_cve_epss  # noqa: E402
 from description_ranking import ranking_for_label  # noqa: E402
 from indicator_aging import (  # noqa: E402
     AGING_BASES,
+    DATABASE_TIME,
     AgingPolicy,
     aging_map,
     basis_expr,
@@ -87,21 +88,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def aging_as_of(value=None) -> datetime:
-    """The evaluation time of the aging job as an aware UTC datetime (2026-10-16;
-    ``indicator_aging.evaluation_time``, which the sync's writes use as well).
-
-    ``value`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run; Airflow
-    passes pendulum datetimes; ``enrichment_as_of`` in the DAG), an ISO-8601 string, or None for
-    now (the command line). A naive datetime is UTC. Each node is evaluated at the later of this
-    time and its own ``aging_evaluated_at`` (``indicator_aging.evaluated_at_expr``).
-    """
-    return evaluation_time(value)
+# 2026-10-16: the time the aging job evaluates the rule at, before the per-node lift: the database's
+# current time (``indicator_aging.DATABASE_TIME``; in ``apoc.periodic.iterate`` each batch reads it
+# when its transaction starts). ``$as_of`` is null in production; a test may give a time.
+AGING_JOB_TIME = f"coalesce(datetime($as_of), {DATABASE_TIME})"
 
 
 def _aging_job_statements(policy: AgingPolicy) -> Tuple[str, str, str]:
     """The aging job's statements: the nodes whose aging changes (``outer``), the update applied to
-    each (``inner``) and their count. Parameters: ``$as_of`` (ISO-8601).
+    each (``inner``) and their count, at ``AGING_JOB_TIME``. Parameter: ``$as_of`` (ISO-8601, or
+    null for the database's current time).
 
     2026-10-16: ``inner`` takes the node's write lock (``apoc.lock.nodes``) before it reads the node,
     then evaluates the rule again and writes only where a value still changes. A concurrent writer
@@ -109,7 +105,7 @@ def _aging_job_statements(policy: AgingPolicy) -> Tuple[str, str, str]:
     it wrote, ``aging_evaluated_at`` included, or waits for this batch: the job never writes values
     it computed from a node another transaction changed in between. ``outer`` reads without a lock
     and only selects the candidates, so unchanged nodes are neither locked nor written."""
-    aged = aging_map("n", "datetime($as_of)", policy)
+    aged = aging_map("n", AGING_JOB_TIME, policy)
     changed = f"WITH n, {aged} AS aged WHERE {changed_predicate('n', 'aged')}"
     select = f"MATCH (n:Indicator) WHERE {basis_expr('n')} IS NOT NULL {changed}"
     outer = f"{select} RETURN n"
@@ -150,28 +146,27 @@ def decay_ioc_confidence(neo4j_client, as_of=None) -> Dict:
       from 730 days   → retired: active = false, retired_by = 'decay', retired_at = basis + 730 d
 
     The value is recomputed from ``source_confidence`` (not multiplied step by step), so a missed
-    or repeated run gives the same graph, and a run with the same ``as_of`` writes nothing. Only
-    nodes whose aging changes are written (``apoc.periodic.iterate`` batches). Nothing is deleted;
-    a manual decommission (``retired_at`` without the ``'decay'`` tag) is kept; a newer report
-    reactivates a node in the sync's write. Every other label (CVE, CVSS, Vulnerability, Malware,
-    ThreatActor, Technique, Tactic, Tool, Sector, Source, Alert) never ages. An Indicator with
-    neither time (no EdgeGuard evidence) is counted and left untouched.
+    or repeated run gives the same graph, and a run in which no node's aging changes writes nothing.
+    Only nodes whose aging changes are written (``apoc.periodic.iterate`` batches). Nothing is
+    deleted; a manual decommission (``retired_at`` without the ``'decay'`` tag) is kept; a newer
+    report reactivates a node in the sync's write. Every other label (CVE, CVSS, Vulnerability,
+    Malware, ThreatActor, Technique, Tactic, Tool, Sector, Source, Alert) never ages. An Indicator
+    with neither time (no EdgeGuard evidence) is counted and left untouched.
 
-    ``as_of`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run;
-    ``enrichment_as_of`` in the DAG), passed through ``run_all_enrichment_jobs``; None means now.
-    Each node is evaluated at the later of ``as_of`` and its ``aging_evaluated_at``, which every
-    evaluation that writes the node stores, so a run with an older ``as_of`` than a node's (a
-    cleared or re-run older DAG run, a baseline overlapping a scheduled sync) changes nothing on
-    it; the job locks a node before it evaluates and writes it (``_aging_job_statements``).
+    The rule runs at the database's current time (``AGING_JOB_TIME``), lifted to a node's
+    ``aging_evaluated_at`` when that is later, as in every Indicator write: a cleared or re-run task
+    evaluates at the time it runs, and no evaluation moves a node backwards. The job locks a node
+    before it evaluates and writes it (``_aging_job_statements``). ``as_of`` is for tests only (a
+    datetime or an ISO-8601 string; None, as in production, means the database's current time); a
+    time given there is lifted per node in the same way, so it can never move a node backwards.
     """
     if not neo4j_client.driver:
         logger.error("decay_ioc_confidence: no Neo4j connection")
         return {}
 
-    when = aging_as_of(as_of)
     policy = load_aging_policy()
     outer, inner, count = _aging_job_statements(policy)
-    params = {"as_of": when.isoformat()}
+    params = {"as_of": None if as_of is None else evaluation_time(as_of).isoformat()}
     results: Dict = {"as_of": params["as_of"]}
 
     try:
@@ -217,8 +212,8 @@ def decay_ioc_confidence(neo4j_client, as_of=None) -> Dict:
         for t in range(len(starts))
     )
     logger.info(
-        "[AGING] as_of=%s: %d Indicator(s) changed; %s; retired (from %d d): %d",
-        params["as_of"],
+        "[AGING] at %s: %d Indicator(s) changed; %s; retired (from %d d): %d",
+        params["as_of"] or "the database's current time",
         results["changed"],
         tier_text,
         policy.retire_days,
@@ -2218,32 +2213,27 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def run_all_enrichment_jobs(neo4j_client, as_of=None) -> Dict:
+def run_all_enrichment_jobs(neo4j_client) -> Dict:
     """
     Run all seven post-sync enrichment jobs in sequence.
 
     Order matters: ``merge_alias_duplicate_actors`` and ``merge_malware_attack_twins`` run
     BEFORE ``build_campaign_nodes`` so campaigns are built on merged actors and malware. Since
     2026-10-16 the aging job (``decay_ioc_confidence``) runs before the campaign builder too, so a
-    campaign's indicators are those active at the run's ``as_of``.
-
-    ``as_of`` (2026-10-16) is the time the aging rule is evaluated at: the DAG run's
-    ``data_interval_end`` (``run_after`` for a manual run; ``enrichment_as_of`` in the DAG), so
-    re-running a run gives the same graph; None (the command line) means now, fixed once for the
-    whole run. A node already evaluated at a later time keeps its aging (``decay_ioc_confidence``).
+    campaign's indicators are those active after the aging. The aging runs at the database's
+    current time, lifted to a node's ``aging_evaluated_at`` when that is later.
 
     Returns a summary dict for logging/metrics.
     """
     summary = {}
-    when = aging_as_of(as_of)
 
     logger.info("=" * 55)
-    logger.info("Running post-sync enrichment jobs (aging as of %s)", when.isoformat())
+    logger.info("Running post-sync enrichment jobs")
     logger.info("=" * 55)
 
-    def _timed(label, fn, *args, **kwargs):
+    def _timed(label, fn, *args):
         _t0 = time.monotonic()
-        result = fn(*args, **kwargs)
+        result = fn(*args)
         if _METRICS_AVAILABLE:
             try:
                 record_enrichment_duration(label, time.monotonic() - _t0)
@@ -2264,7 +2254,7 @@ def run_all_enrichment_jobs(neo4j_client, as_of=None) -> Dict:
 
     # 2026-10-16: before build_campaign_nodes, which links only active indicators.
     logger.info("\n[4/7] Indicator Aging...")
-    summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client, as_of=when)
+    summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
     logger.info("\n[5/7] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)

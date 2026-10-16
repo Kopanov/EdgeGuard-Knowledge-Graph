@@ -16,16 +16,18 @@ arithmetic and the forward-only CASEs. This module runs the production writers a
   Vulnerability add no lifecycle property;
 * the ``SOURCED_FROM`` edge keeps its source's report forward only in any order; ``source_confidence``
   keeps the highest incoming value in either order; the aged confidence stops at the 0.10 floor;
-* the sync of a DAG run (``MISPToNeo4jSync(aging_as_of=...)``) ages its writes at the run's time,
-  the time the run's job uses;
+* a write, the sync's and the alert's, evaluates the rule at the database's current time and stores
+  it (``aging_evaluated_at``); a write of a newer report after a job that changed nothing evaluates
+  that report at the write's own, later time; the alert path reads a report committed while it
+  waited for the node;
 * a manual decommission is kept; an alert does not advance the report time;
-* the job follows the tiers, writes nothing on a second run with the same ``as_of`` and leaves an
-  Indicator with no time, and every other label, untouched;
-* the time never moves backwards on a node (``aging_evaluated_at``): a job or a write at an older
-  time after a newer one changes nothing, a node retired at the newer time included; jobs and writes
-  at three times in every order end in the state of the latest time and never move a node back on
-  the way; a node evaluated before the property existed gets it once; a job that selected a node
-  while a newer write held it waits for that write and evaluates what it wrote.
+* the job follows the tiers, writes nothing on a second run with the same ``as_of`` (a test's time)
+  and leaves an Indicator with no time, and every other label, untouched;
+* the time never moves backwards on a node (``aging_evaluated_at``): a job with an older ``as_of``
+  after a newer one, and a write at the database's time before it, change nothing, a node retired at
+  the newer time included; two jobs and a write in every order end in the state of the latest time
+  and never move a node back on the way; a node evaluated before the property existed gets it once;
+  a job that selected a node while a write held it waits for that write and evaluates what it wrote.
 
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``,
 writes only nodes labelled ``EdgeGuardIT`` (every node a writer MERGEs is created with the label
@@ -103,6 +105,13 @@ def client(raw_driver):
 
 def _now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
+
+
+def _db_now(raw_driver) -> datetime:
+    """The database's current time, the clock every evaluation reads (2026-10-16), to the second."""
+    with raw_driver.session() as session:
+        now = session.run("RETURN datetime() AS now").single()["now"]
+    return _native(now).replace(microsecond=0)
 
 
 def _indicator(raw_driver, value: str, **props) -> None:
@@ -322,12 +331,11 @@ def test_reports_and_duplicates_in_either_order_give_the_same_node(client, raw_d
     assert edges[0] == {k: results[0][k] for k in EDGE_REPORT_PROPS}
 
 
-def _sync(client, attributes, path: str, aging_as_of=None) -> None:
-    """One sync of ``attributes`` on ``path``; ``aging_as_of`` is the DAG run's time (None: a sync
-    started from the command line, each write at its own time)."""
+def _sync(client, attributes, path: str) -> None:
+    """One sync of ``attributes`` on ``path``."""
     from run_misp_to_neo4j import MISPToNeo4jSync
 
-    sync = MISPToNeo4jSync(neo4j_client=client, aging_as_of=aging_as_of)
+    sync = MISPToNeo4jSync(neo4j_client=client)
     sync._create_relationships = lambda rels, source_id: 0
     sync._write_cross_item_relationships = lambda rels: 0
     getattr(sync, path)("41", EVENT, attributes)
@@ -406,45 +414,56 @@ def test_the_aged_confidence_never_falls_below_the_floor(client, raw_driver):
     assert got["confidence_score"] == POLICY.confidence(0.15, 400) == 0.10
 
 
-def test_a_sync_of_a_run_ages_its_writes_at_the_run_time(client, raw_driver):
-    """2026-10-16: the sync of a DAG run writes at the run's evaluation time (``set_aging_as_of``), the
-    time that run's job uses: a node that crosses the retirement day between the due time and the
-    write is not retired by the write and reactivated by the job. Without a run time a write ages at
-    its own time."""
-    now = _now()
-    due = now - timedelta(days=10)
-    report = _attr("203.0.113.16", "r-1", now - timedelta(days=2), due - timedelta(days=725))
-    _indicator(raw_driver, "203.0.113.16")
-    client.set_aging_as_of(due)
-    try:
-        _write(client, report)
-        at_due = _aging(raw_driver, "203.0.113.16")
-        assert (at_due["active"], at_due["aging_tier"], at_due["retired_by"]) == (True, 3, None)
-        assert enrichment_jobs.decay_ioc_confidence(client, as_of=due)["changed"] == 0, "the job agrees"
-    finally:
-        client.set_aging_as_of(None)
-    _write(client, report)
-    now_aged = _aging(raw_driver, "203.0.113.16")
-    assert (now_aged["active"], now_aged["retired_by"]) == (False, "decay"), "a write outside a run: its own time"
-
-
-def test_a_misp_sync_of_a_run_hands_the_run_time_to_its_writes(client, raw_driver):
-    """2026-10-16: ``MISPToNeo4jSync(aging_as_of=...)``, as the DAG builds it, ages the Indicators it
-    writes at the run's time: a node 725 days old at the run's time and past 730 days now is written
-    active, and the run's job at the same time changes nothing."""
-    now = _now()
-    due = now - timedelta(days=10)
+def test_a_sync_write_evaluates_at_the_database_time(client, raw_driver):
+    """2026-10-16: a sync's write evaluates the rule at the database's current time and stores it as
+    ``aging_evaluated_at``; no run passes a time. A node 735 days old at that time is written retired,
+    and the job right after it, at the database's time as well, changes nothing."""
+    before = _db_now(raw_driver)
     _indicator(raw_driver, "203.0.113.19")
-    _sync(
-        client,
-        [_attr("203.0.113.19", "r-2", now - timedelta(days=2), due - timedelta(days=725))],
-        "_process_event_attributes",
-        aging_as_of=due,
-    )
-    assert client.aging_as_of == due.isoformat()
+    report = _attr("203.0.113.19", "r-2", before - timedelta(days=2), before - timedelta(days=735))
+    _sync(client, [report], "_process_event_attributes")
+    after = _db_now(raw_driver) + timedelta(seconds=1)
     got = _aging(raw_driver, "203.0.113.19")
-    assert (got["active"], got["aging_tier"], got["retired_by"]) == (True, 3, None)
-    assert enrichment_jobs.decay_ioc_confidence(client, as_of=due)["changed"] == 0
+    assert (got["active"], got["aging_tier"], got["retired_by"]) == (False, 3, "decay")
+    assert before <= _props(raw_driver, "Indicator", "value", "203.0.113.19")["aging_evaluated_at"] <= after
+    assert enrichment_jobs.decay_ioc_confidence(client)["changed"] == 0, "the job at the database's time agrees"
+
+
+def test_a_newer_report_after_a_job_that_changed_nothing_is_evaluated_at_the_write_time(client, raw_driver):
+    """2026-10-16: the job stores ``aging_evaluated_at`` only with a change. A node aged at an earlier
+    time, its state still right now, is left as it is by the job (its stored time stays the earlier
+    one); a write of a newer report then evaluates that report at the time of the write, not at the
+    stored time: 92 days old now (the first tier), it would be 87 days old at the stored time."""
+    now = _db_now(raw_driver)
+    stored_at = now - timedelta(days=5)
+    basis = now - timedelta(days=100)
+    _indicator(
+        raw_driver,
+        "203.0.113.95",
+        last_reported_at=basis,
+        last_reported_basis="source_date",
+        last_reported_ref="o-1",
+        last_reported_source="feodo_tracker",
+        last_recorded_at=basis + timedelta(days=1),
+        source_confidence=0.8,
+        confidence_score=0.68,
+        aging_basis="source_date",
+        aging_tier=1,
+        aging_factor=0.85,
+        aging_since=basis + timedelta(days=90),
+        active=True,
+        aging_evaluated_at=stored_at,
+    )
+    assert enrichment_jobs.decay_ioc_confidence(client)["changed"] == 0, "the state at the stored time holds now"
+    assert _evaluated_at(raw_driver, "203.0.113.95") == stored_at, "a job that changes nothing stores no time"
+    newer = now - timedelta(days=92)
+    _write(client, _attr("203.0.113.95", "o-2", now - timedelta(days=1), newer))
+    got = _aging(raw_driver, "203.0.113.95")
+    assert got["last_reported_at"] == newer and got["last_reported_ref"] == "o-2"
+    assert (got["aging_tier"], got["aging_factor"], got["confidence_score"]) == (1, 0.85, 0.68)
+    assert got["aging_since"] == newer + timedelta(days=90)
+    assert _evaluated_at(raw_driver, "203.0.113.95") >= now, "the time of the write"
+    assert POLICY.tier(87) == 0, "at the stored time the newer report would still be in tier 0"
 
 
 # ================================================================ whoever created the node
@@ -681,21 +700,19 @@ def _reported(raw_driver, value: str, basis: datetime) -> None:
     )
 
 
-def _write_at(client, value: str, basis: datetime, when: datetime) -> None:
-    """The sync of a DAG run due at ``when`` writes the report ``o-1`` again."""
-    client.set_aging_as_of(when)
-    try:
-        _write(client, _attr(value, "o-1", basis + timedelta(days=1), basis))
-    finally:
-        client.set_aging_as_of(None)
+def _rewrite(client, value: str, basis: datetime) -> None:
+    """A sync writes the report ``o-1`` again, at the database's current time."""
+    _write(client, _attr(value, "o-1", basis + timedelta(days=1), basis))
 
 
 def test_an_older_evaluation_after_a_newer_one_changes_nothing(client, raw_driver):
-    """2026-10-16: a newer run's job ages a node into the third tier and retires another; then an older
-    run's job (cleared, re-run) and an older run's sync write evaluate at the newer time stored on each
-    node: nothing comes back to life, no tier falls, ``aging_since`` and ``aging_evaluated_at`` stay."""
-    newer, older = AS_OF + timedelta(days=200), AS_OF
-    bases = {"203.0.113.90": AS_OF - timedelta(days=600), "203.0.113.91": AS_OF - timedelta(days=300)}
+    """2026-10-16: a job at a later time (a test's ``as_of``) ages a node into the third tier and
+    retires another; then a job with an older ``as_of`` and a sync write at the database's current
+    time, both before that later time, evaluate at the time stored on each node: nothing comes back
+    to life, no tier falls, ``aging_since`` and ``aging_evaluated_at`` stay."""
+    now = _db_now(raw_driver)
+    newer, older = now + timedelta(days=200), now - timedelta(days=5)
+    bases = {"203.0.113.90": now - timedelta(days=600), "203.0.113.91": now - timedelta(days=300)}
     for value, basis in bases.items():
         _reported(raw_driver, value, basis)
     assert enrichment_jobs.decay_ioc_confidence(client, as_of=newer)["changed"] == 2
@@ -706,28 +723,37 @@ def test_an_older_evaluation_after_a_newer_one_changes_nothing(client, raw_drive
     assert tier3["aging_since"] == bases["203.0.113.91"] + timedelta(days=365)
     assert {_evaluated_at(raw_driver, v) for v in bases} == {newer}
 
-    assert enrichment_jobs.decay_ioc_confidence(client, as_of=older)["changed"] == 0, "an older run's job"
+    assert enrichment_jobs.decay_ioc_confidence(client, as_of=older)["changed"] == 0, "a job with an older time"
     for value, basis in bases.items():
-        _write_at(client, value, basis, older)  # an older run's sync writes the same report again
+        _rewrite(client, value, basis)  # a sync writes the same report again, at the database's time
     assert _aging(raw_driver, "203.0.113.90") == retired, "still retired, retired_at and aging_since kept"
     assert _aging(raw_driver, "203.0.113.91") == tier3, "still the third tier"
     assert {_evaluated_at(raw_driver, v) for v in bases} == {newer}, "the stored time never decreases"
-    # At the older time itself the rule gives the earlier states: the stored time is what holds them.
+    # At the database's time itself the rule gives the earlier states: the stored time is what holds them.
     assert POLICY.tier(300) == 2 and 600 < POLICY.retire_days
 
 
+@pytest.mark.parametrize("latest", ["job", "write"])
 @pytest.mark.parametrize(
     "order",
     list(itertools.permutations(range(3))),
     ids=lambda o: "-".join(str(i) for i in o),
 )
-def test_jobs_and_writes_in_any_order_end_in_the_latest_state(client, raw_driver, order):
-    """2026-10-16: a job at 100 days (tier 1), a sync write at 400 days (tier 3) and a job at 800 days
-    (retired), in every order: each node ends in the state of 800 days with that time stored, and no
-    step moves a node back (tier, ``aging_since`` and the time never decrease; nothing reactivates)."""
-    basis = AS_OF - timedelta(days=900)
-    times = [basis + timedelta(days=d) for d in (100, 400, 800)]
-    steps = [("job", times[0]), ("write", times[1]), ("job", times[2])]
+def test_two_jobs_and_a_write_in_any_order_end_in_the_latest_state(client, raw_driver, order, latest):
+    """2026-10-16: two jobs (a test's ``as_of``) and a sync write (the database's current time), in
+    every order, end in the state of the latest of their times with that time stored, and no step moves
+    the node back (tier, ``aging_since`` and the time never decrease; nothing reactivates).
+
+    ``latest="job"``: a job at 100 days (tier 1), the write at 300 days (tier 2), a job at 800 days
+    (retired). ``latest="write"``: jobs at 350 days (tier 2) and 550 days (tier 3), the write at 750
+    days (retired), the write's own time stored."""
+    now = _db_now(raw_driver)
+    if latest == "job":
+        basis = now - timedelta(days=300)
+        steps = [("job", basis + timedelta(days=100)), ("write", None), ("job", basis + timedelta(days=800))]
+    else:
+        basis = now - timedelta(days=750)
+        steps = [("job", basis + timedelta(days=350)), ("job", basis + timedelta(days=550)), ("write", None)]
     value = "203.0.113.92"
     _reported(raw_driver, value, basis)
     seen = []
@@ -736,7 +762,7 @@ def test_jobs_and_writes_in_any_order_end_in_the_latest_state(client, raw_driver
         if kind == "job":
             enrichment_jobs.decay_ioc_confidence(client, as_of=when)
         else:
-            _write_at(client, value, basis, when)
+            _rewrite(client, value, basis)
         seen.append({**_aging(raw_driver, value), "evaluated_at": _evaluated_at(raw_driver, value)})
     for before, after in itertools.pairwise(seen):
         assert after["aging_tier"] >= before["aging_tier"]
@@ -744,7 +770,10 @@ def test_jobs_and_writes_in_any_order_end_in_the_latest_state(client, raw_driver
         assert after["evaluated_at"] >= before["evaluated_at"]
         assert before["active"] or not after["active"], "a retired node never reactivates without a newer report"
     final = seen[-1]
-    assert final["evaluated_at"] == times[2]
+    if latest == "job":
+        assert final["evaluated_at"] == steps[2][1]
+    else:
+        assert now <= final["evaluated_at"] <= _db_now(raw_driver) + timedelta(seconds=1), "the write's own time"
     assert (final["active"], final["retired_by"], final["aging_tier"], final["confidence_score"]) == (
         False,
         "decay",
@@ -755,7 +784,7 @@ def test_jobs_and_writes_in_any_order_end_in_the_latest_state(client, raw_driver
 
 
 def test_a_node_without_the_time_gets_it_once(client, raw_driver):
-    """2026-10-16: a node aged before ``aging_evaluated_at`` existed, its values right for the run's
+    """2026-10-16: a node aged before ``aging_evaluated_at`` existed, its values right for the job's
     time, is written once by the job to store the time; the next run with the same time writes
     nothing, and a later time alone is no change."""
     _indicator(
@@ -779,19 +808,21 @@ def test_a_node_without_the_time_gets_it_once(client, raw_driver):
 
 
 def test_the_job_waits_for_a_write_in_progress_and_evaluates_what_it_wrote(client, raw_driver):
-    """2026-10-16: an older run's job selects a node as changing (third tier at its time) while a newer
-    run's write of the node, retiring it, is still open. The job locks the node before it reads it
+    """2026-10-16: a job with an older time (a test's ``as_of``, as a job whose clock is behind)
+    selects a node as changing (third tier at its time) while a write of the node, retiring it at the
+    database's current time, is still open. The job locks the node before it reads it
     (``apoc.lock.nodes``), so it waits for that write, then reads the retired node and its later time
     and writes nothing. Reading before the lock, it would have written the third tier it computed
     before the write committed: the node active again, at the older time."""
-    from indicator_aging import AS_OF_PARAM, WRITE_AS_OF, aging_set_clause
+    from indicator_aging import aging_set_clause
 
+    now = _db_now(raw_driver)
     value = "203.0.113.94"
-    basis = AS_OF - timedelta(days=300)
+    basis = now - timedelta(days=800)
     _reported(raw_driver, value, basis)
-    enrichment_jobs.decay_ioc_confidence(client, as_of=AS_OF)
+    enrichment_jobs.decay_ioc_confidence(client, as_of=now - timedelta(days=500))
     assert _aging(raw_driver, value)["aging_tier"] == 2
-    older, newer = AS_OF + timedelta(days=100), AS_OF + timedelta(days=500)
+    older = now - timedelta(days=400)
 
     outcome: dict = {}
 
@@ -805,13 +836,11 @@ def test_the_job_waits_for_a_write_in_progress_and_evaluates_what_it_wrote(clien
     session = raw_driver.session()
     tx = session.begin_transaction()
     try:
-        # A write of the newer run, as the writers make it: a property set (which takes the node's
-        # write lock until the commit), then the rule in a clause of its own, at the newer run's time.
+        # A write, as the writers make it: a property set (which takes the node's write lock until
+        # the commit), then the rule in a clause of its own, at the database's current time.
         tx.run(
-            f"MATCH (n:Indicator:{LABEL} {{value: $v}}) SET n.last_updated = datetime() "
-            + aging_set_clause("n", WRITE_AS_OF),
+            f"MATCH (n:Indicator:{LABEL} {{value: $v}}) SET n.last_updated = datetime() " + aging_set_clause("n"),
             v=value,
-            **{AS_OF_PARAM: newer.isoformat()},
         ).consume()
         job.start()
         time.sleep(3)
@@ -829,4 +858,56 @@ def test_the_job_waits_for_a_write_in_progress_and_evaluates_what_it_wrote(clien
     got = _aging(raw_driver, value)
     assert (got["active"], got["retired_by"], got["aging_tier"]) == (False, "decay", 3)
     assert got["aging_since"] == got["retired_at"] == basis + timedelta(days=730)
-    assert _evaluated_at(raw_driver, value) == newer, "the newer write's time, not the job's older one"
+    assert _evaluated_at(raw_driver, value) >= now, "the write's time, not the job's older one"
+
+
+def test_the_alert_path_ages_from_a_report_committed_while_it_waited(client, raw_driver):
+    """2026-10-16: the alert path applies the rule in a second statement of its transaction. A sync
+    write of a newer report is open on a retired node when an alert arrives: the alert's statement
+    waits for the node's lock, and its second statement then reads the newer report and keeps the
+    node active. In one statement the planner read the basis with the MERGE, before the lock: the
+    alert aged the node from the old report and retired it again."""
+    from indicator_aging import aging_set_clause
+
+    now = _db_now(raw_driver)
+    value = "203.0.113.96"
+    _indicator(raw_driver, value)
+    _write(client, _attr(value, "o-1", now - timedelta(days=2), now - timedelta(days=800)))
+    assert _aging(raw_driver, value)["active"] is False
+    newer = now - timedelta(days=10)
+
+    outcome: dict = {}
+
+    def alert() -> None:
+        try:
+            outcome["ok"] = client.create_indicator_from_alert(value, "ipv4", "global", alert_data={"alert_id": "a2"})
+        except Exception as exc:  # pragma: no cover - reported below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=alert, daemon=True)
+    session = raw_driver.session()
+    tx = session.begin_transaction()
+    try:
+        tx.run(
+            f"MATCH (n:Indicator:{LABEL} {{value: $v}}) "
+            "SET n.last_reported_at = datetime($at), n.last_reported_basis = 'source_date', "
+            "n.last_reported_ref = 'o-2', n.last_reported_source = 'feodo_tracker' " + aging_set_clause("n"),
+            v=value,
+            at=newer.isoformat(),
+        ).consume()
+        thread.start()
+        time.sleep(3)
+        waited = thread.is_alive()
+        tx.commit()
+    finally:
+        if not tx.closed():
+            tx.rollback()
+        session.close()
+        if thread.ident is not None:
+            thread.join(timeout=120)
+    assert waited, "the alert waits for the open write of the node"
+    assert not thread.is_alive() and outcome.get("ok") is True, outcome
+    got = _aging(raw_driver, value)
+    assert got["last_reported_at"] == newer and got["last_reported_ref"] == "o-2"
+    assert (got["active"], got["retired_by"], got["aging_tier"]) == (True, None, 0)
+    assert got["aging_since"] == newer

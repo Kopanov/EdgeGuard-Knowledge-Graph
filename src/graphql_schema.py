@@ -261,9 +261,10 @@ class Indicator:
     # source and MISP attribute uuid), the highest confidence a source gave (a node written before
     # 2026-10-16 shows its confidence_score), what the age counts from (source_date,
     # misp_recorded or first_imported), the tier reached (0 below the first tier day), the time the
-    # current aging state began, the time the rule last evaluated the node at (an evaluation at an
-    # older time is lifted to it, so the aging never moves backwards), and who retired the node
-    # ('decay', or a manual decommission).
+    # current aging state began, the time at which the node's aging values were last written (a
+    # write, or a job run that changed them; a job run that changes nothing leaves it unchanged; an
+    # evaluation whose clock is behind it is lifted to it, so the aging never moves backwards), and
+    # who retired the node ('decay', or a manual decommission).
     last_reported_at: Optional[str] = None
     last_reported_source: Optional[str] = None
     last_reported_ref: Optional[str] = None

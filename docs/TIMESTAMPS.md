@@ -181,11 +181,14 @@ the MISP attribute `timestamp` (when MISP recorded it, UTC) and L the source's o
 its source. The indicator ages from `coalesce(n.last_reported_at, n.first_imported_at)`;
 `n.last_updated` (concept 4) is read neither for aging nor for ordering, so a re-sync of the same
 data no longer makes an indicator look new. `n.aging_since` is when the node's aging state began.
-`n.aging_evaluated_at` is the time the rule last evaluated the node at (a DAG run's
-`data_interval_end`, `run_after` for a manual run, or the time of a write outside a run): every
-evaluation uses the later of its own time and this one and stores it with the aging values, so an
-older run cleared or re-run never moves the node's aging backwards. It is no source claim and is
-not read for `modified`.
+`n.aging_evaluated_at` is the time at which the node's aging values were last written: by a write,
+or by a job run that changed them; a job run that changes nothing leaves it unchanged. Every
+evaluation, a write or the job, applies the rule at the database's current time (`datetime()`, a
+database-local time like concept 4), lifted to this one when it is later, and stores that time
+with the aging values; real time only moves forward, so a cleared or re-run task evaluates at the
+time it runs, and the lift keeps two overlapping transactions or a clock set back from moving the
+node's aging backwards. No DAG run passes a time. It is no source claim and is not read for
+`modified`.
 
 #### Edge properties (concepts 1 and 2 — source-truthful per-source)
 
@@ -462,4 +465,4 @@ exercises:
 - Knowledge graph schema: [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md)
 - ResilMesh interop: [`docs/RESILMESH_INTEROPERABILITY.md`](RESILMESH_INTEROPERABILITY.md)
 
-_Last updated: 2026-10-16 — `n.aging_evaluated_at`, the time the aging rule last evaluated an indicator at; an older evaluation is lifted to it. Same day: the kind of an indicator's latest report is recorded in `n.last_reported_basis`; the aging rule derives `n.aging_basis` from it. Same day: indicator aging times: `last_reported_at` (`min(T, coalesce(L, T))`, the source's `last_seen` capped at the MISP timestamp), `last_reported_source`, `last_reported_ref`, `last_recorded_at` and `aging_basis` on the Indicator and its `SOURCED_FROM` edge, forward only; the indicator ages from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX indicator's `modified` is the latest of `created`, `last_recorded_at` and `aging_since`._
+_Last updated: 2026-10-16 — `n.aging_evaluated_at`, the time at which an indicator's aging values were last written (a job run that changes nothing leaves it unchanged); every evaluation applies the rule at the database's current time, lifted to it when it is later. Same day: the kind of an indicator's latest report is recorded in `n.last_reported_basis`; the aging rule derives `n.aging_basis` from it. Same day: indicator aging times: `last_reported_at` (`min(T, coalesce(L, T))`, the source's `last_seen` capped at the MISP timestamp), `last_reported_source`, `last_reported_ref`, `last_recorded_at` and `aging_basis` on the Indicator and its `SOURCED_FROM` edge, forward only; the indicator ages from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX indicator's `modified` is the latest of `created`, `last_recorded_at` and `aging_since`._

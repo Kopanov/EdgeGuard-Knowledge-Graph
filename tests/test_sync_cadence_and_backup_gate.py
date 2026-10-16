@@ -169,11 +169,11 @@ class _FakeSync:
     measurably later than the start-time stamp the fix requires."""
 
     captured: dict = {}
-    init_kwargs: dict = {}
+    init_args: tuple | None = None
 
-    def __init__(self, **kwargs):
+    def __init__(self, *args, **kwargs):
         self._last_sync_failure_reason = None
-        _FakeSync.init_kwargs = kwargs
+        _FakeSync.init_args = (args, kwargs)
 
     def run(self, incremental=True, since=None, sector=None):
         _FakeSync.captured = {
@@ -240,26 +240,13 @@ class TestRunNeo4jSyncWindowAndStamp:
             "a completion-time stamp re-introduces the every-other-run skip"
         )
 
-    def test_the_sync_ages_its_writes_at_the_run_time(self, dag_module, isolated_state, fake_sync_module, monkeypatch):
-        """2026-10-16: the sync's Indicator writes evaluate the aging at the time the run's aging job
-        uses (``enrichment_as_of``: ``data_interval_end``), not at each write's own time."""
-        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
-        monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
-        monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
-        monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
-        monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
-        due = datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc)
-        dag_module.run_neo4j_sync(data_interval_end=due)
-        assert _FakeSync.init_kwargs == {"aging_as_of": due}
-        assert dag_module.enrichment_as_of({"data_interval_end": due}) == due, "the job's time"
-
-    def test_the_sync_and_the_job_of_one_run_use_the_run_time(
+    def test_the_sync_and_the_job_of_a_run_are_given_no_time(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
     ):
-        """2026-10-16: the run's sync and its enrichment job evaluate the aging at the run's own time, a
-        newer run and an older run cleared after it alike; no Airflow Variable holds an aging clock. A
-        node already evaluated at a later time keeps its aging because the rule evaluates it at its
-        stored ``aging_evaluated_at`` (``indicator_aging``), not because the DAG raises the time."""
+        """2026-10-16: the indicator aging is evaluated at the database's current time, lifted to a
+        node's ``aging_evaluated_at`` (``indicator_aging``), so the DAG passes no time of the run: the
+        sync is built without one and the enrichment runner gets the client only, for a newer run and
+        an older run cleared after it alike, and no Airflow Variable is read or set for the aging."""
         monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
         monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
         monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
@@ -280,8 +267,8 @@ class TestRunNeo4jSyncWindowAndStamp:
         monkeypatch.setattr(dag_module, "Variable", _Variable)
         jobs: list = []
 
-        def run_all_enrichment_jobs(client, as_of=None):
-            jobs.append(as_of)
+        def run_all_enrichment_jobs(*args, **kwargs):
+            jobs.append((args, kwargs))
             return {}
 
         class _Client:
@@ -302,10 +289,12 @@ class TestRunNeo4jSyncWindowAndStamp:
             datetime(2026, 10, 10, 3, 0, tzinfo=timezone.utc),
         ):
             _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
+            _FakeSync.init_args = None
             dag_module.run_neo4j_sync(data_interval_end=due)
             dag_module.run_enrichment_jobs(data_interval_end=due)
-            assert _FakeSync.init_kwargs == {"aging_as_of": due}, due
-            assert jobs[-1] == due, due
+            assert _FakeSync.init_args == ((), {}), due
+            (args, kwargs) = jobs[-1]
+            assert len(args) == 1 and isinstance(args[0], _Client) and kwargs == {}, due
         assert not [k for k in keys if "AGING" in str(k).upper()], keys
 
     def test_corrupt_state_file_falls_back_to_fixed_window(

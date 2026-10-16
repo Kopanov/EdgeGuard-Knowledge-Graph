@@ -1573,13 +1573,7 @@ class MISPToNeo4jSync:
         "text": "unknown",
     }
 
-    def __init__(
-        self,
-        misp_url: str = None,
-        misp_api_key: str = None,
-        neo4j_client: Neo4jClient = None,
-        aging_as_of: Any = None,
-    ):
+    def __init__(self, misp_url: str = None, misp_api_key: str = None, neo4j_client: Neo4jClient = None):
         self.misp_url = misp_url or MISP_URL
         self.misp_api_key = misp_api_key or MISP_API_KEY
         # Initialize Neo4j client if not provided
@@ -1594,13 +1588,6 @@ class MISPToNeo4jSync:
                 self.neo4j = None
         else:
             self.neo4j = neo4j_client
-        # 2026-10-16: the DAG run's evaluation time of the indicator aging (``data_interval_end``,
-        # ``run_after`` for a manual run: ``enrichment_as_of`` in the DAG), which that run's aging job
-        # uses as well: every Indicator this sync writes is aged at that time, or at the node's later
-        # ``aging_evaluated_at`` (``Neo4jClient.set_aging_as_of``, ``indicator_aging``). None (the
-        # command line) keeps the time of each write.
-        if aging_as_of is not None and self.neo4j is not None:
-            self.neo4j.set_aging_as_of(aging_as_of)
 
         # Get circuit breakers
         self.misp_circuit = MISP_CIRCUIT_BREAKER

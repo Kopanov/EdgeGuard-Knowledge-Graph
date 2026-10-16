@@ -305,7 +305,7 @@ class TestDecayIsIdempotentWithinTier:
         from indicator_aging import AgingPolicy, aging_map, changed_predicate
 
         outer, inner, count = enrichment_jobs._aging_job_statements(AgingPolicy())
-        assert aging_map("n", "datetime($as_of)", AgingPolicy()) in inner
+        assert aging_map("n", enrichment_jobs.AGING_JOB_TIME, AgingPolicy()) in inner
         assert "round(n.source_confidence * [1.0, 0.85, 0.7, 0.55][_tier], 2)" in inner
         assert "n.confidence_score *" not in inner, "never the stored, already aged value"
         assert f"WHERE {changed_predicate('n', 'aged')} SET n += aged" in inner, "only changed nodes are written"

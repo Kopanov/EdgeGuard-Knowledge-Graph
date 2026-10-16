@@ -153,9 +153,9 @@ _DAG_START_DATE = pendulum.datetime(2025, 1, 1, tz="UTC")
 # month, 96 h at most month ends and 120 h after 28 February of a leap year. ``schedule=timedelta`` is
 # Airflow 3's DeltaTriggerTimetable (``[scheduler] create_delta_data_intervals`` False, the default):
 # a run is due 72 h after the logical date of the previous scheduled run, its data interval is that
-# single instant (``data_interval_end`` = the logical date, the time the indicator aging is evaluated
-# at), and manual runs do not move the schedule. With ``catchup=False`` a run that fell due while the
-# DAG was paused or Airflow was down starts once at resumption, and the 72 h are counted from it.
+# single instant (``data_interval_end`` = the logical date), and manual runs do not move the
+# schedule. With ``catchup=False`` a run that fell due while the DAG was paused or Airflow was down
+# starts once at resumption, and the 72 h are counted from it.
 # Deployed within 72 h of the last cron run, the first run is due 72 h after it, at 03:00 UTC.
 NEO4J_SYNC_EVERY = timedelta(days=3)
 # 2026-10: ``check_sync_needed`` skips a run when the last successful sync started less than this ago
@@ -1617,10 +1617,7 @@ def run_neo4j_sync(**context):
                     e,
                 )
 
-        # 2026-10-16: the sync's Indicator writes evaluate the aging at the run's time, the time this
-        # run's aging job uses (``enrichment_as_of``), so the two never disagree in between; a node
-        # already evaluated at a later time keeps its aging (``indicator_aging``).
-        sync = MISPToNeo4jSync(aging_as_of=enrichment_as_of(context))
+        sync = MISPToNeo4jSync()
         success = sync.run(incremental=incremental, since=since)
 
         if success:
@@ -2107,32 +2104,11 @@ check_neo4j_quality_task = BashOperator(
 #
 #  Order matters:
 #    1. build_relationships  — link IOCs to malware/CVEs (needs fresh data)
-#    2. run_enrichment_jobs  — merges, the indicator aging (one rule, evaluated at the run's
-#                              data_interval_end, or at a node's later aging_evaluated_at;
-#                              2026-10-16), campaigns (active indicators), calibration, EPSS
+#    2. run_enrichment_jobs  — merges, the indicator aging (one rule at the database's current
+#                              time, or a node's later aging_evaluated_at; 2026-10-16), campaigns
+#                              (active indicators), calibration, EPSS
 #                              (enrichment_jobs.run_all_enrichment_jobs)
 # ================================================================================
-
-
-def enrichment_as_of(context) -> datetime:
-    """The time the indicator aging is evaluated at (2026-10-16): the DAG run's
-    ``data_interval_end``, or ``run_after`` for a manual run without a data interval (now only when
-    the context has neither, a direct call). The run's sync (``run_neo4j_sync``,
-    ``run_baseline_full_sync``) ages the Indicators it writes at this time and the run's enrichment
-    job evaluates the rule at it, so the two never disagree in between, and re-running a run gives
-    the same graph.
-
-    No clock is shared between runs: every evaluation applies the rule to a node at the later of
-    this time and the time stored on the node (``aging_evaluated_at``, ``indicator_aging``), so a
-    re-run of an older run, or a baseline overlapping a scheduled sync, never moves a node's aging
-    backwards, whatever order the runs write in."""
-    end = context.get("data_interval_end")
-    if end is None:
-        dag_run = context.get("dag_run")
-        end = getattr(dag_run, "run_after", None) if dag_run is not None else None
-    if end is None:
-        return datetime.now(timezone.utc)
-    return end if end.tzinfo else end.replace(tzinfo=timezone.utc)
 
 
 def run_build_relationships(**context):
@@ -2197,8 +2173,7 @@ def run_enrichment_jobs(**context):
     client = Neo4jClient()
     try:
         client.connect()
-        # 2026-10-16: the indicator aging at the run's time, the time the run's sync wrote at.
-        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
+        summary = run_all_enrichment_jobs(client)
         logger.info(f"Enrichment summary: {summary}")
     except Exception as e:
         logger.error(f"Enrichment failed: {e}")
@@ -2858,9 +2833,7 @@ def run_baseline_full_sync(**context):
 
     logger.info("[BASELINE] Starting full MISP→Neo4j sync (all history)")
     sync_started_at = datetime.now(timezone.utc)
-    # 2026-10-16: aged at the time the baseline's enrichment evaluates the aging (``enrichment_as_of``);
-    # a node already evaluated at a later time keeps its aging (``indicator_aging``).
-    sync = MISPToNeo4jSync(aging_as_of=enrichment_as_of(context))
+    sync = MISPToNeo4jSync()
     success = sync.run(incremental=False)
     if not success:
         detail = (
@@ -2901,8 +2874,7 @@ def run_baseline_enrichment(**context):
     client = Neo4jClient()
     try:
         client.connect()
-        # 2026-10-16: the indicator aging at the run's time, the time the run's sync wrote at.
-        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
+        summary = run_all_enrichment_jobs(client)
         logger.info(f"[BASELINE] Enrichment complete: {summary}")
     except Exception as e:
         logger.error(f"[BASELINE] Enrichment failed: {e}")

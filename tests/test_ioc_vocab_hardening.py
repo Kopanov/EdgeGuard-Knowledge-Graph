@@ -86,9 +86,16 @@ def mock_neo4j_client():
         return client, mock_session
 
 
+def _alert_tx(session):
+    """The transaction the alert path writes in (2026-10-16: its MERGE statement, then the aging rule
+    in a second statement)."""
+    return session.begin_transaction.return_value.__enter__.return_value
+
+
 def _merged_params(session):
-    """(indicator_type, value) bound into the MERGE by the last run call."""
-    kwargs = session.run.call_args.kwargs
+    """(indicator_type, value) bound into the MERGE by the last alert write."""
+    merges = [c for c in _alert_tx(session).run.call_args_list if c.args and c.args[0].lstrip().startswith("MERGE (i:")]
+    kwargs = merges[-1].kwargs
     return kwargs["indicator_type"], kwargs["value"]
 
 
@@ -166,12 +173,14 @@ class TestCreateIndicatorFromAlertVocabParity:
         client, session = mock_neo4j_client
         assert client.create_indicator_from_alert("   ", "domain", "global") is False
         session.run.assert_not_called()
+        session.begin_transaction.assert_not_called()
 
     def test_bare_defang_token_never_merges(self, mock_neo4j_client):
         # "[.]" refangs to "." — no alphanumeric content, no merge key.
         client, session = mock_neo4j_client
         assert client.create_indicator_from_alert("[.]", None, "global") is False
         session.run.assert_not_called()
+        session.begin_transaction.assert_not_called()
 
     def test_every_sync_type_mapping_entry_agrees_end_to_end(self, mock_neo4j_client):
         """Drift guard at the WRITE path: for every entry in the sync's
@@ -182,7 +191,7 @@ class TestCreateIndicatorFromAlertVocabParity:
 
         client, session = mock_neo4j_client
         for misp_type, graph_type in MISPToNeo4jSync.TYPE_MAPPING.items():
-            session.run.reset_mock()
+            _alert_tx(session).run.reset_mock()
             client.create_indicator_from_alert("samplevalue123", misp_type, "global")
             itype, _ = _merged_params(session)
             assert itype == graph_type, (

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -99,20 +98,18 @@ class TestPostcheckFailsWithoutTheChainMarkers:
             assert ep.run_build_relationships() == {"built": True, "returncode": 0}
         sync = MagicMock()
         sync.run.return_value = True
-        due = datetime(2026, 10, 16, 9, 12, tzinfo=timezone.utc)
         with patch("run_misp_to_neo4j.MISPToNeo4jSync", return_value=sync) as sync_class:
-            assert ep.run_baseline_full_sync(
-                ti=self._ti({"baseline_start": {"started": True}}), data_interval_end=due
-            ) == {"synced": True}
-        # 2026-10-16: the full sync ages its writes at the time the baseline's enrichment uses.
-        sync_class.assert_called_once_with(aging_as_of=due)
+            assert ep.run_baseline_full_sync(ti=self._ti({"baseline_start": {"started": True}})) == {"synced": True}
+        # 2026-10-16: no time of the run reaches the sync or the aging job; both age at the database's
+        # current time (``indicator_aging``).
+        sync_class.assert_called_once_with()
+        client = MagicMock()
         with (
-            patch("neo4j_client.Neo4jClient", return_value=MagicMock()),
+            patch("neo4j_client.Neo4jClient", return_value=client),
             patch("enrichment_jobs.run_all_enrichment_jobs", return_value={}) as run_all,
         ):
-            assert ep.run_baseline_enrichment(data_interval_end=due) == {"enriched": True}
-        run_all.assert_called_once()
-        assert run_all.call_args.kwargs == {"as_of": due}, "the same time, and no recorder of a shared clock"
+            assert ep.run_baseline_enrichment() == {"enriched": True}
+        run_all.assert_called_once_with(client)
 
 
 class TestLiveTaskStatesDecide:

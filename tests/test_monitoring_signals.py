@@ -317,9 +317,6 @@ class TestNodeGauges:
         class _Sync:
             _last_sync_failure_reason = None
 
-            def __init__(self, aging_as_of=None):
-                self.aging_as_of = aging_as_of
-
             def run(self, incremental=True, since=None):
                 return success
 
@@ -379,9 +376,7 @@ class TestNodeGauges:
         assert node_reads == []
 
     def _fake_enrichment(self, monkeypatch, events, error=None):
-        def run_all_enrichment_jobs(client, as_of=None):
-            # 2026-10-16: the task passes the time the indicator aging is evaluated at.
-            assert as_of is not None and as_of.tzinfo is not None
+        def run_all_enrichment_jobs(client):
             events.append("enrichment")
             if error is not None:
                 raise error
@@ -880,10 +875,9 @@ class TestSyncStaleness:
         assert sync_dag.catchup is False and sync_dag.max_active_runs == 1
         assert sync_dag.dagrun_timeout < dag_module.NEO4J_SYNC_EVERY, "a run has ended before the next is due"
 
-    def test_a_scheduled_run_is_evaluated_at_the_time_it_is_due(self, dag_module, dags):
-        """The indicator aging is evaluated at the run's ``data_interval_end`` (``enrichment_as_of``,
-        passed by ``run_enrichment_jobs`` to the aging job): with the 72 h schedule, a trigger timetable,
-        the data interval is the instant the run is due, 72 h after the previous one."""
+    def test_the_data_interval_of_a_scheduled_run_is_the_time_it_is_due(self, dag_module, dags):
+        """With the 72 h schedule, a trigger timetable, the data interval of a scheduled run is the
+        instant the run is due, 72 h after the previous one."""
         from airflow.serialization.encoders import coerce_to_core_timetable
         from airflow.timetables.base import DagRunInfo, TimeRestriction
 
@@ -895,8 +889,6 @@ class TestSyncStaleness:
         )
         due = first + timedelta(days=3)
         assert info.run_after == info.data_interval.start == info.data_interval.end == due
-        context = {"data_interval_end": info.data_interval.end, "dag_run": SimpleNamespace(run_after=info.run_after)}
-        assert dag_module.enrichment_as_of(context) == due
 
     def test_the_guard_bound_is_justified_by_the_tasks(self, dag_module, dags):
         """24 h: longer than the rest of a baseline after its full sync starts, shorter than the

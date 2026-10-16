@@ -8,7 +8,7 @@ factor of the tier reached, and is retired after 730 days without a report. Noth
 
 These unit tests run the real callers on fixtures shaped like the MISP 2.5 attributes the sync
 reads (``timestamp`` epoch strings or PyMISP datetimes, the native ``last_seen``, ``uuid``, the
-source tag) and check what reaches the writer, the job's statements, the DAG's evaluation time,
+source tag) and check what reaches the writer, the job's statements, the time of an evaluation,
 the readers and the configuration. The Cypher semantics run on Neo4j in
 ``tests/test_indicator_aging_neo4j.py``.
 """
@@ -208,7 +208,8 @@ class TestOneDefinitionWithoutOwnership:
         policy = ia.AgingPolicy()
         outer, inner, count = enrichment_jobs._aging_job_statements(policy)
         changed = (
-            f"WITH n, {ia.aging_map('n', 'datetime($as_of)', policy)} AS aged WHERE {ia.changed_predicate('n', 'aged')}"
+            f"WITH n, {ia.aging_map('n', enrichment_jobs.AGING_JOB_TIME, policy)} AS aged "
+            f"WHERE {ia.changed_predicate('n', 'aged')}"
         )
         select = f"MATCH (n:Indicator) WHERE coalesce(n.last_reported_at, n.first_imported_at) IS NOT NULL {changed}"
         assert outer == f"{select} RETURN n"
@@ -458,11 +459,13 @@ class TestWriters:
             "reported_basis": "source_date",
         }
 
-    def test_a_sync_of_a_run_hands_its_time_to_its_client_and_the_batch_statement(self):
-        """2026-10-16: ``MISPToNeo4jSync(aging_as_of=...)`` sets the run's time on its Neo4j client and
-        ``merge_indicators_batch`` sends it to ``session.run`` as ``$aging_as_of``, the parameter of
-        ``WRITE_AS_OF``. A real client built without a connection; a strict driver records each
-        statement (any other driver call fails the test)."""
+    def test_the_batch_statement_carries_no_time(self):
+        """2026-10-16: the sync passes no aging time: ``MISPToNeo4jSync`` takes none, and
+        ``merge_indicators_batch`` sends ``session.run`` the batch and the source uuid only; the rule
+        in the statement reads the database's current time. A real client built without a connection;
+        a strict driver records each statement (any other driver call fails the test)."""
+        import inspect
+
         import neo4j_client as nc
 
         runs: list = []
@@ -487,22 +490,21 @@ class TestWriters:
             def session(self, **kwargs):
                 return _Session()
 
-        def unconnected():
-            return nc.Neo4jClient("bolt://edgeguard-test.invalid:7687", "neo4j", "unused")
-
-        client = unconnected()
-        assert client.driver is None and client.aging_as_of is None
-        sync = MISPToNeo4jSync(
-            neo4j_client=client, aging_as_of=datetime(2026, 10, 16, 5, tzinfo=timezone(timedelta(hours=2)))
-        )
-        assert sync.neo4j is client and client.aging_as_of == "2026-10-16T03:00:00+00:00"
+        assert list(inspect.signature(MISPToNeo4jSync.__init__).parameters) == [
+            "self",
+            "misp_url",
+            "misp_api_key",
+            "neo4j_client",
+        ]
+        client = nc.Neo4jClient("bolt://edgeguard-test.invalid:7687", "neo4j", "unused")
+        assert client.driver is None
+        assert MISPToNeo4jSync(neo4j_client=client).neo4j is client
         client.driver = _Driver()
         item = _parse(_attr("203.0.113.42", "f-2", last_seen="2026-08-01T00:00:00+00:00"))
         assert client.merge_indicators_batch([item], source_id="feodo_tracker") == (1, 0)
         ((query, params),) = [r for r in runs if "UNWIND $batch as item" in r[0]]
-        assert params[ia.AS_OF_PARAM] == "2026-10-16T03:00:00+00:00"
-        assert ia.aging_set_clause("n", ia.WRITE_AS_OF) in query
-        assert MISPToNeo4jSync(neo4j_client=unconnected()).neo4j.aging_as_of is None, "no run: each write's time"
+        assert set(params) == {"batch", "source_node_uuid", "timeout"}, "the statement's parameters and its limit"
+        assert ia.aging_set_clause("n") in query
 
     @pytest.mark.parametrize("source_id", ["stix_import", "virustotal"])
     def test_command_line_writers_record_no_report(self, source_id):
@@ -515,8 +517,7 @@ class TestWriters:
         )
         merge = next(c for c in session.run.call_args_list if c.args and "MERGE (n:Indicator" in c.args[0])
         assert merge.kwargs["report"] == dict.fromkeys(ia.REPORT_KEYS)
-        assert ia.aging_set_clause("n", ia.WRITE_AS_OF) in merge.args[0]
-        assert merge.kwargs[ia.AS_OF_PARAM] is None, "outside a DAG run: the time of the write"
+        assert ia.aging_set_clause("n") in merge.args[0]
 
 
 # ================================================================ the job
@@ -561,23 +562,39 @@ STATS = [
 
 
 class TestTheJob:
-    def test_it_runs_the_rule_at_the_given_time_and_reports_the_state(self, caplog):
+    def test_it_runs_at_the_database_time_and_reports_the_state(self, caplog):
+        """2026-10-16: production passes no time: ``$as_of`` is null and the statements evaluate the rule
+        at ``coalesce(datetime($as_of), datetime())``, the database's current time (each batch of
+        ``apoc.periodic.iterate`` reads it when its transaction starts)."""
         session = _JobSession(STATS)
-        as_of = datetime(2026, 10, 16, 3, 0, tzinfo=UTC)
         with caplog.at_level(logging.INFO, logger="enrichment_jobs"):
-            result = enrichment_jobs.decay_ioc_confidence(_job_client(session), as_of=as_of)
+            result = enrichment_jobs.decay_ioc_confidence(_job_client(session))
         count, iterate, stats = session.calls
-        assert count[1]["as_of"] == "2026-10-16T03:00:00+00:00"
-        assert iterate[1]["as_of"] == "2026-10-16T03:00:00+00:00"
-        outer, inner, _ = enrichment_jobs._aging_job_statements(ia.load_aging_policy())
+        assert count[1]["as_of"] is None and iterate[1]["as_of"] is None
+        assert enrichment_jobs.AGING_JOB_TIME == "coalesce(datetime($as_of), datetime())"
+        outer, inner, count_query = enrichment_jobs._aging_job_statements(ia.load_aging_policy())
+        assert count[0] == count_query
         assert (iterate[1]["outer"], iterate[1]["inner"]) == (outer, inner)
+        assert enrichment_jobs.AGING_JOB_TIME in inner and enrichment_jobs.AGING_JOB_TIME in outer
         assert "params: {as_of: $as_of}" in iterate[0]
-        assert result["changed"] == 3
+        assert result["as_of"] is None and result["changed"] == 3
         assert result["tiers"] == {"tier_0": 6, "tier_1": 2, "tier_2": 0, "tier_3": 4}
         assert result["retired"] == 4 and result["no_time"] == 0
         assert result["by_basis"] == {"source_date": 9, "misp_recorded": 2, "first_imported": 1}
-        assert "3 Indicator(s) changed" in caplog.text and "retired (from 730 d): 4" in caplog.text
+        assert "at the database's current time: 3 Indicator(s) changed" in caplog.text
+        assert "retired (from 730 d): 4" in caplog.text
         assert "first_imported=1" in caplog.text and "with no time at all: 0" in caplog.text
+
+    def test_a_test_may_give_the_job_a_time(self, caplog):
+        """``as_of`` is for tests only; it reaches the statements as ``$as_of`` (ISO-8601 UTC) and is
+        lifted per node like the database's time (``TestTheTimeNeverMovesBackwards``)."""
+        session = _JobSession(STATS)
+        as_of = datetime(2026, 10, 16, 5, 0, tzinfo=timezone(timedelta(hours=2)))
+        with caplog.at_level(logging.INFO, logger="enrichment_jobs"):
+            result = enrichment_jobs.decay_ioc_confidence(_job_client(session), as_of=as_of)
+        count, iterate, _stats = session.calls
+        assert count[1]["as_of"] == iterate[1]["as_of"] == result["as_of"] == "2026-10-16T03:00:00+00:00"
+        assert "[AGING] at 2026-10-16T03:00:00+00:00: 3 Indicator(s) changed" in caplog.text
 
     def test_indicators_without_a_time_are_counted_and_warned(self, caplog):
         session = _JobSession(STATS[:1] + [{"tier": None, "basis": None, "retired": False, "no_time": True, "c": 2}])
@@ -590,15 +607,16 @@ class TestTheJob:
         with pytest.raises(RuntimeError, match="AGING"):
             enrichment_jobs.decay_ioc_confidence(_job_client(session), as_of=None)
 
-    def test_as_of_forms(self):
-        assert enrichment_jobs.aging_as_of("2026-10-16T03:00:00Z") == datetime(2026, 10, 16, 3, tzinfo=UTC)
-        assert enrichment_jobs.aging_as_of(datetime(2026, 10, 16, 3)) == datetime(2026, 10, 16, 3, tzinfo=UTC)
+    def test_the_forms_of_a_test_time(self):
+        assert ia.evaluation_time("2026-10-16T03:00:00Z") == datetime(2026, 10, 16, 3, tzinfo=UTC)
+        assert ia.evaluation_time(datetime(2026, 10, 16, 3)) == datetime(2026, 10, 16, 3, tzinfo=UTC)
         cest = datetime(2026, 10, 16, 5, tzinfo=timezone(timedelta(hours=2)))
-        assert enrichment_jobs.aging_as_of(cest) == datetime(2026, 10, 16, 3, tzinfo=UTC)
-        assert type(enrichment_jobs.aging_as_of(cest)) is datetime
-        assert abs(enrichment_jobs.aging_as_of(None) - datetime.now(UTC)) < timedelta(seconds=5)
+        assert ia.evaluation_time(cest) == datetime(2026, 10, 16, 3, tzinfo=UTC)
+        assert type(ia.evaluation_time(cest)) is datetime
+        with pytest.raises(TypeError):
+            ia.evaluation_time(None)
 
-    def test_the_runner_passes_one_time_and_ages_before_the_campaigns(self, monkeypatch):
+    def test_the_runner_passes_no_time_and_ages_before_the_campaigns(self, monkeypatch):
         seen: list = []
         for name in (
             "bridge_vulnerability_cve",
@@ -610,70 +628,29 @@ class TestTheJob:
         ):
             monkeypatch.setattr(enrichment_jobs, name, lambda c, _n=name: seen.append(_n) or {})
         monkeypatch.setattr(
-            enrichment_jobs, "decay_ioc_confidence", lambda c, as_of=None: seen.append(("decay", as_of)) or {}
+            enrichment_jobs, "decay_ioc_confidence", lambda *a, **kw: seen.append(("decay", len(a), kw)) or {}
         )
-        as_of = datetime(2026, 10, 16, 3, tzinfo=UTC)
-        enrichment_jobs.run_all_enrichment_jobs(MagicMock(), as_of=as_of)
-        assert ("decay", as_of) in seen
-        assert seen.index(("decay", as_of)) < seen.index("build_campaign_nodes")
+        enrichment_jobs.run_all_enrichment_jobs(MagicMock())
+        assert ("decay", 1, {}) in seen, "the client only: the job runs at the database's current time"
+        assert seen.index(("decay", 1, {})) < seen.index("build_campaign_nodes")
 
 
-class TestTheDagTime:
-    @pytest.fixture(scope="class")
-    def dag(self):
-        """The DAG file loaded as an isolated module (as the DAG tests do)."""
-        import importlib.util
+class TestTheDagPassesNoTime:
+    """2026-10-16: the aging runs at the database's current time, so no DAG task, runner or sync takes a
+    time of the run (the DAG tests run the tasks: ``tests/test_sync_cadence_and_backup_gate.py``,
+    ``tests/test_baseline_chain_guards.py``)."""
 
-        spec = importlib.util.spec_from_file_location(
-            "_dag_module_indicator_aging", Path(__file__).resolve().parent.parent / "dags" / "edgeguard_pipeline.py"
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    @pytest.fixture
-    def as_of(self, dag):
-        return dag.enrichment_as_of
-
-    def test_the_data_interval_end_of_a_scheduled_run(self, as_of):
-        end = datetime(2026, 10, 16, 3, tzinfo=UTC)
-        assert as_of({"data_interval_end": end, "dag_run": SimpleNamespace(run_after=end + timedelta(hours=1))}) == end
-
-    def test_run_after_of_a_manual_run(self, as_of):
-        after = datetime(2026, 10, 16, 9, 12, tzinfo=UTC)
-        assert as_of({"data_interval_end": None, "dag_run": SimpleNamespace(run_after=after)}) == after
-
-    def test_now_without_either(self, as_of):
-        assert abs(as_of({}) - datetime.now(UTC)) < timedelta(seconds=5)
-
-    def test_no_clock_is_shared_between_runs(self, dag, as_of, monkeypatch):
-        """2026-10-16: the time is the run's own; the DAG keeps no aging clock of its own (the Airflow
-        Variable ``EDGEGUARD_AGING_AS_OF`` it read and raised is gone). A node is held at its latest
-        time by ``aging_evaluated_at`` on the node, whatever the order of the runs, cleared tasks and
-        the baseline (``TestTheTimeNeverMovesBackwards``)."""
-
-        class _NoVariables:
-            @staticmethod
-            def get(*_a, **_k):
-                raise AssertionError("the aging time reads no Airflow Variable")
-
-            set = get
-
-        monkeypatch.setattr(dag, "Variable", _NoVariables)
-        older = datetime(2026, 10, 10, 3, tzinfo=UTC)
-        newer = datetime(2026, 10, 16, 3, tzinfo=UTC)
-        assert as_of({"data_interval_end": newer}) == newer
-        assert as_of({"data_interval_end": older}) == older, "an older run cleared later keeps its own time"
-        for name in ("AGING_AS_OF_VARIABLE", "record_aging_as_of", "sync_aging_as_of", "_read_aging_as_of_mark"):
-            assert not hasattr(dag, name), name
-        source = (Path(__file__).resolve().parent.parent / "dags" / "edgeguard_pipeline.py").read_text()
-        assert "EDGEGUARD_AGING_AS_OF" not in source and "on_aged" not in source
-
-    def test_the_runner_takes_the_time_only(self):
+    def test_the_signatures_take_no_time(self):
         import inspect
 
-        assert list(inspect.signature(enrichment_jobs.run_all_enrichment_jobs).parameters) == ["neo4j_client", "as_of"]
+        assert list(inspect.signature(enrichment_jobs.run_all_enrichment_jobs).parameters) == ["neo4j_client"]
+        assert list(inspect.signature(enrichment_jobs.decay_ioc_confidence).parameters) == ["neo4j_client", "as_of"]
+
+    def test_the_dag_reads_no_time_of_the_run_for_the_aging(self):
+        source = (Path(__file__).resolve().parent.parent / "dags" / "edgeguard_pipeline.py").read_text()
+        assert "as_of" not in source.lower(), "no time of the run reaches the sync or the aging job"
+        assert source.count("run_all_enrichment_jobs(client)") == 2
+        assert source.count("sync = MISPToNeo4jSync()") == 2
 
 
 class TestTheTimeNeverMovesBackwards:
@@ -682,26 +659,34 @@ class TestTheTimeNeverMovesBackwards:
     values change. The Cypher runs on Neo4j in ``tests/test_indicator_aging_neo4j.py``; here, the
     fragments and a Python model of the rule show why storing the time only with a change suffices."""
 
-    def test_the_evaluation_time_is_the_later_of_the_given_and_the_stored(self):
-        assert ia.EVALUATED_AT == "aging_evaluated_at"
-        assert ia.evaluated_at_expr("n", "datetime($as_of)") == (
-            "CASE WHEN n.aging_evaluated_at > datetime($as_of) THEN n.aging_evaluated_at ELSE datetime($as_of) END"
+    def test_the_evaluation_time_is_the_later_of_the_database_time_and_the_stored(self):
+        assert ia.EVALUATED_AT == "aging_evaluated_at" and ia.DATABASE_TIME == "datetime()"
+        assert ia.evaluated_at_expr("n") == (
+            "CASE WHEN n.aging_evaluated_at > datetime() THEN n.aging_evaluated_at ELSE datetime() END"
         )
-        body = ia.aging_map("n", "datetime($as_of)")
-        assert body.startswith(f"[_at IN [{ia.evaluated_at_expr('n', 'datetime($as_of)')}] | [_basis IN [")
+        body = ia.aging_map("n")
+        assert body.startswith(f"[_at IN [{ia.evaluated_at_expr('n')}] | [_basis IN [")
         assert "duration.inDays(_basis, _at).days" in body
-        assert body.count("datetime($as_of)") == 2, "the given time is read only through the later-of"
+        assert body.count("datetime()") == 2, "the database's time is read only through the later-of"
         assert body.endswith(
             "aging_evaluated_at: CASE WHEN _age IS NULL THEN n.aging_evaluated_at ELSE _at END}][0]][0]][0]][0]"
         )
+        job = ia.aging_map("n", enrichment_jobs.AGING_JOB_TIME)
+        assert job.startswith(f"[_at IN [{ia.evaluated_at_expr('n', enrichment_jobs.AGING_JOB_TIME)}] | ")
+        assert job.count(enrichment_jobs.AGING_JOB_TIME) == 2, "a test's time is lifted like the database's"
 
-    def test_every_write_evaluates_at_the_later_time(self):
-        """The writers splice ``aging_set_clause`` with ``WRITE_AS_OF``; the clause carries the later-of."""
-        clause = ia.aging_set_clause("n", ia.WRITE_AS_OF)
-        assert ia.evaluated_at_expr("n", ia.WRITE_AS_OF) in clause
+    def test_every_write_evaluates_at_the_database_time_without_a_parameter(self):
+        """The writers splice ``aging_set_clause``, which reads the database's current time and no
+        parameter: the batch and the single-item path in their statement, the alert path in the second
+        statement of its transaction (primary and fallback)."""
+        clause = ia.aging_set_clause("n")
+        assert ia.evaluated_at_expr("n", ia.DATABASE_TIME) in clause
+        assert "$" not in clause, "no parameter in the rule of a write"
         source = (_SRC / "neo4j_client.py").read_text()
-        assert source.count('aging_set_clause("n", WRITE_AS_OF)') == 2  # the batch and the single-item path
-        assert source.count('aging_set_clause("i", WRITE_AS_OF)') == 2  # the alert path and its fallback
+        assert source.count('aging_set_clause("n")') == 2  # the batch and the single-item path
+        assert source.count('aging_set_clause("i")') == 1  # the alert path's second statement
+        for writer in ("neo4j_client.py", "run_misp_to_neo4j.py"):
+            assert "as_of" not in (_SRC / writer).read_text().lower(), writer
 
     @staticmethod
     def _state(policy: ia.AgingPolicy, age: int) -> tuple:
@@ -741,6 +726,32 @@ class TestTheTimeNeverMovesBackwards:
             for before, after in pairwise(history):
                 assert after[0] >= before[0] and after[3] >= before[3] and (before[4] or not after[4])
             assert stored_state == self._state(p, max(times)), times
+
+    def test_at_the_database_time_a_newer_report_is_evaluated_at_the_time_of_its_write(self):
+        """Model of the 2026-10-16 decision: every evaluation runs at the database's time when it runs
+        (real time, which only moves forward), lifted to the stored time; a write may bring a newer
+        report (a later basis) and always writes, the job writes only on a change. After every step the
+        node holds the state of its current basis at the latest time an evaluation ran at: a write of
+        a newer report after a job that changed nothing evaluates at the write's own, later time."""
+        p = ia.AgingPolicy()
+        rng = random.Random(20261017)
+        for _ in range(1000):
+            clock = rng.randrange(0, 900)
+            basis = clock - rng.randrange(0, 900)
+            stored_state, stored_at = None, None
+            for _step in range(rng.randrange(1, 9)):
+                clock += rng.randrange(0, 120)
+                at = clock if stored_at is None or clock > stored_at else stored_at
+                if rng.random() < 0.5:  # a write; with a newer report half of the time
+                    if rng.random() < 0.5:
+                        basis = rng.randrange(basis, clock + 1)
+                    stored_state, stored_at = self._state(p, at - basis), at
+                else:  # the job
+                    state = self._state(p, at - basis)
+                    if state != stored_state:
+                        stored_state, stored_at = state, at
+                assert stored_at <= clock
+                assert stored_state == self._state(p, clock - basis), (clock, basis, stored_at)
 
 
 # ================================================================ the readers
@@ -849,7 +860,7 @@ class TestReaders:
             False,
             "decay",
         )
-        assert ind.aging_evaluated_at == "2026-10-16T03:00:00+00:00", "the time the rule last evaluated it at"
+        assert ind.aging_evaluated_at == "2026-10-16T03:00:00+00:00", "the time the aging values were last written"
         older = dict(node, source_confidence=None)
         session.run.return_value = [{"n": older}]
         (ind,) = graphql_api._resolve_indicators(client, IndicatorFilter(active_only=False))

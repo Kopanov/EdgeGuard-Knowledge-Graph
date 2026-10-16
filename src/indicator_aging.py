@@ -53,32 +53,38 @@ One definition
 clause that records the report and ``source_confidence``: a clause reads the node as the previous
 clause left it, so the rule sees the report of the same write (a newer report reactivates the node
 in that write) without depending on the order in which one ``SET`` clause applies its items.
-``enrichment_jobs.decay_ioc_confidence`` applies it to every Indicator with the time of the DAG
-run and writes a node when any of its ``AGING_FIELDS`` differs from the stored value. A write
-evaluates it at ``WRITE_AS_OF``: the DAG run's evaluation time when the sync of a run writes
-(``Neo4jClient.set_aging_as_of``; the time the run's job uses, so the sync's writes and the job
-never disagree in between), the time of the write otherwise (the alert path, the command-line
-writers). ``node_report_items`` / ``edge_report_items`` are the forward-only report properties of
-the node and of its ``SOURCED_FROM`` edge. Tests pin every splice.
+``enrichment_jobs.decay_ioc_confidence`` applies it to every Indicator and writes a node when any
+of its ``AGING_FIELDS`` differs from the stored value. ``node_report_items`` /
+``edge_report_items`` are the forward-only report properties of the node and of its
+``SOURCED_FROM`` edge. Tests pin every splice.
 
-The time never moves backwards on a node
-----------------------------------------
-(2026-10-16) Every evaluation, a write or the job, applies the rule at the later of the time it is
-given and the time stored on the node, ``aging_evaluated_at`` (``evaluated_at_expr``), and stores
-that time whenever it writes the aging properties. For one basis, every value of the rule (tier,
-factor, confidence, ``aging_since``, ``active``, ``retired_at``, ``retired_by``) changes in one
-direction only as the time grows, so a node holds the state of the time stored on it, which is
-also the state of every later time it was evaluated at without a change: an evaluation at an older
-time (an older DAG run cleared or re-run, a baseline overlapping a scheduled sync) is lifted to the
-stored time and changes nothing, in whatever order the evaluations run. The job therefore still
-writes only the nodes whose aging changes, and once each node that has a time but no
-``aging_evaluated_at`` (written before 2026-10-16). A newer report (a new basis) is evaluated at the
-same later time. Two evaluations of one node never interleave: the clauses of a write before the
-rule set properties of the node, which takes the node's write lock until the write commits, so the
-rule reads the node under the lock, and the job locks each node it is about to change
-(``apoc.lock.nodes``) and evaluates it again under the lock. No clock is shared between runs (no
-Airflow Variable, no file), so the DAG, a cleared task, the baseline and the command line all keep
-the guarantee.
+The time of an evaluation
+-------------------------
+(2026-10-16) Every evaluation, a write or the job, applies the rule at the database's current time
+(``DATABASE_TIME``, the clock of the statement), lifted to the node's ``aging_evaluated_at`` when
+that is later (``evaluated_at_expr``), and stores that time with the aging values whenever it
+writes them. Real time only moves forward, so an evaluation that runs later evaluates at a later
+time, whichever DAG run it belongs to: a cleared or re-run task, a baseline overlapping a scheduled
+sync and the command line evaluate at the time they run, and a write of a newer report evaluates
+that report at the time of the write. No run passes a time and no clock is shared between runs.
+
+For one basis, every value of the rule (tier, factor, confidence, ``aging_since``, ``active``,
+``retired_at``, ``retired_by``) changes in one direction only as the time grows. The lift keeps a
+node from moving backwards where the clocks of two evaluations do not follow their order: two
+transactions that overlap (each statement reads the clock when it starts) or a clock set back on
+the database server. ``aging_evaluated_at`` is the time at which the node's aging values were last
+written (a write, or a job run that changed them); a job run that changes nothing leaves it
+unchanged, so a node holds the state of its stored time, which is also the state of every later
+time it was evaluated at without a change.
+
+Two evaluations of one node never interleave. The batch and single-item writes set properties of
+the node in the clause before the rule, which takes the node's write lock until the write commits,
+and read the node for the rule after that clause. The alert path applies the rule in a second
+statement of its transaction (``Neo4jClient.create_indicator_from_alert``): in its one statement
+the planner reads the basis with the ``MERGE``, before the lock. The job locks each node it is
+about to change (``apoc.lock.nodes``) and evaluates it again under the lock. A time a test gives
+the job (``decay_ioc_confidence(as_of=...)``) is lifted per node in the same way, so it cannot move
+a node backwards either.
 
 Standard library only; the fragments use single quotes only.
 """
@@ -111,30 +117,21 @@ AGING_BASES: Tuple[str, ...] = (BASIS_SOURCE_DATE, BASIS_MISP_RECORDED, BASIS_FI
 # ``retired_by`` of a retirement this rule made (and clears when the node is reported again).
 RETIRED_BY_DECAY = "decay"
 
-# 2026-10-16: the time an Indicator write evaluates the rule at, and the parameter that carries it.
-# Within a DAG run the sync writes hours after the run's due time and the run's job then evaluates
-# the rule at that due time (``data_interval_end``): a write evaluated at its own time could retire a
-# node that crossed the retirement day in between, and the job reactivate it (a STIX consumer keeping
-# the highest ``modified`` kept the retired version). The sync of a run therefore passes the run's
-# evaluation time; a writer outside a run passes none, and the write's own time applies.
-AS_OF_PARAM = "aging_as_of"
-WRITE_AS_OF = f"coalesce(datetime(${AS_OF_PARAM}), datetime())"
+# 2026-10-16: the time an evaluation applies the rule at before the per-node lift: the database's
+# current time (the clock of the statement, read when it starts). No run passes a time.
+DATABASE_TIME = "datetime()"
 
-# 2026-10-16: the property holding the time the rule last evaluated the node at, stored with the
-# aging properties; an evaluation at an older time is lifted to it (``evaluated_at_expr``).
+# 2026-10-16: the property holding the time at which the node's aging values were last written; an
+# evaluation at an older time is lifted to it (``evaluated_at_expr``).
 EVALUATED_AT = "aging_evaluated_at"
 
 
-def evaluation_time(value: Any = None) -> datetime:
-    """An evaluation time of the rule as an aware UTC datetime.
-
-    ``value`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run; Airflow passes
-    pendulum datetimes; ``enrichment_as_of`` in the DAG), an ISO-8601 string, or None for now (the
-    command line). A naive datetime is UTC. The rule evaluates a node at the later of this time and
-    the node's ``aging_evaluated_at`` (``evaluated_at_expr``).
-    """
-    if value is None:
-        return datetime.now(timezone.utc)
+def evaluation_time(value: Any) -> datetime:
+    """A time given to the aging job by a test (``decay_ioc_confidence(as_of=...)``) as an aware UTC
+    datetime: a datetime (pendulum's subclass included) or an ISO-8601 string; a naive datetime is
+    UTC. Production passes none: the rule runs at the database's current time (``DATABASE_TIME``).
+    Either time is lifted to the node's ``aging_evaluated_at`` when that is later
+    (``evaluated_at_expr``)."""
     if isinstance(value, str):
         value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     if not isinstance(value, datetime):
@@ -234,22 +231,23 @@ def manual_decommission_expr(var: str) -> str:
     return f"({var}.retired_at IS NOT NULL AND coalesce({var}.retired_by, 'manual') <> '{RETIRED_BY_DECAY}')"
 
 
-def evaluated_at_expr(var: str, as_of: str) -> str:
+def evaluated_at_expr(var: str, as_of: str = DATABASE_TIME) -> str:
     """Cypher: the time the rule evaluates the Indicator ``var`` at (2026-10-16), the later of
-    ``as_of`` and the time stored on the node (``aging_evaluated_at``; ``as_of`` when the node has
-    none). An evaluation at an older time than the node's is lifted to the node's time, so the
-    node's aging never moves backwards (module docstring)."""
+    ``as_of`` (the database's current time; a test's time in the job) and the node's
+    ``aging_evaluated_at`` (``as_of`` when the node has none). An evaluation whose clock is behind
+    the node's time is lifted to it, so the node's aging never moves backwards (module docstring)."""
     stored = f"{var}.{EVALUATED_AT}"
     return f"CASE WHEN {stored} > {as_of} THEN {stored} ELSE {as_of} END"
 
 
-def aging_map(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str:
-    """Cypher map of the aging properties of the Indicator ``var`` at ``as_of`` (a Cypher
-    DateTime expression: ``WRITE_AS_OF`` in a write, ``datetime($as_of)`` in the job), lifted to the
-    node's ``aging_evaluated_at`` when that is later (``evaluated_at_expr``).
+def aging_map(var: str, as_of: str = DATABASE_TIME, policy: Optional[AgingPolicy] = None) -> str:
+    """Cypher map of the aging properties of the Indicator ``var`` at ``as_of``, lifted to the node's
+    ``aging_evaluated_at`` when that is later (``evaluated_at_expr``). ``as_of`` is a Cypher DateTime
+    expression: ``DATABASE_TIME`` (the database's current time) in a write; in the job
+    ``enrichment_jobs.AGING_JOB_TIME``, the database's current time unless a test gives a time.
 
     The single definition of the rule (module docstring); its keys are ``AGING_MAP_KEYS``: the
-    ``AGING_FIELDS`` and ``aging_evaluated_at``, the time it evaluated the node at. A write applies
+    ``AGING_FIELDS`` and ``aging_evaluated_at``, the time of this evaluation. A write applies
     it in its own clause (``aging_set_clause``) after the clause that records the report and
     ``source_confidence``, so a newer report reactivates the node in the same write; ``+=``
     evaluates the whole map before it assigns, so every entry reads the lifecycle stored before
@@ -288,19 +286,21 @@ def aging_map(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str
     )
 
 
-def aging_set_item(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str:
-    """The ``SET`` item that applies the rule to ``var`` (``aging_set_clause`` wraps it)."""
-    return f"{var} += {aging_map(var, as_of, policy)}"
+def aging_set_item(var: str, policy: Optional[AgingPolicy] = None) -> str:
+    """The ``SET`` item that applies the rule to ``var`` at the database's current time, lifted per
+    node (``aging_set_clause`` wraps it)."""
+    return f"{var} += {aging_map(var, DATABASE_TIME, policy)}"
 
 
-def aging_set_clause(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str:
-    """The ``SET`` clause that applies the rule to the Indicator ``var`` (2026-10-16).
+def aging_set_clause(var: str, policy: Optional[AgingPolicy] = None) -> str:
+    """The ``SET`` clause that applies the rule to the Indicator ``var`` in a write (2026-10-16), at
+    the database's current time lifted to the node's ``aging_evaluated_at``; a write passes no time.
 
     Spliced after the clause holding ``source_confidence_item`` and ``node_report_items``, never
     into it: the rule reads ``last_reported_at``, ``last_reported_basis`` and ``source_confidence``,
     and a later clause sees what an earlier clause wrote, whereas items of one ``SET`` clause would
     rely on the order in which Neo4j applies them."""
-    return f"SET {aging_set_item(var, as_of, policy)}"
+    return f"SET {aging_set_item(var, policy)}"
 
 
 # The aging values the rule sets; the job writes a node when any differs from the stored one.
@@ -315,8 +315,9 @@ AGING_FIELDS: Tuple[str, ...] = (
     "retired_by",
 )
 
-# The keys of ``aging_map``: the aging values and the time the rule evaluated the node at, which is
-# written with them and never on its own (it is no reason to write a node).
+# The keys of ``aging_map``: the aging values and the time of the evaluation, which is written with
+# them and never on its own (it is no reason to write a node), so a node's ``aging_evaluated_at`` is
+# the time at which its aging values were last written.
 AGING_MAP_KEYS: Tuple[str, ...] = AGING_FIELDS + (EVALUATED_AT,)
 
 
