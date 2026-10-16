@@ -66,6 +66,7 @@ from neo4j_client import (  # noqa: E402
     APOC_ITERATE_YIELD,
     NEO4J_READ_TIMEOUT,
     _dedup_concat_clause,
+    _log_if_timed_out,
     _tlp_most_restrictive_clause,
     apoc_iterate_failures,
 )
@@ -1735,8 +1736,9 @@ def _run_alias_merge_batches(
     canonical with all of its duplicates), then the uuid re-stamps and the list normalisation of the
     canonicals. Once the batch is committed, adds to ``results["merged"]`` and
     ``results["restamped_edges"]``. A failed batch is rolled back whole (its duplicates stay and merge
-    on a later run), logged, counted in ``results["errors"]``, and the next one proceeds. Returns False,
-    with ``results["apoc_missing"] = 1``, when APOC is not installed (nothing more can merge in this run).
+    on a later run), logged, counted in ``results["errors"]``, and the next one proceeds; a batch that
+    reaches its transaction timeout also logs ``[NEO4J-TIMEOUT]``. Returns False, with
+    ``results["apoc_missing"] = 1``, when APOC is not installed (nothing more can merge in this run).
     """
     batches = [pairs[i : i + batch_size] for i in range(0, len(pairs), batch_size)]
     for batch_no, batch in enumerate(batches, start=1):
@@ -1776,6 +1778,15 @@ def _run_alias_merge_batches(
                 canonical_noun,
             )
         except Exception as batch_err:
+            # The session's proxy (``_TimeoutSession``) logs ``[NEO4J-TIMEOUT]`` for ``session.run``
+            # only; the statements of this transaction reach the driver without it, so the batch
+            # names its own timeout (2026-10-16), which covers its four statements together.
+            _log_if_timed_out(
+                batch_err,
+                float(NEO4J_READ_TIMEOUT),
+                f"[{log_tag}] merge batch {batch_no}/{len(batches)} (merge, uuid re-stamps and list "
+                "normalisation in one transaction)",
+            )
             if _is_apoc_missing_error(batch_err):
                 logger.warning(
                     "[%s] APOC unavailable (%s) — skipping the merge; install the APOC plugin to enable it. "

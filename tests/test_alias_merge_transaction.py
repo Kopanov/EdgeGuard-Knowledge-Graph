@@ -11,7 +11,8 @@ uuid.
 The session double below keeps the driver's transaction semantics: a statement run on the session
 is committed at once; the statements of an explicit transaction take effect on ``commit()`` and are
 discarded on a rollback (an exception leaving the ``with`` block). The graph it models holds the
-duplicates not yet folded, so a later run sees what the previous one committed. Both callers of
+duplicates not yet folded, so a later run sees what the previous one committed. The client wraps
+each session in ``_TimeoutSession``, as ``Neo4jClient.driver`` does, and both callers of
 ``_run_alias_merge_batches`` are driven end to end. The same behaviour on a real Neo4j is in
 ``tests/test_actor_alias_merge_neo4j.py`` and ``tests/test_malware_twin_merge_neo4j.py``.
 """
@@ -34,9 +35,19 @@ os.environ.setdefault("NEO4J_PASSWORD", "test-pw-alias-merge-transaction")
 os.environ.setdefault("MISP_API_KEY", "test-key-alias-merge-transaction")
 
 import enrichment_jobs  # noqa: E402
-from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
+from neo4j_client import NEO4J_READ_TIMEOUT, _TimeoutSession  # noqa: E402
 
 WRITE_KINDS = ("apply", "restamp_out", "restamp_in", "normalise")
+TRANSIENT = "Neo.TransientError.Transaction.LockClientStopped"
+TIMED_OUT = "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+
+
+class _ServerError(Exception):
+    """A server error as the driver raises it: ``code`` is the Neo4j status code."""
+
+    def __init__(self, code: str, kind: str):
+        super().__init__(f"{code} ({kind})")
+        self.code = code
 
 
 def _write_kind(query: str) -> Optional[str]:
@@ -71,12 +82,19 @@ class _Graph:
     """The duplicates not folded yet (duplicate -> canonical) and the writes each commit made.
 
     ``fail`` names, per statement kind (or ``"commit"``), the occurrences (1-based, over the graph's
-    lifetime) that raise, as a transient server error would."""
+    lifetime) that raise a server error with status ``code`` (a transient error by default)."""
 
-    def __init__(self, job: str, duplicates: Dict[str, str], fail: Optional[Dict[str, Set[int]]] = None):
+    def __init__(
+        self,
+        job: str,
+        duplicates: Dict[str, str],
+        fail: Optional[Dict[str, Set[int]]] = None,
+        code: str = TRANSIENT,
+    ):
         self.job = job
         self.pending = dict(duplicates)
         self.fail = fail or {}
+        self.code = code
         self.seen: Dict[str, int] = {}
         self.commits: List[List[str]] = []  # the write kinds of each commit, in order
         self.restamped: Set[str] = set()  # canonicals whose moved relationships carry their uuid
@@ -85,7 +103,7 @@ class _Graph:
     def maybe_fail(self, kind: str) -> None:
         self.seen[kind] = self.seen.get(kind, 0) + 1
         if self.seen[kind] in self.fail.get(kind, set()):
-            raise RuntimeError(f"Neo.TransientError.Transaction.LockClientStopped ({kind})")
+            raise _ServerError(self.code, kind)
 
     def answer(self, kind: str, params: dict) -> _Result:
         if kind == "apply":
@@ -162,6 +180,7 @@ class _Session:
         self.graph = graph
 
     def run(self, query, parameters=None, **kwargs):
+        query = getattr(query, "text", query)  # _TimeoutSession passes a neo4j.Query
         kind = _write_kind(query)
         if kind is None:
             return self.graph.read(query)
@@ -188,7 +207,7 @@ class _Client:
         self._graph = graph
 
     def session(self, **_kwargs):
-        return _Session(self._graph)
+        return _TimeoutSession(_Session(self._graph))
 
 
 JOBS = {
@@ -229,11 +248,13 @@ def test_a_failure_after_the_merge_rolls_the_whole_batch_back(job, failing, capl
     assert [tx.state for tx in graph.transactions] == ["rolled back"]
     assert (res["merged"], res["restamped_edges"], res["errors"]) == (0, 0, 1), "counted only once committed"
     assert "batch 1/1 FAILED (1 pairs rolled back)" in caplog.text
+    assert "[NEO4J-TIMEOUT]" not in caplog.text, "only a timeout is reported as one"
 
 
 @pytest.mark.parametrize("job", sorted(JOBS))
 def test_the_next_run_merges_a_batch_that_failed(job):
-    """The bug hunt's case: the uuid re-stamp fails after the merge on the first run."""
+    """The uuid re-stamp fails after the merge on the first run; the next run merges the pair and
+    re-stamps its relationships."""
     graph = _Graph(job, ONE_PAIR[job], fail={"restamp_in": {1}})
     first = _run(job, graph)
     second = _run(job, graph)
@@ -267,3 +288,21 @@ def test_a_failed_batch_does_not_undo_or_add_to_the_counts_of_a_committed_one(jo
     assert graph.commits == [list(WRITE_KINDS)]
     assert len(graph.pending) == 1
     assert (res["merged"], res["restamped_edges"], res["errors"]) == (1, 2, 1)
+
+
+@pytest.mark.parametrize("job", sorted(JOBS))
+@pytest.mark.parametrize("failing", WRITE_KINDS + ("commit",))
+def test_a_batch_that_reaches_its_transaction_timeout_is_logged_as_a_timeout(job, failing, caplog):
+    """The batch's statements share one transaction timeout. ``_TimeoutSession`` logs
+    ``[NEO4J-TIMEOUT]`` only for ``session.run``; the statements of an explicit transaction reach the
+    driver without it, so the batch names its own timeout, once, with the setting that limits it."""
+    graph = _Graph(job, ONE_PAIR[job], fail={failing: {1}}, code=TIMED_OUT)
+    with caplog.at_level(logging.ERROR):
+        res = _run(job, graph)
+    lines = [r.getMessage() for r in caplog.records if "[NEO4J-TIMEOUT]" in r.getMessage()]
+    assert len(lines) == 1, lines
+    tag = {"actor": "[ACTOR-ALIAS-MERGE]", "twin": "[MALWARE-TWIN-MERGE]"}[job]
+    assert f"at its {float(NEO4J_READ_TIMEOUT):.0f} s transaction timeout" in lines[0]
+    assert f"{tag} merge batch 1/1" in lines[0] and "EDGEGUARD_NEO4J_READ_TIMEOUT" in lines[0]
+    assert graph.commits == [] and graph.pending == ONE_PAIR[job]
+    assert (res["merged"], res["errors"]) == (0, 1)
