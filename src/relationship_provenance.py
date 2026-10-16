@@ -9,6 +9,10 @@ accumulating lists:
   (``alienvault_otx:<pulse id>``, ``threatfox:<IOC id>``, ``mitre_attck:G0016``);
 * ``r.misp_event_ids`` — the MISP events that carried it.
 
+A link to a ``Sector`` names only the feeds that gave that sector (2026-10-16, ``zone_prov_with``):
+the node's zones are a union over its sources, and each source's own zones are kept on its
+``SOURCED_FROM`` edge.
+
 Each write adds to the lists and never replaces them, so no feed can erase another's
 claim, and a link can be traced from Neo4j back to the MISP event and the feed record.
 The kind of evidence stays in ``r.match_type``. The MISP→Neo4j sync writes the lists on
@@ -75,6 +79,56 @@ def prov_with(node_var: str, feeds_expr: str, max_events: int = MAX_EVENT_IDS_PE
         "reduce(_acc = [], _x IN _sfs | _acc + coalesce(_x.source_refs, [])) AS _prov_refs, "
         "[_e IN reduce(_acc = [], _x IN _sfs | _acc + coalesce(_x.misp_event_ids, [])) "
         f"WHERE _e IS NOT NULL AND size(_e) > 0][0..{max_events}] AS _prov_events "
+    )
+
+
+def _list_or_null(expr: str) -> str:
+    """``expr`` as a list, null kept null (a missing list means "not recorded", not "empty")."""
+    return f'CASE WHEN {expr} IS NULL THEN null WHEN apoc.meta.cypher.type({expr}) STARTS WITH "LIST" THEN {expr} ELSE [{expr}] END'
+
+
+def zone_prov_with(
+    node_var: str,
+    zone_in_list: str,
+    max_events: int = MAX_EVENT_IDS_PER_EDGE,
+    feeds_filter: str = "> 0",
+) -> str:
+    """``WITH`` / ``UNWIND`` clauses binding, per sector of ``node_var``, the provenance of that sector
+    only (2026-10-16): ``zone_name``, ``_feeds``, ``_prov_refs``, ``_prov_events`` and ``_stated_by``.
+
+    The node's ``zone`` is the union over its sources; the sector a link names may come from one of
+    them only. A feed gave the sector when its ``SOURCED_FROM`` edge lists it in ``zones`` (the zones
+    its records gave the node, ``Neo4jClient``); ``_stated_by`` are the feeds whose edge also lists it
+    in ``stated_zones`` (a statement of the feed, ``sector_evidence``). ``_prov_refs`` /
+    ``_prov_events`` are those feeds' record ids and MISP events, the events cut by the fixed sorted
+    rule (``capped_event_ids``).
+
+    Legacy rule, so a graph written before the per-source zones behaves as before: a ``SOURCED_FROM``
+    edge without ``zones`` counts as giving every zone of the node, and so does a feed of the node
+    without a ``SOURCED_FROM`` edge (the alert path). On a graph whose edges all carry ``zones`` the
+    result is exact. A sector no feed gave (an inconsistent node) is kept out by
+    ``WHERE size(_feeds) > 0``; ``feeds_filter="= 0"`` selects exactly those, for a count.
+
+    ``zone_in_list`` is a Cypher list literal of the sectors a link may name (``global`` excluded here
+    in any case). Double quotes only (``apoc.periodic.iterate``).
+    """
+    if feeds_filter not in ("> 0", "= 0"):
+        raise ValueError(f"zone_prov_with: feeds_filter must be '> 0' or '= 0', not {feeds_filter!r}")
+    n = node_var
+    return (
+        f"WITH {n}, {node_feeds(n)} AS _nf "
+        f"WITH {n}, _nf, [({n})-[_sf:SOURCED_FROM]->(_src:Source) WHERE _src.source_id IN _nf | "
+        f"{{f: _src.source_id, z: {_list_or_null('_sf.zones')}, sz: {as_list('_sf.stated_zones')}, "
+        f"refs: {as_list('_sf.source_refs')}, ev: {as_list('_sf.misp_event_ids')}}}] AS _sfs "
+        f'UNWIND [_z IN {as_list(f"{n}.zone")} WHERE _z IS NOT NULL AND _z <> "" AND _z <> "global" '
+        f"AND _z IN {zone_in_list}] AS zone_name "
+        f"WITH {n}, zone_name, _nf, _sfs, [_x IN _sfs WHERE _x.z IS NULL OR zone_name IN _x.z] AS _st "
+        f"WITH {n}, zone_name, "
+        "apoc.coll.toSet([_x IN _st | _x.f] + [_f IN _nf WHERE NOT _f IN [_x IN _sfs | _x.f]]) AS _feeds, "
+        "reduce(_a = [], _x IN _st | _a + _x.refs) AS _prov_refs, "
+        f"{capped_event_ids('reduce(_a = [], _x IN _st | _a + _x.ev)', max_events)} AS _prov_events, "
+        "[_x IN _st WHERE zone_name IN _x.sz | _x.f] AS _stated_by "
+        f"WHERE size(_feeds) {feeds_filter} "
     )
 
 

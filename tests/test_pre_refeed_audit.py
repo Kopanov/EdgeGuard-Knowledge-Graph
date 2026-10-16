@@ -20,37 +20,28 @@ _SRC = _REPO / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-_BUILD_REL = (_SRC / "build_relationships.py").read_text()
 _CLIENT = (_SRC / "neo4j_client.py").read_text()
-
-
-def _assigned_string(name: str) -> str:
-    import ast
-
-    for node in ast.walk(ast.parse(_BUILD_REL)):
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
-            return "".join(
-                c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)
-            )
-    raise AssertionError(name)
 
 
 # --------------------------------------------------------------------------- D5 / D4: sector edges
 class TestSectorEdgesNeverTargetGlobalAndAreInferences:
     """The old graph carried 137,948 CVE→global AFFECTS and 131,650 Indicator→global TARGETS edges at
-    confidence 1.0 (measured 2026-10-10). `global` means "no sector"; a keyword-derived sector is an
-    inference (Martin's rule) and gets 0.5 like the sync, never 1.0. Text pins: the queries run only
-    through apoc.periodic.iterate on a live graph."""
+    confidence 1.0 (measured 2026-10-10). `global` means "no sector". Since 2026-10-16 the confidence of
+    a sector link follows from its evidence label through one table (``sector_evidence``): a keyword
+    inference is ``zone_classification`` at 0.5, never 1.0, and a stated sector keeps its own label and
+    value instead of being reset to 0.5 on every run. Text pins on the rendered statements: they run
+    only through apoc.periodic.iterate on a live graph (behaviour: tests/test_sector_evidence_neo4j.py)."""
 
-    @pytest.mark.parametrize("name", ["_q7a_inner", "_q7b_inner", "_q7c_inner", "_q7d_inner"])
-    def test_global_is_excluded_and_confidence_is_half(self, name):
-        body = _assigned_string(name)
-        assert 'zone_name <> "global"' in body, f"{name} must never link the global pseudo-sector"
-        assert 'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification"' in body
-        assert "r.confidence_score = 0.5, " in body.split("ON CREATE SET", 1)[1].split(" SET ", 1)[1], (
-            "re-applied on every run so sync-created and Q7-created edges converge"
-        )
+    @pytest.mark.parametrize("name", ["_Q7A_STATEMENTS", "_Q7B_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"])
+    def test_global_is_excluded_and_confidence_follows_the_label(self, name):
+        import build_relationships as br
+
+        body = getattr(br, name).inner
+        assert '_z <> "global"' in body, f"{name} must never link the global pseudo-sector"
+        assert "r.confidence_score = coalesce($sector_confidence[_kept], r.confidence_score)" in body
+        assert "r.confidence_score = 0.5" not in body, "no unconditional reset: it erased a stated sector's 0.9"
         assert "r.confidence_score = 1.0" not in body
+        assert getattr(br, name).params["sector_confidence"] == {"zone_classification": 0.5, "advisory_sector": 0.9}
 
     def test_acceptance_script_polices_global_edges(self):
         script = (_REPO / "scripts" / "verify_fresh_baseline.py").read_text()
@@ -315,6 +306,14 @@ class TestBuildRelationshipsWiring:
         assert not skip["in_tactic"] and not skip["subtechnique_of"], "cheap full passes have no skip query"
         assert {"uses_malware", "uses_tool", "subtechnique_of", "indicates_pulse", "attributed_to_pulse"} <= set(keys)
         assert skip["indicates_pulse"] and not skip["attributed_to_pulse"]
+        # 2026-10-16: the sector steps count the node sectors no feed gave
+        for key in (
+            "indicator_targets_sector",
+            "vuln_affects_sector",
+            "actor_targets_sector",
+            "malware_targets_sector",
+        ):
+            assert skip[key], key
 
 
 # --------------------------------------------------------------------------- B6: dependency pin parity

@@ -165,7 +165,11 @@ def _capturing_client():
 
 
 def _inner_queries() -> list[tuple[str, int, str]]:
-    """``(target name, line, concatenated string constants)`` for every ``*_inner`` assignment."""
+    """``(target name, line, concatenated string constants)`` for every ``*_inner`` assignment. An
+    assignment without string constants (2026-10-16: the sector steps take their statement from
+    ``_sector_link_statements``) is evaluated in the module namespace, which yields the text that runs."""
+    import build_relationships
+
     tree = ast.parse(_BUILD_REL.read_text())
     out: list[tuple[str, int, str]] = []
     for node in ast.walk(tree):
@@ -176,6 +180,9 @@ def _inner_queries() -> list[tuple[str, int, str]]:
                 body = "".join(
                     c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)
                 )
+                if not body:
+                    expr = compile(ast.Expression(node.value), str(_BUILD_REL), "eval")
+                    body = eval(expr, vars(build_relationships))  # noqa: S307 — our own source
                 out.append((tgt.id, node.lineno, body))
     return out
 

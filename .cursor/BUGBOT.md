@@ -436,6 +436,8 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 (Vulnerability|CVE)-[:AFFECTS]->       (Sector)             # sector from zone list (build_relationships)
 ```
 
+**Sector links (2026-10-16).** Flag a write of a link to a `Sector` that names in `r.sources` (or copies `source_refs` / `misp_event_ids` from) a feed whose `SOURCED_FROM.zones` do not hold that sector: use `relationship_provenance.zone_prov_with`, never `prov_with(n, node_feeds(n))`, for a sector link. Flag `advisory_sector` anywhere but on `AFFECTS` from a CVE / Vulnerability whose `cisa_ics` record stated the sector (`sector_evidence.STATEMENT_LABELS`; a CISA advisory sector means "deployed in", never TARGETS), a hard-coded confidence on a sector link (it comes from `sector_evidence.LABEL_CONFIDENCE`), and a statement label whose confidence is not above `zone_classification`'s. A new `SOURCED_FROM` write site must set `zones` and `stated_zones` (`Neo4jClient._sourced_zone_items`).
+
 > **2026-04 rename:** `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` were previously a single generic `USES` edge. The write path in `create_misp_relationships_batch` still accepts `rel_type="USES"` when `to_type="Technique"` as a backward-compat shim — it routes to the correct specialized type based on `from_type`. Flag new code that **emits** the legacy `USES` value; reads against both are fine.
 
 Flag **`(ThreatActor)-[:ATTRIBUTED_TO]->(Malware)`** (reversed). Flag any relationship creation that reverses the rows above. Wrong `ATTRIBUTED_TO` direction makes traversals return empty results silently.

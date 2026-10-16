@@ -128,45 +128,32 @@ def test_stix_bundle_keeps_wall_clock_by_default(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _sector_step_inner(name: str) -> str:
+    """The rendered inner statement of a sector step (2026-10-16: one builder for steps 7a-7d)."""
+    import build_relationships
+
+    return getattr(build_relationships, name).inner
+
+
 def test_sector_merge_in_7a_stamps_edgeguard_managed():
-    """Source-grep pin: build_relationships 7a (Indicator → Sector
-    TARGETS) MUST set ``sec.edgeguard_managed = true`` on the Sector
-    MERGE. Without it, every STIX bundle silently drops the Sector
-    SDO + the TARGETS SRO (exporter filters with WHERE
-    s.edgeguard_managed = true)."""
-    path = os.path.join(_SRC, "build_relationships.py")
-    with open(path) as fh:
-        src = fh.read()
-    # Locate 7a section
-    start = src.find("# 7a.")
-    if start < 0:
-        # Tolerate header reformatting: alternate marker
-        start = src.find("Indicator → Sector (TARGETS)")
-    assert start > 0, "could not locate 7a Sector merge"
-    # Walk to the end of 7a (start of 7b)
-    end = src.find("# 7b.", start)
-    if end < 0:
-        end = src.find("Vulnerability/CVE → Sector", start)
-    section = src[start:end] if end > 0 else src[start : start + 2000]
-    assert "edgeguard_managed = true" in section, (
+    """Pin: build_relationships 7a (Indicator → Sector TARGETS) MUST set ``sec.edgeguard_managed = true``
+    on the Sector MERGE. Without it, every STIX bundle silently drops the Sector SDO + the TARGETS SRO
+    (exporter filters with WHERE s.edgeguard_managed = true). Since 2026-10-16 the steps are built by
+    ``_sector_link_statements``, so the rendered statement is checked."""
+    inner = _sector_step_inner("_Q7A_STATEMENTS")
+    assert "MERGE (sec:Sector {name: zone_name})" in inner
+    assert "ON CREATE SET sec.uuid = " in inner and "sec.edgeguard_managed = true" in inner, (
         "7a Sector MERGE must set sec.edgeguard_managed = true — STIX exporter's WHERE filter drops Sectors without it"
     )
 
 
 def test_sector_merge_in_7b_stamps_edgeguard_managed():
-    """Same contract for 7b (Vulnerability/CVE → Sector AFFECTS)."""
-    path = os.path.join(_SRC, "build_relationships.py")
-    with open(path) as fh:
-        src = fh.read()
-    start = src.find("# 7b.")
-    if start < 0:
-        start = src.find("Vulnerability/CVE → Sector")
-    assert start > 0, "could not locate 7b Sector merge"
-    end = src.find("# 8.", start)
-    if end < 0:
-        end = src.find("# 8/12", start)
-    section = src[start:end] if end > 0 else src[start : start + 2000]
-    assert "edgeguard_managed = true" in section, "7b Sector MERGE must set sec.edgeguard_managed = true"
+    """Same contract for 7b (Vulnerability/CVE → Sector AFFECTS), and for 7c / 7d (actor and malware
+    TARGETS)."""
+    for name in ("_Q7B_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"):
+        inner = _sector_step_inner(name)
+        assert "MERGE (sec:Sector {name: zone_name})" in inner, name
+        assert "sec.edgeguard_managed = true" in inner, f"{name} Sector MERGE must set sec.edgeguard_managed = true"
 
 
 def test_sector_edgeguard_managed_set_on_write():

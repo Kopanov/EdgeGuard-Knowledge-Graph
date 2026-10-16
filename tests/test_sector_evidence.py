@@ -1,0 +1,475 @@
+"""The evidence behind a link to a Sector (2026-10-16).
+
+CISA's ICS advisories state the critical-infrastructure sectors where the affected product is deployed
+(the CSAF note "Critical infrastructure sectors"). On the graph of 2026-10-16 every sector link was
+``zone_classification`` at 0.5, the label of a keyword guess, and ``build_relationships`` steps 7a-7d
+named every feed of the node on every sector link: 2,639 of the 6,506 AFFECTS links named a feed that
+never gave their sector. This module follows a CISA advisory from the collector to the sync rows:
+
+* the table (``sector_evidence``): ``advisory_sector`` at 0.9 on AFFECTS only, above
+  ``zone_classification``, checked at import;
+* the collector merges the advisories that name one CVE into one item, whatever their order;
+* MISPWriter carries the advisory ids and CISA's own sector names in ``NVD_META``, for CISA items only;
+* the sync states the sectors on the item (``stated_zones``), labels the AFFECTS rows ``advisory_sector``,
+  names the advisories (``cisa_ics:<id>``), and keeps everything else ``zone_classification``;
+* the ``SOURCED_FROM`` writers record each source's zones and stated zones;
+* the STIX export links an advisory reference to cisa.gov.
+
+The rendered Cypher of steps 7a-7d runs against a real Neo4j in ``tests/test_sector_evidence_neo4j.py``.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import os
+import sys
+from itertools import permutations
+from pathlib import Path
+from typing import Any, Dict, List
+from unittest.mock import MagicMock
+
+import pytest
+
+TESTS = Path(__file__).resolve().parent
+for _p in (TESTS.parent / "src", TESTS):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+os.environ.setdefault("NEO4J_PASSWORD", "test-pw-sector-evidence")
+os.environ.setdefault("MISP_API_KEY", "test-key-sector-evidence")
+
+from test_cisa_ics_collector import SAMPLE_ADVISORY  # noqa: E402  (the real CSAF 2.0 shape)
+
+import collectors.cisa_ics_collector as ics  # noqa: E402
+import enrichment_jobs  # noqa: E402
+import sector_evidence as se  # noqa: E402
+import stix_exporter as sx  # noqa: E402
+from collectors.misp_writer import MISPWriter  # noqa: E402
+from neo4j_client import Neo4jClient  # noqa: E402
+from run_misp_to_neo4j import MISPToNeo4jSync, _item_source_refs  # noqa: E402
+from source_registry import cisa_ics_advisory_url  # noqa: E402
+
+# A second advisory naming CVE-2026-32645: an ICS medical advisory (ICSMA), revised later, whose sector
+# note names Healthcare and Water. With ICSA-26-281-01 (Energy among five sectors) the CVE is deployed in
+# energy and healthcare; Water and the others are CISA sectors EdgeGuard has no zone for.
+MEDICAL_ADVISORY: Dict[str, Any] = copy.deepcopy(SAMPLE_ADVISORY)
+MEDICAL_ADVISORY["document"]["title"] = "Example Medical Infusion Pump Gateway"
+MEDICAL_ADVISORY["document"]["tracking"] = {
+    "id": "ICSMA-26-283-01",
+    "initial_release_date": "2026-10-10T06:00:00.000000Z",
+    "current_release_date": "2026-10-12T06:00:00.000000Z",
+}
+MEDICAL_ADVISORY["document"]["references"] = []
+for _note in MEDICAL_ADVISORY["document"]["notes"]:
+    if _note["title"] == "Critical infrastructure sectors":
+        _note["text"] = "Healthcare and Public Health, Water and Wastewater Systems"
+MEDICAL_ADVISORY["vulnerabilities"] = [copy.deepcopy(SAMPLE_ADVISORY["vulnerabilities"][0])]
+
+
+def _items(advisory: Dict[str, Any], path: str) -> List[Dict[str, Any]]:
+    collector = ics.CISAICSCollector(misp_writer=MagicMock())
+    items, _skipped = collector.parse_advisory(copy.deepcopy(advisory), path)
+    return items
+
+
+def _advisory_items() -> List[Dict[str, Any]]:
+    """The (advisory, CVE) items of both advisories, newest advisory first as a baseline reads them."""
+    return _items(MEDICAL_ADVISORY, "2026/icsma-26-283-01.json") + _items(SAMPLE_ADVISORY, "2026/icsa-26-281-01.json")
+
+
+@pytest.fixture
+def writer() -> MISPWriter:
+    return MISPWriter.__new__(MISPWriter)  # the attribute builders need no MISP connection
+
+
+@pytest.fixture
+def syncer() -> MISPToNeo4jSync:
+    return MISPToNeo4jSync(neo4j_client=MagicMock())
+
+
+_EVENT = {"id": 161, "info": "EdgeGuard-cisa_ics-2026-10-16", "date": "2026-10-16", "Tag": []}
+
+
+# --------------------------------------------------------------------------- the table
+class TestTable:
+    def test_labels_and_confidences(self):
+        assert se.LABEL_CONFIDENCE == {"zone_classification": 0.5, "advisory_sector": 0.9}
+        assert se.LABEL_CONFIDENCE["advisory_sector"] > se.LABEL_CONFIDENCE["zone_classification"], (
+            "the sync keeps the label of the higher-confidence row: an equal value would let an inferred "
+            "row take a stated link's label"
+        )
+        assert se.STATEMENT_LABELS == {"AFFECTS": {"cisa_ics": "advisory_sector"}, "TARGETS": {}}
+
+    @pytest.mark.parametrize(
+        "source, zones, expected",
+        [
+            ("cisa_ics", ["healthcare", "energy"], ["energy", "healthcare"]),
+            ("cisa_ics", ["global"], []),
+            ("cisa_ics", "Energy", ["energy"]),
+            ("cisa_ics", None, []),
+            ("nvd", ["energy"], []),
+            ("alienvault_otx", ["finance", "healthcare"], []),
+            (None, ["energy"], []),
+        ],
+    )
+    def test_stated_zones(self, source, zones, expected):
+        assert se.stated_zones(source, zones) == expected
+
+    @pytest.mark.parametrize(
+        "source, zone, stated, rel_type, expected",
+        [
+            ("cisa_ics", "energy", ["energy"], "AFFECTS", ("advisory_sector", 0.9)),
+            ("cisa_ics", "finance", ["energy"], "AFFECTS", ("zone_classification", 0.5)),
+            ("cisa_ics", "energy", None, "AFFECTS", ("zone_classification", 0.5)),
+            # a deployment statement never labels TARGETS
+            ("cisa_ics", "energy", ["energy"], "TARGETS", ("zone_classification", 0.5)),
+            ("nvd", "energy", ["energy"], "AFFECTS", ("zone_classification", 0.5)),
+            ("alienvault_otx", "finance", [], "TARGETS", ("zone_classification", 0.5)),
+        ],
+    )
+    def test_link_evidence(self, source, zone, stated, rel_type, expected):
+        assert se.link_evidence(source, zone, stated, rel_type) == expected
+
+    def test_cypher_params_per_relationship_type(self):
+        assert se.cypher_params("AFFECTS") == {
+            "sector_statements": {"cisa_ics": "advisory_sector"},
+            "sector_confidence": {"zone_classification": 0.5, "advisory_sector": 0.9},
+        }
+        assert se.cypher_params("TARGETS")["sector_statements"] == {}
+
+    @pytest.mark.parametrize(
+        "patch, message",
+        [
+            ({"LABEL_CONFIDENCE": {"zone_classification": 0.5, "advisory_sector": 0.5}}, "must be above"),
+            ({"STATEMENT_LABELS": {"AFFECTS": {"cisa": "advisory_sector"}, "TARGETS": {}}}, "canonical"),
+            ({"STATEMENT_LABELS": {"AFFECTS": {"cisa_ics": "deployed"}, "TARGETS": {}}}, "no confidence"),
+            ({"STATEMENT_LABELS": {"AFFECTS": {}, "TARGETS": {"cisa_ics": "advisory_sector"}}}, "never labels TARGETS"),
+            ({"STATING_FEEDS": frozenset({"no_such_feed"})}, "canonical"),
+        ],
+    )
+    def test_the_import_check_refuses_a_broken_table(self, monkeypatch, patch, message):
+        for name, value in patch.items():
+            monkeypatch.setattr(se, name, value)
+        with pytest.raises(ValueError, match=message):
+            se._check_table()
+
+    def test_cypher_fragments_use_double_quotes_only(self):
+        assert "'" not in se.label_with("v") and "'" not in se.label_set("v, sec, r")
+
+
+# --------------------------------------------------------------------------- collector
+class TestCollectorMergesAdvisoriesPerCve:
+    def test_one_item_per_cve_with_the_union_of_the_advisories(self):
+        merged = ics.merge_items_per_cve(_advisory_items())
+        assert [i["cve_id"] for i in merged] == ["CVE-2026-32645", "CVE-2026-39460"]
+        both = merged[0]
+        assert both["zone"] == ["energy", "healthcare"]
+        assert both["advisory_ids"] == ["ICSA-26-281-01", "ICSMA-26-283-01"]
+        assert both["ics_sectors"] == [
+            "Commercial Facilities",
+            "Communications",
+            "Critical Manufacturing",
+            "Energy",
+            "Healthcare and Public Health",
+            "Information Technology",
+            "Water and Wastewater Systems",
+        ]
+        assert both["reference_urls"] == [
+            "https://www.cisa.gov/news-events/ics-advisories/icsa-26-281-01",
+            "https://www.cisa.gov/news-events/ics-medical-advisories/icsma-26-283-01",
+        ]
+        # the newest advisory's text and identity; the earliest publication, the latest revision
+        assert both["advisory_id"] == "ICSMA-26-283-01"
+        assert both["description"].startswith("ICSMA-26-283-01: Example Medical Infusion Pump Gateway")
+        assert both["published"] == both["first_seen"] == "2026-10-08T06:00:00+00:00"
+        assert both["last_modified"] == both["last_seen"] == "2026-10-12T06:00:00+00:00"
+        only = merged[1]
+        assert only["zone"] == ["energy"] and only["advisory_ids"] == ["ICSA-26-281-01"]
+
+    def test_the_result_does_not_depend_on_the_order(self):
+        items = _advisory_items()
+        results = [ics.merge_items_per_cve([copy.deepcopy(i) for i in order]) for order in permutations(items)]
+        assert all(r == results[0] for r in results)
+
+    def test_global_is_dropped_once_an_advisory_names_a_sector(self):
+        unmapped = copy.deepcopy(MEDICAL_ADVISORY)
+        for note in unmapped["document"]["notes"]:
+            if note["title"] == "Critical infrastructure sectors":
+                note["text"] = "Water and Wastewater Systems"
+        global_only = _items(unmapped, "2026/icsma-26-283-01.json")
+        assert global_only[0]["zone"] == ["global"]
+        merged = ics.merge_items_per_cve(global_only + _items(SAMPLE_ADVISORY, "2026/icsa-26-281-01.json"))
+        assert merged[0]["zone"] == ["energy"]
+        assert ics.merge_items_per_cve(global_only)[0]["zone"] == ["global"]
+
+    def test_collect_pushes_merged_items(self, monkeypatch):
+        monkeypatch.setattr(ics.CISAICSCollector, "is_enabled", staticmethod(lambda: True))
+        collector = ics.CISAICSCollector(misp_writer=MagicMock())
+        monkeypatch.setattr(
+            collector, "_select_incremental_paths", lambda: (["2026/icsa-26-281-01.json", "2026/icsma.json"], {})
+        )
+        payloads = {"2026/icsa-26-281-01.json": SAMPLE_ADVISORY, "2026/icsma.json": MEDICAL_ADVISORY}
+        monkeypatch.setattr(
+            collector,
+            "_get",
+            lambda url: MagicMock(json=lambda: copy.deepcopy(payloads[url[len(collector.base_url) :]])),
+        )
+        items = collector.collect(push_to_misp=False, baseline=False)
+        assert [i["cve_id"] for i in items] == ["CVE-2026-32645", "CVE-2026-39460"]
+        assert items[0]["advisory_ids"] == ["ICSA-26-281-01", "ICSMA-26-283-01"]
+
+
+# --------------------------------------------------------------------------- MISPWriter
+class TestWriterCarriesTheAdvisories:
+    def test_cisa_item_carries_advisory_ids_and_cisa_sector_names(self, writer):
+        item = ics.merge_items_per_cve(_advisory_items())[0]
+        attr = writer.create_vulnerability_attribute(item)
+        meta = json.loads(attr["comment"][len("NVD_META:") :])
+        assert meta["advisory_ids"] == ["ICSA-26-281-01", "ICSMA-26-283-01"]
+        assert "Water and Wastewater Systems" in meta["ics_sectors"] and len(meta["ics_sectors"]) == 7
+        tags = {t["name"] for t in attr["Tag"]}
+        assert {"zone:Energy", "zone:Healthcare", "source:CISA-ICS"} <= tags
+
+    def test_nvd_and_kev_items_get_no_new_key(self, writer):
+        nvd = {
+            "cve_id": "CVE-2025-7639",
+            "description": "A flaw in an energy management system.",
+            "zone": ["energy"],
+            "tag": "nvd",
+            "published": "2025-07-14T00:00:00+00:00",
+            "cwe": ["CWE-79"],
+        }
+        meta = json.loads(writer.create_vulnerability_attribute(nvd)["comment"][len("NVD_META:") :])
+        assert "advisory_ids" not in meta and "ics_sectors" not in meta
+
+    def test_advisories_alone_qualify_for_nvd_meta(self, writer):
+        item = {"cve_id": "CVE-2026-32645", "tag": "cisa_ics", "zone": ["energy"], "advisory_ids": ["ICSA-26-281-01"]}
+        attr = writer.create_vulnerability_attribute(item)
+        assert attr["comment"].startswith("NVD_META:")
+        assert json.loads(attr["comment"][len("NVD_META:") :])["advisory_ids"] == ["ICSA-26-281-01"]
+
+    def test_the_lists_are_bounded(self, writer):
+        item = {
+            "cve_id": "CVE-2026-32645",
+            "tag": "cisa_ics",
+            "zone": ["energy"],
+            "advisory_ids": [f"ICSA-26-{i:03d}-01" for i in range(80)] + ["", None, "x" * 100],
+            "ics_sectors": [f"Sector {i}" for i in range(30)],
+        }
+        meta = json.loads(writer.create_vulnerability_attribute(item)["comment"][len("NVD_META:") :])
+        assert len(meta["advisory_ids"]) == 50 and len(meta["ics_sectors"]) == 20
+
+
+# --------------------------------------------------------------------------- the sync
+def _cisa_attribute(writer) -> Dict[str, Any]:
+    item = ics.merge_items_per_cve(_advisory_items())[0]
+    attr = writer.create_vulnerability_attribute(item)
+    attr["uuid"] = "6a1f0000-0000-4000-8000-000000000161"
+    return attr
+
+
+def _nvd_attribute(writer) -> Dict[str, Any]:
+    attr = writer.create_vulnerability_attribute(
+        {
+            "cve_id": "CVE-2026-32645",
+            "description": "Default credentials in an energy controller.",
+            "zone": ["energy", "finance"],
+            "tag": "nvd",
+            "published": "2026-10-08T00:00:00+00:00",
+            "cwe": ["CWE-798"],
+        }
+    )
+    attr["uuid"] = "6a1f0000-0000-4000-8000-000000000162"
+    return attr
+
+
+class TestSyncStatesTheSectors:
+    def test_cisa_item_states_its_sectors_and_names_its_advisories(self, writer, syncer):
+        item, _rels = syncer.parse_attribute(_cisa_attribute(writer), _EVENT)
+        assert item["zone"] == ["energy", "healthcare"]
+        assert item["stated_zones"] == ["energy", "healthcare"]
+        assert item["advisory_ids"] == ["ICSA-26-281-01", "ICSMA-26-283-01"]
+        assert "Water and Wastewater Systems" in item["ics_sectors"]
+        assert item["source_refs"] == ["cisa_ics:ICSA-26-281-01", "cisa_ics:ICSMA-26-283-01"]
+
+    def test_cisa_rows_are_advisory_sector_at_0_9(self, writer, syncer):
+        item, _rels = syncer.parse_attribute(_cisa_attribute(writer), _EVENT)
+        rows = [r for r in syncer._build_cross_item_relationships([item]) if r["to_type"] == "Sector"]
+        assert sorted((r["rel_type"], r["to_key"]["name"]) for r in rows) == [
+            ("AFFECTS", "energy"),
+            ("AFFECTS", "healthcare"),
+        ]
+        for r in rows:
+            assert (r["match_type"], r["confidence"], r["source"]) == ("advisory_sector", 0.9, "cisa_ics")
+            assert r["source_refs"] == ["cisa_ics:ICSA-26-281-01", "cisa_ics:ICSMA-26-283-01"]
+            assert r["misp_event_id"] == "161"
+
+    def test_nvd_rows_stay_zone_classification(self, writer, syncer):
+        item, _rels = syncer.parse_attribute(_nvd_attribute(writer), _EVENT)
+        assert "stated_zones" not in item and "advisory_ids" not in item and "ics_sectors" not in item
+        rows = [r for r in syncer._build_cross_item_relationships([item]) if r["to_type"] == "Sector"]
+        assert sorted(r["to_key"]["name"] for r in rows) == ["energy", "finance"]
+        assert {(r["match_type"], r["confidence"], r["source"]) for r in rows} == {("zone_classification", 0.5, "nvd")}
+
+    def test_a_cisa_record_without_a_sector_states_none(self, writer, syncer):
+        item = ics.merge_items_per_cve(_advisory_items())[0]
+        item["zone"] = ["global"]
+        attr = writer.create_vulnerability_attribute(item)
+        parsed, _ = syncer.parse_attribute(attr, _EVENT)
+        assert parsed["zone"] == ["global"] and "stated_zones" not in parsed
+        assert not [r for r in syncer._build_cross_item_relationships([parsed]) if r["to_type"] == "Sector"]
+
+    def test_indicator_targets_never_take_the_advisory_label(self, syncer):
+        # A CISA ICS source tag on an indicator (not a record the collector writes): TARGETS has no statement label.
+        item = {"type": "indicator", "indicator_type": "ipv4", "value": "203.0.113.7", "zone": ["energy"]}
+        item["tag"] = "cisa_ics"
+        item["stated_zones"] = ["energy"]
+        (row,) = [r for r in syncer._build_cross_item_relationships([item]) if r["to_type"] == "Sector"]
+        assert (row["rel_type"], row["match_type"], row["confidence"]) == ("TARGETS", "zone_classification", 0.5)
+
+    def test_item_source_refs_for_cisa_ics(self):
+        assert _item_source_refs({"advisory_ids": ["ICSA-24-123-01"]}, "cisa_ics") == ["cisa_ics:ICSA-24-123-01"]
+        assert _item_source_refs({}, "cisa_ics") == []
+        assert _item_source_refs({"advisory_ids": ["ICSA-24-123-01"]}, "nvd") == []
+
+
+# --------------------------------------------------------------------------- SOURCED_FROM writers
+class _Session:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, query, *args, **kwargs):
+        params = dict(args[0]) if args and isinstance(args[0], dict) else {}
+        params.update({k: v for k, v in kwargs.items() if k != "timeout"})
+        self.calls.append((query, params))
+        result = MagicMock()
+        result.single.return_value = None
+        result.__iter__ = lambda _self: iter([])
+        return result
+
+
+def _recording_client():
+    calls: list = []
+    client = Neo4jClient.__new__(Neo4jClient)
+    client.driver = MagicMock()
+    client.driver.session.side_effect = lambda **kw: _Session(calls)
+    return client, calls
+
+
+def _sourced_from(calls):
+    return [(q, p) for q, p in calls if "MERGE (n)-[r:SOURCED_FROM]->(s)" in q]
+
+
+class TestSourcedFromRecordsTheZones:
+    ZONES_SET = "r.zones = CASE WHEN {z} IS NULL THEN r.zones ELSE CASE WHEN size("
+    STATED_SET = "r.stated_zones = CASE WHEN size(coalesce({s}, [])) = 0 THEN r.stated_zones"
+
+    def test_merge_cve_sends_the_zones_and_the_stated_zones(self, writer, syncer):
+        item, _ = syncer.parse_attribute(_cisa_attribute(writer), _EVENT)
+        client, calls = _recording_client()
+        client.merge_cve(item, source_id="cisa_ics")
+        ((query, params),) = _sourced_from(calls)
+        assert self.ZONES_SET.format(z="$zones") in query and self.STATED_SET.format(s="$stated_zones") in query
+        assert params["zones"] == ["energy", "healthcare"] and params["stated_zones"] == ["energy", "healthcare"]
+        assert params["source_refs"] == ["cisa_ics:ICSA-26-281-01", "cisa_ics:ICSMA-26-283-01"]
+        raw = json.loads(params["raw_data"])
+        assert raw["advisory_ids"] == ["ICSA-26-281-01", "ICSMA-26-283-01"]
+        assert "Water and Wastewater Systems" in raw["ics_sectors"]
+
+    def test_an_inferring_feed_sends_its_zones_and_no_statement(self, writer, syncer):
+        item, _ = syncer.parse_attribute(_nvd_attribute(writer), _EVENT)
+        client, calls = _recording_client()
+        client.merge_cve(item, source_id="nvd")
+        ((_query, params),) = _sourced_from(calls)
+        assert params["zones"] == ["energy", "finance"] and params["stated_zones"] == []
+
+    @pytest.mark.parametrize(
+        "method, item",
+        [
+            (
+                "merge_indicators_batch",
+                {"indicator_type": "ipv4", "value": "203.0.113.7", "zone": ["energy"], "tag": "nvd"},
+            ),
+            (
+                "merge_vulnerabilities_batch",
+                {"cve_id": "CVE-2026-32645", "zone": ["energy"], "tag": "cisa_ics", "stated_zones": ["energy"]},
+            ),
+        ],
+    )
+    def test_batch_writers_send_the_zones_and_the_stated_zones(self, method, item):
+        client, calls = _recording_client()
+        getattr(client, method)([dict(item)], source_id=item["tag"])
+        queries = [(q, p) for q, p in calls if "MERGE (n)-[r:SOURCED_FROM]->(s)" in q]
+        assert queries, f"{method} wrote no SOURCED_FROM edge"
+        query, params = queries[0]
+        assert self.ZONES_SET.format(z="item.zone") in query
+        assert self.STATED_SET.format(s="item.stated_zones") in query
+        (row,) = params["batch"] if "batch" in params else params["items"]
+        assert row["zone"] == ["energy"]
+        assert row["stated_zones"] == list(item.get("stated_zones", []))
+
+
+# --------------------------------------------------------------------------- merges and STIX
+class TestMergesKeepTheZones:
+    def test_folded_sourced_from_edges_keep_the_union_as_lists(self):
+        assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY["zones"] == "combine"
+        assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY["stated_zones"] == "combine"
+        assert enrichment_jobs._MALWARE_TWIN_MERGE_PROPERTY_STRATEGY["zones"] == "combine"
+        for prop in ("zones", "stated_zones"):
+            assert prop in enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
+            assert prop not in enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS, "edge lists, not node lists"
+        edges = enrichment_jobs._ACTOR_ALIAS_MERGE_NORMALISE_CYPHER.split("MATCH (c)-[r]-()")[1]
+        assert "apoc.coll.sort([_z IN CASE WHEN r.zones IS NULL THEN NULL WHEN apoc.meta.cypher.type(r.zones)" in edges
+
+
+class TestStixLinksTheAdvisory:
+    @pytest.mark.parametrize(
+        "record_id, url",
+        [
+            ("ICSA-24-123-01", "https://www.cisa.gov/news-events/ics-advisories/icsa-24-123-01"),
+            ("ICSMA-26-283-01", "https://www.cisa.gov/news-events/ics-medical-advisories/icsma-26-283-01"),
+            ("not-an-advisory", None),
+        ],
+    )
+    def test_record_url(self, record_id, url):
+        assert sx._record_url("cisa_ics", record_id) == url
+        assert cisa_ics_advisory_url(record_id) == url
+
+    def test_the_collector_uses_the_same_rule(self):
+        assert ics.advisory_url("ICSMA-26-283-01", {"references": []}, "raw") == cisa_ics_advisory_url(
+            "ICSMA-26-283-01"
+        )
+        assert ics.advisory_url("odd", {"references": []}, "raw") == "raw"
+
+
+# --------------------------------------------------------------------------- the build step's count
+class TestSectorStepsCountTheSectorsNoFeedGave:
+    def test_the_skip_line_says_what_was_not_linked(self, caplog):
+        import build_relationships
+
+        client = MagicMock()
+        client.run.side_effect = lambda query, *a, **k: (
+            [{"c": 3}] if "RETURN count(*) AS c" in query and "apoc.periodic.iterate" not in query else [{"count": 5}]
+        )
+        stmts = build_relationships._Q7B_STATEMENTS
+        with caplog.at_level("INFO", logger="build_relationships"):
+            assert build_relationships._safe_run_batched(
+                client,
+                "Vulnerability/CVE -> Sector (AFFECTS)",
+                stmts.outer,
+                stmts.inner,
+                {},
+                "vuln_affects_sector",
+                skip_query=stmts.skip,
+                params=stmts.params,
+            )
+        assert "[SKIP] Vulnerability/CVE -> Sector (AFFECTS): 3 (node, sector) pairs" in caplog.text
+        assert "no matching target node" not in caplog.text
+        assert "WHERE size(_feeds) = 0 RETURN count(*) AS c" in stmts.skip

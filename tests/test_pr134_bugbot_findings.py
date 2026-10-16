@@ -9,7 +9,8 @@
 2. **Zone and tag match_type never written** (Medium) — only the ``ATTRIBUTED_TO`` and ``INDICATES``
    row builders copied ``match_type`` into the batch rows; ``TARGETS`` / ``AFFECTS`` /
    ``EMPLOYS_TECHNIQUE`` / ``IMPLEMENTS_TECHNIQUE`` / ``EXPLOITS`` rows now carry it too, and
-   ``build_relationships`` Q7a/Q7b stamp ``zone_classification`` on edges the sync created first.
+   ``build_relationships`` Q7a-Q7d label the edges the sync created first (since 2026-10-16 with the
+   label they compute from the sector evidence, ``sector_evidence``).
 3. **STIX path loses ATTRIBUTED_TO source** (Medium) — the in-process STIX loader attributes every
    object to its ``x_edgeguard_source`` (stamped per object by ``sync_misp_to_neo4j_via_stix``),
    falls back to ``stix_import`` (never ``"unknown"``), and labels the explicit ``attributed-to``
@@ -19,7 +20,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -293,18 +293,21 @@ class TestBatchRowsCarryMatchType:
         for query, _ in captured:
             assert "THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END" in query, query[:200]
 
-    def test_q7a_q7b_stamp_zone_classification_on_pre_existing_edges(self):
-        text = (Path(_SRC) / "build_relationships.py").read_text()
-        blocks = re.findall(
-            r'ON CREATE SET r\.confidence_score = 0\.5, r\.match_type = "zone_classification".*?r\.edgeguard_managed = true',
-            text,
-            re.S,
-        )
-        assert len(blocks) == 4, (
-            "Q7a (TARGETS), Q7b (AFFECTS), Q7c / Q7d (actor / malware TARGETS, 2026-10 sector build)"
-        )
-        for b in blocks:
-            assert 'r.match_type = coalesce(r.match_type, "zone_classification")' in b, b
+    def test_q7_label_edges_the_sync_created_without_a_label(self):
+        """2026-10-16: an edge the sync created first gets the label the step computes when it has none
+        (``ELSE _label``), keeps a stronger label of the table and any label outside it; the old
+        ``coalesce(r.match_type, "zone_classification")`` labelled every such edge an inference."""
+        import build_relationships as br
+
+        for name in ("_Q7A_STATEMENTS", "_Q7B_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"):
+            body = getattr(br, name).inner
+            assert (
+                "WHEN r.match_type IS NOT NULL AND NOT r.match_type IN keys($sector_confidence) THEN r.match_type"
+                in body
+            )
+            assert "THEN r.match_type ELSE _label END AS _kept SET r.match_type = _kept" in body
+            assert 'coalesce(r.match_type, "zone_classification")' not in body
+            assert "r.edgeguard_managed = true" in body
 
 
 # --------------------------------------------------------------------------- 3. STIX loader provenance

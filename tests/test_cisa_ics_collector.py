@@ -407,17 +407,17 @@ def test_multi_cve_advisory_produces_multiple_items_and_malformed_files_are_coun
     c = _collector(http, monkeypatch)
     items = c.collect(push_to_misp=False, baseline=True, baseline_days=730)
 
-    # Two good advisories × 2 valid CVEs each.
-    assert len(items) == 4
-    assert {i["cve_id"] for i in items} == {"CVE-2026-32645", "CVE-2026-39460"}
+    # Two good advisories × 2 valid CVEs each, the same two CVEs: one item per CVE (2026-10-16).
+    assert len(items) == 2
+    assert [i["cve_id"] for i in items] == ["CVE-2026-32645", "CVE-2026-39460"]
     # Nothing aborted: every candidate was attempted exactly once.
     assert sum(1 for u in http.calls if u.endswith(".json")) == 6
 
     # Same run with push: status dict carries the counters.
     http.calls.clear()
-    c = _collector(http, monkeypatch, push_ok=4)
+    c = _collector(http, monkeypatch, push_ok=2)
     st = c.collect(push_to_misp=True, baseline=True, baseline_days=730)
-    assert st["success"] is True and st["count"] == 4 and st["source"] == "cisa_ics"
+    assert st["success"] is True and st["count"] == 2 and st["source"] == "cisa_ics"
     assert st["stats"]["malformed"] == 2
     assert st["stats"]["fetch_failed"] == 2  # bad JSON + 404
     assert st["stats"]["parsed_ok"] == 2
@@ -457,7 +457,8 @@ def test_limit_caps_items_and_stops_fetching(monkeypatch):
     http = _FakeHTTP(routes)
     c = _collector(http, monkeypatch)
     items = c.collect(limit=3, push_to_misp=False, baseline=True, baseline_days=730)
-    assert len(items) == 3
+    # The limit cuts the (advisory, CVE) items; the three left name two CVEs (2026-10-16 per-CVE merge).
+    assert len(items) == 2
     assert sum(1 for u in http.calls if u.endswith(".json")) == 2  # 2 advisories × 2 CVEs ≥ 3
 
 
@@ -629,9 +630,9 @@ def test_incremental_uses_changes_csv_and_advances_cursor_only_after_clean_push(
         }
     )
     # No cursor stored → 30-day lookback selects a + b, not the 2017 row.
-    c = _collector(http, monkeypatch, push_ok=4)
+    c = _collector(http, monkeypatch, push_ok=2)
     st = c.collect(push_to_misp=True, baseline=False)
-    assert st["success"] is True and st["count"] == 4
+    assert st["success"] is True and st["count"] == 2  # two advisories naming the same two CVEs
     fetched = [u[len(BASE) :] for u in http.calls if u.endswith(".json")]
     assert fetched == ["2026/a.json", "2026/b.json"], "oldest-first so a capped run advances safely"
     assert not any("index.txt" in u for u in http.calls)
@@ -702,7 +703,7 @@ def test_incremental_cursor_filters_with_overlap(monkeypatch):
     items = c.collect(push_to_misp=False, baseline=False)
     fetched = sorted(u[len(BASE) :] for u in http.calls if u.endswith(".json"))
     assert fetched == ["2026/edge.json", "2026/new.json"]
-    assert len(items) == 4
+    assert len(items) == 2  # one item per CVE (2026-10-16)
 
 
 def test_parse_changes_and_index_are_defensive():
@@ -893,4 +894,5 @@ def test_baseline_prefilter_skips_files_whose_name_date_is_far_before_cutoff(mon
     assert ancient not in fetched, "file-name date far before the cutoff must not be fetched"
     assert fetched[:2] == [recent, edge], "dated files newest-first, undated files last"
     assert fetched[2] == unknown
-    assert {i["advisory_id"] for i in items} and len(items) == 4  # recent + unknown; edge dropped by date filter
+    # recent + unknown (edge dropped by the date filter), the same two CVEs: one item per CVE
+    assert {i["advisory_id"] for i in items} and len(items) == 2

@@ -157,6 +157,9 @@ _GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 # but has no effect today.
 
 
+# 2026-10-16: the cisa.gov page of a CISA ICS advisory, for ``cisa_ics:<advisory id>`` record links.
+from source_registry import cisa_ics_advisory_url  # noqa: E402
+
 # PR (S5) (bugbot LOW): consolidated to a shared module to
 # kill the duplication with ``alert_processor._iso_str``. Single source
 # of truth — bug fix in one place propagates to all callers.
@@ -2416,7 +2419,10 @@ def _with_rels(items: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
 
 
 def _record_url(source: str, record_id: str) -> Optional[str]:
-    """Public page of a source record (``_RECORD_URL_TEMPLATES``, ATT&CK by id prefix); ``None`` if none."""
+    """Public page of a source record (``_RECORD_URL_TEMPLATES``, ATT&CK by id prefix, and since
+    2026-10-16 a CISA ICS advisory on cisa.gov, ``source_registry.cisa_ics_advisory_url``); ``None`` if none."""
+    if source == "cisa_ics":
+        return cisa_ics_advisory_url(record_id)
     if source == "mitre_attck":
         for prefix, path in _ATTACK_URL_PATHS:
             rest = record_id[len(prefix) :]

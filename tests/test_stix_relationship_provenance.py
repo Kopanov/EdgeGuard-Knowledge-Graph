@@ -101,6 +101,10 @@ class TestRecordLinks:
             ("coreideas", "claim:4b6d411b", None),
             ("misp_galaxy", "u-1", None),
             ("threatfox", "a/b c", "https://threatfox.abuse.ch/ioc/a%2Fb%20c/"),
+            # 2026-10-16: the CISA ICS advisory a sector statement rests on
+            ("cisa_ics", "ICSA-24-123-01", "https://www.cisa.gov/news-events/ics-advisories/icsa-24-123-01"),
+            ("cisa_ics", "ICSMA-26-283-01", "https://www.cisa.gov/news-events/ics-medical-advisories/icsma-26-283-01"),
+            ("cisa_ics", "not-an-advisory", None),
         ],
     )
     def test_record_url(self, source, record_id, url):
@@ -384,6 +388,37 @@ class TestBundles:
         kinds = sorted((objects[s["source_ref"]]["type"], s["relationship_type"]) for s in _sros(bundle))
         assert kinds == [("intrusion-set", "targets"), ("malware", "exploits")]
         assert all(s["x_edgeguard_sources"] == ["coreideas"] for s in _sros(bundle))
+
+    def test_cve_bundle_exports_a_cisa_sector_statement_with_its_advisory(self):
+        """2026-10-16: a sector CISA's ICS advisory states is ``advisory_sector`` at 0.9 on the AFFECTS link
+        (the product is deployed in the sector); STIX keeps ``related-to`` and carries the label, the
+        confidence 90 and the advisory with its cisa.gov page. NVD also inferred the sector here."""
+        advisory = {
+            "match_type": "advisory_sector",
+            "confidence_score": 0.9,
+            "sources": ["cisa_ics", "nvd"],
+            "source_refs": ["cisa_ics:ICSA-26-281-01"],
+            "misp_event_ids": ["161", "120"],
+        }
+        row = {
+            "seed": {"cve_id": "CVE-2026-32645"},
+            "indicators": [],
+            "threats": [],
+            "sectors": [_pair({"name": "energy"}, advisory)],
+        }
+        bundle = _exporter(row).export_cve("CVE-2026-32645")
+        stix2.parse(json.dumps(bundle), allow_custom=True)
+        (sro,) = _sros(bundle)
+        assert sro["relationship_type"] == "related-to"
+        assert sro["x_edgeguard_match_type"] == "advisory_sector" and sro["confidence"] == 90
+        assert sro["x_edgeguard_sources"] == ["cisa_ics", "nvd"]
+        assert sro["external_references"] == [
+            {
+                "source_name": "cisa_ics",
+                "external_id": "ICSA-26-281-01",
+                "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-26-281-01",
+            }
+        ]
 
     def test_actor_bundle_merges_attribution_and_mitre_uses_into_one_sro(self):
         row = {

@@ -78,6 +78,7 @@ in the test file pins the propagation invariant.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, Optional, Tuple
 
@@ -776,6 +777,26 @@ def format_source_ref(source: Optional[str], record_id: object) -> Optional[str]
     if not rid:
         return None
     return f"{src}{SOURCE_REF_SEPARATOR}{rid[:_SOURCE_REF_MAX_RECORD_CHARS]}"
+
+
+# CISA ICS advisory ids (2026-10-16): ``ICSA-24-123-01`` (ICS advisories) and ``ICSMA-24-123-01`` (ICS
+# medical advisories), each with an optional revision letter. The public page of an advisory is under
+# the path of its kind on cisa.gov.
+_CISA_ICS_ADVISORY_ID_RE = re.compile(r"^(?P<kind>ICSA|ICSMA)-\d{2}-\d{3}-\d{2}[A-Z]?$")
+_CISA_ICS_ADVISORY_PATHS = {"ICSA": "ics-advisories", "ICSMA": "ics-medical-advisories"}
+
+
+def cisa_ics_advisory_url(advisory_id: object) -> Optional[str]:
+    """The cisa.gov page of a CISA ICS advisory id (2026-10-16); ``None`` for an id of another form.
+
+    One rule for the collector (``cisa_ics_collector.advisory_url``, when the advisory names no page of
+    its own) and the STIX export (``external_references`` of ``cisa_ics:<advisory id>``).
+    """
+    rid = str(advisory_id or "").strip().upper()
+    match = _CISA_ICS_ADVISORY_ID_RE.match(rid)
+    if not match:
+        return None
+    return f"https://www.cisa.gov/news-events/{_CISA_ICS_ADVISORY_PATHS[match.group('kind')]}/{rid.lower()}"
 
 
 def source_to_misp_tag_map() -> Dict[str, str]:

@@ -1,7 +1,8 @@
 """Pins for the 2026-10 sector-focus build (energy / finance demo questions).
 
 * L3 — ``build_relationships`` Q7c / Q7d write ``(ThreatActor|Malware)-[:TARGETS]->(Sector)`` from the
-  nodes' ``zone[]`` with the ``zone_classification`` evidence label, skipping ``global``; the step
+  nodes' ``zone[]`` (since 2026-10-16 with the label the sector evidence gives, ``zone_classification`` for
+  an inference), skipping ``global``; the step
   count is 15 and every new inner query stamps the ownership marker.
 * L1 — the CPE-driven zone detector tags ICS / energy vendors and product families (and payment /
   ATM vendors for finance) that the vocabulary previously missed; generic vendors stay ``global``.
@@ -41,23 +42,32 @@ class TestActorAndMalwareTargetSector:
     def test_inner_query_shape(self, name, var, label):
         body = _inner(name)
         assert body.startswith(f"WITH ${var} AS {var} ")
-        # 2026-10 (relationship provenance): the node's own feeds, records and events are bound
-        # before the UNWIND and carried through to the SET.
-        assert f"UNWIND {var}.zone AS zone_name WITH {var}, zone_name, _feeds, _prov_refs, _prov_events" in body
+        # 2026-10-16 (sector evidence): per sector, only the feeds whose SOURCED_FROM zones give it
+        # (``relationship_provenance.zone_prov_with``), carried through to the SET.
+        assert f"[({var})-[_sf:SOURCED_FROM]->(_src:Source) WHERE _src.source_id IN _nf" in body
+        assert "[_x IN _sfs WHERE _x.z IS NULL OR zone_name IN _x.z] AS _st" in body
         assert f"{var}.source" in body and "r.sources = apoc.coll.toSet(coalesce(r.sources, []) + _feeds)" in body
         assert f"MERGE ({var})-[r:TARGETS]->(sec)" in body
-        assert 'zone_name <> "global"' in body, "no (actor)-[:TARGETS]->(global) edges"
-        assert (
-            'r.match_type = "zone_classification"' in body and 'coalesce(r.match_type, "zone_classification")' in body
-        )
+        assert '_z <> "global"' in body, "no (actor)-[:TARGETS]->(global) edges"
+        # The label is computed (``zone_classification`` unless a feed stated the sector) and its
+        # confidence comes from the table; TARGETS has no statement label (``sector_evidence``).
+        assert 'reduce(_b = "zone_classification"' in body and "SET r.match_type = _kept" in body
         assert "r.edgeguard_managed = true" in body
         assert "MERGE (sec:Sector {name: zone_name})" in body and "sec.edgeguard_managed = true" in body
         assert f"r.src_uuid = coalesce(r.src_uuid, {var}.uuid)" in body
 
+    def test_targets_steps_carry_no_statement_label(self):
+        import build_relationships as br
+
+        for name in ("_Q7A_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"):
+            assert getattr(br, name).params["sector_statements"] == {}, name
+        assert br._Q7B_STATEMENTS.params["sector_statements"] == {"cisa_ics": "advisory_sector"}
+
     def test_outer_queries_select_nodes_with_a_zone(self):
-        text = _BUILD_REL.read_text()
-        assert '_q7c_outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.zone, [])) > 0 RETURN a"' in text
-        assert '_q7d_outer = "MATCH (m:Malware) WHERE size(coalesce(m.zone, [])) > 0 RETURN m"' in text
+        import build_relationships as br
+
+        assert br._Q7C_STATEMENTS.outer == "MATCH (a:ThreatActor) WHERE size(coalesce(a.zone, [])) > 0 RETURN a"
+        assert br._Q7D_STATEMENTS.outer == "MATCH (m:Malware) WHERE size(coalesce(m.zone, [])) > 0 RETURN m"
 
     def test_steps_are_wired_with_their_own_stats_keys(self):
         text = _BUILD_REL.read_text()

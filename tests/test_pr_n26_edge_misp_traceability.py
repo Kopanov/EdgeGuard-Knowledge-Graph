@@ -181,18 +181,22 @@ class TestBuildRelationshipsHasMispEventIdsSetClause:
     def test_q7a_targets_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q7a_inner")
         assert "r.misp_event_ids" in body, "Q7a must SET r.misp_event_ids (PR-N26)"
-        assert "[(i)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "coalesce(_x.misp_event_ids, [])" in body, (
+        assert "[(i)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "ev: CASE WHEN _sf.misp_event_ids" in body, (
             "events come from the subject's per-source SOURCED_FROM edges (2026-10 relationship provenance)"
         )
+        # 2026-10-16 (sector evidence): only the SOURCED_FROM edges whose zones give the sector
+        assert "reduce(_a = [], _x IN _st | _a + _x.ev)" in body
         assert "apoc.coll.toSet" in body
 
     def test_q7b_affects_propagates_vulnerability_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q7b_inner")
         assert "r.misp_event_ids" in body, "Q7b must SET r.misp_event_ids (PR-N26)"
         # Q7b uses ``v`` for the Vulnerability/CVE node, not ``i``.
-        assert "[(v)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "coalesce(_x.misp_event_ids, [])" in body, (
+        assert "[(v)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "ev: CASE WHEN _sf.misp_event_ids" in body, (
             "events come from the subject's per-source SOURCED_FROM edges (2026-10 relationship provenance)"
         )
+        # 2026-10-16 (sector evidence): only the SOURCED_FROM edges whose zones give the sector
+        assert "reduce(_a = [], _x IN _st | _a + _x.ev)" in body
         assert "apoc.coll.toSet" in body
 
     def test_q9_indicates_family_propagates_indicator_events(self):
