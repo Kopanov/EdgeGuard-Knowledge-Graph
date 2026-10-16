@@ -38,6 +38,7 @@ from typing import Any, Optional
 
 from airflow.listeners import hookimpl
 from airflow.plugins_manager import AirflowPlugin
+from airflow.utils.session import create_session
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,7 @@ def _run_start_gauge() -> Optional[Any]:
     return DAG_RUN_START
 
 
-def _set_mark(dag_run: Any, value: float) -> None:
-    dag_id = getattr(dag_run, "dag_id", None) or "unknown"
+def _set_mark(dag_id: str, value: float) -> None:
     try:
         gauge = _run_start_gauge()
         if gauge is not None:
@@ -72,38 +72,43 @@ def _set_mark(dag_run: Any, value: float) -> None:
         logger.warning("DAG run in-progress mark of %s not written: %s", dag_id, e)
 
 
-def _other_running_start(dag_run: Any) -> Optional[float]:
+def _other_running_start(dag_id: Optional[str], own: Optional[str]) -> Optional[float]:
     """The start time of the earliest other run of the same DAG still running, or None (2026-10).
 
     The run whose end a hook reports need not be the one in progress: marking an older run failed in
     the UI fires the same hook while the current run goes on. Cleared then, the mark would hide that
     run from ``EdgeGuardDAGRunStuck``. Read from Airflow's metadata database; a failed read clears the
     mark, as before.
+
+    The read uses a non-scoped session of its own. ``DagRun.find()`` without one opens Airflow's
+    scoped session, which in the scheduler is the session of the scheduling loop, and closes it on
+    return: the ``DagRun`` the scheduler is finishing is detached and its next attribute read raises
+    ``DetachedInstanceError``, which stops the scheduler.
     """
-    dag_id = getattr(dag_run, "dag_id", None)
     if not dag_id:
         return None
     try:
         from airflow.models.dagrun import DagRun
         from airflow.utils.state import DagRunState
 
-        runs = DagRun.find(dag_id=dag_id, state=DagRunState.RUNNING)
+        with create_session(scoped=False) as session:
+            runs = DagRun.find(dag_id=dag_id, state=DagRunState.RUNNING, session=session)
+            starts = [
+                r.start_date.timestamp()
+                for r in runs or []
+                if getattr(r, "run_id", None) != own and getattr(r, "start_date", None) is not None
+            ]
     except Exception as e:  # noqa: BLE001 - a listener must never fail the scheduler or the API call
         logger.warning("Running runs of %s not read; its in-progress mark is cleared: %s", dag_id, e)
         return None
-    own = getattr(dag_run, "run_id", None)
-    starts = [
-        r.start_date.timestamp()
-        for r in runs or []
-        if getattr(r, "run_id", None) != own and getattr(r, "start_date", None) is not None
-    ]
     return min(starts) if starts else None
 
 
 def _end_mark(dag_run: Any) -> None:
     """A run ended: the mark follows another run of the DAG still running, else it is cleared."""
-    other = _other_running_start(dag_run)
-    _set_mark(dag_run, other if other is not None else 0)
+    dag_id = getattr(dag_run, "dag_id", None)
+    other = _other_running_start(dag_id, getattr(dag_run, "run_id", None))
+    _set_mark(dag_id or "unknown", other if other is not None else 0)
 
 
 class DagRunStateListener:
@@ -113,7 +118,9 @@ class DagRunStateListener:
     def on_dag_run_running(self, dag_run: Any, msg: str) -> None:
         """The run started (or a cleared run restarted): mark it in progress from its start time."""
         started = getattr(dag_run, "start_date", None)
-        _set_mark(dag_run, started.timestamp() if started is not None else time.time())
+        _set_mark(
+            getattr(dag_run, "dag_id", None) or "unknown", started.timestamp() if started is not None else time.time()
+        )
 
     @hookimpl
     def on_dag_run_success(self, dag_run: Any, msg: str) -> None:
