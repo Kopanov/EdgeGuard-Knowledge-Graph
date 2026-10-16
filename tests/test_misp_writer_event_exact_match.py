@@ -1,4 +1,5 @@
-"""MISPWriter event lookup: exact Event.info match (restSearch substring pitfall)."""
+"""MISPWriter event lookup: only a row with exactly the event name is the event (a MISP older than
+2.4.177 ignores the ``eventinfo`` filter and answers other events too)."""
 
 from collectors import misp_writer as mw
 

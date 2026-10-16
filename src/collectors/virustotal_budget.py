@@ -31,6 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from collectors.collector_utils import state_dir
+
 logger = logging.getLogger(__name__)
 
 QUOTA_LOG_PREFIX = "[VT-QUOTA]"
@@ -63,7 +65,6 @@ _DAILY_BUDGET_ENV = "EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET"
 _PER_RUN_ENV = "EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN"
 _CANDIDATE_DAYS_ENV = "EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS"
 _PATH_ENV = "EDGEGUARD_VIRUSTOTAL_BUDGET_PATH"
-_STATE_DIR_ENV = "EDGEGUARD_STATE_DIR"
 
 _LEDGER_FILENAME = "virustotal_daily_budget.json"
 
@@ -113,22 +114,18 @@ def candidate_days() -> int:
     return _env_int(_CANDIDATE_DAYS_ENV, CANDIDATE_DAYS_DEFAULT, minimum=1)
 
 
-def _repo_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-
 def ledger_path() -> str:
     """Ledger location: ``EDGEGUARD_VIRUSTOTAL_BUDGET_PATH``, else ``<EDGEGUARD_STATE_DIR or <repo>/state>/virustotal_daily_budget.json``.
 
-    The default follows the state-file convention of the Airflow DAG
-    (``dags/edgeguard_pipeline.py::get_state_file``) so the ledger lands in the
-    ``./state`` bind mount of the Compose deployment and survives container restarts.
+    The default directory is :func:`collectors.collector_utils.state_dir`, the state-file
+    convention of the Airflow DAG (``dags/edgeguard_pipeline.py::get_state_file``), so the
+    ledger lands in the ``./state`` bind mount of the Compose deployment and survives
+    container restarts.
     """
     override = os.getenv(_PATH_ENV)
     if override and override.strip():
         return override.strip()
-    state_dir = os.getenv(_STATE_DIR_ENV) or os.path.join(_repo_root(), "state")
-    return os.path.join(state_dir, _LEDGER_FILENAME)
+    return os.path.join(state_dir(), _LEDGER_FILENAME)
 
 
 def _today() -> str:
