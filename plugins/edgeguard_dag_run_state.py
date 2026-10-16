@@ -19,7 +19,9 @@ a manual state change, and the DAG processor runs them asynchronously, so a late
 could clear the mark of the next. A run that is deleted fires no hook: its mark stays until the DAG's
 next run starts (docs/PROMETHEUS_SETUP.md gives the command that clears it at once). When a run
 ends while another run of the same DAG is still running (an older run marked failed by hand), the
-mark keeps that run's start time instead of being cleared.
+mark keeps that run's start time instead of being cleared. The end hooks read the DAG's running runs
+in a session of their own: without one, ``DagRun.find()`` used the scheduling loop's session and
+stopped the scheduler at the end of every run (see ``_other_running_start``).
 
 The mark is written only in prometheus_client's multi-process mode (``PROMETHEUS_MULTIPROC_DIR``, set
 on the ``airflow`` service by docker-compose.yml, which also mounts this directory as the Airflow
@@ -80,10 +82,16 @@ def _other_running_start(dag_id: Optional[str], own: Optional[str]) -> Optional[
     run from ``EdgeGuardDAGRunStuck``. Read from Airflow's metadata database; a failed read clears the
     mark, as before.
 
-    The read uses a non-scoped session of its own. ``DagRun.find()`` without one opens Airflow's
-    scoped session, which in the scheduler is the session of the scheduling loop, and closes it on
-    return: the ``DagRun`` the scheduler is finishing is detached and its next attribute read raises
-    ``DetachedInstanceError``, which stops the scheduler.
+    The read uses a non-scoped session of its own. Without a session, ``DagRun.find()`` uses
+    Airflow's scoped session, which in the scheduler is the scheduling loop's own session. The commit
+    that ``create_session()`` attempts on exit is refused there by the scheduler's commit guard
+    (``prohibit_commit``: "UNEXPECTED COMMIT"), so the session is rolled back and closed: the
+    ``DagRun`` the scheduler is finishing loses its uncommitted end state and is expired and
+    detached, and the scheduler's next read of it (``update_state`` reading ``_state``) raises
+    ``DetachedInstanceError``, which stops the scheduler. The run stays running across restarts.
+
+    The separate session sees committed state only, which relies on ``max_active_runs=1``: two
+    running runs of one DAG never end in one scheduler loop.
     """
     if not dag_id:
         return None

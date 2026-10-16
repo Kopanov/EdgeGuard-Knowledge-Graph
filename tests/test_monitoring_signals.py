@@ -548,9 +548,13 @@ class TestDagRunInProgress:
     def test_the_end_hook_leaves_the_schedulers_session_alone(self, run_state_listener, monkeypatch, tmp_path):
         """The run list is read in a session of its own, and the run is not read again after it.
 
-        ``DagRun.find()`` without a session opens Airflow's scoped session, the one the scheduler
-        loop is using, and closes it on return: the scheduler's ``DagRun`` is detached, the next
-        attribute read raises ``DetachedInstanceError`` and the scheduler exits.
+        Without a session, ``DagRun.find()`` uses Airflow's scoped session, which in the scheduler is
+        the scheduling loop's own session. The commit that ``create_session()`` attempts on exit is
+        refused by the scheduler's commit guard ("UNEXPECTED COMMIT"), so the session is rolled back
+        and closed: the ``DagRun`` the scheduler is finishing loses its uncommitted end state and is
+        expired and detached, and the scheduler's next read of it (``update_state`` reading
+        ``_state``) raises ``DetachedInstanceError``, which stops the scheduler. The run stays running
+        across restarts. The test below runs the same steps with Airflow's real session machinery.
         """
         monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
         from airflow.models.dagrun import DagRun
@@ -590,6 +594,71 @@ class TestDagRunInProgress:
         assert sessions == [False], "the run list is read in a non-scoped session"
         assert seen.get("session") is not None
         assert _in_progress("edgeguard_baseline") == 0
+
+    def test_the_end_hook_inside_the_schedulers_commit_guard(self, run_state_listener, monkeypatch, tmp_path):
+        """The scheduler ends a run in its loop's session under ``prohibit_commit`` and calls the end
+        hook there; the run stays attached, keeps its end state and the scheduler's commit stores it.
+
+        Airflow's real session machinery on a temporary SQLite metadata database: ``settings.Session``
+        is a scoped session, as in the scheduler, and ``settings.NonScopedSession`` its factory, both
+        configured as ``airflow.settings`` configures them (no autoflush, no expiry on commit).
+        """
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        from airflow import settings
+        from airflow.models.dagrun import DagRun
+        from airflow.utils.sqlalchemy import prohibit_commit
+        from airflow.utils.state import DagRunState
+        from sqlalchemy import create_engine, inspect, select
+        from sqlalchemy.orm import scoped_session, sessionmaker
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'airflow.db'}")
+        DagRun.__table__.metadata.tables["log_template"].create(engine)  # dag_run.log_template_id
+        DagRun.__table__.create(engine)
+        factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+        loop_sessions = scoped_session(factory)
+        monkeypatch.setattr(settings, "engine", engine)
+        monkeypatch.setattr(settings, "NonScopedSession", factory)
+        monkeypatch.setattr(settings, "Session", loop_sessions)
+
+        dag_id, run_id = "edgeguard_pipeline", "scheduled__probe"
+        start = datetime(2026, 10, 16, 1, 0, tzinfo=timezone.utc)
+        with factory.begin() as setup:
+            setup.execute(
+                DagRun.__table__.insert().values(
+                    dag_id=dag_id,
+                    run_id=run_id,
+                    run_type="scheduled",
+                    state=DagRunState.RUNNING,
+                    start_date=start,
+                    run_after=start,
+                    logical_date=start,
+                    clear_number=0,
+                    span_status="not_started",
+                )
+            )
+        listener = run_state_listener.listener
+
+        session = settings.Session()  # the scheduling loop's session
+        try:
+            with prohibit_commit(session) as guard:
+                run = session.scalars(select(DagRun).where(DagRun.run_id == run_id)).one()
+                listener.on_dag_run_running(dag_run=run, msg="started")
+                assert _in_progress(dag_id) == start.timestamp()
+
+                # DagRun.update_state: the end state, the end hook, then the run's _state read again.
+                run.set_state(DagRunState.SUCCESS)
+                listener.on_dag_run_success(dag_run=run, msg="success")
+                assert run._state == DagRunState.SUCCESS
+                assert not inspect(run).detached
+                guard.commit()
+            with factory() as check:
+                stored = check.scalars(select(DagRun.state).where(DagRun.run_id == run_id)).one()
+        finally:
+            loop_sessions.remove()
+            engine.dispose()
+
+        assert stored == DagRunState.SUCCESS, "the scheduler's guarded commit stores the end state"
+        assert _in_progress(dag_id) == 0
 
     def test_outside_the_multi_process_mode_the_hooks_write_nothing(self, run_state_listener, monkeypatch):
         """The scheduler's own registry is served by nothing; only the shared directory reaches Prometheus."""
