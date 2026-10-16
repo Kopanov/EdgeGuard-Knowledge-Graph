@@ -586,6 +586,15 @@ class MispLookupError(Exception):
     """
 
 
+# 2026-10: the event lookup pages through ``/events/restSearch``. MISP filters on ``eventinfo`` only
+# from 2.4.177; an older MISP ignores the filter and answers the events of the whole store, so the
+# lookup reads pages until a row carries the exact event name or a page comes back short. The cap
+# bounds that walk (40 x 500 event headers); reaching it fails the lookup instead of creating an
+# event that may already exist beyond the cap.
+EVENT_LOOKUP_PAGE_SIZE = 500
+EVENT_LOOKUP_MAX_PAGES = 40
+
+
 # Let @retry_with_backoff on _get_or_create_event / _push_batch retry these (must re-raise, not swallow).
 # MispTransientError is a TransientServerError subclass, which is also in the
 # decorator's catch tuple in collector_utils.retry_with_backoff.
@@ -964,9 +973,12 @@ def _event_id_and_info_from_restsearch_row(row: Any) -> Tuple[Optional[str], Opt
 
 def _event_id_exact_from_restsearch_rows(rows: List[Any], event_name: str) -> Optional[str]:
     """
-    MISP ``restSearch`` ``info`` filter is often a **substring** match. Parallel tier-1 collectors
-    share the ``EdgeGuard-GLOBAL-`` prefix; taking ``response[0]`` can attach the wrong feed to
-    another source's event. Only accept an **exact** ``Event.info`` match.
+    Only accept an **exact** ``Event.info`` match; taking ``response[0]`` can attach one feed's
+    items to another source's event.
+
+    2026-10: the rows are not all matches. A MISP older than 2.4.177 ignores the ``eventinfo``
+    filter and answers events of the whole store, and MISP's own match follows the database
+    collation, which is usually case-insensitive.
     """
     for row in rows:
         eid, info = _event_id_and_info_from_restsearch_row(row)
@@ -1180,11 +1192,53 @@ class MISPWriter:
         self.liveness_callback = liveness_callback
 
     def _restsearch_events_for_name(self, event_name: str) -> List[Any]:
-        """Call ``/events/restSearch``; returns the ``response`` list (may need exact-info filtering)."""
+        """Look up the event named ``event_name`` through ``/events/restSearch``.
+
+        Returns the rows of the page that holds a row with exactly this ``Event.info``, or an empty
+        list when no page holds one ("no such event"). The caller still picks the exact row.
+
+        2026-10: the request names the filter ``eventinfo``, an exact ``Event.info`` match for a
+        value without ``%``. The earlier ``info`` key is not a restSearch parameter: MISP dropped it
+        and answered the first events of the store, so once the store held more events than one
+        answer, the same-day event was missed and a duplicate was created. MISP honours
+        ``eventinfo`` from 2.4.177 on; on an older MISP the lookup pages until a row carries the
+        name or a page comes back short (``EVENT_LOOKUP_MAX_PAGES`` bounds it). ``metadata`` asks
+        for event headers only: the lookup reads id and info, and a full event with all of its
+        attributes made a php-fpm worker grow by GBs per lookup.
+
+        Raises ``MispTransientError`` on HTTP 429 / 5xx and ``MispLookupError`` on any other failure
+        or when the page cap is reached without a short page: the event may exist beyond the cap.
+        """
+        for page in range(1, EVENT_LOOKUP_MAX_PAGES + 1):
+            rows = self._restsearch_event_page(event_name, page)
+            if _event_id_exact_from_restsearch_rows(rows, event_name):
+                return rows
+            if len(rows) < EVENT_LOOKUP_PAGE_SIZE:
+                return []
+        logger.error(
+            "MISP event lookup for %r reached the page cap (%d pages of %d events) without the event or a "
+            "short page: this MISP most likely ignores the eventinfo filter (older than 2.4.177) and holds "
+            "more events than the cap covers. No event is created after an incomplete lookup; upgrade MISP "
+            "to 2.4.177 or later, or raise EVENT_LOOKUP_MAX_PAGES in src/collectors/misp_writer.py",
+            event_name,
+            EVENT_LOOKUP_MAX_PAGES,
+            EVENT_LOOKUP_PAGE_SIZE,
+        )
+        raise MispLookupError(
+            f"Event lookup for {event_name!r} reached the page cap ({EVENT_LOOKUP_MAX_PAGES} pages) without a result"
+        )
+
+    def _restsearch_event_page(self, event_name: str, page: int) -> List[Any]:
+        """One page of the event lookup; returns the ``response`` list (see ``_restsearch_events_for_name``)."""
         response = self.session.post(
             f"{self.url}/events/restSearch",
-            # ``limit`` > 1: substring ``info`` can return multiple EdgeGuard-* rows; we pick exact match only.
-            json={"returnFormat": "json", "info": event_name, "limit": 50},
+            json={
+                "returnFormat": "json",
+                "eventinfo": event_name,
+                "metadata": True,
+                "limit": EVENT_LOOKUP_PAGE_SIZE,
+                "page": page,
+            },
             verify=self.verify_ssl,
             timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
         )
