@@ -9,7 +9,11 @@ actor counted as one (canonical threat-actor reference), is applied by:
 * the OTX collector, on the pulse's whole adversary list: it writes ``family::adversary::pulse`` pairs
   only for a pulse naming one actor, and records a pulse naming several in ``several_actor_pulses`` on
   every item of it (``OTX_META.sap`` / ``MITRE_USES_TECHNIQUES.sap`` in MISP). MISP drops an actor it
-  already holds, so after the baseline an event may carry only some of a pulse's actors;
+  already holds, so after the baseline an event may carry only some of a pulse's actors. Without the
+  canonical reference the mark goes to ``several_actor_pulses_by_name`` (``sapn``), which the sync uses
+  for its own run and never stores (2026-10);
+* the MISP writer: an IOC MISP already holds is not pushed again, so the mark of a pulse edited to name
+  several actors is added to the stored copies of up to three of its held IOCs (``_carry_marks``);
 * the sync, when it pairs the items of one pulse (``_build_cross_item_relationships``);
 * ``build_relationships`` step 2d: it links the pairs carried on indicators only when a pulse naming
   one actor supports them, removes the links an earlier run made from pulses naming several actors,
@@ -100,6 +104,25 @@ class TestActorIdentities:
     def test_names_without_a_key_are_left_out(self, reference):
         assert cta.actor_identities(["", None, 7, " APT28 "], reference) == {"apt28"}
 
+    def test_several_actor_reports_is_the_union_with_the_indicator_marks(self, reference):
+        # 2026-10: the graph-derived pulses are judged with the reference; a mark is the OTX collector's
+        # judgement of the pulse's whole adversary list and is taken as it is.
+        rows = [
+            {"pid": "p-groups", "names": ["gamaredon", "turla"]},
+            {"pid": "p-alias", "names": ["the gentlemen", "storm-2697"]},
+        ]
+        assert cta.several_actor_reports(rows, [], reference) == ["p-groups"]
+        assert cta.several_actor_reports(rows, ["p-edited", "p-groups"], reference) == ["p-edited", "p-groups"]
+        assert cta.several_actor_reports(rows, ["p-alias"], reference) == ["p-alias", "p-groups"], "not re-judged"
+        assert cta.several_actor_reports([], [" p-edited ", "", None, 7], reference) == ["p-edited"]
+        assert cta.several_actor_reports(rows, ["p-edited"], None) == ["p-alias", "p-edited", "p-groups"]
+
+    def test_the_marks_query_answers_one_row(self):
+        query = cta.INDICATOR_MARKED_REPORTS_QUERY
+        assert query.startswith("MATCH (i:Indicator) WHERE i.several_actor_pulses IS NOT NULL ")
+        assert query.endswith("RETURN collect(DISTINCT pid) AS pulses, count(DISTINCT i) AS indicators")
+        assert "'" not in query
+
     def test_reports_naming_several_actors(self, reference):
         rows = [
             {"pid": "p-groups", "names": ["gamaredon", "turla"]},
@@ -177,6 +200,26 @@ class TestTheCollector:
         assert shared[0]["several_actor_pulses"] == ["p-two"]
         assert shared[0]["pulse_malware_families"] == ["Emotet", "Kazuar"]
 
+    def test_without_the_reference_the_mark_is_by_name(self, monkeypatch):
+        # 2026-10: the aliases of one actor count as several without the reference. The pulse still writes
+        # no pair, but its mark is kept apart from the marks judged with the reference: the sync stores
+        # those on the Indicator node, and step 2d would later remove links on a judgement made by name.
+        def unavailable(*_a, **_k):
+            raise cta.ReferenceUnavailable("test: not found")
+
+        monkeypatch.setattr(oc, "load_canonical_reference", unavailable)
+        items = _HARNESS._collect([_pulse("p-alias", ["X-Agent"], "APT28, Fancy Bear", ["203.0.113.9"])])
+        ioc = next(i for i in items if i.get("value") == "203.0.113.9")
+        assert ioc["pulse_malware_actor_pairs"] == [], "two names count as two actors without the reference"
+        assert all(i["several_actor_pulses"] == [] for i in items)
+        assert all(i["several_actor_pulses_by_name"] == ["p-alias"] for i in items)
+        # With the reference the same pulse names one actor: pairs, and no mark of either kind.
+        monkeypatch.undo()
+        items = _HARNESS._collect([_pulse("p-alias", ["X-Agent"], "APT28, Fancy Bear", ["203.0.113.9"])])
+        ioc = next(i for i in items if i.get("value") == "203.0.113.9")
+        assert ioc["pulse_malware_actor_pairs"] == ["X-Agent::APT28::p-alias", "X-Agent::Fancy Bear::p-alias"]
+        assert ioc["several_actor_pulses"] == [] and ioc["several_actor_pulses_by_name"] == []
+
     def test_the_pair_encoder(self):
         assert oc._pulse_actor_pairs(["Emotet"], ["apt28"], "p1") == ["Emotet::apt28::p1"]
         assert oc._pulse_actor_pairs(["Emotet"], ["apt28"], " ") == ["Emotet::apt28"]
@@ -221,6 +264,89 @@ class TestMispRoundTrip:
         for attr in (indicator, malware, actor):
             item, _ = syncer.parse_attribute({**attr, "uuid": "20000000-0000-0000-0000-00000000abcd"}, _EVENT)
             assert item["several_actor_pulses"] == ["p-two"], attr["type"]
+
+    def test_the_sync_carries_the_mark_into_the_indicator_batch_rows(self):
+        # 2026-10: the mark is stored on the Indicator node (accumulated like the pairs), where step 2d
+        # and the acceptance check read it: the actor nodes miss a pulse edited to name several actors.
+        from neo4j_client import Neo4jClient
+
+        attr = _writer().create_attribute(
+            {
+                **_OTX,
+                "indicator_type": "ipv4",
+                "value": "203.0.113.5",
+                "pulse_id": "p-one",
+                "report_ids": ["p-edited"],
+                "pulse_malware_actor_pairs": ["Kazuar::Turla::p-one"],
+                "several_actor_pulses": ["p-edited"],
+            }
+        )
+        item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+            {**attr, "uuid": "20000000-0000-0000-0000-00000000abcd"}, _EVENT
+        )
+        client = Neo4jClient.__new__(Neo4jClient)
+        client.driver = MagicMock()
+        client._connection_healthy = True
+        session = MagicMock()
+        session.run.return_value.single.return_value = None
+        client.driver.session.return_value.__enter__ = MagicMock(return_value=session)
+        client.driver.session.return_value.__exit__ = MagicMock(return_value=False)
+        client.merge_indicators_batch([item], source_id="alienvault_otx")
+        rows = [
+            v
+            for call in session.run.call_args_list
+            for v in list(call.kwargs.values()) + list(call.args[1:])
+            if isinstance(v, list) and v and isinstance(v[0], dict) and "value" in v[0]
+        ]
+        assert rows and rows[0][0]["several_actor_pulses"] == ["p-edited"]
+        assert rows[0][0]["pulse_malware_actor_pairs"] == ["Kazuar::Turla::p-one"]
+        cypher = "\n".join(call.args[0] for call in session.run.call_args_list if call.args)
+        assert (
+            "n.several_actor_pulses = apoc.coll.toSet(coalesce(n.several_actor_pulses, []) "
+            "+ coalesce(item.several_actor_pulses, []))"
+        ) in cypher, "accumulated across pulses and runs, never overwritten"
+
+    def test_a_mark_by_name_serves_the_sync_run_and_is_never_stored(self):
+        # 2026-10: ``sapn`` (judged by name, without the reference) travels like ``sap`` and keeps the
+        # sync from attributing the pulse's malware in its run, but the indicator batch rows do not carry
+        # it, so no Indicator node records it and step 2d removes nothing on it.
+        from neo4j_client import Neo4jClient
+
+        writer = _writer()
+        syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
+        marked = {"pulse_id": "p-alias", "several_actor_pulses_by_name": ["p-alias"]}
+        indicator = writer.create_attribute({**_OTX, "indicator_type": "ipv4", "value": "203.0.113.5", **marked})
+        malware = writer.create_malware_attribute({**_OTX, "type": "malware", "name": "X-Agent", **marked})
+        actor = writer.create_actor_attribute({**_OTX, "type": "actor", "name": "APT28", **marked})
+        assert _meta(indicator["comment"], "OTX_META:")["sapn"] == ["p-alias"]
+        assert "sap" not in _meta(indicator["comment"], "OTX_META:")
+        for attr in (malware, actor):
+            assert _meta(attr["comment"], "MITRE_USES_TECHNIQUES:")["sapn"] == ["p-alias"]
+        items = []
+        for n, attr in enumerate((indicator, malware, actor)):
+            item, _ = syncer.parse_attribute({**attr, "uuid": f"20000000-0000-0000-0000-00000000ab{n:02d}"}, _EVENT)
+            assert item["several_actor_pulses_by_name"] == ["p-alias"], attr["type"]
+            assert not item.get("several_actor_pulses"), attr["type"]
+            items.append(item)
+        rels = _rels(syncer, _dedupe_parsed_items(items))
+        assert "ATTRIBUTED_TO" not in rels and len(rels["INDICATES"]) == 1, "the run attributes nothing"
+
+        client = Neo4jClient.__new__(Neo4jClient)
+        client.driver = MagicMock()
+        client._connection_healthy = True
+        session = MagicMock()
+        session.run.return_value.single.return_value = None
+        client.driver.session.return_value.__enter__ = MagicMock(return_value=session)
+        client.driver.session.return_value.__exit__ = MagicMock(return_value=False)
+        client.merge_indicators_batch([items[0]], source_id="alienvault_otx")
+        rows = [
+            v
+            for call in session.run.call_args_list
+            for v in list(call.kwargs.values()) + list(call.args[1:])
+            if isinstance(v, list) and v and isinstance(v[0], dict) and "value" in v[0]
+        ]
+        assert rows and rows[0][0]["value"] == "203.0.113.5"
+        assert "several_actor_pulses" not in rows[0][0] and "several_actor_pulses_by_name" not in rows[0][0]
 
     def test_a_pair_too_long_for_its_pulse_id_is_left_out_not_cut(self):
         pair = "Emotet::" + "x" * 320 + "::6a4fdf500b5e6dffde939998"
@@ -269,6 +395,156 @@ class TestMispRoundTrip:
         )
         assert len(items) == 1
         assert items[0]["report_ids"] == ["p-two"] and items[0]["several_actor_pulses"] == ["p-two"]
+
+
+# --------------------------------------------------------------------------- held IOCs get the mark
+_OTX_MISP_TAG = "source:AlienVault-OTX"
+_HELD_EVENT = {"id": "41", "info": "EdgeGuard-alienvault_otx-2026-10-01", "org_id": "1", "distribution": "0"}
+
+
+def _held_rows(items, written_days_ago=2):
+    """The stored copies of the indicators among *items*, as MISP 2.5 ``attributes/restSearch`` lists the
+    attributes ``MISPWriter.create_attribute`` wrote for them in an earlier run."""
+    import time
+
+    writer = _writer()
+    rows = []
+    for n, item in enumerate(i for i in items if i.get("indicator_type")):
+        attr = writer.create_attribute(item)
+        rows.append(
+            {
+                **attr,
+                "id": str(1200 + n),
+                "event_id": _HELD_EVENT["id"],
+                "uuid": f"6f3c1d5e-0000-4000-8000-{n:012d}",
+                "timestamp": str(int(time.time()) - written_days_ago * 86400),
+                "deleted": False,
+                "Event": dict(_HELD_EVENT),
+            }
+        )
+    return rows
+
+
+class TestHeldIndicatorsGetTheMark:
+    """2026-10: MISP does not push an IOC it already holds (cross-event de-duplication), so when a pulse is
+    edited to name several actors, the collector's mark on its IOCs reached no Indicator node and step 2d
+    kept linking the pair written while the pulse named one actor. The writer adds the mark to the stored
+    copies of up to ``MARK_CARRY_COPIES_PER_PULSE`` held IOCs of the pulse."""
+
+    P = "6a4fdf500b5e6dffde93a001"
+    IOCS = ["203.0.113.21", "203.0.113.22", "203.0.113.23", "203.0.113.24"]
+
+    @pytest.fixture(autouse=True)
+    def _misp(self, monkeypatch):
+        from collectors import misp_writer as mw
+
+        monkeypatch.setattr(mw, "MISP_PREFETCH_EXISTING_ATTRS", True)
+        monkeypatch.setattr(mw, "MISP_CROSS_EVENT_DEDUP", True)
+        monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0")
+        monkeypatch.delenv("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", raising=False)
+        monkeypatch.setattr(mw.time, "sleep", lambda _s: None)
+
+    def _runs(self, iocs, run_two_iocs=None):
+        """Run 1: the pulse names Turla alone; run 2: it was edited to name Turla and Gamaredon."""
+        first = _HARNESS._collect([_pulse(self.P, ["Crutch"], "Turla", iocs)])
+        second = _HARNESS._collect([_pulse(self.P, ["Crutch"], "Turla, Gamaredon", run_two_iocs or iocs)])
+        return first, second
+
+    @staticmethod
+    def _push(items, rows):
+        from test_misp_reobserved_indicator_refresh import _Misp, _push
+
+        misp = _Misp(rows, tag=_OTX_MISP_TAG)
+        result, pushed, writer = _push(items, misp)
+        return misp, result, pushed, writer
+
+    def test_the_held_copy_of_an_edited_pulse_gets_the_mark(self):
+        first, second = self._runs(self.IOCS[:1])
+        rows = _held_rows(first)
+        before = _meta(rows[0]["comment"], "OTX_META:")
+        assert before["pa"] == [f"Crutch::Turla::{self.P}"] and "sap" not in before
+        ioc = next(i for i in second if i.get("indicator_type"))
+        assert ioc["several_actor_pulses"] == [self.P] and ioc["pulse_malware_actor_pairs"] == []
+
+        misp, _result, pushed, writer = self._push(second, rows)
+        assert not [a for a in pushed if a.get("value") == self.IOCS[0]], "MISP holds the IOC: not pushed"
+        assert [uuid for uuid, _body in misp.edits] == [rows[0]["uuid"]]
+        sent = misp.edits[0][1]["Attribute"]
+        assert set(sent) == {"comment"}, "the comment only"
+        after = _meta(sent["comment"], "OTX_META:")
+        assert after == {**before, "sap": [self.P]}, "the mark added, nothing else changed"
+        assert writer.stats["attributes_marked"] == 1 and writer.stats.get("attributes_mark_failed", 0) == 0
+
+        # MISP stamped the copy anew; the incremental sync reads it again and the node gets the mark next
+        # to the pair written while the pulse named one actor.
+        item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(misp.stored[0], _EVENT)
+        assert item["several_actor_pulses"] == [self.P]
+        assert item["pulse_malware_actor_pairs"] == [f"Crutch::Turla::{self.P}"]
+
+        # Run 3 reports the pulse again: a held copy carries the mark, nothing is edited.
+        misp_again, _r, _p, _w = self._push(second, misp.stored)
+        assert misp_again.edits == []
+
+    def test_at_most_three_held_copies_per_pulse_besides_its_new_iocs(self):
+        first, second = self._runs(self.IOCS, run_two_iocs=self.IOCS + ["203.0.113.25"])
+        rows = _held_rows(first)
+        misp, _result, pushed, writer = self._push(second, rows)
+        assert [a["value"] for a in pushed if a.get("type") == "ip-dst"] == ["203.0.113.25"]
+        assert _meta(next(a for a in pushed if a.get("type") == "ip-dst")["comment"], "OTX_META:")["sap"] == [self.P]
+        assert [uuid for uuid, _b in misp.edits] == [r["uuid"] for r in rows[:3]], "the first three held copies"
+        assert writer.stats["attributes_marked"] == 3
+
+    def test_a_copy_without_room_is_passed_over_for_the_next(self):
+        first, second = self._runs(self.IOCS[:2])
+        rows = _held_rows(first)
+        full = _meta(rows[0]["comment"], "OTX_META:")
+        full["description"] = "x" * (3990 - len("OTX_META:" + json.dumps(full)))
+        rows[0]["comment"] = "OTX_META:" + json.dumps(full)
+        assert 3980 <= len(rows[0]["comment"]) <= 4000
+        misp, _result, _pushed, writer = self._push(second, rows)
+        assert [uuid for uuid, _b in misp.edits] == [rows[1]["uuid"]], "nothing in the full comment is shortened"
+        assert rows[0]["comment"] == "OTX_META:" + json.dumps(full)
+
+    def test_a_copy_without_an_otx_meta_block_is_left_as_it_is(self, caplog):
+        # OTX copies written before every OTX indicator got an OTX_META block hold the pulse name as their
+        # comment: turned into a block, the sync would read that name as no pulse name.
+        first, second = self._runs(self.IOCS[:1])
+        rows = _held_rows(first)
+        rows[0]["comment"] = "pulse 6a4fdf500b5e6dffde93a001"
+        with caplog.at_level("WARNING", logger="collectors.misp_writer"):
+            misp, _result, _pushed, _writer = self._push(second, rows)
+        assert misp.edits == [] and rows[0]["comment"] == "pulse 6a4fdf500b5e6dffde93a001"
+        assert "1 pulse(s) whose held copies cannot take it" in caplog.text
+
+    def test_with_the_refresh_off_the_mark_is_still_carried(self, monkeypatch):
+        monkeypatch.setenv("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", "0")
+        first, second = self._runs(self.IOCS[:1])
+        rows = _held_rows(first, written_days_ago=400)
+        misp, _result, _pushed, writer = self._push(second, rows)
+        assert [set(body["Attribute"]) for _uuid, body in misp.edits] == [{"comment"}], "no last_seen refresh"
+        assert writer.stats["attributes_marked"] == 1 and not writer.stats.get("attributes_refreshed")
+
+    def test_a_mark_by_name_is_not_carried(self, monkeypatch):
+        first, _second = self._runs(self.IOCS[:1])
+        rows = _held_rows(first)
+
+        def unavailable(*_a, **_k):
+            raise cta.ReferenceUnavailable("test: not found")
+
+        monkeypatch.setattr(oc, "load_canonical_reference", unavailable)
+        second = _HARNESS._collect([_pulse(self.P, ["Crutch"], "Turla, Gamaredon", self.IOCS[:1])])
+        misp, _result, _pushed, _writer = self._push(second, rows)
+        assert misp.edits == [], "a judgement made by name is not stored on a node, so it is not carried"
+
+    def test_a_failed_edit_is_counted_and_is_no_failed_push(self):
+        first, second = self._runs(self.IOCS[:1])
+        rows = _held_rows(first)
+        from test_misp_reobserved_indicator_refresh import _Misp, _push
+
+        misp = _Misp(rows, tag=_OTX_MISP_TAG, edit_status=500)
+        (ok, failed), _pushed, writer = _push(second, misp)
+        assert failed == 0 and writer.stats["attributes_mark_failed"] == 1
+        assert writer.stats.get("attributes_marked", 0) == 0
 
 
 # --------------------------------------------------------------------------- the sync
@@ -384,7 +660,15 @@ _REPORT_ACTOR_ROWS = [
 
 
 def _run_build(
-    monkeypatch, *, report_rows=_REPORT_ACTOR_ROWS, reference_ok=True, read_fails=False, read_empty=False, failing=None
+    monkeypatch,
+    *,
+    report_rows=_REPORT_ACTOR_ROWS,
+    marked=(),
+    reference_ok=True,
+    read_fails=False,
+    read_empty=False,
+    marks_empty=False,
+    failing=None,
 ):
     calls: list = []
 
@@ -403,6 +687,10 @@ def _run_build(
                 if read_empty:
                     return []  # ``Neo4jClient.run`` on a terminal error
                 return [{"reports": [dict(r) for r in report_rows], "pulses": 1530}]
+            if query == cta.INDICATOR_MARKED_REPORTS_QUERY:
+                if marks_empty:
+                    return []  # ``Neo4jClient.run`` on a terminal error
+                return [{"pulses": list(marked), "indicators": 7 * len(marked)}]
             if "apoc.periodic.iterate" in query:
                 names = (failing,) if isinstance(failing, str) else (failing or ())
                 if any(assigned_query(n) in query for n in names):
@@ -467,7 +755,38 @@ class TestStep2d:
         assert ok is True and _step(iterate, "_q2d_outer")["several_actor_reports"] == []
         assert _step(iterate, "_q2d_remove_outer") is None
 
-    @pytest.mark.parametrize("failure", ["read_fails", "read_empty"])
+    def test_a_pulse_marked_only_on_indicators_names_several_actors(self, monkeypatch, caplog):
+        # 2026-10: "p-edited" named one actor when its pairs were written and was edited to name several;
+        # MISP held its actors already, so no actor node records it. The OTX collector's mark on the
+        # indicators makes step 2d skip its pairs and remove the links resting on it.
+        with caplog.at_level("INFO", logger="build_relationships"):
+            ok, iterate = _run_build(monkeypatch, marked=["p-edited", "p-groups"])
+        assert ok is True
+        for name in ("_q2d_outer", "_q2d_remove_outer", "_q2d_trim_outer"):
+            params = _step(iterate, name)
+            assert params["several_actor_reports"] == ["p-edited", "p-groups"], name
+            assert params["several_actor_refs"] == ["alienvault_otx:p-edited", "alienvault_otx:p-groups"], name
+        assert "2 pulse(s) name several actors (2 marked on 14 indicator(s) by the OTX collector)" in caplog.text
+
+    def test_a_mark_is_the_collectors_judgement_taken_as_it_is(self, monkeypatch):
+        # The reference makes p-alias one actor on the actor nodes; a mark on it is not re-judged.
+        ok, iterate = _run_build(monkeypatch, marked=["p-alias"])
+        assert ok is True
+        assert _step(iterate, "_q2d_outer")["several_actor_reports"] == ["p-alias", "p-groups"]
+
+    def test_marks_alone_trigger_the_cleanup(self, monkeypatch):
+        ok, iterate = _run_build(monkeypatch, report_rows=[], marked=["p-edited"])
+        assert ok is True
+        assert _step(iterate, "_q2d_remove_outer")["several_actor_reports"] == ["p-edited"]
+        assert _step(iterate, "_q2d_trim_outer") is not None
+
+    def test_without_the_reference_marks_skip_pairs_but_nothing_is_removed(self, monkeypatch):
+        ok, iterate = _run_build(monkeypatch, reference_ok=False, report_rows=[], marked=["p-edited"])
+        assert ok is True
+        assert _step(iterate, "_q2d_outer")["several_actor_reports"] == ["p-edited"]
+        assert _step(iterate, "_q2d_remove_outer") is None and _step(iterate, "_q2d_trim_outer") is None
+
+    @pytest.mark.parametrize("failure", ["read_fails", "read_empty", "marks_empty"])
     def test_an_unreadable_graph_skips_the_step_and_fails_the_run(self, monkeypatch, failure):
         ok, iterate = _run_build(monkeypatch, **{failure: True})
         assert ok is False

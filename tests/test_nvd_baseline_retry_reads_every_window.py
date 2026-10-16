@@ -78,6 +78,9 @@ def test_a_retry_after_a_window_abort_pushes_every_window(monkeypatch):
         patch.object(nc, "get_source_incremental", lambda _s: {}),
         patch.object(nc, "update_source_incremental", lambda _s, **_kw: None),
         patch.object(nc.time, "sleep", lambda _s: None),
+        # One clock for the test and both attempts: a later reading on a slow runner names the
+        # windows a second apart, and the retry's windows would no longer match the expected ones.
+        patch.object(nc, "_utc_now", lambda: now),
         patch.object(nc.NVDCollector, "_fetch_cves_batch", fetch_batch),
         patch.object(nc.NVDCollector, "check_service_available", lambda self: True),
     ):

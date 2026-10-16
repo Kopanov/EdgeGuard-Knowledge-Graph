@@ -9,12 +9,18 @@ names of one actor (``p3``, The Gentlemen and Storm-2697), in the current proven
 collector since 2026-10, which writes them only for a pulse naming one actor; ``p5`` is a later pulse
 the nodes do not record, naming Turla as Venomous Bear, a name the actor alias merge folds into Turla)
 and ``family::adversary`` (written before). ``snake`` is a name of Turla the alias merge has not
-folded yet: a pair naming it is judged by that node's pulses, not by Turla's. ``unc-it-test`` loses its
-only attribution, and with it its campaign's ``RUNS``. ``strmal`` / ``strmal2`` and ``unc-it-test`` hold
+folded yet: a pair naming it is judged by that node's pulses, not by Turla's. ``p6`` (2026-10) named Turla
+alone when its pair ``crutch::turla::p6`` was written and an earlier run linked ``tinyturla`` to Turla from
+it; it was then edited to name several actors. MISP held those actors already, so no actor node records
+``p6``: only the OTX collector's mark says so, on another indicator of the pulse (``four.it.example``,
+``several_actor_pulses``; the MISP writer adds the mark to the stored copies of up to three held IOCs of
+the pulse, so the indicator carrying the pair need not carry the mark). ``unc-it-test``
+loses its only attribution, and with it its campaign's ``RUNS``. ``strmal`` / ``strmal2`` and ``unc-it-test`` hold
 lists as plain strings, as the actor alias merge's APOC ``combine`` leaves them until its normalising
 statement runs. Step 2d runs as production runs it (its statements, through
-``_safe_run_batched``, with the pulses ``_reports_naming_several_actors`` reads, the committed reference
-and ``_attribution_params``), twice; the acceptance check runs before and after. The campaign builder
+``_safe_run_batched``, with the pulses ``_reports_naming_several_actors`` reads from the actor nodes and
+the indicator marks, the committed reference and ``_attribution_params``), twice; the acceptance check
+runs before and after, on the same pulses. The campaign builder
 then drops the malware membership whose attribution is gone, and its links name only the evidence
 that remains.
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``,
@@ -63,6 +69,8 @@ CREATE (carbon:Malware:{LABEL} {{name: 'carbon', uuid: 'u-carbon', pulse_ids: ['
 CREATE (loader:Malware:{LABEL} {{name: 'loader', uuid: 'u-loader', pulse_ids: ['p1', 'p2']}})
 CREATE (strmal:Malware:{LABEL} {{name: 'strmal', uuid: 'u-strmal', pulse_ids: 'p2'}})
 CREATE (strmal2:Malware:{LABEL} {{name: 'strmal2', uuid: 'u-strmal2'}})
+CREATE (tiny:Malware:{LABEL} {{name: 'tinyturla', uuid: 'u-tiny', pulse_ids: ['p6']}})
+CREATE (crutch:Malware:{LABEL} {{name: 'crutch', uuid: 'u-crutch', pulse_ids: ['p6']}})
 CREATE (turla)-[:SOURCED_FROM {{source_refs: ['alienvault_otx:p1', 'alienvault_otx:p2']}}]->(otx)
 CREATE (kaz)-[:SOURCED_FROM {{source_refs: ['alienvault_otx:p1', 'alienvault_otx:p2']}}]->(otx)
 CREATE (gam)-[:SOURCED_FROM {{source_refs: ['alienvault_otx:p2']}}]->(otx)
@@ -81,6 +89,7 @@ CREATE (carbon)-[:ATTRIBUTED_TO {OTX}, sources: ['otx_pulse'], report_ids: ['p1'
 CREATE (ptero)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p2']}}]->(unc)
 CREATE (strmal)-[:ATTRIBUTED_TO {OTX}, sources: 'alienvault_otx', source_refs: 'alienvault_otx:p2'}}]->(gam)
 CREATE (strmal2)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx', 'threatfox'], source_refs: 'alienvault_otx:p2'}}]->(gam)
+CREATE (tiny)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p6']}}]->(turla)
 CREATE (i1:Indicator:{LABEL} {{indicator_type: 'domain', value: 'one.it.example', uuid: 'u-i1', active: true,
         pulse_malware_actor_pairs: ['kazuar::turla::p1', 'loader::snake']}})
 CREATE (i2:Indicator:{LABEL} {{indicator_type: 'domain', value: 'two.it.example', uuid: 'u-i2', active: true,
@@ -88,7 +97,10 @@ CREATE (i2:Indicator:{LABEL} {{indicator_type: 'domain', value: 'two.it.example'
                                     'pterolnk::gamaredon group', 'pterolnk::gamaredon group::p2']}})
 CREATE (i3:Indicator:{LABEL} {{indicator_type: 'domain', value: 'three.it.example', uuid: 'u-i3', active: true,
         pulse_malware_actor_pairs: ['lockbit::venomous bear::p5']}})
-CREATE (i4:Indicator:{LABEL} {{indicator_type: 'domain', value: 'four.it.example', uuid: 'u-i4', active: true}})
+CREATE (i4:Indicator:{LABEL} {{indicator_type: 'domain', value: 'four.it.example', uuid: 'u-i4', active: true,
+        several_actor_pulses: ['p6']}})
+CREATE (i5:Indicator:{LABEL} {{indicator_type: 'domain', value: 'five.it.example', uuid: 'u-i5', active: true,
+        pulse_malware_actor_pairs: ['crutch::turla::p6']}})
 CREATE (i4)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: 'threatfox',
         source_refs: 'threatfox:9'}}]->(strmal2)
 CREATE (i1)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(kaz)
@@ -196,8 +208,13 @@ def _campaign_malware(client, driver) -> set:
 
 
 def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(client, raw_driver):
+    reference = canonical_threat_actors.load_canonical_reference()
+    # The pulses naming several actors: p2 from the actor nodes, p6 from the indicator mark only.
+    several = build_relationships._reports_naming_several_actors(client, reference)
+    assert several == ["p2", "p6"], "p3 names two names of one actor; p6 is on no actor node"
     before = _campaign_malware(client, raw_driver)
     assert ("pterolnk", "turla") in before and ("kazuar", "gamaredon group") in before
+    assert ("tinyturla", "turla") in before
     assert "alienvault_otx:p2" in _campaign_refs(raw_driver)[("turla", "RUNS")]
     assert "unc-it-test" in _runs(raw_driver)
     # An indicator path whose two links both hold a list as a plain string: two entries, never one
@@ -206,29 +223,34 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
         "alienvault_otx:p2",
         "threatfox:9",
     ]
-    # The acceptance check, by hand from the fixture: twelve same-pulse links (the partner's is not
-    # EdgeGuard's); five rest only on p2 (kazuar, pterolnk and strmal to gamaredon, pterolnk to turla
-    # and to unc-it-test), nine name p2 (strmal2 too), norefs names no pulse.
-    assert _acceptance(raw_driver, ["p2"]) == {
-        "links": 12,
-        "resting_on_several_actor_reports": 5,
-        "naming_several_actor_reports": 9,
+    # The acceptance check, by hand from the fixture: thirteen same-pulse links (the partner's is not
+    # EdgeGuard's); six rest only on p2 or p6 (kazuar, pterolnk and strmal to gamaredon, pterolnk to
+    # turla and to unc-it-test, tinyturla to turla), ten name one of them (strmal2 too), norefs names no
+    # pulse.
+    assert _acceptance(raw_driver, several) == {
+        "links": 13,
+        "resting_on_several_actor_reports": 6,
+        "naming_several_actor_reports": 10,
         "without_reports": 1,
     }
 
     first = _step_2d(client)
-    assert first["several"] == ["p2"], "p3 names two names of one actor"
-    assert (first["removed"], first["trimmed"]) == (5, 4)
+    assert first["several"] == several
+    assert (first["removed"], first["trimmed"]) == (6, 4)
     links = _attributions(raw_driver)
-    # p2 names two groups: its attributions go, in both provenance forms ...
+    # p2 names two groups: its attributions go, in both provenance forms; so does the link resting on
+    # p6, which only the indicator mark shows to name several actors ...
     for gone in (
         ("kazuar", "gamaredon group"),
         ("pterolnk", "gamaredon group"),
         ("pterolnk", "turla"),
         ("pterolnk", "unc-it-test"),
         ("strmal", "gamaredon group"),
+        ("tinyturla", "turla"),
     ):
         assert gone not in links, gone
+    # ... and p6's pair on the indicator is not linked.
+    assert ("crutch", "turla") not in links
     # A list stored as a string is trimmed as a one-entry list and written back as a list.
     assert links[("strmal2", "gamaredon group")] == ([], None)
     # The unmerged alias: 'loader::snake' is judged by snake's pulses (p2 only), so nothing links;
@@ -253,7 +275,7 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     # several actors are not linked again, and the pair carrying p2 is skipped.
     assert (second["removed"], second["trimmed"]) == (0, 0), "a second run changes nothing"
     assert _attributions(raw_driver) == links, "the pairs on the indicators bring nothing back"
-    assert _acceptance(raw_driver, ["p2"]) == {
+    assert _acceptance(raw_driver, several) == {
         "links": 8,
         "resting_on_several_actor_reports": 0,
         "naming_several_actor_reports": 0,
@@ -263,6 +285,7 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     # Campaign membership follows: malware no longer attributed to an actor leaves its campaign.
     after = _campaign_malware(client, raw_driver)
     assert ("pterolnk", "turla") not in after and ("kazuar", "gamaredon group") not in after
+    assert ("tinyturla", "turla") not in after
     assert ("kazuar", "turla") in after and ("lockbit", "gamaredon group") in after and ("lockbit", "turla") in after
     assert ("carbon", "turla") in after
     # An actor with no attribution left keeps no RUNS (its campaign retires).

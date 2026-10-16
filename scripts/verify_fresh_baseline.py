@@ -80,12 +80,13 @@ from attack_software_names import (  # noqa: E402
 )
 from canonical_threat_actors import (  # noqa: E402
     ATTRIBUTION_CHECK_QUERY,
+    INDICATOR_MARKED_REPORTS_QUERY,
     OTX_REPORT_REF_PREFIX,
     REPORT_ACTORS_QUERY,
     REPORT_ATTRIBUTION_FEEDS,
     ReferenceUnavailable,
     load_canonical_reference,
-    reports_naming_several_actors,
+    several_actor_reports,
 )
 
 # NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
@@ -788,25 +789,35 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     #      aliases of one actor count as one, canonical reference) attributes no malware, so no
     #      same-pulse attribution rests only on such pulses, unless another feed asserts it too, and
     #      none names one in its provenance (build_relationships step 2d removes and trims them).
-    #      Informational without the reference: the aliases of one actor cannot be told apart.
+    #      The pulses naming several actors are step 2d's: those whose actor nodes are several actors
+    #      and those the OTX collector marked on indicators (``several_actor_reports``).
+    #      Informational without the reference (the aliases of one actor cannot be told apart), without
+    #      a same-pulse attribution, and when neither an actor records a pulse nor an indicator a mark:
+    #      a pass there would be vacuous.
     try:
         actor_reference = load_canonical_reference()
     except ReferenceUnavailable as exc:
         actor_reference = None
         reference_error = str(exc)
     report_actors = _one(REPORT_ACTORS_QUERY)
-    several = reports_naming_several_actors(report_actors.get("reports") or [], actor_reference)
+    marked = _one(INDICATOR_MARKED_REPORTS_QUERY)
+    several = several_actor_reports(report_actors.get("reports") or [], marked.get("pulses") or [], actor_reference)
     r = _one(
         ATTRIBUTION_CHECK_QUERY,
         {"several": several, "otx_ref_prefix": OTX_REPORT_REF_PREFIX, "feeds": list(REPORT_ATTRIBUTION_FEEDS)},
     )
     r["reports_naming_several_actors"] = len(several)
     r["pulses_recorded_on_actors"] = report_actors.get("pulses") or 0
+    r["pulses_marked_on_indicators"] = len(marked.get("pulses") or [])
     if actor_reference is None:
         r["reference"] = f"unavailable ({reference_error})"
         attribution_ok = None
-    elif not r["pulses_recorded_on_actors"]:
-        # No actor records a pulse: there is nothing to judge, and a pass would be vacuous.
+    elif not r.get("links"):
+        # No same-pulse attribution: nothing to judge (2026-10; it passed as mandatory before).
+        r["reference"] = actor_reference.version
+        attribution_ok = None
+    elif not r["pulses_recorded_on_actors"] and not r["pulses_marked_on_indicators"]:
+        # No actor records a pulse and no indicator a mark: there is nothing to judge.
         r["reference"] = actor_reference.version
         attribution_ok = None
     else:
