@@ -216,6 +216,44 @@ def test_stale_copy_is_edited_with_its_stored_last_seen_and_nothing_else():
     assert misp.listings == 1, "uuid and dates come from the listing the prefetch already makes"
 
 
+def test_a_rerun_misp_holds_entirely_refreshes_without_an_event_lookup():
+    """2026-10: with a complete cross-event listing the duplicate check runs before the event
+    lookup, so a re-run whose indicators MISP holds entirely neither looks up nor creates the day's
+    event, and the stale stored copy is still refreshed."""
+    misp = _Misp([_stored("203.0.113.10", "u-stale", last_seen=None, written=NOW - timedelta(days=90))])
+    writer = mw.MISPWriter(url="https://misp.test", api_key="dummy", verify_ssl=False)
+    writer.session = MagicMock()
+    writer.session.post.side_effect = misp.post
+    lookup = MagicMock(return_value="50")
+    with patch.object(mw.MISPWriter, "_get_or_create_event", lookup):
+        assert writer.push_items([_feodo_item("203.0.113.10")], batch_size=50) == (0, 0)
+    lookup.assert_not_called()
+    assert [uuid for uuid, _ in misp.edits] == ["u-stale"]
+    assert writer.stats["attributes_refreshed"] == 1
+
+
+def test_a_copy_written_today_is_not_refreshed_when_the_listing_is_checked_first():
+    """With the cross-event check first, an indicator also held in today's event is a refresh
+    candidate before the per-event check. The copy MISP wrote last decides, and today's copy was
+    written today, so nothing is edited, as when the per-event check dropped it first."""
+    misp = _Misp(
+        [
+            _stored("203.0.113.10", "u-old", last_seen=None, written=NOW - timedelta(days=200)),
+            _stored(
+                "203.0.113.10",
+                "u-today",
+                last_seen=None,
+                written=NOW,
+                event="50",
+                info=f"EdgeGuard-feodo_tracker-{NOW.strftime('%Y-%m-%d')}",
+            ),
+        ]
+    )
+    (ok, failed), pushed, _writer = _push([_feodo_item("203.0.113.10")], misp)
+    assert (ok, failed) == (0, 0) and pushed == []
+    assert misp.edits == []
+
+
 def test_a_later_last_seen_from_the_source_is_written():
     """AbuseIPDB's blacklist sends ``lastReportedAt``: a claim later than the stored ``last_seen`` is
     the value written (the source's own date)."""
