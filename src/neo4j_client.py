@@ -3776,6 +3776,8 @@ class Neo4jClient:
         MISP peers storing lowercase ids.
 
         ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
+
+        ``is_subtechnique``: whether the normalised id is dotted (2026-10), whatever the record says.
         """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Technique", data=data)
         if mitre_id is None:
@@ -3787,7 +3789,11 @@ class Neo4jClient:
             "attack_domain": str(data.get("attack_domain") or "enterprise"),
         }
         extra_props["detection"] = data.get("detection", "")
-        extra_props["is_subtechnique"] = data.get("is_subtechnique", False)
+        # 2026-10: from the ATT&CK id, as build_relationships step 1b reads it: ATT&CK identifies a
+        # sub-technique by its parent's id and a dotted suffix (T1059.001 under T1059). The MISP round
+        # trip carries no flag, so reading it from the record wrote the default False onto every
+        # sub-technique on each sync.
+        extra_props["is_subtechnique"] = "." in mitre_id
         if data.get("name"):
             extra_props["name"] = data["name"]
         # 2026-10-16: the source ranking decides the description (any record used to set it).
