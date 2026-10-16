@@ -288,6 +288,20 @@ def _links_evidence(rel_var: str, links: str, quote: str = '"') -> str:
     )
 
 
+# Step 5 of ``build_campaign_nodes`` (2026-10-16): the active campaigns this run stamped. Step 1 stamps
+# ``c.last_updated`` with the database's clock, from which ``$run_start_at`` is read when the run
+# starts. The condition was ``duration.between(c.last_updated, datetime()).minutes < 5``, and
+# ``.minutes`` is a component of the duration, not its length: a campaign stamped two days before
+# counted (its minutes component is 0), and one Step 1 stamped more than five minutes before Step 5
+# ran did not. The count feeds a log line only.
+_CAMPAIGNS_STAMPED_THIS_RUN_CYPHER = """
+MATCH (c:Campaign)
+WHERE c.active = true
+  AND c.last_updated >= datetime($run_start_at)
+RETURN count(c) as count
+"""
+
+
 def build_campaign_nodes(neo4j_client) -> Dict:
     """
     Materialise Campaign nodes from the existing threat graph.
@@ -897,13 +911,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["campaigns_deactivated"] = cleanup_count
 
             # Step 5: Count re-activated campaigns (updated in this run, now active)
-            reactivated_query = """
-                MATCH (c:Campaign)
-                WHERE c.active = true
-                  AND duration.between(c.last_updated, datetime()).minutes < 5
-                RETURN count(c) as count
-            """
-            result = session.run(reactivated_query, timeout=NEO4J_READ_TIMEOUT)
+            result = session.run(
+                _CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, run_start_at=run_start_at, timeout=NEO4J_READ_TIMEOUT
+            )
             record = result.single()
             reactivated = record["count"] if record else 0
             if reactivated > 0:
@@ -1721,11 +1731,12 @@ def _run_alias_merge_batches(
     """Merge ``(canonical, duplicate)`` pairs in batches of ``batch_size`` with one label's
     ``statements`` (2026-10: shared by the actor alias merge and the Malware twin merge).
 
-    Per batch: the merge statement (one ``mergeNodes`` call per canonical with all of its
-    duplicates), then the uuid re-stamps and the list normalisation of the canonicals. Adds to
-    ``results["merged"]`` and ``results["restamped_edges"]``. A failed batch is logged, counted in
-    ``results["errors"]`` and the next one proceeds. Returns False, with ``results["apoc_missing"] = 1``,
-    when APOC is not installed (nothing more can merge in this run).
+    Per batch, in one transaction (2026-10-16): the merge statement (one ``mergeNodes`` call per
+    canonical with all of its duplicates), then the uuid re-stamps and the list normalisation of the
+    canonicals. Once the batch is committed, adds to ``results["merged"]`` and
+    ``results["restamped_edges"]``. A failed batch is rolled back whole (its duplicates stay and merge
+    on a later run), logged, counted in ``results["errors"]``, and the next one proceeds. Returns False,
+    with ``results["apoc_missing"] = 1``, when APOC is not installed (nothing more can merge in this run).
     """
     batches = [pairs[i : i + batch_size] for i in range(0, len(pairs), batch_size)]
     for batch_no, batch in enumerate(batches, start=1):
@@ -1733,16 +1744,28 @@ def _run_alias_merge_batches(
         for canonical, dup in batch:
             grouped.setdefault(canonical, []).append(dup)
         groups = [{"canonical": c, "duplicates": sorted(set(d))} for c, d in sorted(grouped.items())]
+        canonical_names = [g["canonical"] for g in groups]
         try:
-            rec = session.run(statements.apply, groups=groups, timeout=NEO4J_READ_TIMEOUT, **apply_params).single()
-            merged = int((rec["merged"] if rec else 0) or 0)
+            # 2026-10-16: the four statements form one transaction. Each was an auto-commit
+            # transaction of its own, so the merge, which deletes the duplicates, was committed before
+            # the re-stamps and the normalisation ran: when one of those failed, the log reported the
+            # batch as rolled back while the merge stood, and no later run repaired the canonical's
+            # moved edges, because no pair named it again once its duplicates were gone. Now a failure
+            # rolls the whole batch back and the next run merges its pairs from the start. The timeout
+            # belongs to the transaction: ``timeout=`` on ``tx.run`` would only be a query parameter.
+            with session.begin_transaction(timeout=float(NEO4J_READ_TIMEOUT)) as tx:
+                rec = tx.run(statements.apply, groups=groups, **apply_params).single()
+                merged = int((rec["merged"] if rec else 0) or 0)
+                restamped = 0
+                for restamp_cypher in (statements.restamp_out, statements.restamp_in):
+                    rs = tx.run(restamp_cypher, canonicals=canonical_names).single()
+                    restamped += int((rs["restamped"] if rs else 0) or 0)
+                # Lists stay lists (see _ACTOR_ALIAS_MERGE_LIST_PROPS).
+                tx.run(statements.normalise, canonicals=canonical_names).consume()
+                tx.commit()
+            # Counted after the commit: a batch that rolled back merged and re-stamped nothing.
             results["merged"] += merged
-            canonical_names = [g["canonical"] for g in groups]
-            for restamp_cypher in (statements.restamp_out, statements.restamp_in):
-                rs = session.run(restamp_cypher, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT).single()
-                results["restamped_edges"] += int((rs["restamped"] if rs else 0) or 0)
-            # Lists stay lists (see _ACTOR_ALIAS_MERGE_LIST_PROPS).
-            session.run(statements.normalise, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT)
+            results["restamped_edges"] += restamped
             logger.info(
                 "[%s] batch %d/%d: merged %d duplicate(s) into %d %s",
                 log_tag,
@@ -1834,9 +1857,11 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
     count and the reference pairs, and merges nothing.
 
     APOC missing: logs a WARNING and returns (``apoc_missing = 1``) instead
-    of failing the enrichment run. Any other per-batch failure is logged,
-    counted in ``errors`` and the next batch proceeds (same best-effort
-    shape as the per-tier handler in ``calibrate_cooccurrence_confidence``);
+    of failing the enrichment run. Any other per-batch failure rolls the
+    whole batch back (2026-10-16: one transaction per batch, so its
+    duplicates stay and merge on a later run), is logged, counted in
+    ``errors`` and the next batch proceeds (same best-effort shape as the
+    per-tier handler in ``calibrate_cooccurrence_confidence``);
     whole-session failures re-raise per PR-N21.
 
     Returns ``{candidates, merged, skipped_ambiguous, errors,
@@ -2100,8 +2125,8 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
 
     Dry run: ``EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE=false`` logs the pairs and merges nothing. APOC
     missing (the candidate read and the merge use it): a WARNING and ``apoc_missing = 1``; a failed
-    batch is counted in ``errors``; any other failed read re-raises (PR-N21), as in
-    ``merge_alias_duplicate_actors``.
+    batch is rolled back whole (one transaction, 2026-10-16) and counted in ``errors``; any other failed
+    read re-raises (PR-N21), as in ``merge_alias_duplicate_actors``.
 
     Returns ``{candidates, merged, base_name_targets, no_target, skipped_ambiguous, errors,
     restamped_edges, apoc_missing}``.
