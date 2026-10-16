@@ -18,6 +18,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, FrozenSet, List, Optional
 from unittest.mock import MagicMock
 
@@ -850,6 +851,12 @@ class _Result:
     def single(self):
         # The curated templates return ``count(r)`` as ``matched``; every row of a batch matches here.
         return _Record(matched=self.matched)
+
+    def consume(self):
+        # 2026-10-16: the writers read every write result inside their ``try`` (the server reports an
+        # execution error with it), so the double needs the method; nothing fails here, and the
+        # summary reports one write so the batch counter inspection stays quiet.
+        return SimpleNamespace(counters=SimpleNamespace(nodes_created=1))
 
 
 class _RecordingSession:

@@ -1742,7 +1742,7 @@ def _run_alias_merge_batches(
                 rs = session.run(restamp_cypher, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT).single()
                 results["restamped_edges"] += int((rs["restamped"] if rs else 0) or 0)
             # Lists stay lists (see _ACTOR_ALIAS_MERGE_LIST_PROPS).
-            session.run(statements.normalise, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT)
+            session.run(statements.normalise, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT).consume()
             logger.info(
                 "[%s] batch %d/%d: merged %d duplicate(s) into %d %s",
                 log_tag,
