@@ -457,6 +457,34 @@ class TestGraphExplorer:
             ("technique:T1059", "tactic:execution", "IN_TACTIC"),
         ]
 
+    def test_vulnerabilities_view_returns_the_description_with_its_source(self, monkeypatch):
+        """2026-10-16: a CVE node of the view carries ``description_source`` with the description, both
+        taken from one node of the CVE's twins (``head(collect(...))`` of each would skip a null on one
+        node and could pair one node's text with the other's source)."""
+        row = {
+            "cve_id": "CVE-2015-5477",
+            "cvss_score": None,
+            "severity": "UNKNOWN",
+            "attack_vector": None,
+            "zones": ["global"],
+            "cisa_exploit_add": "2022-01-10",
+            "cisa_action_due": "2022-07-10",
+            "cisa_notes": "",
+            "cisa_cwes": [],
+            "version_constraints": None,
+            "description": "KEV text",
+            "description_source": "cisa_kev",
+        }
+        session = _Session([("WHERE (n:Vulnerability OR n:CVE)", _Result([row]))])
+        data = _rest(monkeypatch, session).get("/graph/explore?view=vulnerabilities").json()
+        node = next(n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2015-5477")
+        assert (node["description"], node["description_source"]) == ("KEV text", "cisa_kev")
+        query = session.calls[0][0]
+        assert (
+            "head([d IN collect([n.description, n.description_source]) WHERE d[0] IS NOT NULL]) AS described" in query
+        )
+        assert "head(collect(n.description))" not in query
+
     def test_the_page_styles_every_edge_type_the_api_emits(self):
         page = (ROOT / "docs" / "visualization.html").read_text()
         src = (ROOT / "src" / "query_api.py").read_text()
@@ -542,6 +570,35 @@ _TLP_NODES = {
     "indicators": ("Indicator", {"value": "203.0.113.5", "indicator_type": "ipv4", "tlp": "amber"}),
     "vulnerabilities": ("CVE", {"cve_id": "CVE-2021-44228", "tlp": "white"}),
 }
+
+
+class TestGraphqlDescriptionSource:
+    """2026-10-16: every node type with a description returns the source the ranking kept
+    (``description_source``), null when the node names none."""
+
+    @pytest.mark.parametrize("field", sorted(set(_TLP_NODES) - {"campaigns", "indicators"}))
+    def test_every_list_query_returns_the_description_source(self, monkeypatch, field):
+        label, node = _TLP_NODES[field]
+        node = dict(node, description="text", description_source="misp")
+        session = _Session([(f"MATCH (n:{label})", _Result([{"n": node}, {"n": dict(node, description_source=None)}]))])
+        monkeypatch.setattr(graphql_api, "_client", _ConnectedClient(session))
+        result = graphql_api.schema.execute_sync(f"{{ {field} {{ description descriptionSource }} }}")
+        assert result.errors is None, result.errors
+        assert result.data == {
+            field: [
+                {"description": "text", "descriptionSource": "misp"},
+                {"description": "text", "descriptionSource": None},
+            ]
+        }
+
+    def test_cve_returns_its_description_source(self, monkeypatch):
+        cve = {"cve_id": "CVE-2015-5477", "description": "KEV text", "description_source": "cisa_kev"}
+        row = {"c": cve, "cv40": None, "cv31": None, "cv30": None, "cv2": None}
+        session = _Session([("MATCH (c:CVE {cve_id: $cve_id})", _Result(single=row))])
+        monkeypatch.setattr(graphql_api, "_client", _ConnectedClient(session))
+        result = graphql_api.schema.execute_sync('{ cve(cveId: "CVE-2015-5477") { description descriptionSource } }')
+        assert result.errors is None, result.errors
+        assert result.data == {"cve": {"description": "KEV text", "descriptionSource": "cisa_kev"}}
 
 
 class TestGraphqlTlp:

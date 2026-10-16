@@ -49,6 +49,7 @@ from canonical_threat_actors import (  # noqa: E402
     reference_merge_candidates,
 )
 from cve_feed_enrichment import enrich_cve_epss  # noqa: E402
+from description_ranking import ranking_for_label  # noqa: E402
 from neo4j_client import (  # noqa: E402
     NEO4J_READ_TIMEOUT,
     _dedup_concat_clause,
@@ -1273,8 +1274,11 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "name": "discard",
     "uuid": "discard",
     "mitre_id": "discard",
-    # node scalars (merge_node_with_source / merge_actor / decay job)
+    # node scalars (merge_node_with_source / merge_actor / decay job). The merge statement sets
+    # ``description`` and ``description_source`` afterwards to the pair the source ranking keeps
+    # (2026-10-16, ``_alias_merge_apply_cypher``), so "discard" never splits them.
     "description": "discard",
+    "description_source": "discard",
     "confidence_score": "discard",
     "tag": "discard",
     "active": "discard",
@@ -1438,6 +1442,10 @@ def _strongest_on_parallel_edges(direction: str) -> str:
 # Parallel edges that collapse keep the union of their provenance lists
 # (``"combine"``) and, set on every edge of the group before the merge, the
 # strongest evidence's label and confidence (``_strongest_on_parallel_edges``).
+# 2026-10-16: the merged node keeps the description, with its ``description_source``, that the source
+# ranking keeps among the group (``description_ranking.DescriptionRanking.best_of_cypher``): ``"discard"``
+# kept the canonical's description and could take ``description_source`` from a duplicate where the
+# canonical had none, so the node could name a source that did not write its text.
 # 2026-10: the statements are built per label (``_alias_merge_statements``) so the Malware
 # twin merge (JOB 6) runs the same merge; the actor statements are unchanged.
 def _alias_merge_apply_cypher(
@@ -1449,6 +1457,19 @@ def _alias_merge_apply_cypher(
     is never MITRE-sourced, and also meets ``duplicate_guard`` when one is given (a condition on ``d``
     and ``c``; the actor merge has none). ``list_props`` are wrapped back into lists after the merge."""
     duplicate_condition = f"\n  AND {duplicate_guard}" if duplicate_guard else ""
+    ranking = ranking_for_label(label)
+    kept_description = (
+        f",\n     {ranking.best_of_cypher('c', 'dups')} AS described\n"
+        "WITH c, n_dups, dups, described.description AS kept_description,\n"
+        "     described.description_source AS kept_description_source"
+        if ranking is not None
+        else ""
+    )
+    set_description = (
+        "node.description = kept_description,\n    node.description_source = kept_description_source,\n    "
+        if ranking is not None
+        else ""
+    )
     return (
         f"""
 UNWIND $groups AS g
@@ -1465,8 +1486,9 @@ SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name]),
     c.tlp = reduce(_t = c.tlp, _d IN dups | """
         + _tlp_most_restrictive_clause("_t", "_d.tlp")
         + """)
-WITH c, size(dups) AS n_dups, dups
-"""
+WITH c, size(dups) AS n_dups, dups"""
+        + kept_description
+        + "\n"
         + _strongest_on_parallel_edges("out")
         + _strongest_on_parallel_edges("in")
         + """CALL apoc.refactor.mergeNodes([c] + dups, {
@@ -1476,6 +1498,7 @@ WITH c, size(dups) AS n_dups, dups
 })
 YIELD node
 SET """
+        + set_description
         + ",\n    ".join(f"node.{p} = {_list_or_wrapped('node.' + p)}" for p in list_props)
         + """,
     node.last_updated = datetime()

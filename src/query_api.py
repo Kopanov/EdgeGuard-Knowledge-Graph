@@ -457,6 +457,13 @@ class ActorSummaryResponse(BaseModel):
     name: str
     aliases: List[str] = []
     description: Optional[str] = None
+    description_source: Optional[str] = Field(
+        default=None,
+        description=(
+            "The source whose text `description` is (its canonical id, e.g. 'mitre_attck'; 2026-10-16); "
+            "null when the actor has no description or it was written before 2026-10-16."
+        ),
+    )
     sophistication: Optional[str] = None
     motivation: Optional[str] = None
     confidence_score: Optional[float] = None
@@ -1399,16 +1406,18 @@ async def graph_explore(
                          head(collect(n.cisa_notes)) AS cisa_notes,
                          head(collect(n.cisa_cwes)) AS cisa_cwes,
                          head(collect(n.version_constraints)) AS version_constraints,
-                         head(collect(n.description)) AS description
+                         // 2026-10-16: the description with the source it came from, both of one node.
+                         head([d IN collect([n.description, n.description_source]) WHERE d[0] IS NOT NULL]) AS described
                     WITH cve_id, cvss_score, severity, attack_vector,
                          apoc.coll.toSet(zones_raw) AS zones,
                          cisa_exploit_add, cisa_action_due, cisa_notes,
-                         cisa_cwes, version_constraints, description
+                         cisa_cwes, version_constraints, described[0] AS description,
+                         described[1] AS description_source
                     ORDER BY coalesce(cvss_score, 0) DESC
                     LIMIT $limit
                     RETURN cve_id, cvss_score, severity, attack_vector, zones,
                            cisa_exploit_add, cisa_action_due, cisa_notes,
-                           cisa_cwes, version_constraints, description
+                           cisa_cwes, version_constraints, description, description_source
                 """
                 result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 vuln_ids = []
@@ -1429,6 +1438,7 @@ async def graph_explore(
                             "cisa_cwes": r.get("cisa_cwes", []),
                             "version_constraints": r.get("version_constraints"),
                             "description": (r.get("description") or "")[:200],
+                            "description_source": r.get("description_source"),
                             "sector": r.get("zones", ["global"])[0] if r.get("zones") else "global",
                         },
                     )
@@ -1695,7 +1705,7 @@ _ACTOR_SUMMARY_CYPHER = """
     OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
       WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
     WITH a, malware_names, technique_rows, collect(DISTINCT c.name) AS campaign_names
-    RETURN a {.name, .aliases, .description, .sophistication, .motivation,
+    RETURN a {.name, .aliases, .description, .description_source, .sophistication, .motivation,
               .primary_motivation, .confidence_score, .zone, .source} AS actor,
            a.name = toLower(trim($name)) AS resolved_by_name,
            malware_names[0..10] AS malware,
@@ -1749,6 +1759,7 @@ async def actor_summary(request: Request, name: str):
             name=actor.get("name", ""),
             aliases=_as_str_list(actor.get("aliases")),
             description=actor.get("description"),
+            description_source=actor.get("description_source"),
             sophistication=actor.get("sophistication"),
             motivation=actor.get("motivation") or actor.get("primary_motivation"),
             confidence_score=actor.get("confidence_score"),

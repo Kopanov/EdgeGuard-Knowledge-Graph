@@ -729,6 +729,20 @@ class TestActorSummary:
         resp = client.get("/actors/apt28/summary")
         assert resp.status_code == 503
 
+    def test_the_description_names_its_source(self, monkeypatch):
+        """2026-10-16: the profile returns ``description_source`` (the source the ranking kept, read by the
+        query with the description), null for an actor written before."""
+        for stored, expected in (({"description_source": "mitre_attck"}), "mitre_attck"), ({}, None):
+            record = _actor_record()
+            record["actor"].update(stored)
+            session = _FakeSession(results=[_FakeResult(single_record=record)])
+            monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(session))
+            resp = client.get("/actors/APT28/summary")
+            assert resp.status_code == 200
+            assert resp.json()["description_source"] == expected
+            cypher, _params = session.calls[0]
+            assert ".description, .description_source," in cypher
+
 
 # ---------------------------------------------------------------------------
 # alert_processor — bound $indicator is normalized

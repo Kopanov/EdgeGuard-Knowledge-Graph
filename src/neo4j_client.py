@@ -41,6 +41,13 @@ from cvss_selection import (  # noqa: E402
     UNKNOWN_SEVERITY,
 )
 from cvss_selection import clamp_cvss_score as clamp_cvss_score  # noqa: E402  — re-export (moved 2026-10)
+from description_ranking import (  # noqa: E402  — 2026-10-16: whose text a node's description is
+    CVE_DESCRIPTIONS,
+    ENTITY_DESCRIPTIONS,
+    RESILMESH_NATIVE_SOURCE,
+    RankedDescription,
+    ranking_for_label,
+)
 from ioc_normalize import (
     canonicalize_lookup,  # noqa: E402  — alert-path (type, value) parity with the sync vocabulary (post-#126 hardening)
 )
@@ -840,9 +847,9 @@ def _tlp_most_restrictive_clause(existing: str, incoming: str) -> str:
 
 def _set_if_absent_clause(existing: str, incoming: str) -> str:
     """2026-10: keep ``existing`` when it holds a value, else take ``incoming`` (an empty string
-    counts as no value). For text a record may supply but must not replace: a CVE's description
-    and dates from any record but NVD's (``_CVE_RECORD_TEXT_PROPS``), a Malware / ThreatActor / Tool
-    description from any record but MITRE's (``_entity_description_fill``)."""
+    counts as no value). For values a record may supply but must not replace: a CVE's dates from any
+    record but NVD's (``_CVE_RECORD_DATE_PROPS``). A description follows the source ranking instead
+    (``description_ranking``, 2026-10-16)."""
     return f"CASE WHEN {existing} IS NULL OR {existing} = '' THEN {incoming} ELSE {existing} END"
 
 
@@ -982,49 +989,37 @@ _NVD_CVSS_VERSIONS = (
     ("HAS_CVSS_v2", "cvss_v2_data"),
 )
 
-# 2026-10: the CVE record's text and dates. NVD's record (``nvd_record``) sets them; any other record
-# (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has
-# none (``_set_if_absent_clause``), so NVD's text wins whatever the order in which records are merged.
-# Until 2026-10 the record merged last set them: an OTX pulse indicator of type CVE wrote its raw
-# ``OTX_META`` JSON as the description, an OTX pulse reference "Referenced in OTX pulse: <name>", a KEV
-# record CISA's short description, a CISA ICS record the advisory's dates. On a CVE without NVD's record
-# the first record that fills a property keeps it, also against a later revision of the same source's
-# record (a revised CISA ICS advisory, an edited KEV text): no ranking of the other sources exists yet.
-_CVE_RECORD_TEXT_PROPS = ("description", "published", "last_modified")
+# 2026-10: the CVE record's dates. NVD's record (``nvd_record``) sets them; any other record fills them
+# only where the node has none (``_set_if_absent_clause``), so NVD's dates win whatever the order in which
+# records are merged. Until 2026-10 the record merged last set them (a CISA ICS record the advisory's
+# dates). The dates stay outside the description's source ranking (2026-10-16): another record's dates
+# are not the CVE's (a CISA ICS record gives the advisory's release dates; KEV, OTX and the STIX flow give
+# none), and CISA ICS is the only other source in MISP that gives them, one attribute per CVE (MISPWriter
+# skips an advisory's CVE that MISP already holds), so the first record that fills them is the same in
+# any order. The description and its source: ``description_ranking``.
+_CVE_RECORD_DATE_PROPS = ("published", "last_modified")
 
 
-def _batch_record_text_clauses(node: str, row: str) -> List[str]:
-    """SET items for ``_CVE_RECORD_TEXT_PROPS`` in an UNWIND batch (2026-10): a row from NVD's record
+def _batch_record_date_clauses(node: str, row: str) -> List[str]:
+    """SET items for ``_CVE_RECORD_DATE_PROPS`` in an UNWIND batch (2026-10): a row from NVD's record
     (``<row>.nvd_record``) sets the property when it carries a value, any other row fills it."""
     return [
         f"{node}.{prop} = CASE WHEN {row}.nvd_record THEN coalesce({row}.{prop}, {node}.{prop}) "
         f"ELSE {_set_if_absent_clause(f'{node}.{prop}', f'{row}.{prop}')} END"
-        for prop in _CVE_RECORD_TEXT_PROPS
+        for prop in _CVE_RECORD_DATE_PROPS
     ]
 
 
-# 2026-10: the source whose record sets a Malware, ThreatActor or Tool description: MITRE ATT&CK, the
-# record MITRE delivered (``mitre_attck``, the MITRE collector's tag, carried by its MISP attributes and
-# by the STIX flow's objects of a MITRE event). A record from any other source fills the description
-# only where the node has none (``_set_if_absent_clause``), so ATT&CK's text stays whatever the order of
-# the merges. Until 2026-10 the record merged last set it: the OTX collector gave every malware family
-# and adversary of a pulse the pulse's description, and the sync took a malware attribute's raw
-# ``MITRE_USES_TECHNIQUES`` block as one, so Cobalt Strike or APT29 showed a report's text or a JSON
-# block depending on the order of the events in the sync.
-_ENTITY_DESCRIPTION_SOURCE = "mitre_attck"
+# 2026-10-16: properties written only through the description's source ranking (``description_ranking``),
+# never as extra or fill properties of ``merge_node_with_source``.
+_RANKED_DESCRIPTION_PROPS = frozenset({"description", "description_source"})
 
-
-def _entity_description_fill(data: Dict, source_id: str, extra_props: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The description of a Malware / ThreatActor / Tool record (2026-10): MITRE's record
-    (``_ENTITY_DESCRIPTION_SOURCE``) sets it and it is added to ``extra_props``; any other record's is
-    returned as the ``fill_props`` of ``merge_node_with_source``. None when the record has no text."""
-    description = data.get("description")
-    if not isinstance(description, str) or not description.strip():
-        return None
-    if source_id == _ENTITY_DESCRIPTION_SOURCE:
-        extra_props["description"] = description
-        return None
-    return {"description": description}
+# 2026-10-16: the description of a ``merge_vulnerabilities_batch`` row by the source ranking. Rows of one
+# batch come from one source; two rows of one batch for one node are decided against the node as the
+# statement found it, and the later row's text is kept when both win (the same source revising itself).
+_BATCH_RANKED_DESCRIPTION = CVE_DESCRIPTIONS.set_cypher(
+    "n", "n, item", "item.description", "item.description_source", "item.description_rank"
+)
 
 
 # 2026-10: CISA's SSVC decision points, which only NVD's record supplies (``nvd_collector.cisa_ssvc``):
@@ -2354,6 +2349,7 @@ class Neo4jClient:
         source_id: str,
         extra_props: Dict = None,
         fill_props: Optional[Dict] = None,
+        description: Optional[RankedDescription] = None,
     ) -> bool:
         """
         Merge a node with proper source tracking.
@@ -2378,6 +2374,11 @@ class Neo4jClient:
             extra_props: Additional properties to set on the node (beyond standard fields)
             fill_props: Properties set only where the node has no value (2026-10,
                 ``_set_if_absent_clause``); a key also in ``extra_props`` is set from there
+            description: The record's description with its source and that source's rank
+                (2026-10-16): set with ``description_source`` when the source ranks at least as
+                high as the stored description's (``description_ranking``). A label with a
+                description ranking takes ``description`` and ``description_source`` only from
+                here, never from ``extra_props`` or ``fill_props``.
 
         Returns:
             True if successful
@@ -2385,6 +2386,15 @@ class Neo4jClient:
         if not self.driver:
             logger.error("Cannot merge node: no connection")
             return False
+
+        # 2026-10-16: refused before the statement is built, so a caller that bypasses the ranking fails
+        # loudly instead of being logged as a terminal write error.
+        ranking = ranking_for_label(label)
+        bypass = _RANKED_DESCRIPTION_PROPS & (set(extra_props or {}) | set(fill_props or {}))
+        if ranking is not None and bypass:
+            raise ValueError(f"merge_node_with_source: {label} {sorted(bypass)} are written through the source ranking")
+        if description is not None and ranking is None:
+            raise ValueError(f"merge_node_with_source: {label} has no description ranking")
 
         try:
             # Validate property names before interpolating into Cypher.
@@ -2681,16 +2691,25 @@ class Neo4jClient:
                         query += f", n.{prop_name} = ${prop_name}"
                     params_extra[prop_name] = prop_value
 
-            # 2026-10: text a record may supply but must not replace (a CVE's description and dates
-            # from any record but NVD's, ``merge_cve``; a Malware / ThreatActor / Tool description from
-            # any record but MITRE's, ``_entity_description_fill``) is set only where the node has none.
-            # The parameter is prefixed so it cannot collide with a standard parameter of this statement.
+            # 2026-10: values a record may supply but must not replace (a CVE's dates from any record but
+            # NVD's, ``merge_cve``) are set only where the node has none. The parameter is prefixed so it
+            # cannot collide with a standard parameter of this statement.
             for prop_name, prop_value in (fill_props or {}).items():
                 _validate_prop_name(prop_name)
                 if prop_name in extra_props or prop_value is None or prop_value == "":
                     continue
                 query += f", n.{prop_name} = {_set_if_absent_clause(f'n.{prop_name}', f'$fill_{prop_name}')}"
                 params_extra[f"fill_{prop_name}"] = prop_value
+
+            # 2026-10-16: the description and its source, by the source ranking of the label
+            # (``description_ranking``), decided once after every other property is set.
+            if description is not None and ranking is not None:
+                query += "\n" + ranking.set_cypher(
+                    "n", "n", "$ranked_description", "$ranked_description_source", "$ranked_description_rank"
+                )
+                params_extra["ranked_description"] = description.text
+                params_extra["ranked_description_source"] = description.source
+                params_extra["ranked_description_rank"] = description.rank
 
             if params_extra:
                 key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
@@ -3045,14 +3064,21 @@ class Neo4jClient:
         # dates via SOURCED_FROM edges, but the node itself would drop
         # ``published`` / ``last_modified`` without this promotion — exactly
         # the same bug shape PR-N19 Fix #1 closed for ``merge_cve``.
-        # 2026-10: description and dates as in ``merge_cve`` — set by NVD's record, filled by any other.
+        # 2026-10: dates as in ``merge_cve`` — set by NVD's record, filled by any other; the description
+        # by the source ranking (2026-10-16).
         fill_props: Dict[str, Any] = {}
-        record_text = extra_props if data.get("nvd_record") else fill_props
-        for prop in _CVE_RECORD_TEXT_PROPS:
+        record_dates = extra_props if data.get("nvd_record") else fill_props
+        for prop in _CVE_RECORD_DATE_PROPS:
             if data.get(prop):
-                record_text[prop] = data[prop]
+                record_dates[prop] = data[prop]
         return self.merge_node_with_source(
-            "Vulnerability", key_props, data, source_id, extra_props=extra_props or None, fill_props=fill_props or None
+            "Vulnerability",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props or None,
+            fill_props=fill_props or None,
+            description=CVE_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
@@ -3127,8 +3153,10 @@ class Neo4jClient:
         with matching ``HAS_CVSS_*`` relationships (ResilMesh schema), then sets the node's
         ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector`` from those sub-nodes
         (2026-10; the record's own ``cvss_score`` / ``severity`` / ``attack_vector`` are not written).
-        ``description``, ``published`` and ``last_modified`` are set by NVD's record (``nvd_record``)
-        and only filled, where the node has none, by any other record (2026-10).
+        ``published`` and ``last_modified`` are set by NVD's record (``nvd_record``) and only filled,
+        where the node has none, by any other record (2026-10). ``description`` and
+        ``description_source`` follow the source ranking NVD > CISA KEV > CISA ICS > any other source
+        (``description_ranking.CVE_DESCRIPTIONS``, 2026-10-16).
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -3177,16 +3205,18 @@ class Neo4jClient:
         # L5051 correctly writes both; the MISP-sourced path (the
         # one used for the 99,664 CVEs in the 2026-04-22 baseline)
         # did not. Fixes the gap Bravo caught.
-        # 2026-10: ``description``, ``published`` and ``last_modified`` are set by NVD's record only
-        # (``nvd_record``, set by the sync for an NVD attribute with NVD_META); any other record fills
-        # them where the node has none (``_CVE_RECORD_TEXT_PROPS``). Before, the record merged last
-        # set them, so a CVE showed OTX's raw pulse JSON, a pulse name or CISA's short text instead of
-        # NVD's description depending on the order of the events in the sync.
+        # 2026-10: ``published`` and ``last_modified`` are set by NVD's record only (``nvd_record``, set
+        # by the sync for an NVD attribute with NVD_META); any other record fills them where the node has
+        # none (``_CVE_RECORD_DATE_PROPS``). Before, the record merged last set them, and the description
+        # with them, so a CVE showed OTX's raw pulse JSON, a pulse name or CISA's short text instead of
+        # NVD's description depending on the order of the events in the sync. 2026-10-16: the description
+        # follows the source ranking (``description_ranking``), so on a CVE without NVD's record the
+        # KEV's text wins over CISA ICS's, and CISA ICS's over any other, in any order.
         fill_props: Dict = {}
-        record_text = extra_props if data.get("nvd_record") else fill_props
-        for prop in _CVE_RECORD_TEXT_PROPS:
+        record_dates = extra_props if data.get("nvd_record") else fill_props
+        for prop in _CVE_RECORD_DATE_PROPS:
             if data.get(prop):
-                record_text[prop] = data[prop]
+                record_dates[prop] = data[prop]
         # 2026-10 (fresh-baseline PR, ResilMesh conformance finding F2): the four
         # ResilMesh CVE properties ``cwe``, ``ref_tags``, ``cpe_type`` and
         # ``result_impacts`` were rehydrated from NVD_META into the item but never
@@ -3213,7 +3243,13 @@ class Neo4jClient:
                 extra_props["status"] = _status_clean
 
         ok = self.merge_node_with_source(
-            "CVE", key_props, data, source_id, extra_props=extra_props or None, fill_props=fill_props or None
+            "CVE",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props or None,
+            fill_props=fill_props or None,
+            description=CVE_DESCRIPTIONS.record(data.get("description"), source_id),
         )
         if not ok:
             return False
@@ -3447,8 +3483,9 @@ class Neo4jClient:
               indicators from dozens of unrelated threats.
         Defense-in-depth: Q2/Q9 Cypher WHERE also filter placeholders.
 
-        ``description`` (2026-10): MITRE's record (``source_id`` ``mitre_attck``) sets it; a record from
-        any other source fills it only where the node has none (``_entity_description_fill``).
+        ``description`` and ``description_source`` (2026-10-16): the source ranking MITRE ATT&CK > a curated
+        source > any other source (``description_ranking.ENTITY_DESCRIPTIONS``); until then MITRE's record
+        set the description and any other record only filled an empty one.
         """
         # PR-N10: reject placeholder names at ingest. Canonicalization
         # (NFC + strip + lower) happens inside is_placeholder_name so
@@ -3493,12 +3530,16 @@ class Neo4jClient:
             # Source-report provenance: every OTX pulse that mentioned this malware
             # (incl. the extra pulses de-duplication folded into ``report_ids``).
             extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
-        # 2026-10: MITRE's record sets the description, any other record only fills it (until then the
-        # record merged last set it, an OTX pulse's text or a raw JSON block among them).
-        fill_props = _entity_description_fill(data, source_id, extra_props)
+        # 2026-10: the record merged last used to set the description (an OTX pulse's text or a raw JSON
+        # block among them); 2026-10-16: the source ranking decides (``description_ranking``).
         _mark_deprecated(data, extra_props)
         return self.merge_node_with_source(
-            "Malware", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+            "Malware",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
@@ -3517,7 +3558,7 @@ class Neo4jClient:
         ``ThreatActor{name:"unknown"}`` becomes a false-hub to every
         Malware whose attributed_to is "unknown" / "unspecified" / etc.
 
-        ``description``: as in ``merge_malware`` (2026-10).
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
         """
         raw_name = data.get("name")
         if is_placeholder_name(raw_name):
@@ -3558,11 +3599,15 @@ class Neo4jClient:
             extra_props["primary_motivation"] = data["primary_motivation"]
         if data.get("resource_level"):
             extra_props["resource_level"] = data["resource_level"]
-        # 2026-10: as in merge_malware — MITRE's record sets the description, any other only fills it.
-        fill_props = _entity_description_fill(data, source_id, extra_props)
+        # 2026-10-16: as in merge_malware — the source ranking decides the description.
         _mark_deprecated(data, extra_props)
         return self.merge_node_with_source(
-            "ThreatActor", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+            "ThreatActor",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
     def _normalize_mitre_id(self, raw: Any, *, label: str, data: Dict) -> Optional[str]:
@@ -3616,6 +3661,8 @@ class Neo4jClient:
         Cypher MERGE key agrees with the case-insensitive uuid
         computation. Prevents split-node / shared-uuid bugs on
         MISP peers storing lowercase ids.
+
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
         """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Technique", data=data)
         if mitre_id is None:
@@ -3630,15 +3677,24 @@ class Neo4jClient:
         extra_props["is_subtechnique"] = data.get("is_subtechnique", False)
         if data.get("name"):
             extra_props["name"] = data["name"]
-        if data.get("description"):
-            extra_props["description"] = data["description"]
+        # 2026-10-16: the source ranking decides the description (any record used to set it).
         _mark_deprecated(data, extra_props)
-        return self.merge_node_with_source("Technique", key_props, data, source_id, extra_props=extra_props)
+        return self.merge_node_with_source(
+            "Technique",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
+        )
 
     def merge_tactic(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tactic node with source tracking.
 
-        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization."""
+        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization.
+
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
+        """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Tactic", data=data)
         if mitre_id is None:
             return False
@@ -3649,17 +3705,23 @@ class Neo4jClient:
         }
         if data.get("name"):
             extra_props["name"] = data["name"]
-        if data.get("description"):
-            extra_props["description"] = data["description"]
+        # 2026-10-16: the source ranking decides the description (any record used to set it).
         _mark_deprecated(data, extra_props)
-        return self.merge_node_with_source("Tactic", key_props, data, source_id, extra_props=extra_props)
+        return self.merge_node_with_source(
+            "Tactic",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
+        )
 
     def merge_tool(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tool node with source tracking.
 
         PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization.
 
-        ``description``: as in ``merge_malware`` (2026-10).
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
         """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Tool", data=data)
         if mitre_id is None:
@@ -3676,11 +3738,15 @@ class Neo4jClient:
             extra_props["name"] = data["name"]
         if data.get("aliases"):
             extra_props["aliases"] = data["aliases"]
-        # 2026-10: as in merge_malware — MITRE's record sets the description, any other only fills it.
-        fill_props = _entity_description_fill(data, source_id, extra_props)
+        # 2026-10-16: as in merge_malware — the source ranking decides the description.
         _mark_deprecated(data, extra_props)
         return self.merge_node_with_source(
-            "Tool", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+            "Tool",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
     @retry_with_backoff(max_retries=3)
@@ -4306,8 +4372,13 @@ class Neo4jClient:
                     # extra_props builder shape. Each field is conditional
                     # on presence so the batch_item stays compact for
                     # items that don't carry enrichment.
-                    if item.get("description"):
-                        batch_item["description"] = item["description"]
+                    # 2026-10-16: the description with its source and that source's rank (the batch's
+                    # source), applied by the source ranking below (``description_ranking``).
+                    ranked = CVE_DESCRIPTIONS.record(item.get("description"), source_id)
+                    if ranked is not None:
+                        batch_item["description"] = ranked.text
+                        batch_item["description_source"] = ranked.source
+                        batch_item["description_rank"] = ranked.rank
                     if item.get("cvss_score") is not None:
                         batch_item["cvss_score"] = item["cvss_score"]
                     if item.get("severity"):
@@ -4349,7 +4420,7 @@ class Neo4jClient:
                         batch_item["affected_products"] = item["affected_products"]
                     if item.get("tlp"):
                         batch_item["tlp"] = str(item["tlp"])  # 2026-10: TLP level from the tlp:<level> MISP tag
-                    # 2026-10: NVD's record sets description and dates; any other record only fills them.
+                    # 2026-10: NVD's record sets the dates; any other record only fills them.
                     batch_item["nvd_record"] = bool(item.get("nvd_record"))
 
                     batch_data.append(batch_item)
@@ -4400,9 +4471,9 @@ class Neo4jClient:
                     // ``coalesce(item.X, n.X)`` shape so partial-item
                     // batches don't clobber previously-set values with
                     // NULL — matches merge_cve's extra_props semantics.
-                    // 2026-10: description and dates as in merge_cve — NVD's record sets them,
-                    // any other record fills them where the node has none.
-                    {", ".join(_batch_record_text_clauses("n", "item"))},
+                    // 2026-10: dates as in merge_cve — NVD's record sets them, any other record
+                    // fills them where the node has none; the description follows below.
+                    {", ".join(_batch_record_date_clauses("n", "item"))},
                     n.cvss_score = coalesce(item.cvss_score, n.cvss_score),
                     n.severity = coalesce(item.severity, n.severity),
                     n.attack_vector = coalesce(item.attack_vector, n.attack_vector),
@@ -4419,6 +4490,7 @@ class Neo4jClient:
                     n.ref_tags = coalesce(item.ref_tags, n.ref_tags),
                     n.reference_urls = coalesce(item.reference_urls, n.reference_urls),
                     n.affected_products = coalesce(item.affected_products, n.affected_products)
+                {_BATCH_RANKED_DESCRIPTION}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
@@ -6471,9 +6543,12 @@ class Neo4jClient:
         Stamps the same deterministic n.uuid as the MISP path so a node MERGEd
         through either path gets the same uuid.
 
-        ``description`` only fills a node that has none (2026-10), as any record but NVD's does on
-        the MISP path; before, it replaced the stored text and a call without one removed it. ``status``
-        is set when the call carries one and kept when it does not (2026-10).
+        ``description`` follows the source ranking of the MISP path (2026-10-16,
+        ``description_ranking.CVE_DESCRIPTIONS``) with ``description_source`` ``resilmesh``, a source the
+        registry does not know: it fills a node without a description and replaces only the text of
+        another unregistered source whose id sorts after it, never a feed's. Until 2026-10 it replaced the
+        stored text and a call without one removed it. ``status`` is set when the call carries one and kept
+        when it does not (2026-10).
         """
         # PR #37 (Bug Hunter Tier S A3): refuse to merge when ``cve_id`` is
         # missing. Previously this defaulted to the sentinel
@@ -6508,10 +6583,11 @@ class Neo4jClient:
         ON MATCH SET v.edgeguard_enriched = CASE WHEN v.edgeguard_managed = true THEN v.edgeguard_enriched ELSE true END
         SET v.name = coalesce(v.name, $name)
         SET v.status = coalesce($status, v.status),
-            v.description = {_set_if_absent_clause("v.description", "$description")},
             v.last_updated = datetime(),
             v.uuid = coalesce(v.uuid, $vuln_uuid)
+        {CVE_DESCRIPTIONS.set_cypher("v", "v", "$description", "$description_source", "$description_rank")}
         """
+        ranked = CVE_DESCRIPTIONS.record(data.get("description"), RESILMESH_NATIVE_SOURCE)
         try:
             with self.driver.session() as session:
                 session.run(
@@ -6520,7 +6596,9 @@ class Neo4jClient:
                     cve_id=cve_id,
                     vuln_uuid=vuln_uuid,
                     status=data.get("status"),
-                    description=data.get("description"),
+                    description=ranked.text if ranked else None,
+                    description_source=RESILMESH_NATIVE_SOURCE,
+                    description_rank=ranked.rank if ranked else 0,
                     timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated ResilMesh Vulnerability: {name}")
@@ -6537,9 +6615,11 @@ class Neo4jClient:
         extensions (CISA KEV, reference_urls). Both produce compatible
         CVE nodes keyed on ``cve_id`` with the same deterministic n.uuid.
 
-        ``description``, ``published`` and ``last_modified`` only fill a node that has none
-        (2026-10): NVD's record, merged by ``merge_cve``, sets them, so a write here never replaces
-        NVD's text, and a call without them no longer removes the stored values. ``cpe_type``,
+        ``published`` and ``last_modified`` only fill a node that has none (2026-10): NVD's record, merged
+        by ``merge_cve``, sets them, and a call without them no longer removes the stored values.
+        ``description`` follows the source ranking (2026-10-16, ``description_ranking``) with
+        ``description_source`` ``resilmesh``, below every registered feed, so a write here never replaces a
+        feed's text (NVD's, CISA's, ...) and fills a node without one. ``cpe_type``,
         ``result_impacts``, ``ref_tags`` and ``cwe`` are set when the call carries them and kept when
         it does not (2026-10; a call without them removed NVD's lists).
         """
@@ -6549,8 +6629,7 @@ class Neo4jClient:
         MERGE (c:CVE {{cve_id: $cve_id}})
         ON CREATE SET c.uuid = $cve_uuid, c.edgeguard_managed = true
         ON MATCH SET c.edgeguard_enriched = CASE WHEN c.edgeguard_managed = true THEN c.edgeguard_enriched ELSE true END
-        SET c.description = {_set_if_absent_clause("c.description", "$description")},
-            c.published = {_set_if_absent_clause("c.published", "$published")},
+        SET c.published = {_set_if_absent_clause("c.published", "$published")},
             c.last_modified = {_set_if_absent_clause("c.last_modified", "$last_modified")},
             c.cpe_type = coalesce($cpe_type, c.cpe_type),
             c.result_impacts = coalesce($result_impacts, c.result_impacts),
@@ -6561,7 +6640,9 @@ class Neo4jClient:
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
             c.last_updated = datetime(),
             c.uuid = coalesce(c.uuid, $cve_uuid)
+        {CVE_DESCRIPTIONS.set_cypher("c", "c", "$description", "$description_source", "$description_rank")}
         """
+        ranked = CVE_DESCRIPTIONS.record(data.get("description"), RESILMESH_NATIVE_SOURCE)
         try:
             tag = data.get("tag", "default")
             with self.driver.session() as session:
@@ -6570,7 +6651,9 @@ class Neo4jClient:
                     cve_id=cve_id,
                     cve_uuid=cve_uuid,
                     tag=tag,
-                    description=data.get("description"),
+                    description=ranked.text if ranked else None,
+                    description_source=RESILMESH_NATIVE_SOURCE,
+                    description_rank=ranked.rank if ranked else 0,
                     published=data.get("published"),
                     last_modified=data.get("last_modified"),
                     cpe_type=data.get("cpe_type"),

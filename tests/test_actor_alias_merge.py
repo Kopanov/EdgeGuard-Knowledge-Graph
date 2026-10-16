@@ -544,6 +544,31 @@ class TestPropertyStrategy:
         assert self.STRATEGY[".*"] == "discard"
         assert all(v in ("discard", "combine") for v in self.STRATEGY.values())
 
+    @pytest.mark.parametrize("label", ["actor", "malware"])
+    def test_the_merged_node_keeps_the_ranked_description_with_its_source(self, label):
+        """2026-10-16: ``discard`` kept the canonical's description and, where the canonical had no
+        ``description_source``, took a duplicate's, so the node could name a source that did not write its
+        text. The statement picks the pair the source ranking keeps among the group before the merge
+        (``best_of_cypher``) and sets both on the merged node after it."""
+        from description_ranking import ENTITY_DESCRIPTIONS
+
+        query = (
+            enrichment_jobs._ACTOR_ALIAS_MERGE_APPLY_CYPHER
+            if label == "actor"
+            else enrichment_jobs._MALWARE_TWIN_MERGE_STATEMENTS.apply
+        )
+        chosen = query.index(f"{ENTITY_DESCRIPTIONS.best_of_cypher('c', 'dups')} AS described")
+        kept = query.index(
+            "WITH c, n_dups, dups, described.description AS kept_description,\n"
+            "     described.description_source AS kept_description_source"
+        )
+        merge_call = query.index("CALL apoc.refactor.mergeNodes(")
+        set_after = query.index(
+            "SET node.description = kept_description,\n    node.description_source = kept_description_source,"
+        )
+        assert chosen < kept < merge_call < set_after
+        assert self.STRATEGY["description_source"] == "discard"
+
 
 # ---------------------------------------------------------------------------
 # Registration in the runner

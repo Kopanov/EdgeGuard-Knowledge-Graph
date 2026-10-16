@@ -188,6 +188,21 @@ def test_explorer_default_view_shows_indicator_to_malware(rest):
     assert rest.get("/graph/explore?view=attacks&zone=finance").json()["stats"] == {"nodes": 0, "edges": 0}
 
 
+def test_explorer_vulnerabilities_view_pairs_a_description_with_its_own_source(raw_driver, rest):
+    """2026-10-16: the CVE's twins are grouped by ``cve_id``; the view takes the description and its
+    ``description_source`` from one node. Here the CVE node holds a description written before the ranking
+    (no source) and its Vulnerability twin a source without a description: ``head(collect(...))`` of each
+    property would pair the CVE's text with the twin's source."""
+    with raw_driver.session() as session:
+        session.run(
+            f"CREATE (:Vulnerability:{LABEL} {{cve_id: 'CVE-2021-44228', uuid: 'u-v', edgeguard_managed: true, "
+            "description_source: 'nvd', zone: ['healthcare']}})"
+        )
+    data = rest.get("/graph/explore?view=vulnerabilities").json()
+    (node,) = [n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2021-44228"]
+    assert (node["description"], node["description_source"]) == ("Log4Shell", None)
+
+
 def test_explorer_actors_view_follows_the_written_directions(rest):
     data = rest.get("/graph/explore?view=actors").json()
     assert _edges(data) == {

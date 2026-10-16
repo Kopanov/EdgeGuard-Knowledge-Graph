@@ -337,8 +337,10 @@ _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
 #   later than that of 1.3.0, as STIX versioning requires of a new version of an object.
 # 1.5.0 (2026-10-16): x_edgeguard_evidence_types on the SROs of campaign links (the relationship
 #   types a campaign link rests on: ATTRIBUTED_TO, USES_MALWARE, INDICATES).
-_EXTENSION_MODIFIED = "2026-10-16T12:00:00.000Z"
-_EXTENSION_VERSION = "1.5.0"
+# 1.6.0 (2026-10-16): x_edgeguard_description_source on SDOs with a description: the source whose
+#   text the description is (``description_ranking``). ``modified`` is later than that of 1.5.0.
+_EXTENSION_MODIFIED = "2026-10-16T13:00:00.000Z"
+_EXTENSION_VERSION = "1.6.0"
 _EXTENSION_SCHEMA_URL = (
     "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
     "#edgeguard-extension-definition"
@@ -411,6 +413,8 @@ EDGEGUARD_EXTENSION_PROPERTIES: Tuple[str, ...] = (
     "x_edgeguard_merged_from",
     # Explainability (2026-10-16): the relationship types a campaign link rests on
     "x_edgeguard_evidence_types",
+    # Explainability (2026-10-16): the source whose text an SDO's description is
+    "x_edgeguard_description_source",
 ) + tuple(stix_key for _, stix_key in _VULNERABILITY_PROMOTED_FIELDS)
 
 _EXTENSION_PREFIX = "x_edgeguard_"
@@ -1665,6 +1669,7 @@ class StixExporter:
             }
         _attach_zones(sdo, props)
         _attach_misp_provenance(sdo, props)
+        _attach_description_source(sdo, props)
         # Remember the SDO's marking so SROs can inherit the most
         # restrictive marking of their endpoints (``_edge_to_sro``).
         refs = sdo.get("object_marking_refs") or []
@@ -2621,6 +2626,20 @@ def _attach_zones(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
     zones = _extract_zones(props)
     if zones:
         sdo["x_edgeguard_zones"] = zones
+
+
+def _attach_description_source(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
+    """Attach ``x_edgeguard_description_source`` (2026-10-16): the canonical id of the source whose text
+    the SDO's ``description`` is (the node's ``description_source``, ``description_ranking``). Omitted
+    when the SDO has no description or the node names no source (a node written before 2026-10-16, a
+    campaign EdgeGuard built). The text of every source, the chosen one included, stays in MISP: the
+    node's ``SOURCED_FROM`` edge to each source names its MISP events (docs/RUNBOOK.md, "Retrieving raw
+    MISP data from a Neo4j node")."""
+    if not isinstance(sdo, dict) or not sdo.get("description"):
+        return
+    source = props.get("description_source")
+    if isinstance(source, str) and source:
+        sdo["x_edgeguard_description_source"] = source
 
 
 def _attach_misp_provenance(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:

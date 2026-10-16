@@ -245,6 +245,7 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
     return CVE(
         cve_id=c.get("cve_id", ""),
         description=c.get("description"),
+        description_source=c.get("description_source"),
         published=c.get("published"),
         last_modified=c.get("last_modified"),
         cpe_type=_neo4j_list(c.get("cpe_type")),
@@ -381,6 +382,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
                 Vulnerability(
                     cve_id=n.get("cve_id", ""),
                     description=n.get("description"),
+                    description_source=n.get("description_source"),
                     status=_neo4j_list(n.get("status")),
                     severity=n.get("severity"),
                     # Null for a CVE without CVSS (2026-10): never a placeholder score.
@@ -568,6 +570,7 @@ class Query:
             lambda n: ThreatActor(
                 name=n.get("name", ""),
                 description=n.get("description"),
+                description_source=n.get("description_source"),
                 sophistication=n.get("sophistication"),
                 primary_motivation=n.get("primary_motivation"),
                 resource_level=n.get("resource_level"),
@@ -600,6 +603,7 @@ class Query:
                 name=n.get("name", ""),
                 malware_types=_neo4j_list(n.get("malware_types")),
                 description=n.get("description"),
+                description_source=n.get("description_source"),
                 zone=_neo4j_list(n.get("zone")),
                 tlp=n.get("tlp"),
                 confidence_score=n.get("confidence_score"),
@@ -626,6 +630,7 @@ class Query:
                 technique_id=n.get("mitre_id", ""),
                 name=n.get("name", ""),
                 description=n.get("description"),
+                description_source=n.get("description_source"),
                 detection=n.get("detection"),
                 is_subtechnique=n.get("is_subtechnique"),
                 tactic_refs=_neo4j_list(n.get("tactic_phases")),
@@ -654,6 +659,7 @@ class Query:
                 tactic_id=n.get("mitre_id", ""),
                 name=n.get("name", ""),
                 description=n.get("description"),
+                description_source=n.get("description_source"),
                 tlp=n.get("tlp"),
                 edgeguard_managed=n.get("edgeguard_managed"),
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
@@ -728,6 +734,7 @@ class Query:
                         mitre_id=n.get("mitre_id", ""),
                         name=n.get("name", ""),
                         description=n.get("description"),
+                        description_source=n.get("description_source"),
                         tag=n.get("tag"),
                         tool_types=_neo4j_list(n.get("tool_types")),
                         uses_techniques=_neo4j_list(n.get("uses_techniques")),

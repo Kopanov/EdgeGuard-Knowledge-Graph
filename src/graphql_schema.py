@@ -106,6 +106,9 @@ class CVSSv40:
 class CVE:
     cve_id: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     published: Optional[str] = None
     last_modified: Optional[str] = None
     cpe_type: Optional[List[str]] = None
@@ -160,6 +163,9 @@ class CVE:
 class Vulnerability:
     cve_id: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     status: Optional[List[str]] = None
     severity: Optional[str] = None
     cvss_score: Optional[float] = None
@@ -253,6 +259,9 @@ class Indicator:
 class ThreatActor:
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     sophistication: Optional[str] = None
     primary_motivation: Optional[str] = None
     resource_level: Optional[str] = None
@@ -282,6 +291,9 @@ class Malware:
     name: str
     malware_types: Optional[List[str]] = None
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     zone: Optional[List[str]] = None
     # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
     tlp: Optional[str] = None
@@ -306,6 +318,9 @@ class Technique:
     technique_id: str
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     tactic_refs: Optional[List[str]] = None
     zone: Optional[List[str]] = None
     # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
@@ -335,6 +350,9 @@ class Tactic:
     tactic_id: str
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
     tlp: Optional[str] = None
     edgeguard_managed: Optional[bool] = None
@@ -356,6 +374,9 @@ class Tool:
     mitre_id: str
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     tag: Optional[str] = None
     tool_types: Optional[List[str]] = None
     uses_techniques: Optional[List[str]] = None

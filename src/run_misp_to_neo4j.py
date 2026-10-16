@@ -493,9 +493,10 @@ _METADATA_COMMENT_RE = re.compile(
 # 2026-10: plain vulnerability comments that say where a CVE was seen, not what it is: the OTX
 # collector's pulse reference ("Referenced in OTX pulse: <name>", a ``cve_references`` item) and
 # MISPWriter's placeholder for a CVE item without text ("CVE from <source>"). Neither is a description:
-# taken as one, the first of them to reach a CVE without an NVD record would stay there, since any record
-# but NVD's only fills (``Neo4jClient.merge_cve``), and CISA's KEV text would never replace it. The
-# note stays the comment of the MISP attribute, which the node's ``misp_attribute_ids`` name.
+# taken as one, OTX's note would describe a CVE that no NVD, KEV or CISA ICS record describes (OTX ranks
+# below them, ``description_ranking``, 2026-10-16; until then the first such note to reach a CVE without
+# an NVD record stayed there and CISA's KEV text never replaced it). The note stays the comment of the
+# MISP attribute, which the node's ``misp_attribute_ids`` name.
 # The placeholder names a source id (lowercase, as MISPWriter writes the item's tag), so a text such as
 # "CVE from Microsoft" is kept (2026-10, the rule the entity placeholders follow).
 _CVE_PROVENANCE_NOTE_RE = re.compile(r"^\s*(?:Referenced in OTX pulse:.*|CVE from [a-z0-9_-]+\s*)$", re.DOTALL)
@@ -539,7 +540,8 @@ def _vulnerability_comment_description(raw_comment: Any) -> Optional[str]:
 # 2026-10: MISPWriter's comment for a malware, actor, technique, tactic or tool item without text — "Malware
 # from <source>", "Threat actor from <source>", "MITRE ATT&CK technique from <source>", "MITRE ATT&CK
 # tactic", "MITRE ATT&CK tool: <name>". It names the writer, not the entity; taken as a description it would
-# keep any later record's text off a node that MITRE does not describe, since such a record only fills.
+# describe a node no other record describes, and keep a lower-ranked source's text off it (the source
+# ranking, ``description_ranking``, 2026-10-16; until then any record but MITRE's only filled).
 # <source> is the item's tag, a lowercase source id ("alienvault_otx", "mitre_attck", "unknown"), so a
 # partner's or a MISP-native text such as "Threat actor from Iran" or "Malware from APT28" stays a description.
 _ENTITY_PLACEHOLDER_COMMENT_RE = re.compile(

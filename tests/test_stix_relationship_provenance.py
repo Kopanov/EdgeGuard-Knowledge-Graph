@@ -237,14 +237,16 @@ class TestSro:
             "x_edgeguard_cited_ids",
             "x_edgeguard_merged_from",
             "x_edgeguard_evidence_types",
+            "x_edgeguard_description_source",
         ):
             assert prop in sx.EDGEGUARD_EXTENSION_PROPERTIES
         definition = sx._extension_definition()
         # 1.1.0 (2026-10-14) added the provenance; 1.2.0 (2026-10-15) x_edgeguard_status on
         # vulnerabilities; 1.3.0 (2026-10-15) the explainability properties; 1.4.0 (2026-10-15) EPSS
-        # and CISA's SSVC on vulnerabilities; 1.5.0 (2026-10-16) the evidence types of campaign links.
-        assert definition["version"] == "1.5.0"
-        assert definition["modified"] == "2026-10-16T12:00:00.000Z"
+        # and CISA's SSVC on vulnerabilities; 1.5.0 (2026-10-16) the evidence types of campaign links;
+        # 1.6.0 (2026-10-16) the source of an SDO's description.
+        assert definition["version"] == "1.6.0"
+        assert definition["modified"] == "2026-10-16T13:00:00.000Z"
 
     def test_a_campaign_link_carries_the_types_it_rests_on(self):
         """2026-10-16: a campaign link names the relationship types it rests on; the SRO carries them

@@ -832,9 +832,9 @@ After the job, the twins that remain are the `no_target` ones and the ambiguous 
 
 ## Repairing CVE descriptions and dates (2026-10)
 
-Since 2026-10 a CVE's `description`, `published` and `last_modified` come from NVD's record: a record from any other source (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has none. For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the OTX collector's "Referenced in OTX pulse: <name>", MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP"). A graph built before 2026-10 keeps what the record merged last wrote. On the CVEs several feeds name, which are the ones a demonstration shows, that is often the raw `OTX_META` JSON of an OTX pulse indicator, "Referenced in OTX pulse: <name>", CISA's short KEV text or a CISA ICS advisory's dates instead of NVD's.
+Since 2026-10 a CVE's `published` and `last_modified` come from NVD's record: a record from any other source (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has none. Since 2026-10-16 its `description` follows a fixed source ranking, NVD > CISA KEV > CISA ICS > any other source, and the node names the source of its text in `description_source` ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Descriptions and their source"): a record sets the description when its source ranks at least as high as the source of the stored text, so the result does not depend on the order in which the sync merges the records. A description without `description_source`, written before 2026-10-16, counts as NVD's: only NVD's record replaces it, and any other record fills only an empty description. For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the OTX collector's "Referenced in OTX pulse: <name>", MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP"). A graph built before 2026-10 keeps what the record merged last wrote. On the CVEs several feeds name, which are the ones a demonstration shows, that is often the raw `OTX_META` JSON of an OTX pulse indicator, "Referenced in OTX pulse: <name>", CISA's short KEV text or a CISA ICS advisory's dates instead of NVD's.
 
-A wipe and a new baseline need none of this. A graph that is kept is repaired once, after the deploy, in this order (each Cypher statement via `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`). The full sync of step 3 also completes [Repairing Malware, ThreatActor and Tool descriptions](#repairing-malware-threatactor-and-tool-descriptions-2026-10): when both are needed, run that section's steps 1–4 as well before it, and one full sync serves both.
+A wipe and a new baseline need none of this. A graph that is kept is repaired once, after the deploy, in this order (each Cypher statement via `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`). The full sync of step 4 also completes [Repairing Malware, ThreatActor and Tool descriptions](#repairing-malware-threatactor-and-tool-descriptions-2026-10): when both are needed, run that section's steps 1–5 as well before it, and one full sync serves both.
 
 1. **Count** the nodes whose description is a metadata block, an OTX pulse reference or the placeholder (read-only):
 
@@ -847,7 +847,7 @@ A wipe and a new baseline need none of this. A graph that is kept is repaired on
    RETURN labels(c)[0] AS label, count(c) AS nodes;
    ```
 
-2. **Remove those descriptions.** The full sync in step 3 replaces every description of a CVE that NVD has a record of, but on any other CVE it only fills a missing one, so a stored block or pulse reference would stay and CISA's KEV text could not replace it (on the hosted MISP of 2026-10-14, CVE-2015-5477 had only an OTX and a KEV attribute):
+2. **Remove those descriptions.** Such a description names no source, so it counts as NVD's: the full sync in step 4 replaces it on every CVE that NVD has a record of, but on any other CVE a stored block or pulse reference would stay and CISA's KEV text could not replace it (on the hosted MISP of 2026-10-14, CVE-2015-5477 had only an OTX and a KEV attribute). The statement also removes a `description_source`, so a node never names the source of a text it no longer holds:
 
    ```cypher
    MATCH (c)
@@ -855,37 +855,56 @@ A wipe and a new baseline need none of this. A graph that is kept is repaired on
      AND (c.description =~ '(?s)\\s*([A-Z][A-Z0-9_]*_META|Referenced in OTX pulse):.*'
        OR ((c.edgeguard_managed = true OR c.edgeguard_enriched = true)
            AND c.description =~ '\\s*CVE from [a-z0-9_-]+\\s*'))
+   REMOVE c.description, c.description_source;
+   ```
+
+3. **Remove the other descriptions that name no source** (2026-10-16), on the nodes EdgeGuard created. They count as NVD's too, so on a CVE without NVD's record the full sync would keep the text of the record merged first before 2026-10-16 (a CISA ICS advisory's text where the KEV ranks higher). The full sync writes them again from MISP, each with its source; a node a partner created keeps its text:
+
+   ```cypher
+   MATCH (c)
+   WHERE (c:CVE OR c:Vulnerability)
+     AND c.edgeguard_managed = true
+     AND c.description IS NOT NULL
+     AND c.description_source IS NULL
    REMOVE c.description;
    ```
 
-3. **One full MISP → Neo4j sync.** An incremental run does not repair the graph: it writes only the attributes changed since the last sync.
+4. **One full MISP → Neo4j sync.** An incremental run does not repair the graph: it writes only the attributes changed since the last sync.
 
    ```bash
    docker compose exec airflow airflow variables set NEO4J_FULL_SYNC true
    docker compose exec airflow airflow dags trigger edgeguard_neo4j_sync --conf '{"force_sync": true}'
    ```
 
-   `run_neo4j_sync` runs a full sync and clears the Variable once it succeeded ("Requesting a full MISP → Neo4j sync"); `force_sync` bypasses `check_sync_needed` ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), `edgeguard_neo4j_sync`). Every NVD attribute sets its CVE's description and dates again, and the KEV and CISA ICS records (and an `OTX_META` block's own `description` field, where it has one) fill the descriptions step 2 removed; a CVE that only OTX names keeps none. The run re-merges every attribute in MISP and takes about as long as the full sync of a baseline.
+   `run_neo4j_sync` runs a full sync and clears the Variable once it succeeded ("Requesting a full MISP → Neo4j sync"); `force_sync` bypasses `check_sync_needed` ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), `edgeguard_neo4j_sync`). Every CVE takes the text of the highest-ranked record MISP holds for it, with its `description_source` (NVD's record; without one the KEV's, then CISA ICS's, then another source's, such as an `OTX_META` block's own `description` field), and every NVD attribute sets its CVE's dates again; a CVE that only OTX names keeps no description. The run re-merges every attribute in MISP and takes about as long as the full sync of a baseline.
 
-4. **Check.** Step 1 returns no rows, and a CVE that NVD, OTX and the KEV all name shows NVD's text and dates:
+5. **Check.** Step 1 returns no rows, no CVE EdgeGuard created holds a description without its source, and a CVE that NVD, OTX and the KEV all name shows NVD's text and dates:
 
    ```cypher
+   MATCH (c)
+   WHERE (c:CVE OR c:Vulnerability)
+     AND c.edgeguard_managed = true
+     AND c.description IS NOT NULL
+     AND c.description_source IS NULL
+   RETURN labels(c)[0] AS label, count(c) AS without_source;
+   // no rows
+
    MATCH (c:CVE {cve_id: 'CVE-2025-21042'})
-   RETURN c.description, c.published, c.last_modified;
+   RETURN c.description, c.description_source, c.published, c.last_modified;
    // NVD's record (as stored in MISP on 2026-10-14): "Out-of-bounds write in libimagecodec.quram.so prior
-   // to SMR Apr-2025 Release 1 allows remote attackers to execute arbitrary code.",
+   // to SMR Apr-2025 Release 1 allows remote attackers to execute arbitrary code.", description_source "nvd",
    // published 2025-09-12T08:15:44.743000+00:00 (a later NVD update moves last_modified)
    ```
 
-A CVE without an NVD record keeps the text and dates of the first record that filled them (CISA's KEV text, a CISA ICS advisory), also when that source later revises its record (a revised advisory's `last_modified`, an edited KEV text): no ranking of the other sources exists yet.
+A CVE without an NVD record shows the KEV's text when the KEV lists it, else CISA ICS's, else another source's, whatever the order of the events; a revised record of the same source replaces that source's text. Its dates are the CISA ICS record's (the advisory's release dates), the only other record in MISP that gives dates: MISP holds one CISA ICS attribute per CVE, from the first advisory that named it (MISPWriter skips the CVE in later advisories), so the dates do not depend on the order either. They stay outside the ranking, since they are the advisory's dates rather than the CVE's, and NVD's record replaces them.
 
 ## Repairing Malware, ThreatActor and Tool descriptions (2026-10)
 
-Since 2026-10 a `Malware`, `ThreatActor` or `Tool` description comes from MITRE ATT&CK: the record MITRE delivered (source `mitre_attck`) sets it, and a record from any other source fills it only where the node has none. The OTX collector gives its malware-family and adversary items no description (the pulse's text describes the report, not the family or actor), and the sync takes no description from an OTX malware or actor attribute, from a metadata block (`MITRE_USES_TECHNIQUES:{...}` or any other; also a block that does not parse or follows other text) or from MISPWriter's placeholder for an item without text ("Malware from <source>", "Threat actor from <source>", "MITRE ATT&CK tool: <name>", "MITRE ATT&CK technique from <source>", "MITRE ATT&CK tactic") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP"). A graph built before 2026-10 keeps what the record merged last wrote: on an entity MITRE and OTX both name (Cobalt Strike, APT29, the actors and families a demonstration shows) often the description of an OTX pulse, on an OTX family from a pulse without a description the raw `MITRE_USES_TECHNIQUES:{"rt":[...],"pid":"..."}` block, and on every `Tactic` node the placeholder "MITRE ATT&CK tactic".
+Since 2026-10 a `Malware`, `ThreatActor` or `Tool` description is ATT&CK's wherever MITRE ATT&CK describes the entity. Since 2026-10-16 the description of these nodes, and of `Technique` and `Tactic` nodes, follows a fixed source ranking, MITRE ATT&CK > a curated source (Core Ideas, then MISP Galaxy) > any other source, and the node names the source of its text in `description_source` ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Descriptions and their source"): a record sets the description when its source ranks at least as high as the source of the stored text. Until then the record MITRE delivered set it and a record from any other source only filled an empty one, so on a node MITRE does not describe the first source to arrive kept its text, and a `Technique` or `Tactic` took the text of the record merged last. A description without `description_source`, written before 2026-10-16, counts as MITRE's: only MITRE's record replaces it, and any other record fills only an empty description. The OTX collector gives its malware-family and adversary items no description (the pulse's text describes the report, not the family or actor), and the sync takes no description from an OTX malware or actor attribute, from a metadata block (`MITRE_USES_TECHNIQUES:{...}` or any other; also a block that does not parse or follows other text) or from MISPWriter's placeholder for an item without text ("Malware from <source>", "Threat actor from <source>", "MITRE ATT&CK tool: <name>", "MITRE ATT&CK technique from <source>", "MITRE ATT&CK tactic") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP"). A graph built before 2026-10 keeps what the record merged last wrote: on an entity MITRE and OTX both name (Cobalt Strike, APT29, the actors and families a demonstration shows) often the description of an OTX pulse, on an OTX family from a pulse without a description the raw `MITRE_USES_TECHNIQUES:{"rt":[...],"pid":"..."}` block, and on every `Tactic` node the placeholder "MITRE ATT&CK tactic".
 
-**What repairs it.** The MITRE collector's next run does not. An unchanged ATT&CK release is not even downloaded (the bundle's ETag answers 304), and a new one adds only attributes MISP does not hold yet: MISPWriter skips every attribute its source already has in MISP ([COLLECTORS.md](COLLECTORS.md), "Duplicate avoidance"), so the existing MITRE attributes do not change and the incremental sync, which writes changed attributes only, does not re-read them. One full MISP → Neo4j sync does: it re-reads every MITRE attribute, whose comment holds ATT&CK's text after the block, and sets that text on every node MITRE describes, whatever OTX wrote there. On a node MITRE does not describe it only fills a missing description, so the text OTX left there, and a block or placeholder stored anywhere, are removed first. A wipe and a new baseline need none of this.
+**What repairs it.** The MITRE collector's next run does not. An unchanged ATT&CK release is not even downloaded (the bundle's ETag answers 304), and a new one adds only attributes MISP does not hold yet: MISPWriter skips every attribute its source already has in MISP ([COLLECTORS.md](COLLECTORS.md), "Duplicate avoidance"), so the existing MITRE attributes do not change and the incremental sync, which writes changed attributes only, does not re-read them. One full MISP → Neo4j sync does: it re-reads every MITRE attribute, whose comment holds ATT&CK's text after the block, and sets that text with `description_source` `mitre_attck` on every node MITRE describes, whatever OTX wrote there. On a node MITRE does not describe, a stored text that names no source counts as MITRE's and stays, so the text OTX left there, a block or placeholder stored anywhere, and every other description without a source on a node EdgeGuard created are removed first. A wipe and a new baseline need none of this.
 
-A graph that is kept is repaired once, after the deploy, in this order (each Cypher statement via `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`). The full sync of step 5 also completes [Repairing CVE descriptions and dates](#repairing-cve-descriptions-and-dates-2026-10): when both are needed, run that section's steps 1–2 as well before it, and one full sync serves both.
+A graph that is kept is repaired once, after the deploy, in this order (each Cypher statement via `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`). The full sync of step 6 also completes [Repairing CVE descriptions and dates](#repairing-cve-descriptions-and-dates-2026-10): when both are needed, run that section's steps 1–3 as well before it, and one full sync serves both.
 
 1. **Count** the descriptions that are a metadata block, hold one, or are a placeholder (read-only):
 
@@ -899,7 +918,7 @@ A graph that is kept is repaired once, after the deploy, in this order (each Cyp
    RETURN labels(n)[0] AS label, count(n) AS nodes;
    ```
 
-2. **Remove those descriptions.** The full sync sets ATT&CK's text again on every node MITRE describes. A placeholder is removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`; a graph built before 2026-10 stamped `edgeguard_managed` on every node EdgeGuard wrote), and only with a source id after "from" (lowercase, as MISPWriter writes the item's tag), so a partner's or a MISP-native text such as "Threat actor from Iran" stays:
+2. **Remove those descriptions**, with any `description_source`. The full sync sets ATT&CK's text again on every node MITRE describes. A placeholder is removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`; a graph built before 2026-10 stamped `edgeguard_managed` on every node EdgeGuard wrote), and only with a source id after "from" (lowercase, as MISPWriter writes the item's tag), so a partner's or a MISP-native text such as "Threat actor from Iran" stays:
 
    ```cypher
    MATCH (n)
@@ -908,7 +927,7 @@ A graph that is kept is repaired once, after the deploy, in this order (each Cyp
        OR n.description =~ '(?s).*\\b([A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|CURATED_CLAIMS):\\s*[\\[{].*'
        OR ((n.edgeguard_managed = true OR n.edgeguard_enriched = true)
            AND n.description =~ '\\s*((Malware|Threat actor|MITRE ATT&CK technique) from [a-z0-9_-]+|MITRE ATT&CK tactic|MITRE ATT&CK tool: [^\\n]+)\\s*'))
-   REMOVE n.description;
+   REMOVE n.description, n.description_source;
    ```
 
 3. **Count** the families and actors OTX names and MITRE does not that carry a description (read-only). On a graph built before 2026-10 that description is, almost always, the description of the first OTX pulse that named the entity:
@@ -923,7 +942,7 @@ A graph that is kept is repaired once, after the deploy, in this order (each Cyp
    RETURN labels(n)[0] AS label, count(n) AS nodes;
    ```
 
-4. **Remove those descriptions.** Decision (2026-10): an entity only OTX describes shows no description, as it does on a new baseline, rather than a report's text the full sync could never replace (a record from another source only fills). The full sync fills the description again where an attribute of another source than OTX carries text (a MISP attribute of another feed). Only nodes EdgeGuard created (`edgeguard_managed`) are touched, so a partner's own text stays:
+4. **Remove those descriptions.** Decision (2026-10): an entity only OTX describes shows no description, as it does on a new baseline, rather than a report's text that names no source, counts as MITRE's and could only be replaced by a record of MITRE's. The full sync fills the description again where an attribute of another source than OTX carries text (a MISP attribute of another feed), with that source. Only nodes EdgeGuard created (`edgeguard_managed`) are touched, so a partner's own text stays:
 
    ```cypher
    MATCH (n)
@@ -932,23 +951,42 @@ A graph that is kept is repaired once, after the deploy, in this order (each Cyp
      AND n.description IS NOT NULL
      AND 'alienvault_otx' IN n.source
      AND NOT 'mitre_attck' IN n.source
+   REMOVE n.description, n.description_source;
+   ```
+
+5. **Remove the other descriptions that name no source** (2026-10-16), on the nodes EdgeGuard created. They count as MITRE's, so the full sync would keep them on a node MITRE does not describe (a MISP-native text where a curated package ranks higher) and on a `Technique` or `Tactic` whose last record before 2026-10-16 was not MITRE's. The full sync writes them again from MISP, each with its source:
+
+   ```cypher
+   MATCH (n)
+   WHERE (n:Malware OR n:ThreatActor OR n:Tool OR n:Technique OR n:Tactic)
+     AND n.edgeguard_managed = true
+     AND n.description IS NOT NULL
+     AND n.description_source IS NULL
    REMOVE n.description;
    ```
 
-5. **One full MISP → Neo4j sync**, as in [Repairing CVE descriptions and dates](#repairing-cve-descriptions-and-dates-2026-10), step 3:
+6. **One full MISP → Neo4j sync**, as in [Repairing CVE descriptions and dates](#repairing-cve-descriptions-and-dates-2026-10), step 4:
 
    ```bash
    docker compose exec airflow airflow variables set NEO4J_FULL_SYNC true
    docker compose exec airflow airflow dags trigger edgeguard_neo4j_sync --conf '{"force_sync": true}'
    ```
 
-6. **Check.** Steps 1 and 3 return no rows (step 3 may list a node another source than OTX described), and an entity MITRE and OTX both name shows ATT&CK's text:
+7. **Check.** Steps 1 and 3 return no rows (step 3 may list a node another source than OTX described), no node EdgeGuard created holds a description without its source, and an entity MITRE and OTX both name shows ATT&CK's text:
 
    ```cypher
-   MATCH (n:ThreatActor {name: 'apt29'}) RETURN n.description, n.source;
-   // ATT&CK's text, beginning "[APT29](https://attack.mitre.org/groups/G0016)"
-   MATCH (n:Malware {name: 'cobalt strike'}) RETURN n.description, n.source;
-   // ATT&CK's text, beginning "[Cobalt Strike](https://attack.mitre.org/software/S0154)"
+   MATCH (n)
+   WHERE (n:Malware OR n:ThreatActor OR n:Tool OR n:Technique OR n:Tactic)
+     AND n.edgeguard_managed = true
+     AND n.description IS NOT NULL
+     AND n.description_source IS NULL
+   RETURN labels(n)[0] AS label, count(n) AS without_source;
+   // no rows
+
+   MATCH (n:ThreatActor {name: 'apt29'}) RETURN n.description, n.description_source, n.source;
+   // ATT&CK's text, beginning "[APT29](https://attack.mitre.org/groups/G0016)", description_source "mitre_attck"
+   MATCH (n:Malware {name: 'cobalt strike'}) RETURN n.description, n.description_source, n.source;
+   // ATT&CK's text, beginning "[Cobalt Strike](https://attack.mitre.org/software/S0154)", description_source "mitre_attck"
    ```
 
 A `Tactic` node has no description after step 2 until MISP holds the tactic's ATT&CK text: the MITRE collector gives tactics their description since 2026-10, but MISPWriter writes it only into an attribute MISP does not hold yet, so on a MISP that is kept the tactics show none until the next baseline. A MISP attribute an OTX run wrote before 2026-10 keeps the pulse's text after its block; the sync ignores it.
@@ -1020,6 +1058,27 @@ MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'})
 WHERE i.value = '203.0.113.5'
 RETURN r.raw_data, r.misp_event_ids, r.source_refs LIMIT 1;
 ```
+
+### Whose text a description is, and every source's text (2026-10-16)
+
+A `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` node holds one description: the text of the highest-ranked source whose record gave one (CVE and Vulnerability: NVD > CISA KEV > CISA ICS > any other source; the other labels: MITRE ATT&CK > a curated source > any other source; [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Descriptions and their source"). `n.description_source` names that source; it is null on a node without a description and on one written before 2026-10-16. Every source that named the node has its own `SOURCED_FROM` edge, with the MISP events that hold its attribute and its own record ids:
+
+```cypher
+MATCH (c:CVE {cve_id: 'CVE-2025-21042'})-[r:SOURCED_FROM]->(s:Source)
+RETURN s.source_id AS source, s.source_id = c.description_source AS gave_the_description,
+       r.misp_event_ids AS misp_events, r.source_refs AS record_ids
+ORDER BY gave_the_description DESC, source;
+```
+
+Each source's text is the comment of its attribute in those events (`n.misp_attribute_ids[]` lists the attributes of every source, and each attribute's `source:` tag names its source). One source's attribute, by value and source tag:
+
+```bash
+curl -s -H "Authorization: $MISP_API_KEY" -H "Accept: application/json" -H "Content-Type: application/json" \
+     -d '{"returnFormat": "json", "type": "vulnerability", "value": "CVE-2025-21042", "tags": ["source:CISA-KEV"]}' \
+     "$MISP_URL/attributes/restSearch"
+```
+
+For a CVE the comment is the record's `NVD_META:{...}` block, whose `description` field is the source's text (NVD, CISA KEV, CISA ICS), or a plain text; for a `Malware` (`malware-type`), `ThreatActor` (`threat-actor`), `Tool`, `Technique` or `Tactic` (`text`) attribute it is the text MISPWriter wrote after the `MITRE_*` block's line. The node holds the text as MISP holds it (MISPWriter cuts an entity's description to the length [COLLECTORS.md](COLLECTORS.md) gives per kind); the source's own record is named in `r.source_refs[]` where the feed has record ids (`mitre_attck:G0016`). The `source:` tag of each source is its `misp_tag` in `src/source_registry.py` (`source:NVD`, `source:CISA-KEV`, `source:CISA-ICS`, `source:AlienVault-OTX`, `source:MITRE-ATT&CK`, …). A description whose source is not a MISP source (`resilmesh` for a ResilMesh-native write, `stix_import` or another name an external STIX bundle gave) is not in MISP.
 
 ### Coverage
 
@@ -1128,7 +1187,7 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-10-16 — `EdgeGuardNeo4jFullSyncRequestPending` (a requested full sync that failed on its last attempt; it clears 3 days after the last failure) in "Requesting a full MISP → Neo4j sync" and the paging table; the CVE description repair names the shared full sync with the entity description repair, as that section does; step 2d and the acceptance check read the pulses marked on indicators, the MISP writer marks stored copies of held IOCs (`[MARK]`), a mark judged without the reference is not stored, and a repair for a wrong mark. Prior: 2026-10-15 — `EdgeGuardBuildRelationshipsSilentDeath` compares the last successful sync with the last build_relationships completion (new gauge `edgeguard_build_relationships_last_completion_timestamp`), so it no longer fires during a baseline's collection phase or while a build_relationships retry may still complete. Same day: `EdgeGuardBuildRelationshipsSilentDeath` described by the series it reads (the latest successful baseline task). Same day: "Repairing CVE descriptions and dates", steps 1–2: the placeholder "CVE from <source>" is matched only with a lowercase source id and removed only from a node EdgeGuard created or wrote to, as for the entity placeholders. Same day: "Repairing Malware, ThreatActor and Tool descriptions", steps 1–2: a placeholder is matched only with a lowercase source id after "from" and removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`), so a partner's text such as "Threat actor from Iran" stays. Same day: new section "Repairing Malware, ThreatActor and Tool descriptions": MITRE's record sets the description and other sources only fill it; the MITRE collector's next run repairs nothing (ETag 304, existing attributes skipped), one full sync does after removing descriptions that are metadata blocks or placeholders and the OTX pulse text on nodes MITRE does not describe (decision: such nodes show none); Tactic nodes keep none on a kept MISP. Same day: new section "Requesting a full MISP → Neo4j sync": `NEO4J_FULL_SYNC` is cleared only after the full sync succeeded, the mode line in the task log, that no incremental sync runs while the request stands, the alert after the last failed attempt and the recovery step, the 8-hour task limit and the 68-hour DAG run limit. Same day: "Canonical threat-actor reference": what each component reading it does without it ([ATTRIBUTION] warnings). Same day: new section "Malware ATT&CK-id twin merge": what the job logs (including the twins that fold into the node of their base name and the ambiguous ones it skips), the dry run, the acceptance check, an approximate count query and what remains after the job. Same day: "Repairing CVE descriptions and dates": an OTX pulse reference and the placeholder "CVE from <source>" are no CVE description, and steps 1–2 also remove them; the metadata-block rule is stated for CVEs; a CVE without an NVD record keeps the first record's text and dates when that source revises its record. Same day: new section "Repairing CVE descriptions and dates": a CVE's description and dates come from NVD's record (other records only fill them); a kept graph is repaired by removing descriptions that are metadata blocks, then one full sync (`NEO4J_FULL_SYNC`, `force_sync`). Same day: new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-16 — "Repairing CVE descriptions and dates" and "Repairing Malware, ThreatActor and Tool descriptions": the description follows a fixed source ranking with `description_source` (CVE: NVD > CISA KEV > CISA ICS > any other source; entity, Technique and Tactic: MITRE ATT&CK > a curated source > any other source), a description without a source counts as the top source's, the cleanup statements also remove `description_source`, a new step removes the other descriptions without a source on nodes EdgeGuard created before the full sync, and the checks read `description_source`; a CVE without an NVD record shows the KEV's text over CISA ICS's whatever the order, and keeps CISA ICS's dates; new subsection "Whose text a description is, and every source's text" under "Retrieving raw MISP data from a Neo4j node". Same day: `EdgeGuardNeo4jFullSyncRequestPending` (a requested full sync that failed on its last attempt; it clears 3 days after the last failure) in "Requesting a full MISP → Neo4j sync" and the paging table; the CVE description repair names the shared full sync with the entity description repair, as that section does; step 2d and the acceptance check read the pulses marked on indicators, the MISP writer marks stored copies of held IOCs (`[MARK]`), a mark judged without the reference is not stored, and a repair for a wrong mark. Prior: 2026-10-15 — `EdgeGuardBuildRelationshipsSilentDeath` compares the last successful sync with the last build_relationships completion (new gauge `edgeguard_build_relationships_last_completion_timestamp`), so it no longer fires during a baseline's collection phase or while a build_relationships retry may still complete. Same day: `EdgeGuardBuildRelationshipsSilentDeath` described by the series it reads (the latest successful baseline task). Same day: "Repairing CVE descriptions and dates", steps 1–2: the placeholder "CVE from <source>" is matched only with a lowercase source id and removed only from a node EdgeGuard created or wrote to, as for the entity placeholders. Same day: "Repairing Malware, ThreatActor and Tool descriptions", steps 1–2: a placeholder is matched only with a lowercase source id after "from" and removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`), so a partner's text such as "Threat actor from Iran" stays. Same day: new section "Repairing Malware, ThreatActor and Tool descriptions": MITRE's record sets the description and other sources only fill it; the MITRE collector's next run repairs nothing (ETag 304, existing attributes skipped), one full sync does after removing descriptions that are metadata blocks or placeholders and the OTX pulse text on nodes MITRE does not describe (decision: such nodes show none); Tactic nodes keep none on a kept MISP. Same day: new section "Requesting a full MISP → Neo4j sync": `NEO4J_FULL_SYNC` is cleared only after the full sync succeeded, the mode line in the task log, that no incremental sync runs while the request stands, the alert after the last failed attempt and the recovery step, the 8-hour task limit and the 68-hour DAG run limit. Same day: "Canonical threat-actor reference": what each component reading it does without it ([ATTRIBUTION] warnings). Same day: new section "Malware ATT&CK-id twin merge": what the job logs (including the twins that fold into the node of their base name and the ambiguous ones it skips), the dry run, the acceptance check, an approximate count query and what remains after the job. Same day: "Repairing CVE descriptions and dates": an OTX pulse reference and the placeholder "CVE from <source>" are no CVE description, and steps 1–2 also remove them; the metadata-block rule is stated for CVEs; a CVE without an NVD record keeps the first record's text and dates when that source revises its record. Same day: new section "Repairing CVE descriptions and dates": a CVE's description and dates come from NVD's record (other records only fill them); a kept graph is repaired by removing descriptions that are metadata blocks, then one full sync (`NEO4J_FULL_SYNC`, `force_sync`). Same day: new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._
