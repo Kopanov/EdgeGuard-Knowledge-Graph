@@ -5,8 +5,8 @@ Only the MITRE collector's item carries the flag, and the MISP round trip drops 
 no flag into a technique attribute and the sync's parser sets none, so every sync wrote ``false`` onto
 every sub-technique (all 506 dotted Technique nodes of the hosted graph on 2026-10-16), and GraphQL's
 ``Technique.is_subtechnique`` was wrong for each of them. The flag is now read from the normalised id,
-as build_relationships step 1b reads the parent: ATT&CK ids a sub-technique by its parent's id and a
-dotted suffix.
+as build_relationships step 1b reads the parent: ATT&CK identifies a sub-technique by its parent's id
+and a dotted suffix.
 """
 
 from __future__ import annotations

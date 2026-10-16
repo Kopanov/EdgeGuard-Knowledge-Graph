@@ -2,11 +2,14 @@
 
 * ``Technique.is_subtechnique`` follows the ATT&CK id. Every sync wrote ``false`` onto every
   sub-technique, because the MISP round trip carries no flag (all 506 dotted Technique nodes of the
-  hosted graph on 2026-10-16); the next sync of a sub-technique now sets ``true`` on the stored node.
+  hosted graph on 2026-10-16); the next merge of a sub-technique now sets ``true`` on the stored node
+  (the baseline or a full sync; an incremental sync merges only the attributes MISP changed).
 * Q9 (``build_relationships``, ``Indicator → Malware`` by family) names in ``r.sources`` only the
   feeds that state the indicator's ``malware_family``. OTX was listed among them although its
   collector never writes one, so a family-labelled IOC an OTX pulse also listed got OTX, with that
-  pulse and its MISP event, on its Q9 link. Step 9b still credits OTX where the pulse names the family.
+  pulse and its MISP event, on its Q9 link. Step 9b still credits OTX where the pulse names the family
+  by the node's name, that name with an ATT&CK software id, or a name the twin merge folded into the
+  node (``merged_from``); a pulse that names it only by another alias, which Q9 matches, does not.
 
 Steps run as production runs them, through ``_safe_run_batched`` and ``apoc.periodic.iterate``.
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``,
@@ -40,7 +43,8 @@ FIXTURE = f"""
 CREATE (tf:Source:{LABEL} {{source_id: 'threatfox'}})
 CREATE (otx:Source:{LABEL} {{source_id: 'alienvault_otx'}})
 CREATE (:Source:{LABEL} {{source_id: 'mitre_attck'}})
-CREATE (:Malware:{LABEL} {{name: 'emotet', uuid: 'u-emotet', source: ['threatfox'], aliases: ['Heodo']}})
+CREATE (:Malware:{LABEL} {{name: 'emotet', uuid: 'u-emotet', source: ['threatfox'], aliases: ['Heodo', 'geodo'],
+        merged_from: ['geodo']}})
 CREATE (listed:Indicator:{LABEL} {{value: '198.51.100.7', indicator_type: 'ipv4', uuid: 'u-listed',
         source: ['threatfox', 'alienvault_otx'], malware_family: 'Emotet'}})
 CREATE (listed)-[:SOURCED_FROM {{source: 'threatfox', source_refs: ['threatfox:1001'], misp_event_ids: ['21']}}]->(tf)
@@ -51,12 +55,25 @@ CREATE (named:Indicator:{LABEL} {{value: '198.51.100.8', indicator_type: 'ipv4',
 CREATE (named)-[:SOURCED_FROM {{source: 'threatfox', source_refs: ['threatfox:1002'], misp_event_ids: ['22']}}]->(tf)
 CREATE (named)-[:SOURCED_FROM {{source: 'alienvault_otx', source_refs: ['alienvault_otx:p2'],
         misp_event_ids: ['32']}}]->(otx)
+CREATE (alias:Indicator:{LABEL} {{value: '198.51.100.9', indicator_type: 'ipv4', uuid: 'u-alias',
+        source: ['threatfox', 'alienvault_otx'], malware_family: 'Heodo', pulse_malware_families: ['Heodo']}})
+CREATE (alias)-[:SOURCED_FROM {{source: 'threatfox', source_refs: ['threatfox:1003'], misp_event_ids: ['23']}}]->(tf)
+CREATE (alias)-[:SOURCED_FROM {{source: 'alienvault_otx', source_refs: ['alienvault_otx:p3'],
+        misp_event_ids: ['33']}}]->(otx)
+CREATE (folded:Indicator:{LABEL} {{value: '198.51.100.10', indicator_type: 'ipv4', uuid: 'u-folded',
+        source: ['threatfox', 'alienvault_otx'], malware_family: 'Geodo', pulse_malware_families: ['Geodo']}})
+CREATE (folded)-[:SOURCED_FROM {{source: 'threatfox', source_refs: ['threatfox:1004'], misp_event_ids: ['24']}}]->(tf)
+CREATE (folded)-[:SOURCED_FROM {{source: 'alienvault_otx', source_refs: ['alienvault_otx:p4'],
+        misp_event_ids: ['34']}}]->(otx)
 CREATE (:Technique:{LABEL} {{mitre_id: 'T1059.001', uuid: 'u-ps', is_subtechnique: false}})
 CREATE (:Technique:{LABEL} {{mitre_id: 'T1059', uuid: 'u-csi', is_subtechnique: false}})
 """
 # ``listed``: ThreatFox labels the IOC and an OTX pulse lists it without naming the family.
 # ``named``: the OTX pulse names the family too (the shape of all 12 Q9 links crediting OTX on the
-# hosted graph of 2026-10-16). The Techniques are stored as the sync left them before 2026-10.
+# hosted graph of 2026-10-16). ``alias`` / ``folded``: ThreatFox and the pulse name the family by an
+# alias of the node (Q9 matches ``m.aliases``); ``geodo`` is also a name the twin merge folded into the
+# node (``merged_from``, which step 9b reads), ``Heodo`` is not. The Techniques are stored as the sync
+# left them before 2026-10.
 
 
 @pytest.fixture(scope="module")
@@ -155,6 +172,28 @@ def test_9b_still_credits_otx_where_its_pulse_names_the_family(client, raw_drive
     _q9(client)
     _q9b(client)
     assert _indicates(raw_driver) == links
+
+
+def test_9b_credits_otx_for_a_folded_name_and_not_for_another_alias(client, raw_driver):
+    # The limit the documentation states: Q9 matches every alias of the node, 9b only the node's name,
+    # that name with an ATT&CK software id, or a folded name; before 2026-10 Q9 itself credited OTX.
+    _q9(client)
+    _q9b(client)
+    links = _indicates(raw_driver)
+    assert links["198.51.100.9"] == {
+        "sources": ["threatfox"],
+        "refs": ["threatfox:1003"],
+        "events": ["23"],
+        "match_type": "malware_family",
+        "confidence": 0.8,
+    }, "the pulse names the family only by an alias 9b does not read: no OTX credit"
+    assert links["198.51.100.10"] == {
+        "sources": ["alienvault_otx", "threatfox"],
+        "refs": ["alienvault_otx:p4", "threatfox:1004"],
+        "events": ["24", "34"],
+        "match_type": "malware_family",
+        "confidence": 0.8,
+    }, "the pulse names a name the twin merge folded into the node: 9b credits OTX"
 
 
 def _technique_flags(driver) -> dict:
