@@ -199,6 +199,49 @@ def test_cached_empty_list_is_not_reused(col, tmp_path):
     assert req.call_count == 1
 
 
+# Daily and baseline runs: one cache key since the AbuseIPDB per-run cap (2026-10).
+
+
+@pytest.fixture
+def default_limits(monkeypatch):
+    """The code defaults of the limits that set the blacklist request's ``limit``."""
+    import config
+
+    monkeypatch.setattr(config, "MAX_ENTRIES_PER_SOURCE", 0)
+    monkeypatch.setattr(config, "ABUSEIPDB_MAX_PER_RUN", 10000)
+    return config
+
+
+@pytest.mark.parametrize("first", ["daily", "baseline"])
+def test_daily_and_baseline_runs_share_one_cache_key(col, tmp_path, default_limits, first):
+    """The daily run (the DAG's ``get_effective_limit``) and an unlimited baseline both ask for
+    ``{confidenceMinimum: 90, limit: 10000}``: whichever runs second on the same UTC day reuses the
+    first one's answer and sends no request."""
+    runs = {
+        "daily": lambda: col.collect(limit=default_limits.get_effective_limit("abuseipdb")),
+        "baseline": lambda: col.collect(limit=None, baseline=True),
+    }
+    second = "baseline" if first == "daily" else "daily"
+    with _patch(_resp(200, API)) as req:
+        assert runs[first]()["count"] == 1
+    assert req.call_count == 1
+    cached = json.loads((tmp_path / "abuseipdb_blacklist_cache.json").read_text())
+    assert cached["params"] == {"confidenceMinimum": 90, "limit": 10000}
+    with _patch() as req:
+        assert runs[second]()["count"] == 1
+    req.assert_not_called()
+
+
+def test_a_lower_daily_limit_gives_the_daily_run_its_own_request(col, default_limits, monkeypatch):
+    """``EDGEGUARD_MAX_ENTRIES`` below 10,000 applies to the daily run only, so its key differs."""
+    monkeypatch.setattr(default_limits, "MAX_ENTRIES_PER_SOURCE", 500)
+    with _patch(_resp(200, API), _resp(200, API)) as req:
+        col.collect(limit=None, baseline=True)
+        col.collect(limit=default_limits.get_effective_limit("abuseipdb"))
+    assert req.call_count == 2
+    assert [c.kwargs["params"]["limit"] for c in req.call_args_list] == [10000, 500]
+
+
 # Through the real HTTP helper: only the session's request is replaced.
 
 

@@ -92,7 +92,7 @@ class AbuseIPDBCollector:
     # The most addresses one blacklist request returns on the free plan (the ceiling the collector
     # applied before 2026-10 as the "API max"; the 730-day baseline of 2026-10-13 received 10,000).
     # ``EDGEGUARD_ABUSEIPDB_MAX_PER_RUN`` sets the request's ``limit`` up to it; a plan that returns
-    # more needs this raised, never the number of requests (one per run).
+    # more needs this raised, never the number of requests (at most one per run).
     BLACKLIST_MAX_PER_REQUEST = 10000
 
     def __init__(self, api_key: Optional[str] = None, misp_writer: Optional[MISPWriter] = None):
@@ -347,8 +347,10 @@ class AbuseIPDBCollector:
 
         # 2026-10: the source's own cap (``EDGEGUARD_ABUSEIPDB_MAX_PER_RUN``, default 10,000) replaces
         # the generic incremental default, which asked for 200 addresses, so the stored copies of the
-        # others were never reported again and aged while the blacklist still listed them. Still one
-        # request per run: the cap sets its ``limit``, at most BLACKLIST_MAX_PER_REQUEST.
+        # others were never reported again and aged while the blacklist still listed them. Still at
+        # most one request per run (none when the answer fetched earlier on the same UTC day is
+        # reused): the cap sets its ``limit``, at most BLACKLIST_MAX_PER_REQUEST. The daily and the
+        # baseline runs therefore ask for the same parameters by default and share the cached answer.
         cap = lower_limit(limit, self.max_per_run())
         if cap is not None and cap > self.BLACKLIST_MAX_PER_REQUEST:
             logger.warning(
