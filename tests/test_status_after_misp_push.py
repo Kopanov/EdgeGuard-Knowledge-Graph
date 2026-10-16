@@ -103,16 +103,22 @@ class TestIssue62SuccessRateGate:
         assert "0 successes" in st["error"]
 
     def test_errors_name_conversion_failures_as_a_cause(self, monkeypatch):
-        # 2026-10: push_items counts the items it could not convert to a MISP attribute as failed,
-        # so a failure is not necessarily one MISP reported: both error texts name the writer's
-        # [CONVERT] line next to MISP.
+        # 2026-10: push_items counts the items it could not convert to a MISP attribute as failed
+        # when they are all, or at least half, of a source's items in the push, so a failure is not
+        # necessarily one MISP reported: both error texts name the writer's [CONVERT] line next to
+        # MISP, with the rule under which such items are failures.
+        from collectors.misp_writer import CONVERT_FAILED_MIN_SHARE
+
+        assert CONVERT_FAILED_MIN_SHARE == 0.5, "the error text says 'at least half'"
         monkeypatch.delenv("EDGEGUARD_MISP_MIN_SUCCESS_RATE", raising=False)
         none_pushed = status_after_misp_push("otx", 301, 0, 1)
         below_rate = status_after_misp_push("otx", 301, 18, 1)
         for st in (none_pushed, below_rate):
             assert st["success"] is False
             assert "attributes MISP did not store" in st["error"]
-            assert "items no MISP attribute could be built from" in st["error"]
+            assert (
+                "for a source all or at least half of whose items no MISP attribute could be built from" in st["error"]
+            )
             assert "[CONVERT]" in st["error"]
         assert "0 successes" in none_pushed["error"]
         assert "0.947" in below_rate["error"]

@@ -577,12 +577,14 @@ def _misp_min_success_rate() -> float:
     return val
 
 
-# 2026-10: what a failure counted by ``MISPWriter.push_items`` can be. Items that could not be
-# converted are counted as failed although MISP never saw them, so an error that blamed MISP alone
-# pointed the operator away from the writer's ``[CONVERT]`` line.
+# 2026-10: what a failure counted by ``MISPWriter.push_items`` can be. The items no MISP attribute
+# could be built from count as failed when they are all, or at least half
+# (``misp_writer.CONVERT_FAILED_MIN_SHARE``), of a source's items in the push, although MISP never
+# saw them, so an error that blamed MISP alone would point the operator away from the writer's
+# ``[CONVERT]`` line. Fewer such items are reported by that line and are not failures.
 _MISP_PUSH_FAILURE_CAUSES = (
-    "failures are attributes MISP did not store and items no MISP attribute could be built from, "
-    "logged by the writer as [CONVERT]"
+    "failures are attributes MISP did not store and, for a source all or at least half of whose items "
+    "no MISP attribute could be built from, those items, logged by the writer as [CONVERT]"
 )
 
 
@@ -604,10 +606,11 @@ def status_after_misp_push(
     Always emits one grep-able ``COLLECTOR_SUMMARY`` log line per run —
     the at-a-glance operator surface Issue #62 asked for.
 
-    2026-10: since ``push_items`` counts the items no MISP attribute could be built from as
-    failed, a failure is not necessarily one MISP reported; the error text names both causes, so
-    an operator also looks for the writer's ``[CONVERT]`` line. A run with no new attribute
-    therefore fails on a single such item (no success, one failure).
+    2026-10: ``push_items`` counts the items no MISP attribute could be built from as failed when
+    they are all, or at least half, of a source's items in the push (a payload that stopped
+    converting), so a failure is not necessarily one MISP reported; the error text names both
+    causes, so an operator also looks for the writer's ``[CONVERT]`` line. Fewer such items are
+    only reported by that line: a few bad records neither fail the run nor hold a cursor.
     """
     if num_items == 0:
         return make_status(source, True, count=0, failed=0)

@@ -570,7 +570,7 @@ def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
 
 # 2026-10: the fields each ``MISPWriter.create_*_attribute`` needs non-empty after
 # ``sanitize_value``; without them it returns None, and ``push_items`` names the field in the
-# reason it logs for the items it counts as failed.
+# reason it logs for the items it could not convert.
 _CONVERSION_REQUIRES: Dict[str, str] = {
     "indicator": "value",
     "vulnerability": "cve_id",
@@ -580,6 +580,28 @@ _CONVERSION_REQUIRES: Dict[str, str] = {
     "tactic": "mitre_id or name",
     "tool": "mitre_id or name",
 }
+
+# 2026-10: the share of a source's items in one ``push_items`` call that must fail conversion
+# before those items count as failed pushes. Below it they are only reported (the ``[CONVERT]``
+# line and ``stats["items_not_converted"]``); a source all of whose items fail conversion always
+# counts them as failed.
+#
+# Why 0.5. Items that cannot be converted have two causes. A defect in a single record (one OTX
+# pulse with a malformed CVE reference) drops that record's item and nothing else. A change in the
+# source's payload that the collector no longer reads drops every item of the kind it affects, on
+# every record: for a source of one item kind (the indicator feeds; NVD, CISA KEV and CISA ICS,
+# which deliver vulnerabilities) that is every item, for OTX and MITRE ATT&CK the share of that
+# kind. The threshold must lie far above the share one bad record has in a small incremental
+# window, because a counted failure keeps the source's cursor or ETag (OTX, MITRE ATT&CK, CISA ICS,
+# the cursor an NVD baseline seeds), so the next run reads the same record again and fails again.
+# At 0.5 one bad item fails a push only when the source has at most two items in it, and the cursor
+# moves at the first run whose window holds three or more; a payload change that breaks most of a
+# source's items still fails the run. A value such as 0.05 (the complement of the default
+# ``EDGEGUARD_MISP_MIN_SUCCESS_RATE``) would fail every push in which one bad item is among at most
+# 20 items of its source, and keep the cursor until a window held 21. The price of 0.5: a payload
+# change that breaks only a minority kind of a mixed source (for example OTX's CVE references) is
+# reported on every run but does not fail it.
+CONVERT_FAILED_MIN_SHARE = 0.5
 
 
 class MispTransientError(TransientServerError):
@@ -1199,8 +1221,11 @@ class MISPWriter:
             "batches_unverified": 0,
             # Attributes absent from the stored event MISP returned after an HTTP 200 push.
             "attributes_unconfirmed": 0,
-            # Items no MISP attribute could be built from (2026-10; counted as failed pushes).
+            # Items no MISP attribute could be built from (2026-10), and those of them counted as
+            # failed pushes: only a source whose items all, or at least CONVERT_FAILED_MIN_SHARE of
+            # them, failed conversion in one push counts them.
             "items_not_converted": 0,
+            "items_not_converted_failed": 0,
         }
         # PR-F6 (Issue #65): per-batch parent-DAG liveness callback.
         # ``None`` = no check (legacy / incremental DAGs); a callable
@@ -2719,10 +2744,16 @@ class MISPWriter:
         failed push.
 
         2026-10 (push accounting): an item no MISP attribute can be built from (an unknown item
-        type, or a ``create_*_attribute`` that returns None, such as an empty value) counts as
-        failed, with one ``[CONVERT]`` log line naming the reasons and counts per source and
-        ``stats["items_not_converted"]``, so the success-rate gate of ``status_after_misp_push``
-        sees a source whose payload stops converting. A (source, date) group left without
+        type, or a ``create_*_attribute`` that returns None, such as an empty value) is reported:
+        one ``[CONVERT]`` log line per push gives, per source, how many of its items could not be
+        converted, the reasons and whether they count as failed, and
+        ``stats["items_not_converted"]`` counts them. They count as failed (and in
+        ``stats["items_not_converted_failed"]``) only when the drop is systemic for the source in
+        this push: every item of the source failed conversion, or at least
+        ``CONVERT_FAILED_MIN_SHARE`` of them did. A source whose payload stops converting thus fails
+        ``status_after_misp_push``, while a few bad records neither turn a run red nor hold a
+        collector's cursor (OTX, CISA ICS, the NVD baseline seed) or ETag (MITRE ATT&CK), which
+        advance only after a push without failures. A (source, date) group left without
         attributes reaches neither the event lookup nor MISP. With cross-event dedup on and a
         complete listing of the source's attributes (or ``known_source_keys``), the cross-event
         filter runs before ``_get_or_create_event``: a group MISP already holds entirely neither
@@ -2806,14 +2837,16 @@ class MISPWriter:
         # candidates for a last_seen refresh when MISP already holds them.
         reported_indicators: Dict[str, set] = {}
         # 2026-10: per source, the reasons items could not be converted to a MISP attribute and
-        # how many items each reason dropped. They are counted as failed, so a source whose payload
-        # stops converting fails the success-rate gate instead of passing as "already present".
+        # how many items each reason dropped, and the number of items each source gave. A source's
+        # drops count as failed only when they are systemic (``CONVERT_FAILED_MIN_SHARE``).
         not_converted: Dict[str, Dict[str, int]] = {}
+        items_per_source: Dict[str, int] = {}
 
         for item in items:
             source = item.get("tag", "unknown")
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             key = (source, date)
+            items_per_source[str(source)] = items_per_source.get(str(source), 0) + 1
 
             # Convert item to MISP attribute
             item_type = item.get("type", "")
@@ -2849,20 +2882,37 @@ class MISPWriter:
             if kind == "indicator":
                 reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
 
-        not_converted_ct = sum(count for reasons in not_converted.values() for count in reasons.values())
-        if not_converted_ct:
+        not_converted_ct = 0
+        # 2026-10: the dropped items of the sources for which the drop is systemic in this push;
+        # they are failures of the push, the others are reported only.
+        not_converted_failed_ct = 0
+        if not_converted:
+            parts: List[str] = []
             # Sorted so that the same payload always gives the same line.
-            detail = "; ".join(
-                f"{src}: {count} {reason}"
-                for src in sorted(not_converted)
-                for reason, count in sorted(not_converted[src].items())
-            )
-            logger.warning(
-                "[CONVERT] %d item(s) could not be converted to a MISP attribute and are counted as failed (%s)",
+            for src in sorted(not_converted):
+                dropped = sum(not_converted[src].values())
+                given = items_per_source.get(src, dropped)
+                systemic = dropped >= given or dropped / given >= CONVERT_FAILED_MIN_SHARE
+                not_converted_ct += dropped
+                if systemic:
+                    not_converted_failed_ct += dropped
+                reasons = ", ".join(f"{count} {reason}" for reason, count in sorted(not_converted[src].items()))
+                verdict = "counted as failed" if systemic else "not counted as failed"
+                parts.append(f"{src}: {dropped} of {given} item(s), {verdict} ({reasons})")
+            # A WARNING when every drop is only reported; an ERROR when a source's drop fails the push.
+            logger.log(
+                logging.ERROR if not_converted_failed_ct else logging.WARNING,
+                "[CONVERT] %d item(s) could not be converted to a MISP attribute, %d of them counted as failed "
+                "(a source's items count as failed when all or at least %.0f%% of them fail conversion): %s",
                 not_converted_ct,
-                detail,
+                not_converted_failed_ct,
+                CONVERT_FAILED_MIN_SHARE * 100,
+                "; ".join(parts),
             )
             self.stats["items_not_converted"] = self.stats.get("items_not_converted", 0) + not_converted_ct
+            self.stats["items_not_converted_failed"] = (
+                self.stats.get("items_not_converted_failed", 0) + not_converted_failed_ct
+            )
 
         # 2026-10: per resolved source tag, the reported indicators whose stored copy the
         # cross-event prefetch should describe (see ``_get_existing_source_attribute_keys``).
@@ -2879,8 +2929,9 @@ class MISPWriter:
 
         # Resolve events + prefetch existing (type, value); build work queue (post-filter batch counts).
         total_success = 0
-        # 2026-10: the items no attribute could be built from are failures of this push.
-        total_failed = not_converted_ct
+        # 2026-10: the items of a source whose drop in conversion is systemic are failures of this
+        # push; the other items no attribute could be built from are only reported.
+        total_failed = not_converted_failed_ct
         # 2026-10: attributes skipped because MISP already holds them (per-event + cross-event), the
         # N of the "[DEDUP] All N items were already present" line.
         present_ct = 0
@@ -3067,8 +3118,9 @@ class MISPWriter:
             push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
 
         # Only a true dedup skip: nothing failed (#216: a group whose event lookup/creation failed is
-        # counted as failed) and nothing was dropped in conversion (2026-10), and N is the number of
-        # attributes MISP was found to hold.
+        # counted as failed) and nothing was dropped in conversion (2026-10; a drop that is only
+        # reported rules the line out too, since not every item was present), and N is the number
+        # of attributes MISP was found to hold.
         if not push_queue and present_ct > 0 and total_failed == 0 and not_converted_ct == 0:
             logger.warning(
                 "[DEDUP] All %d items were already present in MISP — nothing new to push. "
@@ -3468,17 +3520,26 @@ class MISPWriter:
             refreshed, _refresh_failed = self._refresh_stored_copies(refresh_due, refresh_days)
             refreshed_note = f"; {refreshed} existing attribute(s) refreshed"
 
-        # Final summary
+        # Final summary. 2026-10: the items dropped in conversion but not counted as failed are named,
+        # so that neither line reads as if every item had been pushed or found present.
         total_elapsed = time.time() - start_time
+        reported_only_ct = not_converted_ct - not_converted_failed_ct
+        reported_note = (
+            f"; {reported_only_ct} item(s) not converted, not counted as failed ([CONVERT])" if reported_only_ct else ""
+        )
         if total_success > 0 or total_failed > 0:
             logger.info(
-                f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed{refreshed_note} "
-                f"in {total_elapsed:.1f}s"
+                f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed{reported_note}"
+                f"{refreshed_note} in {total_elapsed:.1f}s"
             )
         elif total_items > 0:
+            deduplicated = (
+                f"{total_items - not_converted_ct} items deduplicated{reported_note}"
+                if not_converted_ct
+                else f"{total_items} items all deduplicated"
+            )
             logger.info(
-                f"[SKIP] MISP push: 0 new attributes to push ({total_items} items all deduplicated{refreshed_note}) "
-                f"in {total_elapsed:.1f}s"
+                f"[SKIP] MISP push: 0 new attributes to push ({deduplicated}{refreshed_note}) in {total_elapsed:.1f}s"
             )
         else:
             logger.info("[OK] MISP push: no items provided")
@@ -3743,6 +3804,7 @@ class MISPWriter:
             "batches_unverified": 0,
             "attributes_unconfirmed": 0,
             "items_not_converted": 0,
+            "items_not_converted_failed": 0,
         }
 
 

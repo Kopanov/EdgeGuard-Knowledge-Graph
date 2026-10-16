@@ -1,4 +1,4 @@
-"""MISP push accounting: no event for a group without attributes, conversion drops fail (2026-10).
+"""MISP push accounting: no event for a group without attributes; conversion drops (2026-10).
 
 ``MISPWriter.push_items`` groups the converted attributes by (source, date) and pushes each group
 into the day's event ``EdgeGuard-{source}-{date}``. Before 2026-10:
@@ -13,11 +13,15 @@ into the day's event ``EdgeGuard-{source}-{date}``. Before 2026-10:
   the success-rate gate (``status_after_misp_push``) passed a source whose payload had stopped
   converting.
 
-Now the items no attribute can be built from are counted as failed with a ``[CONVERT]`` line naming
-the reasons and counts; a group without attributes reaches neither the event lookup nor MISP; with
-cross-event dedup on and a complete listing of the source's attributes, the cross-event filter runs
-before the event lookup (dedup off, or a listing that stopped early, keeps the old order); and the
-"[DEDUP]" line is logged only when nothing failed or was dropped, with N the attributes found present.
+Now the items no attribute can be built from are reported by a ``[CONVERT]`` line (per source: how
+many of its items, the reasons, whether they count as failed) and ``stats["items_not_converted"]``,
+and count as failed only when the drop is systemic for the source in the push: all of its items,
+or at least ``CONVERT_FAILED_MIN_SHARE`` of them. A few bad records therefore neither fail a run
+nor hold a collector's cursor (the OTX case is run through ``OTXCollector.collect``). A group
+without attributes reaches neither the event lookup nor MISP; with cross-event dedup on and a
+complete listing of the source's attributes, the cross-event filter runs before the event lookup
+(dedup off, or a listing that stopped early, keeps the old order); and the "[DEDUP]" line is logged
+only when nothing failed or was dropped, with N the attributes found present.
 
 The fake MISP answers the requests the writer sends (``/events/restSearch`` with ``eventinfo``,
 ``/events``, ``/attributes/restSearch`` with ``tags`` or ``eventid``) in the MISP 2.5 formats; the
@@ -157,53 +161,237 @@ def _otx_tag(writer: mw.MISPWriter) -> str:
     return writer.SOURCE_TAGS.get("otx", "source:otx")
 
 
-# --------------------------------------------------------------------------- conversion failures
+# --------------------------------------------------------------------------- conversion drops
 
 
-def test_a_group_whose_items_all_fail_conversion_creates_no_event_and_counts_failures(monkeypatch, caplog):
+def _bad_cve(tag: str = "otx") -> Dict[str, Any]:
+    """A CVE reference whose id is only whitespace: the collector keeps it, the writer cannot convert it."""
+    return {"type": "vulnerability", "cve_id": " ", "zone": ["global"], "tag": tag, "source": [tag]}
+
+
+def _convert_lines(caplog) -> List[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage().startswith("[CONVERT]")]
+
+
+def test_the_threshold_is_half_of_a_source_s_items():
+    # The docs, the status error ("at least half") and the tests below state this value.
+    assert mw.CONVERT_FAILED_MIN_SHARE == 0.5
+
+
+def test_a_single_dropped_item_among_good_ones_is_reported_not_failed(monkeypatch, caplog):
+    writer, pushed = _writer(_FakeMisp(), monkeypatch)
+    present = ["203.0.113.10", "203.0.113.11", "203.0.113.12"]
+    writer.session = misp = _FakeMisp(stored=[_stored(writer, _otx_ioc(v)) for v in present])
+    items = [_otx_ioc(v) for v in present] + [_otx_ioc("198.51.100.7"), _bad_cve()]
+    with caplog.at_level(logging.INFO, logger="collectors.misp_writer"):
+        result = writer.push_items(items)
+
+    assert result == (1, 0), "one new attribute pushed; the unconvertible item is no failure"
+    assert pushed == [(misp.events[f"EdgeGuard-otx-{TODAY}"], ["198.51.100.7"])]
+    assert writer.stats["items_not_converted"] == 1
+    assert writer.stats["items_not_converted_failed"] == 0
+    convert = _convert_lines(caplog)
+    assert [r.levelno for r in convert] == [logging.WARNING]
+    assert convert[0].getMessage() == (
+        "[CONVERT] 1 item(s) could not be converted to a MISP attribute, 0 of them counted as failed "
+        "(a source's items count as failed when all or at least 50% of them fail conversion): "
+        "otx: 1 of 5 item(s), not counted as failed (1 vulnerability with an empty cve_id)"
+    )
+    assert any(
+        m.startswith("[OK] MISP push complete: 1 succeeded, 0 failed; 1 item(s) not converted, not counted as failed")
+        for m in _messages(caplog)
+    )
+    assert status_after_misp_push("otx", len(items), *result)["success"] is True
+
+
+def test_a_dropped_item_among_items_misp_holds_neither_fails_nor_logs_all_present(monkeypatch, caplog):
+    # The case that turned every run red: nothing new to push, and one record of the source that
+    # never converts. The run passes, and the [DEDUP] line does not claim every item was present.
+    writer, pushed = _writer(_FakeMisp(), monkeypatch)
+    present = ["203.0.113.10", "203.0.113.11"]
+    writer.session = misp = _FakeMisp(stored=[_stored(writer, _otx_ioc(v)) for v in present])
+    items = [_otx_ioc(v) for v in present] + [{"type": "report", "name": "Weekly", "tag": "otx"}]
+    with caplog.at_level(logging.INFO, logger="collectors.misp_writer"):
+        result = writer.push_items(items)
+
+    assert result == (0, 0)
+    assert misp.calls == [("listing", _otx_tag(writer))], "no event looked up or created"
+    assert pushed == []
+    assert any(
+        "otx: 1 of 3 item(s), not counted as failed (1 unknown item type 'report')" in m for m in _messages(caplog)
+    )
+    assert not any("[DEDUP]" in m for m in _messages(caplog)), "an item was dropped: not 'all already present'"
+    assert any(
+        "[SKIP] MISP push: 0 new attributes to push (2 items deduplicated; 1 item(s) not converted, "
+        "not counted as failed ([CONVERT]))" in m
+        for m in _messages(caplog)
+    )
+    assert status_after_misp_push("otx", len(items), *result)["success"] is True
+
+
+def test_a_source_whose_items_all_fail_conversion_fails_and_creates_no_event(monkeypatch, caplog):
     misp = _FakeMisp()
     writer, pushed = _writer(misp, monkeypatch)
     items = [
         _otx_ioc(""),  # an empty value
-        {"type": "vulnerability", "cve_id": "", "zone": ["global"], "tag": "otx", "source": ["otx"]},
+        _bad_cve(),
         {"type": "campaign", "name": "Operation X", "tag": "otx"},
         {"type": "campaign", "name": "Operation Y", "tag": "otx"},
     ]
     with caplog.at_level(logging.INFO, logger="collectors.misp_writer"):
         result = writer.push_items(items)
 
-    assert result == (0, 4), "every item that could not be converted is a failed push"
+    assert result == (0, 4), "a source none of whose items converts fails with every item"
     assert misp.calls == [], "no event lookup, no event creation, no listing for a group without attributes"
     assert pushed == []
     assert writer.stats["items_not_converted"] == 4
+    assert writer.stats["items_not_converted_failed"] == 4
     assert writer.stats["events_created"] == 0
-    convert = [m for m in _messages(caplog) if m.startswith("[CONVERT]")]
-    assert convert == [
-        "[CONVERT] 4 item(s) could not be converted to a MISP attribute and are counted as failed "
-        "(otx: 1 indicator with an empty value; otx: 2 unknown item type 'campaign'; "
-        "otx: 1 vulnerability with an empty cve_id)"
-    ]
+    convert = _convert_lines(caplog)
+    assert [r.levelno for r in convert] == [logging.ERROR]
+    assert convert[0].getMessage() == (
+        "[CONVERT] 4 item(s) could not be converted to a MISP attribute, 4 of them counted as failed "
+        "(a source's items count as failed when all or at least 50% of them fail conversion): "
+        "otx: 4 of 4 item(s), counted as failed (1 indicator with an empty value, "
+        "2 unknown item type 'campaign', 1 vulnerability with an empty cve_id)"
+    )
     assert not any("[DEDUP]" in m for m in _messages(caplog)), "nothing was found present in MISP"
     # The caller's gate sees the failures: before 2026-10 the push returned (0, 0), a success.
-    assert status_after_misp_push("otx", len(items), *result)["success"] is False
+    status = status_after_misp_push("otx", len(items), *result)
+    assert status["success"] is False
+    assert "[CONVERT]" in status["error"] and "at least half" in status["error"]
 
 
-def test_items_present_plus_a_dropped_item_do_not_log_all_already_present(monkeypatch, caplog):
-    writer, pushed = _writer(_FakeMisp(), monkeypatch)
-    writer.session = misp = _FakeMisp(stored=[_stored(writer, _otx_ioc("203.0.113.10"))])
-    items = [_otx_ioc("203.0.113.10"), {"type": "report", "name": "Weekly", "tag": "otx"}]
+def test_every_item_failing_counts_whatever_the_share(monkeypatch):
+    # "All of a source's items" is a rule of its own, not only a share of 1.0 above the threshold.
+    monkeypatch.setattr(mw, "CONVERT_FAILED_MIN_SHARE", 1.5)
+    writer, _pushed = _writer(_FakeMisp(), monkeypatch)
+    assert writer.push_items([_bad_cve(), _bad_cve()]) == (0, 2)
+    writer, _pushed = _writer(_FakeMisp(), monkeypatch)
+    assert writer.push_items([_bad_cve(), _otx_ioc("198.51.100.7")]) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("dropped", "good", "counted"),
+    [
+        (2, 2, True),  # 2 of 4: exactly the threshold counts
+        (3, 1, True),  # 3 of 4: above it
+        (1, 2, False),  # 1 of 3: below it
+        (2, 3, False),  # 2 of 5: below it
+    ],
+)
+def test_the_share_of_dropped_items_decides_at_and_below_the_threshold(monkeypatch, caplog, dropped, good, counted):
+    writer, _pushed = _writer(_FakeMisp(), monkeypatch)
+    values = [f"203.0.113.{10 + i}" for i in range(good)]
+    writer.session = _FakeMisp(stored=[_stored(writer, _otx_ioc(v)) for v in values])
+    items = [_otx_ioc(v) for v in values] + [_bad_cve() for _ in range(dropped)]
     with caplog.at_level(logging.INFO, logger="collectors.misp_writer"):
         result = writer.push_items(items)
 
-    assert result == (0, 1)
-    assert misp.calls == [("listing", _otx_tag(writer))]
-    assert not any("[DEDUP]" in m for m in _messages(caplog)), "an item was dropped: not 'all already present'"
-    assert any("otx: 1 unknown item type 'report'" in m for m in _messages(caplog))
-    # A run that pushes nothing new fails on a single unconvertible item, and its error names the
-    # [CONVERT] line as a cause next to MISP, which never saw the item.
-    status = status_after_misp_push("otx", len(items), *result)
-    assert status["success"] is False
-    assert "[CONVERT]" in status["error"]
+    total = dropped + good
+    verdict = "counted as failed" if counted else "not counted as failed"
+    assert result == (0, dropped if counted else 0)
+    assert writer.stats["items_not_converted"] == dropped
+    assert writer.stats["items_not_converted_failed"] == (dropped if counted else 0)
+    assert any(f"otx: {dropped} of {total} item(s), {verdict} (" in m for m in _messages(caplog))
+    assert status_after_misp_push("otx", total, *result)["success"] is (not counted)
+
+
+def test_the_rule_is_applied_per_source(monkeypatch, caplog):
+    writer, pushed = _writer(_FakeMisp(), monkeypatch)
+    items = [
+        _otx_ioc("198.51.100.7"),
+        _otx_ioc("198.51.100.8"),
+        _otx_ioc("198.51.100.9"),
+        _bad_cve(),  # OTX: 1 of 4, reported
+        _bad_cve("threatfox"),
+        {"type": "campaign", "name": "Operation X", "tag": "threatfox"},  # ThreatFox: 2 of 2, failed
+    ]
+    with caplog.at_level(logging.INFO, logger="collectors.misp_writer"):
+        result = writer.push_items(items)
+
+    assert result == (3, 2)
+    assert [event for event, _values in pushed] == [writer.session.events[f"EdgeGuard-otx-{TODAY}"]]
+    assert f"EdgeGuard-threatfox-{TODAY}" not in writer.session.events
+    message = _convert_lines(caplog)[0].getMessage()
+    assert message.startswith("[CONVERT] 3 item(s) could not be converted to a MISP attribute, 2 of them counted")
+    assert message.endswith(
+        "otx: 1 of 4 item(s), not counted as failed (1 vulnerability with an empty cve_id); "
+        "threatfox: 2 of 2 item(s), counted as failed (1 unknown item type 'campaign', "
+        "1 vulnerability with an empty cve_id)"
+    )
+
+
+# --------------------------------------------------------------------------- the OTX cursor
+
+
+def _otx_pulse(pulse_id: str, modified: str, iocs: List[str], cve_references: List[str]) -> Dict[str, Any]:
+    """A pulse with the fields of OTX's ``/api/v1/pulses/subscribed`` answer that the collector reads."""
+    return {
+        "id": pulse_id,
+        "name": f"pulse {pulse_id}",
+        "description": "",
+        "created": "2026-10-13T11:11:02.458000",
+        "modified": modified,
+        "TLP": "white",
+        "adversary": "",
+        "tags": [],
+        "references": [],
+        "industries": [],
+        "targeted_countries": [],
+        "malware_families": [],
+        "attack_ids": [],
+        "cve_references": cve_references,
+        "indicators": [
+            {"id": 4526831400 + n, "indicator": v, "type": "IPv4", "created": modified, "description": ""}
+            for n, v in enumerate(iocs)
+        ],
+    }
+
+
+def test_an_otx_pulse_with_one_unconvertible_item_does_not_hold_the_cursor(monkeypatch, caplog):
+    """The OTX collector advances its cursor to the newest pulse only after a push without failures;
+    on a partial failure it advanced it to the pulses of the first ``success`` items, an
+    approximation that the dropped item, listed before the second pulse's indicator, shifts. A
+    malformed CVE reference in the older pulse is reported and the cursor reaches the newer one."""
+    from unittest.mock import patch
+
+    from collectors import otx_collector
+
+    writer, pushed = _writer(_FakeMisp(), monkeypatch)
+    older = _otx_pulse("6710e46581edfe9bba0da3f1", "2026-10-14T10:00:00.000000", ["198.51.100.7"], [" "])
+    newer = _otx_pulse("6710e46581edfe9bba0da3f2", "2026-10-15T10:00:00.000000", ["198.51.100.8"], [])
+    collector = otx_collector.OTXCollector.__new__(otx_collector.OTXCollector)
+    collector.api_key = "a" * 64
+    collector.tag = "alienvault_otx"
+    collector.session = MagicMock()
+    collector.rate_limiter = MagicMock()
+    collector._last_http_status = 200
+    collector.circuit_breaker = MagicMock()
+    collector.misp_writer = writer
+    collector.source_name = "otx"
+    cursor: Dict[str, Any] = {}
+    pages = iter([[older, newer]])
+    with (
+        patch.object(collector, "check_service_available", return_value=True),
+        patch.object(collector, "_fetch_pulses", side_effect=lambda **_kw: next(pages, [])),
+        patch.object(otx_collector.time, "sleep"),
+        patch.object(otx_collector, "get_source_incremental", return_value={}),
+        patch.object(otx_collector, "update_source_incremental", lambda _src, **kw: cursor.update(kw)),
+        patch.object(otx_collector, "OTX_INCREMENTAL_MAX_PAGES", 10),
+        caplog.at_level(logging.INFO, logger="collectors.misp_writer"),
+    ):
+        status = collector.collect(limit=10, push_to_misp=True, baseline=False)
+
+    assert [values for _event, values in pushed] == [["198.51.100.7", "198.51.100.8"]]
+    assert cursor == {"otx_last_pulse_modified": "2026-10-15T10:00:00"}, (
+        "the cursor reaches the newer pulse; counted as failed, the item held it at the older one"
+    )
+    assert status["success"] is True and status["failed"] == 0
+    assert any(
+        "alienvault_otx: 1 of 3 item(s), not counted as failed (1 vulnerability with an empty cve_id)" in m
+        for m in _messages(caplog)
+    )
 
 
 # --------------------------------------------------------------------------- re-runs
@@ -251,7 +439,7 @@ def test_partial_push_looks_up_only_the_event_of_the_group_with_new_attributes(m
     otx_tag = _otx_tag(writer)
     tf_tag = writer.SOURCE_TAGS.get("threatfox", "source:threatfox")
     otx_event = f"EdgeGuard-otx-{TODAY}"
-    assert result == (1, 1), "one new attribute pushed, one item failed conversion"
+    assert result == (1, 0), "one new attribute pushed; one OTX item of three dropped in conversion is reported"
     assert misp.calls == [
         ("listing", otx_tag),
         ("lookup", otx_event),
