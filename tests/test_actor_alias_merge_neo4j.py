@@ -133,6 +133,18 @@ def open_test_database():
     driver.close()
 
 
+def fail_after_the_merge(label: str) -> str:
+    """A normalisation statement for ``label`` that fails once the batch's merge statement has run in
+    the same transaction (the canonical then carries ``merged_from``), as a lost lock or a dropped
+    connection after the merge would (2026-10-16)."""
+    return (
+        "UNWIND $canonicals AS cname\n"
+        f"MATCH (c:{label} {{name: cname}})\n"
+        "CALL apoc.util.validate(c.merged_from IS NOT NULL, 'failure after the merge of %s', [cname])\n"
+        "RETURN count(c) AS normalised_edges"
+    )
+
+
 @pytest.fixture(scope="module")
 def raw_driver():
     yield from open_test_database()
@@ -340,6 +352,33 @@ class TestMergeOnNeo4j:
             "clop": ("Core Ideas text", "coreideas"),
             "apt28": ("legacy text", None),
         }
+
+    def test_a_failure_after_the_merge_rolls_the_batch_back_and_the_next_run_merges(self, graph, monkeypatch):
+        """2026-10-16: a batch is one transaction. Its statements were auto-commit transactions of their
+        own, so a failure after the merge left the duplicates deleted and their moved edges with the
+        duplicates' uuids, and no later run named the canonical again."""
+        client, driver = graph
+        statements = enrichment_jobs._ACTOR_ALIAS_MERGE_STATEMENTS
+        monkeypatch.setattr(
+            enrichment_jobs,
+            "_ACTOR_ALIAS_MERGE_STATEMENTS",
+            statements._replace(normalise=fail_after_the_merge("ThreatActor")),
+        )
+        res = enrichment_jobs.merge_alias_duplicate_actors(client)
+        assert (res["merged"], res["restamped_edges"], res["errors"]) == (0, 0, 1)
+        assert _names(driver) == ["apt28", "apt29", "cl0p", "clop", "fancy bear", "medusa", "medusa group", "unc2452"]
+        assert _one(driver, "MATCH (a:ThreatActor) WHERE a.merged_from IS NOT NULL RETURN count(a) AS n") == {"n": 0}
+        moved = (
+            "MATCH (:Malware {name: 'clop ransomware'})-[r:ATTRIBUTED_TO]->(a:ThreatActor) "
+            "RETURN collect([a.name, r.trg_uuid]) AS links"
+        )
+        assert sorted(_one(driver, moved)["links"]) == [["cl0p", "u-cl0p"], ["clop", "u-clop"]]
+
+        monkeypatch.setattr(enrichment_jobs, "_ACTOR_ALIAS_MERGE_STATEMENTS", statements)
+        res = enrichment_jobs.merge_alias_duplicate_actors(client)
+        assert (res["merged"], res["errors"]) == (2, 0)
+        assert _names(driver) == ["apt28", "apt29", "clop", "medusa", "medusa group", "unc2452"]
+        assert _one(driver, moved)["links"] == [["clop", "u-clop"]]
 
     def test_a_second_run_merges_nothing(self, graph):
         client, driver = graph
