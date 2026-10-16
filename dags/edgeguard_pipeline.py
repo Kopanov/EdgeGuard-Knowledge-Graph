@@ -1856,9 +1856,9 @@ daily_dag = DAG(
     # Sized as 7h (8 collectors in parallel, each with its retries) + buffer. Since 2026-10 the
     # collectors share the collector pool (EDGEGUARD_COLLECTOR_POOL_SLOTS, default 4), so they no
     # longer all start together: if every attempt reached its 2h execution_timeout they would need two
-    # rounds (~12h 45m) and the scheduler would mark the collectors still waiting for a slot skipped
-    # at this timeout, without a task failure callback (EdgeGuardCollectionStale reports the source).
-    # Real daily runs take minutes, so the timeout is kept.
+    # rounds (~12h 45m) and the scheduler would mark the collectors still running or waiting for a
+    # slot at this timeout skipped, without a task failure callback (EdgeGuardCollectionStale reports
+    # the source). Real daily runs take minutes, so the timeout is kept.
     dagrun_timeout=timedelta(hours=8, minutes=30),
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
@@ -3673,11 +3673,11 @@ baseline_clean_task = PythonOperator(
 #
 # Tier2 has no order inside the group: its feeds are individually small and
 # don't trigger the failure-mode-2 oversized-event problem. 2026-10: all 7 at
-# once (plus scheduled collectors of other DAGs) did exhaust MISP php-fpm
-# workers (HTTP 502) and the airflow container's memory limit, so every
-# collector, here and in the other DAGs, takes a slot of the shared Airflow
-# pool COLLECTOR_POOL and at most EDGEGUARD_COLLECTOR_POOL_SLOTS (default 4)
-# collectors run at once. Tier1 runs one collector at a time, so it holds one slot.
+# once pushed MISP php-fpm past its memory limit (HTTP 502), and a daily
+# catch-up run plus OTX, VT and NVD hit the airflow container's limit, so
+# every collector of every DAG takes a slot of COLLECTOR_POOL: at most
+# EDGEGUARD_COLLECTOR_POOL_SLOTS (default 4) run at once. Tier1 runs one
+# collector at a time, so it holds one slot.
 with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
         task_id="collect_otx",

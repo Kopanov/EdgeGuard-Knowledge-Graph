@@ -107,8 +107,12 @@ if [ "$1" = pools ]; then
   echo "$n" > "$STUB_DIR/count"
   echo "$*" >> "$STUB_DIR/pool_calls"
   if [ "$n" -le "$FAIL_TIMES" ]; then
-    echo "detail line $n"
-    echo "Database migration required (attempt $n)" >&2
+    if [ -n "$ERROR_TEXT" ]; then
+      echo "$ERROR_TEXT" >&2
+    else
+      echo "detail line $n"
+      echo "Database migration required (attempt $n)" >&2
+    fi
     exit 1
   fi
   # Ancestors of the retry loop, recorded while the standalone stub is still alive.
@@ -130,7 +134,9 @@ exit 1
 """
 
 
-def _run_startup(tmp_path: Path, slots: str | None, fail_times: int = 0) -> tuple[subprocess.CompletedProcess, int]:
+def _run_startup(
+    tmp_path: Path, slots: str | None, fail_times: int = 0, error_text: str = ""
+) -> tuple[subprocess.CompletedProcess, int]:
     real_sleep = shutil.which("sleep")
     if shutil.which("bash") is None or shutil.which("ps") is None or real_sleep is None:
         pytest.skip("bash, ps and sleep are needed to run the compose startup command")
@@ -145,6 +151,7 @@ def _run_startup(tmp_path: Path, slots: str | None, fail_times: int = 0) -> tupl
         "STUB_DIR": str(tmp_path),
         "FAIL_TIMES": str(fail_times),
         "REAL_SLEEP": real_sleep,
+        "ERROR_TEXT": error_text,
     }
     if slots is not None:
         env["EDGEGUARD_COLLECTOR_POOL_SLOTS"] = slots
@@ -177,6 +184,63 @@ def test_startup_retries_until_the_pool_is_set_and_logs_the_outcome(tmp_path):
     assert int((tmp_path / "standalone_pid").read_text()) == pid
     ancestors = {int(p) for p in (tmp_path / "loop_ancestors").read_text().split()}
     assert pid not in ancestors
+
+
+# 2026-10: every SQLAlchemy error ends with a "(Background on this error at: ...)" link, after a
+# blank line and, for statement errors, the [SQL: ...] and [parameters: ...] lines. The log names
+# the exception line instead (the shapes below are those of `airflow pools set` 3.3.2 against an
+# unreachable Postgres and an integer the pool column cannot hold); without an exception line it
+# falls back to the last line that is neither blank nor the link.
+_BACKGROUND = "(Background on this error at: https://sqlalche.me/e/21/e3q8)"
+_REFUSED = (
+    'sqlalchemy.exc.OperationalError: (psycopg2.OperationalError) connection to server at "postgres", '
+    "port 5432 failed: Connection refused"
+)
+_OUT_OF_RANGE = "sqlalchemy.exc.DataError: (psycopg2.errors.NumericValueOutOfRange) integer out of range"
+_UNMIGRATED = (
+    "2026-10-16T16:08:57.819488Z [error    ] Database migration required. Please run `airflow db migrate`. "
+    "[airflow.utils.db] loc=db.py:997"
+)
+
+
+@pytest.mark.parametrize(
+    ("error_text", "expected"),
+    [
+        (
+            "\n".join(
+                [
+                    "Traceback (most recent call last):",
+                    '  File "/opt/airflow/bin/airflow", line 8, in <module>',
+                    "    sys.exit(main())",
+                    _REFUSED,
+                    "\tIs the server running on that host and accepting TCP/IP connections?",
+                    "",
+                    _BACKGROUND,
+                ]
+            ),
+            _REFUSED,
+        ),
+        (
+            "\n".join(
+                [
+                    "Traceback (most recent call last):",
+                    _OUT_OF_RANGE,
+                    "[SQL: UPDATE slot_pool SET slots=%(slots)s WHERE slot_pool.id = %(slot_pool_id)s]",
+                    "[parameters: {'slots': 99999999999999999999, 'slot_pool_id': 2}]",
+                    _BACKGROUND,
+                ]
+            ),
+            _OUT_OF_RANGE,
+        ),
+        ("\n".join([_UNMIGRATED, "", _BACKGROUND, ""]), _UNMIGRATED),
+    ],
+    ids=["unreachable-db", "out-of-range", "no-exception-line"],
+)
+def test_startup_logs_the_cause_not_the_sqlalchemy_background_link(tmp_path, error_text, expected):
+    result, _ = _run_startup(tmp_path, "4", fail_times=30, error_text=error_text)
+    assert result.returncode == 0, result.stderr
+    errors = [line for line in result.stderr.splitlines() if "not set after" in line]
+    assert errors == [f"[edgeguard] collector pool {POOL} not set after 30 attempts: {expected}"]
 
 
 @pytest.mark.parametrize("value", ["four", "0", "00", "-3", "2.5", "4 ", "4x"])

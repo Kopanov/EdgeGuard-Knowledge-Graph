@@ -230,6 +230,8 @@ With git:
 # or: make update
 ```
 
+**First update to the collector pool code (2026-10):** from that version every collector task runs in the Airflow pool **`edgeguard_collectors`**, and while the pool does not exist the collectors of new DAG runs are never scheduled (no failure alert). Create it before you update: on a Compose stack in the running container, **`docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`**; on the venv path, **`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`**. On a Compose stack, run the update only when no **`edgeguard_baseline`** run is in progress: it recreates the containers, which kills the running tasks, and if the rebuild fails after the pull, the old container keeps running and re-parses the new **`./dags`**. Details: [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10).
+
 Without git (tarball): replace files manually, then **`docker compose build && docker compose up -d`** (or **`./install.sh --python`**).
 
 ---
@@ -286,4 +288,4 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-10-16 — venv path: create the Airflow pool `edgeguard_collectors` (`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`) before unpausing the DAGs; Compose creates it on every start. Prior: 2026-04-26 — PR-N33 docs audit: fixed venv-path Airflow install (was `~=2.11`, now `~=3.2` after the 2026-04-15 upgrade); corrected `AIRFLOW_MEMORY_LIMIT` default (was 4g, actual default is 12g); split RAM recommendation into "tiny dev" (8 GB) vs "full 730d baseline" (~32 GB); cross-linked `BASELINE_LAUNCH_CHECKLIST.md` and `MEMORY_TUNING.md`. Prior: 2026-04-06 Compose `x-common-env` / scheduler tuning._
+_Last updated: 2026-10-16 — venv path: create the Airflow pool `edgeguard_collectors` (`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`) before unpausing the DAGs; Compose creates it on every start. Same day: § 7 Updates: before the first update to the collector pool code, create the pool (in the running container on a Compose stack), and on a Compose stack update only when no baseline run is in progress. Prior: 2026-04-26 — PR-N33 docs audit: fixed venv-path Airflow install (was `~=2.11`, now `~=3.2` after the 2026-04-15 upgrade); corrected `AIRFLOW_MEMORY_LIMIT` default (was 4g, actual default is 12g); split RAM recommendation into "tiny dev" (8 GB) vs "full 730d baseline" (~32 GB); cross-linked `BASELINE_LAUNCH_CHECKLIST.md` and `MEMORY_TUNING.md`. Prior: 2026-04-06 Compose `x-common-env` / scheduler tuning._

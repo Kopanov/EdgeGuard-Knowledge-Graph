@@ -340,10 +340,12 @@ services:
     # succeeds (airflow-init has no DB access). Idempotent on every start.
     # 2026-10: a slot value that is not a positive integer falls back to 4 with a message, because
     # the CLI would reject it on every attempt and the collectors would never be scheduled. The
-    # result is logged (success once, the last error line every 30 failed attempts) so a pool that
-    # cannot be set shows in `docker compose logs airflow`. The loop is started detached (double
-    # fork) so it is reparented to the init process, which reaps it, instead of staying a child of
-    # `airflow standalone`.
+    # result is logged (success once, the cause every 30 failed attempts) so a pool that cannot be
+    # set shows in `docker compose logs airflow`. The cause is the last exception line of the CLI
+    # output (`<module>.<Name>Error: ...`), or else its last line other than a blank line and
+    # SQLAlchemy's "(Background on this error at: ...)" link, which ends every SQLAlchemy error and
+    # names no cause. The loop is started detached (double fork) so it is reparented to the init
+    # process, which reaps it, instead of staying a child of `airflow standalone`.
     command:
       - bash
       - -c
@@ -359,7 +361,11 @@ services:
               "Collector tasks of all DAGs (bounds MISP and container memory pressure)" 2>&1); do
             attempts=$$((attempts + 1))
             if [ $$((attempts % 30)) -eq 0 ]; then
-              echo "[edgeguard] collector pool edgeguard_collectors not set after $$attempts attempts: $$(printf '%s\n' "$$out" | tail -n 1)" >&2
+              reason=$$(printf '%s\n' "$$out" | grep -E '^[A-Za-z_][A-Za-z0-9_.]*(Error|Exception): ' | tail -n 1)
+              if [ -z "$$reason" ]; then
+                reason=$$(printf '%s\n' "$$out" | grep -v -e '^(Background on this error' -e '^[[:space:]]*$$' | tail -n 1)
+              fi
+              echo "[edgeguard] collector pool edgeguard_collectors not set after $$attempts attempts: $$reason" >&2
             fi
             sleep 10
           done
