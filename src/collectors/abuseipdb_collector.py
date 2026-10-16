@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import logging
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -32,9 +33,32 @@ from collectors.collector_utils import (
     status_after_misp_push,
 )
 from collectors.misp_writer import MISPWriter
+from collectors.virustotal_budget import _STATE_DIR_ENV, _repo_root
 from config import SSL_VERIFY, detect_zones_from_text, resolve_collection_limit
 
 logger = logging.getLogger(__name__)
+
+_CACHE_HOURS_ENV = "EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS"
+_CACHE_HOURS_DEFAULT = 20.0
+_CACHE_FILENAME = "abuseipdb_blacklist_cache.json"
+
+
+def _blacklist_cache_hours() -> float:
+    """Max age (hours) of a reusable blacklist response; 0 disables the cache."""
+    raw = os.getenv(_CACHE_HOURS_ENV)
+    if raw is None or not raw.strip():
+        return _CACHE_HOURS_DEFAULT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("AbuseIPDB: invalid %s=%r — using %sh", _CACHE_HOURS_ENV, raw, _CACHE_HOURS_DEFAULT)
+        return _CACHE_HOURS_DEFAULT
+
+
+def _blacklist_cache_path() -> str:
+    """``<EDGEGUARD_STATE_DIR or <repo>/state>/abuseipdb_blacklist_cache.json`` (the ./state bind mount)."""
+    state_dir = os.getenv(_STATE_DIR_ENV) or os.path.join(_repo_root(), "state")
+    return os.path.join(state_dir, _CACHE_FILENAME)
 
 
 class AbuseIPDBCollector:
@@ -304,7 +328,19 @@ class AbuseIPDBCollector:
         }
 
         self._last_http_status = None
-        data = self._make_request(self.BLACKLIST_ENDPOINT, params)
+        data = self._load_blacklist_cache(params)
+        if data is None:
+            data = self._make_request(self.BLACKLIST_ENDPOINT, params)
+            if data is None and self._last_http_status == 429:
+                # The free tier allows only a few blacklist calls per day; a 429 means
+                # today's quota is spent. Fail the task rather than report "no data".
+                logger.error(
+                    "AbuseIPDB: daily blacklist quota exhausted (429) — no cached blacklist available; "
+                    "reporting as collector failure"
+                )
+                raise requests.exceptions.HTTPError("AbuseIPDB blacklist daily quota exhausted (429)")
+            if data and "data" in data:
+                self._save_blacklist_cache(params, data)
 
         results = []
         if data and "data" in data:
@@ -315,6 +351,46 @@ class AbuseIPDBCollector:
 
         logger.info(f"[FETCH] AbuseIPDB: Fetched {len(results)} IPs from blacklist (confidence ≥{confidence_minimum})")
         return results
+
+    def _load_blacklist_cache(self, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return the cached blacklist response for ``params`` if fresh enough, else None."""
+        max_hours = _blacklist_cache_hours()
+        if max_hours <= 0:
+            return None
+        try:
+            with open(_blacklist_cache_path(), encoding="utf-8") as fh:
+                cached = json.load(fh)
+            age_hours = (time.time() - float(cached["fetched_at"])) / 3600.0
+            if cached["params"] != params or age_hours > max_hours or "data" not in cached["response"]:
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        logger.info(
+            "AbuseIPDB: using cached blacklist (%.1fh old, max %.1fh) — skipping API call to preserve daily quota",
+            age_hours,
+            max_hours,
+        )
+        return cached["response"]
+
+    def _save_blacklist_cache(self, params: Dict[str, Any], response: Dict[str, Any]) -> None:
+        """Atomically persist a successful blacklist response; never fails collection."""
+        if _blacklist_cache_hours() <= 0:
+            return
+        path = _blacklist_cache_path()
+        tmp_path = None
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".abuseipdb_blacklist_", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"fetched_at": time.time(), "params": params, "response": response}, fh)
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            logger.warning("AbuseIPDB: could not write blacklist cache %s: %s", path, exc)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def _format_ip_result(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
