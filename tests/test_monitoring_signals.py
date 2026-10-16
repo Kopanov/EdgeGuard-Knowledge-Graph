@@ -545,6 +545,52 @@ class TestDagRunInProgress:
         assert _in_progress("edgeguard_low_freq") == 0
         assert any("Running runs of edgeguard_low_freq not read" in r.getMessage() for r in caplog.records)
 
+    def test_the_end_hook_leaves_the_schedulers_session_alone(self, run_state_listener, monkeypatch, tmp_path):
+        """The run list is read in a session of its own, and the run is not read again after it.
+
+        ``DagRun.find()`` without a session opens Airflow's scoped session, the one the scheduler
+        loop is using, and closes it on return: the scheduler's ``DagRun`` is detached, the next
+        attribute read raises ``DetachedInstanceError`` and the scheduler exits.
+        """
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        from airflow.models.dagrun import DagRun
+
+        module = run_state_listener.module
+        sessions: list = []
+        real_create_session = module.create_session
+
+        def create_session(*args, **kwargs):
+            sessions.append(kwargs.get("scoped", args[0] if args else True))
+            return real_create_session(*args, **kwargs)
+
+        monkeypatch.setattr(module, "create_session", create_session)
+
+        class DetachedAfterFind:
+            def __init__(self):
+                self.detached = False
+                self.run_id = "manual__probe"
+
+            @property
+            def dag_id(self):
+                if self.detached:
+                    raise RuntimeError("DagRun is not bound to a Session")
+                return "edgeguard_baseline"
+
+        run = DetachedAfterFind()
+        seen: dict = {}
+
+        def find(**kwargs):
+            seen.update(kwargs)
+            run.detached = True
+            return []
+
+        monkeypatch.setattr(DagRun, "find", staticmethod(find))
+        run_state_listener.listener.on_dag_run_success(dag_run=run, msg="success")
+
+        assert sessions == [False], "the run list is read in a non-scoped session"
+        assert seen.get("session") is not None
+        assert _in_progress("edgeguard_baseline") == 0
+
     def test_outside_the_multi_process_mode_the_hooks_write_nothing(self, run_state_listener, monkeypatch):
         """The scheduler's own registry is served by nothing; only the shared directory reaches Prometheus."""
         monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
