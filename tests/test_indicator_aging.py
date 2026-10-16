@@ -753,6 +753,71 @@ class TestTheTimeNeverMovesBackwards:
                 assert stored_at <= clock
                 assert stored_state == self._state(p, clock - basis), (clock, basis, stored_at)
 
+    def test_a_write_started_before_a_job_that_changed_nothing_lags_until_the_next_evaluation(self):
+        """The one case the lift does not cover (``indicator_aging``, *The time of an evaluation*): the
+        database reads the time once per statement, when it starts, and a job that changes nothing on a
+        node neither locks it nor stores a time. A write whose statement started at ``t_w``, before such
+        a job at ``t_j``, commits a newer report after it: the report is evaluated at ``t_w``, where it
+        is 89 days old (no tier), although it is 90 days old (the first tier) at the job's time. The
+        node moved nothing backwards, and the next evaluation, at its own time, brings it to that time."""
+        p = ia.AgingPolicy()
+        t_w, t_j = 1000, 1001
+        old_basis, stored_at = t_j - 500, 999  # the old report: the third tier at the stored time and at t_j
+        stored_state = self._state(p, stored_at - old_basis)
+        at = max(t_j, stored_at)
+        assert self._state(p, at - old_basis) == stored_state, "the job at t_j changes nothing and stores no time"
+
+        new_basis = t_w - (p.tier_days[0] - 1)
+        at = max(t_w, stored_at)  # the write, committed after the job, at its statement's start
+        stored_state, stored_at = self._state(p, at - new_basis), at
+        assert (stored_at, stored_state[0]) == (t_w, 0) and stored_at < t_j
+        assert self._state(p, t_j - new_basis)[0] == 1, "at the job's time the new report is in the first tier"
+
+        later = t_j + 1  # the next job (or write), at its own time
+        at = max(later, stored_at)
+        state = self._state(p, at - new_basis)
+        assert state != stored_state
+        stored_state, stored_at = state, at
+        assert (stored_at, stored_state[0], stored_state[1]) == (later, 1, p.factor(1))
+
+    def test_overlapping_statements_never_step_back_and_a_later_evaluation_catches_up(self):
+        """Model with statement clocks: a write's statement may have started before evaluations that
+        committed before it (lock waits, a long batch). Whatever the order, the node holds the state of
+        its basis at its stored time, never later than the current time; for one basis it never steps
+        back; and after an evaluation that started after everything committed before it, the node
+        holds the state of that evaluation's own time."""
+        p = ia.AgingPolicy()
+        rng = random.Random(20261018)
+        lagged = 0
+        for _ in range(2000):
+            clock = rng.randrange(0, 900)
+            basis = clock - rng.randrange(0, 900)
+            stored_state, stored_at = None, None
+            for _step in range(rng.randrange(1, 9)):
+                clock += rng.randrange(0, 60)
+                write = rng.random() < 0.5
+                start = clock - (rng.randrange(0, 30) if write else 0)
+                at = start if stored_at is None or start > stored_at else stored_at
+                before_basis, before = basis, stored_state
+                if write:
+                    if rng.random() < 0.5:
+                        basis = rng.randrange(basis, start + 1)  # a newer report, recorded before the write
+                    stored_state, stored_at = self._state(p, at - basis), at
+                else:
+                    state = self._state(p, at - basis)
+                    if state != stored_state:
+                        stored_state, stored_at = state, at
+                assert stored_at <= clock
+                assert stored_state == self._state(p, stored_at - basis), (clock, basis, stored_at)
+                if before is not None and before_basis == basis:
+                    assert stored_state[0] >= before[0] and stored_state[3] >= before[3]
+                    assert before[4] or not stored_state[4], "no reactivation without a newer report"
+                if start == clock:
+                    assert stored_state == self._state(p, clock - basis), (clock, basis, stored_at)
+                elif stored_state != self._state(p, clock - basis):
+                    lagged += 1
+        assert lagged, "the model reaches the lagging case it describes"
+
 
 # ================================================================ the readers
 

@@ -61,12 +61,13 @@ of its ``AGING_FIELDS`` differs from the stored value. ``node_report_items`` /
 The time of an evaluation
 -------------------------
 (2026-10-16) Every evaluation, a write or the job, applies the rule at the database's current time
-(``DATABASE_TIME``, the clock of the statement), lifted to the node's ``aging_evaluated_at`` when
-that is later (``evaluated_at_expr``), and stores that time with the aging values whenever it
-writes them. Real time only moves forward, so an evaluation that runs later evaluates at a later
-time, whichever DAG run it belongs to: a cleared or re-run task, a baseline overlapping a scheduled
-sync and the command line evaluate at the time they run, and a write of a newer report evaluates
-that report at the time of the write. No run passes a time and no clock is shared between runs.
+(``DATABASE_TIME``, the statement clock: one instant per statement, read when it starts), lifted to
+the node's ``aging_evaluated_at`` when that is later (``evaluated_at_expr``), and stores that time
+with the aging values whenever it writes them. Real time only moves forward, so an evaluation whose
+statement starts later evaluates at a later time, whichever DAG run it belongs to: a cleared or
+re-run task, a baseline overlapping a scheduled sync and the command line evaluate at the time they
+run, and a write of a newer report evaluates that report at the time its statement started. No run
+passes a time and no clock is shared between runs.
 
 For one basis, every value of the rule (tier, factor, confidence, ``aging_since``, ``active``,
 ``retired_at``, ``retired_by``) changes in one direction only as the time grows. The lift keeps a
@@ -85,6 +86,15 @@ the planner reads the basis with the ``MERGE``, before the lock. The job locks e
 about to change (``apoc.lock.nodes``) and evaluates it again under the lock. A time a test gives
 the job (``decay_ioc_confidence(as_of=...)``) is lifted per node in the same way, so it cannot move
 a node backwards either.
+
+One case leaves a node behind the latest evaluation for a while, without moving it backwards. The
+job selects the nodes to change without a lock, and a job run that changes none of a node's values
+neither locks it nor stores a time on it, so a write whose statement started before that job
+evaluated the node, and which commits a newer report after it, evaluates the report at its own
+statement's start, earlier than the job's time. The node then holds the state of the new report at
+that earlier time until the next write or job evaluates it at its own time. The gap lasts as long
+as that write's statement ran, lock waits included (the batch write locks all its rows with the
+``MERGE`` before it sets any property).
 
 Standard library only; the fragments use single quotes only.
 """

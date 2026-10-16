@@ -18,8 +18,9 @@ arithmetic and the forward-only CASEs. This module runs the production writers a
   keeps the highest incoming value in either order; the aged confidence stops at the 0.10 floor;
 * a write, the sync's and the alert's, evaluates the rule at the database's current time and stores
   it (``aging_evaluated_at``); a write of a newer report after a job that changed nothing evaluates
-  that report at the write's own, later time; the alert path reads a report committed while it
-  waited for the node;
+  that report at the write's own, later time; a write whose statement started before a job that
+  changed nothing evaluates its newer report at that start, and the next job at its own time; the
+  alert path reads a report committed while it waited for the node;
 * a manual decommission is kept; an alert does not advance the report time;
 * the job follows the tiers, writes nothing on a second run with the same ``as_of`` (a test's time)
   and leaves an Indicator with no time, and every other label, untouched;
@@ -464,6 +465,67 @@ def test_a_newer_report_after_a_job_that_changed_nothing_is_evaluated_at_the_wri
     assert got["aging_since"] == newer + timedelta(days=90)
     assert _evaluated_at(raw_driver, "203.0.113.95") >= now, "the time of the write"
     assert POLICY.tier(87) == 0, "at the stored time the newer report would still be in tier 0"
+
+
+def test_a_write_started_before_a_job_that_changed_nothing_is_evaluated_at_its_start(client, raw_driver):
+    """2026-10-16, the one case the lift does not cover (``indicator_aging``, *The time of an
+    evaluation*): the database reads ``datetime()`` once per statement, when it starts, and a job that
+    changes nothing on a node neither locks it nor stores a time. Another transaction holds the node
+    while a sync write of a newer report starts and waits for it; a job runs meanwhile, finds the
+    stored state right and changes nothing; the write then commits and evaluates the report at its
+    statement's start, where it is 89 days old (no tier), although it is 90 days old (the first tier)
+    at the job's time. Nothing moved backwards, and the next job ages the node at its own time."""
+    value = "203.0.113.97"
+    _indicator(raw_driver, value)
+    first = _db_now(raw_driver)
+    _write(client, _attr(value, "o-1", first - timedelta(days=2), first - timedelta(days=500)))
+    assert (_aging(raw_driver, value)["aging_tier"], _aging(raw_driver, value)["active"]) == (3, True)
+
+    margin = timedelta(seconds=5)  # the write's statement starts within it (checked below)
+    start = _db_now(raw_driver)  # the write's statement starts after this time
+    newer = start + margin - timedelta(days=POLICY.tier_days[0])
+    item = _item(_attr(value, "o-2", start - timedelta(days=1), newer))
+    outcome: dict = {}
+
+    def write() -> None:
+        try:
+            outcome["result"] = client.merge_indicators_batch([item], source_id="feodo_tracker")
+        except Exception as exc:  # pragma: no cover - reported below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=write, daemon=True)
+    session = raw_driver.session()
+    tx = session.begin_transaction()
+    try:
+        # Another transaction holds the node's write lock, so the write waits after its statement started.
+        tx.run(f"MATCH (n:Indicator:{LABEL} {{value: $v}}) SET n.last_updated = datetime()", v=value).consume()
+        thread.start()
+        time.sleep(8)
+        job_time = _db_now(raw_driver)
+        job_changed = enrichment_jobs.decay_ioc_confidence(client)["changed"]
+        waited = thread.is_alive()
+        tx.commit()
+    finally:
+        if not tx.closed():
+            tx.rollback()
+        session.close()
+        if thread.ident is not None:
+            thread.join(timeout=120)
+    assert job_changed == 0, "the job finds the stored state right at its time and changes nothing"
+    assert waited, "the write waited for the node while the job ran"
+    assert not thread.is_alive() and outcome.get("result") == (1, 0), outcome
+    evaluated = _evaluated_at(raw_driver, value)
+    assert start <= evaluated < start + margin, "the write's statement started within the margin (test timing)"
+    assert evaluated < job_time, "earlier than the job that ran before the write committed"
+    got = _aging(raw_driver, value)
+    assert got["last_reported_at"] == newer and got["last_reported_ref"] == "o-2"
+    assert (got["aging_tier"], got["aging_factor"], got["confidence_score"], got["active"]) == (0, 1.0, 0.8, True)
+
+    assert enrichment_jobs.decay_ioc_confidence(client)["changed"] == 1, "the next job, at its own time"
+    got = _aging(raw_driver, value)
+    assert (got["aging_tier"], got["aging_factor"], got["confidence_score"]) == (1, 0.85, 0.68)
+    assert got["aging_since"] == newer + timedelta(days=POLICY.tier_days[0])
+    assert _evaluated_at(raw_driver, value) >= job_time
 
 
 # ================================================================ whoever created the node

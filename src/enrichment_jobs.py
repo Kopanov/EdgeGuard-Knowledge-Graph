@@ -104,7 +104,10 @@ def _aging_job_statements(policy: AgingPolicy) -> Tuple[str, str, str]:
     (the sync of another run, a baseline) either committed before the lock, and the rule reads what
     it wrote, ``aging_evaluated_at`` included, or waits for this batch: the job never writes values
     it computed from a node another transaction changed in between. ``outer`` reads without a lock
-    and only selects the candidates, so unchanged nodes are neither locked nor written."""
+    and only selects the candidates, so unchanged nodes are neither locked nor written: a write that
+    commits a newer report on a node ``outer`` did not select is evaluated by that write alone, at
+    its statement's start, which can be earlier than this job's time (``indicator_aging``, *The time
+    of an evaluation*)."""
     aged = aging_map("n", AGING_JOB_TIME, policy)
     changed = f"WITH n, {aged} AS aged WHERE {changed_predicate('n', 'aged')}"
     select = f"MATCH (n:Indicator) WHERE {basis_expr('n')} IS NOT NULL {changed}"
