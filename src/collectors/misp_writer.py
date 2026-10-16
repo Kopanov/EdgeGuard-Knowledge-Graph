@@ -1232,9 +1232,7 @@ class MISPWriter:
         response = self.session.post(
             f"{self.url}/events/restSearch",
             # ``limit`` > 1: substring ``info`` can return multiple EdgeGuard-* rows; we pick exact match only.
-            # ``metadata``: event headers only; only id/info are read, and a full event (all attributes)
-            # made a php-fpm worker grow by GBs per lookup.
-            json={"returnFormat": "json", "info": event_name, "limit": 50, "metadata": True},
+            json={"returnFormat": "json", "info": event_name, "limit": 50},
             verify=self.verify_ssl,
             timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
         )
