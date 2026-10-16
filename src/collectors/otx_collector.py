@@ -205,7 +205,13 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     # Families / adversaries of every pulse that listed the IOC, the pulses among them that name
     # several actors, and the names a malware item was given (2026-10: "Cobalt Strike - S0154" next
     # to "Cobalt Strike") (copy-on-write as above).
-    for _list_key in ("pulse_malware_families", "pulse_malware_actor_pairs", "several_actor_pulses", "aliases"):
+    for _list_key in (
+        "pulse_malware_families",
+        "pulse_malware_actor_pairs",
+        "several_actor_pulses",
+        "several_actor_pulses_by_name",
+        "aliases",
+    ):
         _extra = [x for x in (dup.get(_list_key) or []) if x not in (kept.get(_list_key) or [])]
         if _extra:
             kept[_list_key] = list(kept.get(_list_key) or []) + _extra
@@ -642,8 +648,14 @@ class OTXCollector:
                 # records the pulse in ``several_actor_pulses`` for the sync. Decided here, on the whole
                 # adversary list (the aliases of one actor count as one, canonical reference): MISP
                 # drops an actor or family it already holds, so downstream a later pulse is incomplete.
+                # Without the reference the aliases of one actor count as several: the pulse still writes
+                # no pair, but the mark goes to ``several_actor_pulses_by_name``, which the sync uses for
+                # its own run and never stores on a node, so build_relationships step 2d removes no link
+                # on a judgement made without the reference.
                 pulse_all_actor_names = clean_actor_names(pulse_adversary or "")
-                pulse_several_actors = len(actor_identities(pulse_all_actor_names, self._report_actor_reference())) > 1
+                actor_reference = self._report_actor_reference()
+                pulse_several_actors = len(actor_identities(pulse_all_actor_names, actor_reference)) > 1
+                pulse_mark = [str(pulse.get("id"))] if pulse_several_actors and pulse.get("id") else []
                 pulse_actor_names = pulse_all_actor_names[:_MAX_PULSE_ADVERSARIES]
                 pulse_actor_pairs = (
                     []
@@ -652,7 +664,8 @@ class OTXCollector:
                 )
                 pulse_meta = {
                     "pulse_id": pulse.get("id"),
-                    "several_actor_pulses": [str(pulse.get("id"))] if pulse_several_actors and pulse.get("id") else [],
+                    "several_actor_pulses": pulse_mark if actor_reference is not None else [],
+                    "several_actor_pulses_by_name": pulse_mark if actor_reference is None else [],
                     "pulse_name": pulse.get("name", "")[:100],
                     "pulse_tags": pulse_tags[:20],
                     "pulse_references": pulse_references,

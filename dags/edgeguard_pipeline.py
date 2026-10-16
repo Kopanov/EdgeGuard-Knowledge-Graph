@@ -2835,7 +2835,8 @@ def run_baseline_full_sync(**context):
     _record_successful_sync_metrics((datetime.now(timezone.utc) - sync_started_at).total_seconds(), node_counts=False)
     # 2026-10: the scheduled sync derives its window from this file. Without a stamp it ran a full
     # sync after the baseline (no file) or treated every attribute since the previous baseline as
-    # changed (a stale file), the same work the baseline gets 6 h for, within its own 4 h limit.
+    # changed (a stale file): the baseline's full sync (about 6 h) again, within the scheduled task's
+    # own 8 h limit (4 h before 2026-10).
     import json
 
     state_file = get_state_file()

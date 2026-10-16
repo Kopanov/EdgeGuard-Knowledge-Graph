@@ -124,6 +124,52 @@ class TestModeSwitches:
         assert 'os.getenv("PROMETHEUS_MULTIPROC_DIR")' in mdag
 
 
+class TestTestMetricsHelper:
+    """2026-10: ``generate_test_metrics`` (manual DAG ``edgeguard_metrics_helpers``) wrote fake series into
+    the shared directory in the compose deployment, where the ``metrics`` service serves them as real
+    ones; ``record_neo4j_sync`` among them stamps the last successful sync that
+    ``EdgeGuardNeo4jSyncStale`` and ``EdgeGuardBuildRelationshipsSilentDeath`` compare. It is for a
+    single-process (bare-metal) metrics server only."""
+
+    _CODE = (
+        "import importlib.util, json, sys; sys.path.insert(0, %r); "
+        "spec = importlib.util.spec_from_file_location('metrics_dag', %r); "
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+        "returned = m.generate_test_metrics(); "
+        "from prometheus_client import REGISTRY; "
+        "print(json.dumps({'returned': returned, "
+        "'stamp': REGISTRY.get_sample_value('edgeguard_neo4j_sync_last_success_timestamp')}))"
+    )
+
+    def _run(self, tmp_path, multiproc_dir=None) -> dict:
+        env = dict(os.environ, NEO4J_PASSWORD="x", MISP_API_KEY="x", AIRFLOW_HOME=str(tmp_path / "airflow"))
+        env.pop("PROMETHEUS_MULTIPROC_DIR", None)
+        if multiproc_dir is not None:
+            env["PROMETHEUS_MULTIPROC_DIR"] = str(multiproc_dir)
+        code = self._CODE % (str(_SRC), str(_ROOT / "dags" / "edgeguard_metrics_server.py"))
+        done = subprocess.run(
+            [sys.executable, "-c", code], check=True, env=env, timeout=300, capture_output=True, text=True
+        )
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_nothing_is_written_to_the_shared_directory(self, tmp_path):
+        mp = tmp_path / "mp"
+        mp.mkdir()
+        assert self._run(tmp_path, mp)["returned"] is False
+        text = generate_latest(metrics_exporter.build_registry(str(mp))).decode()
+        assert "edgeguard_neo4j_sync_last_success_timestamp" not in text
+        assert "edgeguard_indicators_collected_total{" not in text
+
+    def test_a_single_process_server_still_gets_the_test_series(self, tmp_path):
+        out = self._run(tmp_path)
+        assert out["returned"] is True and out["stamp"], "recorded in the process's own registry"
+
+    def test_the_docs_state_the_limit(self):
+        for doc in ("README.md", "docs/AIRFLOW_DAGS.md"):
+            text = (_ROOT / doc).read_text()
+            assert "single-process (bare-metal) metrics server" in text, doc
+
+
 class TestEndToEnd:
     def test_value_recorded_in_another_process_is_served_by_the_aggregate(self, tmp_path, monkeypatch):
         """The defect itself: a child process records metrics; the parent, with an aggregated

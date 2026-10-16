@@ -101,6 +101,7 @@ from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX as _SOFTWARE_ID_SUFF
 from attack_software_names import cypher_family_name_variants as _family_name_variants  # noqa: E402
 from attack_software_names import folded_family_names as _folded_family_names  # noqa: E402
 from canonical_threat_actors import (  # noqa: E402
+    INDICATOR_MARKED_REPORTS_QUERY,
     OTX_REPORT_REF_PREFIX,
     REPORT_ACTORS_QUERY,
     REPORT_ATTRIBUTION_FEEDS,
@@ -109,8 +110,8 @@ from canonical_threat_actors import (  # noqa: E402
     attribution_reports_cypher,
     canonical_actor_names,
     load_canonical_reference,
-    reports_naming_several_actors,
 )
+from canonical_threat_actors import several_actor_reports as _several_actor_reports  # noqa: E402
 from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
 from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
 from relationship_provenance import PROV_VARS as _PROV_VARS  # noqa: E402
@@ -545,13 +546,26 @@ def _load_actor_reference() -> Optional[CanonicalReference]:
 
 
 def _reports_naming_several_actors(client, reference: Optional[CanonicalReference]) -> List[str]:
-    """The OTX pulse ids whose actors are several actors after resolution (sorted). Raises when the
-    graph cannot be read (``Neo4jClient.run`` answers ``[]`` on a terminal error, and the query always
-    answers one row): step 2d then neither links nor removes anything."""
+    """The OTX pulse ids that name several actors (sorted): those whose actor nodes are several actors
+    after resolution, and (2026-10) those the OTX collector marked on indicators
+    (``canonical_threat_actors.several_actor_reports``). Raises when either read fails
+    (``Neo4jClient.run`` answers ``[]`` on a terminal error, and each query always answers one row):
+    step 2d then neither links nor removes anything."""
     rows = client.run(REPORT_ACTORS_QUERY)
     if not rows:
         raise RuntimeError("the actors' pulses could not be read")
-    return reports_naming_several_actors(rows[0].get("reports") or [], reference)
+    marked = client.run(INDICATOR_MARKED_REPORTS_QUERY)
+    if not marked:
+        raise RuntimeError("the pulses marked on indicators could not be read")
+    marked_pulses = marked[0].get("pulses") or []
+    several = _several_actor_reports(rows[0].get("reports") or [], marked_pulses, reference)
+    logger.info(
+        "  [ATTRIBUTION] %d pulse(s) name several actors (%d marked on %d indicator(s) by the OTX collector)",
+        len(several),
+        len(marked_pulses),
+        marked[0].get("indicators") or 0,
+    )
+    return several
 
 
 def _attribution_params(several_actor_reports: List[str], reference: Optional[CanonicalReference]) -> dict:
@@ -900,7 +914,12 @@ def build_relationships():
         # also finds its canonical actor (a name the actor alias merge folded away). Links an earlier
         # run made from pulses naming several actors are removed, and such pulses are dropped from the
         # provenance of links that a pulse naming one actor supports
-        # (``_remove_several_actor_attributions``).
+        # (``_remove_several_actor_attributions``). The pulses naming several actors are those whose
+        # actor nodes are several actors and (2026-10) those the OTX collector marked on indicators
+        # (``Indicator.several_actor_pulses``, judged with the canonical reference): MISP does not push
+        # an actor it already holds again, so the nodes miss a pulse edited to name several actors after
+        # its pairs were written. Nor an IOC: the mark of such a pulse reaches the graph through its new
+        # IOCs and through stored copies of its held IOCs, to which MISPWriter adds it (``_carry_marks``).
         # Bugbot on PR #145: two flat lists unioned across pulses on a shared IOC would cross-link a
         # family from pulse A with an actor from pulse B — the exact cross-report attribution this work
         # replaces; the pair encoding keeps the same-pulse guarantee. Report-scoped evidence:

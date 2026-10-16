@@ -174,12 +174,12 @@ test-graphql:
 	$(PYTHON) -m pytest tests/test_graphql_api.py -v
 
 lint:
-	$(PYTHON) -m ruff check src/ dags/ tests/
-	$(PYTHON) -m ruff format --check src/ dags/ tests/
+	$(PYTHON) -m ruff check src/ dags/ tests/ scripts/ plugins/
+	$(PYTHON) -m ruff format --check src/ dags/ tests/ scripts/ plugins/
 
 fmt:
-	$(PYTHON) -m ruff format src/ dags/ tests/
-	$(PYTHON) -m ruff check --fix src/ dags/ tests/
+	$(PYTHON) -m ruff format src/ dags/ tests/ scripts/ plugins/
+	$(PYTHON) -m ruff check --fix src/ dags/ tests/ scripts/ plugins/
 
 type-check:
 	$(PYTHON) -m mypy src/ --ignore-missing-imports --no-error-summary

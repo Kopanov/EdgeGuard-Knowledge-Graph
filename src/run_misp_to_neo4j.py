@@ -846,11 +846,13 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
                     kept_refs = kept.setdefault("source_refs", [])
                     if ref not in kept_refs:
                         kept_refs.append(ref)
-                # ... and the pulses among them that name several actors (2026-10)
-                for pid in item.get("several_actor_pulses") or []:
-                    kept_several = kept.setdefault("several_actor_pulses", [])
-                    if pid not in kept_several:
-                        kept_several.append(pid)
+                # ... and the pulses among them that name several actors (2026-10), judged with the
+                # canonical reference or, without it, by name
+                for marks_field in ("several_actor_pulses", "several_actor_pulses_by_name"):
+                    for pid in item.get(marks_field) or []:
+                        kept_several = kept.setdefault(marks_field, [])
+                        if pid not in kept_several:
+                            kept_several.append(pid)
     _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
@@ -2634,14 +2636,20 @@ class MISPToNeo4jSync:
                 if tag_name.startswith("malware-type:"):
                     malware_types.append(tag_name.replace("malware-type:", "").strip())
 
+            # 2026-10: named by the base name as ``parse_attribute`` names the node ("Cobalt Strike" for
+            # "Cobalt Strike - S0154"), the original kept as an alias. A STIX import of this bundle
+            # (``run_pipeline``) made the suffixed name a Malware node beside the ATT&CK one.
+            malware_name, attack_software_id = split_attack_software_id(value)
             stix_obj = {
                 "type": "malware",
                 "spec_version": "2.1",
                 "id": f"malware--{attr_uuid}",
-                "name": value,
+                "name": malware_name,
                 "is_family": True,
                 "malware_types": malware_types if malware_types else ["trojan"],
             }
+            if attack_software_id and malware_name != value:
+                stix_obj["aliases"] = [value]
             if labels:
                 stix_obj["labels"] = labels
             return _stamp_sdo(_with_entity_description(stix_obj))
@@ -3080,7 +3088,8 @@ class MISPToNeo4jSync:
           ``otx_pulse``, 0.6). A pulse that names several actors does not say which malware is whose
           (2026-10): its malware is attributed to none of them. The aliases of one actor count as one
           (``canonical_threat_actors.actor_identities``). The OTX collector judges the pulse's whole
-          adversary list and marks such a pulse on its items (``several_actor_pulses``); items
+          adversary list and marks such a pulse on its items (``several_actor_pulses``, or
+          ``several_actor_pulses_by_name`` when it judged by name without the reference); items
           written without the mark are judged by the actors the event carries.
         - Indicator -> TARGETS -> Sector, Vulnerability -> AFFECTS -> Sector
           (from each item's own ``zone``; unchanged)
@@ -3189,7 +3198,12 @@ class MISPToNeo4jSync:
             # holds, so this event may carry only some of the pulse's actors. For items written before
             # that field existed, the actors of the bucket are judged (all of them, before the cap).
             if malware_items and bucket["actors"]:
-                several = any(report_id in (item.get("several_actor_pulses") or []) for item in bucket["all"])
+                # 2026-10: a mark judged by name (the collector had no canonical reference) counts too.
+                several = any(
+                    report_id in (item.get("several_actor_pulses") or [])
+                    or report_id in (item.get("several_actor_pulses_by_name") or [])
+                    for item in bucket["all"]
+                )
                 if not several:
                     names = [a.get("name") for a in bucket["actors"]]
                     several = len(actor_identities(names, self._report_actor_reference())) > 1
@@ -3586,6 +3600,7 @@ class MISPToNeo4jSync:
             actor_pulse_id = ""
             actor_report_ids: List[str] = []
             actor_several_actor_pulses: List[str] = []
+            actor_several_by_name: List[str] = []
             actor_uses_malware: List[str] = []
             actor_uses_tools: List[str] = []
             # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
@@ -3608,6 +3623,7 @@ class MISPToNeo4jSync:
                         actor_several_actor_pulses = [
                             str(x).strip() for x in _meta_list(parsed, "sap") if str(x).strip()
                         ]
+                        actor_several_by_name = [str(x).strip() for x in _meta_list(parsed, "sapn") if str(x).strip()]
                         actor_uses_malware = [str(x).strip() for x in _meta_list(parsed, "m") if str(x).strip()]
                         actor_uses_tools = [str(x).strip() for x in _meta_list(parsed, "s") if str(x).strip()]
                     elif isinstance(parsed, list):
@@ -3678,6 +3694,7 @@ class MISPToNeo4jSync:
                 "pulse_id": actor_pulse_id,
                 "report_ids": actor_report_ids,
                 "several_actor_pulses": actor_several_actor_pulses,
+                "several_actor_pulses_by_name": actor_several_by_name,
                 "uses_malware": actor_uses_malware,
                 "uses_tools": actor_uses_tools,
                 # 2026-10: a curated attribute is not merged as a node (see sync_to_neo4j)
@@ -3720,6 +3737,7 @@ class MISPToNeo4jSync:
             malware_pulse_id = ""
             malware_report_ids: List[str] = []
             malware_several_actor_pulses: List[str] = []
+            malware_several_by_name: List[str] = []
             # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
             # (``_entity_comment_description``). The comment used to become the description when it was
             # only the block (``tail or description``: an OTX family from a pulse without a description
@@ -3739,6 +3757,7 @@ class MISPToNeo4jSync:
                     malware_pulse_id = str(meta.get("pid") or "").strip()
                     malware_report_ids = [str(x).strip() for x in _meta_list(meta, "rids") if str(x).strip()]
                     malware_several_actor_pulses = [str(x).strip() for x in _meta_list(meta, "sap") if str(x).strip()]
+                    malware_several_by_name = [str(x).strip() for x in _meta_list(meta, "sapn") if str(x).strip()]
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
                         "Failed to parse MITRE_USES_TECHNIQUES for malware %r; no techniques taken", malware_name
@@ -3819,6 +3838,7 @@ class MISPToNeo4jSync:
                 "pulse_id": malware_pulse_id,
                 "report_ids": malware_report_ids,
                 "several_actor_pulses": malware_several_actor_pulses,
+                "several_actor_pulses_by_name": malware_several_by_name,
                 "relationships": relationships,
             }
             return self._with_provenance(item, relationships)
@@ -3854,10 +3874,14 @@ class MISPToNeo4jSync:
                     phases_json = raw_comment.split("MITRE_TACTIC_PHASES:", 1)[1].strip()
                     json_part = phases_json.split("\n", 1)[0]
                     parsed = json.loads(json_part)
-                    if isinstance(parsed, dict):
-                        tactic_phases = parsed.get("p", [])
-                    elif isinstance(parsed, list):
-                        tactic_phases = parsed
+                    # 2026-10: through the META guards of the other blocks. ``{"p": "initial-access"}``
+                    # became a string of phases, and a list holding a map, a list or a null reached the
+                    # node property, which Neo4j refuses (the whole batch failed). A bare list, which no
+                    # writer produces, is still read; only its strings and numbers are kept.
+                    if isinstance(parsed, list):
+                        tactic_phases = _scalar_strings(parsed)
+                    else:
+                        tactic_phases = _meta_list(_meta_object(parsed, "MITRE_TACTIC_PHASES", attr_misp_uuid), "p")
                 except (ValueError, IndexError):
                     logger.warning("Unreadable MITRE_TACTIC_PHASES block for technique %s — no tactics taken", mitre_id)
 
@@ -4155,10 +4179,15 @@ class MISPToNeo4jSync:
                     item["pulse_malware_families"] = _fams
                 if _pairs:
                     item["pulse_malware_actor_pairs"] = _pairs
-                # 2026-10: the IOC's pulses whose adversaries are several actors (OTX collector).
+                # 2026-10: the IOC's pulses whose adversaries are several actors (OTX collector). ``sap``
+                # is judged with the canonical reference and is stored on the node (step 2d reads it);
+                # ``sapn`` is judged by name without it and serves this run's linking only.
                 _several = [str(x).strip() for x in _meta_list(otx_meta, "sap") if str(x).strip()]
                 if _several:
                     item["several_actor_pulses"] = _several
+                _several_by_name = [str(x).strip() for x in _meta_list(otx_meta, "sapn") if str(x).strip()]
+                if _several_by_name:
+                    item["several_actor_pulses_by_name"] = _several_by_name
                 item["indicator_role"] = otx_meta.get("indicator_role", "")
                 item["is_active"] = otx_meta.get("is_active", True)
 
@@ -5066,6 +5095,7 @@ class MISPToNeo4jSync:
             # 2026-10: a pulse naming several actors attributes nothing; the OTX collector's mark
             # is the only record of it once MISP has dropped some of the pulse's actors.
             "several_actor_pulses",
+            "several_actor_pulses_by_name",
         )
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size

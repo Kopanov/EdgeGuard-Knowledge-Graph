@@ -72,7 +72,7 @@ class TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators:
             "indicators": [{"type": "IPv4", "indicator": v, "description": "ioc"} for v in iocs],
         }
 
-    def _collect(self, pulses):
+    def _collect(self, pulses, limit=10):
         c = self._collector()
         pages = iter([pulses])
         with (
@@ -82,7 +82,7 @@ class TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators:
             patch("collectors.otx_collector.get_source_incremental", return_value={}),
             patch("collectors.otx_collector.update_source_incremental", lambda *_a, **_k: None),
         ):
-            return c.collect(limit=10, push_to_misp=False)
+            return c.collect(limit=limit, push_to_misp=False)
 
     def test_indicator_carries_the_pulse_families_and_cleaned_adversaries(self):
         items = self._collect(
