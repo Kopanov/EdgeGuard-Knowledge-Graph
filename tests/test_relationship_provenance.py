@@ -379,29 +379,46 @@ class TestBuildSteps:
 class TestEnrichment:
     def test_campaign_and_bridge_links_inherit_provenance(self):
         src = Path(enrichment_jobs.__file__).read_text()
-        # 2026-10: replaced on every run, so campaign links name no evidence step 2d removed or trimmed.
-        assert 'aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)' in src
-        assert 'inherited_prov_set("r", ["_at"], replace=True)' in src
-        assert '"(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})",' in src
-        assert '["_xi", "_xa"],' in src
+        # 2026-10: replaced on every run, so campaign links name no evidence step 2d removed or trimmed;
+        # 2026-10-16: from the links the campaign rests on (ATTRIBUTED_TO and USES_MALWARE), collected
+        # once per link (RUNS: the actor's; a malware member: its own; an indicator: every path's).
+        assert 'aggregated_prov_set(rel_var, f"_e IN {links}", "_e", replace=True)' in src
+        assert '_links_evidence("r_runs", "actor_evidence")' in src
+        assert '_links_evidence("r", "member_evidence")' in src
+        assert 'aggregated_prov_set("r", "_p IN _paths", ["_p[0]", "_p[1]"], replace=True)' in src
         assert 'prov_with("v", node_feeds("v"))' in src
+        # The list form renders as a list comprehension over the collected links.
+        rendered = rp.aggregated_prov_set("r", "_p IN _paths", ["_p[0]", "_p[1]"], replace=True)
+        assert (
+            "r.sources = apoc.coll.toSet(reduce(_acc = [], _x IN [_p IN _paths | "
+            "[] + coalesce(_p[0].sources, []) + coalesce(_p[1].sources, [])] | _acc + _x))"
+        ) in rendered
 
     def test_campaign_links_state_their_evidence(self):
         """2026-10-15: RUNS / PART_OF_CAMPAIGN say they are EdgeGuard's grouping and carry the
-        confidence of the evidence they rest on (run on a real Neo4j in
-        tests/test_explainability_neo4j.py)."""
+        confidence of the evidence they rest on; 2026-10-16: and the relationship types it is made of
+        (run on a real Neo4j in tests/test_explainability_neo4j.py)."""
+        import campaign_evidence
+
         assert enrichment_jobs.CAMPAIGN_MATCH_TYPE == "campaign_grouping"
         src = Path(enrichment_jobs.__file__).read_text()
         body = src.split("def build_campaign_nodes")[1].split("\ndef ")[0]
-        assert 'r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]")' in body
-        assert '_campaign_evidence("r", "_at.confidence_score")' in body
         assert "__CAMPAIGN_EVIDENCE__" in body and 'quote="\'"' in body
         weaker = enrichment_jobs._weaker("x", "y")
         assert weaker == "CASE WHEN x IS NULL THEN y WHEN y IS NULL THEN x WHEN x < y THEN x ELSE y END"
         strongest = enrichment_jobs._strongest("[1, null, 3]")
         assert strongest.startswith("reduce(_best = null, _v IN [1, null, 3] |")
-        inner = enrichment_jobs._campaign_evidence("r", "0.5", quote="'")
-        assert inner == "r.match_type = 'campaign_grouping', r.confidence_score = 0.5" and '"' not in inner
+        inner = enrichment_jobs._campaign_evidence("r", "0.5", "t", quote="'")
+        assert inner == "r.match_type = 'campaign_grouping', r.confidence_score = 0.5, r.evidence_types = t"
+        assert '"' not in inner
+        links = enrichment_jobs._links_evidence("r_runs", "actor_evidence")
+        assert links.startswith(
+            'r_runs.match_type = "campaign_grouping", r_runs.confidence_score = '
+            "reduce(_best = null, _v IN [_e IN actor_evidence | _e.confidence_score] |"
+        )
+        assert "r_runs.evidence_types = " + campaign_evidence.evidence_types("actor_evidence") in links
+        assert "r_runs.sources = apoc.coll.toSet(reduce(_acc = [], _x IN [_e IN actor_evidence |" in links
+        assert campaign_evidence.evidence_types("x") == "apoc.coll.sort(apoc.coll.toSet([_et IN x | type(_et)]))"
 
     def test_calibrator_filters_on_the_evidence_label(self):
         src = Path(enrichment_jobs.__file__).read_text()

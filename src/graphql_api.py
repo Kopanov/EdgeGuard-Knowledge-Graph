@@ -662,7 +662,7 @@ class Query:
             ),
         )
 
-    @strawberry.field(description="List inferred campaign nodes built by the co-occurrence enrichment job.")
+    @strawberry.field(description="List inferred campaign nodes built by the campaign enrichment job.")
     def campaigns(
         self,
         filter: Optional[NodeFilter] = strawberry.UNSET,

@@ -2886,10 +2886,12 @@ def assert_baseline_postconditions(**context):
 
     Invariants checked (each fails the DAG with an actionable message):
 
-      [INV-1] Campaign > 0 IFF ATTRIBUTED_TO > 0.
-        If the graph carries Malware→ThreatActor attributions but no
-        Campaigns materialized, ``build_campaign_nodes`` raised an
-        exception that was swallowed before PR-N21 (now re-raised).
+      [INV-1] Campaign > 0 IFF there are qualifying actors.
+        If the graph carries actors with campaign evidence (a malware attributed
+        to them or, since 2026-10-16, used by them, and an active indicator of that
+        malware; ``campaign_evidence.QUALIFYING_ACTORS_QUERY``) but no Campaigns
+        materialized, ``build_campaign_nodes`` raised an exception that was
+        swallowed before PR-N21 (now re-raised).
 
       [INV-2] Indicator > 0.
         Sync produced data. Zero Indicators means the sync silently
@@ -2910,6 +2912,7 @@ def assert_baseline_postconditions(**context):
     sentinel below: postcheck always runs, detects upstream-failed state,
     emits a clean diagnostic, and exits without double-firing.
     """
+    from campaign_evidence import QUALIFYING_ACTORS_QUERY
     from neo4j_client import Neo4jClient
 
     # PR-N27 sentinel: detect upstream-failed state and emit a clean
@@ -3039,16 +3042,11 @@ def assert_baseline_postconditions(**context):
             # Fix: mirror ``build_campaign_nodes``'s exact qualifying-actor
             # condition. Independent count queries (one row each, no
             # silent-skip risk).
-            row = session.run(
-                """
-                MATCH (a:ThreatActor)
-                WHERE EXISTS {
-                    MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
-                    WHERE i.active = true
-                }
-                RETURN count(a) AS qualifying_actors
-                """
-            ).single()
+            # 2026-10-16: the condition is read from ``campaign_evidence``, the module the builder
+            # reads it from: an actor qualifies with an ATTRIBUTED_TO or a USES_MALWARE link to a
+            # malware that an active indicator INDICATES. An actor with only USES_MALWARE has a
+            # campaign since then; the inline query, which read ATTRIBUTED_TO only, missed it.
+            row = session.run(QUALIFYING_ACTORS_QUERY).single()
             qualifying = int((row["qualifying_actors"] if row else 0) or 0)
 
             row = session.run("MATCH (c:Campaign) RETURN count(c) AS campaigns").single()
@@ -3056,8 +3054,8 @@ def assert_baseline_postconditions(**context):
 
             if qualifying > 0 and camps == 0:
                 violations.append(
-                    f"[INV-1] {qualifying} qualifying ThreatActors exist (have Malware "
-                    "ATTRIBUTED_TO + active Indicator via INDICATES) but Campaign count = 0. "
+                    f"[INV-1] {qualifying} qualifying ThreatActors exist (a Malware ATTRIBUTED_TO "
+                    "or USES_MALWARE + active Indicator via INDICATES) but Campaign count = 0. "
                     "build_campaign_nodes silently produced no campaigns. "
                     "Check Airflow log for the underlying exception (PR-N21 made enrichment_jobs re-raise)."
                 )
@@ -3089,7 +3087,7 @@ def assert_baseline_postconditions(**context):
             )
 
         logger.info(
-            "[BASELINE-POSTCHECK] all invariants OK — Indicator=%d Source=%d (plus Campaign>0 iff ATTRIBUTED_TO>0)",
+            "[BASELINE-POSTCHECK] all invariants OK — Indicator=%d Source=%d (plus Campaign>0 iff qualifying actors>0)",
             ind_count,
             src_count,
         )

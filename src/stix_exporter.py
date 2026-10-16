@@ -335,8 +335,10 @@ _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
 #   intrusion-sets (the names of the actor nodes EdgeGuard folded into this one).
 # 1.4.0 (2026-10-15): FIRST EPSS and CISA's SSVC decision points on vulnerabilities. ``modified`` is
 #   later than that of 1.3.0, as STIX versioning requires of a new version of an object.
-_EXTENSION_MODIFIED = "2026-10-15T12:00:00.000Z"
-_EXTENSION_VERSION = "1.4.0"
+# 1.5.0 (2026-10-16): x_edgeguard_evidence_types on the SROs of campaign links (the relationship
+#   types a campaign link rests on: ATTRIBUTED_TO, USES_MALWARE, INDICATES).
+_EXTENSION_MODIFIED = "2026-10-16T12:00:00.000Z"
+_EXTENSION_VERSION = "1.5.0"
 _EXTENSION_SCHEMA_URL = (
     "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
     "#edgeguard-extension-definition"
@@ -407,6 +409,8 @@ EDGEGUARD_EXTENSION_PROPERTIES: Tuple[str, ...] = (
     # and the actor nodes folded into an intrusion-set
     "x_edgeguard_cited_ids",
     "x_edgeguard_merged_from",
+    # Explainability (2026-10-16): the relationship types a campaign link rests on
+    "x_edgeguard_evidence_types",
 ) + tuple(stix_key for _, stix_key in _VULNERABILITY_PROMOTED_FIELDS)
 
 _EXTENSION_PREFIX = "x_edgeguard_"
@@ -660,6 +664,9 @@ _SRO_PROVENANCE_LISTS: Tuple[Tuple[str, str, Optional[int]], ...] = (
     ("misp_event_ids", "x_edgeguard_misp_event_ids", None),
     # 2026-10 (explainability): only on links a revoked ATT&CK id led to
     ("cited_ids", "x_edgeguard_cited_ids", None),
+    # 2026-10-16 (explainability): only on campaign links (RUNS, PART_OF_CAMPAIGN), the relationship
+    # types they rest on (ATTRIBUTED_TO, USES_MALWARE and, on an indicator's link, INDICATES)
+    ("evidence_types", "x_edgeguard_evidence_types", None),
 )
 
 
@@ -2377,8 +2384,9 @@ def _attach_relationship_provenance(sro: Dict[str, Any], rel: Dict[str, Any]) ->
 
     ``x_edgeguard_match_type`` (kind of evidence), ``x_edgeguard_sources`` (who asserts the
     link — e.g. ``mitre_attck``, ``alienvault_otx``, ``coreideas``), ``x_edgeguard_source_refs``
-    (their record ids, bounded), ``x_edgeguard_misp_event_ids`` and, on a link a revoked ATT&CK
-    id led to, ``x_edgeguard_cited_ids``. Set after the stix2 SDK serialisation, like
+    (their record ids, bounded), ``x_edgeguard_misp_event_ids``, on a link a revoked ATT&CK
+    id led to, ``x_edgeguard_cited_ids`` and, on a campaign link (2026-10-16),
+    ``x_edgeguard_evidence_types``. Set after the stix2 SDK serialisation, like
     ``_attach_misp_provenance``.
     """
     if not isinstance(sro, dict) or not rel:

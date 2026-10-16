@@ -508,7 +508,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
       * Step 1 creates 1 Campaign
       * Steps 2/3a/4/5 link malware/indicators, prune stale, cleanup, reactivate
       * The returned `results` dict reflects the per-step counts
-      * All 12 expected session.run() calls fire in the right order
+      * All 13 expected session.run() calls fire in the right order
       * Campaign uuid is computed deterministically from the actor name
 
     Without this test, a refactor that re-orders / silently swallows
@@ -517,9 +517,9 @@ class TestPRN31BuildCampaignNodesHappyPath:
     flagged this as the gap.
     """
 
-    def _build_fake_session(self, actor_name: str = "APT-N31-Test"):
+    def _build_fake_session(self, actor_name: str = "APT-N31-Test", deleted=None):
         """Construct a MagicMock session that returns happy-path values
-        for each of the 12 session.run() calls build_campaign_nodes
+        for each of the 13 session.run() calls build_campaign_nodes
         makes. Returns ``(client, sess, captured_queries)`` so the test
         can inspect what queries were issued + in what order.
 
@@ -550,6 +550,15 @@ class TestPRN31BuildCampaignNodesHappyPath:
         # (3) backfill_cypher — happy path: nothing to backfill
         backfill_result = MagicMock()
         backfill_result.single.return_value = {"backfilled": 0}
+
+        # (3b) Step 1b delete_without_evidence (2026-10-16) — by default no campaign lost its evidence
+        delete_result = MagicMock()
+        delete_result.single.return_value = deleted or {
+            "deleted": 0,
+            "runs_removed": 0,
+            "members_removed": 0,
+            "names": [],
+        }
 
         # (4) Step 2 link_malware — 3 malware linked
         link_m_result = MagicMock()
@@ -594,6 +603,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
             actors_result,
             create_result,
             backfill_result,
+            delete_result,
             link_m_result,
             malware_prune_result,
             runs_result,
@@ -642,9 +652,10 @@ class TestPRN31BuildCampaignNodesHappyPath:
             f"results dict must include campaign accounting; got keys: {sorted(results.keys())}"
         )
 
-    def test_happy_path_issues_all_12_queries(self):
-        """The function must issue all 12 expected session.run() calls (2026-10: the database's
-        clock, Step 2b, the malware membership prune, and Step 2c, which settles RUNS).
+    def test_happy_path_issues_all_13_queries(self):
+        """The function must issue all 13 expected session.run() calls (2026-10: the database's
+        clock, Step 2b, the malware membership prune, and Step 2c, which settles RUNS; 2026-10-16:
+        Step 1b, which deletes the campaigns without evidence).
         Fewer calls means a step was silently skipped (the swallower
         pattern PR-N21 fixed); more means a step duplicated or a new
         step was added without updating this pin (intentional break-
@@ -659,14 +670,14 @@ class TestPRN31BuildCampaignNodesHappyPath:
         finally:
             ej.time.sleep = original_sleep
 
-        assert sess.run.call_count == 12, (
-            f"build_campaign_nodes must issue exactly 12 session.run() calls "
-            f"(1 clock + 1 pre-fetch + 7 step queries + 3 follow-ups); got {sess.run.call_count}. "
+        assert sess.run.call_count == 13, (
+            f"build_campaign_nodes must issue exactly 13 session.run() calls "
+            f"(1 clock + 1 pre-fetch + 8 step queries + 3 follow-ups); got {sess.run.call_count}. "
             f"If you added a step, update this pin AND the fake-session fixture."
         )
 
     def test_happy_path_query_order(self):
-        """The 12 queries must fire in a specific order (pre-fetch FIRST,
+        """The 13 queries must fire in a specific order (pre-fetch FIRST,
         Campaign create SECOND, etc). A reorder could break the
         backfill-after-create invariant the post-PR-#33 audit caught."""
         ej = self._import_fresh_enrichment_jobs()
@@ -690,12 +701,15 @@ class TestPRN31BuildCampaignNodesHappyPath:
             "MERGE (c:Campaign",
             # (3) backfill_cypher — heals NULL uuids on existing campaigns
             "backfilled",
+            # (3b) Step 1b — campaigns without evidence are deleted (2026-10-16), before the links
+            # are refreshed, so no step links a campaign that goes
+            "DETACH DELETE c",
             # (4) Step 2 link_malware — Malware -> Campaign PART_OF
-            ":Malware",
-            # (5) Step 2b prune_malware — membership whose attribution is gone (2026-10)
-            "(:Malware)-[r:PART_OF_CAMPAIGN]->(:Campaign)",
-            # (5b) Step 2c settle_runs — RUNS follows attribution (2026-10)
-            "MATCH (a:ThreatActor)-[r_runs:RUNS]->(:Campaign)",
+            "MERGE (m)-[r:PART_OF_CAMPAIGN]->(c)",
+            # (5) Step 2b prune_malware — membership without evidence (2026-10)
+            "MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign)",
+            # (5b) Step 2c settle_runs — RUNS follows the evidence (2026-10)
+            "MATCH (a:ThreatActor)-[r_runs:RUNS]->(c:Campaign)",
             # (6) Step 3a — apoc.periodic.iterate signature
             "apoc.periodic.iterate",
         ]
@@ -738,3 +752,67 @@ class TestPRN31BuildCampaignNodesHappyPath:
             "PR #33 cross-environment contract: Campaign.uuid must be deterministic "
             "from compute_node_uuid('Campaign', {'name': '<actor> Campaign'})"
         )
+
+    def _run_capturing(self, deleted=None):
+        ej = self._import_fresh_enrichment_jobs()
+        client, sess, captured = self._build_fake_session(deleted=deleted)
+        original_sleep = ej.time.sleep
+        ej.time.sleep = lambda *_a: None
+        try:
+            results = ej.build_campaign_nodes(client)
+        finally:
+            ej.time.sleep = original_sleep
+        return ej, sess, captured, results
+
+    def test_campaigns_without_evidence_are_deleted_counted_and_logged(self, caplog):
+        """2026-10-16: Step 1b deletes the campaigns EdgeGuard built whose actor has neither an
+        ATTRIBUTED_TO nor a USES_MALWARE link left (or no actor of that name remains), with all their
+        links, in the same run; the run reports how many and names them."""
+        import logging
+
+        deleted = {"deleted": 2, "runs_removed": 2, "members_removed": 7, "names": ["snake campaign", "unc1 campaign"]}
+        with caplog.at_level(logging.INFO, logger="enrichment_jobs"):
+            _ej, _sess, captured, results = self._run_capturing(deleted=deleted)
+        assert results["campaigns_deleted"] == 2
+        assert (
+            "[CAMPAIGN] deleted 2 campaigns whose actor has no ATTRIBUTED_TO or USES_MALWARE link left" in caplog.text
+        )
+        assert "with 2 RUNS and 7 PART_OF_CAMPAIGN links" in caplog.text and "snake campaign" in caplog.text
+        statement = captured[4]
+        # Only campaigns EdgeGuard created; the node goes with every link it has.
+        assert "WHERE c.edgeguard_managed = true" in statement and "DETACH DELETE c" in statement
+        # Ordered by name before the sample is taken, so the logged names do not depend on row order.
+        assert statement.index("ORDER BY name") < statement.index("collect(name)[0..20]")
+
+    def test_no_deletion_is_reported_as_zero(self):
+        _ej, _sess, _captured, results = self._run_capturing()
+        assert results["campaigns_deleted"] == 0
+
+    def test_every_step_reads_the_same_evidence_definition(self):
+        """2026-10-16: an actor qualifies, a campaign survives, a malware is a member and an indicator
+        joins by one definition (``campaign_evidence``): ATTRIBUTED_TO (malware → actor) or
+        USES_MALWARE (actor → malware). Before, every step read ATTRIBUTED_TO only."""
+        import campaign_evidence as ce
+
+        _ej, _sess, captured, _results = self._run_capturing()
+        prefetch, create, _backfill, delete, link_malware, prune_malware, settle_runs, link_indicators = captured[1:9]
+        assert ce.has_evidence("a") in prefetch
+        assert ce.has_evidence("a") in create and ce.member_malware("a") in create
+        assert ce.evidence_links("a") in create  # RUNS: the actor's links
+        assert ce.has_evidence("a") in delete
+        assert ce.member_malware("a") in link_malware and ce.evidence_links("a", "m") in link_malware
+        assert ce.has_evidence("a", "m") in prune_malware
+        assert ce.evidence_links("a") in settle_runs and "coalesce(a.name = c.actor_name, false)" in settle_runs
+        assert ce.member_malware("a") in link_indicators and ce.indicator_paths("i", "a") in link_indicators
+        # Both directions, each the way its claim is made.
+        assert "(a)<-[_ev:ATTRIBUTED_TO]-(m)" in link_malware and "(a)-[_ev:USES_MALWARE]->(m)" in link_malware
+        for statement in (create, link_malware, settle_runs, link_indicators):
+            assert "evidence_types = apoc.coll.sort(apoc.coll.toSet(" in statement
+
+    def test_malware_membership_prune_judges_the_evidence_not_the_clock(self):
+        """2026-10-16: Step 2b removes a malware's membership when the campaign's actor has no link
+        to it, the definition Step 2 links by, whatever the time Step 2 last touched the link."""
+        _ej, sess, captured, _results = self._run_capturing()
+        prune_call = sess.run.call_args_list[6]
+        assert "MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign)" in captured[6]
+        assert "run_start_at" not in prune_call.kwargs and "$run_start_at" not in captured[6]

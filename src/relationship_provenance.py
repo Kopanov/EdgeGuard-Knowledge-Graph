@@ -123,7 +123,9 @@ def aggregated_prov_set(
 
     ``pattern`` is a Cypher path pattern binding ``edge_var``, read as a pattern
     comprehension, e.g. ``"(a)<-[_at:ATTRIBUTED_TO]-(:Malware)"`` with ``edge_var="_at"``; a
-    pattern of several links names each of them (``["_xi", "_xa"]``). With ``replace``
+    pattern of several links names each of them (``["_xi", "_xa"]``). It may also be the head of
+    a list comprehension over links already collected (2026-10-16), e.g. ``"_e IN links"`` with
+    ``edge_var="_e"``, or ``"_p IN paths"`` with ``["_p[0]", "_p[1]"]``. With ``replace``
     (2026-10) the provenance of the matching links becomes ``rel_var``'s instead of being added
     to it, so a derived link follows the removal and trimming of the links it rests on.
     """

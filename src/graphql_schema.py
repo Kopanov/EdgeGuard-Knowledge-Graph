@@ -373,10 +373,13 @@ class Tool:
     last_updated: Optional[str] = None
 
 
+# 2026-10-16: the description said a campaign was built when two indicators share an actor and a
+# malware within a time window; the enrichment job never did that (``campaign_evidence``).
 @strawberry.type(
     description=(
-        "Inferred campaign node — built by EdgeGuard enrichment when "
-        "≥2 indicators share the same ThreatActor + Malware within a time window."
+        "Inferred campaign node — EdgeGuard's grouping of one ThreatActor's malware (attributed to "
+        "it, ATTRIBUTED_TO, or used by it, USES_MALWARE) and those malware's active indicators, built "
+        "by the enrichment job build_campaign_nodes; deleted when the actor has neither link left."
     )
 )
 class Campaign:

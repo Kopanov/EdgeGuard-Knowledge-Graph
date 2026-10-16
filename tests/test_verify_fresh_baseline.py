@@ -46,10 +46,11 @@ _WRITTEN_BY_TYPE: Dict[str, FrozenSet[str]] = {
             "SUBTECHNIQUE_OF",
             "USES_MALWARE",
             "USES_TOOL",
-            "RUNS",  # 2026-10-15: the campaign links state their evidence (campaign_grouping)
-            "PART_OF_CAMPAIGN",
         )
     },
+    # 2026-10-15: the campaign links state their evidence (campaign_grouping); 2026-10-16: and name
+    # the relationship types they rest on.
+    **{t: _LISTS | {"match_type", "evidence_types"} for t in ("RUNS", "PART_OF_CAMPAIGN")},
     **{t: _LISTS for t in ("REFERS_TO",)},
     **{
         t: frozenset({"sources", "misp_event_ids"})
@@ -57,7 +58,7 @@ _WRITTEN_BY_TYPE: Dict[str, FrozenSet[str]] = {
     },
     "SOURCED_FROM": frozenset({"source", "source_refs", "misp_event_ids"}),
 }
-_SCAN_PROPS = ("sources", "source_refs", "misp_event_ids", "match_type", "source")
+_SCAN_PROPS = ("sources", "source_refs", "misp_event_ids", "match_type", "source", "evidence_types")
 
 
 def _scan_row(rel_type, edges=10, managed=None, written=None, empty_events=0, legacy=0):
@@ -184,6 +185,9 @@ _REPORT_ACTOR_ROWS = [
 # also on two actor nodes; the second ("Indonesian Banking Sector Threat Landscape", 8 actors) is on no
 # actor node as a pulse of several: MISP held its actors already and did not push them again.
 _MARKED_PULSES = ["68cd617b3eb5b1212d11643d", "6a4fdf500b5e6dffde939998"]
+# 2026-10-16: check 13d on a correct graph: every campaign EdgeGuard built rests on its actor's
+# ATTRIBUTED_TO or USES_MALWARE links and has the actor's RUNS.
+_CAMPAIGN_EVIDENCE_ROW = {"campaigns": 210, "without_evidence": 0, "without_runs": 0, "runs_without_evidence": 0}
 _ATTRIBUTION_ROW = {
     "links": 3212,
     "resting_on_several_actor_reports": 0,
@@ -233,8 +237,12 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"pulses": list(_MARKED_PULSES), "indicators": 412}]
     if "AS resting_on_several_actor_reports" in s:
         return [dict(_ATTRIBUTION_ROW)]
-    if "AS unattributed" in s:
-        return [{"malware_links": 1600, "unattributed": 0}]
+    # 2026-10-16: checks 13c / 13d (campaign evidence). Before the USES_MALWARE branch below: both
+    # statements name that relationship.
+    if "AS malware_links" in s:
+        return [{"malware_links": 1600, "without_evidence": 0}]
+    if "AS runs_without_evidence" in s:
+        return [dict(_CAMPAIGN_EVIDENCE_ROW)]
     if "d.name =~ $suffixed" in s:
         return [dict(r) for r in _GRAPH_MALWARE_TWINS]
     if "AS attack_raw" in s:
@@ -647,8 +655,8 @@ class TestRelationshipProvenanceContract:
         c = _check(rep, "relationship_provenance_complete")
         assert c["ok"] is True and c["mandatory"] is True
         assert c["detail"]["missing_by_type"] == []
-        # RUNS / PART_OF_CAMPAIGN / REFERS_TO carry no match_type, HAS_CVSS_* no source_refs and
-        # SOURCED_FROM no sources: the healthy scan has them all at 0 and the check still passes.
+        # REFERS_TO carries no match_type, HAS_CVSS_* no source_refs, SOURCED_FROM no sources and only
+        # the campaign links evidence_types: the healthy scan has them all at 0 and the check still passes.
         assert c["detail"]["edges_checked"] == 10 * len(_WRITTEN_BY_TYPE)
 
     def test_an_empty_misp_event_ids_list_is_reported_never_failed(self, vfb, monkeypatch):
@@ -672,6 +680,9 @@ class TestRelationshipProvenanceContract:
             ("IN_TACTIC", "sources"),
             ("RUNS", "misp_event_ids"),
             ("PART_OF_CAMPAIGN", "source_refs"),
+            # 2026-10-16: a campaign link that does not name the relationship types it rests on
+            ("RUNS", "evidence_types"),
+            ("PART_OF_CAMPAIGN", "evidence_types"),
             ("REFERS_TO", "sources"),
             ("HAS_CVSS_v31", "misp_event_ids"),
             ("SOURCED_FROM", "source"),
@@ -708,7 +719,7 @@ class TestRelationshipProvenanceContract:
         columns = {
             name: expr for expr, name in re.findall(r"sum\((CASE WHEN .*?END)\)\s+AS (\w+)", vfb._REL_PROVENANCE_SCAN)
         }
-        for prop in ("sources", "source_refs", "misp_event_ids", "match_type"):
+        for prop in ("sources", "source_refs", "misp_event_ids", "match_type", "evidence_types"):
             assert columns[f"with_{prop}"] == (
                 f"CASE WHEN r.edgeguard_managed = true AND r.{prop} IS NOT NULL THEN 1 ELSE 0 END"
             ), prop
@@ -1009,7 +1020,8 @@ class TestEpssAndSsvc:
 
 class TestAttributionFromSingleActorReports:
     """2026-10: an OTX pulse naming several actors attributes no malware (the aliases of one actor
-    count as one), and a malware is part of a campaign only while attributed to its actor."""
+    count as one), and a malware is part of a campaign only while attributed to its actor or
+    (2026-10-16) used by it."""
 
     def test_a_correct_graph_passes_and_aliases_count_as_one_actor(self, vfb, monkeypatch):
         seen = {}
@@ -1028,7 +1040,7 @@ class TestAttributionFromSingleActorReports:
         # Storm-2697 is The Gentlemen; the second pulse is marked on indicators only.
         assert seen["params"]["several"] == ["68cd617b3eb5b1212d11643d", "6a4fdf500b5e6dffde939998"]
         assert seen["params"]["feeds"] == ["alienvault_otx", "otx_pulse"]
-        assert _check(rep, "campaign_malware_attributed")["ok"] is True
+        assert _check(rep, "campaign_malware_has_evidence")["ok"] is True
 
     def test_the_pulses_are_step_2ds_union_of_the_actor_nodes_and_the_indicator_marks(self, vfb, monkeypatch):
         """2026-10: the set is the one step 2d uses (``canonical_threat_actors.several_actor_reports``).
@@ -1086,13 +1098,13 @@ class TestAttributionFromSingleActorReports:
         c = _check(rep, "attribution_from_single_actor_reports")
         assert c["ok"] is None and "unavailable" in c["detail"]["reference"] and rep.failed == []
 
-    def test_a_malware_member_without_attribution_fails(self, vfb, monkeypatch):
+    def test_a_malware_member_without_evidence_fails(self, vfb, monkeypatch):
         rep = _run(
             vfb,
             monkeypatch,
-            override=lambda st, rows: [dict(rows[0], unattributed=3)] if "AS unattributed" in st else rows,
+            override=lambda st, rows: [dict(rows[0], without_evidence=3)] if "AS malware_links" in st else rows,
         )
-        assert [c["check"] for c in rep.failed] == ["campaign_malware_attributed"]
+        assert [c["check"] for c in rep.failed] == ["campaign_malware_has_evidence"]
 
     def test_no_pulse_recorded_on_any_actor_and_no_mark_is_informational(self, vfb, monkeypatch):
         # Nothing to judge: a pass would be vacuous.
@@ -1130,9 +1142,11 @@ class TestAttributionFromSingleActorReports:
         rep = _run(
             vfb,
             monkeypatch,
-            override=lambda st, rows: [{"malware_links": 0, "unattributed": 0}] if "AS unattributed" in st else rows,
+            override=lambda st, rows: (
+                [{"malware_links": 0, "without_evidence": 0}] if "AS malware_links" in st else rows
+            ),
         )
-        assert _check(rep, "campaign_malware_attributed")["ok"] is None
+        assert _check(rep, "campaign_malware_has_evidence")["ok"] is None
 
     def test_query_shape(self, vfb, monkeypatch):
         import canonical_threat_actors
@@ -1142,7 +1156,7 @@ class TestAttributionFromSingleActorReports:
         def capture(st, rows):
             if "AS resting_on_several_actor_reports" in st:
                 seen["attribution"] = st
-            if "AS unattributed" in st:
+            if "AS malware_links" in st:
                 seen["campaign"] = st
             return rows
 
@@ -1152,7 +1166,13 @@ class TestAttributionFromSingleActorReports:
         assert canonical_threat_actors.attribution_reports_cypher("r") in seen["attribution"]
         assert "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true" in seen["attribution"]
         assert "THEN r.sources ELSE [r.sources] END WHERE s IN $feeds)" in seen["attribution"]
-        assert "(m)-[:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})" in seen["campaign"]
+        # 2026-10-16: the membership check reads the builder's evidence definition: either link, each
+        # in the direction its claim is made, between the member and the campaign's actor.
+        import campaign_evidence
+
+        assert seen["campaign"] == campaign_evidence.MALWARE_MEMBERSHIP_CHECK_QUERY
+        assert "MATCH (a:ThreatActor {name: c.actor_name})" in seen["campaign"]
+        assert "(a)<-[:ATTRIBUTED_TO]-(m)" in seen["campaign"] and "(a)-[:USES_MALWARE]->(m)" in seen["campaign"]
 
 
 def _record(seen, statement, params, override):
@@ -1195,6 +1215,49 @@ class TestCampaignMembership:
         _run(vfb, monkeypatch, override=capture)
         assert "COUNT { ()-[:PART_OF]->(:Campaign) }" in seen["st"]
         assert "WHERE NOT c:Campaign OR NOT (n:Malware OR n:Indicator)" in seen["st"]
+
+
+class TestCampaignEvidence:
+    """2026-10-16: no campaign without evidence. Every campaign EdgeGuard built rests on an
+    ATTRIBUTED_TO or USES_MALWARE link of its actor and has that actor's RUNS; no RUNS comes from an
+    actor that is not the campaign's or has neither link. Informational while there is no campaign."""
+
+    def test_a_correct_graph_passes(self, vfb, monkeypatch):
+        c = _check(_run(vfb, monkeypatch), "campaigns_have_evidence")
+        assert c["ok"] is True and c["mandatory"] is True
+        assert c["detail"] == _CAMPAIGN_EVIDENCE_ROW
+
+    @pytest.mark.parametrize("column", ["without_evidence", "without_runs", "runs_without_evidence"])
+    def test_each_defect_fails(self, vfb, monkeypatch, column):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [dict(rows[0], **{column: 2})] if "AS runs_without_evidence" in st else rows,
+        )
+        assert [c["check"] for c in rep.failed] == ["campaigns_have_evidence"]
+
+    def test_informational_without_campaigns(self, vfb, monkeypatch):
+        empty = {k: 0 for k in _CAMPAIGN_EVIDENCE_ROW}
+        rep = _run(vfb, monkeypatch, override=lambda st, rows: [empty] if "AS runs_without_evidence" in st else rows)
+        assert _check(rep, "campaigns_have_evidence")["ok"] is None and rep.failed == []
+
+    def test_query_reads_the_builders_definition(self, vfb, monkeypatch):
+        import campaign_evidence
+
+        seen = {}
+
+        def capture(st, rows):
+            if "AS runs_without_evidence" in st:
+                seen["st"] = st
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        assert seen["st"] == campaign_evidence.CAMPAIGN_EVIDENCE_CHECK_QUERY
+        # The campaigns EdgeGuard built; the actor by the campaign's name; either link; RUNS from it.
+        assert "MATCH (c:Campaign) WHERE c.edgeguard_managed = true" in seen["st"]
+        assert campaign_evidence.has_evidence("a") in seen["st"]
+        assert "(:ThreatActor {name: c.actor_name})-[:RUNS]->(c)" in seen["st"]
+        assert "coalesce(a.name = rc.actor_name, false)" in seen["st"]
 
 
 class TestCveScoreFromCvss:
