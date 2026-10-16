@@ -190,7 +190,14 @@ class TestPRN30CrossCheckerH2EventIdCap:
         assert f"][0..{relationship_provenance.MAX_EVENT_IDS_PER_EDGE}] AS _prov_events" in (
             relationship_provenance.prov_with("i", relationship_provenance.OTX_FEEDS)
         )
-        assert text.count("_prov_with(") == 19, "every step except 2d binds its events via prov_with"
+        # 2026-10-16: the sector steps 7a-7d bind the events of the feeds that gave each sector through
+        # ``zone_prov_with`` (one builder: its inner statement and its count), cut by the same constant.
+        zone_sites = text.count("_zone_prov_with(")
+        assert zone_sites == 2, "the sector step builder: inner statement and skip count"
+        assert text.count("_prov_with(") - zone_sites == 15, "every other step except 2d binds its events via prov_with"
+        assert f")[0..{relationship_provenance.MAX_EVENT_IDS_PER_EDGE}]][0] AS _prov_events" in (
+            relationship_provenance.zone_prov_with("v", '["energy"]')
+        )
         assert text.count("[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]") == 1, "step 2d caps its intersection"
         assert "_q4_inner" not in text, "Q4 co-occurrence query must stay removed (2026-10)"
         # Negative pin: no hardcoded ``[0..200]`` should remain in actual

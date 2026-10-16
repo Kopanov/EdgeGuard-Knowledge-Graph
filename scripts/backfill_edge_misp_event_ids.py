@@ -38,6 +38,11 @@ existing graph and propagates the originating node's
 | TARGETS | (Indicator → Sector) | i.misp_event_ids |
 | AFFECTS | (Vuln/CVE → Sector) | v.misp_event_ids |
 
+**Sector links (2026-10-16).** ``build_relationships`` steps 7a-7d now give a link to a Sector only the
+MISP events of the feeds that gave its sector (their ``SOURCED_FROM`` edges, ``zones``). This script still
+copies every event of the node, and only onto a link whose event list is empty, which no step leaves on a
+graph built since 2026-10: it is not needed there and is kept for graphs built before PR-N26 only.
+
 The co-occurrence intersection is the only one that can recover the
 EXACT MISP event(s) that produced the edge (because both endpoints carry
 their own arrays and the edge was created when an event was in both).

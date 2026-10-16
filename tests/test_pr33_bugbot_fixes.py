@@ -27,6 +27,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
@@ -506,17 +508,11 @@ def test_build_relationships_stamps_sector_uuid():
     for zone in ("healthcare", "energy", "finance", "global"):
         assert f'WHEN "{zone}" THEN' in case_expr, f"zone {zone!r} missing from CASE"
 
-    # The 7a and 7b queries reference the CASE expression. In the source, the
-    # CASE is interpolated via f-string (`f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "`),
-    # so we can't look for the literal CASE string — instead, assert the
-    # f-string interpolation pattern appears at least twice (one per 7a / 7b).
-    with open(build_relationships.__file__) as fh:
-        source = fh.read()
-    interp_count = source.count("ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}")
-    assert interp_count >= 2, (
-        f"both 7a (TARGETS) and 7b (AFFECTS) must stamp sec.uuid via the CASE "
-        f"interpolation — found {interp_count} occurrences, expected ≥2"
-    )
+    # Every sector step (7a-7d, one builder since 2026-10-16) stamps sec.uuid with the CASE expression.
+    for name in ("_Q7A_STATEMENTS", "_Q7B_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"):
+        inner = getattr(build_relationships, name).inner
+        assert f"ON CREATE SET sec.uuid = {case_expr}" in inner, f"{name} must stamp sec.uuid on create"
+        assert f"SET sec.uuid = coalesce(sec.uuid, {case_expr})" in inner, name
 
 
 # ---------------------------------------------------------------------------
@@ -765,58 +761,21 @@ def test_sector_uuid_case_uses_double_quotes_not_single():
     assert " END" in case_expr
 
 
-def test_q7a_inner_has_no_unescaped_single_quotes():
-    """The full inner Cypher for query 7a (TARGETS) must not contain any
-    single quotes — every string literal inside must use double quotes so
-    the outer single-quote wrapper in ``apoc.periodic.iterate('outer', 'inner')``
-    parses cleanly. Same convention as the working co-occurrence query in
-    ``run_pipeline.py``."""
+@pytest.mark.parametrize("name", ["_Q7A_STATEMENTS", "_Q7B_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"])
+def test_q7_statements_have_no_single_quotes(name):
+    """The rendered statements of the sector steps (7a TARGETS, 7b AFFECTS, 7c / 7d actor and malware
+    TARGETS) must not contain any single quote: ``apoc.periodic.iterate('outer', 'inner')`` wraps them
+    in single quotes. Since 2026-10-16 they are built by ``_sector_link_statements`` from shared
+    fragments, so the rendered text is checked, not the source literals."""
     import importlib
-    import inspect
-    import re
 
     if "build_relationships" in sys.modules:
         del sys.modules["build_relationships"]
     build_relationships = importlib.import_module("build_relationships")
 
-    src = inspect.getsource(build_relationships.build_relationships)
-
-    # Extract the _q7a_inner assignment block (multi-line concatenated string +
-    # f-string interpolations of _SECTOR_UUID_CASE).
-    m = re.search(r"_q7a_inner = \(\s*(.*?)\s*\)\s*\n\s*if not _safe_run_batched", src, re.DOTALL)
-    assert m, "could not locate _q7a_inner assignment"
-    raw_block = m.group(1)
-
-    # Render it: pick out every quoted string fragment (both " and ' delimited)
-    # and concatenate. The fragments themselves are the Cypher chars sent to
-    # Neo4j (after f-string interpolation removes any embedded backticks etc).
-    # We reject single quotes in any "..." fragment (= Cypher with embedded ').
-    double_quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', raw_block)
-    for frag in double_quoted:
-        # Empty Cypher string literal as `""` is fine — but if a fragment
-        # contains a single quote at all, that single quote is literal Cypher
-        # that will break the outer wrapper.
-        assert "'" not in frag, f"_q7a_inner has Cypher fragment with single quote: {frag!r}"
-
-
-def test_q7b_inner_has_no_unescaped_single_quotes():
-    """Same check as 7a, for the AFFECTS query (Vulnerability/CVE → Sector)."""
-    import importlib
-    import inspect
-    import re
-
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
-    build_relationships = importlib.import_module("build_relationships")
-
-    src = inspect.getsource(build_relationships.build_relationships)
-    m = re.search(r"_q7b_inner = \(\s*(.*?)\s*\)\s*\n\s*if not _safe_run_batched", src, re.DOTALL)
-    assert m, "could not locate _q7b_inner assignment"
-    raw_block = m.group(1)
-
-    double_quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', raw_block)
-    for frag in double_quoted:
-        assert "'" not in frag, f"_q7b_inner has Cypher fragment with single quote: {frag!r}"
+    stmts = getattr(build_relationships, name)
+    for part in (stmts.outer, stmts.inner):
+        assert "'" not in part, f"{name} has a single quote: {part[:200]!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1639,7 +1598,7 @@ def test_indicates_cooccurrence_query_sets_updated_at():
 
     for banner, next_banner in (
         ("5b. ThreatActor → Technique", "6. Malware → Technique"),
-        ("6b. Malware → Technique", "7a. Indicator → Sector"),
+        ("6b. Malware → Technique", "7a-7d. Links to the Sector nodes"),
     ):
         block_start = src.find(banner)
         block_end = src.find(next_banner, block_start)

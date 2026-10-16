@@ -661,6 +661,47 @@ _NVD_META_UNORDERED_KEYS = ("cwe", "ref_tags", "cpe_type", "affected_products")
 _REPLACED_VULNERABILITY_TAG_PREFIXES = ("severity:", "cvss:")
 
 
+# Bounds of the CISA ICS provenance in ``NVD_META`` (2026-10-16): a CVE is named by a few advisories,
+# and CISA lists 16 critical-infrastructure sectors.
+_MAX_ADVISORY_IDS = 50
+_MAX_ADVISORY_ID_CHARS = 32
+_MAX_ICS_SECTORS = 20
+_MAX_ICS_SECTOR_CHARS = 100
+# A zone name (``config.VALID_ZONES``); each advisory maps to at most the three tracked sectors.
+_MAX_ADVISORY_ZONES = 10
+_MAX_ADVISORY_ZONE_CHARS = 32
+
+
+def _bounded_strings(values: Any, max_items: int, max_chars: int) -> List[str]:
+    """The non-empty strings of a list, each trimmed and cut to ``max_chars``, de-duplicated in order, at
+    most ``max_items``; ``[]`` for anything that is not a list."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    out: List[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()[:max_chars]
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _bounded_advisory_zones(value: Any, advisory_ids: Sequence[str]) -> Dict[str, List[str]]:
+    """The zones of each advisory (2026-10-16), for the advisories kept in ``advisory_ids`` only, keys and
+    zones sorted; ``{}`` for anything that is not such a map."""
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for advisory in sorted(set(advisory_ids)):
+        zones = value.get(advisory)
+        if isinstance(zones, (list, tuple)):
+            out[advisory] = sorted(_bounded_strings(list(zones), _MAX_ADVISORY_ZONES, _MAX_ADVISORY_ZONE_CHARS))
+    return out
+
+
 def nvd_meta_digest(meta: Dict[str, Any]) -> str:
     """Digest of an ``NVD_META`` payload, for telling a changed CVE from an unchanged one.
 
@@ -2222,6 +2263,20 @@ class MISPWriter:
             # {"exploitation", "automatable", "technical_impact", "version", "timestamp"} or None.
             "ssvc": vuln.get("ssvc"),
         }
+        # 2026-10-16: a CISA ICS record's advisory ids, CISA's own sector names (all 16, not only the
+        # three mapped to zones) and the zones of each advisory, so the graph can name the advisories
+        # behind a sector (``cisa_ics:<id>``, only those that name it) and keep CISA's words. Only when
+        # the item carries them: NVD and KEV records get no new key, so their NVD_META (and its digest,
+        # ``nvd_meta_digest``) is unchanged.
+        advisory_ids = _bounded_strings(vuln.get("advisory_ids"), _MAX_ADVISORY_IDS, _MAX_ADVISORY_ID_CHARS)
+        if advisory_ids:
+            nvd_fields["advisory_ids"] = advisory_ids
+        advisory_zones = _bounded_advisory_zones(vuln.get("advisory_zones"), advisory_ids)
+        if advisory_zones:
+            nvd_fields["advisory_zones"] = advisory_zones
+        ics_sectors = _bounded_strings(vuln.get("ics_sectors"), _MAX_ICS_SECTORS, _MAX_ICS_SECTOR_CHARS)
+        if ics_sectors:
+            nvd_fields["ics_sectors"] = ics_sectors
         has_nvd_meta = any(
             [
                 nvd_fields["published"],
@@ -2237,6 +2292,8 @@ class MISPWriter:
                 # 2026-04 baseline had no queryable KEV property). The KEV date
                 # alone now qualifies the attribute for the META carrier.
                 nvd_fields["cisa_exploit_add"],
+                # 2026-10-16: a CISA ICS record without ``published`` still carries its advisories.
+                nvd_fields.get("advisory_ids"),
             ]
         )
 

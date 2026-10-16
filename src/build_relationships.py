@@ -9,7 +9,7 @@ to prevent false positives (e.g., "APT" matching "AP").
 
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -120,6 +120,10 @@ from relationship_provenance import family_feeds as _family_feeds  # noqa: E402
 from relationship_provenance import node_feeds as _node_feeds  # noqa: E402
 from relationship_provenance import prov_set as _prov_set  # noqa: E402
 from relationship_provenance import prov_with as _prov_with  # noqa: E402
+from relationship_provenance import zone_prov_with as _zone_prov_with  # noqa: E402
+from sector_evidence import cypher_params as _sector_cypher_params  # noqa: E402
+from sector_evidence import label_set as _sector_label_set  # noqa: E402
+from sector_evidence import label_with as _sector_label_with  # noqa: E402
 
 # ATT&CK software ids in family names (2026-10): OTX pulses name families as the MISP ATT&CK galaxy
 # does, "Cobalt Strike - S0154". The collectors and the sync now name the Malware node by the base
@@ -211,6 +215,79 @@ _SECTOR_IN_LIST = "[" + ", ".join(f'"{name}"' for name in _SECTOR_UUIDS) + "]"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class _SectorLinkStatements(NamedTuple):
+    """The statements of one step that links nodes to the Sector nodes (7a-7d)."""
+
+    outer: str
+    inner: str
+    skip: str
+    params: Dict[str, Any]
+
+
+# What a step's [SKIP] count means (``_safe_run_batched``): by default input rows whose target node is
+# missing; for the sector steps 7a-7d (2026-10-16) node sectors that no feed gave, which are not linked.
+_DEFAULT_SKIP_REASON = "input rows had no matching target node (likely missing prerequisite ingestion)"
+_SECTOR_SKIP_REASON = "(node, sector) pairs: a sector of the node's zone that no feed's SOURCED_FROM zones give"
+_SKIP_REASONS: Dict[str, str] = {
+    key: _SECTOR_SKIP_REASON
+    for key in ("indicator_targets_sector", "vuln_affects_sector", "actor_targets_sector", "malware_targets_sector")
+}
+
+
+def _sector_link_statements(node_var: str, outer_match: str, rel_type: str) -> _SectorLinkStatements:
+    """Steps 7a-7d (2026-10-16): link each node matched by ``outer_match`` (bound to ``node_var``) to the
+    Sector of each of its zones by ``rel_type``.
+
+    Per sector, only the feeds that gave it (``relationship_provenance.zone_prov_with``: the node's
+    ``SOURCED_FROM`` edges whose ``zones`` contain it, plus the legacy cases) go into ``r.sources``,
+    ``r.source_refs`` and ``r.misp_event_ids``, which accumulate (``prov_set``). Before 2026-10-16 every
+    link took every feed of the node: 2,639 of the 6,506 AFFECTS links of the 2026-10-16 graph named a
+    feed that never gave their sector. The label is the strongest statement label among the feeds that
+    stated the sector, else ``zone_classification``; a stored stronger label and a label outside the
+    table are kept, and the confidence is the table's value of the label kept (``sector_evidence``).
+    The unconditional ``r.confidence_score = 0.5`` of before is gone: it reset a stated link to 0.5 on
+    every run. ``global`` (the "no sector" marker) is never linked. A node sector no feed gave is not
+    linked; ``skip`` counts those pairs. Double quotes only: the statements run inside
+    ``apoc.periodic.iterate('outer', 'inner', ...)``.
+    """
+    n = node_var
+    inner = (
+        f"WITH ${n} AS {n} "
+        + _zone_prov_with(n, _SECTOR_IN_LIST)
+        + _sector_label_with(n)
+        + "MERGE (sec:Sector {name: zone_name}) "
+        # PR #37: ``edgeguard_managed`` on auto-created Sector nodes, or the STIX export (which reads
+        # Sector nodes with ``s.edgeguard_managed = true`` only) drops the Sector SDO and the link.
+        # 2026-10 shared-database contract: stamped on CREATE only; a Sector a partner created first
+        # gets ``edgeguard_enriched`` on the MATCH path. The uuid is the deterministic UUIDv5 embedded
+        # as a CASE literal (``_SECTOR_UUID_CASE``), so ``r.trg_uuid`` never inherits a NULL.
+        f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
+        "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
+        f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
+        "      sec.last_updated = datetime() "
+        f"MERGE ({n})-[r:{rel_type}]->(sec) "
+        "ON CREATE SET r.created_at = datetime() "
+        + _sector_label_set(f"{n}, sec, r, _feeds, _prov_refs, _prov_events")
+        + ", r.updated_at = datetime(), r.edgeguard_managed = true, "
+        + _prov_set()
+        + f", r.src_uuid = coalesce(r.src_uuid, {n}.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
+    )
+    skip = f"{outer_match} " + _zone_prov_with(n, _SECTOR_IN_LIST, feeds_filter="= 0") + "RETURN count(*) AS c"
+    return _SectorLinkStatements(
+        outer=f"{outer_match} RETURN {n}", inner=inner, skip=skip, params=_sector_cypher_params(rel_type)
+    )
+
+
+_Q7A_STATEMENTS = _sector_link_statements("i", "MATCH (i:Indicator) WHERE size(coalesce(i.zone, [])) > 0", "TARGETS")
+_Q7B_STATEMENTS = _sector_link_statements(
+    "v", "MATCH (v) WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0", "AFFECTS"
+)
+# 7c / 7d (2026-10 sector-focus build): the sector was only a property of actors and malware, so
+# "which actors target energy" had no path in the graph.
+_Q7C_STATEMENTS = _sector_link_statements("a", "MATCH (a:ThreatActor) WHERE size(coalesce(a.zone, [])) > 0", "TARGETS")
+_Q7D_STATEMENTS = _sector_link_statements("m", "MATCH (m:Malware) WHERE size(coalesce(m.zone, [])) > 0", "TARGETS")
 
 
 def _assert_no_unsafe_empty_string_literal_in_outer_queries() -> None:
@@ -345,7 +422,8 @@ def _safe_run_batched(
     count input rows whose inner-MATCH target does NOT exist (the orphan
     rows that the inner action will silently drop). When > 0, an INFO
     ``[SKIP]`` log is emitted so the operator can see how many edges
-    were silently lost.
+    were silently lost. What the count means is ``_SKIP_REASONS[stat_key]`` (2026-10-16: the sector
+    steps 7a-7d count the node sectors no feed gave), else a missing target node.
 
     PR #34 round 20: replaces the broken ``expected_query`` semantics from
     round 13 — that compared APOC ``total`` (count of outer-query rows
@@ -453,11 +531,7 @@ def _safe_run_batched(
             # No comparison needed — skip_count IS the count of input rows
             # whose target doesn't exist.
             if skip_count is not None and skip_count > 0:
-                logger.info(
-                    "  [SKIP] %s: %d input rows had no matching target node (likely missing prerequisite ingestion)",
-                    label,
-                    skip_count,
-                )
+                logger.info("  [SKIP] %s: %d %s", label, skip_count, _SKIP_REASONS.get(stat_key, _DEFAULT_SKIP_REASON))
             # PR #33 round 13: errorMessages now flips return value to False so
             # the caller's failures counter reflects partial APOC errors.
             return not errors
@@ -1271,184 +1345,71 @@ def build_relationships():
             failures += 1
         query_pause()
 
-        # 7a. Indicator → Sector (TARGETS)
-        # The Sector node is auto-CREATEd here — stamp its uuid with the
-        # deterministic Python-precomputed value embedded as a Cypher CASE
-        # expression literal (sector names are a fixed set of 4). Without this,
-        # sec.uuid would be NULL and r.trg_uuid would inherit NULL.
+        # 7a-7d. Links to the Sector nodes from each node's zones: Indicator, ThreatActor and Malware
+        # TARGETS (7a, 7c, 7d), Vulnerability / CVE AFFECTS (7b). 2026-10-16: one builder,
+        # ``_sector_link_statements``. Each link names only the feeds that gave its sector, carries the
+        # strongest evidence label among them and the confidence the label table gives it
+        # (``sector_evidence``); a sector no feed gave is counted ([SKIP]), not linked.
         logger.info("[LINK] 7a/20 Indicator → Sector (TARGETS)...")
-        _q7a_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.zone, [])) > 0 RETURN i"
-        # NB (PR #33 round 6): all string literals inside this inner query use
-        # DOUBLE quotes. _safe_run_batched wraps the inner query in single
-        # quotes for apoc.periodic.iterate('outer', 'inner', ...), so embedded
-        # single quotes terminate the outer string early. Same convention used
-        # in run_pipeline.py's working co-occurrence query.
-        _q7a_inner = (
-            "WITH $i AS i "
-            + _prov_with("i", _node_feeds("i"))
-            + "UNWIND i.zone AS zone_name WITH i, zone_name, "
-            + _PROV_VARS
-            + " "
-            # 2026-10 audit: `global` is the "no sector" marker, not a sector — never an edge target
-            # (Q7c/Q7d and the sync already skip it; the old graph carried 270k such edges).
-            'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
-            f"AND zone_name IN {_SECTOR_IN_LIST} "
-            "MERGE (sec:Sector {name: zone_name}) "
-            # PR #37 (Devil's Advocate Tier S): stamp ``edgeguard_managed=true``
-            # on auto-created Sector nodes. Without it, ``stix_exporter`` —
-            # which filters every Sector lookup with
-            # ``WHERE s.edgeguard_managed = true`` (src/stix_exporter.py:203,254,473)
-            # — silently DROPS the Sector identity SDO and the
-            # ``targets`` SRO from every bundle. ResilMesh consumers
-            # then think the indicator is unscoped (zone metadata
-            # invisible). 2026-10 shared-database contract: the flag is
-            # stamped on CREATE only; a Sector a partner created first gets
-            # ``edgeguard_enriched`` on the MATCH path instead.
-            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
-            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
-            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.last_updated = datetime() "
-            "MERGE (i)-[r:TARGETS]->(sec) "
-            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
-            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
-            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
-            # every run so edges created by either writer converge.
-            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
-            # 2026-10 (Bugbot on PR #134): edges the sync created before this step get the label too
-            '    r.match_type = coalesce(r.match_type, "zone_classification"), '
-            "    r.edgeguard_managed = true, "
-            # PR-N26 (cloud-Neo4j audit 2026-04-23): propagate the indicator's
-            # MISP event ids onto the TARGETS edge. The zone tag itself comes
-            # from MISP attribute parsing (zone-detection runs against MISP
-            # tags), so the edge IS MISP-derived even though the Sector node
-            # is auto-created here. Pre-N26 the cloud showed 0% misp_event_ids
-            # coverage on 36,480 TARGETS edges. See Q3a for the full rationale
-            # on propagating the indicator's full event list (superset of
-            # true provenance, acceptable for traceability).
-            # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): filter nulls/
-            # empty strings (matches Path A's require_nonempty_string guard
-            # in neo4j_client.create_misp_relationships_batch) AND cap
-            # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
-            # semantics between forward-write and the backfill script.
-             + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
-        )
+        _q7a_outer = _Q7A_STATEMENTS.outer
+        _q7a_inner = _Q7A_STATEMENTS.inner
         if not _safe_run_batched(
-            client, "Indicator -> Sector (TARGETS)", _q7a_outer, _q7a_inner, stats, "indicator_targets_sector"
+            client,
+            "Indicator -> Sector (TARGETS)",
+            _q7a_outer,
+            _q7a_inner,
+            stats,
+            "indicator_targets_sector",
+            skip_query=_Q7A_STATEMENTS.skip,
+            params=_Q7A_STATEMENTS.params,
         ):
             failures += 1
         query_pause()
 
-        # 7b. Vulnerability/CVE → Sector (AFFECTS)
-        # Same Sector-uuid stamp as 7a — see comment above.
         logger.info("[LINK] 7b/20 Vulnerability/CVE → Sector (AFFECTS)...")
-        _q7b_outer = "MATCH (v) WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0 RETURN v"
-        # See 7a above: double quotes for inner string literals.
-        _q7b_inner = (
-            "WITH $v AS v "
-            + _prov_with("v", _node_feeds("v"))
-            + "UNWIND v.zone AS zone_name WITH v, zone_name, "
-            + _PROV_VARS
-            + " "
-            'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
-            f"AND zone_name IN {_SECTOR_IN_LIST} "
-            "MERGE (sec:Sector {name: zone_name}) "
-            # PR #37: same edgeguard_managed stamp as 7a — keeps STIX export
-            # from silently dropping AFFECTS/TARGETS Sector edges.
-            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
-            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
-            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.last_updated = datetime() "
-            "MERGE (v)-[r:AFFECTS]->(sec) "
-            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
-            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
-            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
-            # every run so edges created by either writer converge.
-            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
-            # 2026-10 (Bugbot on PR #134): edges the sync created before this step get the label too
-            '    r.match_type = coalesce(r.match_type, "zone_classification"), '
-            "    r.edgeguard_managed = true, "
-            # PR-N26 (cloud-Neo4j audit 2026-04-23): symmetric with Q7a — the
-            # zone tag on Vulnerability/CVE comes from MISP attribute parsing,
-            # so the AFFECTS edge IS MISP-derived. Pre-N26 only 0.1%
-            # (1/1,221) AFFECTS edges carried misp_event_ids — that single
-            # one was created via Path A's _set_clause helper. The other
-            # 1,220 came from this query without the wire-up.
-            # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): same filter +
-            # cap as the i.* sites above — Q7b uses v (Vulnerability/CVE)
-            # as the source endpoint for AFFECTS edges.
-             + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
-        )
+        _q7b_outer = _Q7B_STATEMENTS.outer
+        _q7b_inner = _Q7B_STATEMENTS.inner
         if not _safe_run_batched(
-            client, "Vulnerability/CVE -> Sector (AFFECTS)", _q7b_outer, _q7b_inner, stats, "vuln_affects_sector"
+            client,
+            "Vulnerability/CVE -> Sector (AFFECTS)",
+            _q7b_outer,
+            _q7b_inner,
+            stats,
+            "vuln_affects_sector",
+            skip_query=_Q7B_STATEMENTS.skip,
+            params=_Q7B_STATEMENTS.params,
         ):
             failures += 1
         query_pause()
 
-        # 7c / 7d. ThreatActor → Sector, Malware → Sector (TARGETS) — 2026-10 sector-focus build.
-        # The sector was only a property on these nodes (``zone[]``, from OTX pulse industries
-        # and keyword detection), so "which actors target energy" had no path in the graph.
-        # Same shape and evidence label as Q7a (``zone_classification``); ``global`` is skipped
-        # on purpose — "(APT28)-[:TARGETS]->(global)" is not a claim any source would sign.
         logger.info("[LINK] 7c/20 ThreatActor → Sector (TARGETS)...")
-        _q7c_outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.zone, [])) > 0 RETURN a"
-        _q7c_inner = (
-            "WITH $a AS a "
-            + _prov_with("a", _node_feeds("a"))
-            + "UNWIND a.zone AS zone_name WITH a, zone_name, "
-            + _PROV_VARS
-            + " "
-            'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
-            f"AND zone_name IN {_SECTOR_IN_LIST} "
-            "MERGE (sec:Sector {name: zone_name}) "
-            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
-            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
-            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.last_updated = datetime() "
-            "MERGE (a)-[r:TARGETS]->(sec) "
-            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
-            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
-            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
-            # every run so edges created by either writer converge.
-            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
-            '    r.match_type = coalesce(r.match_type, "zone_classification"), '
-            "    r.edgeguard_managed = true, "
-            + _prov_set()
-            + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
-        )
+        _q7c_outer = _Q7C_STATEMENTS.outer
+        _q7c_inner = _Q7C_STATEMENTS.inner
         if not _safe_run_batched(
-            client, "ThreatActor -> Sector (TARGETS)", _q7c_outer, _q7c_inner, stats, "actor_targets_sector"
+            client,
+            "ThreatActor -> Sector (TARGETS)",
+            _q7c_outer,
+            _q7c_inner,
+            stats,
+            "actor_targets_sector",
+            skip_query=_Q7C_STATEMENTS.skip,
+            params=_Q7C_STATEMENTS.params,
         ):
             failures += 1
         query_pause()
 
         logger.info("[LINK] 7d/20 Malware → Sector (TARGETS)...")
-        _q7d_outer = "MATCH (m:Malware) WHERE size(coalesce(m.zone, [])) > 0 RETURN m"
-        _q7d_inner = (
-            "WITH $m AS m "
-            + _prov_with("m", _node_feeds("m"))
-            + "UNWIND m.zone AS zone_name WITH m, zone_name, "
-            + _PROV_VARS
-            + " "
-            'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
-            f"AND zone_name IN {_SECTOR_IN_LIST} "
-            "MERGE (sec:Sector {name: zone_name}) "
-            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
-            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
-            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.last_updated = datetime() "
-            "MERGE (m)-[r:TARGETS]->(sec) "
-            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
-            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
-            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
-            # every run so edges created by either writer converge.
-            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
-            '    r.match_type = coalesce(r.match_type, "zone_classification"), '
-            "    r.edgeguard_managed = true, "
-            + _prov_set()
-            + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
-        )
+        _q7d_outer = _Q7D_STATEMENTS.outer
+        _q7d_inner = _Q7D_STATEMENTS.inner
         if not _safe_run_batched(
-            client, "Malware -> Sector (TARGETS)", _q7d_outer, _q7d_inner, stats, "malware_targets_sector"
+            client,
+            "Malware -> Sector (TARGETS)",
+            _q7d_outer,
+            _q7d_inner,
+            stats,
+            "malware_targets_sector",
+            skip_query=_Q7D_STATEMENTS.skip,
+            params=_Q7D_STATEMENTS.params,
         ):
             failures += 1
         query_pause()

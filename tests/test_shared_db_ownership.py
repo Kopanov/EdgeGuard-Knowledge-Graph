@@ -91,8 +91,9 @@ class TestMarkerOnCreatePathOnly:
                         last = c.group(0)
                     assert last == "ON CREATE SET", f"{where} writes the marker outside ON CREATE (after {last!r})"
         # 29 in neo4j_client (threat-intel, CVSS, Source, 5× Sector, topology, identity, alert path, Alert),
-        # 4 Sector MERGEs in build_relationships, 1 Campaign in enrichment_jobs.
-        assert sites >= 34, f"expected at least 34 node MERGE sites, found {sites}"
+        # 1 Sector MERGE in build_relationships (since 2026-10-16 the one builder of steps 7a-7d,
+        # ``_sector_link_statements``; it was 4), 1 Campaign in enrichment_jobs.
+        assert sites >= 31, f"expected at least 31 node MERGE sites, found {sites}"
 
     def test_edges_keep_the_unconditional_marker(self):
         """Edges are EdgeGuard's whenever EdgeGuard MERGEs them — including INVOLVES (2026-10)."""

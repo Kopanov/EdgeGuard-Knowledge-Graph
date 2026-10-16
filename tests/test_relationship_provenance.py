@@ -467,8 +467,17 @@ class TestEnrichment:
         node_props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
         edge_props = enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
         assert {"zone", "source", "misp_event_ids", "aliases"} <= set(node_props)
-        # 2026-10 (explainability): ``cited_ids`` is an edge provenance list as well
-        assert set(edge_props) == {"sources", "source_refs", "misp_event_ids", "cited_ids"}
+        # 2026-10 (explainability): ``cited_ids`` is an edge provenance list as well; 2026-10-16 (sector
+        # evidence): so are the zone lists of a SOURCED_FROM edge
+        assert set(edge_props) == {
+            "sources",
+            "source_refs",
+            "misp_event_ids",
+            "cited_ids",
+            "zones",
+            "stated_zones",
+            "stated_refs",
+        }
         assert "source_ids" not in enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY
         cypher = enrichment_jobs._ACTOR_ALIAS_MERGE_NORMALISE_CYPHER
         node_part, edge_part = cypher.split("MATCH (c)-[r]-()")
@@ -483,7 +492,10 @@ class TestEnrichment:
         # would make every ``r.source = 'nvd'`` reader miss the edge (review finding on #175).
         edge_part = enrichment_jobs._ACTOR_ALIAS_MERGE_NORMALISE_CYPHER.split("MATCH (c)-[r]-()")[1]
         assert "r.source =" not in edge_part and "r.source IS" not in edge_part
-        assert "r.zone" not in edge_part and "r.aliases" not in edge_part
+        # the node's ``zone`` is not an edge property; the SOURCED_FROM edge's are ``zones`` / ``stated_zones``
+        assert "r.zone " not in edge_part and "r.zone)" not in edge_part and "r.aliases" not in edge_part
+        assert "r.zones = CASE WHEN r.zones IS NULL THEN NULL" in edge_part
+        assert "r.stated_zones = CASE WHEN r.stated_zones IS NULL THEN NULL" in edge_part
 
     def test_family_label_feeds_are_the_feeds_that_set_malware_family(self):
         # ThreatFox, MalwareBazaar, Feodo Tracker and OTX write ``malware_family``; URLhaus,

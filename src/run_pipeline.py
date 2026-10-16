@@ -38,6 +38,7 @@ from collectors.vt_collector import VTCollector
 from config import baseline_collection_limit_from_env, get_effective_limit
 from neo4j_client import Neo4jClient
 from relationship_provenance import node_feeds, prov_set, prov_with
+from sector_evidence import stated_zones as sector_stated_zones
 
 
 # PR #35 commit 2: surface CLI-path collector failures to Prometheus + Slack
@@ -308,6 +309,18 @@ class EdgeGuardPipeline:
                     zones.append(zone)
         return zones if zones else ["global"]
 
+    def _stix_zone_fields(self, obj: dict) -> dict:
+        """``zone`` of a STIX object and, as the attribute flow sets them (``MISPToNeo4jSync._with_provenance``),
+        the zones its source states itself (``stated_zones``, 2026-10-16): a CVE of a CISA ICS event gets the
+        same ``advisory_sector`` link from ``build_relationships`` step 7b whichever flow loaded it. The STIX
+        objects carry no ``NVD_META``, so no advisory ids: the link cites no advisory."""
+        zones = self._extract_zones_from_stix_labels(obj)
+        fields: dict = {"zone": zones}
+        stated = sector_stated_zones(_stix_object_source(obj), zones)
+        if stated:
+            fields["stated_zones"] = stated
+        return fields
+
     def _create_indicates_relationships(self) -> int:
         """
         CLI relationship pass: CVE-tag EXPLOITS only (2026-10: event co-occurrence INDICATES removed).
@@ -469,7 +482,7 @@ class EdgeGuardPipeline:
                             {
                                 "indicator_type": indicator_data.get("type", "unknown"),
                                 "value": indicator_data.get("value", ""),
-                                "zone": self._extract_zones_from_stix_labels(obj),
+                                **self._stix_zone_fields(obj),
                                 "tag": "stix_import",
                                 "source": [_stix_object_source(obj)],  # Source as array (like zone)
                                 # PR-N14 Fix #4 (2026-04-21 pre-baseline audit): pass
@@ -503,7 +516,7 @@ class EdgeGuardPipeline:
                                 "cvss_score": None,  # None = unscored; 0.0 is a valid CVSS score
                                 "severity": "UNKNOWN",
                                 # No attack vector: merge_cve derives it from the CVSS sub-nodes (2026-10).
-                                "zone": self._extract_zones_from_stix_labels(obj),
+                                **self._stix_zone_fields(obj),
                                 "tag": "stix_import",
                                 "source": [_stix_object_source(obj)],  # Source as array (like zone)
                                 # PR-N14 Fix #4: honest-NULL on STIX re-import — see
@@ -525,7 +538,7 @@ class EdgeGuardPipeline:
                             "name": obj.get("name", ""),
                             "aliases": obj.get("aliases", []),
                             "description": obj.get("description", ""),
-                            "zone": self._extract_zones_from_stix_labels(obj),
+                            **self._stix_zone_fields(obj),
                             "tag": "stix_import",
                             "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.7,
@@ -543,7 +556,7 @@ class EdgeGuardPipeline:
                             "malware_types": obj.get("malware_types", []),
                             "family": obj.get("name", ""),
                             "description": obj.get("description", ""),
-                            "zone": self._extract_zones_from_stix_labels(obj),
+                            **self._stix_zone_fields(obj),
                             "tag": "stix_import",
                             "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.7,
@@ -566,7 +579,7 @@ class EdgeGuardPipeline:
                             "name": obj.get("name", ""),
                             "description": obj.get("description", ""),
                             "tool_types": obj.get("labels", []),
-                            "zone": self._extract_zones_from_stix_labels(obj),
+                            **self._stix_zone_fields(obj),
                             "tag": "stix_import",
                             "source": [_stix_object_source(obj)],
                             "confidence_score": 0.7,
@@ -595,7 +608,7 @@ class EdgeGuardPipeline:
                             "name": obj.get("name", ""),
                             "description": obj.get("description", ""),
                             "platforms": [],
-                            "zone": self._extract_zones_from_stix_labels(obj),
+                            **self._stix_zone_fields(obj),
                             "tag": "stix_import",
                             "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.8,
@@ -638,7 +651,7 @@ class EdgeGuardPipeline:
                             {
                                 "indicator_type": indicator_type,
                                 "value": value,
-                                "zone": self._extract_zones_from_stix_labels(obj),
+                                **self._stix_zone_fields(obj),
                                 "tag": "stix_import",
                                 "source": [_stix_object_source(obj)],
                                 # PR-N14 Fix #4: STIX observables (IPv4 / domain /

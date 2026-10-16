@@ -70,6 +70,10 @@ from node_identity import is_placeholder_name
 from query_pause import query_pause
 from relationship_provenance import CURATED_CLAIM_CONFIDENCE, CURATED_CLAIMS_PREFIX, CURATED_PREDICATES
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
+from sector_evidence import link_evidence as sector_link_evidence
+from sector_evidence import stated_refs as sector_stated_refs
+from sector_evidence import stated_zones as sector_stated_zones
+from sector_evidence import zone_refs as sector_zone_refs
 from source_registry import (
     CURATED_OTHER_LABEL,
     canonical_source_id,
@@ -742,10 +746,11 @@ def _item_source_refs(item: Dict, source: str) -> List[str]:
     """The feed's own record ids behind ``item``, each as ``"<source>:<id>"`` (2026-10).
 
     Covers the feeds that give a record id of their own: the OTX pulse (``pulse_id`` plus
-    the other pulses of the run in ``report_ids``), the ThreatFox IOC id, the URLhaus entry
-    and the MITRE ATT&CK id. Feeds keyed by the value itself (NVD and KEV by CVE id,
-    MalwareBazaar and VirusTotal by hash, Feodo Tracker and AbuseIPDB by IP, SSL Blacklist
-    by certificate hash) need none: the node is the record.
+    the other pulses of the run in ``report_ids``), the ThreatFox IOC id, the URLhaus entry,
+    the MITRE ATT&CK id and (2026-10-16) the CISA ICS advisories that name the CVE
+    (``advisory_ids`` from ``NVD_META``, e.g. ``cisa_ics:ICSA-24-123-01``). Feeds keyed by the
+    value itself (NVD and KEV by CVE id, MalwareBazaar and VirusTotal by hash, Feodo Tracker
+    and AbuseIPDB by IP, SSL Blacklist by certificate hash) need none: the node is the record.
     """
     record_ids: List[object] = []
     if source == "alienvault_otx":
@@ -757,12 +762,53 @@ def _item_source_refs(item: Dict, source: str) -> List[str]:
         record_ids = [match.group(1)] if match else []
     elif source == "mitre_attck":
         record_ids = [item.get("mitre_id")]
+    elif source == "cisa_ics":
+        record_ids = list(item.get("advisory_ids") or [])
     refs: List[str] = []
     for record_id in record_ids:
         ref = format_source_ref(source, record_id)
         if ref and ref not in refs:
             refs.append(ref)
     return refs
+
+
+def _item_zone_refs(item: Dict, source: str) -> Dict[str, List[str]]:
+    """Zone → the feed's record references behind ``item`` that gave that zone (2026-10-16).
+
+    Only for a feed whose records each state their own zones and are merged into one item: CISA ICS,
+    whose CVE item unites the advisories that name the CVE (``advisory_zones`` from ``NVD_META``, advisory
+    id → its zones). Each sector then cites only the advisories that name it
+    (``sector_evidence.stated_refs``). ``{}`` for every other feed: a sector cites all of its references.
+    """
+    if source != "cisa_ics":
+        return {}
+    advisory_zones = item.get("advisory_zones")
+    if not isinstance(advisory_zones, dict):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for advisory in sorted(advisory_zones):
+        ref = format_source_ref(source, advisory)
+        if not ref:
+            continue
+        for zone in advisory_zones[advisory]:
+            out.setdefault(zone, []).append(ref)
+    return out
+
+
+def _meta_advisory_zones(meta: Dict[str, Any]) -> Dict[str, List[str]]:
+    """``NVD_META.advisory_zones`` (2026-10-16): advisory id → its sorted, lower-case specific zones; ``{}``
+    when absent or not a map. A value that is not a list gives the advisory no zone."""
+    value = meta.get("advisory_zones")
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for advisory in sorted(k for k in value if isinstance(k, str) and k.strip()):
+        zones = value[advisory]
+        listed = _scalar_strings(zones) if isinstance(zones, list) else []
+        out[advisory.strip()] = sorted(
+            {z.strip().lower() for z in listed if z.strip() and z.strip().lower() != "global"}
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -3400,6 +3446,13 @@ class MISPToNeo4jSync:
             # The zone tag is the item's own: the link names the item's feed and record ids.
             _item_source = canonical_source_id(item.get("tag")) or "misp"
             _item_refs = list(item.get("source_refs") or [])
+            # 2026-10-16 (sector evidence): the label and confidence follow from what the feed did,
+            # through one table (``sector_evidence``): a sector CISA's ICS advisory states is
+            # ``advisory_sector`` at 0.9 on AFFECTS; every other sector is ``zone_classification`` at
+            # 0.5. A sector cites only the records that gave it (``stated_refs``: of a CISA item, the
+            # advisories that name the sector). ``build_relationships`` steps 7a-7d compute the same.
+            _item_stated = item.get("stated_zones")
+            _item_stated_refs = item.get("stated_refs")
 
             # Map zones to sector names
             for zone in zones:
@@ -3411,6 +3464,7 @@ class MISPToNeo4jSync:
                     if item_type == "vulnerability":
                         cve_id = resolve_vulnerability_cve_id(item)
                         if cve_id:
+                            _label, _conf = sector_link_evidence(_item_source, sector_name, _item_stated, "AFFECTS")
                             relationships.append(
                                 {
                                     "rel_type": "AFFECTS",
@@ -3418,10 +3472,10 @@ class MISPToNeo4jSync:
                                     "from_key": {"cve_id": cve_id},
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
-                                    "confidence": 0.5,
-                                    "match_type": "zone_classification",
+                                    "confidence": _conf,
+                                    "match_type": _label,
                                     "source": _item_source,
-                                    "source_refs": _item_refs,
+                                    "source_refs": sector_zone_refs(_item_stated_refs, sector_name, _item_refs),
                                     "misp_event_id": _evt_id,
                                 }
                             )
@@ -3430,6 +3484,7 @@ class MISPToNeo4jSync:
                         value = item.get("value")
                         indicator_type = item.get("indicator_type", "unknown")
                         if value:
+                            _label, _conf = sector_link_evidence(_item_source, sector_name, _item_stated, "TARGETS")
                             relationships.append(
                                 {
                                     "rel_type": "TARGETS",
@@ -3440,10 +3495,10 @@ class MISPToNeo4jSync:
                                     },
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
-                                    "confidence": 0.5,
-                                    "match_type": "zone_classification",
+                                    "confidence": _conf,
+                                    "match_type": _label,
                                     "source": _item_source,
-                                    "source_refs": _item_refs,
+                                    "source_refs": sector_zone_refs(_item_stated_refs, sector_name, _item_refs),
                                     "misp_event_id": _evt_id,
                                 }
                             )
@@ -3454,7 +3509,9 @@ class MISPToNeo4jSync:
         """Stamp the feed and its record ids on ``item`` and on every relationship it asserts (2026-10).
 
         ``source`` is the attribute's feed (canonical registry id, from its ``source:*`` tag);
-        ``source_refs`` are that feed's own record ids (``_item_source_refs``). The writer
+        ``source_refs`` are that feed's own record ids (``_item_source_refs``); ``stated_zones``
+        (2026-10-16) the zones the feed states itself (``sector_evidence.stated_zones``), and
+        ``stated_refs`` which of its records stated which of them (``_item_zone_refs``). The writer
         accumulates both on the edge as ``r.sources`` / ``r.source_refs`` and on the
         node's ``SOURCED_FROM`` edge, so every link traces back to the feed record and,
         through ``misp_event_ids``, to the MISP event that carried it.
@@ -3463,6 +3520,17 @@ class MISPToNeo4jSync:
         refs = _item_source_refs(item, source)
         if refs:
             item["source_refs"] = refs
+        # 2026-10-16 (sector evidence): the zones the feed states itself (CISA ICS: every specific zone
+        # of the attribute; an inferring feed: none). The writer keeps them on the node's SOURCED_FROM
+        # edge of this feed, and the zone rows of ``_build_cross_item_relationships`` read them.
+        stated = sector_stated_zones(source, item.get("zone"))
+        if stated:
+            item["stated_zones"] = stated
+            # Which record stated which sector (CISA ICS: the advisories that name it), so a sector link
+            # cites only those, not every advisory that names the CVE.
+            stated_refs = sector_stated_refs(stated, _item_zone_refs(item, source))
+            if stated_refs:
+                item["stated_refs"] = stated_refs
         for rel in relationships:
             rel.setdefault("source", source)
             if refs:
@@ -3727,6 +3795,19 @@ class MISPToNeo4jSync:
                 # NVD record only (``nvd_record``), and validates them there.
                 "ssvc": nvd_meta.get("ssvc") if isinstance(nvd_meta.get("ssvc"), dict) else None,
             }
+            # 2026-10-16: a CISA ICS record's advisory ids, CISA's own sector names (all 16, the three
+            # mapped to zones and the others such as Water) and the zones of each advisory, from
+            # NVD_META. They reach the node's SOURCED_FROM edge in ``raw_data`` and give the record
+            # references ``cisa_ics:<advisory id>`` (``_item_source_refs``), per sector only those of
+            # the advisories that name it (``_item_zone_refs``). Only when the record carries them: NVD
+            # and KEV items have none.
+            for _meta_key in ("advisory_ids", "ics_sectors"):
+                _values = _meta_list(nvd_meta, _meta_key)
+                if _values:
+                    item[_meta_key] = _values
+            _advisory_zones = _meta_advisory_zones(nvd_meta)
+            if _advisory_zones:
+                item["advisory_zones"] = _advisory_zones
             return self._with_provenance(item, relationships)
 
         # Handle threat actor
@@ -5257,6 +5338,11 @@ class MISPToNeo4jSync:
             # is the only record of it once MISP has dropped some of the pulse's actors.
             "several_actor_pulses",
             "several_actor_pulses_by_name",
+            # 2026-10-16 (sector evidence): what the feed stated and which record stated it; without them
+            # the zone rows of a paged event labelled a CISA statement ``zone_classification`` at 0.5 and
+            # cited every advisory, unlike the same attribute in a smaller event.
+            "stated_zones",
+            "stated_refs",
         )
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size

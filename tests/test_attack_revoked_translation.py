@@ -42,6 +42,7 @@ from build_rel_queries import assigned_queries  # noqa: E402
 
 import attack_revoked  # noqa: E402
 import build_relationships  # noqa: E402
+import sector_evidence  # noqa: E402
 import stix_exporter  # noqa: E402
 from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX  # noqa: E402
 from neo4j_client import Neo4jClient  # noqa: E402
@@ -196,9 +197,14 @@ class TestBuildRelationships:
         link_2d = assigned_query("_q2d_outer")
         cleanup_2d = [assigned_query(n) for n in ("_q2d_remove_outer", "_q2d_trim_outer")]
         others = [(q, p) for q, p in iterate if ":Technique {mitre_id:" not in q]
-        seen = {"2d": 0, "9b": 0}
+        seen = {"2d": 0, "9b": 0, "sector": 0}
+        sector_params = [{"iterate_params": sector_evidence.cypher_params(t)} for t in ("AFFECTS", "TARGETS")]
         for q, p in others:
-            if link_2d in q:
+            if p is not None and "sector_confidence" in p["iterate_params"]:
+                # 2026-10-16: steps 7a-7d take the sector evidence table, not the map
+                seen["sector"] += 1
+                assert p in sector_params, "sector step"
+            elif link_2d in q:
                 seen["2d"] += 1
                 assert set(p["iterate_params"]) == attribution_keys | set(software_id_params), "step 2d link"
                 assert {k: p["iterate_params"][k] for k in software_id_params} == software_id_params
@@ -207,7 +213,7 @@ class TestBuildRelationships:
             elif p is not None:
                 seen["9b"] += 1
                 assert p == {"iterate_params": software_id_params}, "step 9b"
-        assert seen == {"2d": 1, "9b": 1}, seen
+        assert seen == {"2d": 1, "9b": 1, "sector": 4}, seen
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
 
