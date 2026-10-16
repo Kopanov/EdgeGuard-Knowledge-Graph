@@ -582,7 +582,7 @@ def _misp_min_success_rate() -> float:
 # (``misp_writer.CONVERT_FAILED_MIN_SHARE``), of a source's items in the push, although MISP never
 # saw them, so an error that blamed MISP alone would point the operator away from the writer's
 # ``[CONVERT]`` line. Fewer such items are reported by that line and are not failures.
-_MISP_PUSH_FAILURE_CAUSES = (
+MISP_PUSH_FAILURE_CAUSES = (
     "failures are attributes MISP did not store and, for a source all or at least half of whose items "
     "no MISP attribute could be built from, those items, logged by the writer as [CONVERT]"
 )
@@ -631,7 +631,7 @@ def status_after_misp_push(
     if not ok and push_failed_count:
         err = (
             f"MISP push failed for all or part of batch ({push_failed_count} failures, 0 successes; "
-            f"{_MISP_PUSH_FAILURE_CAUSES})"
+            f"{MISP_PUSH_FAILURE_CAUSES})"
         )
     elif ok and attempted > 0 and min_rate > 0.0 and rate < min_rate:
         # Issue #62 gate: partial silent loss. rate == min_rate passes.
@@ -639,7 +639,7 @@ def status_after_misp_push(
         err = (
             f"MISP push success rate {rate:.3f} below EDGEGUARD_MISP_MIN_SUCCESS_RATE="
             f"{min_rate:.2f} ({push_success_count} pushed, {push_failed_count} failed, "
-            f"{attempted} attempted; {_MISP_PUSH_FAILURE_CAUSES}) — partial silent loss; see the "
+            f"{attempted} attempted; {MISP_PUSH_FAILURE_CAUSES}) — partial silent loss; see the "
             f"COLLECTOR_SUMMARY line above and Issue #62"
         )
         logger.error(f"{source}: {err}")

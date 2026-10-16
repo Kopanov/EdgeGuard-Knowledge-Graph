@@ -546,10 +546,13 @@ they are all or at least half of a source's items in the push
 then names both causes. A red task whose `[CONVERT]` line is an ERROR, with
 `item(s), counted as failed` for a source, means that source's payload
 stopped converting: the fix is in the collector or the source's payload, not
-in MISP, and a re-trigger fails the same way. A `[CONVERT]` WARNING (every
-source `item(s), not counted as failed`) is a few bad records; the run and
-the source's cursor go on, and the line repeats while the source keeps
-sending them.
+in MISP, and a re-trigger fails the same way. The exception is a line that
+reads `1 of 1` or `1 of 2` for the source: one bad record in a small window,
+which clears once a window holds three or more of the source's items. A
+`[CONVERT]` WARNING (every source `item(s), not counted as failed`) is a few
+bad records; the run goes on, the source's cursor is not held by these items,
+and the line repeats while the source keeps sending them. The line names each
+source by its tag (`alienvault_otx`, `threatfox`, …).
 
 ---
 

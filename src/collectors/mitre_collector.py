@@ -17,6 +17,7 @@ import requests
 
 from baseline_checkpoint import get_source_incremental, update_source_incremental
 from collectors.collector_utils import (
+    MISP_PUSH_FAILURE_CAUSES,
     RateLimiter,
     is_auth_or_access_denied,
     make_skipped_optional_source,
@@ -426,7 +427,9 @@ class MITRECollector:
                 ok = failed == 0
                 err = None
                 if failed > 0:
-                    err = f"MISP push reported {failed} failed attribute(s) ({success} ok)"
+                    # 2026-10-16: the same cause text as status_after_misp_push, since ``failed`` also counts
+                    # systemic conversion drops that MISP never saw.
+                    err = f"MISP push reported {failed} failed attribute(s) ({success} ok; {MISP_PUSH_FAILURE_CAUSES})"
                 return self._return_status(success=ok, count=len(all_items), failed=failed, error=err)
             else:
                 if new_etag:

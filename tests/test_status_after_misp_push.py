@@ -164,3 +164,14 @@ class TestMinSuccessRateEnvParsing:
     def test_valid_value_parsed(self, monkeypatch):
         monkeypatch.setenv("EDGEGUARD_MISP_MIN_SUCCESS_RATE", "0.8")
         assert _misp_min_success_rate() == 0.8
+
+
+def test_mitre_push_error_names_both_failure_causes():
+    """2026-10-16: MITRE builds its own error text; it names the same causes as status_after_misp_push."""
+    import inspect
+
+    from collectors import collector_utils, mitre_collector
+
+    source = inspect.getsource(mitre_collector)
+    assert "MISP_PUSH_FAILURE_CAUSES" in source
+    assert "[CONVERT]" in collector_utils.MISP_PUSH_FAILURE_CAUSES
