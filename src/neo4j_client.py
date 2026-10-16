@@ -2989,9 +2989,10 @@ class Neo4jClient:
         timestamps on the edge.
 
         2026-10 (source revisions): ``r.raw_data`` is written when the edge is created and, with
-        ``refresh_raw_data`` (every CVE write, ``merge_cve``), replaced on every write, so the edge of a
-        CVE holds its source's latest record: a KEV or NVD copy edited in MISP reaches the edge at the
-        next sync. Other labels keep the record that created the edge.
+        ``refresh_raw_data`` (a CVE write from a MISP attribute, ``merge_cve``), replaced on every write,
+        so the edge of a CVE holds its source's latest record: a KEV or NVD copy edited in MISP reaches
+        the edge at the next sync. Other labels, and the CVE write of the opt-in STIX import (a reduced
+        record, not the source's), keep the record that created the edge.
 
         2026-10-16 (sector evidence): the edge accumulates the zones this source's records gave the node
         (``r.zones``), the part of them the source stated itself (``r.stated_zones``) and which record
@@ -3273,7 +3274,7 @@ class Neo4jClient:
             extra_props["hostnames"] = data["hostnames"]
         return self.merge_node_with_source("Indicator", key_props, data, source_id, extra_props=extra_props or None)
 
-    def merge_cve(self, data: Dict, source_id: str = "nvd") -> bool:
+    def merge_cve(self, data: Dict, source_id: str = "nvd", *, refresh_raw_data: bool = True) -> bool:
         """
         MERGE a CVE node with source tracking, then create CVSS sub-nodes.
 
@@ -3288,7 +3289,10 @@ class Neo4jClient:
         (``description_ranking.CVE_DESCRIPTIONS``, 2026-10-16). ``cisa_exploit_add``,
         ``cisa_action_due``, ``cisa_required_action`` and ``cisa_vulnerability_name`` are set by a CISA
         KEV record and only filled by any other (``_KEV_OWNED_CVE_PROPS``, 2026-10). The
-        ``SOURCED_FROM`` edge's ``raw_data`` is replaced with the record on every write (2026-10).
+        ``SOURCED_FROM`` edge's ``raw_data`` is replaced with the record on every write (2026-10), so
+        the edge holds the source's latest record; ``refresh_raw_data=False`` writes it only when the
+        edge is created, for a caller whose record is not the source's (the STIX import of
+        ``run_pipeline``, a reduced record under the MISP event's source id).
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -3385,7 +3389,7 @@ class Neo4jClient:
             description=CVE_DESCRIPTIONS.record(data.get("description"), source_id),
             # 2026-10: the SOURCED_FROM edge holds the source's latest record (an edited MISP copy
             # re-read by the sync), not the record that created the edge.
-            refresh_raw_data=True,
+            refresh_raw_data=refresh_raw_data,
         )
         if not ok:
             return False

@@ -186,6 +186,20 @@ class TestRevisions:
         assert "ransomware:known" not in tags(misp.by_value(FLIP))
         assert meta(misp.by_value(FLIP))["known_ransomware_use"] == "Unknown"
 
+    def test_an_analyst_ransomware_taxonomy_tag_is_left_alone(self, env):
+        # Only ``ransomware:known`` is EdgeGuard's: a machine tag of MISP's ``ransomware`` taxonomy that an
+        # analyst attached to the copy neither plans an edit nor is detached when CISA reverts to Unknown.
+        analyst = 'ransomware:type="crypto-ransomware"'
+        clock = Clock()
+        misp = stored_after(catalogue("2026-10-16", FLIP), clock)
+        misp.by_value(FLIP)["Tag"].append({"id": "0", "name": analyst})
+        status = run(misp, catalogue("2026-10-16", FLIP))
+        assert misp.writes() == [] and status["kev_update"]["unchanged"] == 1
+        run(misp, catalogue("2026-09-16", FLIP))
+        ((_uuid, changes),) = misp.edits()
+        assert changes["Tag"] == [{"name": "ransomware:known", "deleted": True}]
+        assert analyst in tags(misp.by_value(FLIP)) and "ransomware:known" not in tags(misp.by_value(FLIP))
+
     def test_an_unchanged_catalogue_writes_nothing_and_a_revised_run_converges(self, env):
         clock = Clock()
         misp = stored_after(catalogue("2026-10-16"), clock)
@@ -246,6 +260,31 @@ class TestNotWritten:
         assert status["kev_update"]["foreign_only"] == 1
         assert f"only in events EdgeGuard did not create ({FLIP})" in caplog.text
 
+    def test_a_cve_in_an_edgeguard_event_and_in_another_event_has_only_its_own_copy_edited(self, env):
+        clock = Clock()
+        misp = stored_after(catalogue("2026-09-16"), clock)
+        own = misp.by_value(DUE)
+        foreign = copy.deepcopy(own)
+        foreign.update(uuid="9b6f4c1e-0000-4000-8000-000000000900", id="3999999", event_id="900")
+        misp.events["900"] = "Analyst triage: exploited kernels"
+        misp.attributes.append(foreign)
+        status = run(misp, catalogue("2026-10-16"))
+        edited = [uid for uid, _changes in misp.edits()]
+        assert own["uuid"] in edited and foreign["uuid"] not in edited
+        assert meta(foreign)["cisa_action_due"] == "2026-09-09" and meta(own)["cisa_action_due"] == "2026-08-29"
+        assert status["kev_update"]["foreign_only"] == 0 and status["kev_update"]["updated"] == 2
+
+    def test_an_addition_misp_does_not_store_fails_the_run(self, env):
+        # MISP answers 200 for the batch without storing one CVE: the run asks MISP by value
+        # (``push_additions``) and counts only what MISP then holds as added.
+        clock = Clock()
+        misp = stored_after(catalogue("2026-09-16"), clock)
+        misp.adds_not_stored.add(NEW[0])
+        status = run(misp, catalogue("2026-10-16"))
+        update = status["kev_update"]
+        assert (update["added"], update["failed"], update["not_written"]) == (1, 1, [NEW[0]])
+        assert status["success"] is False and status["failed"] == 1
+
     def test_listing_rows_without_their_event_are_never_edited(self, env):
         # A MISP answer without ``Event.info`` cannot show that a copy is EdgeGuard's: nothing is
         # edited or added for it, and the run says so.
@@ -297,6 +336,15 @@ class TestNotWritten:
         update = status["kev_update"]
         assert (update["stored_not_in_catalogue"], update["stored_not_in_catalogue_ids"]) == (1, [OLD_FLIP])
         assert "no longer in the catalogue (CVE-2012-0158)" in caplog.text and status["success"]
+
+    def test_a_removed_entry_held_only_in_another_event_is_not_counted(self, env):
+        clock = Clock()
+        misp = stored_after(catalogue("2026-10-16"), clock)
+        misp.events["900"] = "Analyst triage: Log4j"
+        misp.by_value(LOG4SHELL)["event_id"] = "900"
+        remaining = [e for e in catalogue("2026-10-16") if e["cveID"] not in (OLD_FLIP, LOG4SHELL)]
+        status = run(misp, remaining)
+        assert status["kev_update"]["stored_not_in_catalogue_ids"] == [OLD_FLIP]
 
     def test_an_empty_catalogue_compares_nothing(self, env):
         misp = new_misp(Clock())
@@ -351,6 +399,19 @@ class TestCapsAndStopRules:
         assert update["stop_reasons"] == ["stopped after 5 failed edits in a row"]
         assert status["success"] is False
 
+    def test_failures_that_are_not_five_in_a_row_do_not_stop_the_loop(self, env):
+        # Six of seven edits fail, the fourth (CVE-2025-21042, newest dateAdded first) succeeds: never five
+        # failures in a row, so every edit is attempted.
+        clock = Clock()
+        misp = stored_after(catalogue("2026-10-16"), clock)
+        for attribute in misp.attributes:
+            if attribute["value"] != "CVE-2025-21042":
+                misp.edit_status[attribute["uuid"]] = 403
+        status = run(misp, _revised(catalogue("2026-10-16")))
+        assert len(misp.edits()) == 7
+        update = status["kev_update"]
+        assert (update["failed"], update["updated"], update["deferred"], update["stop_reasons"]) == (6, 1, 0, [])
+
     def test_the_time_budget_defers_the_rest(self, env):
         env.setenv("EDGEGUARD_MISP_REFRESH_MAX_SECONDS", "10")
         ticks = iter(range(0, 1000, 6))
@@ -401,6 +462,16 @@ class TestScope:
         ]
         assert misp.posts == []
 
+    def test_entries_added_on_the_same_day_follow_the_cve_id(self, env):
+        # CISA adds several entries on one day; among them the order is the CVE id's, not the feed's.
+        same_day = catalogue("2026-10-16")
+        for e in same_day:
+            e["dateAdded"] = "2026-10-16"
+        feed_order = [e["cveID"] for e in same_day]
+        assert feed_order != sorted(feed_order)
+        items = run(new_misp(Clock()), same_day, push_to_misp=False)
+        assert [i["cve_id"] for i in items] == sorted(feed_order)
+
     def test_an_incremental_run_is_not_cut_at_the_generic_limit(self, env):
         assert config.get_effective_limit("cisa") is None and config.get_effective_limit("cisa_kev") is None
 
@@ -428,6 +499,16 @@ class TestPieces:
         hosted["Event"]["info"] = "Shared by a partner: KEV extract"
         (foreign,) = writer.index_source_attributes("source:CISA-KEV", "vulnerability")["CVE-2025-21042"]
         assert foreign.own_event is False
+
+    def test_a_cve_listed_twice_is_planned_once(self):
+        writer = MISPWriter.__new__(MISPWriter)
+        collector = CISACollector.__new__(CISACollector)
+        collector.tag = "cisa_kev"
+        kev = collector._kev_item(entry("2026-10-16", FLIP))
+        twice = [kev, dict(kev, cve_id=FLIP.lower())]
+        assert len(plan_source_updates(writer, twice, {}, update_existing=True, max_edits=10).to_add) == 1
+        stored = [KnownAttribute(uuid="u0", event_id="1", meta_digest=None, tags=("source:CISA-KEV",))]
+        assert len(plan_source_updates(writer, twice, {FLIP: stored}, update_existing=True, max_edits=10).edits) == 1
 
     def test_a_cve_with_more_copies_than_the_cap_is_still_planned(self):
         writer = MISPWriter.__new__(MISPWriter)
@@ -541,6 +622,27 @@ def test_another_record_only_fills_the_kev_fields():
             f"n.{field} = CASE WHEN n.{field} IS NULL OR n.{field} = '' THEN $fill_{field} ELSE n.{field} END" in query
         )
         assert params[f"fill_{field}"] == nvd_item[field]
+
+
+def test_the_stix_import_keeps_the_record_on_the_edge(env):
+    """The opt-in STIX flow (``run_pipeline --stix-flow``) writes a reduced record under the MISP event's
+    source id (``cisa_kev`` for a KEV event): no NVD_META, CVSS or KEV fields. It is written only when it
+    creates the edge, never over the source's record that the sync wrote there."""
+    from run_misp_to_neo4j import MISPToNeo4jSync
+    from run_pipeline import EdgeGuardPipeline
+
+    clock = Clock()
+    misp = stored_after(catalogue("2026-10-16", DUE), clock)
+    sdo = MISPToNeo4jSync(neo4j_client=MagicMock())._attribute_to_stix21(
+        copy.deepcopy(misp.by_value(DUE)), "00000000-0000-4000-8000-000000000000", ["global"]
+    )
+    sdo["x_edgeguard_source"] = "cisa_kev"  # as the STIX flow stamps the objects of a KEV event
+    client, session = _session_client()
+    pipeline = EdgeGuardPipeline.__new__(EdgeGuardPipeline)
+    pipeline.neo4j = client
+    assert pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [sdo]})["vulnerabilities"] == 1
+    (edge_query,) = [c[0][0] for c in session.run.call_args_list if "MERGE (n)-[r:SOURCED_FROM]->(s)" in c[0][0]]
+    assert edge_query.count("r.raw_data = $raw_data") == 1, "ON CREATE SET only"
 
 
 def test_only_a_cve_write_refreshes_the_edge_record():

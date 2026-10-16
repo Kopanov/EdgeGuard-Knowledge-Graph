@@ -36,7 +36,7 @@ from collectors.collector_utils import (
 )
 
 # Import MISP writer
-from collectors.misp_writer import KEV_REPLACED_TAG_PREFIXES, MispLookupError, MispTransientError, MISPWriter
+from collectors.misp_writer import KEV_REPLACED_TAGS, MispLookupError, MispTransientError, MISPWriter
 from collectors.vulnerability_update import apply_vulnerability_edits, plan_source_updates, push_additions
 from config import (
     SOURCE_TAGS,
@@ -398,8 +398,9 @@ class CISACollector:
           ``EDGEGUARD_KEV_UPDATE_EXISTING=false`` leaves stored copies as they are. At most
           ``EDGEGUARD_KEV_MAX_EDITS_PER_RUN`` edits; the rest are deferred to the next run.
         - Adds the CVEs MISP lacks (``push_items`` given the listing), then edits the copies that differ
-          (``apply_vulnerability_edits``: ``NVD_META``, ``first_seen`` / ``last_seen``; ``severity:``,
-          ``cvss:`` and ``ransomware:`` tags replaced, zone, KEV and source tags only added).
+          (``apply_vulnerability_edits``: ``NVD_META``, ``first_seen`` / ``last_seen``; ``severity:`` and
+          ``cvss:`` tags and the tag ``ransomware:known`` replaced, zone, KEV and source tags only added,
+          any other tag left alone).
         - Counts the CVEs MISP holds in EdgeGuard's events that the catalogue no longer lists; they are
           logged and kept.
 
@@ -429,7 +430,7 @@ class CISACollector:
             known,
             update_existing=kev_update_existing(),
             max_edits=edit_cap,
-            replaced_tag_prefixes=KEV_REPLACED_TAG_PREFIXES,
+            replaced_tags=KEV_REPLACED_TAGS,
             max_additions=limit,
         )
         if plan.foreign_only:

@@ -665,10 +665,12 @@ _NVD_META_PREFIX = "NVD_META:"
 _NVD_META_UNORDERED_KEYS = ("cwe", "ref_tags", "cpe_type", "affected_products")
 # Tag families that describe NVD's current score: an update replaces them.
 _REPLACED_VULNERABILITY_TAG_PREFIXES = ("severity:", "cvss:")
-# 2026-10: a KEV edit also replaces the ``ransomware:`` family. CISA can revert an entry's ransomware use
-# from Known to Unknown, and the KEV collector is the only writer of ``ransomware:known``, so the stored
-# copy then keeps CISA's latest statement instead of a stale tag.
-KEV_REPLACED_TAG_PREFIXES = ("severity:", "cvss:", "ransomware:")
+# 2026-10: a KEV edit also replaces the tag ``ransomware:known``, the only ransomware tag EdgeGuard writes.
+# CISA can revert an entry's ransomware use from Known to Unknown, and the KEV collector is the only writer
+# of that tag, so the stored copy then keeps CISA's latest statement instead of a stale tag. Only that tag:
+# any other ``ransomware:`` tag (a machine tag of MISP's ``ransomware`` taxonomy an analyst attached, such
+# as ``ransomware:type="crypto-ransomware"``) is not EdgeGuard's and is left alone.
+KEV_REPLACED_TAGS = ("severity:", "cvss:", "ransomware:known")
 
 
 # Bounds of the CISA ICS provenance in ``NVD_META`` (2026-10-16): a CVE is named by a few advisories,
@@ -769,18 +771,21 @@ def _vulnerability_tag_changes(
 ) -> Tuple[List[str], List[str]]:
     """Tags to attach and to detach so a stored CVE attribute matches a rebuilt one.
 
-    The families in ``replaced`` are replaced: by default ``severity:`` and ``cvss:``, which describe
-    NVD's current score; a KEV edit also passes ``ransomware:`` (``KEV_REPLACED_TAG_PREFIXES``,
-    2026-10), so a reverted ransomware use detaches ``ransomware:known``. Zone, KEV, source tags and,
-    outside KEV edits, ransomware tags are only added: zones accumulate on the graph node, so
-    detaching a zone tag would not remove the zone there. ``zone:Global`` is added only to an
+    The tags ``replaced`` names are replaced: an entry ending in ``:`` names a family (every tag with
+    that prefix), any other entry one tag (2026-10). By default the families ``severity:`` and
+    ``cvss:``, which describe NVD's current score; a KEV edit also passes the tag ``ransomware:known``
+    (``KEV_REPLACED_TAGS``, 2026-10), so a reverted ransomware use detaches it. Zone, KEV and source
+    tags, and ``ransomware:known`` outside KEV edits, are only added: zones accumulate on the graph node,
+    so detaching a zone tag would not remove the zone there. ``zone:Global`` is added only to an
     attribute with no zone tag (a sector tag already says more). A ``tlp:`` tag is added only when the
-    attribute has none (someone may have raised it in MISP). Tags of any other family are left alone.
+    attribute has none (someone may have raised it in MISP). Tags of any other family, every other
+    ``ransomware:`` tag included, are left alone.
 
     Names compare without case: MISP resolves a tag name case-insensitively, so ``CVSS:low`` in its
     tag table stands for ``cvss:low``.
     """
-    replaced_prefixes = tuple(prefix.lower() for prefix in replaced)
+    replaced_families = tuple(entry.lower() for entry in replaced if entry.endswith(":"))
+    replaced_names = {entry.lower() for entry in replaced if not entry.endswith(":")}
     current_lower = {tag.lower() for tag in current}
     has_tlp = any(tag.startswith("tlp:") for tag in current_lower)
     has_zone = any(tag.startswith("zone:") for tag in current_lower)
@@ -794,7 +799,10 @@ def _vulnerability_tag_changes(
         attach.append(tag)
     desired_lower = {tag.lower() for tag in desired}
     detach = sorted(
-        tag for tag in set(current) if tag.lower().startswith(replaced_prefixes) and tag.lower() not in desired_lower
+        tag
+        for tag in set(current)
+        if (tag.lower() in replaced_names or tag.lower().startswith(replaced_families))
+        and tag.lower() not in desired_lower
     )
     return attach, detach
 
@@ -2374,15 +2382,15 @@ class MISPWriter:
         vuln: Dict,
         known: Sequence[KnownAttribute],
         *,
-        replaced_tag_prefixes: Sequence[str] = _REPLACED_VULNERABILITY_TAG_PREFIXES,
+        replaced_tags: Sequence[str] = _REPLACED_VULNERABILITY_TAG_PREFIXES,
     ) -> List[Tuple[KnownAttribute, Dict[str, Any]]]:
         """The edits that bring MISP's stored copies of a CVE in line with the vulnerability item.
 
         The item is turned into the attribute a new push would write (``create_vulnerability_attribute``)
         and compared with each stored copy: ``NVD_META`` by digest (``nvd_meta_digest``, so a change
         only to ``last_modified`` needs no edit) and the tags by family (``_vulnerability_tag_changes``;
-        ``replaced_tag_prefixes`` names the families an edit replaces, ``KEV_REPLACED_TAG_PREFIXES`` for
-        KEV, 2026-10). Each copy that differs gets one edit: the new comment, ``first_seen`` /
+        ``replaced_tags`` names the families and tags an edit replaces, ``KEV_REPLACED_TAGS`` for KEV,
+        2026-10). Each copy that differs gets one edit: the new comment, ``first_seen`` /
         ``last_seen``, and the tags to attach or detach. Empty when every copy matches.
         """
         attribute = self.create_vulnerability_attribute(vuln)
@@ -2395,7 +2403,7 @@ class MISPWriter:
         ]
         plans: List[Tuple[KnownAttribute, Dict[str, Any]]] = []
         for stored in known:
-            attach, detach = _vulnerability_tag_changes(stored.tags, desired_tags, replaced_tag_prefixes)
+            attach, detach = _vulnerability_tag_changes(stored.tags, desired_tags, replaced_tags)
             if stored.meta_digest == digest and not attach and not detach:
                 continue
             changes: Dict[str, Any] = {"comment": comment}
