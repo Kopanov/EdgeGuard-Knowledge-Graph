@@ -45,12 +45,16 @@ of the tier, or plus the retire days once retired).
 
 One definition
 --------------
-``aging_map`` is the single Cypher definition of the rule. Every Indicator write applies it with
-``datetime()`` (``Neo4jClient.merge_indicators_batch``, ``merge_node_with_source`` for the label
-Indicator, ``create_indicator_from_alert``), so a newer report reactivates a node in the same
-write; ``enrichment_jobs.decay_ioc_confidence`` applies it to every Indicator with the time of the
-DAG run. ``node_report_items`` / ``edge_report_items`` are the forward-only report properties of
-the node and of its ``SOURCED_FROM`` edge. Tests pin every splice.
+``aging_map`` is the single Cypher definition of the rule. Every Indicator write applies it
+(``Neo4jClient.merge_indicators_batch``, ``merge_node_with_source`` for the label Indicator,
+``create_indicator_from_alert``), so a newer report reactivates a node in the same write;
+``enrichment_jobs.decay_ioc_confidence`` applies it to every Indicator with the time of the DAG
+run. A write evaluates it at ``WRITE_AS_OF``: the DAG run's evaluation time when the sync of a run
+writes (``Neo4jClient.set_aging_as_of``; the same ``data_interval_end`` the run's job uses, so the
+sync's writes and the job never disagree in between), the time of the write otherwise (the alert
+path, the command-line writers). ``node_report_items`` / ``edge_report_items`` are the
+forward-only report properties of the node and of its ``SOURCED_FROM`` edge. Tests pin every
+splice.
 
 Standard library only; the fragments use single quotes only.
 """
@@ -59,8 +63,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 TIER_DAYS_ENV = "EDGEGUARD_AGING_TIER_DAYS"
 FACTORS_ENV = "EDGEGUARD_AGING_FACTORS"
@@ -81,6 +86,34 @@ AGING_BASES: Tuple[str, ...] = (BASIS_SOURCE_DATE, BASIS_MISP_RECORDED, BASIS_FI
 
 # ``retired_by`` of a retirement this rule made (and clears when the node is reported again).
 RETIRED_BY_DECAY = "decay"
+
+# 2026-10-16: the time an Indicator write evaluates the rule at, and the parameter that carries it.
+# Within a DAG run the sync writes hours after the run's due time and the run's job then evaluates
+# the rule at that due time (``data_interval_end``): a write evaluated at its own time could retire a
+# node that crossed the retirement day in between, and the job reactivate it (a STIX consumer keeping
+# the highest ``modified`` kept the retired version). The sync of a run therefore passes the run's
+# evaluation time; a writer outside a run passes none, and the write's own time applies.
+AS_OF_PARAM = "aging_as_of"
+WRITE_AS_OF = f"coalesce(datetime(${AS_OF_PARAM}), datetime())"
+
+
+def evaluation_time(value: Any = None) -> datetime:
+    """An evaluation time of the rule as an aware UTC datetime.
+
+    ``value`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run; Airflow passes
+    pendulum datetimes), an ISO-8601 string, or None for now (the command line). A naive datetime
+    is UTC.
+    """
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if not isinstance(value, datetime):
+        raise TypeError(f"aging as_of must be a datetime or an ISO-8601 string, not {type(value).__name__}")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    # A plain datetime: pendulum's subclass would otherwise reach the driver as its own type.
+    return datetime.fromtimestamp(value.timestamp(), tz=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -174,7 +207,7 @@ def manual_decommission_expr(var: str) -> str:
 
 def aging_map(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str:
     """Cypher map of the aging properties of the Indicator ``var`` at ``as_of`` (a Cypher
-    DateTime expression: ``datetime()`` in a write, ``datetime($as_of)`` in the job).
+    DateTime expression: ``WRITE_AS_OF`` in a write, ``datetime($as_of)`` in the job).
 
     The single definition of the rule (module docstring). A write applies it as
     ``SET var += <map>`` after the node's report properties and ``source_confidence``, so a newer

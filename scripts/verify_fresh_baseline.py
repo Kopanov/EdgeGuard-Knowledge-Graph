@@ -848,10 +848,13 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     # 13d. No campaign without evidence (2026-10-16): every campaign EdgeGuard built has an actor with
     #      an ATTRIBUTED_TO or USES_MALWARE link (build_campaign_nodes step 1b deletes the others)
     #      and that actor's RUNS, and no RUNS comes from an actor that is not the campaign's or has
-    #      neither link (step 2c removes it). Informational while there is no campaign.
+    #      neither link (step 2c removes it). Informational while there is no campaign EdgeGuard built
+    #      and no RUNS without evidence: a RUNS without evidence into any campaign (a partner's or one
+    #      written before) fails even on a graph without EdgeGuard campaigns.
     r = _one(CAMPAIGN_EVIDENCE_CHECK_QUERY)
     defects = ("without_evidence", "without_runs", "runs_without_evidence")
-    rep.add("campaigns_have_evidence", None if not r.get("campaigns") else all(r.get(k) == 0 for k in defects), r)
+    judged = r.get("campaigns") or r.get("runs_without_evidence")
+    rep.add("campaigns_have_evidence", all(r.get(k) == 0 for k in defects) if judged else None, r)
 
     # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from
     #     its CVSS sub-nodes (``_CVSS_SELECTION_ORDER``): with a valid sub-node, the score and

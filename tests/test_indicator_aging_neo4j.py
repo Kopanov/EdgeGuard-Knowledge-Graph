@@ -10,7 +10,11 @@ arithmetic and the forward-only CASEs. This module runs the production writers a
 * an ``edgeguard_enriched`` indicator ages like an ``edgeguard_managed`` one;
 * a CVE gets no lifecycle property when EdgeGuard matches it and is never retired; CASM-shaped CVE /
   CVSS / Vulnerability and ISIM-shaped IP / Host / SoftwareVersion nodes are unchanged after the job
-  and after a sync;
+  and after a sync, and ``merge_cve`` / ``merge_vulnerabilities_batch`` matching a partner CVE or
+  Vulnerability add no lifecycle property;
+* the ``SOURCED_FROM`` edge keeps its source's report forward only in any order; ``source_confidence``
+  keeps the highest incoming value in either order; the aged confidence stops at the 0.10 floor;
+* the sync of a DAG run ages its writes at the run's time, the time the run's job uses;
 * a manual decommission is kept; an alert does not advance the report time;
 * the job follows the tiers, writes nothing on a second run with the same ``as_of`` and leaves an
   Indicator with no time, and every other label, untouched.
@@ -128,8 +132,26 @@ def _edge(raw_driver, value: str, source: str) -> dict:
     return {k: _native(v) for k, v in row["p"].items()}
 
 
-def _attr(value: str, uuid: str, recorded: datetime, last_seen: datetime | None, *, tag: str = "Feodo-Tracker") -> dict:
-    """A MISP 2.5 attribute as ``events/view`` lists it (the shape of the hosted baseline's Feodo rows)."""
+EDGE_REPORT_PROPS = ("last_reported_at", "last_reported_ref", "last_reported_source", "last_recorded_at")
+
+
+def _edge_report(raw_driver, value: str, source: str) -> dict:
+    """The report properties of the indicator's ``SOURCED_FROM`` edge to ``source``."""
+    edge = _edge(raw_driver, value, source)
+    return {k: edge.get(k) for k in EDGE_REPORT_PROPS}
+
+
+def _attr(
+    value: str,
+    uuid: str,
+    recorded: datetime,
+    last_seen: datetime | None,
+    *,
+    tag: str = "Feodo-Tracker",
+    confidence: str = "high",
+) -> dict:
+    """A MISP 2.5 attribute as ``events/view`` lists it (the shape of the hosted baseline's Feodo rows);
+    ``confidence`` is the level of its ``confidence:`` tag (high 0.8, medium 0.5, low 0.3)."""
     return {
         "id": str(abs(hash(uuid)) % 100000),
         "event_id": "41",
@@ -142,7 +164,7 @@ def _attr(value: str, uuid: str, recorded: datetime, last_seen: datetime | None,
         "first_seen": "2023-01-01T00:00:00.000000+00:00",
         "last_seen": last_seen.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00") if last_seen else None,
         "value": value,
-        "Tag": [{"name": f"source:{tag}"}, {"name": "tlp:white"}, {"name": "confidence:high"}],
+        "Tag": [{"name": f"source:{tag}"}, {"name": "tlp:white"}, {"name": f"confidence:{confidence}"}],
     }
 
 
@@ -216,21 +238,29 @@ def test_reports_and_duplicates_in_either_order_give_the_same_node(client, raw_d
     newer = _attr("203.0.113.13", "b-2", now - timedelta(days=3), now - timedelta(days=100))
     tie_a = _attr("203.0.113.13", "b-9", now - timedelta(days=4), now - timedelta(days=100))
     results = []
+    edges = []
     for batches in (
         [[older], [newer], [tie_a]],
         [[tie_a], [newer], [older]],
         [[older, tie_a, newer]],
         [[newer, older]],
+        [[newer], [older]],  # a newer report first, then an older copy of the same source
     ):
         _indicator(raw_driver, "203.0.113.13")
         for batch in batches:
             _write(client, *batch)
         results.append(_aging(raw_driver, "203.0.113.13"))
+        edges.append(_edge_report(raw_driver, "203.0.113.13", "feodo_tracker"))
     for got in results:
         assert got == results[0]
     assert results[0]["last_reported_ref"] == "b-2", "an equal time goes to the smaller uuid"
     assert results[0]["last_recorded_at"] == now - timedelta(days=1)
     assert (results[0]["aging_tier"], results[0]["confidence_score"]) == (1, 0.68)
+    # 2026-10-16: the SOURCED_FROM edge keeps its source's report forward only, in any order, and
+    # agrees with the node (one source here).
+    for got in edges:
+        assert got == edges[0]
+    assert edges[0] == {k: results[0][k] for k in EDGE_REPORT_PROPS}
 
 
 def _sync(client, attributes, path: str) -> None:
@@ -260,7 +290,8 @@ def test_full_incremental_and_paged_syncs_give_the_same_aging(client, raw_driver
             _indicator(raw_driver, v)
         for attrs, path in plan:
             _sync(client, attrs, path)
-        return {v: _aging(raw_driver, v) for v in values}
+        # The node's aging and (2026-10-16) the report its SOURCED_FROM edge keeps.
+        return {v: {**_aging(raw_driver, v), "edge": _edge_report(raw_driver, v, "feodo_tracker")} for v in values}
 
     from run_misp_to_neo4j import MISPToNeo4jSync
 
@@ -271,6 +302,69 @@ def test_full_incremental_and_paged_syncs_give_the_same_aging(client, raw_driver
     assert run([(new, "_process_large_event_paged"), (old, "_process_event_attributes")]) == full, "late arrival"
     assert full[values[2]]["active"] is False and full[values[2]]["last_reported_ref"] == "c-3"
     assert full[values[1]]["aging_basis"] == "misp_recorded"
+    for v in values:
+        assert full[v]["edge"] == {k: full[v][k] for k in EDGE_REPORT_PROPS}, v
+
+
+# ================================================================ the confidence
+
+
+def test_source_confidence_keeps_the_highest_incoming_value_in_either_order(client, raw_driver):
+    """``source_confidence`` is the highest confidence a source gave (max-wins over incoming values
+    only); the aged ``confidence_score`` follows it, whichever report comes first."""
+    now = _now()
+    high = _attr("203.0.113.14", "h-1", now - timedelta(days=2), now - timedelta(days=100))
+    medium = _attr(
+        "203.0.113.14", "h-2", now - timedelta(days=1), now - timedelta(days=100), tag="ThreatFox", confidence="medium"
+    )
+    results = []
+    for order in ((high, "feodo_tracker"), (medium, "threatfox")), ((medium, "threatfox"), (high, "feodo_tracker")):
+        _indicator(raw_driver, "203.0.113.14")
+        for attr, source in order:
+            _write(client, attr, source=source)
+        results.append(_aging(raw_driver, "203.0.113.14"))
+    assert results[0] == results[1]
+    assert results[0]["source_confidence"] == 0.8, "a later, lower confidence does not lower it"
+    assert results[0]["confidence_score"] == POLICY.confidence(0.8, 100) == 0.68
+
+
+def test_the_aged_confidence_never_falls_below_the_floor(client, raw_driver):
+    """``max(0.10, round(source_confidence × factor, 2))``: 0.15 × 0.55 = 0.0825 gives 0.10, not 0.08."""
+    _indicator(
+        raw_driver,
+        "203.0.113.15",
+        last_reported_at=AS_OF - timedelta(days=400),
+        aging_basis="source_date",
+        source_confidence=0.15,
+        confidence_score=0.15,
+        active=True,
+    )
+    enrichment_jobs.decay_ioc_confidence(client, as_of=AS_OF)
+    got = _aging(raw_driver, "203.0.113.15")
+    assert (got["aging_tier"], got["aging_factor"]) == (3, 0.55)
+    assert got["confidence_score"] == POLICY.confidence(0.15, 400) == 0.10
+
+
+def test_a_sync_of_a_run_ages_its_writes_at_the_run_time(client, raw_driver):
+    """2026-10-16: the sync of a DAG run writes at the run's evaluation time (``set_aging_as_of``), the
+    time that run's job uses: a node that crosses the retirement day between the due time and the
+    write is not retired by the write and reactivated by the job. Without a run time a write ages at
+    its own time."""
+    now = _now()
+    due = now - timedelta(days=10)
+    report = _attr("203.0.113.16", "r-1", now - timedelta(days=2), due - timedelta(days=725))
+    _indicator(raw_driver, "203.0.113.16")
+    client.set_aging_as_of(due)
+    try:
+        _write(client, report)
+        at_due = _aging(raw_driver, "203.0.113.16")
+        assert (at_due["active"], at_due["aging_tier"], at_due["retired_by"]) == (True, 3, None)
+        assert enrichment_jobs.decay_ioc_confidence(client, as_of=due)["changed"] == 0, "the job agrees"
+    finally:
+        client.set_aging_as_of(None)
+    _write(client, report)
+    now_aged = _aging(raw_driver, "203.0.113.16")
+    assert (now_aged["active"], now_aged["retired_by"]) == (False, "decay"), "a write outside a run: its own time"
 
 
 # ================================================================ whoever created the node
@@ -311,6 +405,7 @@ CREATE (cvss:CVSSv31:{LABEL} {{base_score: 9.4, base_severity: 'CRITICAL',
 CREATE (cve)-[:HAS_CVSS_v31]->(cvss)
 CREATE (v:Vulnerability:{LABEL} {{description: 'Assumed vulnerability with ID CVE-2023-4966', status: ['estimated']}})
 CREATE (v)-[:REFERS_TO]->(cve)
+CREATE (:Vulnerability:{LABEL} {{cve_id: 'CVE-2023-4966', description: 'Citrix Bleed (partner twin)', status: ['confirmed']}})
 CREATE (sw:SoftwareVersion:{LABEL} {{version: 'cpe:2.3:a:citrix:netscaler_gateway:13.1:*:*:*:*:*:*:*',
         cve_timestamp: '2026-10-01T10:00:00'}})
 CREATE (v)-[:IN {{start: '2026-10-01T10:00:00', end: '2026-10-15T10:00:00'}}]->(sw)
@@ -350,6 +445,27 @@ def test_partner_nodes_are_unchanged_after_the_job_and_a_sync(client, raw_driver
     enrichment_jobs.decay_ioc_confidence(client, as_of=now + timedelta(days=1000))
     assert _partner_snapshot(raw_driver) == before
     assert _aging(raw_driver, "203.0.113.40")["retired_by"] == "decay", "the indicator itself aged"
+
+
+def test_a_sync_that_matches_partner_cve_and_vulnerability_nodes_adds_no_lifecycle(client, raw_driver):
+    """The writers that do MATCH partner nodes: ``merge_cve`` on a CASM-created CVE and
+    ``merge_vulnerabilities_batch`` on a ``cve_id``-keyed Vulnerability EdgeGuard did not create. They
+    add EdgeGuard's own properties (sources, ``edgeguard_enriched``), but no ``active``, ``retired_*``
+    or aging property, and they change none of the partner's properties; neither does the job."""
+    with raw_driver.session() as session:
+        session.run(PARTNER_GRAPH)
+    cve_before = _props(raw_driver, "CVE", "cve_id", "CVE-2023-4966")
+    twin_before = _props(raw_driver, "Vulnerability", "cve_id", "CVE-2023-4966")
+    assert client.merge_cve({"cve_id": "CVE-2023-4966", "zone": ["global"]}, source_id="nvd")
+    assert client.merge_vulnerabilities_batch(
+        [{"cve_id": "CVE-2023-4966", "zone": ["global"], "tag": "nvd"}], source_id="nvd"
+    ) == (1, 0)
+    enrichment_jobs.decay_ioc_confidence(client, as_of=_now() + timedelta(days=2000))
+    for label, before in (("CVE", cve_before), ("Vulnerability", twin_before)):
+        after = _props(raw_driver, label, "cve_id", "CVE-2023-4966")
+        assert after["edgeguard_enriched"] is True, label
+        assert {k: after.get(k) for k in before} == before, f"the partner's {label} properties are unchanged"
+        assert not [p for p in LIFECYCLE_PROPS if p in after and p != "confidence_score"], (label, after)
 
 
 def test_a_cve_gets_no_lifecycle_on_match_and_is_never_retired(client, raw_driver):

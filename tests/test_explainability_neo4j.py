@@ -468,3 +468,63 @@ def test_a_campaign_without_evidence_is_deleted_and_one_without_active_indicator
     with raw_driver.session() as session:
         again = session.run("MATCH (c:Campaign {actor_name: 'apt-gone'}) RETURN c.uuid AS u").single()["u"]
     assert again == gone_uuid
+
+
+def test_campaign_link_provenance_does_not_depend_on_the_order_links_were_created(client, raw_driver, monkeypatch):
+    """2026-10-16: a campaign link's ``misp_event_ids`` were the first 200 of the unsorted union of its
+    links' lists, in the order the links were created, so two graphs built from the same MISP data in a
+    different order kept different events. Three evidence links of one actor hold 300 events together;
+    created in either order they give the same lists, the newest 200 events by MISP id, sorted feeds and
+    record ids."""
+    import enrichment_jobs
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    links = [
+        ("ATTRIBUTED_TO", "many-a", "alienvault_otx", range(1, 101)),
+        ("USES_MALWARE", "many-b", "mitre_attck", range(101, 201)),
+        ("USES_MALWARE", "many-c", "coreideas", range(201, 301)),
+    ]
+
+    def build(order) -> dict:
+        with raw_driver.session() as session:
+            session.run(f"MATCH (n:{LABEL}) DETACH DELETE n")
+            session.run(f"CREATE (:ThreatActor:{LABEL} {{name: 'apt-many', uuid: 'u-apt-many'}})")
+            for rel, malware, feed, events in order:
+                session.run(
+                    f"MATCH (a:ThreatActor {{name: 'apt-many'}}) "
+                    f"MERGE (m:Malware:{LABEL} {{name: $m}}) ON CREATE SET m.uuid = 'u-' + $m "
+                    f"CREATE (i:Indicator:{LABEL} {{indicator_type: 'domain', value: $m + '.example', uuid: 'u-i-' + $m, "
+                    "active: true, first_imported_at: datetime('2026-10-01T00:00:00Z')}) "
+                    "CREATE (i)-[:INDICATES {match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox'], "
+                    "source_refs: ['threatfox:' + $m], misp_event_ids: ['7']}]->(m) "
+                    + (
+                        "CREATE (m)-[:ATTRIBUTED_TO {props}]->(a)"
+                        if rel == "ATTRIBUTED_TO"
+                        else "CREATE (a)-[:USES_MALWARE {props}]->(m)"
+                    ).replace(
+                        "{props}",
+                        "{match_type: 'otx_pulse', confidence_score: 0.6, sources: [$feed], "
+                        "source_refs: [$feed + ':' + $m], misp_event_ids: $events, edgeguard_managed: true}",
+                    ),
+                    m=malware,
+                    feed=feed,
+                    events=[str(e) for e in events],
+                )
+        _build(client, raw_driver)
+        with raw_driver.session() as session:
+            return {
+                (r["from"], r["type"]): (r["events"], r["sources"], r["refs"])
+                for r in session.run(
+                    "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'apt-many'}) "
+                    "RETURN coalesce(n.name, n.value) AS from, type(r) AS type, r.misp_event_ids AS events, "
+                    "r.sources AS sources, r.source_refs AS refs"
+                )
+            }
+
+    forward, backward = build(links), build(list(reversed(links)))
+    assert forward == backward, "the same MISP data gives the same lists, in the same order"
+    events, sources, refs = forward[("apt-many", "RUNS")]
+    assert events == [str(e) for e in range(300, 100, -1)], "the newest 200 events, by MISP id"
+    assert sources == ["alienvault_otx", "coreideas", "mitre_attck"]
+    assert refs == ["alienvault_otx:many-a", "coreideas:many-c", "mitre_attck:many-b"]
+    assert forward[("many-c.example", "PART_OF_CAMPAIGN")][0] == [str(e) for e in range(300, 200, -1)] + ["7"]

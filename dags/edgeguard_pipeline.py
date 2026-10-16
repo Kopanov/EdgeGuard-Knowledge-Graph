@@ -1617,7 +1617,9 @@ def run_neo4j_sync(**context):
                     e,
                 )
 
-        sync = MISPToNeo4jSync()
+        # 2026-10-16: the sync's Indicator writes evaluate the aging at the run's time, the time this
+        # run's aging job uses (``enrichment_as_of``), so the two never disagree in between.
+        sync = MISPToNeo4jSync(aging_as_of=enrichment_as_of(context))
         success = sync.run(incremental=incremental, since=since)
 
         if success:
@@ -2113,7 +2115,9 @@ check_neo4j_quality_task = BashOperator(
 def enrichment_as_of(context) -> datetime:
     """The time the indicator aging is evaluated at (2026-10-16): the DAG run's
     ``data_interval_end``, or ``run_after`` for a manual run without a data interval, so re-running
-    a run gives the same graph; now only when the context has neither (a direct call)."""
+    a run gives the same graph; now only when the context has neither (a direct call). The run's
+    sync (``run_neo4j_sync``, ``run_baseline_full_sync``) ages the Indicators it writes at the same
+    time as its enrichment job."""
     end = context.get("data_interval_end")
     if end is None:
         dag_run = context.get("dag_run")
@@ -2845,7 +2849,8 @@ def run_baseline_full_sync(**context):
 
     logger.info("[BASELINE] Starting full MISP→Neo4j sync (all history)")
     sync_started_at = datetime.now(timezone.utc)
-    sync = MISPToNeo4jSync()
+    # 2026-10-16: aged at the time the baseline's enrichment evaluates the aging (``enrichment_as_of``).
+    sync = MISPToNeo4jSync(aging_as_of=enrichment_as_of(context))
     success = sync.run(incremental=False)
     if not success:
         detail = (

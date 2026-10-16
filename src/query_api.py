@@ -32,6 +32,7 @@ from neo4j import time as _neo4j_time
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from description_ranking import CVE_DESCRIPTIONS
 from ioc_normalize import (
     canonicalize_lookup,
     indicator_type_filter,
@@ -255,6 +256,28 @@ def _node_props(node: Any) -> Dict[str, Any]:
 # EdgeGuard created the node (``indicator_aging``). ``last_updated`` (the last database write) moved
 # with every full sync, so it no longer orders indicators.
 _INDICATOR_RECENCY = "coalesce(n.last_reported_at, n.first_imported_at)"
+
+# 2026-10-16: the recency key of ``/zone/{zone}``, which lists several labels: an Indicator by its
+# latest report (``_INDICATOR_RECENCY``), every other label by its last database write
+# (``last_updated``), as before. Catalogue nodes do not age and carry no report time, and a Campaign
+# has no ``first_imported_at`` (the builder sets ``created_at`` and ``last_updated``): ranked by the
+# indicator key, every campaign sorted after all nodes with a time and the other labels by when
+# EdgeGuard created them.
+_ZONE_RECENCY = f"CASE WHEN n:Indicator THEN {_INDICATOR_RECENCY} ELSE n.last_updated END"
+
+# 2026-10-16: of a CVE's twin nodes (``:CVE`` from ``merge_cve``, ``:Vulnerability`` from the per-item
+# fallback and the alert path), the description the source ranking keeps
+# (``description_ranking.CVE_DESCRIPTIONS``), as ``[rank, description_source, description]``: the
+# highest stored rank, then the source id that sorts first, then the text; null when no twin has a
+# text. The twins are written by different paths and their texts can differ; ``head(collect(...))``
+# showed the twin the rows returned first, which could be a lower-ranked text and change between calls.
+_TWIN_DESCRIPTION = (
+    "reduce(_best = null, _d IN collect(["
+    + CVE_DESCRIPTIONS.stored_rank_cypher("n")
+    + ", n.description_source, n.description]) | CASE WHEN _d[0] < 0 THEN _best "
+    "WHEN _best IS NULL OR _d[0] > _best[0] OR (_d[0] = _best[0] AND (coalesce(_d[1], '') < coalesce(_best[1], '') "
+    "OR (coalesce(_d[1], '') = coalesce(_best[1], '') AND _d[2] < _best[2]))) THEN _d ELSE _best END)"
+)
 
 
 try:
@@ -486,6 +509,15 @@ class ActorSummaryResponse(BaseModel):
     resolved_by: str = Field(description="How the actor was matched: 'name' (canonical) or 'alias'.")
     malware: List[str] = Field(default=[], description="Attributed malware names (up to 10).")
     malware_total: int = 0
+    malware_used: List[str] = Field(
+        default=[],
+        description=(
+            "Names of the malware the actor uses (USES_MALWARE: MITRE ATT&CK's 'uses', curated claims), "
+            "up to 10, sorted (2026-10-16). A campaign rests on either link, so `malware` and "
+            "`malware_used` together name the malware the actor's campaigns can rest on."
+        ),
+    )
+    malware_used_total: int = 0
     techniques: List[ActorTechniqueSummary] = Field(default=[], description="Employed techniques (up to 15).")
     technique_total: int = 0
     campaigns: List[str] = Field(default=[], description="Campaign names run by the actor (up to 5).")
@@ -840,14 +872,14 @@ async def get_zone_threats(
             if severity:
                 where_clause += " AND n.severity = $severity"
 
-            # 2026-10-16: newest first by the latest report, or when EdgeGuard created the node
-            # (``_INDICATOR_RECENCY``); nodes without either last, ties by uuid.
+            # Newest first (``_ZONE_RECENCY``); nodes without the time last, ties by uuid.
             query = f"""
                 MATCH (n)
                 WHERE (n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Campaign)
                   AND {where_clause}
+                WITH n, {_ZONE_RECENCY} AS _recency
                 RETURN n
-                ORDER BY ({_INDICATOR_RECENCY} IS NULL), {_INDICATOR_RECENCY} DESC, n.uuid
+                ORDER BY (_recency IS NULL), _recency DESC, n.uuid
                 LIMIT $limit
             """
 
@@ -1432,12 +1464,13 @@ async def graph_explore(
                          head(collect(n.cisa_notes)) AS cisa_notes,
                          head(collect(n.cisa_cwes)) AS cisa_cwes,
                          head(collect(n.version_constraints)) AS version_constraints,
-                         // 2026-10-16: the description with the source it came from, both of one node.
-                         head([d IN collect([n.description, n.description_source]) WHERE d[0] IS NOT NULL]) AS described
+                         // 2026-10-16: the description with the source it came from, both of one node:
+                         // of the twins, the one the source ranking keeps (``_TWIN_DESCRIPTION``).
+                         {_TWIN_DESCRIPTION} AS described
                     WITH cve_id, cvss_score, severity, attack_vector,
                          apoc.coll.toSet(zones_raw) AS zones,
                          cisa_exploit_add, cisa_action_due, cisa_notes,
-                         cisa_cwes, version_constraints, described[0] AS description,
+                         cisa_cwes, version_constraints, described[2] AS description,
                          described[1] AS description_source
                     ORDER BY coalesce(cvss_score, 0) DESC
                     LIMIT $limit
@@ -1725,17 +1758,27 @@ _ACTOR_SUMMARY_CYPHER = """
     OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
       WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
     WITH a, collect(DISTINCT m.name) AS malware_names
+    // 2026-10-16: the malware the actor uses (USES_MALWARE: MITRE's "uses", curated claims). A
+    // campaign rests on either link (``campaign_evidence``), so a campaign of an actor with only
+    // USES_MALWARE links lists its malware here; ``malware`` keeps its meaning (attributed).
+    // Sorted by name, so the first ten do not depend on the order the links were created.
+    OPTIONAL MATCH (a)-[:USES_MALWARE]->(u:Malware)
+      WHERE (u.edgeguard_managed = true OR u.edgeguard_enriched = true)
+    WITH a, malware_names, u ORDER BY u.name
+    WITH a, malware_names, collect(DISTINCT u.name) AS used_names
     OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
       WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
-    WITH a, malware_names, collect(DISTINCT t {.mitre_id, .name}) AS technique_rows
+    WITH a, malware_names, used_names, collect(DISTINCT t {.mitre_id, .name}) AS technique_rows
     OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
       WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
-    WITH a, malware_names, technique_rows, collect(DISTINCT c.name) AS campaign_names
+    WITH a, malware_names, used_names, technique_rows, collect(DISTINCT c.name) AS campaign_names
     RETURN a {.name, .aliases, .description, .description_source, .sophistication, .motivation,
               .primary_motivation, .confidence_score, .zone, .source} AS actor,
            a.name = toLower(trim($name)) AS resolved_by_name,
            malware_names[0..10] AS malware,
            size(malware_names) AS malware_total,
+           used_names[0..10] AS malware_used,
+           size(used_names) AS malware_used_total,
            technique_rows[0..15] AS techniques,
            size(technique_rows) AS technique_total,
            campaign_names[0..5] AS campaigns,
@@ -1759,8 +1802,9 @@ def _as_str_list(val: Any) -> List[str]:
 )
 @limiter.limit(_RATE_LIMIT_READ)
 async def actor_summary(request: Request, name: str):
-    """Summarize a threat actor: profile + attributed malware, employed
-    techniques, and campaigns (top-N lists with total counts).
+    """Summarize a threat actor: profile + attributed malware, the malware it
+    uses (2026-10-16), employed techniques, and campaigns (top-N lists with
+    total counts).
 
     Resolution is alias-aware and case-insensitive — ``name`` may be the
     canonical (lowercase-stored) actor name or any alias in its observed
@@ -1794,6 +1838,8 @@ async def actor_summary(request: Request, name: str):
             resolved_by="name" if record["resolved_by_name"] else "alias",
             malware=[m for m in (record["malware"] or []) if m],
             malware_total=record["malware_total"] or 0,
+            malware_used=[m for m in (record["malware_used"] or []) if m],
+            malware_used_total=record["malware_used_total"] or 0,
             techniques=techniques,
             technique_total=record["technique_total"] or 0,
             campaigns=[c for c in (record["campaigns"] or []) if c],

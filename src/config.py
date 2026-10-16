@@ -791,10 +791,11 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   (URLhaus csv_recent) window holding about 1,100 new entries per day each; cut at 200, about
 #   80% of them were never collected (neither feed has a cursor). EDGEGUARD_THREATFOX_MAX_PER_RUN
 #   and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap to the whole window (see their definitions).
-#   feodo, sslbl, abuseipdb (2026-10): each run reads the whole list the source publishes; cut at
-#   200, the other entries were never reported again and aged while still listed.
-#   EDGEGUARD_FEODO_MAX_PER_RUN, EDGEGUARD_SSLBL_MAX_PER_RUN and EDGEGUARD_ABUSEIPDB_MAX_PER_RUN
-#   size the cap to the list (see their definitions).
+#   feodo, sslbl (2026-10): each run reads the whole list the source publishes; abuseipdb: one
+#   blacklist request of at most 10,000 addresses, which AbuseIPDB chooses. Cut at 200, the other
+#   entries were never reported again and aged while still listed. EDGEGUARD_FEODO_MAX_PER_RUN and
+#   EDGEGUARD_SSLBL_MAX_PER_RUN size the cap to the list, EDGEGUARD_ABUSEIPDB_MAX_PER_RUN is the
+#   request's limit (see their definitions).
 OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb"})
 
 
@@ -1378,13 +1379,15 @@ URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 50000)
 # ---------------------------------------------------------------------------
 # Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10)
 # ---------------------------------------------------------------------------
-# The three are lists, not windows: each run reads the whole list the source publishes, and an
-# entry stays on it as long as the source lists it. Cut at the generic incremental default (200),
-# a daily run reported the first 200 entries only, so the stored copies of the others were never
-# reported again, never refreshed (``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS``) and aged while the
-# source still listed them. Each cap covers the whole list; a run whose list is longer keeps the
-# newest entries and logs a warning. ``EDGEGUARD_MAX_ENTRIES`` and an explicit baseline limit still
-# apply when lower; ``0`` removes the cap.
+# The three are lists, not windows: an entry stays on a list as long as the source lists it. A Feodo
+# Tracker or SSL Blacklist run reads the whole list the source publishes; an AbuseIPDB run reads one
+# blacklist answer of at most 10,000 addresses, which AbuseIPDB chooses (below). Cut at the generic
+# incremental default (200), a daily run reported the first 200 entries only, so the stored copies of
+# the others were never reported again, never refreshed (``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS``)
+# and aged while the source still listed them. The Feodo Tracker and SSL Blacklist caps cover the
+# whole list; a run whose list is longer keeps the newest entries and logs a warning.
+# ``EDGEGUARD_MAX_ENTRIES`` and an explicit baseline limit still apply when lower; ``0`` removes the
+# cap.
 #   Feodo Tracker: servers, after the rows are merged per address. A baseline reads the complete C2
 #   history (7,980 rows, 7,607 servers on 2026-10-12), a daily run the servers active in the last
 #   30 days (5 rows on that day; the feed has not been updated since 2026-03-04). 15,000 is about

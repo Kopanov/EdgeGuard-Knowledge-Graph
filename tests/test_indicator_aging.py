@@ -410,7 +410,8 @@ class TestWriters:
         )
         merge = next(c for c in session.run.call_args_list if c.args and "MERGE (n:Indicator" in c.args[0])
         assert merge.kwargs["report"] == dict.fromkeys(ia.REPORT_KEYS)
-        assert ia.aging_set_item("n", "datetime()") in merge.args[0]
+        assert ia.aging_set_item("n", ia.WRITE_AS_OF) in merge.args[0]
+        assert merge.kwargs[ia.AS_OF_PARAM] is None, "outside a DAG run: the time of the write"
 
 
 # ================================================================ the job
@@ -552,6 +553,48 @@ class TestReaders:
             "ORDER BY (coalesce(n.last_reported_at, n.first_imported_at) IS NULL), "
         )
 
+    def test_the_zone_list_orders_only_indicators_by_report_time(self, monkeypatch):
+        """``/zone/{zone}`` lists indicators with catalogue nodes and campaigns: only an Indicator is
+        ranked by its latest report; the other labels keep ``last_updated`` (a Campaign has no
+        ``first_imported_at``, so the indicator key put every campaign last). Run on a real Neo4j in
+        tests/test_export_paths_neo4j.py."""
+        from fastapi.testclient import TestClient
+
+        import query_api
+
+        assert query_api._ZONE_RECENCY == (
+            "CASE WHEN n:Indicator THEN coalesce(n.last_reported_at, n.first_imported_at) ELSE n.last_updated END"
+        )
+        seen = []
+
+        class _Result(list):
+            def single(self):
+                return {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
+
+        class _Session:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def run(self, query, **params):
+                seen.append(query)
+                return _Result()
+
+        class _Client:
+            driver = SimpleNamespace(session=lambda **kw: _Session())
+
+            def is_connected(self):
+                return True
+
+        monkeypatch.setattr(query_api, "neo4j_client", _Client())
+        monkeypatch.setattr(query_api, "_API_KEY", None)
+        assert TestClient(query_api.app).get("/zone/finance").status_code == 200
+        listing = seen[0]
+        assert f"WITH n, {query_api._ZONE_RECENCY} AS _recency" in listing
+        assert "ORDER BY (_recency IS NULL), _recency DESC, n.uuid" in listing
+
     def test_rest_shows_the_source_confidence_of_an_older_node(self):
         import query_api
 
@@ -638,3 +681,16 @@ class TestReaders:
             {"value": "203.0.113.52", "indicator_type": "ipv4", "first_imported_at": "2026-10-14T06:40:00+00:00"}
         )
         assert fresh["modified"] == fresh["created"], "never before created"
+        # A source reports the indicator again (a later MISP record, ``last_recorded_at``) without a
+        # change of tier: ``modified`` moves to that record.
+        rereported = sx.StixExporter(object())._indicator_sdo(
+            {
+                "value": "203.0.113.53",
+                "indicator_type": "ipv4",
+                "first_imported_at": "2026-10-14T06:40:00+00:00",
+                "aging_since": "2026-10-14T00:00:00+00:00",
+                "last_recorded_at": "2026-11-02T04:10:00+00:00",
+                "last_updated": "2026-11-05T03:00:00+00:00",
+            }
+        )
+        assert rereported["modified"] == "2026-11-02T04:10:00.000Z", "last_recorded_at, the latest of the three"

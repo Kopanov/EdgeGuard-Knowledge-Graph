@@ -352,27 +352,58 @@ class TestBuildSteps:
     def test_replace_assigns_the_source_links_provenance(self):
         # 2026-10: a derived link follows the removal and trimming of the links it rests on.
         added = rp.inherited_prov_set("r", ["_at"])
-        assert "r.source_refs = apoc.coll.toSet(coalesce(r.source_refs, []) + coalesce(_at.source_refs, []))" in added
+        assert (
+            "r.source_refs = " + rp.sorted_set("coalesce(r.source_refs, []) + coalesce(_at.source_refs, [])") in added
+        )
         replaced = rp.inherited_prov_set("r", ["_at"], replace=True)
         # ``[] +`` keeps a list when the source link holds a plain string
-        assert "r.source_refs = apoc.coll.toSet([] + coalesce(_at.source_refs, []))" in replaced
+        assert "r.source_refs = " + rp.sorted_set("[] + coalesce(_at.source_refs, [])") in replaced
         assert "coalesce(r." not in replaced
         pattern = "(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor)"
         agg = rp.aggregated_prov_set("r", pattern, ["_xi", "_xa"], max_events=7, replace=True)
         assert (
-            "r.source_refs = apoc.coll.toSet(reduce(_acc = [], _x IN "
-            f"[{pattern} | [] + coalesce(_xi.source_refs, []) + coalesce(_xa.source_refs, [])] | _acc + _x))"
+            "r.source_refs = "
+            + rp.sorted_set(
+                "reduce(_acc = [], _x IN "
+                f"[{pattern} | [] + coalesce(_xi.source_refs, []) + coalesce(_xa.source_refs, [])] | _acc + _x)"
+            )
         ) in agg, "every operand a list element: two plain strings never concatenate"
-        assert agg.endswith("[0..7]") and "coalesce(r." not in agg
-        # the default keeps the accumulating form, byte for byte
+        assert agg.endswith("[0..7]][0]") and "coalesce(r." not in agg
+        # the default keeps the accumulating form: the stored lists are part of the union
+        union = "[(a)<-[_at:ATTRIBUTED_TO]-(:Malware) | coalesce(_at.{f}, [])] | _acc + _x)"
         assert rp.aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at") == (
-            "r_runs.sources = apoc.coll.toSet(coalesce(r_runs.sources, []) + reduce(_acc = [], _x IN "
-            "[(a)<-[_at:ATTRIBUTED_TO]-(:Malware) | coalesce(_at.sources, [])] | _acc + _x)), "
-            "r_runs.source_refs = apoc.coll.toSet(coalesce(r_runs.source_refs, []) + reduce(_acc = [], _x IN "
-            "[(a)<-[_at:ATTRIBUTED_TO]-(:Malware) | coalesce(_at.source_refs, [])] | _acc + _x)), "
-            "r_runs.misp_event_ids = apoc.coll.toSet(coalesce(r_runs.misp_event_ids, []) + reduce(_acc = [], _x IN "
-            f"[(a)<-[_at:ATTRIBUTED_TO]-(:Malware) | coalesce(_at.misp_event_ids, [])] | _acc + _x))[0..{rp.MAX_EVENT_IDS_PER_EDGE}]"
+            "r_runs.sources = "
+            + rp.sorted_set("coalesce(r_runs.sources, []) + reduce(_acc = [], _x IN " + union.format(f="sources"))
+            + ", r_runs.source_refs = "
+            + rp.sorted_set(
+                "coalesce(r_runs.source_refs, []) + reduce(_acc = [], _x IN " + union.format(f="source_refs")
+            )
+            + ", r_runs.misp_event_ids = "
+            + rp.capped_event_ids(
+                "coalesce(r_runs.misp_event_ids, []) + reduce(_acc = [], _x IN " + union.format(f="misp_event_ids"),
+                rp.MAX_EVENT_IDS_PER_EDGE,
+            )
         )
+
+    def test_lists_and_the_event_cap_follow_a_fixed_order(self):
+        """2026-10-16: the union of the links' lists was cut unsorted (``apoc.coll.toSet(...)[0..200]``),
+        so which events a campaign link kept followed the order in which its links were created. The
+        lists are now sorted and the events are the newest ``N`` by numeric id (checked on a real
+        Neo4j in tests/test_explainability_neo4j.py)."""
+        assert rp.sorted_set("x") == "apoc.coll.sort(apoc.coll.toSet([_sv IN x WHERE _sv IS NOT NULL | toString(_sv)]))"
+        capped = rp.capped_event_ids("x", 5)
+        assert capped.startswith("[_ids IN [apoc.coll.toSet([_ei IN x WHERE _ei IS NOT NULL | toString(_ei)])] | ")
+        assert "reverse(apoc.coll.sort(apoc.coll.toSet([_ei IN _ids WHERE toInteger(_ei) IS NOT NULL" in capped
+        assert "+ apoc.coll.sort([_ei IN _ids WHERE toInteger(_ei) IS NULL]))[0..5]][0]" in capped
+        for fragment in (
+            rp.inherited_prov_set("r", ["_at"], replace=True),
+            rp.inherited_prov_set("r", ["_at"]),
+            rp.aggregated_prov_set("r", "_e IN links", "_e", replace=True),
+            rp.aggregated_prov_set("r", "_e IN links", "_e"),
+        ):
+            assert ".sources = apoc.coll.sort(" in fragment and ".source_refs = apoc.coll.sort(" in fragment
+            assert ".misp_event_ids = [_ids IN " in fragment
+            assert "[0..200]][0]" in fragment and "))[0..200]," not in fragment
 
 
 # --------------------------------------------------------------------------- enrichment
@@ -390,8 +421,11 @@ class TestEnrichment:
         # The list form renders as a list comprehension over the collected links.
         rendered = rp.aggregated_prov_set("r", "_p IN _paths", ["_p[0]", "_p[1]"], replace=True)
         assert (
-            "r.sources = apoc.coll.toSet(reduce(_acc = [], _x IN [_p IN _paths | "
-            "[] + coalesce(_p[0].sources, []) + coalesce(_p[1].sources, [])] | _acc + _x))"
+            "r.sources = "
+            + rp.sorted_set(
+                "reduce(_acc = [], _x IN [_p IN _paths | "
+                "[] + coalesce(_p[0].sources, []) + coalesce(_p[1].sources, [])] | _acc + _x)"
+            )
         ) in rendered
 
     def test_campaign_links_state_their_evidence(self):
@@ -417,7 +451,10 @@ class TestEnrichment:
             "reduce(_best = null, _v IN [_e IN actor_evidence | _e.confidence_score] |"
         )
         assert "r_runs.evidence_types = " + campaign_evidence.evidence_types("actor_evidence") in links
-        assert "r_runs.sources = apoc.coll.toSet(reduce(_acc = [], _x IN [_e IN actor_evidence |" in links
+        assert (
+            "r_runs.sources = apoc.coll.sort(apoc.coll.toSet([_sv IN reduce(_acc = [], _x IN [_e IN actor_evidence |"
+            in links
+        )
         assert campaign_evidence.evidence_types("x") == "apoc.coll.sort(apoc.coll.toSet([_et IN x | type(_et)]))"
 
     def test_calibrator_filters_on_the_evidence_label(self):

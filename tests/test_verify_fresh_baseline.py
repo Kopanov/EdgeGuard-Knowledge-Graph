@@ -1241,6 +1241,14 @@ class TestCampaignEvidence:
         rep = _run(vfb, monkeypatch, override=lambda st, rows: [empty] if "AS runs_without_evidence" in st else rows)
         assert _check(rep, "campaigns_have_evidence")["ok"] is None and rep.failed == []
 
+    def test_a_runs_without_evidence_fails_without_edgeguard_campaigns(self, vfb, monkeypatch):
+        """A RUNS left on a campaign EdgeGuard did not create (a partner's, or one written before), whose
+        actor has no evidence, is a defect even when the graph holds no EdgeGuard campaign."""
+        row = dict({k: 0 for k in _CAMPAIGN_EVIDENCE_ROW}, runs_without_evidence=1)
+        rep = _run(vfb, monkeypatch, override=lambda st, rows: [row] if "AS runs_without_evidence" in st else rows)
+        assert _check(rep, "campaigns_have_evidence")["ok"] is False
+        assert [c["check"] for c in rep.failed] == ["campaigns_have_evidence"]
+
     def test_query_reads_the_builders_definition(self, vfb, monkeypatch):
         import campaign_evidence
 

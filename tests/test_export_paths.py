@@ -482,10 +482,18 @@ class TestGraphExplorer:
         node = next(n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2015-5477")
         assert (node["description"], node["description_source"]) == ("KEV text", "cisa_kev")
         query = session.calls[0][0]
-        assert (
-            "head([d IN collect([n.description, n.description_source]) WHERE d[0] IS NOT NULL]) AS described" in query
+        # Of the twins, the one the source ranking keeps (run on a real Neo4j in
+        # tests/test_export_paths_neo4j.py): ``head(...)`` took the twin the rows returned first.
+        import query_api
+        from description_ranking import CVE_DESCRIPTIONS
+
+        assert f"{query_api._TWIN_DESCRIPTION} AS described" in query
+        assert query_api._TWIN_DESCRIPTION.startswith(
+            f"reduce(_best = null, _d IN collect([{CVE_DESCRIPTIONS.stored_rank_cypher('n')}, "
+            "n.description_source, n.description]) | CASE WHEN _d[0] < 0 THEN _best "
         )
-        assert "head(collect(n.description))" not in query
+        assert "described[2] AS description" in query and "described[1] AS description_source" in query
+        assert "head(collect(n.description))" not in query and "head([d IN collect(" not in query
 
     def test_the_page_styles_every_edge_type_the_api_emits(self):
         page = (ROOT / "docs" / "visualization.html").read_text()

@@ -1,4 +1,4 @@
-"""2026-10 aging logic check (Kalin: "how the updates and aging of the weights is going on").
+"""2026-10 aging logic check (how the updates and the aging of the weights work).
 
 Two fixes:
 1. Aging and reactivation. Since 2026-10-16 one rule ages every Indicator, whoever supplied it
@@ -83,7 +83,7 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
         node_set = cy.split("MERGE (n)-[r:SOURCED_FROM]->(s)", 1)[0]
         assert ia.source_confidence_item("n", "item.confidence") in node_set
         assert ia.node_report_items("n", "item.report", "item.source_id") in node_set
-        assert node_set.split("WITH n, item", 1)[0].rstrip().endswith(ia.aging_set_item("n", "datetime()")), (
+        assert node_set.split("WITH n, item", 1)[0].rstrip().endswith(ia.aging_set_item("n", ia.WRITE_AS_OF)), (
             "the rule is the last node item before WITH"
         )
         assert "n.confidence_score = CASE" not in node_set, "confidence_score comes from the rule only"
@@ -98,9 +98,9 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
         node = _node_merge(session, "Indicator")
         assert ia.source_confidence_item("n", "$confidence") in node
         assert ia.node_report_items("n", "$report", "$source_id") in node
-        assert ia.aging_set_item("n", "datetime()") in node
+        assert ia.aging_set_item("n", ia.WRITE_AS_OF) in node
         assert node.index(ia.node_report_items("n", "$report", "$source_id")) < node.index(
-            ia.aging_set_item("n", "datetime()")
+            ia.aging_set_item("n", ia.WRITE_AS_OF)
         )
         sourced = next(
             c.args[0] for c in session.run.call_args_list if c.args and "MERGE (n)-[r:SOURCED_FROM]" in c.args[0]
@@ -112,11 +112,37 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
         session.run.side_effect = [RuntimeError("primary failed"), MagicMock()]
         assert client.create_indicator_from_alert("203.0.113.9", "ipv4", "global", alert_data={"a": 1}) is True
         primary, fallback = (c.args[0] for c in session.run.call_args_list)
+        for call in session.run.call_args_list:
+            assert call.kwargs[ia.AS_OF_PARAM] is None, "outside a DAG run: the time of the write"
         for query in (primary, fallback):
             assert ia.source_confidence_item("i", "$confidence_score") in query
-            assert ia.aging_set_item("i", "datetime()") in query
+            assert ia.aging_set_item("i", ia.WRITE_AS_OF) in query
             assert "last_reported_at:" not in query, "an alert records no report"
             assert "i.confidence_score = CASE" not in query
+
+    def test_a_sync_of_a_run_ages_its_writes_at_the_run_time(self):
+        """2026-10-16: the sync's writes evaluate the rule at the DAG run's time, the time that run's
+        aging job uses (``WRITE_AS_OF`` with ``$aging_as_of``); without one, at the write's own time.
+        Before, the writes used ``datetime()`` and the job the run's ``data_interval_end``: a node that
+        crossed a tier or the retirement day in between was moved forward by the write and back by
+        the job."""
+        assert ia.WRITE_AS_OF == "coalesce(datetime($aging_as_of), datetime())"
+        client, session = _client()
+        assert client.aging_as_of is None
+        client.set_aging_as_of("2026-10-16T03:00:00Z")
+        assert client.aging_as_of == "2026-10-16T03:00:00+00:00"
+        client.merge_indicators_batch(
+            [{"indicator_type": "ipv4", "value": "203.0.113.5", "tag": "otx", "zone": ["global"]}], source_id="misp"
+        )
+        batch = next(c for c in session.run.call_args_list if c.args and "UNWIND $batch as item" in c.args[0])
+        assert batch.kwargs[ia.AS_OF_PARAM] == "2026-10-16T03:00:00+00:00"
+        client.merge_indicator(
+            {"indicator_type": "ipv4", "value": "203.0.113.6", "tag": "otx", "zone": ["global"]}, source_id="misp"
+        )
+        single = next(c for c in session.run.call_args_list if c.args and "MERGE (n:Indicator " in c.args[0])
+        assert single.kwargs[ia.AS_OF_PARAM] == "2026-10-16T03:00:00+00:00"
+        client.set_aging_as_of(None)
+        assert client.aging_as_of is None
 
     def test_manual_decommission_still_wins(self):
         body = ia.aging_map("n", "datetime()")

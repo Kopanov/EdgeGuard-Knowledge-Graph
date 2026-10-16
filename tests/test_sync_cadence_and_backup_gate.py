@@ -169,9 +169,11 @@ class _FakeSync:
     measurably later than the start-time stamp the fix requires."""
 
     captured: dict = {}
+    init_kwargs: dict = {}
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         self._last_sync_failure_reason = None
+        _FakeSync.init_kwargs = kwargs
 
     def run(self, incremental=True, since=None, sector=None):
         _FakeSync.captured = {
@@ -237,6 +239,19 @@ class TestRunNeo4jSyncWindowAndStamp:
             f"got {stamped.isoformat()} vs run() entry {entered.isoformat()} — "
             "a completion-time stamp re-introduces the every-other-run skip"
         )
+
+    def test_the_sync_ages_its_writes_at_the_run_time(self, dag_module, isolated_state, fake_sync_module, monkeypatch):
+        """2026-10-16: the sync's Indicator writes evaluate the aging at the time the run's aging job
+        uses (``enrichment_as_of``: ``data_interval_end``), not at each write's own time."""
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
+        monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
+        monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
+        due = datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc)
+        dag_module.run_neo4j_sync(data_interval_end=due)
+        assert _FakeSync.init_kwargs == {"aging_as_of": due}
+        assert dag_module.enrichment_as_of({"data_interval_end": due}) == due, "the job's time"
 
     def test_corrupt_state_file_falls_back_to_fixed_window(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch

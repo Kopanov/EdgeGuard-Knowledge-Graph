@@ -317,6 +317,9 @@ class TestNodeGauges:
         class _Sync:
             _last_sync_failure_reason = None
 
+            def __init__(self, aging_as_of=None):
+                self.aging_as_of = aging_as_of
+
             def run(self, incremental=True, since=None):
                 return success
 

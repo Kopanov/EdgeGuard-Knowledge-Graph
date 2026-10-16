@@ -98,9 +98,10 @@ x-common-env: &common-env
   # replace EDGEGUARD_INCREMENTAL_LIMIT for the two sources. Defaults mirror src/config.py.
   EDGEGUARD_THREATFOX_MAX_PER_RUN: ${EDGEGUARD_THREATFOX_MAX_PER_RUN:-10000}
   EDGEGUARD_URLHAUS_MAX_PER_RUN: ${EDGEGUARD_URLHAUS_MAX_PER_RUN:-50000}
-  # Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10), sized to each whole list; they
-  # replace EDGEGUARD_INCREMENTAL_LIMIT for the three sources. AbuseIPDB stays at one blacklist
-  # request per run (at most 10,000 addresses on the free plan). Defaults mirror src/config.py.
+  # Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10); they replace
+  # EDGEGUARD_INCREMENTAL_LIMIT for the three sources. Feodo Tracker and SSL Blacklist: sized to the
+  # whole list; AbuseIPDB: the limit of its one blacklist request per run (at most 10,000 addresses on
+  # the free plan, which AbuseIPDB chooses). Defaults mirror src/config.py.
   EDGEGUARD_FEODO_MAX_PER_RUN: ${EDGEGUARD_FEODO_MAX_PER_RUN:-15000}
   EDGEGUARD_SSLBL_MAX_PER_RUN: ${EDGEGUARD_SSLBL_MAX_PER_RUN:-20000}
   EDGEGUARD_ABUSEIPDB_MAX_PER_RUN: ${EDGEGUARD_ABUSEIPDB_MAX_PER_RUN:-10000}

@@ -70,7 +70,7 @@ class _ScriptedSync:
     outcomes: list = []
     calls: list = []
 
-    def __init__(self):
+    def __init__(self, aging_as_of=None):
         self._last_sync_failure_reason = "scripted failure"
 
     def run(self, incremental=True, since=None, sector=None):

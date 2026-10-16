@@ -58,6 +58,7 @@ from indicator_aging import (  # noqa: E402
     aging_map,
     basis_expr,
     changed_predicate,
+    evaluation_time,
     load_aging_policy,
 )
 from neo4j_client import (  # noqa: E402
@@ -87,22 +88,14 @@ logger = logging.getLogger(__name__)
 
 
 def aging_as_of(value=None) -> datetime:
-    """The evaluation time of the aging job as an aware UTC datetime (2026-10-16).
+    """The evaluation time of the aging job as an aware UTC datetime (2026-10-16;
+    ``indicator_aging.evaluation_time``, which the sync's writes use as well).
 
     ``value`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run; Airflow
     passes pendulum datetimes), an ISO-8601 string, or None for now (the command line). A naive
     datetime is UTC.
     """
-    if value is None:
-        return datetime.now(timezone.utc)
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    if not isinstance(value, datetime):
-        raise TypeError(f"aging as_of must be a datetime or an ISO-8601 string, not {type(value).__name__}")
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    # A plain datetime: pendulum's subclass would otherwise reach the driver as its own type.
-    return datetime.fromtimestamp(value.timestamp(), tz=timezone.utc)
+    return evaluation_time(value)
 
 
 def _aging_job_statements(policy: AgingPolicy) -> Tuple[str, str, str]:

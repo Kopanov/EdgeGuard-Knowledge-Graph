@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -98,8 +99,13 @@ class TestPostcheckFailsWithoutTheChainMarkers:
             assert ep.run_build_relationships() == {"built": True, "returncode": 0}
         sync = MagicMock()
         sync.run.return_value = True
-        with patch("run_misp_to_neo4j.MISPToNeo4jSync", return_value=sync):
-            assert ep.run_baseline_full_sync(ti=self._ti({"baseline_start": {"started": True}})) == {"synced": True}
+        due = datetime(2026, 10, 16, 9, 12, tzinfo=timezone.utc)
+        with patch("run_misp_to_neo4j.MISPToNeo4jSync", return_value=sync) as sync_class:
+            assert ep.run_baseline_full_sync(
+                ti=self._ti({"baseline_start": {"started": True}}), data_interval_end=due
+            ) == {"synced": True}
+        # 2026-10-16: the full sync ages its writes at the time the baseline's enrichment uses.
+        sync_class.assert_called_once_with(aging_as_of=due)
         with (
             patch("neo4j_client.Neo4jClient", return_value=MagicMock()),
             patch("enrichment_jobs.run_all_enrichment_jobs", return_value={}),

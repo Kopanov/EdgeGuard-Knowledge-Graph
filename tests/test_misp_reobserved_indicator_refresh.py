@@ -572,7 +572,7 @@ def test_the_indicator_merge_records_the_report_and_keeps_first_seen():
     records the report forward only and applies the one aging rule, so its age moves only when the
     report is newer (``indicator_aging``). ``first_imported_at`` is set on create only, and the edge
     keeps the earliest first-seen claim and the latest last-seen claim."""
-    from indicator_aging import aging_set_item, node_report_items
+    from indicator_aging import WRITE_AS_OF, aging_set_item, node_report_items
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient.__new__(Neo4jClient)
@@ -595,7 +595,7 @@ def test_the_indicator_merge_records_the_report_and_keeps_first_seen():
     assert "n.last_updated = datetime()" in node_set, "every merge of the node moves last_updated"
     assert node_report_items("n", "item.report", "item.source_id") in node_set
     assert node_set.index(node_report_items("n", "item.report", "item.source_id")) < node_set.index(
-        aging_set_item("n", "datetime()")
+        aging_set_item("n", WRITE_AS_OF)
     ), "the rule reads the report recorded in the same write"
     assert "retired_by, '') = 'decay' THEN null" not in node_set, "no unconditional reactivation"
     assert "last_decayed" not in cypher

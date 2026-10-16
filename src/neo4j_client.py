@@ -49,8 +49,11 @@ from description_ranking import (  # noqa: E402  — 2026-10-16: whose text a no
     ranking_for_label,
 )
 from indicator_aging import (  # noqa: E402  — 2026-10-16: one aging rule for every Indicator
+    AS_OF_PARAM,
+    WRITE_AS_OF,
     aging_set_item,
     edge_report_items,
+    evaluation_time,
     node_report_items,
     report_row,
     source_confidence_item,
@@ -1535,6 +1538,11 @@ class _TimeoutDriver:
 class Neo4jClient:
     """Production-ready Neo4j client with retry logic and batch processing."""
 
+    # 2026-10-16: the time this client's Indicator writes evaluate the aging rule at
+    # (``indicator_aging.WRITE_AS_OF``), an ISO-8601 UTC string; None = the time of each write. A class
+    # default, so a client built without ``__init__`` reads None as well.
+    aging_as_of: Optional[str] = None
+
     def __init__(self, uri: str = None, user: str = None, password: str = None):
         from config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER
 
@@ -1543,6 +1551,15 @@ class Neo4jClient:
         self.password = password or NEO4J_PASSWORD
         self.driver = None
         self._connection_healthy = False
+
+    def set_aging_as_of(self, value: Any) -> None:
+        """Evaluate the aging rule of this client's Indicator writes at ``value`` (2026-10-16).
+
+        The sync of a DAG run passes the run's evaluation time (``data_interval_end``, ``run_after``
+        for a manual run), the time that run's aging job (``enrichment_jobs.decay_ioc_confidence``)
+        uses, so the sync's writes and the job agree on every node in between; None restores the
+        time of each write (the alert path, the command-line writers)."""
+        self.aging_as_of = None if value is None else evaluation_time(value).isoformat()
 
     @retry_with_backoff(max_retries=MAX_RETRIES)
     def connect(self) -> bool:
@@ -2511,7 +2528,7 @@ class Neo4jClient:
             if is_indicator:
                 # Last node item: reads the report and ``source_confidence`` set above.
                 query += f""",
-                {aging_set_item("n", "datetime()")}"""
+                {aging_set_item("n", WRITE_AS_OF)}"""
 
             # PR #33 round 10: dropped legacy scalars misp_event_id / misp_attribute_id
             # (pre-release, no real data to migrate). Multi-event provenance lives only
@@ -2792,8 +2809,10 @@ class Neo4jClient:
                     **params_extra,
                 }
                 if is_indicator:
-                    # 2026-10-16: the report the data carries (all None without one).
+                    # 2026-10-16: the report the data carries (all None without one), and the time the
+                    # aging rule is evaluated at (``set_aging_as_of``; None = this write's time).
                     params["report"] = report_row(data)
+                    params[AS_OF_PARAM] = self.aging_as_of
                 # PR (S5) (architecture redesign + bugbot 9e58af6 LOW):
                 # source-truthful timestamps live on the SOURCED_FROM
                 # edge (not the node), so they are NOT bound into the
@@ -4087,7 +4106,7 @@ class Neo4jClient:
                     // 2026-10-16 (indicator aging): the report, forward only, then the one rule
                     // (``indicator_aging``); a newer report reactivates the node in this write.
                     {node_report_items("n", "item.report", "item.source_id")},
-                    {aging_set_item("n", "datetime()")}
+                    {aging_set_item("n", WRITE_AS_OF)}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
@@ -4144,6 +4163,7 @@ class Neo4jClient:
                     query_kwargs={
                         "batch": batch_data,
                         "source_node_uuid": source_node_uuid,
+                        AS_OF_PARAM: self.aging_as_of,
                     },
                 )
                 if ok:
@@ -7640,6 +7660,8 @@ class Neo4jClient:
             "last_updated": now,
             "source": ["resilmesh"],
             "confidence_score": 0.8 if alert_data else 0.5,
+            # 2026-10-16: the alert path runs outside a DAG run: None, the rule at this write's time.
+            AS_OF_PARAM: self.aging_as_of,
         }
 
         # PR #34 round 18: dropped n.original_source SET — Neo4j property had
@@ -7673,7 +7695,7 @@ class Neo4jClient:
             {_zone_clause_i},
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
             i.tlp = coalesce(i.tlp, $tlp),
-            {aging_set_item("i", "datetime()")}
+            {aging_set_item("i", WRITE_AS_OF)}
         """
 
         try:
@@ -7698,7 +7720,7 @@ class Neo4jClient:
                 {source_confidence_item("i", "$confidence_score")},
                 {_zone_clause_i},
                 i.tlp = coalesce(i.tlp, $tlp),
-                {aging_set_item("i", "datetime()")}
+                {aging_set_item("i", WRITE_AS_OF)}
             """
             try:
                 with self.driver.session() as session:

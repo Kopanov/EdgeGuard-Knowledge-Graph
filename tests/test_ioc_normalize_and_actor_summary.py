@@ -658,6 +658,8 @@ def _actor_record(resolved_by_name=True):
         "resolved_by_name": resolved_by_name,
         "malware": ["x-agent", "zebrocy"],
         "malware_total": 12,
+        "malware_used": ["x-agent"],
+        "malware_used_total": 1,
         "techniques": [{"mitre_id": "T1059", "name": "Command and Scripting Interpreter"}],
         "technique_total": 25,
         "campaigns": ["grizzly steppe"],
@@ -728,6 +730,31 @@ class TestActorSummary:
         monkeypatch.setattr(query_api, "neo4j_client", None)
         resp = client.get("/actors/apt28/summary")
         assert resp.status_code == 503
+
+    def test_an_actor_that_only_uses_malware_lists_the_malware_its_campaign_rests_on(self, monkeypatch):
+        """2026-10-16: a campaign rests on ATTRIBUTED_TO or USES_MALWARE (``campaign_evidence``). A MITRE
+        group with only "uses" links has a campaign; the summary lists the malware it uses in
+        ``malware_used`` (``malware`` stays the attributed malware), as the STIX export of the actor does."""
+        record = _actor_record()
+        record.update(
+            malware=[],
+            malware_total=0,
+            malware_used=["carbanak", "griffon"],
+            malware_used_total=2,
+            campaigns=["fin7 campaign"],
+        )
+        session = _FakeSession(results=[_FakeResult(single_record=record)])
+        monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(session))
+        resp = client.get("/actors/FIN7/summary")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert (data["malware"], data["malware_total"]) == ([], 0)
+        assert (data["malware_used"], data["malware_used_total"]) == (["carbanak", "griffon"], 2)
+        assert data["campaigns"] == ["fin7 campaign"]
+        cypher, _params = session.calls[0]
+        assert "OPTIONAL MATCH (a)-[:USES_MALWARE]->(u:Malware)" in cypher
+        assert "WITH a, malware_names, u ORDER BY u.name" in cypher
+        assert "used_names[0..10] AS malware_used" in cypher and "size(used_names) AS malware_used_total" in cypher
 
     def test_the_description_names_its_source(self, monkeypatch):
         """2026-10-16: the profile returns ``description_source`` (the source the ranking kept, read by the
