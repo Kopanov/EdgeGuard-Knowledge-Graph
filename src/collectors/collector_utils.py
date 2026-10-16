@@ -154,6 +154,7 @@ def request_with_rate_limit_retries(
     max_rate_limit_retries: int = 3,
     fallback_delay_sec: float = 60.0,
     retry_on_403: bool = False,
+    retry_on_429: bool = True,
     context: str = "HTTP",
     **kwargs: Any,
 ) -> requests.Response:
@@ -176,6 +177,9 @@ def request_with_rate_limit_retries(
         fallback_delay_sec: Base delay when ``Retry-After`` is absent; also used as
             exponential backoff multiplier index
         retry_on_403: If True, treat 403 like 429 for retry purposes (use sparingly)
+        retry_on_429: If False, a 429 is returned at once without waiting (2026-10). For an
+            endpoint whose 429 means a daily quota is spent, waiting minutes cannot succeed;
+            502/503/504 are still retried.
         context: Label for log messages (e.g. ``OTX``)
         **kwargs: Passed to ``session.request`` / ``requests.request``
 
@@ -212,7 +216,7 @@ def request_with_rate_limit_retries(
             return last_response
 
         code = last_response.status_code
-        retryable = code in (429, 502, 503, 504) or (retry_on_403 and code == 403)
+        retryable = code in (502, 503, 504) or (retry_on_429 and code == 429) or (retry_on_403 and code == 403)
 
         if not retryable:
             return last_response
@@ -235,6 +239,26 @@ def request_with_rate_limit_retries(
         time.sleep(delay)
 
     return last_response  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Shared state directory
+# ---------------------------------------------------------------------------
+
+STATE_DIR_ENV = "EDGEGUARD_STATE_DIR"
+
+
+def state_dir() -> str:
+    """Directory of the state files shared across task runs: ``EDGEGUARD_STATE_DIR``, else ``<repo>/state``.
+
+    On the Compose deployment ``<repo>/state`` is the ``./state`` bind mount (``/opt/airflow/state``),
+    the directory ``dags/edgeguard_pipeline.py::get_state_file`` also uses, so the files survive
+    container restarts and every task process reads the same ones. An empty value counts as unset.
+    The directory is not created here; the writer of a file creates it. Public since 2026-10 so the
+    VirusTotal ledger and the AbuseIPDB blacklist cache resolve the directory in one place.
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return os.getenv(STATE_DIR_ENV) or os.path.join(repo_root, "state")
 
 
 # ---------------------------------------------------------------------------

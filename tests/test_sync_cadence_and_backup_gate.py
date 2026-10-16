@@ -12,7 +12,9 @@ audit (multi-agent, adversarially challenged):
    Fix: stamp the sync START time + subtract a tolerance
    (``EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN``, default 60) in
    ``should_run_neo4j_sync``, and derive the incremental ``since`` from the
-   state file (+1d overlap) so coverage survives skips/pauses/outages.
+   state file (minus ``EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS``, default 1 h,
+   at least 60 s, at most 720 h; 2026-10, was 1 day) so coverage survives
+   skips/pauses/outages.
    2026-10: the DAG runs every 72 h (``NEO4J_SYNC_EVERY``, a timedelta
    schedule) and the guard skips a run only when the last sync started less
    than 24 h ago (``NEO4J_SYNC_MIN_GAP``): the tolerance and the
@@ -217,7 +219,123 @@ class TestRunNeo4jSyncWindowAndStamp:
             "window covers everything since the last successful sync — the fixed "
             "3d+1d window silently drops the excess after skips/pauses/outages"
         )
-        assert captured["since"] == last_sync - timedelta(days=1), "window must be last_sync − 1d overlap"
+        assert captured["since"] == last_sync - timedelta(hours=1), "window must be last_sync − 1h default overlap"
+
+    def test_overlap_env_override(self, dag_module, isolated_state, fake_sync_module, monkeypatch):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "6")
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=6)
+
+    @pytest.mark.parametrize("raw", ["abc", "-2", "nan", "inf"])
+    def test_invalid_overlap_env_falls_back_to_default(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert any(
+            "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() and raw in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_overlap_env_is_silent_default(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """Set but empty (a deployment outside docker-compose.yml, which itself sets ``1``)
+        behaves like unset: the 1 h default, without an invalid-value warning on every run."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert not any("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() for r in caplog.records), (
+            "an empty value must not emit a spurious invalid-value warning"
+        )
+
+    @pytest.mark.parametrize("raw", ["721", "2e7", "1e400"])
+    def test_overlap_above_bound_warns_and_does_not_fail_the_run(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """A huge value (2e7 h) used to raise OverflowError on ``last_sync − overlap`` and
+        fail every run; above 720 h it is invalid, logged and replaced by the default."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert any(
+            "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() and raw in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_overlap_at_bound_is_used(self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "720")
+
+        with caplog.at_level(logging.INFO):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=720)
+        # The log states whole seconds, not exponent form ("2.592e+06 s").
+        assert any("− 2592000 s overlap" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("raw", ["0", "0.0", "-0", "0.01", "1e-9"])
+    def test_overlap_below_floor_is_raised_to_60_seconds(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """0 (or anything under 60 s) removed the margin: MISP timestamps are whole seconds, so
+        an attribute stamped in the second the previous sync started was never read."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(seconds=60)
+        assert any("below the minimum of 60 s" in r.getMessage() for r in caplog.records)
+
+    def test_overlap_of_exactly_60_seconds_is_kept_without_warning(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog
+    ):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", str(1 / 60))
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(seconds=60)
+        assert not any("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() for r in caplog.records)
+
+    def test_state_date_at_datetime_minimum_falls_back_to_fixed_window(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch
+    ):
+        """``last_sync − overlap`` below ``datetime.min`` raises OverflowError; the run falls
+        back to the fixed window like any unreadable state file instead of failing."""
+        _write_state(isolated_state, datetime(1, 1, 1, 0, 30, tzinfo=timezone.utc))
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["incremental"] is True
+        assert _FakeSync.captured["since"] is None
 
     def test_state_file_stamped_with_start_time_not_completion(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch

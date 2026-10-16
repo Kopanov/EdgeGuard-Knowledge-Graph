@@ -38,6 +38,21 @@ def _edgeguard_required_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_abuseipdb_blacklist_cache(monkeypatch):
+    """Keep the AbuseIPDB blacklist cache out of ``<repo>/state`` (2026-10).
+
+    The collector keeps a fetched blacklist in ``<EDGEGUARD_STATE_DIR or <repo>/state>/
+    abuseipdb_blacklist_cache.json`` and reuses it for the rest of the UTC day. A test that runs
+    the collector with a fake request would leave its fake answer there: a later test run would be
+    served from it instead of the fake, and a local collector run with the same parameters would
+    push the test addresses to MISP as AbuseIPDB indicators. The cache is therefore off for every
+    test; the cache tests point ``EDGEGUARD_STATE_DIR`` at a temporary directory and remove this
+    setting themselves.
+    """
+    monkeypatch.setenv("EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS", "0")
+
+
+@pytest.fixture(autouse=True)
 def _reset_source_trust_env(monkeypatch):
     """PR #44 audit M4 (Bug Hunter / Maintainer Dev): reset
     ``source_trust`` module-level allowlists after every test so a

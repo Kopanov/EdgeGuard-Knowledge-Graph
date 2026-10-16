@@ -100,8 +100,9 @@ x-common-env: &common-env
   EDGEGUARD_URLHAUS_MAX_PER_RUN: ${EDGEGUARD_URLHAUS_MAX_PER_RUN:-50000}
   # Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10); they replace
   # EDGEGUARD_INCREMENTAL_LIMIT for the three sources. Feodo Tracker and SSL Blacklist: sized to the
-  # whole list; AbuseIPDB: the limit of its one blacklist request per run (at most 10,000 addresses on
-  # the free plan, which AbuseIPDB chooses). Defaults mirror src/config.py.
+  # whole list; AbuseIPDB: the limit of its blacklist request, at most one per run and none when the
+  # run reuses the same UTC day's answer (at most 10,000 addresses on the free plan, which AbuseIPDB
+  # chooses). Defaults mirror src/config.py.
   EDGEGUARD_FEODO_MAX_PER_RUN: ${EDGEGUARD_FEODO_MAX_PER_RUN:-15000}
   EDGEGUARD_SSLBL_MAX_PER_RUN: ${EDGEGUARD_SSLBL_MAX_PER_RUN:-20000}
   EDGEGUARD_ABUSEIPDB_MAX_PER_RUN: ${EDGEGUARD_ABUSEIPDB_MAX_PER_RUN:-10000}
@@ -111,6 +112,7 @@ x-common-env: &common-env
   EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET: ${EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET:-400}
   EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN: ${EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN:-60}
   EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS: ${EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS:-30}
+  EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS: ${EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS:-20}
   # Slots of the Airflow pool every collector task runs in (dags/edgeguard_pipeline.py COLLECTOR_POOL):
   # at most this many collectors run at once across all DAGs. The airflow service creates the pool.
   EDGEGUARD_COLLECTOR_POOL_SLOTS: ${EDGEGUARD_COLLECTOR_POOL_SLOTS:-4}
@@ -150,6 +152,10 @@ x-common-env: &common-env
   # Incremental MISP -> Neo4j sync writes only attributes changed in the window
   # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
   EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}
+  # Hours the incremental sync window reaches back before the last sync's start
+  # (dags/edgeguard_pipeline.py _sync_window_overlap). At least 60 s; negative,
+  # non-numeric or above 720 = 1.
+  EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS: ${EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS:-1}
   # Client-side timeout (seconds) for Neo4j read/relationship queries (src/neo4j_client.py).
   # int() of the value, so compose carries the code default rather than an empty string.
   EDGEGUARD_NEO4J_READ_TIMEOUT: ${EDGEGUARD_NEO4J_READ_TIMEOUT:-3600}
