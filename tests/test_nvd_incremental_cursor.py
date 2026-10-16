@@ -148,7 +148,8 @@ class FakeMisp:
         if path == "/attributes/restSearch":
             return self._rest_search(json or {})
         if path == "/events/restSearch":
-            info = (json or {}).get("info")
+            # MISP's exact Event.info filter (``eventinfo``, honoured from 2.4.177 on).
+            info = (json or {}).get("eventinfo")
             return _Response(
                 200, {"response": [{"Event": {"id": i, "info": n}} for i, n in self.events.items() if n == info]}
             )

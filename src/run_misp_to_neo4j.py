@@ -180,14 +180,16 @@ NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 500  # 500 keeps lock hold time manageable durin
 NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
 
-# Substring matched against event metadata in MISP restSearch (not exact event title).
-# PyMISP/MISP ``eventinfo=`` filtering is unreliable on some 2.4.x builds (e.g. 2.4.123);
-# ``search`` maps to the server-side substring / full-text style filter our events need
-# (titles look like ``EdgeGuard-{source}-{date}``).
+# Substring of the event title that marks an EdgeGuard event (titles look like
+# ``EdgeGuard-{source}-{date}``), matched case-insensitively by ``_is_edgeguard_index_event``.
+# 2026-10: the restSearch fallback sends it as ``eventinfo: "%<needle>%"`` (a LIKE filter on
+# ``Event.info``). MISP honours ``eventinfo`` from 2.4.177 on and an older MISP ignores it, so the
+# fallback also keeps only the rows ``_is_edgeguard_index_event`` accepts. The ``search`` key used
+# before is not a restSearch parameter: MISP dropped it and answered every event of the store.
 MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "EdgeGuard").strip() or "EdgeGuard"
 
-# Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
-# time out / 500 on very large events (e.g. URLhaus, SSL blacklist).
+# Lightweight event list (no attribute scan). restSearch without ``metadata`` answers full events with
+# all of their attributes and can time out / 500 on very large events (e.g. URLhaus, SSL blacklist).
 try:
     MISP_EVENTS_INDEX_PAGE_SIZE = int(os.getenv("EDGEGUARD_MISP_PAGE_SIZE", "500"))
 except (ValueError, TypeError):
@@ -216,6 +218,30 @@ def _is_edgeguard_index_event(ev: Dict[str, Any]) -> bool:
     if isinstance(org, dict) and (org.get("name") or "").strip() == "EdgeGuard":
         return True
     return False
+
+
+def _fallback_search_filters() -> Dict[str, Any]:
+    """Filters of the ``fetch_edgeguard_events`` restSearch fallback (PyMISP and requests, 2026-10).
+
+    ``metadata`` asks for event headers only: the caller reads id, info and attribute_count and
+    fetches each event's attributes separately, and a page of 500 full events is the whole store
+    with every attribute. ``eventinfo`` narrows to EdgeGuard titles on MISP 2.4.177 or later.
+    """
+    return {"metadata": True, "eventinfo": f"%{MISP_EDGEGUARD_DISCOVERY_SEARCH}%"}
+
+
+def _edgeguard_fallback_rows(rows: List[Any]) -> List[Any]:
+    """Rows of a fallback restSearch page whose event ``_is_edgeguard_index_event`` accepts (2026-10).
+
+    A MISP older than 2.4.177 ignores ``eventinfo`` and answers every event of the store; the index
+    path applies the same filter to its rows.
+    """
+    kept: List[Any] = []
+    for row in rows:
+        ev = _unwrap_single_misp_event_row(row)
+        if ev is not None and _is_edgeguard_index_event(ev):
+            kept.append(row)
+    return kept
 
 
 def _event_covers_since(ev: Dict[str, Any], since: Optional[datetime]) -> bool:
@@ -1673,7 +1699,9 @@ class MISPToNeo4jSync:
 
         Prefers paginated ``/events/index`` (or ``/events``): lightweight list rows without scanning
         all attributes (avoids restSearch timeouts on huge events). Falls back to PyMISP/restSearch
-        if index endpoints are unavailable.
+        if index endpoints are unavailable. 2026-10: the fallback asks for event headers only
+        (``metadata``), narrows with ``eventinfo`` and keeps the rows ``_is_edgeguard_index_event``
+        accepts (see ``_fallback_search_filters``).
 
         Args:
             since: Only fetch events modified since this datetime
@@ -1742,7 +1770,7 @@ class MISPToNeo4jSync:
                     search_kwargs: dict = {
                         "limit": _FALLBACK_PAGE_SIZE,
                         "page": page,
-                        "search": MISP_EDGEGUARD_DISCOVERY_SEARCH,
+                        **_fallback_search_filters(),
                     }
                     if since:
                         search_kwargs["timestamp"] = int(since.timestamp())
@@ -1787,11 +1815,14 @@ class MISPToNeo4jSync:
                         )
                     if not page_rows:
                         break
-                    events.extend(page_rows)
+                    # 2026-10: keep EdgeGuard events only; the short-page test below counts every row.
+                    kept_rows = _edgeguard_fallback_rows(page_rows)
+                    events.extend(kept_rows)
                     logger.info(
-                        "[MISP-FETCH-FALLBACK] PyMISP page %d returned %d row(s)",
+                        "[MISP-FETCH-FALLBACK] PyMISP page %d returned %d row(s), %d EdgeGuard event(s)",
                         page,
                         len(page_rows),
+                        len(kept_rows),
                     )
                     if len(page_rows) < _FALLBACK_PAGE_SIZE:
                         # Short read — we're at the end.
@@ -1861,7 +1892,7 @@ class MISPToNeo4jSync:
                             "returnFormat": "json",
                             "limit": _FALLBACK_PAGE_SIZE,
                             "page": page,
-                            "search": MISP_EDGEGUARD_DISCOVERY_SEARCH,
+                            **_fallback_search_filters(),
                         }
                         if since:
                             rest_body["timestamp"] = int(since.timestamp())
@@ -1939,11 +1970,14 @@ class MISPToNeo4jSync:
                             )
                         if not page_rows:
                             break
-                        events.extend(page_rows)
+                        # 2026-10: keep EdgeGuard events only; the short-page test below counts every row.
+                        kept_rows = _edgeguard_fallback_rows(page_rows)
+                        events.extend(kept_rows)
                         logger.info(
-                            "[MISP-FETCH-FALLBACK] restSearch page %d returned %d row(s)",
+                            "[MISP-FETCH-FALLBACK] restSearch page %d returned %d row(s), %d EdgeGuard event(s)",
                             page,
                             len(page_rows),
+                            len(kept_rows),
                         )
                         if len(page_rows) < _FALLBACK_PAGE_SIZE:
                             break
