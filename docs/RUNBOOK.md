@@ -243,13 +243,17 @@ Each entry: symptom → detection signal → remediation.
 
 ### 7. Baseline chain stopped after a failed step; postcheck (PR-N27, 2026-10)
 
-**7a. Collectors and `full_neo4j_sync` refuse to run (2026-10).**
+**7a. Collectors, `full_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` refuse to run (2026-10).**
 
 - **Symptom.** The `tier1_core` / `tier2_feeds` collector tasks (a
   flag-guarded source that is switched off still skips) and
   `full_neo4j_sync` fail at start, without their retry, with `[BASELINE] <step>: baseline_start
   is <state> in this run — refusing to run after a failed baseline_clean /
-  baseline_start` (or `... did not succeed (no XCom marker) ...`).
+  baseline_start` (or `... did not succeed (no XCom marker) ...`), or with
+  `... no baseline holds the baseline lock ...` (the collectors and the three
+  writers), or `... is held by <holder>, not by this run ...` (the three
+  writers only: `full_neo4j_sync`, `build_relationships` and
+  `run_enrichment_jobs`; the collectors stand down instead and succeed).
 - **What it means.** `baseline_clean` or `baseline_start` did not succeed
   in this DAG run. The tier groups and `full_neo4j_sync` keep
   `trigger_rule=ALL_DONE`, so that one failed source does not stop the
