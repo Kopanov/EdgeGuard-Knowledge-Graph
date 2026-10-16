@@ -22,11 +22,15 @@ from collector_failure_alerts import is_transient_external_error
 from collectors.collector_utils import (
     RateLimiter,
     TransientServerError,
+    feed_time,
     is_auth_or_access_denied,
+    lower_limit,
     make_skipped_optional_source,
     make_status,
+    newest_first,
     request_with_rate_limit_retries,
     retry_with_backoff,
+    source_run_cap,
     status_after_misp_push,
 )
 
@@ -205,6 +209,12 @@ def feodo_merge_rows(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     return list(merged.values())
 
 
+def feodo_record_time(record: Dict[str, Any]) -> Optional[datetime]:
+    """The latest date the feed gives for a merged server (2026-10): ``last_online``, or ``first_seen``
+    when the server was never seen online. Orders the servers before a per-run cap."""
+    return feed_time(record.get("last_online")) or feed_time(record.get("first_seen"))
+
+
 class FeodoCollector:
     """Collects Feodo Tracker Botnet C2 IP Blocklist"""
 
@@ -227,6 +237,11 @@ class FeodoCollector:
     def list_url(self, baseline: bool) -> str:
         """URL of the blocklist a run downloads: full history for baselines, 30-day list otherwise."""
         return self.baseline_url if baseline else self.url
+
+    @staticmethod
+    def max_per_run() -> int:
+        """``config.FEODO_MAX_PER_RUN`` (default 15,000 servers; ``0`` = no per-run cap)."""
+        return source_run_cap("FEODO_MAX_PER_RUN", 15000)
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _download(self, url: str) -> requests.Response:
@@ -315,8 +330,23 @@ class FeodoCollector:
                 )
 
             records = feodo_merge_rows(rows)
-            if limit is not None:
-                records = records[:limit]
+            # 2026-10: the source's own cap (``EDGEGUARD_FEODO_MAX_PER_RUN``) replaces the generic
+            # incremental default, which reported only the first 200 servers of the list; a run whose
+            # list is longer keeps the servers seen online most recently.
+            cap = lower_limit(limit, self.max_per_run())
+            if cap is not None and len(records) > cap:
+                listed = len(records)
+                records = newest_first(records, feodo_record_time)[:cap]
+                logger.warning(
+                    "Feodo: the %s lists %d servers, more than this run's cap of %d "
+                    "(EDGEGUARD_FEODO_MAX_PER_RUN, or a lower EDGEGUARD_MAX_ENTRIES / baseline limit); "
+                    "the %d seen online most recently are kept, %d others are not collected by this run",
+                    "complete history" if baseline else "30-day list",
+                    listed,
+                    cap,
+                    cap,
+                    listed - cap,
+                )
 
             today = _utc_today()
             feed_updated = feodo_feed_last_updated(raw_text)
@@ -408,6 +438,11 @@ class SSLBlacklistCollector:
         self.source_name = "sslbl"
         self.misp_writer = misp_writer or MISPWriter()
 
+    @staticmethod
+    def max_per_run() -> int:
+        """``config.SSLBL_MAX_PER_RUN`` (default 20,000 fingerprints; ``0`` = no per-run cap)."""
+        return source_run_cap("SSLBL_MAX_PER_RUN", 20000)
+
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _download(self) -> requests.Response:
         """One download with transport-error retry; HTTP 429 / 5xx are retried inside the helper."""
@@ -453,24 +488,40 @@ class SSLBlacklistCollector:
         try:
             raw_text = self._fetch_raw()
 
-            # Parse CSV - skip comments and header
+            # Parse CSV - skip comments and the header row. 2026-10: the header is recognised by its
+            # first column name, whichever form it takes (a ``# Listingdate,SHA1,Listingreason``
+            # comment, as the other abuse.ch downloads write it, or a plain row); skipping the first
+            # line after the comments dropped the first listing when the header is a comment.
             lines = [ln for ln in raw_text.strip().split("\n") if ln and not ln.startswith("#")]
+            rows: List[List[str]] = []
+            for line in lines:
+                parts = [part.strip().strip('"') for part in line.split(",")]
+                if len(parts) < 3 or parts[0].lower() == "listingdate" or not parts[1]:
+                    continue
+                rows.append(parts)
+
+            # 2026-10: the source's own cap (``EDGEGUARD_SSLBL_MAX_PER_RUN``) replaces the generic
+            # incremental default, which reported only the first 200 fingerprints of the list; a run
+            # whose list is longer keeps the newest listings.
+            cap = lower_limit(limit, self.max_per_run())
+            if cap is not None and len(rows) > cap:
+                listed = len(rows)
+                rows = newest_first(rows, lambda parts: feed_time(parts[0]))[:cap]
+                logger.warning(
+                    "SSL Blacklist: the blacklist lists %d certificates, more than this run's cap of %d "
+                    "(EDGEGUARD_SSLBL_MAX_PER_RUN, or a lower EDGEGUARD_MAX_ENTRIES / baseline limit); "
+                    "the newest %d by Listingdate are kept, %d older ones are not collected by this run",
+                    listed,
+                    cap,
+                    cap,
+                    listed - cap,
+                )
 
             results = []
-            for i, line in enumerate(lines[1:]):  # Skip header
-                if limit is not None and i >= limit:
-                    break
-
-                parts = line.split(",")
-                if len(parts) < 3:
-                    continue
-
-                date = parts[0].strip().strip('"')
-                sha1 = parts[1].strip().strip('"')
-                reason = parts[2].strip().strip('"').lower()
-
-                if not sha1:
-                    continue
+            for parts in rows:
+                date = parts[0]
+                sha1 = parts[1]
+                reason = parts[2].lower()
 
                 # Determine ALL zones from reason using common detection
                 zones = detect_zones_from_text(reason)

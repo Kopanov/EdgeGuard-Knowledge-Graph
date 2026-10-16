@@ -4,12 +4,14 @@ Comprehensive Threat Intelligence Collection
 
 MISP-as-Source-of-Truth Architecture:
 - Task Group 1: Collect sources → Push to MISP (configurable intervals)
-- Task Group 2: MISP → Neo4j sync (configurable interval, default 72h)
+- Task Group 2: MISP → Neo4j sync (every 72 h, ``NEO4J_SYNC_EVERY``)
 - MISP preflight (**PythonOperator**) before collector operations
 
 Config:
 - MISP_REFRESH_INTERVAL: informational only (logged at parse time); the collector DAGs run on fixed cron schedules
-- NEO4J_SYNC_INTERVAL: How often to sync MISP to Neo4j (hours)
+- NEO4J_SYNC_INTERVAL: no longer read (2026-10). The sync DAG runs every 72 hours (``NEO4J_SYNC_EVERY``)
+  and skips a run within 24 hours of the last sync start (``NEO4J_SYNC_MIN_GAP``); the Prometheus
+  thresholds are derived from both
 - EDGEGUARD_COLLECT_SOURCES: Optional comma-separated allowlist of collector names
   (e.g. ``otx,nvd,cisa``). Unset = all collectors run. ``none`` or ``-`` = disable all.
   Skipped collectors return ``skipped`` with ``skip_reason_class=collector_disabled_by_config``.
@@ -52,7 +54,7 @@ DAILY (Once per day):
 - Feodo Tracker: Botnet C2 IPs
 - SSLBlacklist: Malicious SSL certificates
 
-SYNC (Every 72 hours / configurable):
+SYNC (Every 72 hours):
 - MISP → Neo4j: Full graph synchronization
 
 ================================================================================
@@ -144,6 +146,37 @@ except ImportError:  # pragma: no cover - Airflow 2.x / 3.2 fallback
 # recomputes it on every scheduler heartbeat which breaks run deduplication
 # and causes catchup/backfill instability.
 _DAG_START_DATE = pendulum.datetime(2025, 1, 1, tz="UTC")
+
+# 2026-10: the MISP → Neo4j sync runs at a fixed interval. The day-of-month cron ``0 3 */3 * *`` it
+# replaces fired on the 1st, 4th, ..., 28th and 31st: 24 h apart at the end of a 31-day month (and
+# after 28 February), so with the former 71 h guard the gap between two syncs was 72 h in most of a
+# month, 96 h at most month ends and 120 h after 28 February of a leap year. ``schedule=timedelta`` is
+# Airflow 3's DeltaTriggerTimetable (``[scheduler] create_delta_data_intervals`` False, the default):
+# a run is due 72 h after the logical date of the previous scheduled run, its data interval is that
+# single instant (``data_interval_end`` = the logical date), and manual runs do not move the
+# schedule. With ``catchup=False`` a run that fell due while the DAG was paused or Airflow was down
+# starts once at resumption, and the 72 h are counted from it.
+# Deployed within 72 h of the last cron run, the first run is due 72 h after it, at 03:00 UTC.
+NEO4J_SYNC_EVERY = timedelta(days=3)
+# 2026-10: ``check_sync_needed`` skips a run when the last successful sync started less than this ago
+# (the state file's ``last_sync``). It exists for the run right after another sync: the baseline's full
+# sync or a manual ``force_sync`` run, both of which stamp the state file. Such a run would re-read what
+# that sync wrote (the incremental window starts a day before its start) and repeat build_relationships
+# and the enrichment jobs on the graph just built. 24 h, because:
+#   * it is longer than the rest of a baseline after its full sync starts, every task at its limit
+#     (``full_neo4j_sync`` 6 h, ``build_relationships`` 5 h, ``run_enrichment_jobs`` 5 h, no retries;
+#     ``baseline_postcheck``, ``baseline_complete`` and ``baseline_release_lock`` 49 min with their
+#     retries: 16 h 49 min), so no scheduled sync starts during or just after the baseline's own chain;
+#   * it is shorter than the shortest gap a regular run sees: the previous sync may have started as late
+#     as 16 h 10 min after its run was due (its third attempt, after two 8 h attempts and two 5 min
+#     retry delays) plus 32 min of ``check_sync_needed`` and ``neo4j_health_check`` attempts, which
+#     leaves 55 h 18 min of the 72 h. A regular run is therefore never skipped; the former 71 h guard
+#     (``NEO4J_SYNC_INTERVAL`` minus ``EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN``) skipped the run after a
+#     sync that succeeded on a retry and the run at most month ends;
+#   * after a baseline or a forced sync the next scheduled sync starts at most 24 h + 72 h = 96 h later
+#     (before: up to 143 h), which with the sync task's longest run bounds EdgeGuardNeo4jSyncStale
+#     (prometheus/alerts.yml).
+NEO4J_SYNC_MIN_GAP = timedelta(hours=24)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -622,7 +655,9 @@ default_args = {
 
 
 def get_intervals():
-    """Get configurable intervals from Airflow variables or use defaults."""
+    """The intervals logged at parse time: ``MISP_REFRESH_INTERVAL`` from its Airflow Variable
+    (informational), and the sync interval ``NEO4J_SYNC_EVERY`` in hours. 2026-10: the Airflow Variable
+    ``NEO4J_SYNC_INTERVAL`` is no longer read; it set only the skip guard, never the schedule."""
     try:
         # Use positional default (second arg) so the call works on both
         # Airflow 2.x (kwarg is `default_var`) and 3.x (kwarg is `default`).
@@ -630,20 +665,21 @@ def get_intervals():
         # and silently fall through to the except, disabling all Variable
         # configuration on the upgraded runtime.
         misp_refresh = int(Variable.get("MISP_REFRESH_INTERVAL", 8))
-        neo4j_sync = int(Variable.get("NEO4J_SYNC_INTERVAL", 72))
     except (ImportError, ValueError, TypeError) as e:
         logger.warning(f"Failed to get interval variables, using defaults: {e}")
         misp_refresh = 8
-        neo4j_sync = 72
 
-    return misp_refresh, neo4j_sync
+    return misp_refresh, int(NEO4J_SYNC_EVERY.total_seconds() // 3600)
 
 
 MISP_REFRESH_INTERVAL, NEO4J_SYNC_INTERVAL = get_intervals()
 
 logger.info("EdgeGuard DAG configured:")
 logger.info(f"  MISP Refresh Interval: {MISP_REFRESH_INTERVAL}h")
-logger.info(f"  Neo4j Sync Interval: {NEO4J_SYNC_INTERVAL}h")
+logger.info(
+    f"  Neo4j Sync Interval: {NEO4J_SYNC_INTERVAL}h "
+    f"(skipped within {int(NEO4J_SYNC_MIN_GAP.total_seconds() // 3600)}h of the last sync start)"
+)
 
 
 # MISP preflight (aligned with run_pipeline_misp_spt.check_misp_health)
@@ -1374,7 +1410,8 @@ def _force_sync_requested(context: dict) -> bool:
 
 
 def should_run_neo4j_sync(**context):
-    """Determine if Neo4j sync should run based on interval."""
+    """Whether this run of ``edgeguard_neo4j_sync`` syncs: not while a baseline holds the lock, always
+    with ``force_sync``, otherwise when the last sync started ``NEO4J_SYNC_MIN_GAP`` (24 h) ago or more."""
     import json
 
     # Baseline mutex: the scheduled Neo4j sync must never run concurrently
@@ -1401,40 +1438,12 @@ def should_run_neo4j_sync(**context):
 
     state_file = get_state_file()
 
-    try:
-        interval_hours = int(Variable.get("NEO4J_SYNC_INTERVAL", 72))
-    except (ImportError, ValueError, TypeError) as e:
-        logger.warning(f"Failed to get NEO4J_SYNC_INTERVAL, using default: {e}")
-        interval_hours = 72
-
-    # Deterministic-skip fix (2026-06): the cron (`0 3 */3 * *`) fires exactly
-    # interval_hours apart mid-month, while ``last_sync`` used to be stamped at
-    # sync COMPLETION. At the next fire ``elapsed`` was therefore always
-    # ``interval − (preflight + sync duration)`` — strictly under the interval —
-    # so the ShortCircuit skipped every other scheduled run and the effective
-    # cadence silently doubled (144h against a 96h incremental fetch window
-    # ≈ 48h of MISP events dropped per cycle). Two-part fix: ``run_neo4j_sync``
-    # now stamps the sync START time, and this check subtracts a tolerance so
-    # scheduler/task-startup drift can never push ``elapsed`` just under the
-    # interval. Tolerance is clamped to half the interval so the skip check
-    # still suppresses genuinely-early fires (e.g. the 24h month-boundary
-    # gap of a ``*/3`` day-of-month cron).
-    # `or "60"` (not just a getenv default): docker-compose passes the var
-    # through as `${...:-}`, so an unconfigured deployment sees it SET but
-    # EMPTY — int("") would raise and spam a bogus "invalid config" warning
-    # on every scheduled check. Empty/whitespace means "unset" here.
-    _raw_tolerance = (os.getenv("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN") or "").strip() or "60"
-    try:
-        tolerance_minutes = int(_raw_tolerance)
-    except ValueError:
-        logger.warning(
-            "Invalid EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN=%r — using default 60",
-            _raw_tolerance,
-        )
-        tolerance_minutes = 60
-    tolerance_minutes = max(0, min(tolerance_minutes, (interval_hours * 60) // 2))
-    effective_interval = timedelta(hours=interval_hours) - timedelta(minutes=tolerance_minutes)
-
+    # 2026-10: the run is skipped when the last successful sync started less than NEO4J_SYNC_MIN_GAP
+    # (24 h) ago; the bound is justified at its definition. It replaces the former guard of
+    # NEO4J_SYNC_INTERVAL (Airflow Variable, 72) minus EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN (60 min),
+    # which sat an hour below the cron's spacing and so needed the tolerance against scheduler drift:
+    # 24 h is far from the 72 h interval, and neither setting is read any more. The state file stamps
+    # the sync START (run_neo4j_sync, the baseline's full_neo4j_sync; 2026-06, see sync_started_at).
     try:
         if os.path.exists(state_file):
             with open(state_file, "r") as f:
@@ -1442,16 +1451,18 @@ def should_run_neo4j_sync(**context):
                 _raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
                 last_sync = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
 
-                if datetime.now(timezone.utc) - last_sync < effective_interval:
+                if datetime.now(timezone.utc) - last_sync < NEO4J_SYNC_MIN_GAP:
                     logger.info(
-                        f"Skipping Neo4j sync - last sync was {last_sync}, "
-                        f"interval is {interval_hours}h (tolerance {tolerance_minutes}min)"
+                        "Skipping Neo4j sync - the last sync started at %s, less than %s ago "
+                        "(a baseline's full sync or a forced sync); the next scheduled run syncs",
+                        last_sync.isoformat(),
+                        NEO4J_SYNC_MIN_GAP,
                     )
                     return False
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.error(f"Corrupted sync state file ({state_file}): {e} — running sync to be safe")
 
-    logger.info(f"Running Neo4j sync - interval {interval_hours}h has passed")
+    logger.info("Running Neo4j sync - the last sync started %s or more ago", NEO4J_SYNC_MIN_GAP)
     return True
 
 
@@ -1521,8 +1532,9 @@ def run_neo4j_sync(**context):
 
         start_time = time.time()
         task_start = start_time
-        # Stamped into the state file on success INSTEAD of completion time —
-        # half of the deterministic-skip fix (see should_run_neo4j_sync).
+        # Stamped into the state file on success INSTEAD of completion time (2026-06): a
+        # completion stamp left the next run's elapsed time just under the former 72 h guard at
+        # every run, so every other scheduled sync was skipped (should_run_neo4j_sync).
         sync_started_at = datetime.now(timezone.utc)
 
         from run_misp_to_neo4j import MISPToNeo4jSync
@@ -1577,7 +1589,7 @@ def run_neo4j_sync(**context):
                 _attempt,
             )
 
-        # Window fix (same bug family as the tolerance fix in
+        # Window fix (same bug family as the 2026-06 skip fix of
         # should_run_neo4j_sync): derive the incremental fetch window from the
         # state file's last successful sync (+1 day MERGE-idempotent overlap)
         # instead of relying only on the fixed EDGEGUARD_SYNC_INTERVAL_DAYS
@@ -1617,7 +1629,7 @@ def run_neo4j_sync(**context):
 
             try:
                 with open(state_file, "w") as f:
-                    # START time, not completion time — see should_run_neo4j_sync
+                    # START time, not completion time — see sync_started_at above
                     # (deterministic every-other-run skip fix). Also keeps the
                     # derived incremental window anchored at the moment the data
                     # fetch began, so nothing modified mid-run is ever skipped.
@@ -1663,7 +1675,7 @@ def run_neo4j_sync(**context):
 #    edgeguard_low_freq     → NVD               (every 8 h)
 #    edgeguard_daily        → MITRE, AbuseIPDB, ThreatFox, URLhaus,
 #                             Feodo, SSLBlacklist  (daily @ 02:00)
-#    edgeguard_neo4j_sync   → MISP → Neo4j      (every 3 days @ 03:00)
+#    edgeguard_neo4j_sync   → MISP → Neo4j      (every 72 h, NEO4J_SYNC_EVERY)
 #
 #  Having medium/low/daily task groups inside this DAG caused every API to
 #  be called every 30 minutes, immediately exhausting rate limits.
@@ -1949,14 +1961,15 @@ log_daily_summary = BashOperator(
 
 
 # ================================================================================
-#  DAG: Neo4j Sync (Every 72 hours / configurable)
+#  DAG: Neo4j Sync (Every 72 hours)
 # ================================================================================
 
 neo4j_sync_dag = DAG(
     "edgeguard_neo4j_sync",
     default_args=default_args,
     description="EdgeGuard MISP to Neo4j Synchronization",
-    schedule="0 3 */3 * *",  # Every 3 days at 3 AM
+    # 2026-10: every 72 h (was the cron "0 3 */3 * *"); semantics and reasons at NEO4J_SYNC_EVERY.
+    schedule=NEO4J_SYNC_EVERY,
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1964,8 +1977,8 @@ neo4j_sync_dag = DAG(
     # three attempts (execution_timeout × 3 + 2 retry delays of 5 min): check_sync_needed and
     # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (8 h limit), build_relationships and
     # run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
-    # A requested full sync keeps its flag until it succeeds, so it may need all three attempts. With
-    # max_active_runs=1 a long run only delays the next scheduled one, which then checks the interval.
+    # A requested full sync keeps its flag until it succeeds, so it may need all three attempts. 68 h
+    # is below the 72 h interval, so a run has ended before the next one is due.
     dagrun_timeout=timedelta(hours=68),
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
@@ -2091,9 +2104,10 @@ check_neo4j_quality_task = BashOperator(
 #
 #  Order matters:
 #    1. build_relationships  — link IOCs to malware/CVEs (needs fresh data)
-#    2. build_campaigns      — materialise Campaign nodes (needs relationships)
-#    3. calibrate_confidence — adjust INDICATES scores by event size
-#    4. decay_ioc_confidence — retire/reduce stale indicators (idempotent last step)
+#    2. run_enrichment_jobs  — merges, the indicator aging (one rule at the database's current
+#                              time, or a node's later aging_evaluated_at; 2026-10-16), campaigns
+#                              (active indicators), calibration, EPSS
+#                              (enrichment_jobs.run_all_enrichment_jobs)
 # ================================================================================
 
 
@@ -2152,7 +2166,7 @@ def run_build_relationships(**context):
 
 
 def run_enrichment_jobs(**context):
-    """Run IOC decay, Campaign builder, and confidence calibration after sync."""
+    """Run the post-sync enrichment jobs (merges, indicator aging, campaigns, calibration, EPSS)."""
     from enrichment_jobs import run_all_enrichment_jobs
     from neo4j_client import Neo4jClient
 
@@ -2886,10 +2900,12 @@ def assert_baseline_postconditions(**context):
 
     Invariants checked (each fails the DAG with an actionable message):
 
-      [INV-1] Campaign > 0 IFF ATTRIBUTED_TO > 0.
-        If the graph carries Malware→ThreatActor attributions but no
-        Campaigns materialized, ``build_campaign_nodes`` raised an
-        exception that was swallowed before PR-N21 (now re-raised).
+      [INV-1] Campaign > 0 IFF there are qualifying actors.
+        If the graph carries actors with campaign evidence (a malware attributed
+        to them or, since 2026-10-16, used by them, and an active indicator of that
+        malware; ``campaign_evidence.QUALIFYING_ACTORS_QUERY``) but no Campaigns
+        materialized, ``build_campaign_nodes`` raised an exception that was
+        swallowed before PR-N21 (now re-raised).
 
       [INV-2] Indicator > 0.
         Sync produced data. Zero Indicators means the sync silently
@@ -2910,6 +2926,7 @@ def assert_baseline_postconditions(**context):
     sentinel below: postcheck always runs, detects upstream-failed state,
     emits a clean diagnostic, and exits without double-firing.
     """
+    from campaign_evidence import QUALIFYING_ACTORS_QUERY
     from neo4j_client import Neo4jClient
 
     # PR-N27 sentinel: detect upstream-failed state and emit a clean
@@ -3039,16 +3056,11 @@ def assert_baseline_postconditions(**context):
             # Fix: mirror ``build_campaign_nodes``'s exact qualifying-actor
             # condition. Independent count queries (one row each, no
             # silent-skip risk).
-            row = session.run(
-                """
-                MATCH (a:ThreatActor)
-                WHERE EXISTS {
-                    MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
-                    WHERE i.active = true
-                }
-                RETURN count(a) AS qualifying_actors
-                """
-            ).single()
+            # 2026-10-16: the condition is read from ``campaign_evidence``, the module the builder
+            # reads it from: an actor qualifies with an ATTRIBUTED_TO or a USES_MALWARE link to a
+            # malware that an active indicator INDICATES. An actor with only USES_MALWARE has a
+            # campaign since then; the inline query, which read ATTRIBUTED_TO only, missed it.
+            row = session.run(QUALIFYING_ACTORS_QUERY).single()
             qualifying = int((row["qualifying_actors"] if row else 0) or 0)
 
             row = session.run("MATCH (c:Campaign) RETURN count(c) AS campaigns").single()
@@ -3056,8 +3068,8 @@ def assert_baseline_postconditions(**context):
 
             if qualifying > 0 and camps == 0:
                 violations.append(
-                    f"[INV-1] {qualifying} qualifying ThreatActors exist (have Malware "
-                    "ATTRIBUTED_TO + active Indicator via INDICATES) but Campaign count = 0. "
+                    f"[INV-1] {qualifying} qualifying ThreatActors exist (a Malware ATTRIBUTED_TO "
+                    "or USES_MALWARE + active Indicator via INDICATES) but Campaign count = 0. "
                     "build_campaign_nodes silently produced no campaigns. "
                     "Check Airflow log for the underlying exception (PR-N21 made enrichment_jobs re-raise)."
                 )
@@ -3089,7 +3101,7 @@ def assert_baseline_postconditions(**context):
             )
 
         logger.info(
-            "[BASELINE-POSTCHECK] all invariants OK — Indicator=%d Source=%d (plus Campaign>0 iff ATTRIBUTED_TO>0)",
+            "[BASELINE-POSTCHECK] all invariants OK — Indicator=%d Source=%d (plus Campaign>0 iff qualifying actors>0)",
             ind_count,
             src_count,
         )

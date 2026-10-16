@@ -787,10 +787,11 @@ def _write_state(state_dir: Path, last_sync: datetime) -> None:
 
 
 def _sync_starts(dag_module, state_dir: Path, fires: list, last_start: datetime) -> list:
-    """Sync start times the real should_run_neo4j_sync admits for the given cron fires.
+    """Sync start times the real should_run_neo4j_sync admits for the given scheduled runs.
 
     The state file is written relative to the wall clock (``now - elapsed``), so the guard's own
-    ``datetime.now`` sees the simulated elapsed time. A sync stamps its start one minute after the fire.
+    ``datetime.now`` sees the simulated elapsed time. A sync stamps its start one minute after the run
+    is due.
     """
     starts = []
     for fire in fires:
@@ -801,73 +802,166 @@ def _sync_starts(dag_module, state_dir: Path, fires: list, last_start: datetime)
     return starts
 
 
-def _simulate_sync_schedule(dag_module, schedule: str, state_dir: Path) -> SimpleNamespace:
-    """Sync starts of the 3-day cron through the real cadence guard, 2025-2032 (two leap years).
+def _timetable_runs(dag, first: datetime, count: int) -> list:
+    """``count`` scheduled runs of ``dag`` after ``first`` from its own timetable, as the scheduler
+    computes them (Airflow 3: the core timetable's ``next_dagrun_info_v2`` with the DAG's start date and
+    ``catchup``). The times lie in the future, where a run is due ``schedule`` after the previous one."""
+    from airflow.serialization.encoders import coerce_to_core_timetable
+    from airflow.timetables.base import DagRunInfo, TimeRestriction
 
-    ``gaps``: hours between consecutive scheduled sync starts. ``after_baseline``: hours from a
-    baseline's full sync (which restarts the guard) to the next scheduled sync start, for a baseline
-    starting at every hour of January and February 2027.
+    timetable = coerce_to_core_timetable(dag.timetable)
+    restriction = TimeRestriction(earliest=dag.start_date, latest=None, catchup=dag.catchup)
+    runs, last = [], DagRunInfo.interval(first, first)
+    for _ in range(count):
+        last = timetable.next_dagrun_info_v2(last_dagrun_info=last, restriction=restriction)
+        runs.append(last.run_after)
+    return runs
+
+
+def _worst_run(task) -> timedelta:
+    """Every attempt of a task at its limit, with the retry delays between them."""
+    return (task.retries + 1) * task.execution_timeout + task.retries * task.retry_delay
+
+
+def _simulate_sync_schedule(dag_module, dag, state_dir: Path) -> SimpleNamespace:
+    """Sync starts of the sync DAG's schedule through the real cadence guard over eight years.
+
+    ``gaps``: hours between consecutive scheduled sync starts. ``after_baseline``: hours from a sync
+    between two runs (a baseline's full sync or a forced sync, which stamp the state file) to the next
+    scheduled sync start, for such a sync starting every 7 minutes over six days. ``after_retry``: the
+    next start after a sync that began on its third attempt (two failed 8 h attempts, two retry delays,
+    and the attempts of the two tasks before it).
     """
-    fires = _cron_fires(schedule, datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2033, 1, 1, tzinfo=timezone.utc))
+    first = (datetime.now(timezone.utc) + timedelta(days=365)).replace(hour=3, minute=0, second=0, microsecond=0)
+    fires = [first] + _timetable_runs(dag, first, 8 * 122)
     starts = _sync_starts(dag_module, state_dir, fires[1:], fires[0] + timedelta(minutes=1))
     after_baseline = []
-    for hour in range(0, 24 * 31 * 2, 1):
-        baseline_start = datetime(2027, 1, 1, tzinfo=timezone.utc) + timedelta(hours=hour, minutes=7)
-        upcoming = [f for f in fires if f > baseline_start][:4]
-        first = _sync_starts(dag_module, state_dir, upcoming, baseline_start)[0]
-        after_baseline.append((first - baseline_start).total_seconds() / 3600)
+    for step in range(0, 6 * 24 * 60, 7):
+        baseline_start = fires[10] + timedelta(minutes=step)
+        upcoming = [f for f in fires if f > baseline_start][:3]
+        nxt = _sync_starts(dag_module, state_dir, upcoming, baseline_start)[0]
+        after_baseline.append((nxt - baseline_start).total_seconds() / 3600)
+    sync_task = dag.get_task("run_neo4j_sync")
+    late_start = (
+        _worst_run(dag.get_task("check_sync_needed"))
+        + _worst_run(dag.get_task("neo4j_health_check"))
+        + sync_task.retries * (sync_task.execution_timeout + sync_task.retry_delay)
+    )
+    retried = _sync_starts(dag_module, state_dir, fires[21:22], fires[20] + late_start)
     return SimpleNamespace(
+        fires=fires,
         starts=starts,
         gaps=[(b - a).total_seconds() / 3600 for a, b in pairwise(starts)],
         after_baseline=after_baseline,
+        after_retry=retried,
+        late_start=late_start,
     )
 
 
 class TestSyncStaleness:
-    def test_threshold_covers_the_longest_gap_of_the_three_day_schedule(
-        self, dag_module, dags, compose_metrics, tmp_path
-    ):
+    """2026-10: the sync runs every 72 h (a timedelta schedule) and skips a run within 24 h of the last
+    sync start; the staleness thresholds are derived from both and from the tasks' limits. The
+    day-of-month cron ``0 3 */3 * *`` with a 71 h guard left 96 h at most month ends, 120 h after a leap
+    February and up to 143 h after a baseline, and needed 145 h."""
+
+    def test_the_schedule_is_a_fixed_72_hour_interval(self, dag_module, dags):
+        from airflow.serialization.encoders import coerce_to_core_timetable
+        from airflow.timetables.trigger import DeltaTriggerTimetable
+
         sync_dag = dags["edgeguard_neo4j_sync"]
-        assert sync_dag.schedule == "0 3 */3 * *"
-        sim = _simulate_sync_schedule(dag_module, sync_dag.schedule, tmp_path / "state")
-        starts, gaps = sim.starts, sim.gaps
-        assert round(max(gaps)) == 120, "28 February to 4 March in a leap year"
-        non_leap = [
-            (b - a).total_seconds() / 3600 for a, b in pairwise(starts) if a.year not in (2028, 2032) or a.month != 2
-        ]
-        assert round(max(non_leap)) == 96, "the fire after the 31st is skipped by the 71 h guard"
-        month_end_gaps_2027 = [g for a, g in zip(starts[:-1], gaps, strict=True) if a.year == 2027 and g > 73]
-        assert len(month_end_gaps_2027) >= 8, "the former 72 h limit fired at most month ends"
-        # A baseline's full sync restarts the guard: the next scheduled sync may be one fire later.
-        assert 142 < max(sim.after_baseline) < 144
+        assert sync_dag.schedule == timedelta(days=3) == dag_module.NEO4J_SYNC_EVERY
+        timetable = coerce_to_core_timetable(sync_dag.timetable)
+        assert isinstance(timetable, DeltaTriggerTimetable), "Airflow 3: a run is due 72 h after the previous one"
+        assert sync_dag.catchup is False and sync_dag.max_active_runs == 1
+        assert sync_dag.dagrun_timeout < dag_module.NEO4J_SYNC_EVERY, "a run has ended before the next is due"
+
+    def test_the_data_interval_of_a_scheduled_run_is_the_time_it_is_due(self, dag_module, dags):
+        """With the 72 h schedule, a trigger timetable, the data interval of a scheduled run is the
+        instant the run is due, 72 h after the previous one."""
+        from airflow.serialization.encoders import coerce_to_core_timetable
+        from airflow.timetables.base import DagRunInfo, TimeRestriction
+
+        sync_dag = dags["edgeguard_neo4j_sync"]
+        first = (datetime.now(timezone.utc) + timedelta(days=365)).replace(hour=3, minute=0, second=0, microsecond=0)
+        info = coerce_to_core_timetable(sync_dag.timetable).next_dagrun_info_v2(
+            last_dagrun_info=DagRunInfo.interval(first, first),
+            restriction=TimeRestriction(earliest=sync_dag.start_date, latest=None, catchup=sync_dag.catchup),
+        )
+        due = first + timedelta(days=3)
+        assert info.run_after == info.data_interval.start == info.data_interval.end == due
+
+    def test_the_guard_bound_is_justified_by_the_tasks(self, dag_module, dags):
+        """24 h: longer than the rest of a baseline after its full sync starts, shorter than the
+        shortest gap a regular run sees after a sync that started on its third attempt."""
+        baseline = dags["edgeguard_baseline"]
+        chain = (
+            "full_neo4j_sync",
+            "build_relationships",
+            "run_enrichment_jobs",
+            "baseline_postcheck",
+            "baseline_complete",
+            "baseline_release_lock",
+        )
+        rest = sum((_worst_run(baseline.get_task(t)) for t in chain), timedelta())
+        assert rest == timedelta(hours=16, minutes=49), "the baseline holds its lock until the last task"
+        gap = dag_module.NEO4J_SYNC_MIN_GAP
+        assert gap == timedelta(hours=24)
+        assert rest < gap
+
+        sim_dag = dags["edgeguard_neo4j_sync"]
+        sync_task = sim_dag.get_task("run_neo4j_sync")
+        late_start = (
+            _worst_run(sim_dag.get_task("check_sync_needed"))
+            + _worst_run(sim_dag.get_task("neo4j_health_check"))
+            + sync_task.retries * (sync_task.execution_timeout + sync_task.retry_delay)
+        )
+        assert late_start == timedelta(hours=16, minutes=42)
+        assert gap < dag_module.NEO4J_SYNC_EVERY - late_start == timedelta(hours=55, minutes=18)
+
+    def test_threshold_covers_the_longest_gap_of_the_schedule(self, dag_module, dags, compose_metrics, tmp_path):
+        sync_dag = dags["edgeguard_neo4j_sync"]
+        sim = _simulate_sync_schedule(dag_module, sync_dag, tmp_path / "state")
+        assert {round(g, 6) for g in sim.gaps} == {72.0}, "every scheduled run syncs, 72 h apart"
+        assert len(sim.starts) == len(sim.fires) - 1
+        assert sim.after_retry, "the run after a sync that started on its third attempt is not skipped"
+        # A sync between two runs: the next scheduled sync starts at least 24 h and less than 96 h after it.
+        assert 24 <= min(sim.after_baseline) and 95.8 < max(sim.after_baseline) < 96 + 1 / 60
 
         expr = _norm(_rule("EdgeGuardNeo4jSyncStale")["expr"])
         assert expr == (
-            "time() - edgeguard_neo4j_sync_last_success_timestamp > 522000 "
+            "time() - edgeguard_neo4j_sync_last_success_timestamp > 439200 "
             "and edgeguard_neo4j_sync_last_success_timestamp > 0"
         )
-        threshold_h = 522000 / 3600
-        # The stamp is written when run_neo4j_sync succeeds, so the next sync may take up to every
-        # attempt of that task longer (never longer than the DAG run's timeout).
-        sync_task = sync_dag.get_task("run_neo4j_sync")
-        attempts = sync_task.retries + 1
-        task_h = (
-            attempts * sync_task.execution_timeout + sync_task.retries * sync_task.retry_delay
-        ).total_seconds() / 3600
-        duration_h = min(task_h, sync_dag.dagrun_timeout.total_seconds() / 3600)
-        assert max(gaps) + duration_h <= threshold_h, (max(gaps), duration_h)
-        assert max(sim.after_baseline) <= threshold_h
+        threshold = timedelta(seconds=439200)
+        # The stamp is written when run_neo4j_sync succeeds, so the next sync may take every attempt of the
+        # tasks before it and of that task longer than the gap between the two sync starts.
+        longest_start_gap = (dag_module.NEO4J_SYNC_MIN_GAP + dag_module.NEO4J_SYNC_EVERY).total_seconds() / 3600
+        assert max(max(sim.gaps), max(sim.after_baseline)) <= longest_start_gap + 1 / 60
+        worst = (
+            timedelta(hours=longest_start_gap)
+            + _worst_run(sync_dag.get_task("check_sync_needed"))
+            + _worst_run(sync_dag.get_task("neo4j_health_check"))
+            + _worst_run(sync_dag.get_task("run_neo4j_sync"))
+        )
+        assert worst == timedelta(hours=120, minutes=42)
+        assert worst < threshold <= worst + timedelta(hours=2), "covers the worst case, with a margin of at most 2 h"
         assert _rule("EdgeGuardNeo4jSyncStale")["for"] == "1h"
+        assert "122 hours" in _rule("EdgeGuardNeo4jSyncStale")["annotations"]["description"]
 
     def test_misp_to_neo4j_staleness_covers_the_longest_gap_between_two_syncs(
         self, dag_module, dags, compose_metrics, tmp_path
     ):
         """``misp_to_neo4j`` is stamped when a sync connects (and again on a clean run), so two
-        stamps are at most one start-to-start gap apart; the 26 h catch-all fired 46 h of every 72 h."""
-        sim = _simulate_sync_schedule(dag_module, dags["edgeguard_neo4j_sync"].schedule, tmp_path / "state")
-        longest_s = max(max(sim.gaps), max(sim.after_baseline)) * 3600
-        limit_s = _label_map("edgeguard:collector_max_stale_seconds", "source")["misp_to_neo4j"]
-        assert longest_s < limit_s <= longest_s + 3 * 3600, "covers the longest gap, with at most 3 h margin"
+        stamps are at most one start-to-start gap apart, plus the attempts of the tasks before the sync;
+        the 26 h catch-all fired 46 h of every 72 h."""
+        sync_dag = dags["edgeguard_neo4j_sync"]
+        sim = _simulate_sync_schedule(dag_module, sync_dag, tmp_path / "state")
+        longest = timedelta(hours=max(max(sim.gaps), max(sim.after_baseline)))
+        longest += _worst_run(sync_dag.get_task("check_sync_needed")) + _worst_run(
+            sync_dag.get_task("neo4j_health_check")
+        )
+        limit = timedelta(seconds=_label_map("edgeguard:collector_max_stale_seconds", "source")["misp_to_neo4j"])
+        assert longest < limit <= longest + timedelta(hours=3), "covers the longest gap, with at most 3 h margin"
 
 
 class TestCollectorOutcomes:

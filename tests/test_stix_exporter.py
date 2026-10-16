@@ -1348,7 +1348,7 @@ def test_a_rejected_cve_exports_its_status_and_parses_strictly():
     assert vulnerability["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
     definition = next(o for o in bundle["objects"] if o["type"] == "extension-definition")
     assert "x_edgeguard_status" in definition["extension_properties"]
-    assert (definition["version"], definition["modified"][:10]) == ("1.4.0", "2026-10-15")
+    assert (definition["version"], definition["modified"][:10]) == ("1.7.0", "2026-10-16")
     parsed = stix2.parse(bundle)  # strict: allow_custom defaults to False
     assert next(o for o in parsed.objects if o.type == "vulnerability")["x_edgeguard_status"] == ["rejected"]
 
@@ -1598,3 +1598,53 @@ def test_stix_types_advertises_limit_bounds(monkeypatch):
     data = resp.json()
     assert data["default_limit"] == 100
     assert data["max_limit"] == 500
+
+
+def test_an_sdo_names_the_source_of_its_description_and_parses_strictly():
+    """2026-10-16: an SDO with a description carries ``x_edgeguard_description_source``, the node's
+    ``description_source`` (the source the ranking kept, ``description_ranking``). A node that names no
+    source (written before 2026-10-16) and a node without a description export none; a campaign EdgeGuard
+    built has a description of its own and no source."""
+    rows = [
+        {
+            "seed": {"name": "dragonfly", "description": "ATT&CK text", "description_source": "mitre_attck"},
+            "malware": [
+                {
+                    "name": "cobalt strike",
+                    "malware_types": ["backdoor"],
+                    "description": "MISP text",
+                    "description_source": "misp",
+                },
+                {"name": "havex", "malware_types": ["trojan"], "description_source": "misp"},  # no text
+            ],
+            "actor_tech": [{"mitre_id": "T1059", "name": "Command and Scripting Interpreter", "description": "legacy"}],
+            "mal_tech": [],
+            "campaigns": [{"name": "dragonfly campaign", "description": "EdgeGuard's grouping"}],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_threat_actor("dragonfly")
+    (intrusion_set,) = _by_type(bundle, "intrusion-set")
+    assert intrusion_set["x_edgeguard_description_source"] == "mitre_attck"
+    malware = {o["name"]: o for o in _by_type(bundle, "malware")}
+    assert malware["cobalt strike"]["x_edgeguard_description_source"] == "misp"
+    assert "x_edgeguard_description_source" not in malware["havex"]
+    (technique,) = _by_type(bundle, "attack-pattern")
+    assert "x_edgeguard_description_source" not in technique
+    (campaign,) = _by_type(bundle, "campaign")
+    assert "x_edgeguard_description_source" not in campaign
+    definition = next(o for o in bundle["objects"] if o["type"] == "extension-definition")
+    assert "x_edgeguard_description_source" in definition["extension_properties"]
+    stix2.parse(bundle)  # strict: allow_custom defaults to False
+
+    rows = [
+        {
+            "seed": {"cve_id": "CVE-2015-5477", "description": "KEV text", "description_source": "cisa_kev"},
+            "indicators": [],
+            "threats": [],
+            "sectors": [],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_cve("CVE-2015-5477")
+    (vulnerability,) = _by_type(bundle, "vulnerability")
+    assert vulnerability["x_edgeguard_description_source"] == "cisa_kev"
+    stix2.parse(bundle)

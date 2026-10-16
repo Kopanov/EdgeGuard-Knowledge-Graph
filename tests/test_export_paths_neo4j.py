@@ -12,7 +12,11 @@ runs the export paths against it:
   the indicator returned when one value is stored under two types;
 * the Wazuh CDB export: newest entries first under the cap, nulls last, ties by key;
 * md5 / sha1 / sha256 / sha512 filters on the stored ``hash`` indicators;
-* GraphQL ``vulnerabilities`` on ``:CVE`` (the README example) and ``tlp``.
+* GraphQL ``vulnerabilities`` on ``:CVE`` (the README example) and ``tlp``;
+* (2026-10-16) the explorer's choice of a CVE twin's description by the source ranking (at an equal
+  rank the twin that names a source), the order of ``/zone/{zone}`` (one clock for every label: an
+  indicator's latest report, otherwise when the node entered the graph) and the actor summary's
+  ``malware_used``.
 
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with
 ``EDGEGUARD_IT_NEO4J_URI``, writes only nodes labelled ``EdgeGuardIT``, refuses any other node.
@@ -188,6 +192,49 @@ def test_explorer_default_view_shows_indicator_to_malware(rest):
     assert rest.get("/graph/explore?view=attacks&zone=finance").json()["stats"] == {"nodes": 0, "edges": 0}
 
 
+def test_explorer_vulnerabilities_view_pairs_a_description_with_its_own_source(raw_driver, rest):
+    """2026-10-16: the CVE's twins are grouped by ``cve_id``; the view takes the description and its
+    ``description_source`` from one node. Here the CVE node holds a description written before the ranking
+    (no source) and its Vulnerability twin a source without a description: ``head(collect(...))`` of each
+    property would pair the CVE's text with the twin's source."""
+    with raw_driver.session() as session:
+        session.run(
+            f"CREATE (:Vulnerability:{LABEL} {{cve_id: 'CVE-2021-44228', uuid: 'u-v', edgeguard_managed: true, "
+            "description_source: 'nvd', zone: ['healthcare']})"
+        )
+    data = rest.get("/graph/explore?view=vulnerabilities").json()
+    (node,) = [n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2021-44228"]
+    assert (node["description"], node["description_source"]) == ("Log4Shell", None)
+
+
+def test_explorer_vulnerabilities_view_shows_the_twin_the_ranking_keeps(raw_driver, rest):
+    """2026-10-16: of two twins with different texts, the view shows the one the source ranking keeps
+    (NVD's over OTX's), whichever twin the rows return first. At an equal rank the twin that names a
+    source wins: a text written before the ranking (no ``description_source``) counts as the top
+    source's, and the write rule lets NVD's record replace it, so the view shows NVD's text, not the
+    sourceless one (whose empty source sorted first before)."""
+    cases = (
+        ({"CVE": ("NVD text", "nvd"), "Vulnerability": ("OTX text", "alienvault_otx")}, ("NVD text", "nvd")),
+        ({"CVE": ("Text written before the ranking", None), "Vulnerability": ("NVD text", "nvd")}, ("NVD text", "nvd")),
+    )
+    for texts, expected in cases:
+        for first, second in (("Vulnerability", "CVE"), ("CVE", "Vulnerability")):
+            with raw_driver.session() as session:
+                session.run("MATCH (n {cve_id: 'CVE-2024-3400'}) DETACH DELETE n")
+                for label in (first, second):
+                    text, source = texts[label]
+                    session.run(
+                        f"CREATE (n:{label}:{LABEL} {{cve_id: 'CVE-2024-3400', uuid: 'u-' + $l, edgeguard_managed: true, "
+                        "description: $t, cvss_score: 10.0, zone: ['energy']}) SET n.description_source = $s",
+                        l=label,
+                        t=text,
+                        s=source,
+                    )
+            data = rest.get("/graph/explore?view=vulnerabilities").json()
+            (node,) = [n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2024-3400"]
+            assert (node["description"], node["description_source"]) == expected, (texts, first)
+
+
 def test_explorer_actors_view_follows_the_written_directions(rest):
     data = rest.get("/graph/explore?view=actors").json()
     assert _edges(data) == {
@@ -266,17 +313,21 @@ def test_search_returns_the_related_nodes_of_the_indicator_it_returns(raw_driver
 # Wazuh CDB: newest first under the cap
 # ---------------------------------------------------------------------------
 
+# 2026-10-16: an indicator is ordered by its latest report (``last_reported_at``), or when EdgeGuard
+# created it (``first_imported_at``) when no report dated it; ``last_updated`` (the last database write,
+# which a full sync moves) is not read.
 CDB_FIXTURE = f"""
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'newest.example', edgeguard_managed: true,
-        zone: ['finance'], last_updated: datetime('2026-10-15T09:00:00Z')}})
+        zone: ['finance'], last_reported_at: datetime('2026-10-15T09:00:00Z'),
+        last_updated: datetime('2026-10-01T00:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'b-tie.example', edgeguard_managed: true,
-        zone: ['finance'], last_updated: datetime('2026-10-14T09:00:00Z')}})
+        zone: ['finance'], last_reported_at: datetime('2026-10-14T09:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'a-tie.example', edgeguard_managed: true,
-        zone: ['finance'], last_updated: datetime('2026-10-14T09:00:00Z')}})
+        zone: ['finance'], first_imported_at: datetime('2026-10-14T09:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'aaa-undated.example', edgeguard_managed: true,
-        zone: ['finance']}})
+        zone: ['finance'], last_updated: datetime('2026-10-16T00:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'retired.example', edgeguard_managed: true,
-        zone: ['finance'], active: false, last_updated: datetime('2026-10-15T10:00:00Z')}})
+        zone: ['finance'], active: false, last_reported_at: datetime('2026-10-15T10:00:00Z')}})
 """
 
 
@@ -289,7 +340,7 @@ def test_wazuh_list_keeps_the_newest_entries_and_reports_the_cut(raw_driver, res
         "newest.example",
         "a-tie.example",
         "b-tie.example",
-        "aaa-undated.example",  # no last_updated: last, not first (Cypher sorts null first descending)
+        "aaa-undated.example",  # no report time: last, not first (Cypher sorts null first descending)
     ]
     assert resp.headers["X-EdgeGuard-Truncated"] == "false"
     monkeypatch.setattr(query_api, "_CDB_EXPORT_MAX_ENTRIES", 3)
@@ -407,3 +458,58 @@ def test_graphql_vulnerabilities_read_the_cve_nodes(client, raw_driver, monkeypa
     ]
     result = graphql_api.schema.execute_sync('{ indicators(filter: {zone: "energy"}) { value tlp } }')
     assert result.data == {"indicators": [{"value": "203.0.113.5", "tlp": "amber"}]}
+
+
+# ---------------------------------------------------------------------------
+# /zone/{zone} and the actor summary (2026-10-16)
+# ---------------------------------------------------------------------------
+
+# The state after a run: the sync rewrote every node (``last_updated`` on 2026-10-16) and the campaign
+# builder rebuilt the campaign after it; one indicator was reported in that run (2026-10-15).
+ZONE_FIXTURE = f"""
+CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'reported.example', uuid: 'z-1', edgeguard_managed: true,
+        zone: ['finance'], last_reported_at: datetime('2026-10-15T00:00:00Z'),
+        first_imported_at: datetime('2026-10-01T00:00:00Z'), last_updated: datetime('2026-10-16T00:00:00Z')}})
+CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'unreported.example', uuid: 'z-2', edgeguard_managed: true,
+        zone: ['finance'], first_imported_at: datetime('2026-10-12T00:00:00Z'),
+        last_updated: datetime('2026-10-16T00:00:00Z')}})
+CREATE (:Campaign:{LABEL} {{name: 'fin-actor campaign', uuid: 'z-3', edgeguard_managed: true, zone: ['finance'],
+        created_at: datetime('2026-09-01T00:00:00Z'), last_updated: datetime('2026-10-16T02:00:00Z')}})
+CREATE (:CVE:{LABEL} {{cve_id: 'CVE-2026-0001', uuid: 'z-4', edgeguard_managed: true, zone: ['finance'],
+        first_imported_at: datetime('2026-09-02T00:00:00Z'), last_updated: datetime('2026-10-16T01:00:00Z')}})
+CREATE (:Malware:{LABEL} {{name: 'undated', uuid: 'z-5', edgeguard_managed: true, zone: ['finance']}})
+CREATE (:ThreatActor:{LABEL} {{name: 'fin-actor', uuid: 'z-6', edgeguard_managed: true, zone: ['finance'],
+        first_imported_at: datetime('2026-10-14T00:00:00Z'), last_updated: datetime('2026-10-16T01:30:00Z')}})
+"""
+
+
+def test_the_zone_list_ranks_every_label_by_one_clock(raw_driver, rest):
+    """2026-10-16: an indicator by its latest report, every other node by when it entered the graph
+    (``first_imported_at``; a campaign's ``created_at``); nodes without a time last. The indicator
+    reported in the latest run comes first, above the nodes the sync and the campaign builder merely
+    rewrote: ordered by ``last_updated`` they were ``z-3``, ``z-6``, ``z-4`` before it."""
+    with raw_driver.session() as session:
+        session.run(ZONE_FIXTURE)
+    threats = rest.get("/zone/finance?limit=10").json()["threats"]
+    assert [t["uuid"] for t in threats] == ["z-1", "z-6", "z-2", "z-4", "z-3", "z-5"]
+
+
+def test_the_actor_summary_lists_the_malware_a_campaign_rests_on(raw_driver, rest):
+    """2026-10-16: a MITRE group with only "uses" links has a campaign; the summary lists that malware in
+    ``malware_used`` (sorted), and ``malware`` stays the attributed malware."""
+    with raw_driver.session() as session:
+        session.run(
+            f"CREATE (a:ThreatActor:{LABEL} {{name: 'fin7', uuid: 'u-fin7', edgeguard_managed: true}}) "
+            f"CREATE (g:Malware:{LABEL} {{name: 'griffon', uuid: 'u-griffon', edgeguard_managed: true}}) "
+            f"CREATE (c:Malware:{LABEL} {{name: 'carbanak', uuid: 'u-carbanak', edgeguard_managed: true}}) "
+            f"CREATE (camp:Campaign:{LABEL} {{name: 'fin7 Campaign', uuid: 'u-fin7-c', edgeguard_managed: true}}) "
+            "CREATE (a)-[:USES_MALWARE {match_type: 'mitre_explicit', confidence_score: 0.95}]->(g) "
+            "CREATE (a)-[:USES_MALWARE {match_type: 'mitre_explicit', confidence_score: 0.95}]->(c) "
+            "CREATE (a)-[:RUNS {match_type: 'campaign_grouping'}]->(camp)"
+        )
+    data = rest.get("/actors/fin7/summary").json()
+    assert (data["malware"], data["malware_total"]) == ([], 0)
+    assert (data["malware_used"], data["malware_used_total"]) == (["carbanak", "griffon"], 2)
+    assert data["campaigns"] == ["fin7 Campaign"]
+    apt28 = rest.get("/actors/APT28/summary").json()
+    assert (apt28["malware"], apt28["malware_used"], apt28["malware_used_total"]) == (["emotet"], [], 0)

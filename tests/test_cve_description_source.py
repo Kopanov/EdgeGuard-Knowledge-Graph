@@ -8,25 +8,29 @@ ICS record the advisory's dates. Which one a CVE showed depended on the order of
 (smallest first), and the CVEs several feeds name are the ones a demonstration shows.
 
 The rule now: NVD's record (``nvd_record``, set by the sync for an NVD attribute with ``NVD_META``) sets
-the three properties; any other record fills them only where the node has none; a comment that is a
-metadata block never becomes a description (``run_misp_to_neo4j._comment_description``), and neither
-does a vulnerability comment that only says where the CVE was seen: the OTX pulse reference and
-MISPWriter's "CVE from <source>" placeholder (``_vulnerability_comment_description``). Taken as one, the
-pulse reference was the first text to reach a CVE without an NVD record, and CISA's KEV text could
-then never replace it.
+the dates; any other record fills them only where the node has none. The description follows the source
+ranking NVD > CISA KEV > CISA ICS > any other source (``description_ranking``, 2026-10-16; until then any
+record but NVD's only filled it, so on a CVE without NVD's record the first source to arrive kept its
+text), and the node names the source in ``description_source``. A comment that is a metadata block never
+becomes a description (``run_misp_to_neo4j._comment_description``), and neither does a vulnerability
+comment that only says where the CVE was seen: the OTX pulse reference and MISPWriter's "CVE from
+<source>" placeholder (``_vulnerability_comment_description``).
 
 Fixtures are real: the ``misp`` attributes of ``test_cvss_real_payloads.json`` (hosted MISP, read on
 2026-10-14) — CVE-2025-21042 from OTX, NVD and the KEV, CVE-2015-5477 from OTX and the KEV (outside the
 NVD window), CVE-2025-14272 and CVE-2025-7223 from NVD and CISA ICS. The OTX pulse reference and the
 ``MITRE_*`` blocks are written by the OTX collector and MISPWriter's own builders; the remaining blocks
 without a real attribute (``MITRE_TACTIC_PHASES`` without a description, ``CURATED_CLAIMS``, an unknown
-``*_META``) are literals of the same shape. The same rule on a real Neo4j:
-``tests/test_cve_epss_ssvc_neo4j.py``.
+``*_META``) are literals of the same shape. A KEV and a CISA ICS record of one CVE without NVD's record
+are the real KEV attribute of CVE-2025-21042 and the real CISA ICS attribute of CVE-2025-14272 named for
+CVE-2025-21042 (the capture holds no CVE with both). The same rule on a real Neo4j:
+``tests/test_cve_epss_ssvc_neo4j.py`` and ``tests/test_description_ranking_neo4j.py``.
 """
 
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import re
 import sys
@@ -40,9 +44,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from test_cve_attack_vector import _otx_cve_item  # noqa: E402  (the OTX collector's cve_references item)
+from test_description_ranking import SINGLE_PARAMS, apply_statement  # noqa: E402  (the ranked SET)
 
 import neo4j_client  # noqa: E402
 from collectors import misp_writer  # noqa: E402
+from description_ranking import CVE_DESCRIPTIONS  # noqa: E402
 from run_misp_to_neo4j import (  # noqa: E402
     _METADATA_COMMENT_RE,
     MISPToNeo4jSync,
@@ -52,6 +58,7 @@ from run_misp_to_neo4j import (  # noqa: E402
 
 MISP = json.loads((Path(__file__).resolve().parent / "test_cvss_real_payloads.json").read_text())["misp"]
 RECORD_TEXT = ("description", "published", "last_modified")
+RECORD_DATES = ("published", "last_modified")
 WRITER = misp_writer.MISPWriter.__new__(misp_writer.MISPWriter)
 
 # An OTX malware family and an ATT&CK technique as MISPWriter writes them: the ``MITRE_*`` block, then the
@@ -133,17 +140,15 @@ def _node_statement(session, label: str):
     return calls[-1].args[0], calls[-1].kwargs
 
 
-_SET = re.compile(r"n\.(description|published|last_modified) = \$(\w+)")
-_FILL = re.compile(
-    r"n\.(description|published|last_modified) = "
-    r"CASE WHEN n\.\1 IS NULL OR n\.\1 = '' THEN \$(\w+) ELSE n\.\1 END"
-)
+_SET = re.compile(r"n\.(published|last_modified) = \$(\w+)")
+_FILL = re.compile(r"n\.(published|last_modified) = CASE WHEN n\.\1 IS NULL OR n\.\1 = '' THEN \$(\w+) ELSE n\.\1 END")
 
 
 def _apply(node: dict, query: str, params: dict) -> None:
-    """What the statement does to the three properties of *node*: a plain SET replaces, the
-    set-if-absent CASE fills an absent or empty value. Any other form of assignment fails the test."""
-    assigned = re.findall(r"n\.(description|published|last_modified) = (?!'')", query)  # not the IS-empty test
+    """What the statement does to the CVE node's dates, description and description_source: a plain SET
+    of a date replaces, the set-if-absent CASE fills an absent or empty date (any other form of assignment
+    fails the test), and the description follows the ranked SET (``apply_statement``)."""
+    assigned = re.findall(r"n\.(published|last_modified) = (?!'')", query)  # not the IS-empty test
     plain, fill = _SET.findall(query), _FILL.findall(query)
     assert sorted(assigned) == sorted([p for p, _ in plain] + [p for p, _ in fill]), query
     for prop, param in plain:
@@ -151,17 +156,18 @@ def _apply(node: dict, query: str, params: dict) -> None:
     for prop, param in fill:
         if node.get(prop) in (None, ""):
             node[prop] = params[param]
+    apply_statement(node, query, params, CVE_DESCRIPTIONS)
 
 
-def _merged(*keys: str) -> dict:
-    """The CVE node's three properties after ``merge_cve`` of the synced attributes, in order."""
-    return _merged_items(*(synced_key(key) for key in keys))
+def _merged(*keys: str, stored: dict | None = None) -> dict:
+    """The CVE node after ``merge_cve`` of the synced attributes, in order."""
+    return _merged_items(*(synced_key(key) for key in keys), stored=stored)
 
 
-def _merged_items(*items: dict) -> dict:
-    """The CVE node's three properties after ``merge_cve`` of the synced items, in order."""
+def _merged_items(*items: dict, stored: dict | None = None) -> dict:
+    """The CVE node after ``merge_cve`` of the synced items, in order (from *stored*)."""
     client, session = _recording_client()
-    node: dict = {}
+    node: dict = dict(stored or {})
     for item in items:
         assert client.merge_cve(item, source_id=item["tag"])
         _apply(node, *_node_statement(session, "CVE"))
@@ -169,7 +175,22 @@ def _merged_items(*items: dict) -> dict:
 
 
 def _record_text(item: dict) -> dict:
-    return {prop: item[prop] for prop in RECORD_TEXT if item.get(prop)}
+    """The node one record leaves on an empty CVE: its text with its source, and its dates."""
+    node = {prop: item[prop] for prop in RECORD_TEXT if item.get(prop)}
+    if item.get("description"):
+        node["description_source"] = item["tag"]
+    return node
+
+
+def _without_nvd(*sources: str) -> dict:
+    """The records of CVE-2025-21042 without NVD's: the real KEV and OTX attributes (the OTX block given a
+    ``description`` field), and the real CISA ICS attribute of CVE-2025-14272 named for it."""
+    otx = _with_comment_meta(attribute("CVE-2025-21042__source:AlienVault-OTX"), description="Samsung RCE")
+    ics = attribute("CVE-2025-14272__source:CISA-ICS")
+    ics["value"] = "CVE-2025-21042"
+    records = {"kev": synced_key("CVE-2025-21042__source:CISA-KEV"), "otx": synced(otx), "ics": synced(ics)}
+    assert {r["cve_id"] for r in records.values()} == {"CVE-2025-21042"}
+    return {name: records[name] for name in sources}
 
 
 # ---------------------------------------------------------------- the sync never stores a block
@@ -262,7 +283,7 @@ class TestProvenanceNotes:
         # reference merged first stayed, and the KEV text could never replace it.
         reference, kev = synced(otx_pulse_reference()), synced_key("CVE-2015-5477__source:CISA-KEV")
         order = (reference, kev) if first == "pulse_reference" else (kev, reference)
-        assert _merged_items(*order) == {"description": kev["description"]}
+        assert _merged_items(*order) == {"description": kev["description"], "description_source": "cisa_kev"}
 
     def test_the_stix_vulnerability_carries_neither(self):
         syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
@@ -323,38 +344,51 @@ class TestSyncedDescription:
         )
 
 
-# ---------------------------------------------------------------- merge_cve: NVD sets, others fill
+# ---------------------------------------------------------------- merge_cve: dates by NVD, description by rank
+def _ranked(query: str, params: dict) -> tuple:
+    """The ranked description a statement carries: (text, source, rank), or None without one."""
+    if CVE_DESCRIPTIONS.set_cypher("n", "n", *SINGLE_PARAMS) not in query:
+        return None
+    return params["ranked_description"], params["ranked_description_source"], params["ranked_description_rank"]
+
+
 class TestMergeCveStatements:
-    def test_nvd_record_sets_the_three_properties(self):
+    def test_nvd_record_sets_the_dates_and_carries_its_text_at_the_top_rank(self):
         client, session = _recording_client()
         nvd = synced_key("CVE-2025-21042__source:NVD")
         client.merge_cve(nvd, source_id="nvd")
         query, params = _node_statement(session, "CVE")
-        for prop in RECORD_TEXT:
+        for prop in RECORD_DATES:
             assert f"n.{prop} = ${prop}" in query
             assert params[prop] == nvd[prop]
         assert "$fill_" not in query
+        assert _ranked(query, params) == (nvd["description"], "nvd", CVE_DESCRIPTIONS.top_rank)
 
     @pytest.mark.parametrize(
         "key", ["CVE-2025-21042__source:CISA-KEV", "CVE-2025-14272__source:CISA-ICS", "CVE-2025-7223__source:CISA-ICS"]
     )
-    def test_another_record_only_fills(self, key):
+    def test_another_record_fills_the_dates_and_carries_its_text_at_its_rank(self, key):
         client, session = _recording_client()
         item = synced_key(key)
         client.merge_cve(item, source_id=item["tag"])
         query, params = _node_statement(session, "CVE")
-        for prop, value in _record_text(item).items():
-            assert (
-                f"n.{prop} = CASE WHEN n.{prop} IS NULL OR n.{prop} = '' THEN $fill_{prop} ELSE n.{prop} END" in query
-            )
-            assert params[f"fill_{prop}"] == value
+        for prop in RECORD_DATES:
+            if item.get(prop):
+                assert (
+                    f"n.{prop} = CASE WHEN n.{prop} IS NULL OR n.{prop} = '' THEN $fill_{prop} ELSE n.{prop} END"
+                ) in query
+                assert params[f"fill_{prop}"] == item[prop]
             assert f"n.{prop} = ${prop}" not in query
+        rank = CVE_DESCRIPTIONS.rank(item["tag"])
+        assert 0 < rank < CVE_DESCRIPTIONS.top_rank
+        assert _ranked(query, params) == (item["description"], item["tag"], rank)
 
     def test_an_otx_pulse_indicator_writes_none_of_them(self):
         client, session = _recording_client()
         client.merge_cve(synced_key("CVE-2015-5477__source:AlienVault-OTX"), source_id="alienvault_otx")
-        query, _params = _node_statement(session, "CVE")
-        assert not re.search(r"n\.(description|published|last_modified) =", query)
+        query, params = _node_statement(session, "CVE")
+        assert not re.search(r"n\.(description|description_source|published|last_modified) =", query)
+        assert _ranked(query, params) is None
 
 
 class TestMergeOrder:
@@ -362,20 +396,14 @@ class TestMergeOrder:
 
     NVD_21042 = "CVE-2025-21042__source:NVD"
 
-    @pytest.mark.parametrize(
-        "order",
-        [
-            ("NVD", "AlienVault-OTX", "CISA-KEV"),  # NVD then OTX; KEV after NVD
-            ("AlienVault-OTX", "CISA-KEV", "NVD"),  # OTX then NVD
-            ("CISA-KEV", "NVD", "AlienVault-OTX"),
-        ],
-    )
+    @pytest.mark.parametrize("order", list(itertools.permutations(("NVD", "AlienVault-OTX", "CISA-KEV"))))
     def test_nvd_text_wins_in_any_order(self, order):
         node = _merged(*(f"CVE-2025-21042__source:{source}" for source in order))
         assert node == _record_text(synced_key(self.NVD_21042))
+        assert node["description_source"] == "nvd"
 
     @pytest.mark.parametrize("cve_id", ["CVE-2025-14272", "CVE-2025-7223"])
-    def test_ics_dates_fill_and_nvd_replaces_them(self, cve_id):
+    def test_ics_text_and_dates_fill_and_nvd_replaces_them(self, cve_id):
         nvd, ics = synced_key(f"{cve_id}__source:NVD"), synced_key(f"{cve_id}__source:CISA-ICS")
         assert (ics["published"], ics["last_modified"]) != (nvd["published"], nvd["last_modified"])
         assert _merged(f"{cve_id}__source:CISA-ICS") == _record_text(ics), "alone, ICS fills the node"
@@ -394,74 +422,169 @@ class TestMergeOrder:
     )
     def test_without_an_nvd_record_the_kev_text_fills_and_otx_adds_nothing(self, order):
         node = _merged(*order)
-        assert node == {"description": synced_key("CVE-2015-5477__source:CISA-KEV")["description"]}
+        kev = synced_key("CVE-2015-5477__source:CISA-KEV")
+        assert node == {"description": kev["description"], "description_source": "cisa_kev"}
+
+    @pytest.mark.parametrize("order", list(itertools.permutations(("kev", "ics", "otx"))))
+    def test_without_an_nvd_record_kev_ranks_above_ics_and_ics_above_otx(self, order):
+        # 2026-10-16: until then the first of these to arrive kept the description (any record but NVD's
+        # only filled it), so the node depended on the order of the events.
+        records = _without_nvd(*order)
+        node = _merged_items(*records.values())
+        kev, ics = records["kev"], records["ics"]
+        assert node["description"] == kev["description"] and node["description_source"] == "cisa_kev"
+        # The dates are CISA ICS's (the advisory's): only NVD's record sets them, and KEV and OTX give none.
+        assert (node["published"], node["last_modified"]) == (ics["published"], ics["last_modified"])
+
+    @pytest.mark.parametrize("first", ["ics", "otx"])
+    def test_ics_text_ranks_above_an_otx_blocks_own_description(self, first):
+        records = _without_nvd("ics", "otx")
+        assert records["otx"]["description"] == "Samsung RCE"
+        order = (records["ics"], records["otx"]) if first == "ics" else (records["otx"], records["ics"])
+        node = _merged_items(*order)
+        assert (node["description"], node["description_source"]) == (records["ics"]["description"], "cisa_ics")
+        alone = _merged_items(records["otx"])
+        assert alone == {"description": "Samsung RCE", "description_source": "alienvault_otx"}
+
+    def test_the_same_source_revising_its_record_replaces_its_text(self):
+        kev = synced_key("CVE-2015-5477__source:CISA-KEV")
+        revised = dict(kev, description="ISC BIND contains a revised assertion failure description.")
+        node = _merged_items(kev, revised)
+        assert node == {"description": revised["description"], "description_source": "cisa_kev"}
 
     def test_an_empty_stored_description_counts_as_absent(self):
-        node = {"description": ""}
-        client, session = _recording_client()
         kev = synced_key("CVE-2015-5477__source:CISA-KEV")
-        client.merge_cve(kev, source_id="cisa_kev")
-        _apply(node, *_node_statement(session, "CVE"))
-        assert node["description"] == kev["description"]
+        node = _merged_items(kev, stored={"description": ""})
+        assert node == {"description": kev["description"], "description_source": "cisa_kev"}
+
+    def test_a_description_written_before_is_replaced_by_nvd_only(self):
+        # A node of a graph built before 2026-10-16: a description, no description_source.
+        legacy = {"description": "Text a record wrote before the ranking"}
+        kev, ics = _without_nvd("kev", "ics").values()
+        assert _merged_items(kev, ics, stored=legacy)["description"] == legacy["description"]
+        assert "description_source" not in _merged_items(kev, ics, stored=legacy)
+        nvd = synced_key(self.NVD_21042)
+        node = _merged_items(kev, nvd, ics, stored=legacy)
+        assert (node["description"], node["description_source"]) == (nvd["description"], "nvd")
 
 
 # ---------------------------------------------------------------- the other write paths
 class TestOtherWritePaths:
-    def test_merge_vulnerability_follows_the_same_rule(self):
+    @pytest.mark.parametrize("first", ["NVD", "CISA-KEV"])
+    def test_merge_vulnerability_follows_the_same_rule(self, first):
         client, session = _recording_client()
         node: dict = {}
-        for key in ("CVE-2025-21042__source:NVD", "CVE-2025-21042__source:CISA-KEV"):
-            item = synced_key(key)
+        order = ("NVD", "CISA-KEV") if first == "NVD" else ("CISA-KEV", "NVD")
+        for source in order:
+            item = synced_key(f"CVE-2025-21042__source:{source}")
             assert client.merge_vulnerability(item, source_id=item["tag"])
             _apply(node, *_node_statement(session, "Vulnerability"))
         assert node == _record_text(synced_key("CVE-2025-21042__source:NVD"))
 
-    def test_merge_node_with_source_sets_a_property_in_both_dicts_once(self):
+    @pytest.mark.parametrize(
+        ("label", "extra_props", "fill_props"),
+        [
+            ("CVE", {"description": "NVD"}, None),
+            ("CVE", None, {"description": "other"}),
+            ("Malware", {"description_source": "mitre_attck"}, None),
+            ("Tactic", {"description": "ATT&CK"}, None),
+        ],
+    )
+    def test_merge_node_with_source_refuses_a_description_outside_the_ranking(self, label, extra_props, fill_props):
+        client, session = _recording_client()
+        with pytest.raises(ValueError, match="source ranking"):
+            client.merge_node_with_source(
+                label, {"name": "x"}, {"name": "x"}, "nvd", extra_props=extra_props, fill_props=fill_props
+            )
+        assert not session.run.call_args_list, "nothing was written"
+
+    def test_a_label_without_a_ranking_keeps_its_description_and_takes_no_ranked_one(self):
         client, session = _recording_client()
         client.merge_node_with_source(
-            "CVE",
-            {"cve_id": "CVE-2025-21042"},
-            {"cve_id": "CVE-2025-21042"},
-            "nvd",
-            extra_props={"description": "NVD"},
-            fill_props={"description": "other", "published": "", "last_modified": None},
+            "Indicator", {"value": "x"}, {"value": "x"}, "misp", extra_props={"description": "an alert's text"}
         )
-        query, params = _node_statement(session, "CVE")
-        assert query.count("n.description =") == 1 and "n.description = $description" in query
-        assert "n.published" not in query and "n.last_modified" not in query
-        assert not [p for p in params if p.startswith("fill_")]
+        assert any("n.description = $description" in c.args[0] for c in session.run.call_args_list if c.args)
+        with pytest.raises(ValueError, match="no description ranking"):
+            client.merge_node_with_source(
+                "Indicator", {"value": "x"}, {"value": "x"}, "misp", description=CVE_DESCRIPTIONS.record("t", "nvd")
+            )
 
-    def test_batch_rows_from_nvd_set_and_other_rows_fill(self):
+    def test_batch_rows_carry_their_ranked_text_and_nvd_rows_set_the_dates(self):
         client, session = _recording_client()
         nvd, kev = synced_key("CVE-2025-21042__source:NVD"), synced_key("CVE-2025-21042__source:CISA-KEV")
-        client.merge_vulnerabilities_batch([nvd], source_id="nvd")
         client.merge_vulnerabilities_batch([kev], source_id="cisa_kev")
+        client.merge_vulnerabilities_batch([nvd], source_id="nvd")
         batch_calls = [c for c in session.run.call_args_list if c.args and "UNWIND $batch as item" in c.args[0]]
         assert len(batch_calls) == 2
         query = batch_calls[0].args[0]
-        for prop in RECORD_TEXT:
+        for prop in RECORD_DATES:
             assert (
                 f"n.{prop} = CASE WHEN item.nvd_record THEN coalesce(item.{prop}, n.{prop}) "
                 f"ELSE CASE WHEN n.{prop} IS NULL OR n.{prop} = '' THEN item.{prop} ELSE n.{prop} END END"
             ) in query
-            assert f"n.{prop} = coalesce(item.{prop}, n.{prop})" not in query
+        block = CVE_DESCRIPTIONS.set_cypher(
+            "n", "n, item", "item.description", "item.description_source", "item.description_rank"
+        )
+        assert query.count(block) == 1
+        assert not re.search(r"\bn\.description(_source)? = ", query.replace(block, ""))
+        assert block + "\n" in query and query.index(block) < query.index("MATCH (s:Source")
         rows = [c.kwargs["batch"][0] for c in batch_calls]
-        assert [row["nvd_record"] for row in rows] == [True, False]
-        assert rows[0]["description"] == nvd["description"] and rows[1]["description"] == kev["description"]
+        assert [row["nvd_record"] for row in rows] == [False, True]
+        assert [(row["description"], row["description_source"], row["description_rank"]) for row in rows] == [
+            (kev["description"], "cisa_kev", CVE_DESCRIPTIONS.rank("cisa_kev")),
+            (nvd["description"], "nvd", CVE_DESCRIPTIONS.top_rank),
+        ]
+        # The rows in either order leave NVD's text (the mirror of the ranked SET).
+        node: dict = {}
+        for row in rows[::-1] + rows:
+            record = CVE_DESCRIPTIONS.record(row["description"], row["description_source"])
+            if CVE_DESCRIPTIONS.replaces(node.get("description"), node.get("description_source"), record):
+                node.update(description=record.text, description_source=record.source)
+        assert node == {"description": nvd["description"], "description_source": "nvd"}
+
+    def test_a_batch_row_without_text_carries_none(self):
+        client, session = _recording_client()
+        client.merge_vulnerabilities_batch(
+            [synced_key("CVE-2015-5477__source:AlienVault-OTX")], source_id="alienvault_otx"
+        )
+        (row,) = [c.kwargs["batch"][0] for c in session.run.call_args_list if c.args and "UNWIND $batch" in c.args[0]]
+        assert not {"description", "description_source", "description_rank"} & set(row)
+
+    @pytest.mark.parametrize(("method", "var"), [("merge_resilmesh_cve", "c"), ("merge_resilmesh_vulnerability", "v")])
+    def test_resilmesh_native_writes_rank_below_every_feed(self, method, var):
+        client, session = _recording_client()
+        assert getattr(client, method)(
+            {"cve_id": "CVE-2025-21042", "name": "x", "status": ["active"], "description": "p"}
+        )
+        query, params = session.run.call_args_list[-1].args[0], session.run.call_args_list[-1].kwargs
+        block = CVE_DESCRIPTIONS.set_cypher(var, var, "$description", "$description_source", "$description_rank")
+        assert query.count(block) == 1
+        assert not re.search(rf"\b{var}\.description(_source)? = ", query.replace(block, ""))
+        assert (params["description"], params["description_source"], params["description_rank"]) == (
+            "p",
+            "resilmesh",
+            0,
+        )
+        record = CVE_DESCRIPTIONS.record("p", "resilmesh")
+        assert not CVE_DESCRIPTIONS.replaces("NVD text", "nvd", record), "never a feed's text"
+        assert not CVE_DESCRIPTIONS.replaces("legacy", None, record)
+        assert CVE_DESCRIPTIONS.replaces(None, None, record) and CVE_DESCRIPTIONS.replaces("x", "stix_import", record)
 
     @pytest.mark.parametrize("method", ["merge_resilmesh_cve", "merge_resilmesh_vulnerability"])
-    def test_resilmesh_native_writes_only_fill(self, method):
+    def test_a_resilmesh_native_write_without_text_changes_no_description(self, method):
+        # A call without a description used to remove the stored one (SET to null).
         client, session = _recording_client()
-        assert getattr(client, method)({"cve_id": "CVE-2025-21042", "name": "x", "status": ["active"]})
+        assert getattr(client, method)({"cve_id": "CVE-2025-21042"})
+        params = session.run.call_args_list[-1].kwargs
+        assert params["description"] is None  # the ranked SET's guard: no text, no change
+
+    def test_resilmesh_native_cve_dates_only_fill(self):
+        client, session = _recording_client()
+        assert client.merge_resilmesh_cve({"cve_id": "CVE-2025-21042"})
         query = session.run.call_args_list[-1].args[0]
-        var = "c" if method == "merge_resilmesh_cve" else "v"
-        props = RECORD_TEXT if method == "merge_resilmesh_cve" else ("description",)
-        for prop in props:
-            assert (
-                f"{var}.{prop} = CASE WHEN {var}.{prop} IS NULL OR {var}.{prop} = '' THEN ${prop} ELSE {var}.{prop} END"
-            ) in query
-            # A call without the property used to remove NVD's value (SET to null).
-            assert f"{var}.{prop} = ${prop}" not in query
+        for prop in RECORD_DATES:
+            assert f"c.{prop} = CASE WHEN c.{prop} IS NULL OR c.{prop} = '' THEN ${prop} ELSE c.{prop} END" in query
+            assert f"c.{prop} = ${prop}" not in query
 
     @pytest.mark.parametrize(
         ("method", "props"),
@@ -485,9 +608,10 @@ class TestOtherWritePaths:
 # ---------------------------------------------------------------- the opt-in STIX flow
 class TestStixImport:
     """``run_pipeline.load_stix21_to_neo4j`` (MISP → STIX → Neo4j, ``--stix-flow``): the vulnerability SDO
-    carries no NVD record, so every CVE it names, NVD's included, only fills the description."""
+    of an NVD event carries NVD's text and NVD as its source, so the CVE gets the description the attribute
+    flow gives it (until 2026-10-16 the SDO, which carries no NVD record, only filled it)."""
 
-    def test_an_nvd_sdo_only_fills_the_description(self):
+    def test_an_nvd_sdo_gives_the_description_the_attribute_flow_gives(self):
         from run_pipeline import EdgeGuardPipeline
 
         client, session = _recording_client()
@@ -502,15 +626,13 @@ class TestStixImport:
             pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [sdo]})
         ((data,), kwargs) = merge_cve.call_args
         assert kwargs["source_id"] == "nvd"
-        assert data["description"] == synced_key("CVE-2025-21042__source:NVD")["description"]
         assert not data.get("nvd_record")
-        query, params = _node_statement(session, "CVE")
-        assert (
-            "n.description = CASE WHEN n.description IS NULL OR n.description = '' "
-            "THEN $fill_description ELSE n.description END"
-        ) in query
-        assert "n.description = $description" not in query
-        assert params["fill_description"] == data["description"]
+        node = {"description": "KEV text", "description_source": "cisa_kev"}
+        _apply(node, *_node_statement(session, "CVE"))
+        attribute_flow = _merged("CVE-2025-21042__source:CISA-KEV", "CVE-2025-21042__source:NVD")
+        expected = (synced_key("CVE-2025-21042__source:NVD")["description"], "nvd")
+        assert (node["description"], node["description_source"]) == expected
+        assert (attribute_flow["description"], attribute_flow["description_source"]) == expected
 
 
 # ================================================================ the RUNBOOK repair (docs/RUNBOOK.md)

@@ -22,12 +22,16 @@ from collectors.collector_utils import (
     THREATFOX_API_KEY_PLACEHOLDERS,
     RateLimiter,
     TransientServerError,
+    feed_time,
     is_auth_or_access_denied,
+    lower_limit,
     make_skipped_optional_source,
     make_status,
+    newest_first,
     optional_api_key_effective,
     request_with_rate_limit_retries,
     retry_with_backoff,
+    source_run_cap,
     status_after_misp_push,
 )
 
@@ -57,65 +61,6 @@ def get_zones_from_malware(malware_name: str) -> List[str]:
         List of zone names (e.g., ['finance', 'healthcare'] or ['global'] if no match)
     """
     return detect_zones_from_text(malware_name or "")
-
-
-def _source_run_cap(attr_name: str, default: int) -> int:
-    """``config.<attr_name>`` clamped at 0 (``0`` = no per-run cap); read per call so tests and
-    Airflow tasks see the current value."""
-    import config as _config
-
-    try:
-        return max(0, int(getattr(_config, attr_name, default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _lower_limit(limit: Optional[int], cap: int) -> Optional[int]:
-    """The lower of the regular collection ``limit`` and the source's per-run ``cap``.
-
-    ``cap`` ≤ 0 means no per-run cap; ``limit`` ``None`` means no regular limit; ``None`` = no cut.
-    """
-    effective: Optional[int] = cap if cap > 0 else None
-    if limit is not None:
-        effective = limit if effective is None else min(limit, effective)
-    return effective
-
-
-def _abusech_time(value: Any) -> Optional[datetime]:
-    """An abuse.ch feed timestamp as an aware UTC datetime; None when absent or unparseable.
-
-    ThreatFox writes ``first_seen`` as ``YYYY-MM-DD HH:MM:SS UTC``, URLhaus ``dateadded`` as
-    ``YYYY-MM-DD HH:MM:SS`` (UTC). Used only to order entries before a per-run cap (2026-10).
-    """
-    text = str(value or "").strip().strip('"')
-    if text.upper().endswith(" UTC"):
-        text = text[:-4].rstrip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _newest_first(entries: List[Any], stamp: Any) -> List[Any]:
-    """``entries`` ordered by ``stamp(entry)`` (an aware datetime or None), newest first.
-
-    Entries without a usable timestamp come last; entries with equal keys keep the feed's
-    order (the sort is stable, also in reverse).
-    """
-    keyed = [(stamp(entry), entry) for entry in entries]
-    keyed.sort(key=lambda pair: (pair[0] is not None, pair[0] or _EPOCH_UTC), reverse=True)
-    return [entry for _, entry in keyed]
 
 
 # MalwareBazaar (abuse.ch) — flag-guarded source added 2026-10 (see MalwareBazaarCollector).
@@ -186,7 +131,7 @@ class ThreatFoxCollector:
     @staticmethod
     def max_per_run() -> int:
         """``config.THREATFOX_MAX_PER_RUN`` (default 10,000; ``0`` = no per-run cap)."""
-        return _source_run_cap("THREATFOX_MAX_PER_RUN", 10000)
+        return source_run_cap("THREATFOX_MAX_PER_RUN", 10000)
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _fetch_iocs(self, days: int) -> dict:
@@ -311,10 +256,10 @@ class ThreatFoxCollector:
 
             # 2026-10: the source's own cap (``EDGEGUARD_THREATFOX_MAX_PER_RUN``) replaces the
             # generic incremental default; a run that reaches it keeps the newest IOCs.
-            cap = _lower_limit(limit, self.max_per_run())
+            cap = lower_limit(limit, self.max_per_run())
             iocs_to_process = iocs
             if cap is not None and len(iocs) > cap:
-                iocs_to_process = _newest_first(iocs, lambda ioc: _abusech_time(ioc.get("first_seen")))[:cap]
+                iocs_to_process = newest_first(iocs, lambda ioc: feed_time(ioc.get("first_seen")))[:cap]
                 logger.warning(
                     "ThreatFox: the %d-day window lists %d IOCs, more than this run's cap of %d "
                     "(EDGEGUARD_THREATFOX_MAX_PER_RUN, or a lower EDGEGUARD_MAX_ENTRIES / baseline limit); "
@@ -498,7 +443,7 @@ class URLhausCollector:
     @staticmethod
     def max_per_run() -> int:
         """``config.URLHAUS_MAX_PER_RUN`` (default 50,000; ``0`` = no per-run cap)."""
-        return _source_run_cap("URLHAUS_MAX_PER_RUN", 50000)
+        return source_run_cap("URLHAUS_MAX_PER_RUN", 50000)
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _fetch_feed(self, url: str) -> str:
@@ -549,7 +494,7 @@ class URLhausCollector:
         limit = resolve_collection_limit(limit, "urlhaus", baseline=baseline)
         # 2026-10: the source's own cap (``EDGEGUARD_URLHAUS_MAX_PER_RUN``) replaces the generic
         # incremental default; a run that reaches it keeps the newest URLs.
-        cap = _lower_limit(limit, self.max_per_run())
+        cap = lower_limit(limit, self.max_per_run())
         results = []
         # Track per-URL failures so we can distinguish "all mirrors failed"
         # (real outage — report FAILURE to Airflow/Prometheus) from "first
@@ -574,7 +519,7 @@ class URLhausCollector:
                 rows = list(csv.reader(io.StringIO("\n".join(data_lines))))
                 listed = len(rows)
                 if cap is not None and listed > cap:
-                    rows = _newest_first(rows, lambda parts: _abusech_time(parts[1]) if len(parts) > 1 else None)[:cap]
+                    rows = newest_first(rows, lambda parts: feed_time(parts[1]) if len(parts) > 1 else None)[:cap]
                     logger.warning(
                         "URLhaus: %s lists %d URLs, more than this run's cap of %d "
                         "(EDGEGUARD_URLHAUS_MAX_PER_RUN, or a lower EDGEGUARD_MAX_ENTRIES / baseline limit); "

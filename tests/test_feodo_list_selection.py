@@ -308,9 +308,14 @@ def test_limit_counts_addresses_not_rows(feodo, monkeypatch) -> None:
         text = REPEATED
 
     monkeypatch.setattr(mod, "request_with_rate_limit_retries", lambda *a, **k: Resp())
-    items = feodo.collect(limit=2, push_to_misp=False, baseline=True)
-    assert [i["value"] for i in items] == ["103.61.101.11", "12.172.173.82"]
+    # Seven rows, four addresses: a limit of four keeps every address (a cut by rows would keep two).
+    items = feodo.collect(limit=4, push_to_misp=False, baseline=True)
+    assert [i["value"] for i in items] == ["103.61.101.11", "12.172.173.82", "192.0.2.44", "192.0.2.45"]
     assert items[0]["last_online"] == "2021-03-02", "the first address still carries all three of its rows"
+    # 2026-10: a lower limit keeps the addresses seen online most recently (``last_online``, else
+    # ``first_seen``), not the first ones of the file.
+    items = feodo.collect(limit=2, push_to_misp=False, baseline=True)
+    assert [i["value"] for i in items] == ["12.172.173.82", "192.0.2.45"]
 
 
 def test_last_seen_comes_from_last_online_and_never_precedes_first_seen(repeated) -> None:

@@ -278,9 +278,11 @@ def test_exports_of_driver_datetimes_parse_strictly(monkeypatch, method):
         (indicator,) = indicators
         # valid_from = the earliest source claim (SOURCED_FROM min), nanoseconds cut.
         assert indicator["valid_from"] == "2023-01-01T00:00:00.987654Z"
+        # 2026-10-16: an indicator's modified is the latest of created, last_recorded_at and
+        # aging_since (``indicator_aging``), not last_updated, so it is never before created.
         assert (indicator["created"], indicator["modified"]) == (
             "2026-10-15T08:00:00.123456Z",
-            "2026-10-14T07:30:00.000Z",
+            "2026-10-15T08:00:00.123456Z",
         )
         assert indicator["x_edgeguard_first_imported_at"] == "2026-10-15T08:00:00.123456+00:00"
         assert "x_edgeguard_first_seen_inferred" not in indicator
@@ -457,6 +459,46 @@ class TestGraphExplorer:
             ("technique:T1059", "tactic:execution", "IN_TACTIC"),
         ]
 
+    def test_vulnerabilities_view_returns_the_description_with_its_source(self, monkeypatch):
+        """2026-10-16: a CVE node of the view carries ``description_source`` with the description, both
+        taken from one node of the CVE's twins (``head(collect(...))`` of each would skip a null on one
+        node and could pair one node's text with the other's source)."""
+        row = {
+            "cve_id": "CVE-2015-5477",
+            "cvss_score": None,
+            "severity": "UNKNOWN",
+            "attack_vector": None,
+            "zones": ["global"],
+            "cisa_exploit_add": "2022-01-10",
+            "cisa_action_due": "2022-07-10",
+            "cisa_notes": "",
+            "cisa_cwes": [],
+            "version_constraints": None,
+            "description": "KEV text",
+            "description_source": "cisa_kev",
+        }
+        session = _Session([("WHERE (n:Vulnerability OR n:CVE)", _Result([row]))])
+        data = _rest(monkeypatch, session).get("/graph/explore?view=vulnerabilities").json()
+        node = next(n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2015-5477")
+        assert (node["description"], node["description_source"]) == ("KEV text", "cisa_kev")
+        query = session.calls[0][0]
+        # Of the twins, the one the source ranking keeps (run on a real Neo4j in
+        # tests/test_export_paths_neo4j.py): ``head(...)`` took the twin the rows returned first.
+        import query_api
+        from description_ranking import CVE_DESCRIPTIONS
+
+        assert f"{query_api._TWIN_DESCRIPTION} AS described" in query
+        assert query_api._TWIN_DESCRIPTION.startswith(
+            f"reduce(_best = null, _d IN collect([{CVE_DESCRIPTIONS.stored_rank_cypher('n')}, "
+            "n.description_source, n.description]) | CASE WHEN _d[0] < 0 THEN _best "
+        )
+        # 2026-10-16: at an equal rank the twin that names a source wins (a null source sorts last), as
+        # the write rule lets a named source's record replace a text without one.
+        assert "(_d[0] = _best[0] AND ((_d[1] IS NOT NULL AND _best[1] IS NULL) OR " in query_api._TWIN_DESCRIPTION
+        assert "coalesce(_d[1], '')" not in query_api._TWIN_DESCRIPTION
+        assert "described[2] AS description" in query and "described[1] AS description_source" in query
+        assert "head(collect(n.description))" not in query and "head([d IN collect(" not in query
+
     def test_the_page_styles_every_edge_type_the_api_emits(self):
         page = (ROOT / "docs" / "visualization.html").read_text()
         src = (ROOT / "src" / "query_api.py").read_text()
@@ -542,6 +584,35 @@ _TLP_NODES = {
     "indicators": ("Indicator", {"value": "203.0.113.5", "indicator_type": "ipv4", "tlp": "amber"}),
     "vulnerabilities": ("CVE", {"cve_id": "CVE-2021-44228", "tlp": "white"}),
 }
+
+
+class TestGraphqlDescriptionSource:
+    """2026-10-16: every node type with a description returns the source the ranking kept
+    (``description_source``), null when the node names none."""
+
+    @pytest.mark.parametrize("field", sorted(set(_TLP_NODES) - {"campaigns", "indicators"}))
+    def test_every_list_query_returns_the_description_source(self, monkeypatch, field):
+        label, node = _TLP_NODES[field]
+        node = dict(node, description="text", description_source="misp")
+        session = _Session([(f"MATCH (n:{label})", _Result([{"n": node}, {"n": dict(node, description_source=None)}]))])
+        monkeypatch.setattr(graphql_api, "_client", _ConnectedClient(session))
+        result = graphql_api.schema.execute_sync(f"{{ {field} {{ description descriptionSource }} }}")
+        assert result.errors is None, result.errors
+        assert result.data == {
+            field: [
+                {"description": "text", "descriptionSource": "misp"},
+                {"description": "text", "descriptionSource": None},
+            ]
+        }
+
+    def test_cve_returns_its_description_source(self, monkeypatch):
+        cve = {"cve_id": "CVE-2015-5477", "description": "KEV text", "description_source": "cisa_kev"}
+        row = {"c": cve, "cv40": None, "cv31": None, "cv30": None, "cv2": None}
+        session = _Session([("MATCH (c:CVE {cve_id: $cve_id})", _Result(single=row))])
+        monkeypatch.setattr(graphql_api, "_client", _ConnectedClient(session))
+        result = graphql_api.schema.execute_sync('{ cve(cveId: "CVE-2015-5477") { description descriptionSource } }')
+        assert result.errors is None, result.errors
+        assert result.data == {"cve": {"description": "KEV text", "descriptionSource": "cisa_kev"}}
 
 
 class TestGraphqlTlp:
@@ -771,7 +842,9 @@ class TestWazuhCap:
         assert resp.headers["X-EdgeGuard-Entries"] == "2"
         assert any("truncated" in r.getMessage() and "energy" in r.getMessage() for r in caplog.records)
         query, params = session.calls[0]
-        assert "ORDER BY (n.last_updated IS NULL), n.last_updated DESC, key LIMIT $cap + 1" in query
+        # 2026-10-16: indicators by their latest report (or when EdgeGuard created them).
+        assert query.endswith(query_api._CDB_INDICATOR_ORDER_AND_LIMIT)
+        assert "coalesce(n.last_reported_at, n.first_imported_at) DESC, key LIMIT $cap + 1" in query
         assert params["cap"] == 2
 
     def test_a_list_within_the_cap_is_complete(self, monkeypatch, caplog):
