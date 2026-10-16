@@ -2160,15 +2160,7 @@ def cmd_stats(args) -> int:
             misp_summary = _fetch_misp_event_summary()
             result["misp"] = misp_summary
             if misp_summary and not use_json:
-                print(
-                    f"\n  MISP Events: {misp_summary['total_events']} events, "
-                    f"{misp_summary['total_attributes']:,} attributes"
-                )
-                if misp_summary.get("by_source"):
-                    print(f"\n  {'MISP by Source':<28} {'Events':>8} {'Attributes':>12}")
-                    print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
-                    for src in sorted(misp_summary["by_source"], key=lambda x: -x["attributes"]):
-                        print(f"  {src['source']:<28} {src['events']:>8} {src['attributes']:>12,}")
+                _print_misp_event_summary(misp_summary)
         except Exception as e:
             warn(f"MISP: {e}")
 
@@ -2225,8 +2217,36 @@ def cmd_stats(args) -> int:
     return 0
 
 
+# 2026-10: ``stats --misp`` pages through ``/events/index`` (it read one page of 500 events, so on a
+# deployment after a 730-day baseline, one event per source per day, the per-source table covered an
+# arbitrary first 500). The cap bounds the run on an instance with far more events than EdgeGuard's.
+_MISP_SUMMARY_PAGE_SIZE = 500
+_MISP_SUMMARY_MAX_PAGES = 200
+
+
+def _print_misp_event_summary(misp_summary: dict) -> None:
+    """The ``stats --misp`` table: totals, a note when the page cap was reached (2026-10), and the
+    events and attributes per source."""
+    print(f"\n  MISP Events: {misp_summary['total_events']} events, {misp_summary['total_attributes']:,} attributes")
+    if misp_summary.get("truncated"):
+        warn(
+            f"MISP: stopped after {_MISP_SUMMARY_MAX_PAGES} page(s) of {_MISP_SUMMARY_PAGE_SIZE} events; "
+            "the counts miss any event beyond them"
+        )
+    if misp_summary.get("by_source"):
+        print(f"\n  {'MISP by Source':<28} {'Events':>8} {'Attributes':>12}")
+        print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
+        for src in sorted(misp_summary["by_source"], key=lambda x: -x["attributes"]):
+            print(f"  {src['source']:<28} {src['events']:>8} {src['attributes']:>12,}")
+
+
 def _fetch_misp_event_summary() -> dict:
-    """Query MISP for event/attribute counts grouped by source tag."""
+    """Query MISP for event/attribute counts grouped by source tag.
+
+    Reads every page of ``/events/index`` matching ``EdgeGuard`` (2026-10), up to
+    ``_MISP_SUMMARY_MAX_PAGES`` pages of ``_MISP_SUMMARY_PAGE_SIZE`` events; ``truncated`` is true
+    when the last allowed page was full, so the counts may miss events beyond the cap.
+    """
     import warnings
 
     import requests as _requests
@@ -2244,20 +2264,28 @@ def _fetch_misp_event_summary() -> dict:
     )
     apply_misp_http_host_header(session)
 
-    # Fetch EdgeGuard events index (lightweight — no attributes)
-    with warnings.catch_warnings():
-        if not SSL_VERIFY:
-            warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-        resp = session.get(
-            f"{MISP_URL}/events/index",
-            params={"limit": 500, "searchall": "EdgeGuard"},
-            verify=SSL_VERIFY,
-            timeout=(15, 60),
-        )
-    resp.raise_for_status()
-    events = resp.json()
-    if not isinstance(events, list):
-        events = []
+    # Fetch EdgeGuard events index (lightweight — no attributes), page by page.
+    events: list = []
+    truncated = False
+    for page in range(1, _MISP_SUMMARY_MAX_PAGES + 1):
+        with warnings.catch_warnings():
+            if not SSL_VERIFY:
+                warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+            resp = session.get(
+                f"{MISP_URL}/events/index",
+                params={"limit": _MISP_SUMMARY_PAGE_SIZE, "page": page, "searchall": "EdgeGuard"},
+                verify=SSL_VERIFY,
+                timeout=(15, 60),
+            )
+        resp.raise_for_status()
+        batch = resp.json()
+        if not isinstance(batch, list) or not batch:
+            break
+        events.extend(batch)
+        if len(batch) < _MISP_SUMMARY_PAGE_SIZE:
+            break
+        if page == _MISP_SUMMARY_MAX_PAGES:
+            truncated = True
 
     total_events = 0
     total_attrs = 0
@@ -2286,6 +2314,7 @@ def _fetch_misp_event_summary() -> dict:
     return {
         "total_events": total_events,
         "total_attributes": total_attrs,
+        "truncated": truncated,
         "by_source": [
             {"source": src, "events": data["events"], "attributes": data["attributes"]}
             for src, data in source_map.items()
@@ -2955,7 +2984,7 @@ Examples:
   edgeguard.py stats --full          # + breakdown by zone, source, and MISP events
   edgeguard.py stats --by-zone       # Node counts per zone (shows multi-zone overlap)
   edgeguard.py stats --by-source     # Node counts per source
-  edgeguard.py stats --misp          # MISP event/attribute counts by source and zone
+  edgeguard.py stats --misp          # MISP event/attribute counts by source
   edgeguard.py stats --json          # Machine-readable JSON output
   edgeguard.py dag status            # Show Airflow DAG run states (color-coded)
   edgeguard.py dag status --state running  # Only running/queued runs

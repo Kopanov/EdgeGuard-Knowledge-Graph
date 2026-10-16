@@ -1,6 +1,6 @@
 # EdgeGuard Demo
 
-**Last updated:** 2026-10-16 — rewritten for `demo/alert_enrichment_demo.py`, which runs EdgeGuard's alert enrichment read-only against the configured Neo4j and prints the processor's own response; the earlier NATS mock, which printed random values as an enrichment without querying anything, was removed. New section "Workflow demonstration": the end-to-end checks a presenter can run against a deployment. Same day: the alert enrichment reads CVEs as the graph links them, `(Indicator)-[:EXPLOITS]->` a `CVE` or `Vulnerability` node (it read `INDICATES` to a `Vulnerability`, which no code path writes, and found none).
+**Last updated:** 2026-10-16 — rewritten for `demo/alert_enrichment_demo.py`, which runs EdgeGuard's alert enrichment read-only against the configured Neo4j and prints the processor's own response; the earlier NATS mock, which printed random values as an enrichment without querying anything, was removed. New section "Workflow demonstration": the end-to-end checks a presenter can run against a deployment. Same day: the alert enrichment reads CVEs as the graph links them, `(Indicator)-[:EXPLOITS]->` a `CVE` or `Vulnerability` node (it read `INDICATES` to a `Vulnerability`, which no code path writes, and found none), with the score and severity of one node. Same day: a failed enrichment query is `enriched: false` and ends the demo with exit code 1, an alert the processor raises on is named and gives exit code 2; the prerequisites set a Bolt URI the host can reach; the comparison with `process_alert` covers confidence and last update; `stats --misp` counts every page of MISP's event index.
 
 Everything shown on this page is what the code returns from the graph it is pointed at. The
 output samples below give the **shape** only; the values in angle brackets are placeholders, not
@@ -24,8 +24,9 @@ generated from those fields. The demo hands alerts to that code and prints the r
   validation, indicator canonicalization (refang, case-fold, type inference) and enrichment
   queries as `process_alert`, without its writes (`process_alert` first records the Alert node,
   the alert's Indicator and `INVOLVES`, and afterwards stores the enrichment on the Alert node).
-  Every session is opened in read access mode; the only statements sent are the enrichment's
-  `MATCH` / `RETURN` queries and, with `--from-graph`, the selection query below.
+  Apart from `Neo4jClient`'s connection check (`RETURN 1`, in a session of the default access
+  mode), every statement is a `MATCH` / `RETURN` query sent in a read access session: the
+  enrichment's queries and, with `--from-graph`, the selection query below.
 - **No NATS.** The alert is passed to the processor directly. EdgeGuard subscribes to
   `resilmesh.alerts.zone.*` in code but has no deployed consumer, and does not publish the
   enriched response yet ([TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) § NATS Topics).
@@ -42,22 +43,28 @@ How the read-only answer differs from a `process_alert` answer, because nothing 
 | Field | Demo (read-only) | `process_alert` |
 |-------|------------------|-----------------|
 | `query_metadata.indicator_found` | `false` for an indicator the graph does not hold | `true` once its write succeeded: it creates the indicator before reading |
-| `enrichment.confidence`, `first_seen` | the stored values (`0.0` and `null` for an indicator the graph does not hold) | an unknown indicator has just been created at confidence 0.8, first imported now |
+| `enrichment.confidence` | the stored value (`0.0` for an indicator the graph does not hold) | at least 0.8: before reading, the write raises the indicator's confidence to 0.8 when it is lower, for a known indicator too (`create_indicator_from_alert`) |
+| `enrichment.last_updated`, `first_seen` | the stored values (`null` for an indicator the graph does not hold) | when no source reports a last seen, `last_updated` is the time of the write (it sets `last_updated` on every alert); an indicator it creates is first imported then |
 | `enrichment.sectors_affected` | the indicator's stored zones (the alert's `zone` when the graph does not hold the indicator), plus the alert's `tags` | the indicator's zones after the alert's zones (its `tags`, else its `zone`) were added to them, plus the alert's `tags` |
+| `enrichment.known_malware`, `query_metadata.malware_found` | a malware the alert names is listed even when the graph does not hold the indicator, so `malware_found` can be `true` from the alert alone | the same |
 | `enrichment.assets`, `users` | empty | empty: no code path writes `(Alert)-[:TARGETS]->(Asset)` or `(Alert)-[:INVOLVES_USER]->(User)` |
+| `enriched` when an enrichment query fails | `false`, with `query_metadata.error` | `true`, with `query_metadata.error` |
 
 ### Prerequisites
 
 - The repository's Python environment (`./install.sh --python`, or the project's `.venv`).
 - A populated Neo4j (after a baseline and a MISP → Neo4j sync).
 - The connection settings in the environment, as for every EdgeGuard command
-  ([SETUP_GUIDE.md](SETUP_GUIDE.md) § 3.6): `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`. From the
-  host of a Compose deployment, Neo4j's Bolt port is published on the loopback interface,
-  `bolt://localhost:7687`. `src/config.py` also requires `MISP_API_KEY` when it is imported; the
-  demo does not contact MISP.
+  ([SETUP_GUIDE.md](SETUP_GUIDE.md) § 3.6): `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`.
+  `src/config.py` also requires `MISP_API_KEY` when it is imported; the demo does not contact MISP.
+- `.env` names the Compose service (`NEO4J_URI=bolt://neo4j:7687`), which resolves inside the
+  Compose network only. From the host of a Compose deployment, Neo4j's Bolt port is published on
+  the loopback interface: set `NEO4J_URI` after loading `.env`. A remote deployment needs its own
+  Bolt URI (for example through a tunnel to its Bolt port).
 
 ```bash
-set -a && source .env && set +a   # bash/zsh
+set -a && source .env && set +a          # bash/zsh
+export NEO4J_URI=bolt://localhost:7687   # host of a Compose deployment; .env names the container
 ```
 
 ### Commands
@@ -101,15 +108,23 @@ An alert file uses the ResilMesh alert schema ([TECHNICAL_SPEC.md](TECHNICAL_SPE
 Format, `ResilMeshAlert` in `src/alert_processor.py`). Only `alert_id` (a non-empty string) is
 required, and `threat`, when present, must be an object; an alert failing that check is answered
 with `enriched: false` and the reason, as `process_alert` answers it. Fields the alert itself
-carries are reported as such: a CVE the alert names is listed with `"source": "alert"`; when the
-indicator is in the graph, a malware the alert names is listed with the description
-`From alert (not in graph)` unless a family the indicator is linked to has exactly that name
-(graph names are lower case and the comparison is case-sensitive).
+carries are reported as such: a CVE the alert names is listed with `"source": "alert"`; a malware
+the alert names is listed with the description `From alert (not in graph)` whether or not the
+graph holds the indicator, unless a family the indicator is linked to has exactly that name (graph
+names are lower case and the comparison is case-sensitive). `malware_found` is then `true` from
+the alert alone, and the recommendations include `Deploy signatures for <malware>`.
 
-Exit codes: `0` done, `1` Neo4j unreachable (one connection attempt, without the pipeline's
-retries) or the selection query failed, `2` usage or configuration error, `3` `--from-graph`
-selected no indicator. An enrichment query that fails is reported in that response's
-`query_metadata.error`, as `process_alert` reports it.
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Every alert answered (a rejected alert is answered with `enriched: false` and the reason) |
+| `1` | Neo4j unreachable (one connection attempt, without the pipeline's retries), the selection query failed, or an enrichment query failed. A failed enrichment query leaves the processor's defaults (nothing found, confidence `0.0`) for every part it had not read yet, which would read as "the graph holds nothing more on this indicator" although those parts were never read: that response is printed with `enriched: false` and `query_metadata.error`, and its alert id is named on stderr |
+| `2` | Usage or configuration error, an unreadable alert file, or an alert the processor raised on (for example a `threat.cve` that is not a string): that alert is left out of the output and named on stderr with the exception, the other alerts are answered |
+| `3` | `--from-graph` selected no indicator |
+
+Read the exit code, or `enriched` and `query_metadata.error`, before showing a response: the
+`jq '.[0].enrichment'` recipe above prints the enrichment without them.
 
 ### Output shape
 
@@ -154,8 +169,11 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
 ]
 ```
 
-A failed enrichment carries `query_metadata.error`; a rejected alert is `enriched: false` with an
-empty `enrichment`.
+A failed enrichment query gives `enriched: false` with `query_metadata.error` and the defaults in
+`enrichment`; a rejected alert is `enriched: false` with `query_metadata.error` and an empty
+`enrichment`. `cves` takes each CVE's score and severity from one node: the `CVE` node's (a null
+score with severity `UNKNOWN` when the CVE has no CVSS), or the `Vulnerability` node's when no
+`CVE` node of that id states them.
 
 ---
 
@@ -178,9 +196,9 @@ edgeguard stats --misp          # or: python src/edgeguard.py stats --misp
 
 Next to the graph's node counts, prints the number of EdgeGuard events and attributes in MISP and
 a table of events and attributes per source, parsed from the event names
-(`EdgeGuard-<source>-<date>`). The summary reads one page
-of MISP's `/events/index` (`limit=500`, `searchall=EdgeGuard`), so on a deployment holding more
-than 500 EdgeGuard events it counts the first 500 only. `--json` prints the same as JSON.
+(`EdgeGuard-<source>-<date>`). The summary reads every page of MISP's `/events/index`
+(`searchall=EdgeGuard`, 500 events a page, at most 200 pages; it warns when it stops at that cap,
+and `--json` then carries `"truncated": true`). `--json` prints the same as JSON.
 
 ### 2. Graph Explorer
 

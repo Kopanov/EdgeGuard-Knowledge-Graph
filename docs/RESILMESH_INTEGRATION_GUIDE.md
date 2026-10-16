@@ -254,11 +254,11 @@ raise `AttributeError`.
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ 4. NODE CREATION                                                │
-│    Neo4jClient creates/updates:                                 │
+│    process_complete_resilmesh_alert (Neo4jClient) creates:      │
 │    - Alert node (alert_id, source, zone, severity)              │
 │    - Indicator node (value, type, zones)                        │
-│    - IP node (if indicator is IP)                               │
-│    - Host node (if hostname in alert)                           │
+│    - IP / Host nodes: not written by the alert path (helpers    │
+│      exist, see the tables above)                               │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -271,13 +271,12 @@ raise `AttributeError`.
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ 6. ENRICHMENT QUERY                                             │
-│    GraphRAG queries for enrichment:                             │
-│    - Find malware attributed to indicator                       │
-│    - Find threat actors using malware                           │
-│    - Find MITRE techniques used by actors                       │
-│    - Find CVEs linked to indicator                              │
-│    - Find network context (hosts, subnets)                      │
+│ 6. ENRICHMENT QUERY (AlertProcessor._enrich_indicator, reads)   │
+│    - Malware the indicator INDICATES                            │
+│    - Threat actors that malware is ATTRIBUTED_TO                │
+│    - MITRE techniques those actors EMPLOY (EMPLOYS_TECHNIQUE)   │
+│    - CVEs the indicator EXPLOITS (CVE / Vulnerability nodes)    │
+│    - Network context (hosts, subnets): planned, not read        │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -289,7 +288,7 @@ raise `AttributeError`.
 │    - Threat actor details                                       │
 │    - MITRE ATT&CK mappings                                      │
 │    - CVE details with CVSS scores                               │
-│    - Network context from ResilMesh topology                    │
+│    - Network context: planned (assets / users stay empty)       │
 │    - Cross-zone impact assessment                               │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -329,26 +328,20 @@ alert_data = {
     }
 }
 
-# Step 2: Process complete alert
-result = client.process_complete_resilmesh_alert(alert_data)
-# Creates: Alert node, Indicator node, IP node, Host node
-# Links: Alert->Indicator, Indicator->IP
+# Step 2: Record and enrich the alert (src/alert_processor.py)
+processor = AlertProcessor(neo4j_client=client)
+response = processor.process_alert(alert_data)
+# Records: the Alert node, the alert's Indicator node, (Alert)-[:INVOLVES]->(Indicator)
+# Reads: malware (INDICATES), actors (ATTRIBUTED_TO), techniques (EMPLOYS_TECHNIQUE),
+#        CVEs (EXPLOITS to CVE / Vulnerability), the indicator's zones and source dates
+# Returns: an EnrichedAlert; response.to_dict() is the JSON (TECHNICAL_SPEC.md § Output)
+# Without recording the alert: processor.enrich_alert_read_only(alert_data)
+#   (demo/alert_enrichment_demo.py, DEMO.md)
 
-# Step 3: Enrichment query
-enrichment = client.get_enrichment_chain("192.168.1.100")
-
-# Step 4: Build response
-response = {
-    "alert_id": alert_data["alert_id"],
-    "enriched": True,
-    "latency_ms": 120,
-    "enrichment": enrichment
-}
-
-# Step 5: Publish to NATS — target design, not implemented (2026-10). The current handler
+# Step 3: Publish to NATS — target design, not implemented (2026-10). The current handler
 # (`alert_processor.handle_resilmesh_alert`) returns the response to its caller; no code
 # path publishes it. Subject and response schema are pending agreement with ResilMesh.
-await nats_client.publish("resilmesh.enriched.alerts", json.dumps(response))
+await nats_client.publish("resilmesh.enriched.alerts", json.dumps(response.to_dict()))
 ```
 
 ---
@@ -722,6 +715,6 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-_Last updated: 2026-10-15 — `merge_resilmesh_cve` keeps `cpe_type`, `result_impacts`, `ref_tags` and `cwe` when a call omits them. Same day: `merge_resilmesh_cve` only fills `description`, `published` and `last_modified`; NVD's record sets them. Prior: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
+_Last updated: 2026-10-16 — alert flow steps 4, 6 and 7 and the code example state what the alert path writes and reads: no IP or Host node, no network context (planned), the enrichment through `AlertProcessor` (the example called a stub that returns sample data). Prior: 2026-10-15 — `merge_resilmesh_cve` keeps `cpe_type`, `result_impacts`, `ref_tags` and `cwe` when a call omits them. Same day: `merge_resilmesh_cve` only fills `description`, `published` and `last_modified`; NVD's record sets them. Prior: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
 
 _Prior: 2026-04-28 — PR-N34 fixup of PR-N33 slip: corrected edge name `HAS_CVSSv*` → `HAS_CVSS_v*` (actual edges in `neo4j_client.py:_merge_cvss_node` use underscore + lowercase v + version: `HAS_CVSS_v2 / HAS_CVSS_v30 / HAS_CVSS_v31 / HAS_CVSS_v40`). Per-version mentions in code blocks + verification Cypher all corrected. Prior: 2026-04-26 PR-N33 docs audit (removed calls to deleted `create_cve_has_cvss()` helper, now internal to `merge_cve()` via `_merge_cvss_node`; fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` to avoid ISIM collision). 2026-04-18 PR #41 cleanup pass._

@@ -116,60 +116,64 @@ def _graph_cves(rows: List[Optional[Dict[str, Any]]]) -> List[Dict[str, Any]]:
 
     The graph can link an indicator to two nodes of one id, the ``CVE`` node (NVD's record; its
     score and severity come from the CVSS sub-nodes, ``merge_cve``) and a ``Vulnerability`` node.
-    The ``CVE`` node's values are taken first and the ``Vulnerability`` node fills only a value
-    the ``CVE`` node lacks. Entries are ordered by CVE id.
+    The score and severity are taken as a pair from one node, never field by field: from the
+    ``CVE`` node whenever it states either, including the null score and ``UNKNOWN`` severity of a
+    CVE without CVSS; from the ``Vulnerability`` node only when no ``CVE`` node of that id states
+    them. Mixing the two would print a pair no node holds, e.g. a score the ``CVE`` node dropped
+    (a ``Vulnerability`` node keeps an older score, ``merge_vulnerabilities_batch`` coalesces)
+    beside the ``CVE`` node's ``UNKNOWN``. Entries are ordered by CVE id.
     """
-    present = [row for row in rows if row and row.get("cve_id")]
-    present.sort(key=lambda row: 0 if row.get("node_label") == "CVE" else 1)
-    merged: Dict[str, Dict[str, Any]] = {}
-    for row in present:
-        entry = merged.setdefault(row["cve_id"], {"cve_id": row["cve_id"], "cvss_score": None, "severity": None})
-        for field in ("cvss_score", "severity"):
-            if entry[field] is None and row.get(field) is not None:
-                entry[field] = row[field]
-    return [merged[cve_id] for cve_id in sorted(merged)]
+
+    def _states(row: Dict[str, Any]) -> bool:
+        return row.get("cvss_score") is not None or row.get("severity") is not None
+
+    chosen: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if not row or not row.get("cve_id"):
+            continue
+        current = chosen.get(row["cve_id"])
+        rank = (_states(row), row.get("node_label") == "CVE")
+        if current is None or rank > (_states(current), current.get("node_label") == "CVE"):
+            chosen[row["cve_id"]] = row
+    return [
+        {"cve_id": cve_id, "cvss_score": chosen[cve_id].get("cvss_score"), "severity": chosen[cve_id].get("severity")}
+        for cve_id in sorted(chosen)
+    ]
 
 
 @dataclass
 class EnrichedAlert:
     """
-    EdgeGuard Enriched Response Schema
+    EdgeGuard enriched response: what ``process_alert`` and ``enrich_alert_read_only`` return.
+
+    The shape, with placeholders in angle brackets (2026-10: the list entries are objects, as
+    ``_enrich_indicator`` builds them; the sample here showed plain strings and invented values).
+    docs/TECHNICAL_SPEC.md § Output and docs/DEMO.md § Output shape describe each field.
 
     {
-      "alert_id": "wazuh-001",
-      "enriched": true,
+      "alert_id": "<the alert's id>",
+      "enriched": <true | false>,
       "edgeguard_version": "<CalVer from pyproject.toml>",
-      "latency_ms": 120,
+      "latency_ms": <milliseconds>,
       "query_metadata": {
-        "indicator_found": true,
-        "malware_found": true,
-        "actor_found": true,
-        "techniques_found": 3
+        "indicator_found": <true | false>, "malware_found": <true | false>,
+        "actor_found": <true | false>, "techniques_found": <count>, "cves_found": <count>,
+        "assets_found": 0, "users_found": 0,
+        "error": "<only when a query failed or the alert was rejected>"
       },
       "enrichment": {
-        "indicator": "192.168.1.100",
-        "indicator_type": "ip",
-        "known_malware": ["TrickBot", "Emotet"],
-        "threat_actors": ["Wizard Spider"],
-        "techniques": [
-          {
-            "mitre_id": "T1071",
-            "name": "Application Layer Protocol",
-            "tactic": "Command and Control"
-          }
-        ],
-        "cves": ["CVE-2021-43297"],
-        "confidence": 0.85,
-        "first_seen": "2025-01-15",
-        "last_updated": "2026-03-07",
-        "sectors_affected": ["healthcare", "finance"],
-        "cross_zone_detected": true,
-        "recommendations": [
-          "Block indicator 192.168.1.100 at perimeter",
-          "Check hospital-server-01 for compromise indicators"
-        ]
+        "indicator": "<canonical value>", "indicator_type": "<graph type>",
+        "known_malware": [{"name": ..., "family": ..., "malware_types": [...], "description": ...}],
+        "threat_actors": [{"name": ..., "aliases": [...], "description": ...}],
+        "techniques": [{"mitre_id": ..., "name": ..., "description": ...}],
+        "cves": [{"cve_id": ..., "cvss_score": ..., "severity": ...}],
+        "assets": [], "users": [],
+        "confidence": <the indicator's confidence_score>,
+        "first_seen": "<ISO-8601 or null>", "last_updated": "<ISO-8601 or null>",
+        "sectors_affected": ["<zone>", ...], "cross_zone_detected": <true | false>,
+        "recommendations": ["<generated from the fields above>", ...]
       },
-      "original_alert": { ... }  # Copy of incoming alert
+      "original_alert": { ... }  # copy of the incoming alert
     }
     """
 
@@ -356,11 +360,20 @@ class AlertProcessor:
         is not modified. ``demo/alert_enrichment_demo.py`` uses it so that a demonstration against
         a deployment leaves the graph as it was.
 
-        Because nothing is recorded, the response describes the graph as it stands, which differs
-        from a ``process_alert`` response in two places: an indicator the graph does not hold is
-        ``indicator_found: false`` (``process_alert`` creates it first, at confidence 0.8, and then
-        finds it), and ``sectors_affected`` comes from the indicator's stored zones, to which
-        ``process_alert`` first adds the alert's zones.
+        Because nothing is recorded, the response describes the graph as it stands. A
+        ``process_alert`` response for the same alert can differ where its writes change what is
+        read (``Neo4jClient.create_indicator_from_alert``): an indicator the graph does not hold is
+        ``indicator_found: false`` here (``process_alert`` creates it first and then finds it); the
+        indicator's ``confidence`` is the stored one here, while ``process_alert`` first raises it to
+        at least 0.8, for a known indicator too; ``last_updated``, when no source reports a last
+        seen, is the stored value here and the time of the write there (``first_seen`` too, for an
+        indicator ``process_alert`` creates); and ``sectors_affected`` comes from the indicator's
+        stored zones, to which ``process_alert`` first adds the alert's zones.
+
+        ``enriched`` is false when an enrichment query failed (2026-10): ``_enrich_indicator`` then
+        returns its defaults for every part it had not read yet, with ``query_metadata.error`` set,
+        which would otherwise read as "the graph holds nothing more on this indicator" although
+        those parts were never read. ``process_alert`` keeps ``enriched: true`` in that case.
 
         A client that already holds a driver (``neo4j.driver``) is used as it is; otherwise the
         processor connects as ``process_alert`` does.
@@ -392,7 +405,7 @@ class AlertProcessor:
         latency_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return EnrichedAlert(
             alert_id=alert.alert_id,
-            enriched=True,
+            enriched="error" not in enrichment_data["metadata"],
             edgeguard_version=self.VERSION,
             latency_ms=round(latency_ms, 2),
             query_metadata=enrichment_data["metadata"],

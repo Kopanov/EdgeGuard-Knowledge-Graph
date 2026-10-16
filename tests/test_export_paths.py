@@ -914,17 +914,22 @@ class TestDocumentation:
         assert "The MISP → Neo4j sync writes :CVE nodes, which carry the score, the" in guide
 
     def test_the_demo_page_states_the_written_directions(self):
-        """``(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)``, ``(Indicator)-[:INDICATES]->(Malware)`` and
-        ``(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)``, as ``build_relationships`` writes them."""
+        """``(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)``, ``(Indicator)-[:INDICATES]->(Malware)``,
+        ``(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`` and ``(Indicator)-[:EXPLOITS]->`` a CVE or
+        Vulnerability, as ``build_relationships`` writes them (2026-10: the page listed INDICATES to a
+        Vulnerability, which no pipeline path writes, and no EXPLOITS row)."""
         demo = (ROOT / "docs" / "demo.html").read_text()
         rows = dict(re.findall(r"<td>([A-Z_]+)</td>\s*<td>([^<]+)</td>", demo))
         assert rows["ATTRIBUTED_TO"] == "Malware → ThreatActor"
-        assert rows["INDICATES"] == "Indicator → Malware / Vulnerability"
+        assert rows["INDICATES"] == "Indicator → Malware"
+        assert rows["EXPLOITS"] == "Indicator → CVE / Vulnerability"
         assert rows["EMPLOYS_TECHNIQUE"] == "ThreatActor → Technique"
         assert "USES" not in rows
         assert "— Indicator → Malware</span>" not in demo
         build = (ROOT / "src" / "build_relationships.py").read_text()
         assert "MERGE (m)-[r:ATTRIBUTED_TO]->(a)" in build and "MERGE (i)-[r:INDICATES]->(m)" in build
+        assert "MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v)" in build
+        assert "MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c)" in build
 
     def test_the_stix_export_docstring_names_what_stix_types_returns(self, monkeypatch):
         """The route's OpenAPI description and ``/stix/types`` describe the same neighbourhoods."""

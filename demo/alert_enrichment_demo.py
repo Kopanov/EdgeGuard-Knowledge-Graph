@@ -9,8 +9,9 @@ is derived from them by the processor (the recommendations), or is the processor
 measured latency).
 
 The demo never writes: ``enrich_alert_read_only`` skips the steps of ``process_alert`` that
-record the alert, every session is opened in read access mode, and the only statements sent are
-the enrichment's MATCH / RETURN queries and, with ``--from-graph``, the selection query below.
+record the alert. Apart from ``Neo4jClient``'s connection check (``RETURN 1``, in a session of the
+default access mode), every statement is a MATCH / RETURN query sent in a read access session: the
+enrichment's queries and, with ``--from-graph``, the selection query below.
 
 The alert is handed to the processor directly: no NATS server is involved (EdgeGuard has no
 deployed NATS consumer yet). Usage: ``--help`` and ``docs/DEMO.md``.
@@ -41,8 +42,13 @@ LIMIT $limit"""
 SELECTION_TIMEOUT_SECONDS = 120.0
 
 EXIT_OK = 0
-EXIT_NEO4J = 1  # Neo4j unreachable, credentials refused, or the selection query failed
-EXIT_USAGE = 2  # bad arguments, unreadable alert file, incomplete configuration
+# Neo4j unreachable, credentials refused, the selection query failed, or (2026-10) an enrichment
+# query failed: the parts not read yet then hold the processor's defaults, as if the graph held
+# nothing.
+EXIT_NEO4J = 1
+# Bad arguments, unreadable alert file, incomplete configuration, or (2026-10) an alert the
+# processor raised on (e.g. a non-string ``threat.cve``).
+EXIT_USAGE = 2
 EXIT_NOTHING_SELECTED = 3  # --from-graph found no indicator to enrich
 
 _HELP_EPILOG = f"""\
@@ -62,9 +68,12 @@ neo4j), NEO4J_PASSWORD. src/config.py also requires MISP_API_KEY to be set when
 it is imported; the demo does not contact MISP.
 
 Output: a JSON array of responses on stdout; progress and errors on stderr.
-Exit codes: 0 done, 1 Neo4j unreachable or the selection query failed, 2 usage
-or configuration error, 3 --from-graph selected no indicator. An enrichment
-query that fails is reported in that response's query_metadata.error.
+A response whose enrichment query failed is printed with enriched: false and
+query_metadata.error, and its alert id is named on stderr. An alert the
+processor raises on is left out of the array and named on stderr.
+Exit codes: 0 done; 1 Neo4j unreachable, the selection query failed or an
+enrichment query failed; 2 usage or configuration error, or an alert the
+processor raised on; 3 --from-graph selected no indicator.
 """
 
 
@@ -206,9 +215,31 @@ def main(argv: Optional[Sequence[str]] = None, client_factory: Optional[Callable
             _err(f"Selected {len(alerts)} indicator(s) with the query shown by --help")
 
         processor = AlertProcessor(neo4j_client=client)
-        responses = [processor.enrich_alert_read_only(alert).to_dict() for alert in alerts]
+        responses: List[Dict[str, Any]] = []
+        raised: List[str] = []
+        for alert in alerts:
+            # 2026-10: one malformed alert (a non-string ``threat.cve`` or ``tags``) makes the
+            # processor raise outside its query error handling; report it and keep the others'
+            # responses instead of ending the demo with a traceback and no output.
+            try:
+                responses.append(processor.enrich_alert_read_only(alert).to_dict())
+            except Exception as exc:  # noqa: BLE001 - reported per alert, not raised, for a presenter
+                raised.append(f"{alert.get('alert_id')!r} ({type(exc).__name__}: {exc})")
         print(json.dumps(responses, indent=2, default=str))
-        return EXIT_OK
+
+        # 2026-10: a failed enrichment query leaves the processor's defaults (nothing found,
+        # confidence 0.0) for every part not read yet, so the run must not end as a success. A rejected alert (no alert_id,
+        # no indicator) has an empty enrichment and is the processor's normal answer to it.
+        failed = [r["alert_id"] for r in responses if r["enrichment"] and "error" in r["query_metadata"]]
+        if raised:
+            _err(f"The processor raised on {len(raised)} alert(s), left out of the output: {'; '.join(raised)}")
+        if failed:
+            _err(
+                f"An enrichment query failed for alert(s) {', '.join(map(repr, failed))}: the graph was not "
+                "fully read (see query_metadata.error)"
+            )
+            return EXIT_NEO4J
+        return EXIT_USAGE if raised else EXIT_OK
     finally:
         client.close()
 

@@ -12,13 +12,17 @@
   and prints what the processor returns. It never sends a write statement.
 
 The fake graph below answers each enrichment statement only for the pattern the graph really
-holds, so a query reading a relationship nothing writes gets nothing back.
+holds, so a query reading a relationship nothing writes gets nothing back; ``TestReadsHaveWriters``
+ties each of those patterns to the statement in ``build_relationships`` / ``neo4j_client`` that
+writes it. Like Neo4j, the fake answers an aggregate without grouping key (``RETURN collect(...)``)
+with one row of empty lists when nothing matches.
 """
 
 from __future__ import annotations
 
 import copy
 import importlib.util
+import inspect
 import json
 import re
 import sys
@@ -26,6 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
+from neo4j.exceptions import ServiceUnavailable
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
@@ -71,22 +76,35 @@ class _Result:
 class _Graph:
     """Answers the enrichment statements for ``_INDICATOR`` only where the pattern is one the
     graph writes: ``INDICATES`` to Malware, ``ATTRIBUTED_TO`` to ThreatActor, ``EMPLOYS_TECHNIQUE``
-    to Technique, ``EXPLOITS`` to CVE and Vulnerability."""
+    to Technique, ``EXPLOITS`` to CVE and Vulnerability. The CVE id is linked to both of its nodes
+    with their real shapes: the CVE node's score with the matching severity, and a Vulnerability
+    node holding an older score."""
 
     def __init__(self) -> None:
         self.statements: List[str] = []
+        self.params: List[Dict[str, Any]] = []
         self.session_kwargs: List[Dict[str, Any]] = []
+        self.fail_selection = False
+        self.fail_enrichment = False
         self.selection_rows = [
             {"value": _INDICATOR, "indicator_type": "ipv4", "zone": ["global", "energy"]},
             {"value": "evil.example", "indicator_type": "domain", "zone": ["global"]},
         ]
 
     def answer(self, query: str, params: Dict[str, Any]) -> _Result:
+        self.params.append(params)
         if "EXISTS { MATCH (i)-[:INDICATES]->(:Malware) }" in query:
-            return _Result(self.selection_rows[: params.get("limit", 0)])
-        if params.get("indicator") != _INDICATOR:
-            return _Result()  # MATCH (i:Indicator {value: $indicator}) finds no node
+            if self.fail_selection:
+                raise ServiceUnavailable("connection lost")
+            zone = params["zone"]
+            rows = [r for r in self.selection_rows if zone is None or zone in (r.get("zone") or [])]
+            return _Result(rows[: params["limit"]])
+        if self.fail_enrichment:
+            raise ServiceUnavailable("connection lost")
+        known = params.get("indicator") == _INDICATOR
         if "RETURN i {" in query:
+            if not known:
+                return _Result()  # grouped by i: no row when no Indicator node matches
             return _Result(
                 [
                     {
@@ -97,28 +115,37 @@ class _Graph:
                 ]
             )
         if "AS cves" in query or "as cves" in query:
-            if "OPTIONAL MATCH (i)-[:EXPLOITS]->(v)" in query and "WHERE v:CVE OR v:Vulnerability" in query:
+            if known and "OPTIONAL MATCH (i)-[:EXPLOITS]->(v)" in query and "WHERE v:CVE OR v:Vulnerability" in query:
                 return _Result(
                     [
                         {
                             "cves": [
                                 {
                                     "cve_id": "CVE-2024-3400",
-                                    "cvss_score": None,
-                                    "severity": "CRITICAL",
+                                    "cvss_score": 7.5,
+                                    "severity": "HIGH",
                                     "node_label": "Vulnerability",
                                 },
-                                {"cve_id": "CVE-2024-3400", "cvss_score": 10.0, "severity": None, "node_label": "CVE"},
+                                {
+                                    "cve_id": "CVE-2024-3400",
+                                    "cvss_score": 10.0,
+                                    "severity": "CRITICAL",
+                                    "node_label": "CVE",
+                                },
                             ]
                         }
                     ]
                 )
             return _Result([{"cves": []}])
         if "as malware_list" in query:
-            ok = "OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)" in query
+            ok = known and "OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)" in query
             return _Result([{"malware_list": [{"name": "cobalt strike"}] if ok else []}])
         if "as actors" in query:
-            ok = "(m)-[:ATTRIBUTED_TO]->(a:ThreatActor)" in query and "(a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)" in query
+            ok = (
+                known
+                and "(m)-[:ATTRIBUTED_TO]->(a:ThreatActor)" in query
+                and "(a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)" in query
+            )
             return _Result(
                 [
                     {
@@ -128,9 +155,10 @@ class _Graph:
                 ]
             )
         if "as assets" in query:
-            return _Result()  # no Alert node: the demo alert was never recorded
+            # No Alert node (the demo alert was never recorded): one aggregate row of empty lists.
+            return _Result([{"assets": [], "users": []}])
         if "RETURN i.zone as zone" in query:
-            return _Result([{"zone": ["energy"]}])
+            return _Result([{"zone": ["energy"]}] if known else [])
         raise AssertionError(f"unexpected statement: {query}")
 
 
@@ -246,18 +274,42 @@ class TestCveEnrichmentFollowsExploits:
 
 
 class TestGraphCves:
-    def test_one_entry_per_cve_id_cve_node_first(self):
+    """Score and severity come as a pair from one node (2026-10). A ``CVE`` node is either
+    ``{score, matching severity}`` or, without CVSS, ``{null, "UNKNOWN"}`` (``merge_cve``); a
+    ``Vulnerability`` node can keep an older score (``merge_vulnerabilities_batch`` coalesces); a
+    ``CVE`` node a partner wrote (``merge_resilmesh_cve``) can state neither."""
+
+    def test_one_entry_per_cve_id_the_pair_from_one_node(self):
         rows = [
-            {"cve_id": "CVE-2024-2", "cvss_score": 5.0, "severity": "MEDIUM", "node_label": "Vulnerability"},
-            {"cve_id": "CVE-2024-2", "cvss_score": 7.5, "severity": None, "node_label": "CVE"},
-            {"cve_id": "CVE-2024-1", "cvss_score": None, "severity": None, "node_label": "CVE"},
+            {"cve_id": "CVE-2024-2", "cvss_score": 3.0, "severity": "LOW", "node_label": "Vulnerability"},
+            {"cve_id": "CVE-2024-2", "cvss_score": None, "severity": "UNKNOWN", "node_label": "CVE"},
+            {"cve_id": "CVE-2024-1", "cvss_score": 9.8, "severity": "CRITICAL", "node_label": "CVE"},
+            {"cve_id": "CVE-2024-1", "cvss_score": 7.5, "severity": "HIGH", "node_label": "Vulnerability"},
+            {"cve_id": "CVE-2024-3", "cvss_score": 6.1, "severity": "MEDIUM", "node_label": "Vulnerability"},
+            {"cve_id": "CVE-2024-4", "cvss_score": None, "severity": None, "node_label": "CVE"},
+            {"cve_id": "CVE-2024-4", "cvss_score": 5.0, "severity": "MEDIUM", "node_label": "Vulnerability"},
             None,
             {"cve_id": None, "node_label": "CVE"},
         ]
         assert _graph_cves(rows) == [
-            {"cve_id": "CVE-2024-1", "cvss_score": None, "severity": None},
-            {"cve_id": "CVE-2024-2", "cvss_score": 7.5, "severity": "MEDIUM"},
+            {"cve_id": "CVE-2024-1", "cvss_score": 9.8, "severity": "CRITICAL"},
+            # The CVE node's statement that no CVSS exists wins over the Vulnerability node's
+            # older 3.0 (field by field this printed 3.0 beside UNKNOWN).
+            {"cve_id": "CVE-2024-2", "cvss_score": None, "severity": "UNKNOWN"},
+            {"cve_id": "CVE-2024-3", "cvss_score": 6.1, "severity": "MEDIUM"},
+            {"cve_id": "CVE-2024-4", "cvss_score": 5.0, "severity": "MEDIUM"},
         ]
+
+    def test_the_order_of_the_rows_does_not_matter(self):
+        rows = [
+            {"cve_id": "CVE-2024-2", "cvss_score": None, "severity": "UNKNOWN", "node_label": "CVE"},
+            {"cve_id": "CVE-2024-2", "cvss_score": 3.0, "severity": "LOW", "node_label": "Vulnerability"},
+        ]
+        assert (
+            _graph_cves(rows)
+            == _graph_cves(list(reversed(rows)))
+            == [{"cve_id": "CVE-2024-2", "cvss_score": None, "severity": "UNKNOWN"}]
+        )
 
     def test_empty(self):
         assert _graph_cves([]) == []
@@ -294,6 +346,37 @@ class TestEnrichAlertReadOnly:
         assert response.enriched is True
         assert response.query_metadata["indicator_found"] is False
         assert response.enrichment["known_malware"] == [] and response.enrichment["cves"] == []
+
+    def test_a_malware_the_alert_names_is_listed_even_when_the_graph_lacks_the_indicator(self):
+        """The malware query aggregates without grouping key, so Neo4j answers one row (empty
+        list) for an absent indicator and the alert's malware is appended: ``malware_found`` is
+        then true from the alert alone (docs/DEMO.md states it)."""
+        response = _connected_processor(_Graph()).enrich_alert_read_only(_alert("203.0.113.9", malware="TrickBot"))
+        assert response.query_metadata["indicator_found"] is False
+        assert response.query_metadata["malware_found"] is True
+        assert response.enrichment["known_malware"] == [
+            {"name": "TrickBot", "family": None, "malware_types": [], "description": "From alert (not in graph)"}
+        ]
+        assert "Deploy signatures for TrickBot" in response.enrichment["recommendations"]
+
+    def test_a_failed_query_is_not_reported_as_enriched(self):
+        """2026-10: the defaults left by a failed query (nothing found, confidence 0.0) must not
+        read as an answer from the graph."""
+        graph = _Graph()
+        graph.fail_enrichment = True
+        response = _connected_processor(graph).enrich_alert_read_only(_alert())
+        assert response.enriched is False
+        assert response.query_metadata["error"] == "connection lost"
+        assert response.query_metadata["indicator_found"] is False and response.enrichment["confidence"] == 0.0
+
+    def test_process_alert_keeps_its_answer_to_a_failed_query(self):
+        graph = _Graph()
+        graph.fail_enrichment = True
+        client = _Client(graph)
+        client.process_complete_resilmesh_alert = lambda alert_data: None
+        client.update_alert_enrichment_status = lambda **kwargs: None
+        response = AlertProcessor(neo4j_client=client).process_alert(_alert())
+        assert response.enriched is True and response.query_metadata["error"] == "connection lost"
 
     def test_the_callers_payload_is_not_modified(self):
         payload = _alert("198[.]51.100.7")
@@ -377,6 +460,15 @@ class TestDemoSelectionQuery:
         assert rows == graph.selection_rows[:1]
         assert graph.session_kwargs == [{"default_access_mode": "READ"}]
         assert graph.statements == [demo.SELECTION_QUERY]
+        assert graph.params == [{"limit": 1, "zone": "energy"}]
+
+    def test_without_zone_the_parameter_is_null(self):
+        graph = _Graph()
+        demo.select_indicators(_Driver(graph), 2, None, "READ")
+        assert graph.params == [{"limit": 2, "zone": None}]
+
+    def test_the_documented_query_is_the_one_the_demo_runs(self):
+        assert demo.SELECTION_QUERY in (_ROOT / "docs" / "DEMO.md").read_text()
 
     def test_help_shows_the_query(self, capsys):
         with pytest.raises(SystemExit) as exc:
@@ -411,6 +503,50 @@ class TestDemoRun:
         assert all(kw.get("default_access_mode") == "READ" for kw in graph.session_kwargs)
         assert clients[0].closed
         assert "Selected 2 indicator(s)" in err
+
+    def test_zone_is_bound_into_the_selection(self, capsys):
+        code, out, _err, graph, _clients = self._run(["--from-graph", "3", "--zone", "energy"], capsys=capsys)
+        assert code == demo.EXIT_OK
+        assert graph.params[0] == {"limit": 3, "zone": "energy"}
+        responses = json.loads(out)
+        assert [r["original_alert"]["zone"] for r in responses] == ["energy"]
+        assert [r["enrichment"]["indicator"] for r in responses] == [_INDICATOR]
+
+    def test_a_failed_selection_query(self, capsys):
+        graph = _Graph()
+        graph.fail_selection = True
+        code, out, err, _graph, clients = self._run(["--from-graph", "1"], graph=graph, capsys=capsys)
+        assert code == demo.EXIT_NEO4J and out == ""
+        assert "The selection query failed (ServiceUnavailable: connection lost)" in err
+        assert clients[0].closed
+
+    def test_a_failed_enrichment_query_ends_the_run_as_a_failure(self, capsys):
+        graph = _Graph()
+        graph.fail_enrichment = True
+        code, out, err, _graph, clients = self._run(["--from-graph", "1"], graph=graph, capsys=capsys)
+        assert code == demo.EXIT_NEO4J
+        (response,) = json.loads(out)
+        assert response["enriched"] is False and response["query_metadata"]["error"] == "connection lost"
+        assert "An enrichment query failed for alert(s) 'demo-graph-1'" in err
+        assert clients[0].closed
+
+    def test_an_alert_the_processor_raises_on(self, tmp_path, capsys):
+        path = tmp_path / "alerts.json"
+        bad = {"alert_id": "bad-1", "threat": {"indicator": "203.0.113.9", "cve": 2021}}
+        path.write_text(json.dumps([{**_alert(), "alert_id": "ok-1"}, bad]))
+        code, out, err, _graph, clients = self._run(["--alerts", str(path)], capsys=capsys)
+        assert code == demo.EXIT_USAGE
+        assert [r["alert_id"] for r in json.loads(out)] == ["ok-1"]
+        assert "'bad-1' (AttributeError" in err
+        assert clients[0].closed
+
+    def test_a_rejected_alert_is_the_processors_answer_not_a_failure(self, tmp_path, capsys):
+        path = tmp_path / "alerts.json"
+        path.write_text(json.dumps([{"alert_id": "no-indicator", "threat": {}}]))
+        code, out, err, *_ = self._run(["--alerts", str(path)], capsys=capsys)
+        assert code == demo.EXIT_OK and "failed" not in err
+        (response,) = json.loads(out)
+        assert response["enriched"] is False and response["query_metadata"] == {"error": "No indicator in alert"}
 
     def test_alerts_file(self, tmp_path, capsys):
         path = tmp_path / "alerts.json"
@@ -485,3 +621,100 @@ def test_no_demo_script_draws_random_values():
     assert scripts
     for path in scripts:
         assert not re.search(r"^\s*(import random|from random import)", path.read_text(), re.MULTILINE), path.name
+
+
+# ---------------------------------------------------------------------------
+# The patterns the enrichment reads have writers
+# ---------------------------------------------------------------------------
+
+
+def _code_text(path: Path) -> str:
+    """Source text with adjacent string literals joined and whitespace collapsed, so a Cypher
+    statement split over several literals or lines reads as one string."""
+    text = re.sub(r"\"\s*\+?\s*\"", "", path.read_text())
+    return re.sub(r"\s+", " ", text)
+
+
+class TestReadsHaveWriters:
+    """Each relationship / label pair ``_enrich_indicator`` reads is MERGEd by
+    ``build_relationships`` or ``neo4j_client`` (2026-10). The CVE read followed ``INDICATES`` to a
+    ``Vulnerability``, which nothing on a pipeline path writes, and stayed empty unnoticed: renaming
+    or retargeting a writer must fail here, not only empty the enrichment."""
+
+    _READS_AND_WRITERS = [
+        (
+            "OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)",
+            r"MATCH \(m:Malware[^)]*\)[^;]{0,200}?MERGE \(i\)-\[r:INDICATES\]->\(m\)",
+        ),
+        (
+            "OPTIONAL MATCH (m)-[:ATTRIBUTED_TO]->(a:ThreatActor)",
+            r"MATCH \(m:Malware\)[^;]{0,200}?MATCH \(a:ThreatActor\)[^;]{0,200}?MERGE \(m\)-\[r:ATTRIBUTED_TO\]->\(a\)",
+        ),
+        (
+            "OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)",
+            r"MATCH \(a:ThreatActor[^)]*\)[^;]{0,200}?MATCH \(t:Technique[^)]*\) MERGE \(a\)-\[r:EMPLOYS_TECHNIQUE\]->\(t\)",
+        ),
+        (
+            "OPTIONAL MATCH (i)-[:EXPLOITS]->(v) WHERE v:CVE OR v:Vulnerability",
+            re.escape("MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v)"),
+        ),
+        (
+            "OPTIONAL MATCH (i)-[:EXPLOITS]->(v) WHERE v:CVE OR v:Vulnerability",
+            re.escape("MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c)"),
+        ),
+        (
+            "OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)",
+            r"MATCH \(s:Source[^)]*\)[^;]{0,300}?MERGE \(n\)-\[r:SOURCED_FROM\]->\(s\)",
+        ),
+    ]
+
+    @pytest.mark.parametrize("read, writer", _READS_AND_WRITERS)
+    def test_read_pattern_has_a_writer(self, read, writer):
+        reader = re.sub(r"\s+", " ", inspect.getsource(AlertProcessor._enrich_indicator))
+        assert read in reader, f"_enrich_indicator no longer reads {read!r}: update this table"
+        writers = _code_text(_ROOT / "src" / "build_relationships.py") + _code_text(_ROOT / "src" / "neo4j_client.py")
+        assert re.search(writer, writers), f"nothing writes what {read!r} reads"
+
+    def test_no_read_without_a_writer(self):
+        """Every relationship type the enrichment follows is in the table, except the two it reads
+        from the Alert node, which no code path writes (``assets`` / ``users`` are documented as
+        always empty)."""
+        reader = inspect.getsource(AlertProcessor._enrich_indicator)
+        followed = set(re.findall(r"\((?:i|m|a)\)-\[r?:([A-Z_]+)\]->", reader))
+        alert_side = {"TARGETS", "INVOLVES_USER"}
+        assert alert_side <= followed and "MATCH (a:Alert {alert_id: $alert_id})" in reader
+        tabled = set()
+        for read, _writer in self._READS_AND_WRITERS:
+            match = re.search(r":([A-Z_]+)\]", read)
+            assert match is not None
+            tabled.add(match.group(1))
+        assert followed - alert_side == tabled
+
+
+# ---------------------------------------------------------------------------
+# Demo material states only real behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestDemoMaterial:
+    def test_demo_md_sets_a_host_reachable_bolt_uri(self):
+        """``.env`` names the Compose service (``bolt://neo4j:7687``), which the host cannot resolve."""
+        assert "NEO4J_URI=bolt://neo4j:7687" in (_ROOT / ".env.example").read_text(), "premise"
+        guide = (_ROOT / "docs" / "DEMO.md").read_text()
+        source_line = guide.index("set -a && source .env && set +a")
+        assert guide.index("export NEO4J_URI=bolt://localhost:7687", source_line) > source_line
+
+    def test_demo_md_states_the_failure_exit_codes(self):
+        guide = " ".join((_ROOT / "docs" / "DEMO.md").read_text().split())
+        assert "an enrichment query failed" in guide and "`enriched: false`" in guide
+        assert (
+            "a malware the alert names is listed with the description `From alert (not in graph)` whether or not"
+            in guide
+        )
+        assert "connection check (`RETURN 1`" in guide
+
+    def test_demo_page_shows_no_invented_enrichment_or_latency(self):
+        page = (_ROOT / "docs" / "demo.html").read_text()
+        assert '"malware": ["Cobalt Strike"]' not in page and '"confidence": 0.85' not in page
+        assert "&lt;150ms</span>" not in page and "<150ms typical" not in page
+        assert "docs/DEMO.md" in page

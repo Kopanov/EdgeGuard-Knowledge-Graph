@@ -101,7 +101,7 @@
 | [MISP_SOURCES.md](MISP_SOURCES.md) | MISP SSoT; **event** tag **`EdgeGuard`** only (sector/source/`zone:` on **attributes**); **index + filter** discovery; **`restSearch`** fallback; **collector → MISP** duplicate avoidance (prefetch + cursors); per-event sync; troubleshooting | `misp_writer.py`, `run_misp_to_neo4j.py`, `misp_health.py`, `neo4j_client.py`, `config.py` (`ZONE_*_THRESHOLD`, dedup env vars) | Verified (2026-03-24) |
 | [DATA_QUALITY.md](DATA_QUALITY.md) | Quality practices, MISP→Neo4j per-event + chunking + rel batch | `neo4j_client.py` (`SOURCED_FROM`), `enrichment_jobs.py`, `run_misp_to_neo4j.py` | Verified (2026-03-21) |
 | [VERSIONING.md](VERSIONING.md) | CalVer policy (`YYYY.M.D`) | `pyproject.toml`, `edgeguard version` | Verified (2026-03-20) |
-| [DEMO.md](DEMO.md) | Alert enrichment demo (read-only, the processor's own response); workflow demonstration commands | `demo/alert_enrichment_demo.py`, `src/alert_processor.py` (`enrich_alert_read_only`), `src/query_api.py`, `src/graphql_api.py`, `src/edgeguard.py` (`stats --misp`) | Verified (2026-10-16) |
+| [DEMO.md](DEMO.md) | Alert enrichment demo (read-only, the processor's own response, exit codes for a failed query or alert); workflow demonstration commands | `demo/alert_enrichment_demo.py`, `src/alert_processor.py` (`enrich_alert_read_only`), `src/query_api.py`, `src/graphql_api.py`, `src/edgeguard.py` (`stats --misp`); `docs/demo.html` states the same enrichment shape | Verified (2026-10-16) |
 | [sources/README.md](sources/README.md) | Source doc index | — | Narrative |
 | [sources/MISP/SETUP.md](sources/MISP/SETUP.md) | MISP setup | MISP product | Narrative |
 | [TIMESTAMPS.md](TIMESTAMPS.md) | Source-truthful first/last-seen architecture; honest-NULL contract; PR-S5/PR-M2 | `src/source_truthful_timestamps.py`, `src/collectors/*` | Verified (2026-04-15) |
@@ -131,7 +131,7 @@ Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules)
 
 ---
 
-_Last updated: 2026-10-16 — DEMO row: the read-only alert enrichment demo and the workflow demonstration commands, verified against the code (the row named a mock publisher, since removed). Prior: 2026-10-15 — wording only: the PR #126 entry states the documentation rule instead of naming a review tool's rule file. Prior: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
+_Last updated: 2026-10-16 — DEMO row: the read-only alert enrichment demo and the workflow demonstration commands, verified against the code (the row named a mock publisher, since removed); it also covers the demo's exit codes for a failed enrichment query or an alert the processor raises on, and `docs/demo.html`, whose relationship table and enrichment example now state what the code writes and returns. Prior: 2026-10-15 — wording only: the PR #126 entry states the documentation rule instead of naming a review tool's rule file. Prior: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
 
 The PR-N26 → PR-N32 train added significant capabilities that earlier
 versions of this index did not cover. Added rows for: TIMESTAMPS,
