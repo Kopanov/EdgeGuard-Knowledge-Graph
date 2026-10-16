@@ -106,6 +106,9 @@ class CVSSv40:
 class CVE:
     cve_id: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     published: Optional[str] = None
     last_modified: Optional[str] = None
     cpe_type: Optional[List[str]] = None
@@ -160,6 +163,9 @@ class CVE:
 class Vulnerability:
     cve_id: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     status: Optional[List[str]] = None
     severity: Optional[str] = None
     cvss_score: Optional[float] = None
@@ -199,7 +205,11 @@ class Vulnerability:
     description=(
         "Threat Indicator (IP, domain, hash, URL). "
         "Not yet in ISIM GraphQL schema — EdgeGuard extension. "
-        "confidence_score decays over time via enrichment jobs. "
+        "Ages by one rule for every supplier: confidence_score is source_confidence times the factor "
+        "of its aging_tier, counted from last_reported_at (the latest report of any source, dated by "
+        "the source's own last-report date capped at the MISP record time; first_imported_at when no "
+        "report dated it, aging_basis says which); retired (active false, retired_by 'decay') after "
+        "730 days without a report, reactivated by a newer one. "
         "misp_event_ids[] / misp_attribute_ids[] / misp_event_urls[] / misp_attribute_urls[] "
         "let analysts retrieve the full raw MISP context for every event/attribute that "
         "contributed to this indicator (original attributes, comments, attachments). "
@@ -247,12 +257,35 @@ class Indicator:
     last_online: Optional[str] = None
     threat_label: Optional[str] = None
     threat_category: Optional[str] = None
+    # 2026-10-16 (indicator aging, ``indicator_aging``): the latest report of any source (its time,
+    # source and MISP attribute uuid), the highest confidence a source gave (a node written before
+    # 2026-10-16 shows its confidence_score), what the age counts from (source_date,
+    # misp_recorded or first_imported), the tier reached (0 below the first tier day), the time the
+    # current aging state began, the time at which the node's aging values were last written (a
+    # write, or a job run that changed them; a job run that changes nothing leaves it unchanged; an
+    # evaluation whose clock is behind it is lifted to it, so the aging never moves backwards), and
+    # who retired the node ('decay', or a manual decommission).
+    last_reported_at: Optional[str] = None
+    last_reported_source: Optional[str] = None
+    last_reported_ref: Optional[str] = None
+    last_recorded_at: Optional[str] = None
+    source_confidence: Optional[float] = None
+    aging_basis: Optional[str] = None
+    aging_tier: Optional[int] = None
+    aging_factor: Optional[float] = None
+    aging_since: Optional[str] = None
+    aging_evaluated_at: Optional[str] = None
+    retired_by: Optional[str] = None
+    retired_at: Optional[str] = None
 
 
 @strawberry.type(description="Threat actor node — EdgeGuard-owned, planned ISIM extension.")
 class ThreatActor:
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     sophistication: Optional[str] = None
     primary_motivation: Optional[str] = None
     resource_level: Optional[str] = None
@@ -282,6 +315,9 @@ class Malware:
     name: str
     malware_types: Optional[List[str]] = None
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     zone: Optional[List[str]] = None
     # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
     tlp: Optional[str] = None
@@ -306,6 +342,9 @@ class Technique:
     technique_id: str
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     tactic_refs: Optional[List[str]] = None
     zone: Optional[List[str]] = None
     # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
@@ -335,6 +374,9 @@ class Tactic:
     tactic_id: str
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
     tlp: Optional[str] = None
     edgeguard_managed: Optional[bool] = None
@@ -356,6 +398,9 @@ class Tool:
     mitre_id: str
     name: str
     description: Optional[str] = None
+    # 2026-10-16: the source whose text ``description`` is (its canonical id, e.g. "nvd", "cisa_kev",
+    # "mitre_attck"; ``description_ranking``); null when the node has none or was written before.
+    description_source: Optional[str] = None
     tag: Optional[str] = None
     tool_types: Optional[List[str]] = None
     uses_techniques: Optional[List[str]] = None
@@ -373,10 +418,13 @@ class Tool:
     last_updated: Optional[str] = None
 
 
+# 2026-10-16: the description said a campaign was built when two indicators share an actor and a
+# malware within a time window; the enrichment job never did that (``campaign_evidence``).
 @strawberry.type(
     description=(
-        "Inferred campaign node — built by EdgeGuard enrichment when "
-        "≥2 indicators share the same ThreatActor + Malware within a time window."
+        "Inferred campaign node — EdgeGuard's grouping of one ThreatActor's malware (attributed to "
+        "it, ATTRIBUTED_TO, or used by it, USES_MALWARE) and those malware's active indicators, built "
+        "by the enrichment job build_campaign_nodes; deleted when the actor has neither link left."
     )
 )
 class Campaign:

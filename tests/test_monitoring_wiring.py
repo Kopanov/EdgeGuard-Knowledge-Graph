@@ -41,7 +41,7 @@ _SCHEDULED_SOURCES = {
 }
 
 # Sources stamped outside run_collector_with_metrics (2026-10): the MISP to Neo4j sync, every 72 h.
-_SYNC_SOURCES = {"misp_to_neo4j": 522000}
+_SYNC_SOURCES = {"misp_to_neo4j": 352800}
 
 
 def _rules():

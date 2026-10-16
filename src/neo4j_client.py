@@ -41,6 +41,20 @@ from cvss_selection import (  # noqa: E402
     UNKNOWN_SEVERITY,
 )
 from cvss_selection import clamp_cvss_score as clamp_cvss_score  # noqa: E402  — re-export (moved 2026-10)
+from description_ranking import (  # noqa: E402  — 2026-10-16: whose text a node's description is
+    CVE_DESCRIPTIONS,
+    ENTITY_DESCRIPTIONS,
+    RESILMESH_NATIVE_SOURCE,
+    RankedDescription,
+    ranking_for_label,
+)
+from indicator_aging import (  # noqa: E402  — 2026-10-16: one aging rule for every Indicator
+    aging_set_clause,
+    edge_report_items,
+    node_report_items,
+    report_row,
+    source_confidence_item,
+)
 from ioc_normalize import (
     canonicalize_lookup,  # noqa: E402  — alert-path (type, value) parity with the sync vocabulary (post-#126 hardening)
 )
@@ -840,9 +854,9 @@ def _tlp_most_restrictive_clause(existing: str, incoming: str) -> str:
 
 def _set_if_absent_clause(existing: str, incoming: str) -> str:
     """2026-10: keep ``existing`` when it holds a value, else take ``incoming`` (an empty string
-    counts as no value). For text a record may supply but must not replace: a CVE's description
-    and dates from any record but NVD's (``_CVE_RECORD_TEXT_PROPS``), a Malware / ThreatActor / Tool
-    description from any record but MITRE's (``_entity_description_fill``)."""
+    counts as no value). For values a record may supply but must not replace: a CVE's dates from any
+    record but NVD's (``_CVE_RECORD_DATE_PROPS``). A description follows the source ranking instead
+    (``description_ranking``, 2026-10-16)."""
     return f"CASE WHEN {existing} IS NULL OR {existing} = '' THEN {incoming} ELSE {existing} END"
 
 
@@ -982,49 +996,37 @@ _NVD_CVSS_VERSIONS = (
     ("HAS_CVSS_v2", "cvss_v2_data"),
 )
 
-# 2026-10: the CVE record's text and dates. NVD's record (``nvd_record``) sets them; any other record
-# (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has
-# none (``_set_if_absent_clause``), so NVD's text wins whatever the order in which records are merged.
-# Until 2026-10 the record merged last set them: an OTX pulse indicator of type CVE wrote its raw
-# ``OTX_META`` JSON as the description, an OTX pulse reference "Referenced in OTX pulse: <name>", a KEV
-# record CISA's short description, a CISA ICS record the advisory's dates. On a CVE without NVD's record
-# the first record that fills a property keeps it, also against a later revision of the same source's
-# record (a revised CISA ICS advisory, an edited KEV text): no ranking of the other sources exists yet.
-_CVE_RECORD_TEXT_PROPS = ("description", "published", "last_modified")
+# 2026-10: the CVE record's dates. NVD's record (``nvd_record``) sets them; any other record fills them
+# only where the node has none (``_set_if_absent_clause``), so NVD's dates win whatever the order in which
+# records are merged. Until 2026-10 the record merged last set them (a CISA ICS record the advisory's
+# dates). The dates stay outside the description's source ranking (2026-10-16): another record's dates
+# are not the CVE's (a CISA ICS record gives the advisory's release dates; KEV, OTX and the STIX flow give
+# none), and CISA ICS is the only other source in MISP that gives them, one attribute per CVE (MISPWriter
+# skips an advisory's CVE that MISP already holds), so the first record that fills them is the same in
+# any order. The description and its source: ``description_ranking``.
+_CVE_RECORD_DATE_PROPS = ("published", "last_modified")
 
 
-def _batch_record_text_clauses(node: str, row: str) -> List[str]:
-    """SET items for ``_CVE_RECORD_TEXT_PROPS`` in an UNWIND batch (2026-10): a row from NVD's record
+def _batch_record_date_clauses(node: str, row: str) -> List[str]:
+    """SET items for ``_CVE_RECORD_DATE_PROPS`` in an UNWIND batch (2026-10): a row from NVD's record
     (``<row>.nvd_record``) sets the property when it carries a value, any other row fills it."""
     return [
         f"{node}.{prop} = CASE WHEN {row}.nvd_record THEN coalesce({row}.{prop}, {node}.{prop}) "
         f"ELSE {_set_if_absent_clause(f'{node}.{prop}', f'{row}.{prop}')} END"
-        for prop in _CVE_RECORD_TEXT_PROPS
+        for prop in _CVE_RECORD_DATE_PROPS
     ]
 
 
-# 2026-10: the source whose record sets a Malware, ThreatActor or Tool description: MITRE ATT&CK, the
-# record MITRE delivered (``mitre_attck``, the MITRE collector's tag, carried by its MISP attributes and
-# by the STIX flow's objects of a MITRE event). A record from any other source fills the description
-# only where the node has none (``_set_if_absent_clause``), so ATT&CK's text stays whatever the order of
-# the merges. Until 2026-10 the record merged last set it: the OTX collector gave every malware family
-# and adversary of a pulse the pulse's description, and the sync took a malware attribute's raw
-# ``MITRE_USES_TECHNIQUES`` block as one, so Cobalt Strike or APT29 showed a report's text or a JSON
-# block depending on the order of the events in the sync.
-_ENTITY_DESCRIPTION_SOURCE = "mitre_attck"
+# 2026-10-16: properties written only through the description's source ranking (``description_ranking``),
+# never as extra or fill properties of ``merge_node_with_source``.
+_RANKED_DESCRIPTION_PROPS = frozenset({"description", "description_source"})
 
-
-def _entity_description_fill(data: Dict, source_id: str, extra_props: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The description of a Malware / ThreatActor / Tool record (2026-10): MITRE's record
-    (``_ENTITY_DESCRIPTION_SOURCE``) sets it and it is added to ``extra_props``; any other record's is
-    returned as the ``fill_props`` of ``merge_node_with_source``. None when the record has no text."""
-    description = data.get("description")
-    if not isinstance(description, str) or not description.strip():
-        return None
-    if source_id == _ENTITY_DESCRIPTION_SOURCE:
-        extra_props["description"] = description
-        return None
-    return {"description": description}
+# 2026-10-16: the description of a ``merge_vulnerabilities_batch`` row by the source ranking. Rows of one
+# batch come from one source; two rows of one batch for one node are decided against the node as the
+# statement found it, and the later row's text is kept when both win (the same source revising itself).
+_BATCH_RANKED_DESCRIPTION = CVE_DESCRIPTIONS.set_cypher(
+    "n", "n, item", "item.description", "item.description_source", "item.description_rank"
+)
 
 
 # 2026-10: CISA's SSVC decision points, which only NVD's record supplies (``nvd_collector.cisa_ssvc``):
@@ -1299,7 +1301,7 @@ def _alert_default_tlp() -> str:
 # another system created first (ResilMesh topology, a CRUSOE scanner's CVE / Vulnerability), the
 # MATCH path stamps ``edgeguard_enriched = true`` instead. ``clear_edgeguard_managed`` deletes the
 # first set and never the second; the REST / GraphQL / STIX readers expose both. The clause is
-# spliced literally into each query (same convention as ``_reactivation_clauses``); this helper is
+# spliced literally into each query (same convention as ``indicator_aging``); this helper is
 # the single definition the tests compare every splice against.
 def _enriched_on_match_clause(var: str) -> str:
     """``ON MATCH`` sub-clause marking a node EdgeGuard wrote to but did not create."""
@@ -1354,25 +1356,23 @@ def _normalise_zone_list(value: Any) -> List[str]:
     return cleaned or ["global"]
 
 
-def _reactivation_clauses(var: str, indent: str = "") -> str:
-    """The SET fragments every node write applies for the active / retired lifecycle.
-
-    2026-10 (aging logic check): ``decay_ioc_confidence`` retires a node after a year without a
-    sighting (``active = false``, ``retired_at``, ``retired_by = 'decay'``). Before this, every merge
-    kept ``active`` untouched whenever ``retired_at`` was set — meant for a manual decommission, but
-    the decay job set the same field, so an IOC that reappeared in a fresh pulse stayed inactive
-    forever and its decay tier never reset. A re-observation now reactivates a decay-retired node;
-    a manual decommission (``retired_at`` without the ``'decay'`` tag) still wins. Order matters:
-    ``active`` and ``retired_at`` read ``retired_by`` before it is cleared. The same text is spliced
-    into every node-write query (tests pin the equality).
-    """
-    v = var
-    return (
-        f"{v}.active = CASE WHEN {v}.retired_at IS NOT NULL AND coalesce({v}.retired_by, 'manual') <> 'decay' THEN {v}.active ELSE true END,\n"
-        f"{indent}{v}.retired_at = CASE WHEN coalesce({v}.retired_by, '') = 'decay' THEN null ELSE {v}.retired_at END,\n"
-        f"{indent}{v}.last_decayed_tier = null,\n"
-        f"{indent}{v}.retired_by = CASE WHEN coalesce({v}.retired_by, '') = 'decay' THEN null ELSE {v}.retired_by END"
-    )
+# 2026-10-16: lifecycle writes by label (``indicator_aging``). Before, every node write reactivated
+# a decay-retired node (``active = true``, ``retired_at`` / ``retired_by`` cleared,
+# ``last_decayed_tier = null``) whatever its label and restored a decayed confidence by max-wins, so
+# a full sync undid the decay. Now only an Indicator ages: its writes record the report
+# (``indicator_aging.node_report_items``), then apply the one rule in a SET clause of its own
+# (``indicator_aging.aging_set_clause``) at the database's current time, lifted to the node's
+# ``aging_evaluated_at`` when that is later; it reactivates a node only when a newer report moves its
+# basis. The batch and single-item writes read the node for the rule after a clause that set its
+# properties, under the node's write lock; the alert path applies the rule in a second statement of
+# its transaction (``create_indicator_from_alert``). Every other label is set ``active = true`` when
+# EdgeGuard creates it (``_create_active``) and gets no ``active``, ``retired_*`` or decay property
+# when EdgeGuard matches it, so a node another system created (CASM CVE / CVSS, ISIM assets) never
+# receives an EdgeGuard lifecycle property and a manual decommission is never touched.
+def _create_active(var: str) -> str:
+    """``ON CREATE`` item of a node that does not age: active from its creation, never changed by a
+    later EdgeGuard write."""
+    return f"{var}.active = true"
 
 
 def _statement_head(query: Any) -> str:
@@ -2154,6 +2154,9 @@ class Neo4jClient:
             # arrive at edges via a node match, never via a property
             # lookup on the relationship).
             "CREATE INDEX indicator_first_imported_at IF NOT EXISTS FOR (i:Indicator) ON (i.first_imported_at)",
+            # 2026-10-16: the time an indicator ages from, and the per-tier counts of the aging job.
+            "CREATE INDEX indicator_last_reported_at IF NOT EXISTS FOR (i:Indicator) ON (i.last_reported_at)",
+            "CREATE INDEX indicator_aging_tier IF NOT EXISTS FOR (i:Indicator) ON (i.aging_tier)",
             "CREATE INDEX vulnerability_first_imported_at IF NOT EXISTS FOR (v:Vulnerability) ON (v.first_imported_at)",
             "CREATE INDEX campaign_first_seen IF NOT EXISTS FOR (c:Campaign) ON (c.first_seen)",
             "CREATE INDEX campaign_last_seen IF NOT EXISTS FOR (c:Campaign) ON (c.last_seen)",
@@ -2354,6 +2357,7 @@ class Neo4jClient:
         source_id: str,
         extra_props: Dict = None,
         fill_props: Optional[Dict] = None,
+        description: Optional[RankedDescription] = None,
     ) -> bool:
         """
         Merge a node with proper source tracking.
@@ -2378,6 +2382,11 @@ class Neo4jClient:
             extra_props: Additional properties to set on the node (beyond standard fields)
             fill_props: Properties set only where the node has no value (2026-10,
                 ``_set_if_absent_clause``); a key also in ``extra_props`` is set from there
+            description: The record's description with its source and that source's rank
+                (2026-10-16): set with ``description_source`` when the source ranks at least as
+                high as the stored description's (``description_ranking``). A label with a
+                description ranking takes ``description`` and ``description_source`` only from
+                here, never from ``extra_props`` or ``fill_props``.
 
         Returns:
             True if successful
@@ -2385,6 +2394,15 @@ class Neo4jClient:
         if not self.driver:
             logger.error("Cannot merge node: no connection")
             return False
+
+        # 2026-10-16: refused before the statement is built, so a caller that bypasses the ranking fails
+        # loudly instead of being logged as a terminal write error.
+        ranking = ranking_for_label(label)
+        bypass = _RANKED_DESCRIPTION_PROPS & (set(extra_props or {}) | set(fill_props or {}))
+        if ranking is not None and bypass:
+            raise ValueError(f"merge_node_with_source: {label} {sorted(bypass)} are written through the source ranking")
+        if description is not None and ranking is None:
+            raise ValueError(f"merge_node_with_source: {label} has no description ranking")
 
         try:
             # Validate property names before interpolating into Cypher.
@@ -2456,35 +2474,43 @@ class Neo4jClient:
             # ``r.source_reported_last_at`` with MIN/MAX CASE semantics.
             first_seen_at_source = data.get("first_seen_at_source")
             last_seen_at_source = data.get("last_seen_at_source")
+            # 2026-10-16 (indicator aging): an Indicator keeps the highest confidence a source gave
+            # (``source_confidence``), records the report the data carries (MISP sync items carry
+            # one; the STIX import and the VirusTotal re-enrichment do not, so they never advance
+            # the basis) and gets its ``confidence_score`` and lifecycle from the one rule. Any
+            # other label keeps the max-wins confidence and gets ``active`` on create only.
+            is_indicator = label == "Indicator"
+            if is_indicator:
+                confidence_items = f"""{source_confidence_item("n", "$confidence")},
+                {node_report_items("n", "$report", "$source_id")},"""
+                create_items = ""
+            else:
+                confidence_items = """n.confidence_score = CASE
+                    WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score
+                    THEN $confidence
+                    ELSE n.confidence_score END,"""
+                create_items = f",\n                          {_create_active('n')}"
             query = f"""
             MERGE (n:{label} {{{key_set}}})
             ON CREATE SET n.first_imported_at = datetime(),
                           n.uuid = $node_uuid,
-                          n.edgeguard_managed = true
+                          n.edgeguard_managed = true{create_items}
             ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
 
             // Always accumulate sources and zones — provenance is never overwritten.
             // Use APOC to deduplicate the merged arrays in one step.
-            SET n.confidence_score = CASE
-                    WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score
-                    THEN $confidence
-                    ELSE n.confidence_score END,
+            SET {confidence_items}
                 n.source = {_dedup_concat_clause("n.source", "$source_array")},
                 {_zone_clause},
                 n.tags = {_dedup_concat_clause("n.tags", "$tag_array")},
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
-                n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                n.last_decayed_tier = null,
-                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                 // n.uuid is deterministic — coalesce so we never overwrite it.
                 // (Defensive only; same input always produces same uuid, but if a
                 // node was created before this code was deployed it will get the
                 // uuid stamped here on next MERGE.)
-                n.uuid = coalesce(n.uuid, $node_uuid)
-            """
+                n.uuid = coalesce(n.uuid, $node_uuid)"""
 
             # PR #33 round 10: dropped legacy scalars misp_event_id / misp_attribute_id
             # (pre-release, no real data to migrate). Multi-event provenance lives only
@@ -2681,16 +2707,30 @@ class Neo4jClient:
                         query += f", n.{prop_name} = ${prop_name}"
                     params_extra[prop_name] = prop_value
 
-            # 2026-10: text a record may supply but must not replace (a CVE's description and dates
-            # from any record but NVD's, ``merge_cve``; a Malware / ThreatActor / Tool description from
-            # any record but MITRE's, ``_entity_description_fill``) is set only where the node has none.
-            # The parameter is prefixed so it cannot collide with a standard parameter of this statement.
+            # 2026-10: values a record may supply but must not replace (a CVE's dates from any record but
+            # NVD's, ``merge_cve``) are set only where the node has none. The parameter is prefixed so it
+            # cannot collide with a standard parameter of this statement.
             for prop_name, prop_value in (fill_props or {}).items():
                 _validate_prop_name(prop_name)
                 if prop_name in extra_props or prop_value is None or prop_value == "":
                     continue
                 query += f", n.{prop_name} = {_set_if_absent_clause(f'n.{prop_name}', f'$fill_{prop_name}')}"
                 params_extra[f"fill_{prop_name}"] = prop_value
+
+            # 2026-10-16: an Indicator's aging, in a SET clause of its own after the one above: the rule
+            # reads the report and ``source_confidence`` that clause recorded (``indicator_aging``).
+            if is_indicator:
+                query += "\n            " + aging_set_clause("n")
+
+            # 2026-10-16: the description and its source, by the source ranking of the label
+            # (``description_ranking``), decided once after every other property is set.
+            if description is not None and ranking is not None:
+                query += "\n" + ranking.set_cypher(
+                    "n", "n", "$ranked_description", "$ranked_description_source", "$ranked_description_rank"
+                )
+                params_extra["ranked_description"] = description.text
+                params_extra["ranked_description_source"] = description.source
+                params_extra["ranked_description_rank"] = description.rank
 
             if params_extra:
                 key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
@@ -2701,10 +2741,16 @@ class Neo4jClient:
                     list(params_extra.keys()),
                 )
 
-            # Check existing confidence before update for audit logging
+            # Check existing confidence before update for audit logging. 2026-10-16: an Indicator's
+            # comparison value is the confidence a source gave (``source_confidence``; a node written
+            # before has only ``confidence_score``), not its aged ``confidence_score``.
+            confidence_expr = (
+                "coalesce(n.source_confidence, n.confidence_score)" if is_indicator else "n.confidence_score"
+            )
             check_query = f"""
             MATCH (n:{label} {{{key_set}}})
-            RETURN n.confidence_score as existing_confidence, n.source as existing_source, n.retired_at as retired_at
+            RETURN {confidence_expr} as existing_confidence, n.source as existing_source,
+                   n.retired_at as retired_at, n.retired_by as retired_by
             """
 
             with self.driver.session() as session:
@@ -2718,15 +2764,23 @@ class Neo4jClient:
                     key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
                     if existing_conf is not None and confidence < existing_conf:
                         logger.info(
-                            f"AUDIT: Skipping lower-confidence update for {label}({key_str}): "
+                            f"AUDIT: Keeping the higher confidence of {label}({key_str}): "
                             f"existing={existing_conf} (source={existing_src}), new={confidence} (source={source_id})"
                         )
-                    # Log when a retired node is re-imported but kept inactive
+                    # 2026-10-16: a retired node written again. A manual decommission stays; an
+                    # Indicator's decay retirement is recomputed from its report time by the aging rule.
                     existing_retired = existing_record.get("retired_at")
                     if existing_retired is not None:
-                        logger.warning(
-                            f"AUDIT: Re-imported retired node {label}({key_str}): "
-                            f"active flag preserved (retired_at={existing_retired}), source={source_id}"
+                        logger.info(
+                            "AUDIT: Re-imported retired node %s(%s): retired_by=%s, retired_at=%s, source=%s — %s",
+                            label,
+                            key_str,
+                            existing_record.get("retired_by"),
+                            existing_retired,
+                            source_id,
+                            "the aging rule decides from the report time"
+                            if is_indicator and existing_record.get("retired_by") == "decay"
+                            else "kept",
                         )
 
                 # Execute the merge
@@ -2741,6 +2795,9 @@ class Neo4jClient:
                     "node_uuid": node_uuid,
                     **params_extra,
                 }
+                if is_indicator:
+                    # 2026-10-16: the report the data carries (all None without one).
+                    params["report"] = report_row(data)
                 # PR (S5) (architecture redesign + bugbot 9e58af6 LOW):
                 # source-truthful timestamps live on the SOURCED_FROM
                 # edge (not the node), so they are NOT bound into the
@@ -2781,6 +2838,7 @@ class Neo4jClient:
                 source_reported_last_at=last_seen_at_source,
                 misp_event_id=misp_event_id,
                 source_refs=data.get("source_refs"),
+                report=report_row(data) if is_indicator else None,
             )
 
         except (
@@ -2862,9 +2920,15 @@ class Neo4jClient:
         source_reported_last_at: Optional[str] = None,
         misp_event_id: Optional[str] = None,
         source_refs: Optional[List[str]] = None,
+        report: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Create or update SOURCED_FROM relationship with raw data + per-source
         timestamps on the edge.
+
+        2026-10-16 (indicator aging): ``report`` (an Indicator write only, ``indicator_aging.report_row``)
+        records the source's report on the edge, forward only: ``r.last_recorded_at`` and, when the
+        report is newer, ``r.last_reported_at`` / ``r.last_reported_ref`` / ``r.last_reported_source``
+        (``indicator_aging.edge_report_items``).
 
         2026-10 (relationship provenance): the edge also accumulates, per source, the
         MISP events that carried this entity (``r.misp_event_ids``) and the source's own
@@ -2968,8 +3032,10 @@ class Neo4jClient:
                 WHEN datetime($source_reported_last_at) > r.source_reported_last_at
                     THEN datetime($source_reported_last_at)
                 ELSE r.source_reported_last_at
-            END
-        """
+            END"""
+        if report is not None:
+            query += f""",
+            {edge_report_items("r", "$report", "$source_id")}"""
 
         try:
             with self.driver.session() as session:
@@ -2985,6 +3051,8 @@ class Neo4jClient:
                     "misp_event_id": str(misp_event_id) if misp_event_id else None,
                     "source_refs": [str(x) for x in (source_refs or []) if x],
                 }
+                if report is not None:
+                    params["report"] = dict(report)
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             return True
         except (
@@ -3045,14 +3113,21 @@ class Neo4jClient:
         # dates via SOURCED_FROM edges, but the node itself would drop
         # ``published`` / ``last_modified`` without this promotion — exactly
         # the same bug shape PR-N19 Fix #1 closed for ``merge_cve``.
-        # 2026-10: description and dates as in ``merge_cve`` — set by NVD's record, filled by any other.
+        # 2026-10: dates as in ``merge_cve`` — set by NVD's record, filled by any other; the description
+        # by the source ranking (2026-10-16).
         fill_props: Dict[str, Any] = {}
-        record_text = extra_props if data.get("nvd_record") else fill_props
-        for prop in _CVE_RECORD_TEXT_PROPS:
+        record_dates = extra_props if data.get("nvd_record") else fill_props
+        for prop in _CVE_RECORD_DATE_PROPS:
             if data.get(prop):
-                record_text[prop] = data[prop]
+                record_dates[prop] = data[prop]
         return self.merge_node_with_source(
-            "Vulnerability", key_props, data, source_id, extra_props=extra_props or None, fill_props=fill_props or None
+            "Vulnerability",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props or None,
+            fill_props=fill_props or None,
+            description=CVE_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
@@ -3127,8 +3202,10 @@ class Neo4jClient:
         with matching ``HAS_CVSS_*`` relationships (ResilMesh schema), then sets the node's
         ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector`` from those sub-nodes
         (2026-10; the record's own ``cvss_score`` / ``severity`` / ``attack_vector`` are not written).
-        ``description``, ``published`` and ``last_modified`` are set by NVD's record (``nvd_record``)
-        and only filled, where the node has none, by any other record (2026-10).
+        ``published`` and ``last_modified`` are set by NVD's record (``nvd_record``) and only filled,
+        where the node has none, by any other record (2026-10). ``description`` and
+        ``description_source`` follow the source ranking NVD > CISA KEV > CISA ICS > any other source
+        (``description_ranking.CVE_DESCRIPTIONS``, 2026-10-16).
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -3177,16 +3254,18 @@ class Neo4jClient:
         # L5051 correctly writes both; the MISP-sourced path (the
         # one used for the 99,664 CVEs in the 2026-04-22 baseline)
         # did not. Fixes the gap Bravo caught.
-        # 2026-10: ``description``, ``published`` and ``last_modified`` are set by NVD's record only
-        # (``nvd_record``, set by the sync for an NVD attribute with NVD_META); any other record fills
-        # them where the node has none (``_CVE_RECORD_TEXT_PROPS``). Before, the record merged last
-        # set them, so a CVE showed OTX's raw pulse JSON, a pulse name or CISA's short text instead of
-        # NVD's description depending on the order of the events in the sync.
+        # 2026-10: ``published`` and ``last_modified`` are set by NVD's record only (``nvd_record``, set
+        # by the sync for an NVD attribute with NVD_META); any other record fills them where the node has
+        # none (``_CVE_RECORD_DATE_PROPS``). Before, the record merged last set them, and the description
+        # with them, so a CVE showed OTX's raw pulse JSON, a pulse name or CISA's short text instead of
+        # NVD's description depending on the order of the events in the sync. 2026-10-16: the description
+        # follows the source ranking (``description_ranking``), so on a CVE without NVD's record the
+        # KEV's text wins over CISA ICS's, and CISA ICS's over any other, in any order.
         fill_props: Dict = {}
-        record_text = extra_props if data.get("nvd_record") else fill_props
-        for prop in _CVE_RECORD_TEXT_PROPS:
+        record_dates = extra_props if data.get("nvd_record") else fill_props
+        for prop in _CVE_RECORD_DATE_PROPS:
             if data.get(prop):
-                record_text[prop] = data[prop]
+                record_dates[prop] = data[prop]
         # 2026-10 (fresh-baseline PR, ResilMesh conformance finding F2): the four
         # ResilMesh CVE properties ``cwe``, ``ref_tags``, ``cpe_type`` and
         # ``result_impacts`` were rehydrated from NVD_META into the item but never
@@ -3213,7 +3292,13 @@ class Neo4jClient:
                 extra_props["status"] = _status_clean
 
         ok = self.merge_node_with_source(
-            "CVE", key_props, data, source_id, extra_props=extra_props or None, fill_props=fill_props or None
+            "CVE",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props or None,
+            fill_props=fill_props or None,
+            description=CVE_DESCRIPTIONS.record(data.get("description"), source_id),
         )
         if not ok:
             return False
@@ -3447,8 +3532,9 @@ class Neo4jClient:
               indicators from dozens of unrelated threats.
         Defense-in-depth: Q2/Q9 Cypher WHERE also filter placeholders.
 
-        ``description`` (2026-10): MITRE's record (``source_id`` ``mitre_attck``) sets it; a record from
-        any other source fills it only where the node has none (``_entity_description_fill``).
+        ``description`` and ``description_source`` (2026-10-16): the source ranking MITRE ATT&CK > a curated
+        source > any other source (``description_ranking.ENTITY_DESCRIPTIONS``); until then MITRE's record
+        set the description and any other record only filled an empty one.
         """
         # PR-N10: reject placeholder names at ingest. Canonicalization
         # (NFC + strip + lower) happens inside is_placeholder_name so
@@ -3493,12 +3579,16 @@ class Neo4jClient:
             # Source-report provenance: every OTX pulse that mentioned this malware
             # (incl. the extra pulses de-duplication folded into ``report_ids``).
             extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
-        # 2026-10: MITRE's record sets the description, any other record only fills it (until then the
-        # record merged last set it, an OTX pulse's text or a raw JSON block among them).
-        fill_props = _entity_description_fill(data, source_id, extra_props)
+        # 2026-10: the record merged last used to set the description (an OTX pulse's text or a raw JSON
+        # block among them); 2026-10-16: the source ranking decides (``description_ranking``).
         _mark_deprecated(data, extra_props)
         return self.merge_node_with_source(
-            "Malware", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+            "Malware",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
@@ -3517,7 +3607,7 @@ class Neo4jClient:
         ``ThreatActor{name:"unknown"}`` becomes a false-hub to every
         Malware whose attributed_to is "unknown" / "unspecified" / etc.
 
-        ``description``: as in ``merge_malware`` (2026-10).
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
         """
         raw_name = data.get("name")
         if is_placeholder_name(raw_name):
@@ -3558,11 +3648,15 @@ class Neo4jClient:
             extra_props["primary_motivation"] = data["primary_motivation"]
         if data.get("resource_level"):
             extra_props["resource_level"] = data["resource_level"]
-        # 2026-10: as in merge_malware — MITRE's record sets the description, any other only fills it.
-        fill_props = _entity_description_fill(data, source_id, extra_props)
+        # 2026-10-16: as in merge_malware — the source ranking decides the description.
         _mark_deprecated(data, extra_props)
         return self.merge_node_with_source(
-            "ThreatActor", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+            "ThreatActor",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
     def _normalize_mitre_id(self, raw: Any, *, label: str, data: Dict) -> Optional[str]:
@@ -3616,6 +3710,8 @@ class Neo4jClient:
         Cypher MERGE key agrees with the case-insensitive uuid
         computation. Prevents split-node / shared-uuid bugs on
         MISP peers storing lowercase ids.
+
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
         """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Technique", data=data)
         if mitre_id is None:
@@ -3630,15 +3726,24 @@ class Neo4jClient:
         extra_props["is_subtechnique"] = data.get("is_subtechnique", False)
         if data.get("name"):
             extra_props["name"] = data["name"]
-        if data.get("description"):
-            extra_props["description"] = data["description"]
+        # 2026-10-16: the source ranking decides the description (any record used to set it).
         _mark_deprecated(data, extra_props)
-        return self.merge_node_with_source("Technique", key_props, data, source_id, extra_props=extra_props)
+        return self.merge_node_with_source(
+            "Technique",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
+        )
 
     def merge_tactic(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tactic node with source tracking.
 
-        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization."""
+        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization.
+
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
+        """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Tactic", data=data)
         if mitre_id is None:
             return False
@@ -3649,17 +3754,23 @@ class Neo4jClient:
         }
         if data.get("name"):
             extra_props["name"] = data["name"]
-        if data.get("description"):
-            extra_props["description"] = data["description"]
+        # 2026-10-16: the source ranking decides the description (any record used to set it).
         _mark_deprecated(data, extra_props)
-        return self.merge_node_with_source("Tactic", key_props, data, source_id, extra_props=extra_props)
+        return self.merge_node_with_source(
+            "Tactic",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
+        )
 
     def merge_tool(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tool node with source tracking.
 
         PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization.
 
-        ``description``: as in ``merge_malware`` (2026-10).
+        ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
         """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Tool", data=data)
         if mitre_id is None:
@@ -3676,133 +3787,21 @@ class Neo4jClient:
             extra_props["name"] = data["name"]
         if data.get("aliases"):
             extra_props["aliases"] = data["aliases"]
-        # 2026-10: as in merge_malware — MITRE's record sets the description, any other only fills it.
-        fill_props = _entity_description_fill(data, source_id, extra_props)
+        # 2026-10-16: as in merge_malware — the source ranking decides the description.
         _mark_deprecated(data, extra_props)
         return self.merge_node_with_source(
-            "Tool", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+            "Tool",
+            key_props,
+            data,
+            source_id,
+            extra_props=extra_props,
+            description=ENTITY_DESCRIPTIONS.record(data.get("description"), source_id),
         )
 
-    @retry_with_backoff(max_retries=3)
-    def mark_inactive_nodes(self, active_event_ids: List[str]) -> Dict[str, int]:
-        """
-        Mark nodes as inactive if NONE of their MISP event IDs are in the active list,
-        and re-activate nodes whose events re-enter the active list.
-
-        A node is considered active if ANY event in its ``misp_event_ids[]`` array is
-        currently active. PR #33 round 10 dropped the legacy ``misp_event_id`` scalar
-        — provenance lives only in the array now.
-
-        Both Indicators and Vulnerabilities get the symmetric pair:
-
-        - re-activation gate (``any(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
-          — sets ``active = true`` unless ``retired_at`` indicates manual decommission.
-        - deactivation gate (``none(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
-          — sets ``active = false``.
-
-        Nodes without any MISP event reference are not affected.
-
-        Args:
-            active_event_ids: List of event IDs that are currently active in MISP
-
-        Returns:
-            Dict with counts of marked inactive nodes by label
-        """
-        if not self.driver:
-            logger.error("Cannot mark inactive nodes: no connection")
-            return {}
-
-        if not active_event_ids:
-            logger.warning("No active event IDs provided, skipping inactive marking")
-            return {}
-
-        results = {}
-
-        try:
-            # Convert to set for efficient lookup
-            active_ids_set = set(str(eid) for eid in active_event_ids)
-
-            # Re-activate Indicators where ANY of their MISP event IDs is currently active.
-            # ``retired_at`` (manual decommission) wins over the auto-active reset.
-            query_indicators = """
-            MATCH (n:Indicator)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                n.last_decayed_tier = null,
-                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END
-            """
-
-            query_indicators_inactive = """
-            MATCH (n:Indicator)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = false
-            RETURN count(n) as count
-            """
-
-            # Re-activate Vulnerabilities where ANY of their MISP event IDs is active.
-            # Mirrors query_indicators above so a Vulnerability that was marked inactive
-            # gets re-activated when its events re-enter the active list.
-            # ``retired_at`` (manual decommission) wins over the auto-active reset.
-            query_vulnerabilities = """
-            MATCH (n:Vulnerability)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                n.last_decayed_tier = null,
-                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END
-            """
-
-            # Mark inactive Vulnerabilities — same any-of / none-of semantics.
-            query_vulnerabilities_inactive = """
-            MATCH (n:Vulnerability)
-            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
-            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = false
-            RETURN count(n) as count
-            """
-
-            with self.driver.session() as session:
-                # First, mark all nodes with ANY active MISP event ID as active.
-                # Indicators and Vulnerabilities both get the re-activation pass so a
-                # node previously flipped inactive comes back when its events do.
-                session.run(query_indicators, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
-                session.run(query_vulnerabilities, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
-
-                # Mark inactive Indicators
-                result = session.run(
-                    query_indicators_inactive, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT
-                )
-                record = result.single()
-                results["indicators_marked_inactive"] = record["count"] if record else 0
-
-                # Mark inactive Vulnerabilities
-                result = session.run(
-                    query_vulnerabilities_inactive, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT
-                )
-                record = result.single()
-                results["vulnerabilities_marked_inactive"] = record["count"] if record else 0
-
-            total_inactive = sum(results.values())
-            logger.info(f"Marked {total_inactive} nodes as inactive (not in {len(active_ids_set)} active MISP events)")
-            logger.info(f"   - Indicators: {results.get('indicators_marked_inactive', 0)}")
-            logger.info(f"   - Vulnerabilities: {results.get('vulnerabilities_marked_inactive', 0)}")
-
-            return results
-
-        except (
-            neo4j_exceptions.ServiceUnavailable,
-            neo4j_exceptions.TransientError,
-            ConnectionError,
-            TimeoutError,
-        ):
-            raise  # let @retry_with_backoff handle transient errors
-        except Exception as e:
-            logger.error(f"Error marking inactive nodes: {e}")
-            return {}
+    # 2026-10-16: ``mark_inactive_nodes`` (no caller) was removed. It set ``active`` from whether a
+    # node's MISP events were still listed, without a ``retired_by`` tag, on Indicator and
+    # Vulnerability nodes alike: a rule beside the one aging rule (``indicator_aging``) that a later
+    # write would have undone, and a lifecycle write on a label that does not age.
 
     def merge_indicators_batch(self, items: List[Dict], source_id: str = "misp") -> Tuple[int, int]:
         """
@@ -3963,6 +3962,9 @@ class Neo4jClient:
                         # existing value rather than overwriting with NULL.
                         "first_seen_at_source": item.get("first_seen_at_source"),
                         "last_seen_at_source": item.get("last_seen_at_source"),
+                        # 2026-10-16 (indicator aging): the report this item makes (recorded_at,
+                        # reported_at, report_ref, reported_basis; all None without one).
+                        "report": report_row(item),
                     }
 
                     # PR #34 round 17 historical context: dropped the old
@@ -4029,7 +4031,7 @@ class Neo4jClient:
                     # listed the IOC accumulate on the node (build_relationships Q9b / Q2d), and so do
                     # the pulses among them the OTX collector judged, with the canonical reference, to
                     # name several actors (step 2d attributes nothing from them; the actor nodes miss a
-                    # pulse edited to name several, whose mark MISPWriter adds to stored IOC copies).
+                    # pulse edited to name several, whose mark arrives with the pulse's new IOCs).
                     # A mark judged by name without the reference (``several_actor_pulses_by_name``)
                     # is never stored: it serves the sync's own run.
                     for _list_field in ("pulse_malware_families", "pulse_malware_actor_pairs", "several_actor_pulses"):
@@ -4058,19 +4060,12 @@ class Neo4jClient:
                               n.uuid = item.node_uuid,
                               n.edgeguard_managed = true
                 ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
-                SET n.confidence_score = CASE
-                        WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
-                        THEN item.confidence
-                        ELSE n.confidence_score END,
+                SET {source_confidence_item("n", "item.confidence")},
                     n.source = {_dedup_concat_clause("n.source", "item.source_array")},
                     {_zone_clause},
                     n.tags = {_dedup_concat_clause("n.tags", "[item.tag]")},
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                    n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                    n.last_decayed_tier = null,
-                    n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
                     n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
@@ -4092,7 +4087,12 @@ class Neo4jClient:
                     n.hostnames = coalesce(item.hostnames, n.hostnames),
                     n.pulse_malware_families = {_dedup_concat_clause("n.pulse_malware_families", "coalesce(item.pulse_malware_families, [])")},
                     n.pulse_malware_actor_pairs = {_dedup_concat_clause("n.pulse_malware_actor_pairs", "coalesce(item.pulse_malware_actor_pairs, [])")},
-                    n.several_actor_pulses = {_dedup_concat_clause("n.several_actor_pulses", "coalesce(item.several_actor_pulses, [])")}
+                    n.several_actor_pulses = {_dedup_concat_clause("n.several_actor_pulses", "coalesce(item.several_actor_pulses, [])")},
+                    // 2026-10-16 (indicator aging): the report, forward only (``indicator_aging``).
+                    {node_report_items("n", "item.report", "item.source_id")}
+                // 2026-10-16: the one aging rule, in a SET clause of its own, so it reads the report and
+                // source_confidence recorded above; a newer report reactivates the node in this write.
+                {aging_set_clause("n")}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
@@ -4125,7 +4125,9 @@ class Neo4jClient:
                         WHEN r.source_reported_last_at IS NULL THEN datetime(item.last_seen_at_source)
                         WHEN datetime(item.last_seen_at_source) > r.source_reported_last_at
                             THEN datetime(item.last_seen_at_source)
-                        ELSE r.source_reported_last_at END
+                        ELSE r.source_reported_last_at END,
+                    // 2026-10-16: this source's report times, forward only (``indicator_aging``)
+                    {edge_report_items("r", "item.report", "item.source_id")}
                 """
 
                 # PR-N15 (2026-04-21 pre-baseline audit Fix #2): run
@@ -4306,8 +4308,13 @@ class Neo4jClient:
                     # extra_props builder shape. Each field is conditional
                     # on presence so the batch_item stays compact for
                     # items that don't carry enrichment.
-                    if item.get("description"):
-                        batch_item["description"] = item["description"]
+                    # 2026-10-16: the description with its source and that source's rank (the batch's
+                    # source), applied by the source ranking below (``description_ranking``).
+                    ranked = CVE_DESCRIPTIONS.record(item.get("description"), source_id)
+                    if ranked is not None:
+                        batch_item["description"] = ranked.text
+                        batch_item["description_source"] = ranked.source
+                        batch_item["description_rank"] = ranked.rank
                     if item.get("cvss_score") is not None:
                         batch_item["cvss_score"] = item["cvss_score"]
                     if item.get("severity"):
@@ -4349,7 +4356,7 @@ class Neo4jClient:
                         batch_item["affected_products"] = item["affected_products"]
                     if item.get("tlp"):
                         batch_item["tlp"] = str(item["tlp"])  # 2026-10: TLP level from the tlp:<level> MISP tag
-                    # 2026-10: NVD's record sets description and dates; any other record only fills them.
+                    # 2026-10: NVD's record sets the dates; any other record only fills them.
                     batch_item["nvd_record"] = bool(item.get("nvd_record"))
 
                     batch_data.append(batch_item)
@@ -4372,7 +4379,8 @@ class Neo4jClient:
                 ON CREATE SET n.first_imported_at = datetime(),
                     n.status = item.status,
                     n.uuid = item.node_uuid,
-                    n.edgeguard_managed = true
+                    n.edgeguard_managed = true,
+                    {_create_active("n")}
                 ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
@@ -4384,10 +4392,6 @@ class Neo4jClient:
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
-                    n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
-                    n.last_decayed_tier = null,
-                    n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                     n.tlp = {_tlp_most_restrictive_clause("n.tlp", "item.tlp")},
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
@@ -4400,9 +4404,9 @@ class Neo4jClient:
                     // ``coalesce(item.X, n.X)`` shape so partial-item
                     // batches don't clobber previously-set values with
                     // NULL — matches merge_cve's extra_props semantics.
-                    // 2026-10: description and dates as in merge_cve — NVD's record sets them,
-                    // any other record fills them where the node has none.
-                    {", ".join(_batch_record_text_clauses("n", "item"))},
+                    // 2026-10: dates as in merge_cve — NVD's record sets them, any other record
+                    // fills them where the node has none; the description follows below.
+                    {", ".join(_batch_record_date_clauses("n", "item"))},
                     n.cvss_score = coalesce(item.cvss_score, n.cvss_score),
                     n.severity = coalesce(item.severity, n.severity),
                     n.attack_vector = coalesce(item.attack_vector, n.attack_vector),
@@ -4419,6 +4423,7 @@ class Neo4jClient:
                     n.ref_tags = coalesce(item.ref_tags, n.ref_tags),
                     n.reference_urls = coalesce(item.reference_urls, n.reference_urls),
                     n.affected_products = coalesce(item.affected_products, n.affected_products)
+                {_BATCH_RANKED_DESCRIPTION}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
@@ -6471,9 +6476,12 @@ class Neo4jClient:
         Stamps the same deterministic n.uuid as the MISP path so a node MERGEd
         through either path gets the same uuid.
 
-        ``description`` only fills a node that has none (2026-10), as any record but NVD's does on
-        the MISP path; before, it replaced the stored text and a call without one removed it. ``status``
-        is set when the call carries one and kept when it does not (2026-10).
+        ``description`` follows the source ranking of the MISP path (2026-10-16,
+        ``description_ranking.CVE_DESCRIPTIONS``) with ``description_source`` ``resilmesh``, a source the
+        registry does not know: it fills a node without a description and replaces only the text of
+        another unregistered source whose id sorts after it, never a feed's. Until 2026-10 it replaced the
+        stored text and a call without one removed it. ``status`` is set when the call carries one and kept
+        when it does not (2026-10).
         """
         # PR #37 (Bug Hunter Tier S A3): refuse to merge when ``cve_id`` is
         # missing. Previously this defaulted to the sentinel
@@ -6508,10 +6516,11 @@ class Neo4jClient:
         ON MATCH SET v.edgeguard_enriched = CASE WHEN v.edgeguard_managed = true THEN v.edgeguard_enriched ELSE true END
         SET v.name = coalesce(v.name, $name)
         SET v.status = coalesce($status, v.status),
-            v.description = {_set_if_absent_clause("v.description", "$description")},
             v.last_updated = datetime(),
             v.uuid = coalesce(v.uuid, $vuln_uuid)
+        {CVE_DESCRIPTIONS.set_cypher("v", "v", "$description", "$description_source", "$description_rank")}
         """
+        ranked = CVE_DESCRIPTIONS.record(data.get("description"), RESILMESH_NATIVE_SOURCE)
         try:
             with self.driver.session() as session:
                 session.run(
@@ -6520,7 +6529,9 @@ class Neo4jClient:
                     cve_id=cve_id,
                     vuln_uuid=vuln_uuid,
                     status=data.get("status"),
-                    description=data.get("description"),
+                    description=ranked.text if ranked else None,
+                    description_source=RESILMESH_NATIVE_SOURCE,
+                    description_rank=ranked.rank if ranked else 0,
                     timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated ResilMesh Vulnerability: {name}")
@@ -6537,9 +6548,11 @@ class Neo4jClient:
         extensions (CISA KEV, reference_urls). Both produce compatible
         CVE nodes keyed on ``cve_id`` with the same deterministic n.uuid.
 
-        ``description``, ``published`` and ``last_modified`` only fill a node that has none
-        (2026-10): NVD's record, merged by ``merge_cve``, sets them, so a write here never replaces
-        NVD's text, and a call without them no longer removes the stored values. ``cpe_type``,
+        ``published`` and ``last_modified`` only fill a node that has none (2026-10): NVD's record, merged
+        by ``merge_cve``, sets them, and a call without them no longer removes the stored values.
+        ``description`` follows the source ranking (2026-10-16, ``description_ranking``) with
+        ``description_source`` ``resilmesh``, below every registered feed, so a write here never replaces a
+        feed's text (NVD's, CISA's, ...) and fills a node without one. ``cpe_type``,
         ``result_impacts``, ``ref_tags`` and ``cwe`` are set when the call carries them and kept when
         it does not (2026-10; a call without them removed NVD's lists).
         """
@@ -6549,8 +6562,7 @@ class Neo4jClient:
         MERGE (c:CVE {{cve_id: $cve_id}})
         ON CREATE SET c.uuid = $cve_uuid, c.edgeguard_managed = true
         ON MATCH SET c.edgeguard_enriched = CASE WHEN c.edgeguard_managed = true THEN c.edgeguard_enriched ELSE true END
-        SET c.description = {_set_if_absent_clause("c.description", "$description")},
-            c.published = {_set_if_absent_clause("c.published", "$published")},
+        SET c.published = {_set_if_absent_clause("c.published", "$published")},
             c.last_modified = {_set_if_absent_clause("c.last_modified", "$last_modified")},
             c.cpe_type = coalesce($cpe_type, c.cpe_type),
             c.result_impacts = coalesce($result_impacts, c.result_impacts),
@@ -6561,7 +6573,9 @@ class Neo4jClient:
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
             c.last_updated = datetime(),
             c.uuid = coalesce(c.uuid, $cve_uuid)
+        {CVE_DESCRIPTIONS.set_cypher("c", "c", "$description", "$description_source", "$description_rank")}
         """
+        ranked = CVE_DESCRIPTIONS.record(data.get("description"), RESILMESH_NATIVE_SOURCE)
         try:
             tag = data.get("tag", "default")
             with self.driver.session() as session:
@@ -6570,7 +6584,9 @@ class Neo4jClient:
                     cve_id=cve_id,
                     cve_uuid=cve_uuid,
                     tag=tag,
-                    description=data.get("description"),
+                    description=ranked.text if ranked else None,
+                    description_source=RESILMESH_NATIVE_SOURCE,
+                    description_rank=ranked.rank if ranked else 0,
                     published=data.get("published"),
                     last_modified=data.get("last_modified"),
                     cpe_type=data.get("cpe_type"),
@@ -7646,30 +7662,44 @@ class Neo4jClient:
         # for any indicator that arrived via an alert. Fixed: write
         # only ``i.first_imported_at`` (ON CREATE SET, never overwritten)
         # and ``i.last_updated`` (= datetime() every MERGE).
+        # 2026-10-16 (indicator aging): the alert keeps the highest confidence a source gave
+        # (``source_confidence``) and applies the one aging rule. It records no report: an alert
+        # does not advance ``last_reported_at`` (its time and whether it is independent evidence,
+        # rather than a match of a list EdgeGuard exported to Wazuh, are to be designed with the
+        # ResilMesh alert integration; no subscriber is deployed), so a node it creates ages from
+        # ``first_imported_at`` and an existing node keeps its basis.
         query = f"""
         MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
         ON CREATE SET i.first_imported_at = datetime(), i.edgeguard_managed = true
         ON MATCH SET i.edgeguard_enriched = CASE WHEN i.edgeguard_managed = true THEN i.edgeguard_enriched ELSE true END
         SET i.last_updated = datetime(),
             i.source = {_dedup_concat_clause("i.source", "$source")},
-            i.confidence_score = CASE
-                WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
-                THEN $confidence_score
-                ELSE i.confidence_score END,
+            {source_confidence_item("i", "$confidence_score")},
             {_zone_clause_i},
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
-            i.tlp = coalesce(i.tlp, $tlp),
-            i.active = CASE WHEN i.retired_at IS NOT NULL AND coalesce(i.retired_by, 'manual') <> 'decay' THEN i.active ELSE true END,
-            i.retired_at = CASE WHEN coalesce(i.retired_by, '') = 'decay' THEN null ELSE i.retired_at END,
-            i.last_decayed_tier = null,
-            i.retired_by = CASE WHEN coalesce(i.retired_by, '') = 'decay' THEN null ELSE i.retired_by END
+            i.tlp = coalesce(i.tlp, $tlp)
+        """
+        # 2026-10-16: the aging rule, in a second statement of the same transaction. In the statement
+        # above the planner reads the node's basis (``last_reported_at``, ``first_imported_at``) with
+        # the MERGE, before the SET takes the node's write lock (EXPLAIN: CacheProperties under the
+        # Merge), so the rule could miss a write committed in between. The second statement reads the
+        # node after that SET, under the write lock this transaction holds until it commits.
+        aging_query = f"""
+        MATCH (i:Indicator {{indicator_type: $indicator_type, value: $value}})
+        {aging_set_clause("i")}
         """
 
-        try:
+        def _write(statement: str) -> None:
             with self.driver.session() as session:
-                session.run(query, **data, timeout=NEO4J_READ_TIMEOUT)
-                logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
-                return True
+                with session.begin_transaction(timeout=float(NEO4J_READ_TIMEOUT)) as tx:
+                    tx.run(statement, **data).consume()
+                    tx.run(aging_query, indicator_type=normalized_type, value=normalized_value).consume()
+                    tx.commit()
+
+        try:
+            _write(query)
+            logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
+            return True
         except Exception:
             # PR (S5) (Bug Hunter v3 #3 MED): fallback Cypher
             # now uses server-side ``datetime()`` for ``i.last_updated``
@@ -7678,22 +7708,20 @@ class Neo4jClient:
             # (server clock + Python clock) introduced clock-drift risk.
             # ``i.last_updated`` is a DB-local fact; the server should
             # be the single source of truth for it.
+            # 2026-10-16: followed by the same aging statement as the primary query, in the same
+            # transaction (the rule itself needs no APOC).
             fallback_query = f"""
             MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
             ON CREATE SET i.first_imported_at = datetime(), i.edgeguard_managed = true
             ON MATCH SET i.edgeguard_enriched = CASE WHEN i.edgeguard_managed = true THEN i.edgeguard_enriched ELSE true END
             SET i.last_updated = datetime(),
-                i.confidence_score = CASE
-                    WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
-                    THEN $confidence_score
-                    ELSE i.confidence_score END,
+                {source_confidence_item("i", "$confidence_score")},
                 {_zone_clause_i},
                 i.tlp = coalesce(i.tlp, $tlp)
             """
             try:
-                with self.driver.session() as session:
-                    session.run(fallback_query, **data, timeout=NEO4J_READ_TIMEOUT)
-                    return True
+                _write(fallback_query)
+                return True
             except Exception as e2:
                 logger.error(f"Failed to create indicator: {e2}")
                 return False

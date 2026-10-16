@@ -103,6 +103,11 @@ class _Session:
                 "count": 0,
                 "linked": 0,
                 "c": 0,
+                # 2026-10-16: Step 1b, the campaigns deleted for want of evidence
+                "deleted": 0,
+                "runs_removed": 0,
+                "members_removed": 0,
+                "names": [],
             }
         return result
 

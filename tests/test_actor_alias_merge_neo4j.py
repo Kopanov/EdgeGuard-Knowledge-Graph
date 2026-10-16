@@ -311,6 +311,36 @@ class TestMergeOnNeo4j:
         )
         assert attributed == {"tlp": None}
 
+    def test_the_merged_node_keeps_the_ranked_description_with_its_source(self, graph):
+        """2026-10-16: the merged node keeps the description the source ranking keeps among the group, with
+        its ``description_source``: Core Ideas' text of the duplicate cl0p over the canonical clop's MISP text;
+        the canonical apt28's text written before the ranking (no source, counted as MITRE's) over the
+        duplicate's MISP text, without the duplicate's source (``discard`` took it, since apt28 had none)."""
+        client, driver = graph
+        with driver.session() as session:
+            session.run(
+                "MATCH (a:ThreatActor {name: 'clop'}) SET a.description = 'MISP text', a.description_source = 'misp'"
+            )
+            session.run(
+                "MATCH (a:ThreatActor {name: 'cl0p'}) SET a.description = 'Core Ideas text', "
+                "a.description_source = 'coreideas'"
+            )
+            session.run("MATCH (a:ThreatActor {name: 'apt28'}) SET a.description = 'legacy text'")
+            session.run(
+                "MATCH (a:ThreatActor {name: 'fancy bear'}) SET a.description = 'other MISP text', "
+                "a.description_source = 'misp'"
+            )
+        assert enrichment_jobs.merge_alias_duplicate_actors(client)["merged"] == 2
+        rows = _rows(
+            driver,
+            "MATCH (a:ThreatActor) WHERE a.name IN ['clop', 'apt28'] "
+            "RETURN a.name AS name, a.description AS description, a.description_source AS source",
+        )
+        assert {r["name"]: (r["description"], r["source"]) for r in rows} == {
+            "clop": ("Core Ideas text", "coreideas"),
+            "apt28": ("legacy text", None),
+        }
+
     def test_a_second_run_merges_nothing(self, graph):
         client, driver = graph
         enrichment_jobs.merge_alias_duplicate_actors(client)
