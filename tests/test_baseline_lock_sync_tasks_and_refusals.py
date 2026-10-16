@@ -13,6 +13,9 @@
    wiped. A refusal now releases the lock; ``baseline_clean`` (cleared after an environment fix)
    takes it again before the wipe and ``baseline_start`` before the collectors, which also covers
    a ``baseline_clean`` marked success by hand.
+3. A ``baseline_start`` marked success by hand after such a refusal takes nothing, and the
+   collectors' own check finds no sentinel: the collectors and ``full_neo4j_sync`` now refuse while
+   no baseline holds the lock (a verify, not a re-acquire: the tier-2 collectors run in parallel).
 
 The DAG module is imported as Airflow imports it, and the lock is a real sentinel file; only the
 Airflow REST lookup of the run state, the sync, the subprocess, the enrichment and the wipe are
@@ -168,6 +171,18 @@ def test_sync_dag_tasks_skip_while_a_baseline_holds_the_lock(dag, lock, sync_tas
     assert sync_tasks.state_file.exists() and _Variables.store["NEO4J_FULL_SYNC"] == "false"
 
 
+def test_the_sync_tasks_proceed_when_the_lock_cannot_be_read(dag, lock, sync_tasks, monkeypatch):
+    """Fail-open, as ``check_sync_needed``: a broken lock check must not fail every scheduled sync."""
+
+    def broken(**_kwargs):
+        raise RuntimeError("lock check failed")
+
+    monkeypatch.setattr(baseline_lock, "baseline_skip_reason", broken)
+    for task in sync_tasks.tasks:
+        task(**_context(SYNC_RUN))
+    assert sync_tasks.ran == ["run_neo4j_sync", "build_relationships", "run_enrichment_jobs"]
+
+
 def test_a_process_held_lock_skips_the_sync_tasks_too(dag, lock, sync_tasks):
     """The in-process baseline (``run_pipeline --baseline``) is never the task's own run."""
     assert baseline_lock.acquire_baseline_lock()
@@ -301,6 +316,75 @@ def test_baseline_start_takes_the_lock_again_after_a_refusal(dag, lock, clean, m
     assert _holder_on_disk(lock.path) == BASELINE_A["run_id"]
     # Idempotent while the run holds the lock (the additive path, or a cleared baseline_start).
     assert dag._baseline_start_summary(**_context(BASELINE_A, {}))["started"] is True
+
+
+def _marked_success(run: dict, conf: dict | None = None) -> dict:
+    """A context in which Airflow reports ``baseline_start`` as success, as after marking it success by hand."""
+    context = _context(run, conf)
+    context["ti"] = SimpleNamespace(
+        dag_id=run["dag_id"],
+        run_id=run["run_id"],
+        get_task_states=lambda dag_id, task_ids, run_ids: {run["run_id"]: dict.fromkeys(task_ids, "success")},
+    )
+    return context
+
+
+@pytest.fixture
+def collector_spy(dag, monkeypatch):
+    """``run_baseline_collector`` up to the collector wrapper, which records the call."""
+    reached: list = []
+    monkeypatch.setattr(dag, "get_baseline_config", lambda context=None: (None, 730))
+    monkeypatch.setattr("collectors.misp_writer.MISPWriter", MagicMock())
+    monkeypatch.setattr("parent_dag_liveness.make_liveness_callback", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        dag, "run_collector_with_metrics", lambda name, *_a, **kwargs: reached.append((name, kwargs["baseline_holder"]))
+    )
+    return reached
+
+
+def test_the_collectors_and_full_sync_refuse_while_no_baseline_holds_the_lock(
+    dag, lock, clean, sync_tasks, collector_spy
+):
+    """The regression: after a refusal released the lock, ``baseline_clean`` and ``baseline_start`` marked
+    success by hand let the collectors and ``full_neo4j_sync`` write without any lock."""
+    conf = {"fresh_baseline": True}
+    clean.gate_error = "EDGEGUARD_LAST_BACKUP_AT is not set"
+    dag._baseline_acquire_lock(**_context(BASELINE_A, conf))
+    with pytest.raises(dag.AirflowException, match="BASELINE_CLEAN refused"):
+        dag._baseline_clean(**_context(BASELINE_A, conf))
+    assert not lock.path.exists()
+
+    context = _marked_success(BASELINE_A, conf)
+    with pytest.raises(dag.AirflowFailException, match="full_neo4j_sync: no baseline holds the baseline lock"):
+        dag.run_baseline_full_sync(**context)
+    with pytest.raises(dag.AirflowFailException, match="urlhaus: no baseline holds the baseline lock"):
+        dag.run_baseline_collector("urlhaus", object, context=context)
+    assert sync_tasks.ran == [] and collector_spy == []
+    assert not lock.path.exists(), "the check only verifies; it takes no lock"
+
+    # Clearing baseline_start takes the lock for this run; the same tasks then run under it.
+    dag._baseline_start_summary(**_context(BASELINE_A, conf))
+    assert dag.run_baseline_full_sync(**context) == {"synced": True}
+    dag.run_baseline_collector("urlhaus", object, context=context)
+    assert sync_tasks.ran == ["run_neo4j_sync"] and collector_spy == [("urlhaus", BASELINE_A)]
+
+
+def test_a_lock_held_by_another_run_is_left_to_the_collectors_own_check(dag, lock, collector_spy):
+    """The new check refuses only a free lock; another run's lock still stands the collectors down there."""
+    dag._baseline_acquire_lock(**_context(BASELINE_B, {}))
+    dag.run_baseline_collector("urlhaus", object, context=_marked_success(BASELINE_A))
+    assert collector_spy == [("urlhaus", BASELINE_A)]
+
+
+def test_the_collectors_proceed_when_the_lock_cannot_be_read(dag, lock, collector_spy, monkeypatch):
+    """Fail-open, as the collectors' own check: a broken lock module must not fail every baseline collector."""
+
+    def broken():
+        raise RuntimeError("lock check failed")
+
+    monkeypatch.setattr(baseline_lock, "is_baseline_running", broken)
+    dag.run_baseline_collector("urlhaus", object, context=_marked_success(BASELINE_A))
+    assert collector_spy == [("urlhaus", BASELINE_A)]
 
 
 def test_baseline_start_refuses_while_another_run_holds_the_lock(dag, lock, monkeypatch):

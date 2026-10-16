@@ -2766,6 +2766,39 @@ def _require_baseline_start(context, step: str) -> None:
         )
 
 
+def _require_baseline_lock(context, step: str) -> None:
+    """Refuse a baseline step that would write while no baseline holds the baseline lock (2026-10-16).
+
+    A refusal of ``baseline_clean`` before the wipe releases the lock, and ``baseline_clean`` and
+    ``baseline_start`` take it again when they run. A ``baseline_start`` marked success by hand does
+    not run, yet ``_require_baseline_start`` accepts it, and the collectors' own check
+    (``baseline_skip_reason``) finds no sentinel: the collectors and ``full_neo4j_sync`` would write
+    beside the scheduled DAGs, which the lock exists to prevent. Before 2026-10-16 the refused run
+    kept its lock, so this path did not exist. The check only verifies: the tier-2 collectors run in
+    parallel and would race on the sentinel's atomic create if each took the lock. A lock held by
+    another baseline is left to the collectors' own check, which stands them down. No check without a
+    run id (no Airflow DAG run, as in ``_retake_baseline_lock``); fail-open when the lock cannot be
+    read, as the collectors' own check.
+    """
+    holder = _baseline_run_holder(context or {})
+    if not holder["run_id"]:
+        return
+    try:
+        from baseline_lock import baseline_lock_path, is_baseline_running
+
+        held = is_baseline_running()
+        path = baseline_lock_path()
+    except Exception:
+        logger.warning("[BASELINE] %s: the baseline lock could not be read; proceeding", step, exc_info=True)
+        return
+    if held is None:
+        raise AirflowFailException(
+            f"[BASELINE] {step}: no baseline holds the baseline lock ({path}), so this run would write beside "
+            "the scheduled DAGs (a refusal of baseline_clean released it, or it was reaped at the age cap or "
+            "removed by hand). Clear baseline_start, which takes the lock again for this run, then this task."
+        )
+
+
 def run_baseline_collector(collector_name: str, collector_class, context=None, **kwargs):
     """
     Run a single collector in baseline mode.
@@ -2784,6 +2817,7 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
     **kwargs        : passed through to the collector constructor
     """
     _require_baseline_start(context, collector_name)
+    _require_baseline_lock(context, collector_name)
 
     from collectors.misp_writer import MISPWriter
 
@@ -2945,6 +2979,7 @@ def run_baseline_malwarebazaar(**context):
 def run_baseline_full_sync(**context):
     """Run a FULL (non-incremental) MISP→Neo4j sync after baseline collection."""
     _require_baseline_start(context, "full_neo4j_sync")
+    _require_baseline_lock(context, "full_neo4j_sync")
 
     from run_misp_to_neo4j import MISPToNeo4jSync
 
@@ -3077,8 +3112,8 @@ def assert_baseline_postconditions(**context):
                 logger.error(
                     "[BASELINE-POSTCHECK-SKIPPED] upstream task(s) did not succeed — "
                     "invariants would be trivially violated for upstream reasons, NOT "
-                    "a real data-integrity breach. State table: %s. The DAG is already "
-                    "FAILED via upstream — no need to raise AirflowException here. "
+                    "a real data-integrity breach. State table: %s. The run ends success "
+                    "(a skipped leaf counts): this line shows the failure. "
                     "To debug: inspect the failed upstream task's log first.",
                     upstream_states,
                 )
@@ -3096,13 +3131,12 @@ def assert_baseline_postconditions(**context):
                 # NONE_FAILED_MIN_ONE_SUCCESS evaluates: "no direct parent
                 # failed (skipped ≠ failed), at least one succeeded
                 # (skipped ≠ success — FALSE)" → baseline_complete also
-                # gets skipped → DAG correctly marked FAILED via the
-                # original upstream failure state. No double-fire of
-                # AirflowException, just a clean state-machine propagation.
+                # gets skipped. 2026-10-16: the run ends success, not
+                # failed (a skipped leaf counts; RUNBOOK § 7c, Airflow 2).
                 raise AirflowSkipException(
                     f"[BASELINE-POSTCHECK-SKIPPED] upstream failure propagation: "
                     f"{upstream_states}. Postcheck skipped so downstream "
-                    "baseline_complete also skips and DAG reflects the true upstream failure."
+                    "baseline_complete also skips; the run ends success, see the state table."
                 )
         except AirflowSkipException:
             # Let the skip propagate through Airflow's state machine —
@@ -3337,9 +3371,11 @@ def _retake_baseline_lock(holder: dict, step: str, before: str) -> None:
     (``_release_lock_on_pre_wipe_refusal``), so a run that goes on afterwards must hold it again:
     ``baseline_clean``, cleared after an environment fix, takes it before the wipe, and
     ``baseline_start`` takes it before the collectors and the full sync, which also covers a
-    ``baseline_clean`` marked success by hand. Idempotent while this run holds the lock; refuses
-    while another DAG run or an in-process baseline holds it. ``baseline_acquire_lock`` refuses a
-    context without a run id, so no such run reaches this step; it is a no-op there.
+    ``baseline_clean`` marked success by hand. A ``baseline_start`` marked success by hand takes
+    nothing; the collectors and ``full_neo4j_sync`` then refuse (``_require_baseline_lock``).
+    Idempotent while this run holds the lock; refuses while another DAG run or an in-process
+    baseline holds it. ``baseline_acquire_lock`` refuses a context without a run id, so no such run
+    reaches this step; it is a no-op there.
     """
     if not holder["run_id"]:
         return
@@ -4111,7 +4147,8 @@ baseline_complete = BashOperator(
 # keeps the lock so that clearing the failed task resumes under the mutex (the liveness check keeps a
 # failed run's sentinel until the age cap and prunes it once the run state is success). A refusal of
 # ``baseline_clean`` before the wipe releases it instead; ``baseline_clean`` and ``baseline_start``
-# take it again before the run goes on (2026-10-16).
+# take it again before the run goes on, and the collectors and ``full_neo4j_sync`` refuse while no
+# baseline holds it (2026-10-16).
 # The scheduled DAGs skip while the sentinel is held; in ``edgeguard_neo4j_sync`` every task that
 # writes checks it at its start, not only ``check_sync_needed`` (2026-10-16). The earlier PID-based
 # attempt failed because the task process that writes the sentinel exits while the DAG run

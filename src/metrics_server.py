@@ -582,7 +582,8 @@ BUILD_RELATIONSHIPS_COMPLETIONS = Counter(
 
 # 2026-10: when build_relationships last completed. EdgeGuardBuildRelationshipsSilentDeath compares it
 # with the last successful MISP→Neo4j sync, which build_relationships follows in both the scheduled
-# sync DAG and the baseline.
+# sync DAG and the baseline. Since 2026-10-16 the sync DAG's build_relationships skips while a baseline
+# holds the baseline lock, so the rule is silent while a baseline run is in progress.
 BUILD_RELATIONSHIPS_LAST_COMPLETION = Gauge(
     "edgeguard_build_relationships_last_completion_timestamp",
     "Unix timestamp (seconds) of the last build_relationships run that reached its [BUILD_RELATIONSHIPS SUMMARY] line.",

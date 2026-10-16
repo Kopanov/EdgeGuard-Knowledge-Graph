@@ -215,6 +215,9 @@ def test_scheduled_collector_still_stands_down_during_a_baseline(dag, lock_path,
 
 def test_every_baseline_collector_callable_passes_its_run_context(dag, lock_path, running, monkeypatch) -> None:
     """All baseline collector tasks must reach the wrapper with the identity of their DAG run."""
+    # 2026-10-16: the run holds its lock, as every baseline run does before its collectors; without
+    # one they refuse (``_require_baseline_lock``).
+    dag._baseline_acquire_lock(**_context(RUN))
     seen: List[Dict[str, Any]] = []
 
     def spy(collector_name, collector_class, writer, **kwargs):
