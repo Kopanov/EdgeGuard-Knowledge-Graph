@@ -35,7 +35,6 @@ FORWARDED = [
     ("EDGEGUARD_FEODO_MAX_PER_RUN", "15000"),  # 2026-10 per-run caps (AbuseIPDB: one request's limit)
     ("EDGEGUARD_SSLBL_MAX_PER_RUN", "20000"),
     ("EDGEGUARD_ABUSEIPDB_MAX_PER_RUN", "10000"),  # one blacklist request per run, free-plan maximum
-    ("EDGEGUARD_CISA_INCREMENTAL_DAYS", "30"),  # int(os.environ.get(...))
     ("EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET", "400"),
     ("EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN", "60"),
     ("EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS", "30"),
@@ -51,7 +50,9 @@ FORWARDED = [
     ("EPSS_DOWNLOAD_DEADLINE_SEC", "300"),
     ("EDGEGUARD_NVD_MAX_PER_RUN", "5000"),
     ("EDGEGUARD_NVD_UPDATE_EXISTING", "true"),
-    ("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true"),  # 2026-10 whole KEV catalogue in baseline mode
+    ("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true"),  # 2026-10 whole KEV catalogue in every run
+    ("EDGEGUARD_KEV_MAX_EDITS_PER_RUN", "500"),  # 2026-10 KEV revisions: stored copies edited per run
+    ("EDGEGUARD_KEV_UPDATE_EXISTING", "true"),
     ("EDGEGUARD_NVD_BASELINE_KEV_SWEEP", "true"),  # 2026-10 NVD records of every KEV CVE in baseline mode
     ("EDGEGUARD_NVD_EXTRA_CVE_IDS", None),  # 2026-10 CVE ids fetched by id; empty = none
     ("EDGEGUARD_MISP_DELETE_TIMEOUT_SEC", "900"),  # 2026-10 fresh-baseline wipe: one MISP event delete
@@ -71,6 +72,12 @@ FORWARDED = [
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
     ("EDGEGUARD_CANONICAL_THREAT_ACTORS", None),  # empty = the reference shipped in src/reference/
     ("EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE", "true"),  # 2026-10 Malware ATT&CK-id twin merge
+]
+
+
+# Retired variables: no code reads them any more, so compose must not forward them as if they worked.
+RETIRED = [
+    "EDGEGUARD_CISA_INCREMENTAL_DAYS",  # 2026-10: every KEV run compares the whole catalogue
 ]
 
 
@@ -126,7 +133,16 @@ def test_int_parsed_variables_never_default_to_empty():
     env = _common_env()
     for name in (
         "EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS",
-        "EDGEGUARD_CISA_INCREMENTAL_DAYS",
         "EDGEGUARD_NVD_INCREMENTAL_DAYS",
     ):
         assert not str(env[name]).endswith(":-}"), f"{name} would be empty inside the container when unset in .env"
+
+
+@pytest.mark.parametrize("name", RETIRED)
+def test_retired_variable_is_not_forwarded(name):
+    data = yaml.safe_load(COMPOSE.read_text())
+    assert name not in _common_env() and name not in data["services"]["airflow"]["environment"]
+    for path in [*(REPO_ROOT / "src").rglob("*.py"), *(REPO_ROOT / "dags").rglob("*.py")]:
+        # A name a module reads is a string literal; comments may still name the retired variable.
+        text = path.read_text()
+        assert f'"{name}"' not in text and f"'{name}'" not in text, f"{path} still reads the retired {name}"

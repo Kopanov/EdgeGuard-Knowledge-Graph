@@ -361,7 +361,13 @@ class TestMergeCveStatements:
         for prop in RECORD_DATES:
             assert f"n.{prop} = ${prop}" in query
             assert params[prop] == nvd[prop]
-        assert "$fill_" not in query
+            assert f"$fill_{prop}" not in query
+        # 2026-10: CVE-2025-21042 is on KEV, and NVD's record carries NVD's copy of the KEV fields; the KEV
+        # record owns them, so NVD's record only fills them (tests/test_kev_update_path.py).
+        kev_fields = {p for p in ("cisa_exploit_add", "cisa_action_due", "cisa_required_action") if nvd.get(p)}
+        assert kev_fields, "premise: NVD's record carries the KEV fields"
+        assert {k[len("fill_") :] for k in params if k.startswith("fill_")} <= kev_fields | {"cisa_vulnerability_name"}
+        assert all(f"$fill_{p}" in query and f"n.{p} = ${p}" not in query for p in kev_fields)
         assert _ranked(query, params) == (nvd["description"], "nvd", CVE_DESCRIPTIONS.top_rank)
 
     @pytest.mark.parametrize(

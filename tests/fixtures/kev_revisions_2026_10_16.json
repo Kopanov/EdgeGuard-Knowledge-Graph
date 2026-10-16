@@ -1,0 +1,302 @@
+{
+ "_provenance": "Real CISA KEV catalogue entries, unchanged (every field as CISA published it). '2026-10-16': the live feed https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json read on 2026-10-16 18:53 UTC; '2026-09-16' and '2026-05-22': the cisagov/kev-data snapshots of those days. Each snapshot keeps only the entries the tests use, with the catalogue's envelope (title, catalogVersion, dateReleased, count). Between 2026-09-16 and 2026-10-16 CISA revised CVE-2026-63077 (knownRansomwareCampaignUse Unknown -> Known) and CVE-2022-0995 (dueDate 2026-09-09 -> 2026-08-29) and added CVE-2025-61624; between 2026-05-22 and 2026-09-16 CVE-2012-0158 (added 2021-11-03) became Known and CVE-2025-24813's shortDescription was extended. 'misp': the KEV attribute of CVE-2025-21042 in the hosted EdgeGuard MISP read on 2026-10-14 (written by the baseline of 2026-10-13, before the KEV score fix: severity:high and cvss:high tags, cisa_known_ransomware_use in NVD_META), from tests/test_cvss_real_payloads.json; its event reduced to id and info as the attribute listing returns it.",
+ "catalogues": {
+  "2026-05-22": {
+   "envelope": {
+    "title": "CISA Catalog of Known Exploited Vulnerabilities",
+    "catalogVersion": "2026.05.22",
+    "dateReleased": "2026-05-22T18:00:11.5035Z",
+    "count": 1602
+   },
+   "vulnerabilities": [
+    {
+     "cveID": "CVE-2012-0158",
+     "vendorProject": "Microsoft",
+     "product": "MSCOMCTL.OCX",
+     "vulnerabilityName": "Microsoft MSCOMCTL.OCX Remote Code Execution Vulnerability",
+     "dateAdded": "2021-11-03",
+     "shortDescription": "Microsoft MSCOMCTL.OCX contains an unspecified vulnerability that allows for remote code execution, allowing an attacker to take complete control of an affected system under the context of the current user.",
+     "requiredAction": "Apply updates per vendor instructions.",
+     "dueDate": "2022-05-03",
+     "knownRansomwareCampaignUse": "Unknown",
+     "notes": "https://nvd.nist.gov/vuln/detail/CVE-2012-0158",
+     "cwes": [
+      "CWE-94"
+     ]
+    },
+    {
+     "cveID": "CVE-2025-24813",
+     "vendorProject": "Apache",
+     "product": "Tomcat",
+     "vulnerabilityName": "Apache Tomcat Path Equivalence Vulnerability",
+     "dateAdded": "2025-04-01",
+     "shortDescription": "Apache Tomcat contains a path equivalence vulnerability that allows a remote attacker to execute code, disclose information, or inject malicious content via a partial PUT request.",
+     "requiredAction": "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.",
+     "dueDate": "2025-04-22",
+     "knownRansomwareCampaignUse": "Unknown",
+     "notes": "This vulnerability affects a common open-source component, third-party library, or a protocol used by different products. Please check with specific vendors for information on patching status. For more information, please see: https://lists.apache.org/thread/j5fkjv2k477os90nczf2v9l61fb0kkgq ; https://nvd.nist.gov/vuln/detail/CVE-2025-24813",
+     "cwes": [
+      "CWE-44",
+      "CWE-502"
+     ]
+    }
+   ]
+  },
+  "2026-09-16": {
+   "envelope": {
+    "title": "CISA Catalog of Known Exploited Vulnerabilities",
+    "catalogVersion": "2026.09.16",
+    "dateReleased": "2026-09-16T18:47:50.6796Z",
+    "count": 1713
+   },
+   "vulnerabilities": [
+    {
+     "cveID": "CVE-2026-63077",
+     "vendorProject": "JetBrains",
+     "product": "TeamCity",
+     "vulnerabilityName": "JetBrains TeamCity Deserialization of Untrusted Data Vulnerability",
+     "dateAdded": "2026-08-05",
+     "shortDescription": "JetBrains TeamCity contains a deserialization of untrusted data vulnerability that could allow unauthenticated remote code execution via the agent polling protocol.",
+     "requiredAction": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "dueDate": "2026-08-08",
+     "knownRansomwareCampaignUse": "Unknown",
+     "forensicTriage": "Yes",
+     "notes": "https://blog.jetbrains.com/teamcity/2026/07/cve-2026-63077/; https://www.jetbrains.com/privacy-security/issues-fixed/ ; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk ; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk ; https://nvd.nist.gov/vuln/detail/CVE-2026-63077",
+     "cwes": [
+      "CWE-502"
+     ]
+    },
+    {
+     "cveID": "CVE-2022-0995",
+     "vendorProject": "Linux",
+     "product": "Kernel",
+     "vulnerabilityName": "Linux Kernel Out-of-Bounds Write Vulnerability",
+     "dateAdded": "2026-08-26",
+     "shortDescription": "Linux Kernel contains an out-of-bounds memory write vulnerability which could allow a local user to gain privileged access or cause a denial of service on the system.",
+     "requiredAction": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "dueDate": "2026-09-09",
+     "knownRansomwareCampaignUse": "Unknown",
+     "forensicTriage": "No",
+     "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=93ce93587d36493f2f86921fa79921b3cba63fbb ; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk ; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk ; https://nvd.nist.gov/vuln/detail/CVE-2022-0995",
+     "cwes": [
+      "CWE-787"
+     ]
+    },
+    {
+     "cveID": "CVE-2025-24813",
+     "vendorProject": "Apache",
+     "product": "Tomcat",
+     "vulnerabilityName": "Apache Tomcat Path Equivalence Vulnerability",
+     "dateAdded": "2025-04-01",
+     "shortDescription": "Apache Tomcat contains a path equivalence vulnerability that allows a remote attacker to execute code, disclose information, or inject malicious content via a partial PUT request. This vulnerability can be chained with CVE‑2026‑34486.",
+     "requiredAction": "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.",
+     "dueDate": "2025-04-22",
+     "knownRansomwareCampaignUse": "Unknown",
+     "forensicTriage": "No",
+     "notes": "This vulnerability affects a common open-source component, third-party library, or a protocol used by different products. Please check with specific vendors for information on patching status. For more information, please see: https://lists.apache.org/thread/j5fkjv2k477os90nczf2v9l61fb0kkgq ; https://nvd.nist.gov/vuln/detail/CVE-2025-24813",
+     "cwes": [
+      "CWE-44",
+      "CWE-502"
+     ]
+    },
+    {
+     "cveID": "CVE-2021-44228",
+     "vendorProject": "Apache",
+     "product": "Log4j2",
+     "vulnerabilityName": "Apache Log4j2 Remote Code Execution Vulnerability",
+     "dateAdded": "2021-12-10",
+     "shortDescription": "Apache Log4j2 contains a vulnerability where JNDI features do not protect against attacker-controlled JNDI-related endpoints, allowing for remote code execution.",
+     "requiredAction": "For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks. Temporary mitigations using one of the measures provided at https://www.cisa.gov/uscert/ed-22-02-apache-log4j-recommended-mitigation-measures are only acceptable until updates are available.",
+     "dueDate": "2021-12-24",
+     "knownRansomwareCampaignUse": "Known",
+     "forensicTriage": "No",
+     "notes": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228",
+     "cwes": [
+      "CWE-20",
+      "CWE-400",
+      "CWE-502"
+     ]
+    },
+    {
+     "cveID": "CVE-2012-0158",
+     "vendorProject": "Microsoft",
+     "product": "MSCOMCTL.OCX",
+     "vulnerabilityName": "Microsoft MSCOMCTL.OCX Remote Code Execution Vulnerability",
+     "dateAdded": "2021-11-03",
+     "shortDescription": "Microsoft MSCOMCTL.OCX contains an unspecified vulnerability that allows for remote code execution, allowing an attacker to take complete control of an affected system under the context of the current user.",
+     "requiredAction": "Apply updates per vendor instructions.",
+     "dueDate": "2022-05-03",
+     "knownRansomwareCampaignUse": "Known",
+     "forensicTriage": "No",
+     "notes": "https://nvd.nist.gov/vuln/detail/CVE-2012-0158",
+     "cwes": [
+      "CWE-94"
+     ]
+    }
+   ]
+  },
+  "2026-10-16": {
+   "envelope": {
+    "title": "CISA Catalog of Known Exploited Vulnerabilities",
+    "catalogVersion": "2026.10.16",
+    "dateReleased": "2026-10-16T17:15:48.8752Z",
+    "count": 1748
+   },
+   "vulnerabilities": [
+    {
+     "cveID": "CVE-2025-61624",
+     "vendorProject": "Fortinet",
+     "product": "Multiple Products",
+     "vulnerabilityName": "Fortinet Multiple Products Path Traversal Vulnerability",
+     "dateAdded": "2026-10-16",
+     "shortDescription": "FortiOS, FortiPAM, FortiProxy, and FortiSwitchManager contain a path traversal vulnerability that may allow an authenticated attacker with admin profile and at least read-write permissions to write or delete arbitrary files via specific CLI commands.",
+     "requiredAction": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "dueDate": "2026-10-19",
+     "knownRansomwareCampaignUse": "Unknown",
+     "forensicTriage": "Yes",
+     "notes": "https://fortiguard.fortinet.com/psirt/FG-IR-26-122 ; ; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk ; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk ; https://nvd.nist.gov/vuln/detail/CVE-2025-61624",
+     "cwes": [
+      "CWE-22"
+     ]
+    },
+    {
+     "cveID": "CVE-2026-63077",
+     "vendorProject": "JetBrains",
+     "product": "TeamCity",
+     "vulnerabilityName": "JetBrains TeamCity Deserialization of Untrusted Data Vulnerability",
+     "dateAdded": "2026-08-05",
+     "shortDescription": "JetBrains TeamCity contains a deserialization of untrusted data vulnerability that could allow unauthenticated remote code execution via the agent polling protocol.",
+     "requiredAction": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "dueDate": "2026-08-08",
+     "knownRansomwareCampaignUse": "Known",
+     "forensicTriage": "Yes",
+     "notes": "https://blog.jetbrains.com/teamcity/2026/07/cve-2026-63077/; https://www.jetbrains.com/privacy-security/issues-fixed/ ; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk ; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk ; https://nvd.nist.gov/vuln/detail/CVE-2026-63077",
+     "cwes": [
+      "CWE-502"
+     ]
+    },
+    {
+     "cveID": "CVE-2022-0995",
+     "vendorProject": "Linux",
+     "product": "Kernel",
+     "vulnerabilityName": "Linux Kernel Out-of-Bounds Write Vulnerability",
+     "dateAdded": "2026-08-26",
+     "shortDescription": "Linux Kernel contains an out-of-bounds memory write vulnerability which could allow a local user to gain privileged access or cause a denial of service on the system.",
+     "requiredAction": "Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA’s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA’s “Forensics Triage Requirements” (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.",
+     "dueDate": "2026-08-29",
+     "knownRansomwareCampaignUse": "Unknown",
+     "forensicTriage": "Yes",
+     "notes": "This vulnerability affects an open-source component, third-party library, protocol, or proprietary implementation that could be used by different products. For more information, please see: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=93ce93587d36493f2f86921fa79921b3cba63fbb ; BOD 26-04: https://www.cisa.gov/news-events/directives/bod-26-04-prioritizing-security-updates-based-risk ; Forensics Triage Requirements: https://www.cisa.gov/news-events/directives/bod-26-04-implementation-guidance-prioritizing-security-updates-based-risk ; https://nvd.nist.gov/vuln/detail/CVE-2022-0995",
+     "cwes": [
+      "CWE-787"
+     ]
+    },
+    {
+     "cveID": "CVE-2025-24813",
+     "vendorProject": "Apache",
+     "product": "Tomcat",
+     "vulnerabilityName": "Apache Tomcat Path Equivalence Vulnerability",
+     "dateAdded": "2025-04-01",
+     "shortDescription": "Apache Tomcat contains a path equivalence vulnerability that allows a remote attacker to execute code, disclose information, or inject malicious content via a partial PUT request. This vulnerability can be chained with CVE‑2026‑34486.",
+     "requiredAction": "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.",
+     "dueDate": "2025-04-22",
+     "knownRansomwareCampaignUse": "Unknown",
+     "forensicTriage": "No",
+     "notes": "This vulnerability affects a common open-source component, third-party library, or a protocol used by different products. Please check with specific vendors for information on patching status. For more information, please see: https://lists.apache.org/thread/j5fkjv2k477os90nczf2v9l61fb0kkgq ; https://nvd.nist.gov/vuln/detail/CVE-2025-24813",
+     "cwes": [
+      "CWE-44",
+      "CWE-502"
+     ]
+    },
+    {
+     "cveID": "CVE-2025-21042",
+     "vendorProject": "Samsung",
+     "product": "Mobile Devices",
+     "vulnerabilityName": "Samsung Mobile Devices Out-of-Bounds Write Vulnerability",
+     "dateAdded": "2025-11-10",
+     "shortDescription": "Samsung mobile devices contain an out-of-bounds write vulnerability in libimagecodec.quram.so. This vulnerability could allow remote attackers to execute arbitrary code.",
+     "requiredAction": "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.",
+     "dueDate": "2025-12-01",
+     "knownRansomwareCampaignUse": "Unknown",
+     "forensicTriage": "No",
+     "notes": "https://security.samsungmobile.com/securityUpdate.smsb?year=2025&month=04 ; https://nvd.nist.gov/vuln/detail/CVE-2025-21042",
+     "cwes": [
+      "CWE-787"
+     ]
+    },
+    {
+     "cveID": "CVE-2021-44228",
+     "vendorProject": "Apache",
+     "product": "Log4j2",
+     "vulnerabilityName": "Apache Log4j2 Remote Code Execution Vulnerability",
+     "dateAdded": "2021-12-10",
+     "shortDescription": "Apache Log4j2 contains a vulnerability where JNDI features do not protect against attacker-controlled JNDI-related endpoints, allowing for remote code execution.",
+     "requiredAction": "For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks. Temporary mitigations using one of the measures provided at https://www.cisa.gov/uscert/ed-22-02-apache-log4j-recommended-mitigation-measures are only acceptable until updates are available.",
+     "dueDate": "2021-12-24",
+     "knownRansomwareCampaignUse": "Known",
+     "forensicTriage": "No",
+     "notes": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228",
+     "cwes": [
+      "CWE-20",
+      "CWE-400",
+      "CWE-502"
+     ]
+    },
+    {
+     "cveID": "CVE-2012-0158",
+     "vendorProject": "Microsoft",
+     "product": "MSCOMCTL.OCX",
+     "vulnerabilityName": "Microsoft MSCOMCTL.OCX Remote Code Execution Vulnerability",
+     "dateAdded": "2021-11-03",
+     "shortDescription": "Microsoft MSCOMCTL.OCX contains an unspecified vulnerability that allows for remote code execution, allowing an attacker to take complete control of an affected system under the context of the current user.",
+     "requiredAction": "Apply updates per vendor instructions.",
+     "dueDate": "2022-05-03",
+     "knownRansomwareCampaignUse": "Known",
+     "forensicTriage": "No",
+     "notes": "https://nvd.nist.gov/vuln/detail/CVE-2012-0158",
+     "cwes": [
+      "CWE-94"
+     ]
+    }
+   ]
+  }
+ },
+ "misp": {
+  "CVE-2025-21042": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "18871a8a-4450-4215-8305-8727722e2e44",
+   "event_id": "135",
+   "timestamp": "1791887497",
+   "comment": "NVD_META:{\"published\": \"\", \"last_modified\": \"\", \"cwe\": [], \"ref_tags\": [], \"reference_urls\": [], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"NETWORK\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"Samsung mobile devices contain an out-of-bounds write vulnerability in libimagecodec.quram.so. This vulnerability could allow remote attackers to execute arbitrary code.\", \"vendor\": \"Samsung\", \"product\": \"Mobile Devices\", \"cisa_exploit_add\": \"2025-11-10\", \"cisa_action_due\": \"2025-12-01\", \"cisa_required_action\": \"Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.\", \"cisa_vulnerability_name\": \"Samsung Mobile Devices Out-of-Bounds Write Vulnerability\", \"version_constraints\": [], \"status\": [], \"cisa_known_ransomware_use\": \"Unknown\"}",
+   "value": "CVE-2025-21042",
+   "first_seen": "2025-11-10T00:00:00.000000+00:00",
+   "last_seen": null,
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:CISA-KEV"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    },
+    {
+     "name": "CISA-KEV"
+    }
+   ],
+   "Event": {
+    "id": "135",
+    "info": "EdgeGuard-cisa_kev-2026-10-13"
+   }
+  }
+ }
+}
