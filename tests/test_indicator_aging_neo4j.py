@@ -4,7 +4,9 @@ Mocked sessions cannot show what the Cypher does with ``SET n += <map>``, nulls,
 arithmetic and the forward-only CASEs. This module runs the production writers and the job:
 
 * a full sync after a retirement neither reactivates the node nor restores its confidence; a
-  newer report reactivates it in the same write; a source date later than the MISP time is capped;
+  newer report reactivates it in the same write, and after that one write every aging property
+  (``aging_basis`` included) follows the new report; the job corrects a stale ``aging_basis``; a
+  source date later than the MISP time is capped;
 * duplicates and reports in either order, and the in-memory, paged and incremental sync paths,
   leave identical aging properties;
 * an ``edgeguard_enriched`` indicator ages like an ``edgeguard_managed`` one;
@@ -14,7 +16,8 @@ arithmetic and the forward-only CASEs. This module runs the production writers a
   Vulnerability add no lifecycle property;
 * the ``SOURCED_FROM`` edge keeps its source's report forward only in any order; ``source_confidence``
   keeps the highest incoming value in either order; the aged confidence stops at the 0.10 floor;
-* the sync of a DAG run ages its writes at the run's time, the time the run's job uses;
+* the sync of a DAG run (``MISPToNeo4jSync(aging_as_of=...)``) ages its writes at the run's time,
+  the time the run's job uses;
 * a manual decommission is kept; an alert does not advance the report time;
 * the job follows the tiers, writes nothing on a second run with the same ``as_of`` and leaves an
   Indicator with no time, and every other label, untouched.
@@ -219,6 +222,54 @@ def test_a_newer_report_reactivates_in_the_same_write(client, raw_driver):
     assert edge["last_recorded_at"] == now - timedelta(days=1)
 
 
+def test_one_newer_report_write_sets_the_aging_from_that_report(client, raw_driver):
+    """2026-10-16: the rule runs in a SET clause of its own after the clause that records the report,
+    so after one write of a newer report every aging property follows that report: here a retired
+    node aged from a source date is reported again with only a MISP time (another kind of basis)."""
+    now = _now()
+    _indicator(raw_driver, "203.0.113.17")
+    _write(client, _attr("203.0.113.17", "a-5", now - timedelta(days=3), now - timedelta(days=800)))
+    old = _aging(raw_driver, "203.0.113.17")
+    assert (old["aging_basis"], old["aging_tier"], old["active"]) == ("source_date", 3, False)
+    _write(client, _attr("203.0.113.17", "a-6", now - timedelta(days=1), None))
+    got = _aging(raw_driver, "203.0.113.17")
+    assert got["last_reported_at"] == now - timedelta(days=1)
+    assert (got["aging_basis"], got["aging_tier"], got["aging_since"], got["active"]) == (
+        "misp_recorded",
+        0,
+        now - timedelta(days=1),
+        True,
+    )
+    assert (got["retired_at"], got["retired_by"], got["confidence_score"]) == (None, None, 0.8)
+    assert _props(raw_driver, "Indicator", "value", "203.0.113.17")["last_reported_basis"] == "misp_recorded"
+    assert enrichment_jobs.decay_ioc_confidence(client, as_of=_now())["changed"] == 0, "the job agrees"
+
+
+def test_the_job_corrects_a_stale_aging_basis(client, raw_driver):
+    """2026-10-16: the job writes a node when any aging property differs from what the rule gives,
+    ``aging_basis`` among them; the rule derives it from the recorded report (``last_reported_basis``),
+    so an ``aging_basis`` that disagrees with the report is put right."""
+    now = _now()
+    _indicator(
+        raw_driver,
+        "203.0.113.18",
+        last_reported_at=now - timedelta(days=10),
+        last_reported_basis="source_date",
+        source_confidence=0.8,
+        confidence_score=0.8,
+        aging_basis="first_imported",
+        aging_tier=0,
+        aging_factor=1.0,
+        aging_since=now - timedelta(days=10),
+        active=True,
+    )
+    result = enrichment_jobs.decay_ioc_confidence(client, as_of=now)
+    assert result["changed"] == 1
+    got = _aging(raw_driver, "203.0.113.18")
+    assert (got["aging_basis"], got["aging_tier"], got["active"]) == ("source_date", 0, True)
+    assert enrichment_jobs.decay_ioc_confidence(client, as_of=now)["changed"] == 0
+
+
 def test_a_source_date_later_than_the_misp_time_is_capped(client, raw_driver):
     now = _now()
     _indicator(raw_driver, "203.0.113.12")
@@ -263,10 +314,12 @@ def test_reports_and_duplicates_in_either_order_give_the_same_node(client, raw_d
     assert edges[0] == {k: results[0][k] for k in EDGE_REPORT_PROPS}
 
 
-def _sync(client, attributes, path: str) -> None:
+def _sync(client, attributes, path: str, aging_as_of=None) -> None:
+    """One sync of ``attributes`` on ``path``; ``aging_as_of`` is the DAG run's time (None: a sync
+    started from the command line, each write at its own time)."""
     from run_misp_to_neo4j import MISPToNeo4jSync
 
-    sync = MISPToNeo4jSync(neo4j_client=client)
+    sync = MISPToNeo4jSync(neo4j_client=client, aging_as_of=aging_as_of)
     sync._create_relationships = lambda rels, source_id: 0
     sync._write_cross_item_relationships = lambda rels: 0
     getattr(sync, path)("41", EVENT, attributes)
@@ -365,6 +418,25 @@ def test_a_sync_of_a_run_ages_its_writes_at_the_run_time(client, raw_driver):
     _write(client, report)
     now_aged = _aging(raw_driver, "203.0.113.16")
     assert (now_aged["active"], now_aged["retired_by"]) == (False, "decay"), "a write outside a run: its own time"
+
+
+def test_a_misp_sync_of_a_run_hands_the_run_time_to_its_writes(client, raw_driver):
+    """2026-10-16: ``MISPToNeo4jSync(aging_as_of=...)``, as the DAG builds it, ages the Indicators it
+    writes at the run's time: a node 725 days old at the run's time and past 730 days now is written
+    active, and the run's job at the same time changes nothing."""
+    now = _now()
+    due = now - timedelta(days=10)
+    _indicator(raw_driver, "203.0.113.19")
+    _sync(
+        client,
+        [_attr("203.0.113.19", "r-2", now - timedelta(days=2), due - timedelta(days=725))],
+        "_process_event_attributes",
+        aging_as_of=due,
+    )
+    assert client.aging_as_of == due.isoformat()
+    got = _aging(raw_driver, "203.0.113.19")
+    assert (got["active"], got["aging_tier"], got["retired_by"]) == (True, 3, None)
+    assert enrichment_jobs.decay_ioc_confidence(client, as_of=due)["changed"] == 0
 
 
 # ================================================================ whoever created the node
@@ -474,11 +546,11 @@ def test_a_cve_gets_no_lifecycle_on_match_and_is_never_retired(client, raw_drive
         session.run(
             f"CREATE (c:CVE:{LABEL} {{cve_id: 'CVE-2019-0708', edgeguard_managed: true, active: true, "
             "confidence_score: 0.9, first_imported_at: datetime('2024-01-01T00:00:00Z'), "
-            "last_updated: datetime('2024-01-01T00:00:00Z')}})"
+            "last_updated: datetime('2024-01-01T00:00:00Z')})"
         )
         session.run(
             f"CREATE (v:Vulnerability:{LABEL} {{cve_id: 'CVE-2019-0708', active: true, confidence_score: 0.9, "
-            "last_updated: datetime('2023-01-01T00:00:00Z'), first_imported_at: datetime('2023-01-01T00:00:00Z')}})"
+            "last_updated: datetime('2023-01-01T00:00:00Z'), first_imported_at: datetime('2023-01-01T00:00:00Z')})"
         )
     assert client.merge_cve({"cve_id": "CVE-2024-3400", "zone": ["global"]}, source_id="nvd")
     casm = _props(raw_driver, "CVE", "cve_id", "CVE-2024-3400")

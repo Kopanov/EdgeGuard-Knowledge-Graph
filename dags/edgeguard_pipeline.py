@@ -2107,24 +2107,117 @@ check_neo4j_quality_task = BashOperator(
 #  Order matters:
 #    1. build_relationships  — link IOCs to malware/CVEs (needs fresh data)
 #    2. run_enrichment_jobs  — merges, the indicator aging (one rule, evaluated at the run's
-#                              data_interval_end; 2026-10-16), campaigns (active indicators),
-#                              calibration, EPSS (enrichment_jobs.run_all_enrichment_jobs)
+#                              data_interval_end or the later aging-clock mark; 2026-10-16),
+#                              campaigns (active indicators), calibration, EPSS
+#                              (enrichment_jobs.run_all_enrichment_jobs)
 # ================================================================================
+
+
+# 2026-10-16: the high-water mark of the indicator aging clock, an Airflow Variable holding the latest
+# time an aging job evaluated the graph at (ISO-8601 UTC). Only the enrichment task writes it, after
+# ``decay_ioc_confidence`` succeeded, and never lowers it. Without it, clearing an older run's
+# enrichment task after a newer run had aged the graph (RUNBOOK) evaluated the rule at the older
+# time: retired indicators came back, tiers fell, and ``aging_since`` and the STIX ``modified`` moved
+# backwards until the next run.
+AGING_AS_OF_VARIABLE = "EDGEGUARD_AGING_AS_OF"
+
+
+def _read_aging_as_of_mark() -> tuple[Optional[datetime], bool]:
+    """``(mark, readable)``: the aging clock's high-water mark (``AGING_AS_OF_VARIABLE``) as an aware
+    UTC datetime, None when the Variable is unset or holds no ISO-8601 time; ``readable`` is False when
+    the Variable store could not be read. Each case without a mark is logged."""
+    from indicator_aging import evaluation_time
+
+    try:
+        raw = Variable.get(AGING_AS_OF_VARIABLE, None)
+    except Exception as e:
+        logger.warning(
+            "Could not read the Airflow Variable %s (%s): the indicator aging is evaluated at the run's own time",
+            AGING_AS_OF_VARIABLE,
+            e,
+        )
+        return None, False
+    if raw is None or not str(raw).strip():
+        logger.info(
+            "The Airflow Variable %s is not set (no aging job has recorded its time yet): the indicator "
+            "aging is evaluated at the run's own time",
+            AGING_AS_OF_VARIABLE,
+        )
+        return None, True
+    try:
+        return evaluation_time(str(raw)), True
+    except (TypeError, ValueError) as e:
+        logger.warning(
+            "The Airflow Variable %s holds no ISO-8601 time (%r, %s): the indicator aging is evaluated at the "
+            "run's own time, and the next successful aging job records its time",
+            AGING_AS_OF_VARIABLE,
+            str(raw)[:64],
+            e,
+        )
+        return None, True
+
+
+def record_aging_as_of(as_of) -> None:
+    """Raise the aging clock's high-water mark to ``as_of`` (2026-10-16), the time an aging job has
+    just evaluated the graph at (``run_all_enrichment_jobs`` calls it once ``decay_ioc_confidence``
+    succeeded). A mark at or after ``as_of`` is kept, so the mark never decreases; when the Variable
+    cannot be read nothing is written, so an unknown higher mark is not lowered. A failure to write
+    is logged and does not fail the task: the graph is aged, and only a later re-run of an older run
+    could then evaluate the rule at that run's own, earlier time."""
+    from indicator_aging import evaluation_time
+
+    when = evaluation_time(as_of)
+    mark, readable = _read_aging_as_of_mark()
+    if not readable:
+        logger.warning(
+            "The aging clock's mark (Airflow Variable %s) is left as it is: it could not be read", AGING_AS_OF_VARIABLE
+        )
+        return
+    if mark is not None and mark >= when:
+        return
+    try:
+        Variable.set(AGING_AS_OF_VARIABLE, when.isoformat())
+        logger.info("Aging clock: Airflow Variable %s set to %s", AGING_AS_OF_VARIABLE, when.isoformat())
+    except Exception as e:
+        logger.warning(
+            "Could not write the Airflow Variable %s=%s (%s): a later re-run of an older run may evaluate the "
+            "indicator aging at its own, earlier time",
+            AGING_AS_OF_VARIABLE,
+            when.isoformat(),
+            e,
+        )
 
 
 def enrichment_as_of(context) -> datetime:
     """The time the indicator aging is evaluated at (2026-10-16): the DAG run's
-    ``data_interval_end``, or ``run_after`` for a manual run without a data interval, so re-running
-    a run gives the same graph; now only when the context has neither (a direct call). The run's
-    sync (``run_neo4j_sync``, ``run_baseline_full_sync``) ages the Indicators it writes at the same
-    time as its enrichment job."""
+    ``data_interval_end``, or ``run_after`` for a manual run without a data interval (now only when
+    the context has neither, a direct call), raised to the aging clock's high-water mark
+    (``AGING_AS_OF_VARIABLE``) when the mark is later. The clock therefore never moves backwards: a
+    re-run of an older run evaluates the rule at the newer time a later run already aged the graph
+    at, and re-running a run gives the same graph. The run's sync (``run_neo4j_sync``,
+    ``run_baseline_full_sync``) and its enrichment job both call this and get the same time: only a
+    successful aging job raises the mark, and no other run's job runs in between (one active run per
+    DAG, the baseline lock between the baseline and the scheduled sync). A missing or unreadable
+    Variable leaves the run's own time (logged)."""
     end = context.get("data_interval_end")
     if end is None:
         dag_run = context.get("dag_run")
         end = getattr(dag_run, "run_after", None) if dag_run is not None else None
     if end is None:
-        return datetime.now(timezone.utc)
-    return end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+        run_time = datetime.now(timezone.utc)
+    else:
+        run_time = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+    mark, _readable = _read_aging_as_of_mark()
+    if mark is not None and mark > run_time:
+        logger.info(
+            "Indicator aging evaluated at %s, the latest time an aging job evaluated the graph at (Airflow "
+            "Variable %s), not at this run's earlier time %s: the aging clock never moves backwards",
+            mark.isoformat(),
+            AGING_AS_OF_VARIABLE,
+            run_time.isoformat(),
+        )
+        return mark
+    return run_time
 
 
 def run_build_relationships(**context):
@@ -2189,7 +2282,8 @@ def run_enrichment_jobs(**context):
     client = Neo4jClient()
     try:
         client.connect()
-        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
+        # 2026-10-16: the aging job's time becomes the aging clock's mark once that job succeeded.
+        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context), on_aged=record_aging_as_of)
         logger.info(f"Enrichment summary: {summary}")
     except Exception as e:
         logger.error(f"Enrichment failed: {e}")
@@ -2891,7 +2985,8 @@ def run_baseline_enrichment(**context):
     client = Neo4jClient()
     try:
         client.connect()
-        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context))
+        # 2026-10-16: the aging job's time becomes the aging clock's mark once that job succeeded.
+        summary = run_all_enrichment_jobs(client, as_of=enrichment_as_of(context), on_aged=record_aging_as_of)
         logger.info(f"[BASELINE] Enrichment complete: {summary}")
     except Exception as e:
         logger.error(f"[BASELINE] Enrichment failed: {e}")

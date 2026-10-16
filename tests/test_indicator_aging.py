@@ -153,6 +153,45 @@ class TestOneDefinitionWithoutOwnership:
             assert "last_updated" not in text, "the last database write is not an aging time"
             assert '"' not in text, "single quotes only (the fragments run inside apoc strings)"
 
+    def test_the_rule_sets_exactly_the_aging_fields(self):
+        """2026-10-16: the keys of ``aging_map`` are ``AGING_FIELDS``, and the job writes a node when any
+        of them differs from the stored value (``aging_basis`` among them, so a stale one is corrected)."""
+        import re
+
+        body = ia.aging_map("n", "datetime()")
+        keys = tuple(re.findall(r"(?:\{|, )([a-z_]+): CASE WHEN", body))
+        assert keys == (
+            "aging_basis",
+            "aging_tier",
+            "aging_factor",
+            "aging_since",
+            "confidence_score",
+            "active",
+            "retired_at",
+            "retired_by",
+        )
+        assert set(keys) == set(ia.AGING_FIELDS)
+        predicate = ia.changed_predicate("n", "aged")
+        assert predicate.startswith("any(_k IN ['aging_basis', 'aging_tier', 'aging_factor', 'aging_since', ")
+        for field in ia.AGING_FIELDS:
+            assert f"'{field}'" in predicate
+        _outer, inner, count = enrichment_jobs._aging_job_statements(ia.AgingPolicy())
+        assert f"WHERE {predicate} SET n += aged" in inner and f"WHERE {predicate} RETURN count(n)" in count
+
+    def test_aging_basis_is_derived_from_the_recorded_report(self):
+        """2026-10-16: the report items record the kind of the latest report (``last_reported_basis``);
+        the rule derives ``aging_basis`` from it (``first_imported`` without a report), so the job puts
+        right an ``aging_basis`` that disagrees with the stored report."""
+        report = ia.node_report_items("n", "item.report", "item.source_id")
+        assert "last_reported_basis: item.report.reported_basis" in report
+        assert "aging_basis" not in report, "the report records the kind; the rule sets aging_basis"
+        body = ia.aging_map("n", "datetime()")
+        assert (
+            "aging_basis: CASE WHEN _age IS NULL THEN n.aging_basis WHEN n.last_reported_at IS NULL "
+            "THEN 'first_imported' ELSE coalesce(n.last_reported_basis, n.aging_basis) END"
+        ) in body
+        assert "last_reported_basis" not in ia.edge_report_items("r", "item.report", "item.source_id")
+
     def test_the_job_reads_every_indicator_with_a_time(self):
         outer, _inner, _count = enrichment_jobs._aging_job_statements(ia.AgingPolicy())
         assert outer == (
@@ -399,6 +438,52 @@ class TestWriters:
             "reported_basis": "source_date",
         }
 
+    def test_a_sync_of_a_run_hands_its_time_to_its_client_and_the_batch_statement(self):
+        """2026-10-16: ``MISPToNeo4jSync(aging_as_of=...)`` sets the run's time on its Neo4j client and
+        ``merge_indicators_batch`` sends it to ``session.run`` as ``$aging_as_of``, the parameter of
+        ``WRITE_AS_OF``. A real client built without a connection; a strict driver records each
+        statement (any other driver call fails the test)."""
+        import neo4j_client as nc
+
+        runs: list = []
+        counters = SimpleNamespace(nodes_created=1, properties_set=1, relationships_created=1)
+
+        class _Result:
+            def consume(self):
+                return SimpleNamespace(counters=counters)
+
+        class _Session:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def run(self, query, **params):
+                runs.append((query, params))
+                return _Result()
+
+        class _Driver:
+            def session(self, **kwargs):
+                return _Session()
+
+        def unconnected():
+            return nc.Neo4jClient("bolt://edgeguard-test.invalid:7687", "neo4j", "unused")
+
+        client = unconnected()
+        assert client.driver is None and client.aging_as_of is None
+        sync = MISPToNeo4jSync(
+            neo4j_client=client, aging_as_of=datetime(2026, 10, 16, 5, tzinfo=timezone(timedelta(hours=2)))
+        )
+        assert sync.neo4j is client and client.aging_as_of == "2026-10-16T03:00:00+00:00"
+        client.driver = _Driver()
+        item = _parse(_attr("203.0.113.42", "f-2", last_seen="2026-08-01T00:00:00+00:00"))
+        assert client.merge_indicators_batch([item], source_id="feodo_tracker") == (1, 0)
+        ((query, params),) = [r for r in runs if "UNWIND $batch as item" in r[0]]
+        assert params[ia.AS_OF_PARAM] == "2026-10-16T03:00:00+00:00"
+        assert ia.aging_set_clause("n", ia.WRITE_AS_OF) in query
+        assert MISPToNeo4jSync(neo4j_client=unconnected()).neo4j.aging_as_of is None, "no run: each write's time"
+
     @pytest.mark.parametrize("source_id", ["stix_import", "virustotal"])
     def test_command_line_writers_record_no_report(self, source_id):
         """The STIX import and the VirusTotal re-enrichment go through ``merge_indicator``: the same
@@ -410,7 +495,7 @@ class TestWriters:
         )
         merge = next(c for c in session.run.call_args_list if c.args and "MERGE (n:Indicator" in c.args[0])
         assert merge.kwargs["report"] == dict.fromkeys(ia.REPORT_KEYS)
-        assert ia.aging_set_item("n", ia.WRITE_AS_OF) in merge.args[0]
+        assert ia.aging_set_clause("n", ia.WRITE_AS_OF) in merge.args[0]
         assert merge.kwargs[ia.AS_OF_PARAM] is None, "outside a DAG run: the time of the write"
 
 
@@ -513,10 +598,31 @@ class TestTheJob:
         assert seen.index(("decay", as_of)) < seen.index("build_campaign_nodes")
 
 
+class _Variables:
+    """Airflow Variable stand-in backed by a dict; ``fail_get`` / ``fail_set`` make the store unreadable
+    or unwritable."""
+
+    def __init__(self, **values):
+        self.store = dict(values)
+        self.fail_get = self.fail_set = False
+        self.sets: list = []
+
+    def get(self, key, default=None):
+        if self.fail_get:
+            raise RuntimeError("the metadata database is not reachable")
+        return self.store.get(key, default)
+
+    def set(self, key, value):
+        if self.fail_set:
+            raise RuntimeError("the metadata database is not reachable")
+        self.sets.append((key, value))
+        self.store[key] = value
+
+
 class TestTheDagTime:
     @pytest.fixture(scope="class")
-    def as_of(self):
-        """``enrichment_as_of`` of the DAG file loaded as an isolated module (as the DAG tests do)."""
+    def dag(self):
+        """The DAG file loaded as an isolated module (as the DAG tests do)."""
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
@@ -525,7 +631,17 @@ class TestTheDagTime:
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.enrichment_as_of
+        return module
+
+    @pytest.fixture
+    def variables(self, dag, monkeypatch):
+        store = _Variables()
+        monkeypatch.setattr(dag, "Variable", store)
+        return store
+
+    @pytest.fixture
+    def as_of(self, dag, variables):
+        return dag.enrichment_as_of
 
     def test_the_data_interval_end_of_a_scheduled_run(self, as_of):
         end = datetime(2026, 10, 16, 3, tzinfo=UTC)
@@ -537,6 +653,93 @@ class TestTheDagTime:
 
     def test_now_without_either(self, as_of):
         assert abs(as_of({}) - datetime.now(UTC)) < timedelta(seconds=5)
+
+    # 2026-10-16: the aging clock never moves backwards (``EDGEGUARD_AGING_AS_OF``).
+
+    def test_a_mark_later_than_the_run_time_wins(self, dag, variables, as_of, caplog):
+        """Clearing an older run's enrichment after a newer run aged the graph: the old run evaluates at
+        the newer time, so no retired indicator comes back and no tier falls."""
+        older_run = datetime(2026, 10, 10, 3, tzinfo=UTC)
+        newer = datetime(2026, 10, 13, 3, tzinfo=UTC)
+        variables.store[dag.AGING_AS_OF_VARIABLE] = newer.isoformat()
+        assert dag.AGING_AS_OF_VARIABLE == "EDGEGUARD_AGING_AS_OF"
+        with caplog.at_level(logging.INFO):
+            assert as_of({"data_interval_end": older_run}) == newer
+        assert "never moves backwards" in caplog.text
+        later_run = datetime(2026, 10, 16, 3, tzinfo=UTC)
+        assert as_of({"data_interval_end": later_run}) == later_run, "an earlier mark leaves the run's time"
+
+    def test_the_mark_never_decreases(self, dag, variables):
+        t1, t2, t3 = (datetime(2026, 10, d, 3, tzinfo=UTC) for d in (10, 13, 16))
+        dag.record_aging_as_of(t2)
+        assert variables.store[dag.AGING_AS_OF_VARIABLE] == t2.isoformat()
+        dag.record_aging_as_of(t1)
+        dag.record_aging_as_of(t2)
+        assert variables.store[dag.AGING_AS_OF_VARIABLE] == t2.isoformat() and len(variables.sets) == 1
+        dag.record_aging_as_of(datetime(2026, 10, 16, 5, tzinfo=timezone(timedelta(hours=2))))
+        assert variables.store[dag.AGING_AS_OF_VARIABLE] == t3.isoformat()
+
+    def test_a_missing_or_unreadable_mark_leaves_the_run_time(self, dag, variables, as_of, caplog):
+        run = datetime(2026, 10, 16, 3, tzinfo=UTC)
+        with caplog.at_level(logging.INFO):
+            assert as_of({"data_interval_end": run}) == run
+        assert "EDGEGUARD_AGING_AS_OF is not set" in caplog.text
+        variables.store[dag.AGING_AS_OF_VARIABLE] = "not a time"
+        with caplog.at_level(logging.WARNING):
+            assert as_of({"data_interval_end": run}) == run
+        assert "holds no ISO-8601 time" in caplog.text
+        dag.record_aging_as_of(run)
+        assert variables.store[dag.AGING_AS_OF_VARIABLE] == run.isoformat(), "a successful job repairs it"
+        variables.fail_get = True
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert as_of({"data_interval_end": run + timedelta(days=3)}) == run + timedelta(days=3)
+            dag.record_aging_as_of(run + timedelta(days=3))
+        assert "Could not read the Airflow Variable EDGEGUARD_AGING_AS_OF" in caplog.text
+        assert variables.store[dag.AGING_AS_OF_VARIABLE] == run.isoformat(), "an unread mark is never overwritten"
+
+    def test_a_failed_write_of_the_mark_does_not_fail_the_task(self, dag, variables, caplog):
+        variables.fail_set = True
+        with caplog.at_level(logging.WARNING):
+            dag.record_aging_as_of(datetime(2026, 10, 16, 3, tzinfo=UTC))
+        assert "Could not write the Airflow Variable EDGEGUARD_AGING_AS_OF" in caplog.text
+
+    def test_the_runner_reports_the_time_only_after_the_aging_job_succeeded(self, monkeypatch):
+        names = (
+            "bridge_vulnerability_cve",
+            "merge_alias_duplicate_actors",
+            "merge_malware_attack_twins",
+            "calibrate_cooccurrence_confidence",
+            "enrich_cve_epss",
+        )
+        for name in names:
+            monkeypatch.setattr(enrichment_jobs, name, lambda c: {})
+        aged: list = []
+        as_of = datetime(2026, 10, 16, 3, tzinfo=UTC)
+
+        def campaigns_fail(c):
+            assert aged == [as_of], "reported before the jobs after the aging run"
+            raise RuntimeError("campaign builder failed")
+
+        monkeypatch.setattr(enrichment_jobs, "build_campaign_nodes", campaigns_fail)
+        monkeypatch.setattr(
+            enrichment_jobs, "decay_ioc_confidence", lambda c, as_of=None: {"as_of": as_of.isoformat(), "changed": 0}
+        )
+        with pytest.raises(RuntimeError, match="campaign builder"):
+            enrichment_jobs.run_all_enrichment_jobs(MagicMock(), as_of=as_of, on_aged=aged.append)
+        assert aged == [as_of], "the graph is aged at as_of although a later job failed"
+
+        def decay_fails(c, as_of=None):
+            raise RuntimeError("[AGING] apoc.periodic.iterate batch failures")
+
+        aged.clear()
+        monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", decay_fails)
+        with pytest.raises(RuntimeError, match="AGING"):
+            enrichment_jobs.run_all_enrichment_jobs(MagicMock(), as_of=as_of, on_aged=aged.append)
+        monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", lambda c, as_of=None: {})
+        monkeypatch.setattr(enrichment_jobs, "build_campaign_nodes", lambda c: {})
+        enrichment_jobs.run_all_enrichment_jobs(MagicMock(), as_of=as_of, on_aged=aged.append)
+        assert aged == [], "a failed job, or one without a connection, reports no time"
 
 
 # ================================================================ the readers
@@ -553,18 +756,19 @@ class TestReaders:
             "ORDER BY (coalesce(n.last_reported_at, n.first_imported_at) IS NULL), "
         )
 
-    def test_the_zone_list_orders_only_indicators_by_report_time(self, monkeypatch):
-        """``/zone/{zone}`` lists indicators with catalogue nodes and campaigns: only an Indicator is
-        ranked by its latest report; the other labels keep ``last_updated`` (a Campaign has no
-        ``first_imported_at``, so the indicator key put every campaign last). Run on a real Neo4j in
+    def test_the_zone_list_orders_every_label_by_one_clock(self, monkeypatch):
+        """``/zone/{zone}`` lists indicators with catalogue nodes and campaigns, all by one clock: an
+        Indicator's latest report, otherwise when the node entered the graph (``created_at`` for a
+        Campaign, which has no ``first_imported_at``). ``last_updated`` (the last database write, moved
+        by every sync and campaign rebuild) is not read: ordering the other labels by it put a node a
+        sync had just rewritten above an indicator reported in the latest run. Run on a real Neo4j in
         tests/test_export_paths_neo4j.py."""
         from fastapi.testclient import TestClient
 
         import query_api
 
-        assert query_api._ZONE_RECENCY == (
-            "CASE WHEN n:Indicator THEN coalesce(n.last_reported_at, n.first_imported_at) ELSE n.last_updated END"
-        )
+        assert query_api._ZONE_RECENCY == "coalesce(n.last_reported_at, n.first_imported_at, n.created_at)"
+        assert "last_updated" not in query_api._ZONE_RECENCY
         seen = []
 
         class _Result(list):

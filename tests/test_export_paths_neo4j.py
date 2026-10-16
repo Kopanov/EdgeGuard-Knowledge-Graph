@@ -13,9 +13,10 @@ runs the export paths against it:
 * the Wazuh CDB export: newest entries first under the cap, nulls last, ties by key;
 * md5 / sha1 / sha256 / sha512 filters on the stored ``hash`` indicators;
 * GraphQL ``vulnerabilities`` on ``:CVE`` (the README example) and ``tlp``;
-* (2026-10-16) the explorer's choice of a CVE twin's description by the source ranking, the order of
-  ``/zone/{zone}`` (indicators by their latest report, other labels by their last write) and the
-  actor summary's ``malware_used``.
+* (2026-10-16) the explorer's choice of a CVE twin's description by the source ranking (at an equal
+  rank the twin that names a source), the order of ``/zone/{zone}`` (one clock for every label: an
+  indicator's latest report, otherwise when the node entered the graph) and the actor summary's
+  ``malware_used``.
 
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with
 ``EDGEGUARD_IT_NEO4J_URI``, writes only nodes labelled ``EdgeGuardIT``, refuses any other node.
@@ -199,7 +200,7 @@ def test_explorer_vulnerabilities_view_pairs_a_description_with_its_own_source(r
     with raw_driver.session() as session:
         session.run(
             f"CREATE (:Vulnerability:{LABEL} {{cve_id: 'CVE-2021-44228', uuid: 'u-v', edgeguard_managed: true, "
-            "description_source: 'nvd', zone: ['healthcare']}})"
+            "description_source: 'nvd', zone: ['healthcare']})"
         )
     data = rest.get("/graph/explore?view=vulnerabilities").json()
     (node,) = [n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2021-44228"]
@@ -208,23 +209,30 @@ def test_explorer_vulnerabilities_view_pairs_a_description_with_its_own_source(r
 
 def test_explorer_vulnerabilities_view_shows_the_twin_the_ranking_keeps(raw_driver, rest):
     """2026-10-16: of two twins with different texts, the view shows the one the source ranking keeps
-    (NVD's over OTX's), whichever twin the rows return first."""
-    for first, second in (("Vulnerability", "CVE"), ("CVE", "Vulnerability")):
-        texts = {"CVE": ("NVD text", "nvd"), "Vulnerability": ("OTX text", "alienvault_otx")}
-        with raw_driver.session() as session:
-            session.run("MATCH (n {cve_id: 'CVE-2024-3400'}) DETACH DELETE n")
-            for label in (first, second):
-                text, source = texts[label]
-                session.run(
-                    f"CREATE (:{label}:{LABEL} {{cve_id: 'CVE-2024-3400', uuid: 'u-' + $l, edgeguard_managed: true, "
-                    "description: $t, description_source: $s, cvss_score: 10.0, zone: ['energy']})",
-                    l=label,
-                    t=text,
-                    s=source,
-                )
-        data = rest.get("/graph/explore?view=vulnerabilities").json()
-        (node,) = [n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2024-3400"]
-        assert (node["description"], node["description_source"]) == ("NVD text", "nvd"), first
+    (NVD's over OTX's), whichever twin the rows return first. At an equal rank the twin that names a
+    source wins: a text written before the ranking (no ``description_source``) counts as the top
+    source's, and the write rule lets NVD's record replace it, so the view shows NVD's text, not the
+    sourceless one (whose empty source sorted first before)."""
+    cases = (
+        ({"CVE": ("NVD text", "nvd"), "Vulnerability": ("OTX text", "alienvault_otx")}, ("NVD text", "nvd")),
+        ({"CVE": ("Text written before the ranking", None), "Vulnerability": ("NVD text", "nvd")}, ("NVD text", "nvd")),
+    )
+    for texts, expected in cases:
+        for first, second in (("Vulnerability", "CVE"), ("CVE", "Vulnerability")):
+            with raw_driver.session() as session:
+                session.run("MATCH (n {cve_id: 'CVE-2024-3400'}) DETACH DELETE n")
+                for label in (first, second):
+                    text, source = texts[label]
+                    session.run(
+                        f"CREATE (n:{label}:{LABEL} {{cve_id: 'CVE-2024-3400', uuid: 'u-' + $l, edgeguard_managed: true, "
+                        "description: $t, cvss_score: 10.0, zone: ['energy']}) SET n.description_source = $s",
+                        l=label,
+                        t=text,
+                        s=source,
+                    )
+            data = rest.get("/graph/explore?view=vulnerabilities").json()
+            (node,) = [n["data"] for n in data["nodes"] if n["data"]["id"] == "vuln:CVE-2024-3400"]
+            assert (node["description"], node["description_source"]) == expected, (texts, first)
 
 
 def test_explorer_actors_view_follows_the_written_directions(rest):
@@ -456,29 +464,34 @@ def test_graphql_vulnerabilities_read_the_cve_nodes(client, raw_driver, monkeypa
 # /zone/{zone} and the actor summary (2026-10-16)
 # ---------------------------------------------------------------------------
 
+# The state after a run: the sync rewrote every node (``last_updated`` on 2026-10-16) and the campaign
+# builder rebuilt the campaign after it; one indicator was reported in that run (2026-10-15).
 ZONE_FIXTURE = f"""
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'reported.example', uuid: 'z-1', edgeguard_managed: true,
-        zone: ['finance'], last_reported_at: datetime('2026-10-10T00:00:00Z'),
+        zone: ['finance'], last_reported_at: datetime('2026-10-15T00:00:00Z'),
         first_imported_at: datetime('2026-10-01T00:00:00Z'), last_updated: datetime('2026-10-16T00:00:00Z')}})
 CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: 'unreported.example', uuid: 'z-2', edgeguard_managed: true,
         zone: ['finance'], first_imported_at: datetime('2026-10-12T00:00:00Z'),
         last_updated: datetime('2026-10-16T00:00:00Z')}})
 CREATE (:Campaign:{LABEL} {{name: 'fin-actor campaign', uuid: 'z-3', edgeguard_managed: true, zone: ['finance'],
-        created_at: datetime('2026-09-01T00:00:00Z'), last_updated: datetime('2026-10-14T00:00:00Z')}})
+        created_at: datetime('2026-09-01T00:00:00Z'), last_updated: datetime('2026-10-16T02:00:00Z')}})
 CREATE (:CVE:{LABEL} {{cve_id: 'CVE-2026-0001', uuid: 'z-4', edgeguard_managed: true, zone: ['finance'],
-        first_imported_at: datetime('2026-09-01T00:00:00Z'), last_updated: datetime('2026-10-11T00:00:00Z')}})
+        first_imported_at: datetime('2026-09-02T00:00:00Z'), last_updated: datetime('2026-10-16T01:00:00Z')}})
 CREATE (:Malware:{LABEL} {{name: 'undated', uuid: 'z-5', edgeguard_managed: true, zone: ['finance']}})
+CREATE (:ThreatActor:{LABEL} {{name: 'fin-actor', uuid: 'z-6', edgeguard_managed: true, zone: ['finance'],
+        first_imported_at: datetime('2026-10-14T00:00:00Z'), last_updated: datetime('2026-10-16T01:30:00Z')}})
 """
 
 
-def test_the_zone_list_ranks_only_indicators_by_report_time(raw_driver, rest):
-    """An indicator by its latest report (else when EdgeGuard created it), every other label by its last
-    write; nodes without a time last. A campaign has no ``first_imported_at``: ranked by the indicator key
-    it went after every node with a time."""
+def test_the_zone_list_ranks_every_label_by_one_clock(raw_driver, rest):
+    """2026-10-16: an indicator by its latest report, every other node by when it entered the graph
+    (``first_imported_at``; a campaign's ``created_at``); nodes without a time last. The indicator
+    reported in the latest run comes first, above the nodes the sync and the campaign builder merely
+    rewrote: ordered by ``last_updated`` they were ``z-3``, ``z-6``, ``z-4`` before it."""
     with raw_driver.session() as session:
         session.run(ZONE_FIXTURE)
     threats = rest.get("/zone/finance?limit=10").json()["threats"]
-    assert [t["uuid"] for t in threats] == ["z-3", "z-2", "z-4", "z-1", "z-5"]
+    assert [t["uuid"] for t in threats] == ["z-1", "z-6", "z-2", "z-4", "z-3", "z-5"]
 
 
 def test_the_actor_summary_lists_the_malware_a_campaign_rests_on(raw_driver, rest):

@@ -253,6 +253,61 @@ class TestRunNeo4jSyncWindowAndStamp:
         assert _FakeSync.init_kwargs == {"aging_as_of": due}
         assert dag_module.enrichment_as_of({"data_interval_end": due}) == due, "the job's time"
 
+    def test_the_sync_and_the_job_of_one_run_use_the_same_time(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch
+    ):
+        """2026-10-16: the run's sync and its enrichment job evaluate the aging at one time, the later
+        of the run's time and the aging clock's mark (``EDGEGUARD_AGING_AS_OF``): a re-run of an older
+        run after a newer run aged the graph uses the newer time; a newer run uses its own time, and
+        its job raises the mark to it once the aging succeeded."""
+        monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
+        monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
+        monkeypatch.setattr(dag_module, "record_neo4j_node_counts", lambda: True)
+        mark = datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)
+        store = {dag_module.AGING_AS_OF_VARIABLE: mark.isoformat()}
+
+        class _Variable(_StubVariable):
+            @staticmethod
+            def get(key, default=None):
+                return store.get(key, default)
+
+            @staticmethod
+            def set(key, value):
+                store[key] = value
+
+        monkeypatch.setattr(dag_module, "Variable", _Variable)
+        jobs: list = []
+
+        def run_all_enrichment_jobs(client, as_of=None, on_aged=None):
+            jobs.append(as_of)
+            on_aged(as_of)  # the aging job succeeded
+            return {}
+
+        class _Client:
+            def connect(self):
+                return True
+
+            def close(self):
+                return None
+
+        monkeypatch.setitem(
+            sys.modules, "enrichment_jobs", SimpleNamespace(run_all_enrichment_jobs=run_all_enrichment_jobs)
+        )
+        monkeypatch.setitem(sys.modules, "neo4j_client", SimpleNamespace(Neo4jClient=_Client))
+
+        for due, expected in (
+            (datetime(2026, 10, 10, 3, 0, tzinfo=timezone.utc), mark),  # an older run, cleared and re-run
+            (datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc), datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc)),
+        ):
+            _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
+            dag_module.run_neo4j_sync(data_interval_end=due)
+            dag_module.run_enrichment_jobs(data_interval_end=due)
+            assert _FakeSync.init_kwargs == {"aging_as_of": expected}, due
+            assert jobs[-1] == expected, due
+            assert store[dag_module.AGING_AS_OF_VARIABLE] == expected.isoformat(), "the mark never decreases"
+
     def test_corrupt_state_file_falls_back_to_fixed_window(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
     ):

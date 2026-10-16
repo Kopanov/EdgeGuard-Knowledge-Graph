@@ -27,7 +27,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -2207,7 +2207,7 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def run_all_enrichment_jobs(neo4j_client, as_of=None) -> Dict:
+def run_all_enrichment_jobs(neo4j_client, as_of=None, on_aged: Optional[Callable[[datetime], None]] = None) -> Dict:
     """
     Run all seven post-sync enrichment jobs in sequence.
 
@@ -2217,8 +2217,11 @@ def run_all_enrichment_jobs(neo4j_client, as_of=None) -> Dict:
     campaign's indicators are those active at the run's ``as_of``.
 
     ``as_of`` (2026-10-16) is the time the aging rule is evaluated at: the DAG run's
-    ``data_interval_end`` (``run_after`` for a manual run), so re-running a run gives the same
-    graph; None (the command line) means now, fixed once for the whole run.
+    ``data_interval_end`` (``run_after`` for a manual run), raised to the aging clock's mark when
+    that is later (``enrichment_as_of`` in the DAG), so re-running a run gives the same graph; None
+    (the command line) means now, fixed once for the whole run. ``on_aged`` (2026-10-16) is called
+    with that time once the aging job succeeded, before the jobs after it run, so a later job's
+    failure does not keep the DAG from recording the time the graph is aged at.
 
     Returns a summary dict for logging/metrics.
     """
@@ -2253,6 +2256,10 @@ def run_all_enrichment_jobs(neo4j_client, as_of=None) -> Dict:
     # 2026-10-16: before build_campaign_nodes, which links only active indicators.
     logger.info("\n[4/7] Indicator Aging...")
     summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client, as_of=when)
+    # The job raises on a failure and returns {} without a connection: only a result naming its time
+    # is a graph aged at ``when``.
+    if on_aged is not None and (summary["decay"] or {}).get("as_of"):
+        on_aged(when)
 
     logger.info("\n[5/7] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)

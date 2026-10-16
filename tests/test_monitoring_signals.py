@@ -379,9 +379,11 @@ class TestNodeGauges:
         assert node_reads == []
 
     def _fake_enrichment(self, monkeypatch, events, error=None):
-        def run_all_enrichment_jobs(client, as_of=None):
-            # 2026-10-16: the task passes the time the indicator aging is evaluated at.
+        def run_all_enrichment_jobs(client, as_of=None, on_aged=None):
+            # 2026-10-16: the task passes the time the indicator aging is evaluated at, and the
+            # recorder of the aging clock's mark.
             assert as_of is not None and as_of.tzinfo is not None
+            assert on_aged is not None and on_aged.__name__ == "record_aging_as_of"
             events.append("enrichment")
             if error is not None:
                 raise error

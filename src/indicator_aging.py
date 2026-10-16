@@ -16,12 +16,14 @@ it) and ``L`` the source's own last-report date carried in the attribute's ``las
 at ``T``. The report time is ``min(T, coalesce(L, T))`` (``misp_report_times`` in
 ``run_misp_to_neo4j``). The node keeps, forward only, the latest report time over every source
 (``last_reported_at``, with ``last_reported_source``, ``last_reported_ref`` = the MISP attribute
-uuid and ``aging_basis`` = ``source_date`` or ``misp_recorded``) and the latest MISP record time
-(``last_recorded_at``); a report with an older or equal time changes none of them (an equal time
-with a smaller attribute uuid takes the reference, so the result does not depend on the order of
-arrival). The basis of aging is ``coalesce(last_reported_at, first_imported_at)``:
+uuid and ``last_reported_basis`` = ``source_date`` or ``misp_recorded``) and the latest MISP record
+time (``last_recorded_at``); a report with an older or equal time changes none of them (an equal
+time with a smaller attribute uuid takes the reference, so the result does not depend on the order
+of arrival). The basis of aging is ``coalesce(last_reported_at, first_imported_at)``:
 ``first_imported_at`` (set once, when EdgeGuard creates the node) dates a node no MISP report
-dated, ``aging_basis = 'first_imported'``. ``last_updated`` (the last database write) is not read.
+dated. ``aging_basis`` names it: ``last_reported_basis`` for a reported node, ``first_imported``
+otherwise; the rule derives it from the stored report like every other aging property, so the job
+corrects a stale value. ``last_updated`` (the last database write) is not read.
 
 The rule
 --------
@@ -47,14 +49,17 @@ One definition
 --------------
 ``aging_map`` is the single Cypher definition of the rule. Every Indicator write applies it
 (``Neo4jClient.merge_indicators_batch``, ``merge_node_with_source`` for the label Indicator,
-``create_indicator_from_alert``), so a newer report reactivates a node in the same write;
+``create_indicator_from_alert``) in a ``SET`` clause of its own (``aging_set_clause``) after the
+clause that records the report and ``source_confidence``: a clause reads the node as the previous
+clause left it, so the rule sees the report of the same write (a newer report reactivates the node
+in that write) without depending on the order in which one ``SET`` clause applies its items.
 ``enrichment_jobs.decay_ioc_confidence`` applies it to every Indicator with the time of the DAG
-run. A write evaluates it at ``WRITE_AS_OF``: the DAG run's evaluation time when the sync of a run
-writes (``Neo4jClient.set_aging_as_of``; the same ``data_interval_end`` the run's job uses, so the
-sync's writes and the job never disagree in between), the time of the write otherwise (the alert
-path, the command-line writers). ``node_report_items`` / ``edge_report_items`` are the
-forward-only report properties of the node and of its ``SOURCED_FROM`` edge. Tests pin every
-splice.
+run and writes a node when any of its ``AGING_FIELDS`` differs from the stored value. A write
+evaluates it at ``WRITE_AS_OF``: the DAG run's evaluation time when the sync of a run writes
+(``Neo4jClient.set_aging_as_of``; the time the run's job uses, so the sync's writes and the job
+never disagree in between), the time of the write otherwise (the alert path, the command-line
+writers). ``node_report_items`` / ``edge_report_items`` are the forward-only report properties of
+the node and of its ``SOURCED_FROM`` edge. Tests pin every splice.
 
 Standard library only; the fragments use single quotes only.
 """
@@ -209,11 +214,12 @@ def aging_map(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str
     """Cypher map of the aging properties of the Indicator ``var`` at ``as_of`` (a Cypher
     DateTime expression: ``WRITE_AS_OF`` in a write, ``datetime($as_of)`` in the job).
 
-    The single definition of the rule (module docstring). A write applies it as
-    ``SET var += <map>`` after the node's report properties and ``source_confidence``, so a newer
-    report reactivates the node in the same write; ``+=`` evaluates the whole map before it
-    assigns, so every entry reads the stored lifecycle. A node with neither ``last_reported_at``
-    nor ``first_imported_at`` keeps every value (EdgeGuard holds no time for it).
+    The single definition of the rule (module docstring); its keys are ``AGING_FIELDS``. A write
+    applies it in its own clause (``aging_set_clause``) after the clause that records the report
+    and ``source_confidence``, so a newer report reactivates the node in the same write; ``+=``
+    evaluates the whole map before it assigns, so every entry reads the lifecycle stored before
+    this clause. A node with neither ``last_reported_at`` nor ``first_imported_at`` keeps every
+    value (EdgeGuard holds no time for it).
     """
     p = policy or load_aging_policy()
     days = ", ".join(str(d) for d in p.tier_days)
@@ -227,7 +233,8 @@ def aging_map(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str
         f"[_basis IN [{basis_expr(v)}] | [_age IN [duration.inDays(_basis, {as_of}).days] | "
         f"[_tier IN [size([_t IN [{days}] WHERE _t <= _age])] | {{"
         f"aging_basis: CASE WHEN _age IS NULL THEN {v}.aging_basis "
-        f"WHEN {v}.last_reported_at IS NULL THEN '{BASIS_FIRST_IMPORTED}' ELSE {v}.aging_basis END, "
+        f"WHEN {v}.last_reported_at IS NULL THEN '{BASIS_FIRST_IMPORTED}' "
+        f"ELSE coalesce({v}.last_reported_basis, {v}.aging_basis) END, "
         f"aging_tier: CASE WHEN _age IS NULL THEN {v}.aging_tier ELSE _tier END, "
         f"aging_factor: CASE WHEN _age IS NULL THEN {v}.aging_factor ELSE {factor} END, "
         f"aging_since: CASE WHEN _age IS NULL THEN {v}.aging_since "
@@ -245,15 +252,40 @@ def aging_map(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str
 
 
 def aging_set_item(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str:
-    """The ``SET`` item that applies the rule to ``var`` (spliced last into an Indicator write)."""
+    """The ``SET`` item that applies the rule to ``var`` (``aging_set_clause`` wraps it)."""
     return f"{var} += {aging_map(var, as_of, policy)}"
 
 
+def aging_set_clause(var: str, as_of: str, policy: Optional[AgingPolicy] = None) -> str:
+    """The ``SET`` clause that applies the rule to the Indicator ``var`` (2026-10-16).
+
+    Spliced after the clause holding ``source_confidence_item`` and ``node_report_items``, never
+    into it: the rule reads ``last_reported_at``, ``last_reported_basis`` and ``source_confidence``,
+    and a later clause sees what an earlier clause wrote, whereas items of one ``SET`` clause would
+    rely on the order in which Neo4j applies them."""
+    return f"SET {aging_set_item(var, as_of, policy)}"
+
+
+# The properties the rule sets (the keys of ``aging_map``); the job writes a node when any differs.
+AGING_FIELDS: Tuple[str, ...] = (
+    "aging_basis",
+    "aging_tier",
+    "aging_factor",
+    "aging_since",
+    "confidence_score",
+    "active",
+    "retired_at",
+    "retired_by",
+)
+
+
 def changed_predicate(var: str, map_var: str) -> str:
-    """Cypher predicate: a value of the map ``map_var`` differs from the stored one (a null and a
-    value differ; two nulls do not), so the job writes only nodes whose aging changes."""
+    """Cypher predicate: a value of ``AGING_FIELDS`` in the map ``map_var`` differs from the stored
+    one (a null and a value differ; two nulls do not), so the job writes only nodes whose aging
+    changes, and every node with a stale aging property (``aging_basis`` among them)."""
+    fields = ", ".join(f"'{f}'" for f in AGING_FIELDS)
     return (
-        f"any(_k IN keys({map_var}) WHERE NOT coalesce({var}[_k] = {map_var}[_k], "
+        f"any(_k IN [{fields}] WHERE NOT coalesce({var}[_k] = {map_var}[_k], "
         f"{var}[_k] IS NULL AND {map_var}[_k] IS NULL))"
     )
 
@@ -283,16 +315,17 @@ def _forward_recorded(target: str, recorded_at: str) -> str:
 
 def node_report_items(var: str, row: str, source: str) -> str:
     """``SET`` items recording one report on the Indicator ``var``, forward only: the latest MISP
-    record time, and the latest report time with its source, reference and kind (``aging_basis``)
-    when the report is newer (``_newer_report``). ``row`` is the Cypher map holding
-    ``recorded_at``, ``reported_at``, ``report_ref`` and ``reported_basis`` (``item`` in a batch, a
-    parameter map otherwise); ``source`` the source id expression. Spliced before ``aging_map``."""
+    record time, and the latest report time with its source, reference and kind
+    (``last_reported_basis``) when the report is newer (``_newer_report``). ``row`` is the Cypher
+    map holding ``recorded_at``, ``reported_at``, ``report_ref`` and ``reported_basis`` (``item`` in
+    a batch, a parameter map otherwise); ``source`` the source id expression. The clause holding
+    them precedes ``aging_set_clause``, which derives ``aging_basis`` from the kind."""
     newer = _newer_report(var, f"{row}.reported_at", f"{row}.report_ref", source)
     return (
         f"{_forward_recorded(var, f'{row}.recorded_at')}, "
         f"{var} += CASE WHEN {newer} THEN {{last_reported_at: datetime({row}.reported_at), "
         f"last_reported_source: {source}, last_reported_ref: {row}.report_ref, "
-        f"aging_basis: {row}.reported_basis}} ELSE {{}} END"
+        f"last_reported_basis: {row}.reported_basis}} ELSE {{}} END"
     )
 
 

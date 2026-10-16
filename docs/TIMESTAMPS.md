@@ -175,7 +175,8 @@ on its own edge.
 only, the latest report of any source: `n.last_reported_at` = `min(T, coalesce(L, T))`, where T is
 the MISP attribute `timestamp` (when MISP recorded it, UTC) and L the source's own last-report date
 (the attribute's `last_seen`, concept 2, capped at T), with `n.last_reported_source`,
-`n.last_reported_ref` (the attribute uuid) and `n.aging_basis` (`source_date` / `misp_recorded`); and
+`n.last_reported_ref` (the attribute uuid) and `n.last_reported_basis` (`source_date` / `misp_recorded`;
+`n.aging_basis` is derived from it by the aging rule, `first_imported` without a report); and
 `n.last_recorded_at`, the latest T. The indicator's `SOURCED_FROM` edge keeps the same values for
 its source. The indicator ages from `coalesce(n.last_reported_at, n.first_imported_at)`;
 `n.last_updated` (concept 4) is read neither for aging nor for ordering, so a re-sync of the same
@@ -456,4 +457,4 @@ exercises:
 - Knowledge graph schema: [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md)
 - ResilMesh interop: [`docs/RESILMESH_INTEROPERABILITY.md`](RESILMESH_INTEROPERABILITY.md)
 
-_Last updated: 2026-10-16 — indicator aging times: `last_reported_at` (`min(T, coalesce(L, T))`, the source's `last_seen` capped at the MISP timestamp), `last_reported_source`, `last_reported_ref`, `last_recorded_at` and `aging_basis` on the Indicator and its `SOURCED_FROM` edge, forward only; the indicator ages from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX indicator's `modified` is the latest of `created`, `last_recorded_at` and `aging_since`._
+_Last updated: 2026-10-16 — the kind of an indicator's latest report is recorded in `n.last_reported_basis`; the aging rule derives `n.aging_basis` from it. Same day: indicator aging times: `last_reported_at` (`min(T, coalesce(L, T))`, the source's `last_seen` capped at the MISP timestamp), `last_reported_source`, `last_reported_ref`, `last_recorded_at` and `aging_basis` on the Indicator and its `SOURCED_FROM` edge, forward only; the indicator ages from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX indicator's `modified` is the latest of `created`, `last_recorded_at` and `aging_since`._

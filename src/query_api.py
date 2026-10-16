@@ -257,26 +257,30 @@ def _node_props(node: Any) -> Dict[str, Any]:
 # with every full sync, so it no longer orders indicators.
 _INDICATOR_RECENCY = "coalesce(n.last_reported_at, n.first_imported_at)"
 
-# 2026-10-16: the recency key of ``/zone/{zone}``, which lists several labels: an Indicator by its
-# latest report (``_INDICATOR_RECENCY``), every other label by its last database write
-# (``last_updated``), as before. Catalogue nodes do not age and carry no report time, and a Campaign
-# has no ``first_imported_at`` (the builder sets ``created_at`` and ``last_updated``): ranked by the
-# indicator key, every campaign sorted after all nodes with a time and the other labels by when
-# EdgeGuard created them.
-_ZONE_RECENCY = f"CASE WHEN n:Indicator THEN {_INDICATOR_RECENCY} ELSE n.last_updated END"
+# 2026-10-16: the recency key of ``/zone/{zone}``, which lists several labels, one clock for all of
+# them: an Indicator's latest report, otherwise when the node entered the graph (``first_imported_at``;
+# ``created_at`` for a Campaign, which the campaign builder creates without ``first_imported_at``).
+# None of these times moves when a sync or the campaign builder rewrites a node. Ordering the other
+# labels by ``last_updated`` (the last database write) put every node a sync or the builder had just
+# rewritten above an indicator reported in the latest run: the two clocks cannot be compared.
+_ZONE_RECENCY = "coalesce(n.last_reported_at, n.first_imported_at, n.created_at)"
 
 # 2026-10-16: of a CVE's twin nodes (``:CVE`` from ``merge_cve``, ``:Vulnerability`` from the per-item
 # fallback and the alert path), the description the source ranking keeps
 # (``description_ranking.CVE_DESCRIPTIONS``), as ``[rank, description_source, description]``: the
-# highest stored rank, then the source id that sorts first, then the text; null when no twin has a
-# text. The twins are written by different paths and their texts can differ; ``head(collect(...))``
-# showed the twin the rows returned first, which could be a lower-ranked text and change between calls.
+# highest stored rank; at an equal rank the twin that names a source (a text written before the
+# ranking counts as the top source's, and the write rule lets that source's record replace it), then
+# the source id that sorts first, then the text; null when no twin has a text. The twins are written
+# by different paths and their texts can differ; ``head(collect(...))`` showed the twin the rows
+# returned first, which could be a lower-ranked text and change between calls.
 _TWIN_DESCRIPTION = (
     "reduce(_best = null, _d IN collect(["
     + CVE_DESCRIPTIONS.stored_rank_cypher("n")
     + ", n.description_source, n.description]) | CASE WHEN _d[0] < 0 THEN _best "
-    "WHEN _best IS NULL OR _d[0] > _best[0] OR (_d[0] = _best[0] AND (coalesce(_d[1], '') < coalesce(_best[1], '') "
-    "OR (coalesce(_d[1], '') = coalesce(_best[1], '') AND _d[2] < _best[2]))) THEN _d ELSE _best END)"
+    "WHEN _best IS NULL OR _d[0] > _best[0] OR (_d[0] = _best[0] AND ("
+    "(_d[1] IS NOT NULL AND _best[1] IS NULL) OR (_d[1] IS NOT NULL AND _d[1] < _best[1]) "
+    "OR (coalesce(_d[1] = _best[1], _d[1] IS NULL AND _best[1] IS NULL) AND _d[2] < _best[2]))) "
+    "THEN _d ELSE _best END)"
 )
 
 
@@ -872,7 +876,8 @@ async def get_zone_threats(
             if severity:
                 where_clause += " AND n.severity = $severity"
 
-            # Newest first (``_ZONE_RECENCY``); nodes without the time last, ties by uuid.
+            # Newest first by one clock for every label (``_ZONE_RECENCY``); nodes without the time
+            # last, ties by uuid.
             query = f"""
                 MATCH (n)
                 WHERE (n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Campaign)

@@ -492,6 +492,10 @@ class TestGraphExplorer:
             f"reduce(_best = null, _d IN collect([{CVE_DESCRIPTIONS.stored_rank_cypher('n')}, "
             "n.description_source, n.description]) | CASE WHEN _d[0] < 0 THEN _best "
         )
+        # 2026-10-16: at an equal rank the twin that names a source wins (a null source sorts last), as
+        # the write rule lets a named source's record replace a text without one.
+        assert "(_d[0] = _best[0] AND ((_d[1] IS NOT NULL AND _best[1] IS NULL) OR " in query_api._TWIN_DESCRIPTION
+        assert "coalesce(_d[1], '')" not in query_api._TWIN_DESCRIPTION
         assert "described[2] AS description" in query and "described[1] AS description_source" in query
         assert "head(collect(n.description))" not in query and "head([d IN collect(" not in query
 

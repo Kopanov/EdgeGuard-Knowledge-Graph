@@ -51,7 +51,7 @@ from description_ranking import (  # noqa: E402  — 2026-10-16: whose text a no
 from indicator_aging import (  # noqa: E402  — 2026-10-16: one aging rule for every Indicator
     AS_OF_PARAM,
     WRITE_AS_OF,
-    aging_set_item,
+    aging_set_clause,
     edge_report_items,
     evaluation_time,
     node_report_items,
@@ -1363,12 +1363,12 @@ def _normalise_zone_list(value: Any) -> List[str]:
 # a decay-retired node (``active = true``, ``retired_at`` / ``retired_by`` cleared,
 # ``last_decayed_tier = null``) whatever its label and restored a decayed confidence by max-wins, so
 # a full sync undid the decay. Now only an Indicator ages: its writes record the report
-# (``indicator_aging.node_report_items``) and apply the one rule (``indicator_aging.aging_set_item``),
-# which reactivates a node only when a newer report moves its basis. Every other label is set
-# ``active = true`` when EdgeGuard creates it (``_create_active``) and gets no ``active``,
-# ``retired_*`` or decay property when EdgeGuard matches it, so a node another system created (CASM
-# CVE / CVSS, ISIM assets) never receives an EdgeGuard lifecycle property and a manual decommission
-# is never touched.
+# (``indicator_aging.node_report_items``), then apply the one rule in a SET clause of its own
+# (``indicator_aging.aging_set_clause``), which reactivates a node only when a newer report moves its
+# basis. Every other label is set ``active = true`` when EdgeGuard creates it (``_create_active``)
+# and gets no ``active``, ``retired_*`` or decay property when EdgeGuard matches it, so a node
+# another system created (CASM CVE / CVSS, ISIM assets) never receives an EdgeGuard lifecycle
+# property and a manual decommission is never touched.
 def _create_active(var: str) -> str:
     """``ON CREATE`` item of a node that does not age: active from its creation, never changed by a
     later EdgeGuard write."""
@@ -2525,10 +2525,6 @@ class Neo4jClient:
                 // node was created before this code was deployed it will get the
                 // uuid stamped here on next MERGE.)
                 n.uuid = coalesce(n.uuid, $node_uuid)"""
-            if is_indicator:
-                # Last node item: reads the report and ``source_confidence`` set above.
-                query += f""",
-                {aging_set_item("n", WRITE_AS_OF)}"""
 
             # PR #33 round 10: dropped legacy scalars misp_event_id / misp_attribute_id
             # (pre-release, no real data to migrate). Multi-event provenance lives only
@@ -2734,6 +2730,11 @@ class Neo4jClient:
                     continue
                 query += f", n.{prop_name} = {_set_if_absent_clause(f'n.{prop_name}', f'$fill_{prop_name}')}"
                 params_extra[f"fill_{prop_name}"] = prop_value
+
+            # 2026-10-16: an Indicator's aging, in a SET clause of its own after the one above: the rule
+            # reads the report and ``source_confidence`` that clause recorded (``indicator_aging``).
+            if is_indicator:
+                query += "\n            " + aging_set_clause("n", WRITE_AS_OF)
 
             # 2026-10-16: the description and its source, by the source ranking of the label
             # (``description_ranking``), decided once after every other property is set.
@@ -4103,10 +4104,11 @@ class Neo4jClient:
                     n.pulse_malware_families = {_dedup_concat_clause("n.pulse_malware_families", "coalesce(item.pulse_malware_families, [])")},
                     n.pulse_malware_actor_pairs = {_dedup_concat_clause("n.pulse_malware_actor_pairs", "coalesce(item.pulse_malware_actor_pairs, [])")},
                     n.several_actor_pulses = {_dedup_concat_clause("n.several_actor_pulses", "coalesce(item.several_actor_pulses, [])")},
-                    // 2026-10-16 (indicator aging): the report, forward only, then the one rule
-                    // (``indicator_aging``); a newer report reactivates the node in this write.
-                    {node_report_items("n", "item.report", "item.source_id")},
-                    {aging_set_item("n", WRITE_AS_OF)}
+                    // 2026-10-16 (indicator aging): the report, forward only (``indicator_aging``).
+                    {node_report_items("n", "item.report", "item.source_id")}
+                // 2026-10-16: the one aging rule, in a SET clause of its own, so it reads the report and
+                // source_confidence recorded above; a newer report reactivates the node in this write.
+                {aging_set_clause("n", WRITE_AS_OF)}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
@@ -7694,8 +7696,8 @@ class Neo4jClient:
             {source_confidence_item("i", "$confidence_score")},
             {_zone_clause_i},
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
-            i.tlp = coalesce(i.tlp, $tlp),
-            {aging_set_item("i", WRITE_AS_OF)}
+            i.tlp = coalesce(i.tlp, $tlp)
+        {aging_set_clause("i", WRITE_AS_OF)}
         """
 
         try:
@@ -7719,8 +7721,8 @@ class Neo4jClient:
             SET i.last_updated = datetime(),
                 {source_confidence_item("i", "$confidence_score")},
                 {_zone_clause_i},
-                i.tlp = coalesce(i.tlp, $tlp),
-                {aging_set_item("i", WRITE_AS_OF)}
+                i.tlp = coalesce(i.tlp, $tlp)
+            {aging_set_clause("i", WRITE_AS_OF)}
             """
             try:
                 with self.driver.session() as session:

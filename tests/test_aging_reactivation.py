@@ -52,6 +52,26 @@ def _node_merge(session, label):
     return next(c.args[0] for c in session.run.call_args_list if c.args and f"MERGE (n:{label} " in c.args[0])
 
 
+def _assert_rule_in_its_own_clause(query: str, var: str, recorded: tuple) -> None:
+    """2026-10-16: the aging map is applied once, in a ``SET`` clause of its own that follows the
+    ``SET`` clause recording ``recorded`` (``source_confidence`` and, on a report, the report items).
+    A clause reads the node as the previous clause left it; items of one clause would depend on the
+    order in which Neo4j applies them."""
+    clause = ia.aging_set_clause(var, ia.WRITE_AS_OF)
+    assert clause == f"SET {ia.aging_set_item(var, ia.WRITE_AS_OF)}"
+    assert query.count(ia.aging_set_item(var, ia.WRITE_AS_OF)) == 1, "the rule is applied once"
+    start = query.index(clause)
+    line_start = query.rfind("\n", 0, start) + 1
+    assert not query[line_start:start].strip(), "the aging clause begins its own line"
+    lines = [ln.strip() for ln in query[:line_start].splitlines()]
+    code = [ln for ln in lines if ln and not ln.startswith("//")]
+    assert not code[-1].endswith(","), "the clause before it is complete: the rule is no item of it"
+    head = max(i for i, ln in enumerate(code) if ln.startswith("SET "))
+    previous = "\n".join(code[head:])
+    for fragment in recorded:
+        assert fragment in previous, f"recorded in the SET clause before the rule: {fragment[:60]}"
+
+
 class TestDecayTagsItsRetirements:
     def test_the_rule_tags_its_retirements_decay(self):
         body = ia.aging_map("n", "datetime()")
@@ -83,8 +103,16 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
         node_set = cy.split("MERGE (n)-[r:SOURCED_FROM]->(s)", 1)[0]
         assert ia.source_confidence_item("n", "item.confidence") in node_set
         assert ia.node_report_items("n", "item.report", "item.source_id") in node_set
-        assert node_set.split("WITH n, item", 1)[0].rstrip().endswith(ia.aging_set_item("n", ia.WRITE_AS_OF)), (
-            "the rule is the last node item before WITH"
+        _assert_rule_in_its_own_clause(
+            node_set,
+            "n",
+            (
+                ia.source_confidence_item("n", "item.confidence"),
+                ia.node_report_items("n", "item.report", "item.source_id"),
+            ),
+        )
+        assert node_set.split("WITH n, item", 1)[0].rstrip().endswith(ia.aging_set_clause("n", ia.WRITE_AS_OF)), (
+            "the rule is the last node clause before WITH"
         )
         assert "n.confidence_score = CASE" not in node_set, "confidence_score comes from the rule only"
         assert ia.edge_report_items("r", "item.report", "item.source_id") in cy
@@ -98,9 +126,10 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
         node = _node_merge(session, "Indicator")
         assert ia.source_confidence_item("n", "$confidence") in node
         assert ia.node_report_items("n", "$report", "$source_id") in node
-        assert ia.aging_set_item("n", ia.WRITE_AS_OF) in node
-        assert node.index(ia.node_report_items("n", "$report", "$source_id")) < node.index(
-            ia.aging_set_item("n", ia.WRITE_AS_OF)
+        _assert_rule_in_its_own_clause(
+            node,
+            "n",
+            (ia.source_confidence_item("n", "$confidence"), ia.node_report_items("n", "$report", "$source_id")),
         )
         sourced = next(
             c.args[0] for c in session.run.call_args_list if c.args and "MERGE (n)-[r:SOURCED_FROM]" in c.args[0]
@@ -116,7 +145,7 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
             assert call.kwargs[ia.AS_OF_PARAM] is None, "outside a DAG run: the time of the write"
         for query in (primary, fallback):
             assert ia.source_confidence_item("i", "$confidence_score") in query
-            assert ia.aging_set_item("i", ia.WRITE_AS_OF) in query
+            _assert_rule_in_its_own_clause(query, "i", (ia.source_confidence_item("i", "$confidence_score"),))
             assert "last_reported_at:" not in query, "an alert records no report"
             assert "i.confidence_score = CASE" not in query
 
@@ -143,6 +172,26 @@ class TestEveryIndicatorWriteAppliesTheOneRule:
         assert single.kwargs[ia.AS_OF_PARAM] == "2026-10-16T03:00:00+00:00"
         client.set_aging_as_of(None)
         assert client.aging_as_of is None
+
+    def test_a_single_merge_with_more_items_still_ends_its_clause_before_the_rule(self):
+        """``merge_node_with_source`` appends the MISP ids, ``extra_props`` and ``fill_props`` to its SET
+        clause after the report items: the rule's clause follows all of them."""
+        client, session = _client()
+        client.merge_indicator(
+            {
+                "indicator_type": "ipv4",
+                "value": "203.0.113.7",
+                "tag": "otx",
+                "zone": ["global"],
+                "misp_event_id": "41",
+                "misp_attribute_id": "9",
+                "tlp": "amber",
+            },
+            source_id="misp",
+        )
+        node = _node_merge(session, "Indicator")
+        assert node.index("n.misp_attribute_ids = ") < node.index(ia.aging_set_clause("n", ia.WRITE_AS_OF))
+        _assert_rule_in_its_own_clause(node, "n", ("n.misp_event_ids = ", "n.misp_attribute_ids = "))
 
     def test_manual_decommission_still_wins(self):
         body = ia.aging_map("n", "datetime()")
