@@ -1518,10 +1518,14 @@ def _sync_window_overlap() -> timedelta:
     The incremental sync reads from ``last_sync`` minus this overlap. MISP stamps attribute
     timestamps itself, so the margin covers clock skew between the Airflow and MISP hosts and a
     write that becomes visible after the sync read its event. That holds only while the sync reads
-    the MISP the collectors write to; a copy filled by MISP-to-MISP synchronisation or import keeps
-    the origin's timestamps and needs an overlap above the copy delay.
+    the MISP the collectors write to and the two hosts keep their clocks synchronised (NTP): a
+    clock difference larger than the overlap skips attributes. A copy filled by MISP-to-MISP
+    synchronisation or import keeps the origin's timestamps and needs an overlap above the copy
+    delay.
 
-    - Unset or empty: the default, without a warning (``docker-compose.yml`` forwards the variable).
+    - Unset or empty (or only whitespace): the default, without a warning (``docker-compose.yml``
+      sets ``1`` when the variable is unset or empty, but a deployment outside compose may set it
+      empty).
     - Not a number, negative, not finite or above 720 h: a warning and the default. The bound
       keeps the subtraction from ``last_sync`` inside the ``datetime`` range, where a huge value
       raised ``OverflowError`` and failed every run instead of falling back.
@@ -1646,10 +1650,10 @@ def run_neo4j_sync(**context):
                 _last_sync_dt = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
                 since = _last_sync_dt - _overlap
                 logger.info(
-                    "Incremental window derived from state file: since %s (last_sync %s − %g s overlap)",
+                    "Incremental window derived from state file: since %s (last_sync %s − %d s overlap)",
                     since.isoformat(),
                     _raw,
-                    _overlap.total_seconds(),
+                    int(_overlap.total_seconds()),
                 )
             except (OSError, ValueError, OverflowError, json.JSONDecodeError) as e:
                 logger.warning(

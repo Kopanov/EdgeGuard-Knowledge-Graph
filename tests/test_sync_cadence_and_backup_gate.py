@@ -235,17 +235,40 @@ class TestRunNeo4jSyncWindowAndStamp:
 
         assert _FakeSync.captured["since"] == last_sync - timedelta(hours=6)
 
-    @pytest.mark.parametrize("raw", ["abc", "-2", "", "nan", "inf"])
+    @pytest.mark.parametrize("raw", ["abc", "-2", "nan", "inf"])
     def test_invalid_overlap_env_falls_back_to_default(
-        self, dag_module, isolated_state, fake_sync_module, monkeypatch, raw
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
     ):
         last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
         _write_state(isolated_state, last_sync)
         monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
 
-        self._run(dag_module, monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
 
         assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert any(
+            "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() and raw in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_overlap_env_is_silent_default(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """Set but empty (a deployment outside docker-compose.yml, which itself sets ``1``)
+        behaves like unset: the 1 h default, without an invalid-value warning on every run."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert not any("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() for r in caplog.records), (
+            "an empty value must not emit a spurious invalid-value warning"
+        )
 
     @pytest.mark.parametrize("raw", ["721", "2e7", "1e400"])
     def test_overlap_above_bound_warns_and_does_not_fail_the_run(
@@ -266,14 +289,17 @@ class TestRunNeo4jSyncWindowAndStamp:
             for r in caplog.records
         )
 
-    def test_overlap_at_bound_is_used(self, dag_module, isolated_state, fake_sync_module, monkeypatch):
+    def test_overlap_at_bound_is_used(self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog):
         last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
         _write_state(isolated_state, last_sync)
         monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "720")
 
-        self._run(dag_module, monkeypatch)
+        with caplog.at_level(logging.INFO):
+            self._run(dag_module, monkeypatch)
 
         assert _FakeSync.captured["since"] == last_sync - timedelta(hours=720)
+        # The log states whole seconds, not exponent form ("2.592e+06 s").
+        assert any("− 2592000 s overlap" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("raw", ["0", "0.0", "-0", "0.01", "1e-9"])
     def test_overlap_below_floor_is_raised_to_60_seconds(
