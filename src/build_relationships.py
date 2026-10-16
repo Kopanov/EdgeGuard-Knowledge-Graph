@@ -919,7 +919,8 @@ def build_relationships():
         # (``Indicator.several_actor_pulses``, judged with the canonical reference): MISP does not push
         # an actor it already holds again, so the nodes miss a pulse edited to name several actors after
         # its pairs were written. Nor an IOC: the mark of such a pulse reaches the graph through its new
-        # IOCs and through stored copies of its held IOCs, to which MISPWriter adds it (``_carry_marks``).
+        # IOCs only; MISPWriter adds no mark to a stored copy (MISP keeps what the sources said), so a
+        # pulse whose IOCs MISP all holds stays unmarked (a known limit).
         # Bugbot on PR #145: two flat lists unioned across pulses on a shared IOC would cross-link a
         # family from pulse A with an actor from pulse B — the exact cross-report attribution this work
         # replaces; the pair encoding keeps the same-pulse guarantee. Report-scoped evidence:

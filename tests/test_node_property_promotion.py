@@ -22,6 +22,21 @@ def neo4j_client_module():
     return neo4j_client
 
 
+def assert_ranked_description(call, label: str, text: str, source: str) -> None:
+    """2026-10-16: the description reaches the node through the source ranking (``description_ranking``):
+    the statement carries the ranked SET, with the record's text, source and that source's rank."""
+    from description_ranking import ranking_for_label
+
+    ranking = ranking_for_label(label)
+    query, params = call[0][0], call[1]
+    block = ranking.set_cypher(
+        "n", "n", "$ranked_description", "$ranked_description_source", "$ranked_description_rank"
+    )
+    assert block in query, f"{label}.description must be promoted through the source ranking"
+    assert (params["ranked_description"], params["ranked_description_source"]) == (text, source)
+    assert params["ranked_description_rank"] == ranking.rank(source)
+
+
 @pytest.fixture
 def mock_neo4j_client():
     """Create a Neo4jClient with mocked driver."""
@@ -74,8 +89,7 @@ class TestTechniquePropertyPromotion:
         }
         client.merge_technique(data, source_id="mitre_attck")
         cypher_call = session.run.call_args_list[1]
-        cypher_text = cypher_call[0][0]
-        assert "n.description = $description" in cypher_text, "Technique.description must be promoted"
+        assert_ranked_description(cypher_call, "Technique", data["description"], "mitre_attck")
 
 
 class TestTacticPropertyPromotion:
@@ -118,7 +132,7 @@ class TestCVEPropertyPromotion:
         client.merge_cve(data, source_id="nvd")
         cypher_call = session.run.call_args_list[1]
         cypher_text = cypher_call[0][0]
-        assert "n.description = $description" in cypher_text, "CVE.description must be promoted"
+        assert_ranked_description(cypher_call, "CVE", data["description"], "nvd")
         assert "cvss_score" not in cypher_text and "severity" not in cypher_text, (
             "the record's score must not be written: a 0.0 placeholder, a KEV value or OTX's UNKNOWN "
             "used to overwrite the CVSS of another source"
@@ -151,7 +165,7 @@ class TestToolPropertyPromotion:
         cypher_call = session.run.call_args_list[1]
         cypher_text = cypher_call[0][0]
         assert "n.name = $name" in cypher_text, "Tool.name must be promoted"
-        assert "n.description = $description" in cypher_text, "Tool.description must be promoted"
+        assert_ranked_description(cypher_call, "Tool", data["description"], "mitre_attck")
 
 
 class TestMalwarePropertyPromotion:
@@ -169,8 +183,7 @@ class TestMalwarePropertyPromotion:
         }
         client.merge_malware(data, source_id="mitre_attck")
         cypher_call = session.run.call_args_list[1]
-        cypher_text = cypher_call[0][0]
-        assert "n.description = $description" in cypher_text, "Malware.description must be promoted"
+        assert_ranked_description(cypher_call, "Malware", data["description"], "mitre_attck")
 
 
 class TestActorPropertyPromotion:

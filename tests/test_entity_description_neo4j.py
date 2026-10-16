@@ -1,8 +1,10 @@
 """Malware, ThreatActor and Tool descriptions on a real Neo4j (2026-10).
 
-MITRE ATT&CK's record (``mitre_attck``) sets the description; a record from any other source fills it only
-where the node has none, an empty string counting as none (``neo4j_client._entity_description_fill``,
-``tests/test_entity_description_source.py``). The records are the ones that suite builds: ATT&CK's
+The source ranking MITRE ATT&CK > a curated source > any other source decides the description, and the node
+names its source in ``description_source`` (``description_ranking``, 2026-10-16; until then MITRE's record
+set it and any other record only filled it); an empty string counts as no description
+(``tests/test_entity_description_source.py``, every order: ``tests/test_description_ranking_neo4j.py``).
+The records are the ones that suite builds: ATT&CK's
 Dragonfly, Cobalt Strike and Mimikatz through the MITRE collector, MISPWriter and the sync, and the items
 the OTX collector gave until 2026-10 (the pulse's description as the entity's), merged in both orders.
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``,
@@ -104,21 +106,31 @@ def test_attacks_text_wins_in_both_orders(client, raw_driver, kind, first):
     for item, source in records if first == "mitre" else records[::-1]:
         assert getattr(client, MERGE[kind])(item, source_id=source)
     node = _node(raw_driver, kind)
-    assert node["description"] == mitre["description"]
+    assert (node["description"], node["description_source"]) == (mitre["description"], "mitre_attck")
     assert node["description"].startswith(f"[{ATTACK_NAMES[kind]}]")
     assert set(node["source"]) == {"mitre_attck", "alienvault_otx"}, "both records were merged"
 
 
-def test_another_source_fills_an_empty_node_and_its_text_stays(client, raw_driver):
+def _described(raw_driver, node: str) -> tuple:
+    props = _node(raw_driver, node)
+    return props.get("description"), props.get("description_source")
+
+
+def test_each_record_replaces_a_lower_ranked_text_and_none_replaces_mitres(client, raw_driver):
+    # Until 2026-10-16 the external bundle's text, which arrived first, stayed against the MISP-native one.
     _create(raw_driver, "actor", description="")
-    first = dict(_mitre("actor"), description="An external bundle's text")
-    second = dict(_mitre("actor"), description="A MISP-native attribute's text")
-    assert client.merge_actor(first, source_id="stix_import")
-    assert _node(raw_driver, "actor")["description"] == "An external bundle's text", "an empty value counts as none"
-    assert client.merge_actor(second, source_id="misp")
-    assert _node(raw_driver, "actor")["description"] == "An external bundle's text"
+    bundle = dict(_mitre("actor"), description="An external bundle's text")
+    native = dict(_mitre("actor"), description="A MISP-native attribute's text")
+    assert client.merge_actor(bundle, source_id="stix_import")
+    assert _described(raw_driver, "actor") == ("An external bundle's text", "stix_import"), "'' counts as none"
+    assert client.merge_actor(native, source_id="misp")
+    assert _described(raw_driver, "actor") == ("A MISP-native attribute's text", "misp"), "a registered source"
+    assert client.merge_actor(bundle, source_id="stix_import")
+    assert _described(raw_driver, "actor") == ("A MISP-native attribute's text", "misp")
     assert client.merge_actor(_mitre("actor"), source_id="mitre_attck")
-    assert _node(raw_driver, "actor")["description"] == _mitre("actor")["description"], "MITRE's record replaces it"
+    assert _described(raw_driver, "actor") == (_mitre("actor")["description"], "mitre_attck")
+    assert client.merge_actor(native, source_id="misp")
+    assert _described(raw_driver, "actor") == (_mitre("actor")["description"], "mitre_attck")
 
 
 def test_a_tool_takes_mitres_revised_text_and_no_other(client, raw_driver):

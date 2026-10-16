@@ -7,7 +7,9 @@ They are designed to be idempotent — safe to re-run at any time.
 
 Jobs
 ----
-1. decay_ioc_confidence   — Reduce confidence of stale indicators over time
+1. decay_ioc_confidence   — The one aging rule for Indicator nodes, every supplier alike (2026-10-16,
+                            indicator_aging): confidence by age since the last report, retirement
+                            after 730 days without one
 2. build_campaign_nodes   — Group ThreatActor / Malware / Indicator into Campaigns
 3. calibrate_cooccurrence — Adjust INDICATES/EXPLOITS confidence for large MISP feed dumps
 4. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
@@ -29,6 +31,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import campaign_evidence  # noqa: E402
 import config  # noqa: E402
 from attack_revoked import load_revoked_ids  # noqa: E402
 from attack_software_names import (  # noqa: E402
@@ -48,7 +51,19 @@ from canonical_threat_actors import (  # noqa: E402
     reference_merge_candidates,
 )
 from cve_feed_enrichment import enrich_cve_epss  # noqa: E402
+from description_ranking import ranking_for_label  # noqa: E402
+from indicator_aging import (  # noqa: E402
+    AGING_BASES,
+    DATABASE_TIME,
+    AgingPolicy,
+    aging_map,
+    basis_expr,
+    changed_predicate,
+    evaluation_time,
+    load_aging_policy,
+)
 from neo4j_client import (  # noqa: E402
+    APOC_ITERATE_YIELD,
     NEO4J_READ_TIMEOUT,
     _dedup_concat_clause,
     _tlp_most_restrictive_clause,
@@ -56,7 +71,7 @@ from neo4j_client import (  # noqa: E402
 )
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
-from relationship_provenance import aggregated_prov_set, inherited_prov_set, node_feeds, prov_set, prov_with  # noqa: E402
+from relationship_provenance import aggregated_prov_set, node_feeds, prov_set, prov_with  # noqa: E402
 
 try:
     from metrics_server import record_enrichment_duration
@@ -73,117 +88,114 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def decay_ioc_confidence(neo4j_client) -> Dict:
-    """
-    Time-decay confidence scores for Indicator and Vulnerability nodes.
+# 2026-10-16: the time the aging job evaluates the rule at, before the per-node lift: the database's
+# current time (``indicator_aging.DATABASE_TIME``; in ``apoc.periodic.iterate`` each batch reads it
+# when its transaction starts). ``$as_of`` is null in production; a test may give a time.
+AGING_JOB_TIME = f"coalesce(datetime($as_of), {DATABASE_TIME})"
 
-    Threat intelligence has a shelf life.  An IP flagged 18 months ago
-    with no recent sightings is far less actionable than one seen yesterday.
 
-    Decay tiers (based on days since last_updated):
-      < 90 days   → no change
-      90–180 days → confidence × 0.85 (15% reduction)
-      180–365 days→ confidence × 0.70 (30% reduction)
-      > 365 days  → active = false (retired, not deleted)
+def _aging_job_statements(policy: AgingPolicy) -> Tuple[str, str, str]:
+    """The aging job's statements: the nodes whose aging changes (``outer``), the update applied to
+    each (``inner``) and their count, at ``AGING_JOB_TIME``. Parameter: ``$as_of`` (ISO-8601, or
+    null for the database's current time).
 
-    All changes are non-destructive:
-    - Minimum confidence floor is 0.10 (node stays queryable)
-    - Retired nodes (active=false) are kept for historical queries
-    - 2026-10: retirement by this job is tagged ``retired_by = 'decay'`` so a node that
-      is observed again in a later sync is reactivated (``active = true``, ``retired_at``
-      cleared, decay tier reset) — only a manual decommission (``retired_at`` set without
-      that tag) survives a re-observation
-    - first_imported_at and source are never touched
+    2026-10-16: ``inner`` takes the node's write lock (``apoc.lock.nodes``) before it reads the node,
+    then evaluates the rule again and writes only where a value still changes. A concurrent writer
+    (the sync of another run, a baseline) either committed before the lock, and the rule reads what
+    it wrote, ``aging_evaluated_at`` included, or waits for this batch: the job never writes values
+    it computed from a node another transaction changed in between. ``outer`` reads without a lock
+    and only selects the candidates, so unchanged nodes are neither locked nor written: a write that
+    commits a newer report on a node ``outer`` did not select is evaluated by that write alone, at
+    its statement's start, which can be earlier than this job's time (``indicator_aging``, *The time
+    of an evaluation*)."""
+    aged = aging_map("n", AGING_JOB_TIME, policy)
+    changed = f"WITH n, {aged} AS aged WHERE {changed_predicate('n', 'aged')}"
+    select = f"MATCH (n:Indicator) WHERE {basis_expr('n')} IS NOT NULL {changed}"
+    outer = f"{select} RETURN n"
+    inner = f"CALL apoc.lock.nodes([n]) {changed} SET n += aged"
+    count = f"{select} RETURN count(n) AS changed"
+    return outer, inner, count
+
+
+_AGING_ITERATE_CYPHER = (
+    "CALL apoc.periodic.iterate($outer, $inner, "
+    "{batchSize: 10000, parallel: false, retries: 2, params: {as_of: $as_of}}) "
+    f"YIELD {APOC_ITERATE_YIELD} RETURN {APOC_ITERATE_YIELD}"
+)
+
+# What the job logs after it ran: Indicators per tier, retired, by basis, and those with no time.
+_AGING_STATS_CYPHER = (
+    "MATCH (n:Indicator) "
+    "RETURN n.aging_tier AS tier, n.aging_basis AS basis, "
+    "coalesce(n.retired_by = 'decay', false) AS retired, "
+    "(n.last_reported_at IS NULL AND n.first_imported_at IS NULL) AS no_time, count(*) AS c"
+)
+
+
+def decay_ioc_confidence(neo4j_client, as_of=None) -> Dict:
+    """Apply the one aging rule to every Indicator at ``as_of`` (2026-10-16, ``indicator_aging``).
+
+    Threat intelligence has a shelf life, and an indicator is a time-bound claim. Each Indicator
+    ages from ``coalesce(last_reported_at, first_imported_at)`` (the latest report of any source,
+    dated by the source's own last-report date capped at the MISP record time; the time EdgeGuard
+    created a node no MISP report dated), whichever supplier reported it and whoever created the
+    node. With the defaults (``EDGEGUARD_AGING_TIER_DAYS``, ``EDGEGUARD_AGING_FACTORS``,
+    ``EDGEGUARD_AGING_RETIRE_DAYS``):
+
+      below 90 days   → confidence_score = source_confidence
+      from 90 days    → × 0.85
+      from 180 days   → × 0.70
+      from 365 days   → × 0.55 (never below 0.10)
+      from 730 days   → retired: active = false, retired_by = 'decay', retired_at = basis + 730 d
+
+    The value is recomputed from ``source_confidence`` (not multiplied step by step), so a missed
+    or repeated run gives the same graph, and a run in which no node's aging changes writes nothing.
+    Only nodes whose aging changes are written (``apoc.periodic.iterate`` batches). Nothing is
+    deleted; a manual decommission (``retired_at`` without the ``'decay'`` tag) is kept; a newer
+    report reactivates a node in the sync's write. Every other label (CVE, CVSS, Vulnerability,
+    Malware, ThreatActor, Technique, Tactic, Tool, Sector, Source, Alert) never ages. An Indicator
+    with neither time (no EdgeGuard evidence) is counted and left untouched.
+
+    The rule runs at the database's current time (``AGING_JOB_TIME``), lifted to a node's
+    ``aging_evaluated_at`` when that is later, as in every Indicator write: a cleared or re-run task
+    evaluates at the time it runs, and no evaluation moves a node backwards. The job locks a node
+    before it evaluates and writes it (``_aging_job_statements``). ``as_of`` is for tests only (a
+    datetime or an ISO-8601 string; None, as in production, means the database's current time); a
+    time given there is lifted per node in the same way, so it can never move a node backwards.
     """
     if not neo4j_client.driver:
         logger.error("decay_ioc_confidence: no Neo4j connection")
         return {}
 
-    results = {}
-
-    tiers = [
-        # (label, min_days, max_days, multiplier, retire)
-        ("Indicator", 90, 180, 0.85, False),
-        ("Indicator", 180, 365, 0.70, False),
-        ("Indicator", 365, None, 1.00, True),  # retire
-        ("Vulnerability", 90, 180, 0.90, False),
-        ("Vulnerability", 180, 365, 0.80, False),
-        ("Vulnerability", 365, None, 1.00, True),
-    ]
+    policy = load_aging_policy()
+    outer, inner, count = _aging_job_statements(policy)
+    params = {"as_of": None if as_of is None else evaluation_time(as_of).isoformat()}
+    results: Dict = {"as_of": params["as_of"]}
 
     try:
         with neo4j_client.driver.session() as session:
-            for label, min_days, max_days, multiplier, retire in tiers:
-                if retire:
-                    cypher = f"""
-                    MATCH (n:{label})
-                    WHERE n.last_updated IS NOT NULL
-                      AND n.active = true
-                      AND duration.between(n.last_updated, datetime()).days > $min_days
-                    SET n.active = false,
-                        n.retired_at = datetime(),
-                        n.retired_by = 'decay'
-                    RETURN count(n) AS affected
-                    """
-                    desc = f"{label} retired (>{min_days}d)"
-                    # Retire path is idempotent via the ``n.active = true``
-                    # guard in WHERE — already-retired nodes skip. No
-                    # ``last_decayed_tier`` gating needed here.
-                    params = {"min_days": min_days, "max_days": max_days, "mult": multiplier}
-                else:
-                    # PR-M3b §8-RI-S4-Decay: gate by ``last_decayed_tier`` so
-                    # the multiplicative decay fires AT MOST ONCE per tier
-                    # transition per node.  The prior query had no idempotency
-                    # marker: every enrichment run matched the same nodes in
-                    # the same tier and re-applied the multiplier, so a
-                    # node sitting in the 180-365d tier for 100 daily runs
-                    # got ``confidence × 0.70^100`` ≈ 0 (floored at 0.10)
-                    # within ~7 runs.  All indicators in the tier collapsed
-                    # to the 0.10 floor long before aging out — losing all
-                    # discriminatory power for filtering / ranking.
-                    #
-                    # Fix: each tier gets a unique label (``"<min>-<max>"``
-                    # format, stable across runs) stored on the node as
-                    # ``n.last_decayed_tier``. The WHERE clause excludes
-                    # nodes already decayed at this tier; the SET clause
-                    # updates the marker so the next run is a no-op.  When
-                    # a node AGES INTO the next tier, ``last_decayed_tier``
-                    # differs from the new tier label → decay fires once
-                    # for the new tier and updates the marker.  Net: each
-                    # node sees at most one decay application per tier
-                    # boundary crossed, matching the semantic intent
-                    # documented in the function docstring.
-                    cypher = f"""
-                    MATCH (n:{label})
-                    WHERE n.last_updated IS NOT NULL
-                      AND n.confidence_score IS NOT NULL
-                      AND duration.between(n.last_updated, datetime()).days >= $min_days
-                      AND duration.between(n.last_updated, datetime()).days < $max_days
-                      AND (n.last_decayed_tier IS NULL OR n.last_decayed_tier <> $tier_label)
-                    SET n.confidence_score = CASE
-                            WHEN n.confidence_score * $mult < 0.10 THEN 0.10
-                            ELSE round(n.confidence_score * $mult * 100) / 100
-                        END,
-                        n.last_decayed_tier = $tier_label,
-                        n.last_decayed_at = datetime()
-                    RETURN count(n) AS affected
-                    """
-                    desc = f"{label} decayed ({min_days}–{max_days}d, ×{multiplier})"
-                    tier_label = f"{label.lower()}-{min_days}-{max_days}"
-                    params = {
-                        "min_days": min_days,
-                        "max_days": max_days,
-                        "mult": multiplier,
-                        "tier_label": tier_label,
-                    }
-
-                result = session.run(cypher, timeout=NEO4J_READ_TIMEOUT, **params)
-                record = result.single()
-                count = record["affected"] if record else 0
-                results[desc] = count
-                if count:
-                    logger.info(f"  [DECAY] {desc}: {count} nodes")
-
+            record = session.run(count, timeout=NEO4J_READ_TIMEOUT, **params).single()
+            results["changed"] = int(record["changed"]) if record else 0
+            record = session.run(
+                _AGING_ITERATE_CYPHER, outer=outer, inner=inner, timeout=NEO4J_READ_TIMEOUT, **params
+            ).single()
+            failures = apoc_iterate_failures(record) if record else []
+            if failures:
+                raise RuntimeError(f"[AGING] apoc.periodic.iterate batch failures: {failures}")
+            tiers: Dict[str, int] = {f"tier_{t}": 0 for t in range(len(policy.tier_days) + 1)}
+            by_basis: Dict[str, int] = {basis: 0 for basis in AGING_BASES}
+            retired = no_time = 0
+            for row in session.run(_AGING_STATS_CYPHER, timeout=NEO4J_READ_TIMEOUT):
+                c = int(row["c"] or 0)
+                if row["no_time"]:
+                    no_time += c
+                    continue
+                if row["tier"] is not None:
+                    tiers[f"tier_{int(row['tier'])}"] = tiers.get(f"tier_{int(row['tier'])}", 0) + c
+                if row["basis"] is not None:
+                    by_basis[str(row["basis"])] = by_basis.get(str(row["basis"]), 0) + c
+                if row["retired"]:
+                    retired += c
     except Exception as e:
         # PR-N21 BLOCKER: re-raise instead of silently returning zero
         # results. The pre-N21 ``except Exception: logger.error()`` (no
@@ -191,15 +203,34 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
         # OOM) and returned ``{}`` — which the runner happily aggregated
         # and Airflow marked SUCCESS. Operators saw a green DAG with no
         # decay actually applied, identical to a "no work needed" run.
-        # The 2026-04-22 cloud baseline showed ``Campaign = 0`` with the
-        # same root cause (the swallower in ``build_campaign_nodes``).
         # Fix: re-raise so the DAG task FAILS loudly and the operator
         # sees the actual exception in the Airflow log.
         logger.error(f"[DECAY] decay_ioc_confidence FAILED: {e}", exc_info=True)
         raise
 
-    total = sum(results.values())
-    logger.info(f"[DECAY] IOC decay complete — {total} nodes updated")
+    results.update({"tiers": tiers, "retired": retired, "by_basis": by_basis, "no_time": no_time})
+    starts = (0,) + tuple(policy.tier_days)
+    tier_text = ", ".join(
+        f"tier {t} (from {starts[t]} d, x{policy.factor(t):.2f}): {tiers.get(f'tier_{t}', 0)}"
+        for t in range(len(starts))
+    )
+    logger.info(
+        "[AGING] at %s: %d Indicator(s) changed; %s; retired (from %d d): %d",
+        params["as_of"] or "the database's current time",
+        results["changed"],
+        tier_text,
+        policy.retire_days,
+        retired,
+    )
+    logger.info("[AGING] by basis: %s", ", ".join(f"{basis}={count_}" for basis, count_ in sorted(by_basis.items())))
+    if no_time:
+        logger.warning(
+            "[AGING] %d Indicator(s) have neither last_reported_at nor first_imported_at (no EdgeGuard "
+            "time; expected 0): left untouched",
+            no_time,
+        )
+    else:
+        logger.info("[AGING] Indicators with no time at all: 0")
     return results
 
 
@@ -208,11 +239,13 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-# 2026-10 (explainability): a campaign is EdgeGuard's grouping of one actor's attributed malware and
-# those malware's active indicators, not a source's claim. Its links say so (``match_type``) and
-# carry the confidence of the evidence they rest on: a malware link its ATTRIBUTED_TO link's; an
-# indicator link its best path, each path as strong as its weaker link (INDICATES, ATTRIBUTED_TO);
-# RUNS the actor's strongest attribution. Recomputed on every run, like the links themselves.
+# 2026-10 (explainability): a campaign is EdgeGuard's grouping of one actor's malware and those
+# malware's active indicators, not a source's claim. Its links say so (``match_type``) and carry the
+# confidence of the evidence they rest on: a malware link its strongest link to the actor (since
+# 2026-10-16 ATTRIBUTED_TO or USES_MALWARE, ``campaign_evidence``); an indicator link its best path,
+# each path as strong as its weaker link (INDICATES, then ATTRIBUTED_TO or USES_MALWARE); RUNS the
+# actor's strongest link. ``r.evidence_types`` names the relationship types the link rests on.
+# Recomputed on every run, like the links themselves.
 CAMPAIGN_MATCH_TYPE = "campaign_grouping"
 
 
@@ -229,10 +262,30 @@ def _strongest(values: str) -> str:
     )
 
 
-def _campaign_evidence(rel_var: str, confidence: str, quote: str = '"') -> str:
-    """``SET`` items naming a campaign link's evidence; ``quote`` is ``'`` inside a double-quoted
-    ``apoc.periodic.iterate`` statement."""
-    return f"{rel_var}.match_type = {quote}{CAMPAIGN_MATCH_TYPE}{quote}, {rel_var}.confidence_score = {confidence}"
+def _campaign_evidence(rel_var: str, confidence: str, types: str, quote: str = '"') -> str:
+    """``SET`` items naming a campaign link's evidence: its kind, its confidence and (2026-10-16) the
+    relationship types it rests on; ``quote`` is ``'`` inside a double-quoted ``apoc.periodic.iterate``
+    statement."""
+    return (
+        f"{rel_var}.match_type = {quote}{CAMPAIGN_MATCH_TYPE}{quote}, {rel_var}.confidence_score = {confidence}, "
+        f"{rel_var}.evidence_types = {types}"
+    )
+
+
+def _links_evidence(rel_var: str, links: str, quote: str = '"') -> str:
+    """``SET`` items for a campaign link resting on the list of links ``links`` (RUNS, a malware
+    member): the strongest link's confidence, their types, and their provenance, replaced on each
+    run so the link names no evidence removed or trimmed since."""
+    return (
+        _campaign_evidence(
+            rel_var,
+            _strongest(f"[_e IN {links} | _e.confidence_score]"),
+            campaign_evidence.evidence_types(links),
+            quote,
+        )
+        + ", "
+        + aggregated_prov_set(rel_var, f"_e IN {links}", "_e", replace=True)
+    )
 
 
 def build_campaign_nodes(neo4j_client) -> Dict:
@@ -240,18 +293,23 @@ def build_campaign_nodes(neo4j_client) -> Dict:
     Materialise Campaign nodes from the existing threat graph.
 
     A Campaign represents a coordinated set of threat activity by one actor.
-    We infer campaigns from graph structure:
-      ThreatActor -[:ATTRIBUTED_TO]<- Malware -[:INDICATES]<- Indicator
+    We infer campaigns from graph structure (``campaign_evidence``):
+      ThreatActor <-[:ATTRIBUTED_TO]- Malware <-[:INDICATES]- Indicator
+      ThreatActor -[:USES_MALWARE]->  Malware <-[:INDICATES]- Indicator   (2026-10-16)
 
-    For each ThreatActor that has at least one attributed malware and one
-    related indicator, we create a Campaign node and link:
+    For each ThreatActor that has at least one malware attributed to it or used
+    by it, and an active indicator of such a malware, we create a Campaign node and link:
       ThreatActor -[:RUNS]-> Campaign
       Malware     -[:PART_OF_CAMPAIGN]-> Campaign
       Indicator   -[:PART_OF_CAMPAIGN]-> Campaign  (sampled — up to 100 per campaign)
 
-    The links follow attribution (2026-10): a malware link whose ATTRIBUTED_TO is gone is pruned
-    (Step 2b), a RUNS whose actor has no attribution left is removed (Step 2c), and every link's
-    provenance is replaced on each run by that of the links it currently rests on.
+    The links follow the evidence (2026-10): a campaign whose actor has neither link left is
+    deleted with its links (Step 1b, 2026-10-16), a malware link without either link is pruned
+    (Step 2b), a RUNS whose actor is not the campaign's or has no evidence is removed (Step 2c), and
+    every link's provenance is replaced on each run by that of the links it currently rests on;
+    ``r.evidence_types`` names their relationship types. A campaign with evidence whose indicators
+    all expired stays, inactive (Step 4). A re-created campaign keeps its ``uuid``: it is computed
+    from the actor's name (``compute_node_uuid``), never stored elsewhere.
 
     ``PART_OF_CAMPAIGN`` was ``PART_OF`` until 2026-10: ResilMesh uses ``PART_OF`` for its own
     asset model (IP → Subnet, the OrganizationUnit hierarchy), and in the shared database one
@@ -279,7 +337,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
     results = {"campaigns_created": 0, "campaigns_updated": 0, "links_created": 0}
 
     # PR-M3d: capture the run's start time in ISO-8601 with UTC offset.
-    # Passed to Step 3b's prune query as ``$run_start_at`` to distinguish
+    # Passed to Step 3b's prune query (and the link count) as ``$run_start_at`` to distinguish
     # edges touched by THIS run (``r.updated_at >= $run_start_at``) from
     # stale edges left over from prior runs' non-deterministic top-100
     # (``r.updated_at < $run_start_at``).  Python-side capture is
@@ -291,9 +349,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
-            # 2026-10: the prunes (Steps 2b and 3b) compare ``r.updated_at``, which the server's
+            # 2026-10: Step 3b's prune and the link count compare ``r.updated_at``, which the server's
             # ``datetime()`` stamps, with ``run_start_at``: read it from the same clock, so a worker
-            # clock ahead of the database's can never make this run's edges look stale.
+            # clock ahead of the database's can never make this run's edges look stale. (Step 2b
+            # judges the evidence itself since 2026-10-16, not the time.)
             now_record = session.run("RETURN toString(datetime()) AS now", timeout=NEO4J_READ_TIMEOUT).single()
             try:
                 server_now = now_record["now"] if now_record is not None else None
@@ -307,9 +366,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # create Campaign nodes with NULL uuid — silently breaking the
             # cross-environment traceability contract this PR exists for.
             # Caught in the post-PR-#33 fresh-eyes audit.
-            qualifying_actors_query = """
+            # 2026-10-16: an actor qualifies with either evidence link (ATTRIBUTED_TO or USES_MALWARE).
+            qualifying_actors_query = f"""
             MATCH (a:ThreatActor)
-            WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
+            WHERE {campaign_evidence.has_evidence("a")}
             RETURN a.name AS name
             """
             actor_names = [
@@ -334,14 +394,16 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # whose deterministic uuid was precomputed; new actors are
             # picked up on the next run when they're included in the
             # pre-fetch.
+            #
+            # 2026-10-16: the members are the malware with either evidence link to the actor
+            # (``campaign_evidence``); an indicator counts through INDICATES to any member, once.
             create_cypher = f"""
             MATCH (a:ThreatActor)
-            WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
+            WHERE {campaign_evidence.has_evidence("a")}
               AND a.name IN keys($campaign_uuids)
-            WITH a
-            OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(m:Malware)
-            WITH a, collect(DISTINCT m) AS malware_list
-            OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
+            WITH a, {campaign_evidence.member_malware("a")} AS malware_list
+            UNWIND malware_list AS _member
+            OPTIONAL MATCH (_member)<-[:INDICATES]-(i:Indicator)
             WHERE i.active = true
             // PR (S5) (bugbot c9bb277 MED + architecture redesign):
             // per-source timestamps live on SOURCED_FROM edges, not on
@@ -445,6 +507,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                                        THEN last_seen ELSE c.last_seen END,
                 c.zone             = all_zones,
                 c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
+            WITH a, c, {campaign_evidence.evidence_links("a")} AS actor_evidence
             MERGE (a)-[r_runs:RUNS]->(c)
             // PR-N8 HIGH (audit Cross-Checker, 2026-04-21): stamp
             // created_at / updated_at so this edge is visible to cloud
@@ -459,13 +522,12 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid),
                 r_runs.updated_at = datetime(),
                 r_runs.edgeguard_managed = true,
-                // 2026-10 (explainability): the kind of evidence, and the actor's strongest attribution.
-                {_campaign_evidence("r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]"))},
-                // 2026-10 (relationship provenance): the campaign is built from the
-                // actor's ATTRIBUTED_TO links, so RUNS carries their feeds, record ids
-                // and MISP events: those of the current links (replaced, not added to, so
-                // RUNS names no pulse build_relationships step 2d removed or trimmed).
-                {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)}
+                // 2026-10 (explainability, relationship provenance): the campaign is built from
+                // the actor's links to malware (ATTRIBUTED_TO and, since 2026-10-16, USES_MALWARE),
+                // so RUNS carries the strongest link's confidence, their relationship types, and
+                // their feeds, record ids and MISP events: those of the current links (replaced,
+                // not added to, so RUNS names no pulse build_relationships step 2d removed or trimmed).
+                {_links_evidence("r_runs", "actor_evidence")}
             RETURN count(DISTINCT c) AS campaigns
             """
             result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
@@ -491,12 +553,54 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 )
             query_pause()
 
+            # Step 1b (2026-10-16): a campaign without evidence is deleted, not kept. When no
+            # ThreatActor of the campaign's actor name has an ATTRIBUTED_TO or USES_MALWARE link left
+            # (build_relationships step 2d removed its same-pulse attributions, or the actor alias
+            # merge folded the actor into another, so no actor of that name remains), the Campaign
+            # node goes with every link it has (RUNS, PART_OF_CAMPAIGN) in this run. Only campaigns
+            # EdgeGuard created: a partner's node keeps existing, and Steps 2b, 2c and 3b remove
+            # EdgeGuard's links to it. A campaign with evidence whose indicators all expired stays
+            # (Step 4 marks it inactive). Re-created later, it gets the same uuid (computed from the
+            # actor's name).
+            delete_without_evidence = f"""
+            MATCH (c:Campaign)
+            WHERE c.edgeguard_managed = true
+              AND NOT EXISTS {{
+                MATCH (a:ThreatActor {{name: c.actor_name}})
+                WHERE {campaign_evidence.has_evidence("a")}
+              }}
+            WITH c, c.name AS name,
+                 COUNT {{ (c)<-[:RUNS]-() }} AS runs,
+                 COUNT {{ (c)<-[:PART_OF_CAMPAIGN]-() }} AS members
+            ORDER BY name
+            DETACH DELETE c
+            RETURN count(*) AS deleted, sum(runs) AS runs_removed, sum(members) AS members_removed,
+                   collect(name)[0..20] AS names
+            """
+            deleted_record = session.run(delete_without_evidence, timeout=NEO4J_READ_TIMEOUT).single()
+            campaigns_deleted = int((deleted_record["deleted"] if deleted_record else 0) or 0)
+            if campaigns_deleted:
+                logger.info(
+                    "[CAMPAIGN] deleted %d campaigns whose actor has no ATTRIBUTED_TO or USES_MALWARE link left "
+                    "(with %s RUNS and %s PART_OF_CAMPAIGN links); first names: %s",
+                    campaigns_deleted,
+                    deleted_record["runs_removed"],
+                    deleted_record["members_removed"],
+                    list(deleted_record["names"] or []),
+                )
+            results["campaigns_deleted"] = campaigns_deleted
+            query_pause()
+
             # Step 2: Link malware to their campaigns. Both endpoints have
             # n.uuid by now (Malware via merge_node_with_source, Campaign via
             # step 1 above) so the edge SET reads bound .uuid directly.
+            # 2026-10-16: every malware with an evidence link to the campaign's actor (ATTRIBUTED_TO
+            # or USES_MALWARE) is a member; the link rests on those links (one or both).
             link_malware = f"""
-            MATCH (a:ThreatActor)<-[_at:ATTRIBUTED_TO]-(m:Malware)
-            MATCH (c:Campaign {{actor_name: a.name}})
+            MATCH (c:Campaign)
+            MATCH (a:ThreatActor {{name: c.actor_name}})
+            UNWIND {campaign_evidence.member_malware("a")} AS m
+            WITH c, a, m, {campaign_evidence.evidence_links("a", "m")} AS member_evidence
             MERGE (m)-[r:PART_OF_CAMPAIGN]->(c)
             // PR-N8 HIGH (audit Cross-Checker): stamp created_at /
             // updated_at so PART_OF_CAMPAIGN(malware) edges are visible to
@@ -507,11 +611,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
                 r.updated_at = datetime(),
                 r.edgeguard_managed = true,
-                // 2026-10 (explainability): the kind of evidence, and the ATTRIBUTED_TO link's confidence.
-                {_campaign_evidence("r", "_at.confidence_score")},
-                // 2026-10 (relationship provenance): that of the ATTRIBUTED_TO link it rests on
-                // (replaced, not added to: it follows the link's trimming).
-                {inherited_prov_set("r", ["_at"], replace=True)}
+                // 2026-10 (explainability, relationship provenance): the strongest of the links it
+                // rests on, their relationship types, and their provenance (replaced, not added to:
+                // it follows the links' removal and trimming).
+                {_links_evidence("r", "member_evidence")}
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
@@ -519,44 +622,55 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["links_created"] += record["links"] if record else 0
             query_pause()
 
-            # Step 2b (2026-10): prune the malware membership that no attribution supports any more.
-            # Step 2 refreshes the link of every malware attributed to a campaign's actor, so a link it
-            # did not touch in this run lost its ATTRIBUTED_TO: removed by build_relationships step 2d
-            # (a pulse naming several actors), or gone with an actor the alias merge folded away. Same
-            # freshness marker as Step 3b.
-            prune_malware = """
-            MATCH (:Malware)-[r:PART_OF_CAMPAIGN]->(:Campaign)
-            WHERE r.updated_at IS NULL OR r.updated_at < datetime($run_start_at)
+            # Step 2b (2026-10): prune the malware membership that no evidence supports any more: the
+            # malware has neither an ATTRIBUTED_TO nor (2026-10-16) a USES_MALWARE link to the
+            # campaign's actor (build_relationships step 2d removed a same-pulse attribution, or the
+            # actor is gone). Judged by the same definition as Step 2 (``campaign_evidence``), not by
+            # the time Step 2 last touched the link.
+            prune_malware = f"""
+            MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign)
+            WHERE NOT EXISTS {{
+              MATCH (a:ThreatActor {{name: c.actor_name}})
+              WHERE {campaign_evidence.has_evidence("a", "m")}
+            }}
             DELETE r
             RETURN count(r) AS pruned
             """
-            prune_record = session.run(prune_malware, run_start_at=run_start_at, timeout=NEO4J_READ_TIMEOUT).single()
+            prune_record = session.run(prune_malware, timeout=NEO4J_READ_TIMEOUT).single()
             malware_pruned = prune_record["pruned"] if prune_record else 0
             if malware_pruned:
                 logger.info(
-                    "[CAMPAIGN] pruned %d malware PART_OF_CAMPAIGN edges whose attribution is gone", malware_pruned
+                    "[CAMPAIGN] pruned %d malware PART_OF_CAMPAIGN edges with no ATTRIBUTED_TO or USES_MALWARE "
+                    "link to the campaign's actor",
+                    malware_pruned,
                 )
             results["malware_links_pruned"] = malware_pruned
             query_pause()
 
-            # Step 2c (2026-10): RUNS follows attribution too. Step 1 rewrites RUNS only for actors
-            # that still qualify (attributed malware and an active indicator); every other RUNS is
-            # settled here: removed when the actor has no ATTRIBUTED_TO left (the campaign then
-            # retires in Step 4), otherwise its evidence and provenance are recomputed from the
-            # actor's current attributions. Either way RUNS names no link step 2d removed or trimmed.
+            # Step 2c (2026-10): RUNS follows the evidence too. Step 1 rewrites RUNS only for actors
+            # that still qualify (evidence and an active indicator); every RUNS is settled here:
+            # removed when its actor is not the campaign's actor or has neither link left (after
+            # Step 1b, a campaign EdgeGuard did not create, or the RUNS the alias merge moved onto
+            # another actor), otherwise its evidence and provenance are recomputed from the actor's
+            # current links. Either way RUNS names no link step 2d removed or trimmed.
             settle_runs = f"""
-            MATCH (a:ThreatActor)-[r_runs:RUNS]->(:Campaign)
-            WITH a, r_runs, EXISTS {{ (a)<-[:ATTRIBUTED_TO]-(:Malware) }} AS attributed
-            FOREACH (_ IN CASE WHEN attributed THEN [] ELSE [1] END | DELETE r_runs)
-            FOREACH (_ IN CASE WHEN attributed THEN [1] ELSE [] END |
-                SET {_campaign_evidence("r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]"))},
-                    {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)})
-            RETURN sum(CASE WHEN attributed THEN 0 ELSE 1 END) AS removed
+            MATCH (a:ThreatActor)-[r_runs:RUNS]->(c:Campaign)
+            WITH a, c, r_runs, {campaign_evidence.evidence_links("a")} AS actor_evidence
+            WITH a, c, r_runs, actor_evidence,
+                 coalesce(a.name = c.actor_name, false) AND size(actor_evidence) > 0 AS evidenced
+            FOREACH (_ IN CASE WHEN evidenced THEN [] ELSE [1] END | DELETE r_runs)
+            FOREACH (_ IN CASE WHEN evidenced THEN [1] ELSE [] END |
+                SET {_links_evidence("r_runs", "actor_evidence")})
+            RETURN sum(CASE WHEN evidenced THEN 0 ELSE 1 END) AS removed
             """
             runs_record = session.run(settle_runs, timeout=NEO4J_READ_TIMEOUT).single()
             runs_removed = runs_record["removed"] if runs_record else 0
             if runs_removed:
-                logger.info("[CAMPAIGN] removed %d RUNS edges whose actor has no attribution left", runs_removed)
+                logger.info(
+                    "[CAMPAIGN] removed %d RUNS edges whose actor is not the campaign's or has no "
+                    "ATTRIBUTED_TO or USES_MALWARE link left",
+                    runs_removed,
+                )
             results["runs_removed"] = runs_removed
             query_pause()
 
@@ -590,6 +704,16 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # top-100 of active indicators. Reproducible, bounded, matches
             # the documented "sample: up to 100 per campaign" contract.
             #
+            # 2026-10-16: the slice takes 100 distinct indicators (it took 100 paths, so an
+            # indicator reached through two member malware, or through a malware that is both
+            # attributed to and used by the actor, took two places), reached through INDICATES to
+            # any member malware; the indicator type breaks a tie of date and value (the indicator
+            # key is type and value), so the order is total.
+            #
+            # 2026-10-16 (indicator aging): newest first by the latest report of any source, or when
+            # EdgeGuard created the node (``coalesce(i.last_reported_at, i.first_imported_at)``), so the
+            # sample follows the MISP data, not the time a sync happened to write the node.
+            #
             # PR-N21 (next-baseline robustness): wrap in
             # ``apoc.periodic.iterate`` with one Campaign per batch so the
             # cartesian explosion (Campaign × Malware × Indicator) doesn't
@@ -603,16 +727,19 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # broad ``except Exception`` (now removed) swallowing the
             # raise. Same shape ``bridge_vulnerability_cve`` already
             # uses for symmetric scale safety.
-            link_indicators_batched = """
+            link_indicators_batched = (
+                """
             CALL apoc.periodic.iterate(
               "MATCH (c:Campaign) RETURN c",
-              "MATCH (a:ThreatActor {name: c.actor_name})<-[_at:ATTRIBUTED_TO]-(m:Malware)<-[_ind:INDICATES]-(i:Indicator)
+              "MATCH (a:ThreatActor {name: c.actor_name})
+               UNWIND __MEMBERS__ AS m
+               MATCH (m)<-[:INDICATES]-(i:Indicator)
                WHERE i.active = true
-               WITH c, i, _at, _ind
-               ORDER BY i.first_imported_at DESC, i.value ASC
-               WITH c, collect({i: i, at: _at, ind: _ind})[0..100] AS _paths
-               UNWIND _paths AS _p
-               WITH c, _p.i AS i, _p.at AS _at, _p.ind AS _ind
+               WITH DISTINCT c, a, i
+               ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC, i.indicator_type ASC
+               WITH c, a, collect(i)[0..100] AS _top
+               UNWIND _top AS i
+               WITH c, a, i, __PATHS__ AS _paths
                MERGE (i)-[r:PART_OF_CAMPAIGN]->(c)
                ON CREATE SET r.created_at = datetime(),
                              r.src_uuid = i.uuid,
@@ -630,29 +757,35 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             RETURN batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
                    batch, operations, updateStatistics
             """.replace(
-                # 2026-10 (relationship provenance): that of the INDICATES and ATTRIBUTED_TO links
-                # of every path from the indicator to the campaign's actor, replaced on each run
-                # (one row per path, so a per-row value would keep only the last path's).
-                "__INHERITED_PROV__",
-                aggregated_prov_set(
-                    "r",
-                    "(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})",
-                    ["_xi", "_xa"],
-                    replace=True,
-                ),
-            ).replace(
-                # 2026-10 (explainability): the indicator's best path to the campaign's actor, each
-                # path as strong as its weaker link; over every path, so the row order does not matter.
-                "__CAMPAIGN_EVIDENCE__",
-                _campaign_evidence(
-                    "r",
-                    _strongest(
-                        "[(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name}) | "
-                        + _weaker("_xi.confidence_score", "_xa.confidence_score")
-                        + "]"
+                    # 2026-10-16: the campaign's members and the indicator's paths to the actor through
+                    # them, each ``[INDICATES, ATTRIBUTED_TO or USES_MALWARE]`` (``campaign_evidence``).
+                    "__MEMBERS__",
+                    campaign_evidence.member_malware("a"),
+                )
+                .replace(
+                    "__PATHS__",
+                    campaign_evidence.indicator_paths("i", "a"),
+                )
+                .replace(
+                    # 2026-10 (relationship provenance): that of both links of every path from the
+                    # indicator to the campaign's actor, replaced on each run.
+                    "__INHERITED_PROV__",
+                    aggregated_prov_set("r", "_p IN _paths", ["_p[0]", "_p[1]"], replace=True),
+                )
+                .replace(
+                    # 2026-10 (explainability): the indicator's best path to the campaign's actor, each
+                    # path as strong as its weaker link; over every path, so the row order does not
+                    # matter. The relationship types of every path (INDICATES and the actor's links).
+                    "__CAMPAIGN_EVIDENCE__",
+                    _campaign_evidence(
+                        "r",
+                        _strongest(
+                            "[_p IN _paths | " + _weaker("_p[0].confidence_score", "_p[1].confidence_score") + "]"
+                        ),
+                        campaign_evidence.evidence_types("reduce(_flat = [], _p IN _paths | _flat + _p)"),
+                        quote="'",
                     ),
-                    quote="'",
-                ),
+                )
             )
             result = session.run(link_indicators_batched, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
@@ -1174,8 +1307,11 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "name": "discard",
     "uuid": "discard",
     "mitre_id": "discard",
-    # node scalars (merge_node_with_source / merge_actor / decay job)
+    # node scalars (merge_node_with_source / merge_actor / decay job). The merge statement sets
+    # ``description`` and ``description_source`` afterwards to the pair the source ranking keeps
+    # (2026-10-16, ``_alias_merge_apply_cypher``), so "discard" never splits them.
     "description": "discard",
+    "description_source": "discard",
     "confidence_score": "discard",
     "tag": "discard",
     "active": "discard",
@@ -1185,8 +1321,6 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "edgeguard_managed": "discard",
     "retired_at": "discard",
     "retired_by": "discard",
-    "last_decayed_tier": "discard",
-    "last_decayed_at": "discard",
     "sophistication": "discard",
     "primary_motivation": "discard",
     "resource_level": "discard",
@@ -1339,6 +1473,10 @@ def _strongest_on_parallel_edges(direction: str) -> str:
 # Parallel edges that collapse keep the union of their provenance lists
 # (``"combine"``) and, set on every edge of the group before the merge, the
 # strongest evidence's label and confidence (``_strongest_on_parallel_edges``).
+# 2026-10-16: the merged node keeps the description, with its ``description_source``, that the source
+# ranking keeps among the group (``description_ranking.DescriptionRanking.best_of_cypher``): ``"discard"``
+# kept the canonical's description and could take ``description_source`` from a duplicate where the
+# canonical had none, so the node could name a source that did not write its text.
 # 2026-10: the statements are built per label (``_alias_merge_statements``) so the Malware
 # twin merge (JOB 6) runs the same merge; the actor statements are unchanged.
 def _alias_merge_apply_cypher(
@@ -1350,6 +1488,19 @@ def _alias_merge_apply_cypher(
     is never MITRE-sourced, and also meets ``duplicate_guard`` when one is given (a condition on ``d``
     and ``c``; the actor merge has none). ``list_props`` are wrapped back into lists after the merge."""
     duplicate_condition = f"\n  AND {duplicate_guard}" if duplicate_guard else ""
+    ranking = ranking_for_label(label)
+    kept_description = (
+        f",\n     {ranking.best_of_cypher('c', 'dups')} AS described\n"
+        "WITH c, n_dups, dups, described.description AS kept_description,\n"
+        "     described.description_source AS kept_description_source"
+        if ranking is not None
+        else ""
+    )
+    set_description = (
+        "node.description = kept_description,\n    node.description_source = kept_description_source,\n    "
+        if ranking is not None
+        else ""
+    )
     return (
         f"""
 UNWIND $groups AS g
@@ -1366,8 +1517,9 @@ SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name]),
     c.tlp = reduce(_t = c.tlp, _d IN dups | """
         + _tlp_most_restrictive_clause("_t", "_d.tlp")
         + """)
-WITH c, size(dups) AS n_dups, dups
-"""
+WITH c, size(dups) AS n_dups, dups"""
+        + kept_description
+        + "\n"
         + _strongest_on_parallel_edges("out")
         + _strongest_on_parallel_edges("in")
         + """CALL apoc.refactor.mergeNodes([c] + dups, {
@@ -1377,6 +1529,7 @@ WITH c, size(dups) AS n_dups, dups
 })
 YIELD node
 SET """
+        + set_description
         + ",\n    ".join(f"node.{p} = {_list_or_wrapped('node.' + p)}" for p in list_props)
         + """,
     node.last_updated = datetime()
@@ -1624,10 +1777,11 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
     ``src_uuid`` / ``trg_uuid`` are re-stamped with the canonical's uuid.
 
     Campaigns: a stale ``"<duplicate> Campaign"`` node (if any) is NOT
-    touched here. ``build_campaign_nodes`` runs right after this job: its
-    Step 3b prunes the stale PART_OF_CAMPAIGN edges and Step 4 marks the campaign
-    ``active = false`` (the repo's retire-don't-delete rule), while the
-    canonical's own campaign is (re)built with the merged aliases.
+    touched here. ``build_campaign_nodes`` runs right after this job: no
+    ThreatActor of the duplicate's name remains, so its Step 1b deletes that
+    campaign with its links (2026-10-16; it was marked ``active = false`` and
+    kept before), while the canonical's own campaign is (re)built with the
+    merged aliases.
 
     Batching: ``_ACTOR_ALIAS_MERGE_BATCH_SIZE`` pairs per transaction,
     ``_ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN`` cap per run (idempotent —
@@ -2067,7 +2221,10 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     Run all seven post-sync enrichment jobs in sequence.
 
     Order matters: ``merge_alias_duplicate_actors`` and ``merge_malware_attack_twins`` run
-    BEFORE ``build_campaign_nodes`` so campaigns are built on merged actors and malware.
+    BEFORE ``build_campaign_nodes`` so campaigns are built on merged actors and malware. Since
+    2026-10-16 the aging job (``decay_ioc_confidence``) runs before the campaign builder too, so a
+    campaign's indicators are those active after the aging. The aging runs at the database's
+    current time, lifted to a node's ``aging_evaluated_at`` when that is later.
 
     Returns a summary dict for logging/metrics.
     """
@@ -2098,14 +2255,15 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("\n[3/7] Malware ATT&CK-id Twin Merge...")
     summary["malware_twin_merge"] = _timed("malware_twin_merge", merge_malware_attack_twins, neo4j_client)
 
-    logger.info("\n[4/7] Campaign Node Builder...")
+    # 2026-10-16: before build_campaign_nodes, which links only active indicators.
+    logger.info("\n[4/7] Indicator Aging...")
+    summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
+
+    logger.info("\n[5/7] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)
 
-    logger.info("\n[5/7] Co-occurrence Confidence Calibration...")
+    logger.info("\n[6/7] Co-occurrence Confidence Calibration...")
     summary["calibration"] = _timed("calibration", calibrate_cooccurrence_confidence, neo4j_client)
-
-    logger.info("\n[6/7] IOC Confidence Decay...")
-    summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
     # FIRST EPSS, the one feed written straight to Neo4j. Flag-off = INFO line, no network call.
     # A feed outage is logged and skipped inside the job (never raises).
@@ -2132,7 +2290,8 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
         _sum({"merged": (summary.get("malware_twin_merge") or {}).get("merged", 0)}),
         _sum(summary.get("campaigns")),
         _sum(summary.get("calibration")),
-        _sum(summary.get("decay")),
+        # 2026-10-16: the Indicators whose aging changed, not a sum of its counts (tier counts are state).
+        _sum({"changed": (summary.get("decay") or {}).get("changed", 0)}),
         # The CVE nodes EPSS updated, not a sum of its counts: the feed's row count is not work done.
         _sum({"cves_updated": (summary.get("epss") or {}).get("cves_updated", 0)}),
     )

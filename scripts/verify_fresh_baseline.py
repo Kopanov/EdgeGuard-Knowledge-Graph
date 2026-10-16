@@ -27,7 +27,11 @@ is a revoked group or piece of software, and warns when another source's actor s
 revoked group's name. Since the Malware twin fix of 2026-10 it fails when a Malware node from another
 source is still named after an ATT&CK software id (``cobalt strike - s0154``) while the enrichment job
 ``merge_malware_attack_twins`` would fold it: into the MITRE Malware node of that id or base name, or,
-for software without one, into the node of its base name.
+for software without one, into the node of its base name. Since the campaign evidence change of
+2026-10-16 it fails when a campaign, a campaign's malware member or a ``RUNS`` rests on no
+``ATTRIBUTED_TO`` or ``USES_MALWARE`` link between the campaign's actor and a malware
+(``src/campaign_evidence.py``), and when a campaign link does not name the relationship types it rests
+on (``evidence_types``).
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -64,8 +68,9 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-# Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b, and the ATT&CK
-# software ids in malware family names of checks 10a4 / 10a5.
+# Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b, the ATT&CK
+# software ids in malware family names of checks 10a4 / 10a5, and (2026-10-16) the campaign evidence
+# of checks 13c / 13d, which ``build_campaign_nodes`` reads from the same module.
 from attack_revoked import load_revoked_ids  # noqa: E402
 from attack_software_names import (  # noqa: E402
     CYPHER_BASE_NODES_READ,
@@ -78,6 +83,7 @@ from attack_software_names import (  # noqa: E402
     plan_twin_folds,
     twin_base_names,
 )
+from campaign_evidence import CAMPAIGN_EVIDENCE_CHECK_QUERY, MALWARE_MEMBERSHIP_CHECK_QUERY  # noqa: E402
 from canonical_threat_actors import (  # noqa: E402
     ATTRIBUTION_CHECK_QUERY,
     INDICATOR_MARKED_REPORTS_QUERY,
@@ -167,8 +173,11 @@ _PROVENANCE_LISTS = ("sources", "source_refs", "misp_event_ids")
 # ``enrichment_jobs``: the Vulnerability ↔ CVE bridge (REFERS_TO) takes the vulnerability record's
 # lists and states no evidence label. The campaign links (RUNS, PART_OF_CAMPAIGN) inherit the lists
 # of the links they are built from and, since 2026-10-15, state their evidence
-# (``campaign_grouping``), so they are held to the full contract below.
+# (``campaign_grouping``), so they are held to the full contract below; since 2026-10-16 they also
+# name the relationship types they rest on (``evidence_types``: ATTRIBUTED_TO, USES_MALWARE and, on
+# an indicator's link, INDICATES).
 _INHERITED_REL_TYPES = ("REFERS_TO",)
+_CAMPAIGN_REL_TYPES = ("RUNS", "PART_OF_CAMPAIGN")
 # ``Neo4jClient._merge_cvss_node``: the feed and the MISP event of the score; no record id (the CVE
 # is the record) and no evidence label.
 _CVSS_REL_TYPES = ("HAS_CVSS_v2", "HAS_CVSS_v30", "HAS_CVSS_v31", "HAS_CVSS_v40")
@@ -179,8 +188,9 @@ REL_PROVENANCE_CONTRACT: Dict[str, Tuple[str, ...]] = {
     **{
         t: _PROVENANCE_LISTS + ("match_type",)
         for t in PROVENANCE_REL_TYPES
-        if t not in _INHERITED_REL_TYPES + _CVSS_REL_TYPES
+        if t not in _INHERITED_REL_TYPES + _CVSS_REL_TYPES + _CAMPAIGN_REL_TYPES
     },
+    **{t: _PROVENANCE_LISTS + ("match_type", "evidence_types") for t in _CAMPAIGN_REL_TYPES},
     **{t: _PROVENANCE_LISTS for t in _INHERITED_REL_TYPES},
     **{t: ("sources", "misp_event_ids") for t in _CVSS_REL_TYPES},
     # The per-source edge of a node: the source id (``source``, a string), the source's record ids
@@ -189,6 +199,7 @@ REL_PROVENANCE_CONTRACT: Dict[str, Tuple[str, ...]] = {
 }
 # One pass over the relationships, one row per type, for checks 12b and 12c: how many edges
 # EdgeGuard manages, how many of those carry each contract property (``source`` only as a string,
+# ``evidence_types`` of the campaign links since 2026-10-16,
 # the scalar it must stay), how many have an empty ``misp_event_ids``, and how many edges carry a
 # key dropped in 2026-10 (``source_id``, ``source_ids``, ``report_ids``).
 _REL_PROVENANCE_SCAN = (
@@ -199,6 +210,8 @@ _REL_PROVENANCE_SCAN = (
     "sum(CASE WHEN r.edgeguard_managed = true AND r.misp_event_ids IS NOT NULL THEN 1 ELSE 0 END) "
     "AS with_misp_event_ids, "
     "sum(CASE WHEN r.edgeguard_managed = true AND r.match_type IS NOT NULL THEN 1 ELSE 0 END) AS with_match_type, "
+    "sum(CASE WHEN r.edgeguard_managed = true AND r.evidence_types IS NOT NULL THEN 1 ELSE 0 END) "
+    "AS with_evidence_types, "
     "sum(CASE WHEN r.edgeguard_managed = true AND r.source IS NOT NULL "
     "THEN CASE apoc.meta.cypher.type(r.source) WHEN 'STRING' THEN 1 ELSE 0 END ELSE 0 END) AS with_source, "
     "sum(CASE WHEN r.edgeguard_managed = true AND r.misp_event_ids = [] THEN 1 ELSE 0 END) AS empty_misp_event_ids, "
@@ -825,15 +838,23 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
         attribution_ok = not r.get("resting_on_several_actor_reports") and not r.get("naming_several_actor_reports")
     rep.add("attribution_from_single_actor_reports", attribution_ok, r)
 
-    # 13c. Campaign membership follows attribution (2026-10): a malware is part of a campaign only
-    #      while it is attributed to the campaign's actor (build_campaign_nodes step 2b prunes the rest).
-    r = _one(
-        "MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign) "
-        "RETURN count(r) AS malware_links, "
-        "sum(CASE WHEN NOT EXISTS { (m)-[:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name}) } "
-        "THEN 1 ELSE 0 END) AS unattributed"
-    )
-    rep.add("campaign_malware_attributed", None if not r.get("malware_links") else r.get("unattributed") == 0, r)
+    # 13c. Campaign membership follows the evidence (2026-10): a malware is part of a campaign only
+    #      while it is attributed to the campaign's actor or (2026-10-16) used by it
+    #      (``campaign_evidence``; build_campaign_nodes step 2b prunes the rest). Named
+    #      ``campaign_malware_attributed`` until 2026-10-16, when it read ATTRIBUTED_TO only.
+    r = _one(MALWARE_MEMBERSHIP_CHECK_QUERY)
+    rep.add("campaign_malware_has_evidence", None if not r.get("malware_links") else r.get("without_evidence") == 0, r)
+
+    # 13d. No campaign without evidence (2026-10-16): every campaign EdgeGuard built has an actor with
+    #      an ATTRIBUTED_TO or USES_MALWARE link (build_campaign_nodes step 1b deletes the others)
+    #      and that actor's RUNS, and no RUNS comes from an actor that is not the campaign's or has
+    #      neither link (step 2c removes it). Informational while there is no campaign EdgeGuard built
+    #      and no RUNS without evidence: a RUNS without evidence into any campaign (a partner's or one
+    #      written before) fails even on a graph without EdgeGuard campaigns.
+    r = _one(CAMPAIGN_EVIDENCE_CHECK_QUERY)
+    defects = ("without_evidence", "without_runs", "runs_without_evidence")
+    judged = r.get("campaigns") or r.get("runs_without_evidence")
+    rep.add("campaigns_have_evidence", all(r.get(k) == 0 for k in defects) if judged else None, r)
 
     # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from
     #     its CVSS sub-nodes (``_CVSS_SELECTION_ORDER``): with a valid sub-node, the score and

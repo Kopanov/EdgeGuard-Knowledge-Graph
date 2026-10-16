@@ -25,11 +25,15 @@ import requests
 
 from collectors.collector_utils import (
     ABUSEIPDB_API_KEY_PLACEHOLDERS,
+    feed_time,
+    lower_limit,
     make_skipped_optional_source,
     make_status,
+    newest_first,
     optional_api_key_effective,
     request_with_rate_limit_retries,
     retry_with_backoff,
+    source_run_cap,
     state_dir,
     status_after_misp_push,
 )
@@ -85,6 +89,11 @@ class AbuseIPDBCollector:
     # Rate limiting (free tier)
     REQUESTS_PER_DAY = 1000
     MIN_INTERVAL_SECONDS = 1.0  # 1 request per second to stay safe
+    # The most addresses one blacklist request returns on the free plan (the ceiling the collector
+    # applied before 2026-10 as the "API max"; the 730-day baseline of 2026-10-13 received 10,000).
+    # ``EDGEGUARD_ABUSEIPDB_MAX_PER_RUN`` sets the request's ``limit`` up to it; a plan that returns
+    # more needs this raised, never the number of requests (one per run).
+    BLACKLIST_MAX_PER_REQUEST = 10000
 
     def __init__(self, api_key: Optional[str] = None, misp_writer: Optional[MISPWriter] = None):
         """
@@ -302,6 +311,12 @@ class AbuseIPDBCollector:
 
         return results
 
+    @staticmethod
+    def max_per_run() -> int:
+        """``config.ABUSEIPDB_MAX_PER_RUN`` (default 10,000 addresses; ``0`` = the most one request
+        returns, ``BLACKLIST_MAX_PER_REQUEST``)."""
+        return source_run_cap("ABUSEIPDB_MAX_PER_RUN", 10000)
+
     def get_blacklist(
         self,
         confidence_minimum: int = 90,
@@ -330,9 +345,23 @@ class AbuseIPDBCollector:
             logger.warning("AbuseIPDB: No API key configured - cannot fetch blacklist")
             return []
 
+        # 2026-10: the source's own cap (``EDGEGUARD_ABUSEIPDB_MAX_PER_RUN``, default 10,000) replaces
+        # the generic incremental default, which asked for 200 addresses, so the stored copies of the
+        # others were never reported again and aged while the blacklist still listed them. Still one
+        # request per run: the cap sets its ``limit``, at most BLACKLIST_MAX_PER_REQUEST.
+        cap = lower_limit(limit, self.max_per_run())
+        if cap is not None and cap > self.BLACKLIST_MAX_PER_REQUEST:
+            logger.warning(
+                "AbuseIPDB: the per-run cap of %d is above the %d addresses one blacklist request returns "
+                "(BLACKLIST_MAX_PER_REQUEST); the request asks for %d",
+                cap,
+                self.BLACKLIST_MAX_PER_REQUEST,
+                self.BLACKLIST_MAX_PER_REQUEST,
+            )
+        request_limit = self.BLACKLIST_MAX_PER_REQUEST if cap is None else min(cap, self.BLACKLIST_MAX_PER_REQUEST)
         params = {
             "confidenceMinimum": confidence_minimum,
-            "limit": min(limit, 10000) if limit is not None else 10000,  # API max is 10,000
+            "limit": request_limit,
         }
 
         self._last_http_status = None
@@ -352,12 +381,33 @@ class AbuseIPDBCollector:
             if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
                 self._save_blacklist_cache(params, data)
 
+        listed = data.get("data") if isinstance(data, dict) else None
+        entries: List[Dict[str, Any]] = [e for e in listed if isinstance(e, dict)] if isinstance(listed, list) else []
+        if len(entries) > request_limit:
+            # An answer longer than the request keeps the addresses reported most recently, as the
+            # other per-run caps keep the newest entries.
+            logger.warning(
+                "AbuseIPDB: the blacklist answer holds %d addresses, more than the %d requested; the %d "
+                "reported most recently (lastReportedAt) are kept",
+                len(entries),
+                request_limit,
+                request_limit,
+            )
+            entries = newest_first(entries, lambda entry: feed_time(entry.get("lastReportedAt")))[:request_limit]
+        elif entries and len(entries) == request_limit:
+            logger.info(
+                "AbuseIPDB: the blacklist answer fills the request (%d addresses, EDGEGUARD_ABUSEIPDB_MAX_PER_RUN "
+                "or the %d one request returns): the blacklist may list more, and AbuseIPDB chose which "
+                "addresses fill it",
+                request_limit,
+                self.BLACKLIST_MAX_PER_REQUEST,
+            )
+
         results = []
-        if data and "data" in data:
-            for ip_data in data["data"]:
-                indicator = self._format_blacklist_result(ip_data)
-                if indicator:
-                    results.append(indicator)
+        for ip_data in entries:
+            indicator = self._format_blacklist_result(ip_data)
+            if indicator:
+                results.append(indicator)
 
         logger.info(f"[FETCH] AbuseIPDB: Fetched {len(results)} IPs from blacklist (confidence ≥{confidence_minimum})")
         return results

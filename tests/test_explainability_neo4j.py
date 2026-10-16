@@ -7,6 +7,12 @@ are run as production runs them: ``build_relationships`` step 8 (OTX ``attack_id
 ``create_misp_relationships_batch``, whose shared ``SET`` clause now handles ``cited_ids`` for every
 relationship type. Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with
 ``EDGEGUARD_IT_NEO4J_URI``, writes only nodes labelled ``EdgeGuardIT``, refuses any other node.
+
+Campaign links (2026-10-15, 2026-10-16) state their evidence: ``campaign_grouping``, the confidence of
+the links they rest on and the relationship types of those links (``r.evidence_types``). A campaign
+rests on ATTRIBUTED_TO or USES_MALWARE links between its actor and a malware (``campaign_evidence``);
+one without either is deleted, one with evidence whose indicators expired stays inactive, and the
+baseline postcheck and the acceptance checks read the same definition.
 """
 
 from __future__ import annotations
@@ -26,8 +32,10 @@ from build_rel_queries import assigned_queries  # noqa: E402
 from test_actor_alias_merge_neo4j import LABEL, URI, open_test_database  # noqa: E402  (same guards)
 
 import build_relationships  # noqa: E402
+import campaign_evidence  # noqa: E402
 import neo4j_client  # noqa: E402
 from attack_revoked import technique_successors  # noqa: E402
+from node_identity import compute_node_uuid  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not URI, reason="EDGEGUARD_IT_NEO4J_URI is not set (no throwaway Neo4j)")
 
@@ -160,16 +168,24 @@ def test_campaign_links_state_their_evidence_and_its_strength(client, raw_driver
                 session.run(
                     "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'fin7'}) "
                     "RETURN coalesce(n.name, n.value) AS from, type(r) AS type, r.match_type AS label, "
-                    "r.confidence_score AS confidence, r.sources AS sources"
+                    "r.confidence_score AS confidence, r.sources AS sources, r.evidence_types AS types"
                 )
             )
             rows = {(r["from"], r["type"]): (r["label"], r["confidence"]) for r in found}
             sources = {(r["from"], r["type"]): sorted(r["sources"] or []) for r in found}
+            types = {(r["from"], r["type"]): r["types"] for r in found}
         assert rows == {
             ("fin7", "RUNS"): ("campaign_grouping", 0.95),
             ("carbanak", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.6),
             ("griffon", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.95),
             ("fin7.example", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.6),
+        }
+        # 2026-10-16: the relationship types each link rests on, sorted.
+        assert types == {
+            ("fin7", "RUNS"): ["ATTRIBUTED_TO"],
+            ("carbanak", "PART_OF_CAMPAIGN"): ["ATTRIBUTED_TO"],
+            ("griffon", "PART_OF_CAMPAIGN"): ["ATTRIBUTED_TO"],
+            ("fin7.example", "PART_OF_CAMPAIGN"): ["ATTRIBUTED_TO", "INDICATES"],
         }
         # Provenance (2026-10): the indicator's link carries that of every path to the actor
         # (INDICATES and ATTRIBUTED_TO through carbanak and through griffon), not the last row's.
@@ -179,3 +195,336 @@ def test_campaign_links_state_their_evidence_and_its_strength(client, raw_driver
             ("griffon", "PART_OF_CAMPAIGN"): ["mitre_attck"],
             ("fin7.example", "PART_OF_CAMPAIGN"): ["alienvault_otx", "mitre_attck", "threatfox"],
         }
+
+
+# 2026-10-16: campaign evidence. ``apt-uses`` rests on MITRE's "uses" alone, ``apt-both`` on an OTX
+# attribution and a curated "uses" claim of one malware, ``apt-gone`` on an attribution step 2d will
+# remove, ``apt-quiet`` on a "uses" whose only indicator will expire, ``apt-folded`` on a "uses" of an
+# actor the alias merge will fold into ``apt-both``.
+EVIDENCE_FIXTURE = f"""
+CREATE (uses:ThreatActor:{LABEL} {{name: 'apt-uses', uuid: 'u-apt-uses'}})
+CREATE (both:ThreatActor:{LABEL} {{name: 'apt-both', uuid: 'u-apt-both'}})
+CREATE (gone:ThreatActor:{LABEL} {{name: 'apt-gone', uuid: 'u-apt-gone'}})
+CREATE (quiet:ThreatActor:{LABEL} {{name: 'apt-quiet', uuid: 'u-apt-quiet'}})
+CREATE (folded:ThreatActor:{LABEL} {{name: 'apt-folded', uuid: 'u-apt-folded'}})
+CREATE (usemal:Malware:{LABEL} {{name: 'usemal', uuid: 'u-usemal'}})
+CREATE (bothmal:Malware:{LABEL} {{name: 'bothmal', uuid: 'u-bothmal'}})
+CREATE (gonemal:Malware:{LABEL} {{name: 'gonemal', uuid: 'u-gonemal'}})
+CREATE (quietmal:Malware:{LABEL} {{name: 'quietmal', uuid: 'u-quietmal'}})
+CREATE (foldmal:Malware:{LABEL} {{name: 'foldmal', uuid: 'u-foldmal'}})
+CREATE (uses)-[:USES_MALWARE {{match_type: 'mitre_explicit', confidence_score: 0.95, sources: ['mitre_attck'],
+        source_refs: ['mitre_attck:G9001'], misp_event_ids: ['11'], edgeguard_managed: true}}]->(usemal)
+CREATE (bothmal)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        source_refs: ['alienvault_otx:p9'], misp_event_ids: ['12'], edgeguard_managed: true}}]->(both)
+CREATE (both)-[:USES_MALWARE {{match_type: 'coreideas_curated', confidence_score: 0.85, sources: ['coreideas'],
+        source_refs: ['coreideas:pkg1'], misp_event_ids: ['13'], edgeguard_managed: true}}]->(bothmal)
+CREATE (gonemal)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        edgeguard_managed: true}}]->(gone)
+CREATE (quiet)-[:USES_MALWARE {{match_type: 'mitre_explicit', confidence_score: 0.95, sources: ['mitre_attck'],
+        edgeguard_managed: true}}]->(quietmal)
+CREATE (folded)-[:USES_MALWARE {{match_type: 'mitre_explicit', confidence_score: 0.95, sources: ['mitre_attck'],
+        edgeguard_managed: true}}]->(foldmal)
+CREATE (iu:Indicator:{LABEL} {{indicator_type: 'domain', value: 'uses.example', uuid: 'u-iu', active: true,
+        first_imported_at: datetime('2026-10-01T00:00:00Z')}})
+CREATE (ib:Indicator:{LABEL} {{indicator_type: 'domain', value: 'both.example', uuid: 'u-ib', active: true,
+        first_imported_at: datetime('2026-10-02T00:00:00Z')}})
+CREATE (ig:Indicator:{LABEL} {{indicator_type: 'domain', value: 'gone.example', uuid: 'u-ig', active: true,
+        first_imported_at: datetime('2026-10-03T00:00:00Z')}})
+CREATE (iq:Indicator:{LABEL} {{indicator_type: 'domain', value: 'quiet.example', uuid: 'u-iq', active: true,
+        first_imported_at: datetime('2026-10-04T00:00:00Z')}})
+CREATE (ifo:Indicator:{LABEL} {{indicator_type: 'domain', value: 'fold.example', uuid: 'u-ifo', active: true,
+        first_imported_at: datetime('2026-10-05T00:00:00Z')}})
+CREATE (iu)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(usemal)
+CREATE (ib)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(bothmal)
+CREATE (ig)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(gonemal)
+CREATE (iq)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(quietmal)
+CREATE (ifo)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(foldmal)
+"""
+
+
+def _build(client, raw_driver) -> dict:
+    """``build_campaign_nodes`` as the enrichment run calls it; the campaigns it writes get the suite's
+    label, so the module's cleanup removes them."""
+    import enrichment_jobs
+
+    results = enrichment_jobs.build_campaign_nodes(client)
+    with raw_driver.session() as session:
+        session.run(f"MATCH (c:Campaign) SET c:{LABEL}")
+    return results
+
+
+def _campaign_links(raw_driver) -> dict:
+    """Every campaign link: (campaign actor, member or actor, type) -> (confidence, types, sources)."""
+    with raw_driver.session() as session:
+        return {
+            (r["actor"], r["from"], r["type"]): (r["confidence"], r["types"], sorted(r["sources"] or []))
+            for r in session.run(
+                "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(c:Campaign) "
+                "RETURN c.actor_name AS actor, coalesce(n.name, n.value) AS from, type(r) AS type, "
+                "r.confidence_score AS confidence, r.evidence_types AS types, r.sources AS sources"
+            )
+        }
+
+
+def _snapshot(raw_driver) -> tuple:
+    """The campaigns and their links, without the run's timestamps."""
+    with raw_driver.session() as session:
+        campaigns = sorted(
+            (r["name"], r["uuid"], r["active"], r["malware_count"], r["indicator_count"])
+            for r in session.run(
+                "MATCH (c:Campaign) RETURN c.name AS name, c.uuid AS uuid, c.active AS active, "
+                "c.malware_count AS malware_count, c.indicator_count AS indicator_count"
+            )
+        )
+        links = sorted(
+            (r["c"], r["n"], r["t"], r["label"], r["conf"], r["types"], r["src"], r["refs"], r["events"])
+            for r in session.run(
+                "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(c:Campaign) "
+                "RETURN c.name AS c, coalesce(n.name, n.value) AS n, type(r) AS t, r.match_type AS label, "
+                "r.confidence_score AS conf, r.evidence_types AS types, apoc.coll.sort(r.sources) AS src, "
+                "apoc.coll.sort(r.source_refs) AS refs, apoc.coll.sort(r.misp_event_ids) AS events"
+            )
+        )
+    return campaigns, links
+
+
+def _one(raw_driver, query: str) -> dict:
+    with raw_driver.session() as session:
+        return dict(session.run(query).single())
+
+
+def test_an_actor_that_uses_malware_has_a_campaign_resting_on_that_link(client, raw_driver, monkeypatch):
+    import enrichment_jobs
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    with raw_driver.session() as session:
+        session.run(EVIDENCE_FIXTURE)
+    # The postcheck's count (INV-1) is the builder's: five actors, five campaigns.
+    qualifying = _one(raw_driver, campaign_evidence.QUALIFYING_ACTORS_QUERY)["qualifying_actors"]
+    results = _build(client, raw_driver)
+    assert qualifying == results["campaigns_created"] == 5
+    links = _campaign_links(raw_driver)
+    # MITRE's "uses" alone: the actor, its malware and the malware's indicator.
+    assert links[("apt-uses", "apt-uses", "RUNS")] == (0.95, ["USES_MALWARE"], ["mitre_attck"])
+    assert links[("apt-uses", "usemal", "PART_OF_CAMPAIGN")] == (0.95, ["USES_MALWARE"], ["mitre_attck"])
+    assert links[("apt-uses", "uses.example", "PART_OF_CAMPAIGN")] == (
+        0.8,
+        ["INDICATES", "USES_MALWARE"],
+        ["mitre_attck", "threatfox"],
+    )
+    # Both links to one malware: the strongest for RUNS and the member; for the indicator the best
+    # path, each as strong as its weaker link (max(min(0.8, 0.6), min(0.8, 0.85)) = 0.8).
+    assert links[("apt-both", "apt-both", "RUNS")] == (
+        0.85,
+        ["ATTRIBUTED_TO", "USES_MALWARE"],
+        ["alienvault_otx", "coreideas"],
+    )
+    assert links[("apt-both", "bothmal", "PART_OF_CAMPAIGN")] == (
+        0.85,
+        ["ATTRIBUTED_TO", "USES_MALWARE"],
+        ["alienvault_otx", "coreideas"],
+    )
+    assert links[("apt-both", "both.example", "PART_OF_CAMPAIGN")] == (
+        0.8,
+        ["ATTRIBUTED_TO", "INDICATES", "USES_MALWARE"],
+        ["alienvault_otx", "coreideas", "threatfox"],
+    )
+    # The malware reached through both links counts once, and so does its indicator.
+    with raw_driver.session() as session:
+        both = session.run(
+            "MATCH (c:Campaign {actor_name: 'apt-both'}) RETURN c.malware_count AS m, c.indicator_count AS i"
+        ).single()
+    assert (both["m"], both["i"]) == (1, 1)
+    # The acceptance checks pass on the graph the builder wrote.
+    assert _one(raw_driver, campaign_evidence.MALWARE_MEMBERSHIP_CHECK_QUERY) == {
+        "malware_links": 5,
+        "without_evidence": 0,
+    }
+    assert _one(raw_driver, campaign_evidence.CAMPAIGN_EVIDENCE_CHECK_QUERY) == {
+        "campaigns": 5,
+        "without_evidence": 0,
+        "without_runs": 0,
+        "runs_without_evidence": 0,
+    }
+
+
+def test_a_campaign_takes_its_newest_100_indicators_once_each(client, raw_driver, monkeypatch):
+    """Each indicator of ``bothmal`` has two paths to ``apt-both`` (ATTRIBUTED_TO and USES_MALWARE):
+    the sample is 100 indicators, not 100 paths."""
+    import enrichment_jobs
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    with raw_driver.session() as session:
+        session.run(EVIDENCE_FIXTURE)
+        session.run(
+            f"MATCH (m:Malware {{name: 'bothmal'}}) UNWIND range(1, 101) AS n "
+            f"CREATE (i:Indicator:{LABEL} {{indicator_type: 'domain', value: 'b' + toString(n) + '.example', active: true, "
+            "first_imported_at: datetime('2026-09-01T00:00:00Z') + duration({days: n})}) "
+            "CREATE (i)-[:INDICATES {match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}]->(m)"
+        )
+    _build(client, raw_driver)
+    with raw_driver.session() as session:
+        linked = {
+            r["v"]
+            for r in session.run(
+                "MATCH (i:Indicator)-[:PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'apt-both'}) RETURN i.value AS v"
+            )
+        }
+        count = session.run("MATCH (c:Campaign {actor_name: 'apt-both'}) RETURN c.indicator_count AS n").single()["n"]
+    assert len(linked) == 100 and count == 102
+    # The two oldest of the 102 active indicators fall out of the sample.
+    assert "b1.example" not in linked and "b2.example" not in linked and "both.example" in linked
+
+
+def test_a_campaign_without_evidence_is_deleted_and_one_without_active_indicators_stays(
+    client, raw_driver, monkeypatch
+):
+    import enrichment_jobs
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    with raw_driver.session() as session:
+        session.run(EVIDENCE_FIXTURE)
+    _build(client, raw_driver)
+    with raw_driver.session() as session:
+        gone_uuid = session.run("MATCH (c:Campaign {actor_name: 'apt-gone'}) RETURN c.uuid AS u").single()["u"]
+        # The uuid is computed from the actor's name.
+        assert gone_uuid == compute_node_uuid("Campaign", {"name": "apt-gone Campaign"})
+        # build_relationships step 2d removes apt-gone's only attribution; the indicator of apt-quiet's
+        # malware expires; the actor alias merge folds apt-folded into apt-both (its links, the RUNS of
+        # its campaign among them, move to apt-both, and no actor of its name remains).
+        session.run("MATCH (:Malware {name: 'gonemal'})-[r:ATTRIBUTED_TO]->(:ThreatActor {name: 'apt-gone'}) DELETE r")
+        session.run("MATCH (i:Indicator {value: 'quiet.example'}) SET i.active = false")
+        session.run(
+            "MATCH (c:ThreatActor {name: 'apt-both'}), (d:ThreatActor {name: 'apt-folded'}) "
+            "CALL apoc.refactor.mergeNodes([c, d], {properties: 'discard', mergeRels: true}) YIELD node "
+            "RETURN node.name AS name"
+        ).consume()
+    # The acceptance checks see the defects the builder has not settled yet.
+    assert _one(raw_driver, campaign_evidence.CAMPAIGN_EVIDENCE_CHECK_QUERY) == {
+        "campaigns": 5,
+        "without_evidence": 2,  # apt-gone (no link left), apt-folded (no actor of that name)
+        "without_runs": 1,  # apt-folded's RUNS now comes from apt-both; apt-gone keeps its RUNS
+        "runs_without_evidence": 2,  # apt-gone's RUNS, and apt-both's to apt-folded's campaign
+    }
+    assert _one(raw_driver, campaign_evidence.MALWARE_MEMBERSHIP_CHECK_QUERY)["without_evidence"] == 2
+
+    results = _build(client, raw_driver)
+    assert results["campaigns_deleted"] == 2
+    with raw_driver.session() as session:
+        campaigns = {
+            r["actor"]: r["active"]
+            for r in session.run("MATCH (c:Campaign) RETURN c.actor_name AS actor, c.active AS active")
+        }
+        orphans = session.run(
+            "MATCH (n)-[:PART_OF_CAMPAIGN]->() WHERE n.name IN ['gonemal'] OR n.value IN ['gone.example'] "
+            "RETURN count(n) AS n"
+        ).single()["n"]
+    assert campaigns == {"apt-uses": True, "apt-both": True, "apt-quiet": False}
+    assert orphans == 0, "the deleted campaign's links went with it"
+    links = _campaign_links(raw_driver)
+    # Evidence without an active indicator: the campaign stays, inactive, with its actor and malware.
+    assert ("apt-quiet", "apt-quiet", "RUNS") in links and ("apt-quiet", "quietmal", "PART_OF_CAMPAIGN") in links
+    assert ("apt-quiet", "quiet.example", "PART_OF_CAMPAIGN") not in links
+    # The folded actor's malware and its indicator now belong to apt-both's campaign.
+    assert links[("apt-both", "foldmal", "PART_OF_CAMPAIGN")] == (0.95, ["USES_MALWARE"], ["mitre_attck"])
+    assert ("apt-both", "fold.example", "PART_OF_CAMPAIGN") in links
+    assert links[("apt-both", "apt-both", "RUNS")] == (
+        0.95,
+        ["ATTRIBUTED_TO", "USES_MALWARE"],
+        ["alienvault_otx", "coreideas", "mitre_attck"],
+    )
+    assert not any(actor in ("apt-gone", "apt-folded") for actor, _n, _t in links)
+    assert _one(raw_driver, campaign_evidence.CAMPAIGN_EVIDENCE_CHECK_QUERY) == {
+        "campaigns": 3,
+        "without_evidence": 0,
+        "without_runs": 0,
+        "runs_without_evidence": 0,
+    }
+    assert _one(raw_driver, campaign_evidence.MALWARE_MEMBERSHIP_CHECK_QUERY)["without_evidence"] == 0
+
+    # A RUNS from an actor that is not the campaign's is removed (Step 2c).
+    with raw_driver.session() as session:
+        session.run(
+            "MATCH (a:ThreatActor {name: 'apt-both'}), (c:Campaign {actor_name: 'apt-uses'}) "
+            "CREATE (a)-[:RUNS {edgeguard_managed: true}]->(c)"
+        )
+    results = _build(client, raw_driver)
+    assert (results["runs_removed"], results["campaigns_deleted"]) == (1, 0)
+
+    # A second run changes nothing.
+    before = _snapshot(raw_driver)
+    results = _build(client, raw_driver)
+    assert (results["campaigns_deleted"], results["runs_removed"], results["malware_links_pruned"]) == (0, 0, 0)
+    assert _snapshot(raw_driver) == before
+
+    # Evidence again: the campaign is built again, with the same uuid.
+    with raw_driver.session() as session:
+        session.run(
+            "MATCH (m:Malware {name: 'gonemal'}), (a:ThreatActor {name: 'apt-gone'}) "
+            "CREATE (m)-[:ATTRIBUTED_TO {match_type: 'otx_pulse', confidence_score: 0.6, "
+            "sources: ['alienvault_otx'], edgeguard_managed: true}]->(a)"
+        )
+    _build(client, raw_driver)
+    with raw_driver.session() as session:
+        again = session.run("MATCH (c:Campaign {actor_name: 'apt-gone'}) RETURN c.uuid AS u").single()["u"]
+    assert again == gone_uuid
+
+
+def test_campaign_link_provenance_does_not_depend_on_the_order_links_were_created(client, raw_driver, monkeypatch):
+    """2026-10-16: a campaign link's ``misp_event_ids`` were the first 200 of the unsorted union of its
+    links' lists, in the order the links were created, so two graphs built from the same MISP data in a
+    different order kept different events. Three evidence links of one actor hold 300 events together;
+    created in either order they give the same lists, the newest 200 events by MISP id, sorted feeds and
+    record ids."""
+    import enrichment_jobs
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    links = [
+        ("ATTRIBUTED_TO", "many-a", "alienvault_otx", range(1, 101)),
+        ("USES_MALWARE", "many-b", "mitre_attck", range(101, 201)),
+        ("USES_MALWARE", "many-c", "coreideas", range(201, 301)),
+    ]
+
+    def build(order) -> dict:
+        with raw_driver.session() as session:
+            session.run(f"MATCH (n:{LABEL}) DETACH DELETE n")
+            session.run(f"CREATE (:ThreatActor:{LABEL} {{name: 'apt-many', uuid: 'u-apt-many'}})")
+            for rel, malware, feed, events in order:
+                session.run(
+                    f"MATCH (a:ThreatActor {{name: 'apt-many'}}) "
+                    f"MERGE (m:Malware:{LABEL} {{name: $m}}) ON CREATE SET m.uuid = 'u-' + $m "
+                    f"CREATE (i:Indicator:{LABEL} {{indicator_type: 'domain', value: $m + '.example', uuid: 'u-i-' + $m, "
+                    "active: true, first_imported_at: datetime('2026-10-01T00:00:00Z')}) "
+                    "CREATE (i)-[:INDICATES {match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox'], "
+                    "source_refs: ['threatfox:' + $m], misp_event_ids: ['7']}]->(m) "
+                    + (
+                        "CREATE (m)-[:ATTRIBUTED_TO {props}]->(a)"
+                        if rel == "ATTRIBUTED_TO"
+                        else "CREATE (a)-[:USES_MALWARE {props}]->(m)"
+                    ).replace(
+                        "{props}",
+                        "{match_type: 'otx_pulse', confidence_score: 0.6, sources: [$feed], "
+                        "source_refs: [$feed + ':' + $m], misp_event_ids: $events, edgeguard_managed: true}",
+                    ),
+                    m=malware,
+                    feed=feed,
+                    events=[str(e) for e in events],
+                )
+        _build(client, raw_driver)
+        with raw_driver.session() as session:
+            return {
+                (r["from"], r["type"]): (r["events"], r["sources"], r["refs"])
+                for r in session.run(
+                    "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'apt-many'}) "
+                    "RETURN coalesce(n.name, n.value) AS from, type(r) AS type, r.misp_event_ids AS events, "
+                    "r.sources AS sources, r.source_refs AS refs"
+                )
+            }
+
+    forward, backward = build(links), build(list(reversed(links)))
+    assert forward == backward, "the same MISP data gives the same lists, in the same order"
+    events, sources, refs = forward[("apt-many", "RUNS")]
+    assert events == [str(e) for e in range(300, 100, -1)], "the newest 200 events, by MISP id"
+    assert sources == ["alienvault_otx", "coreideas", "mitre_attck"]
+    assert refs == ["alienvault_otx:many-a", "coreideas:many-c", "mitre_attck:many-b"]
+    assert forward[("many-c.example", "PART_OF_CAMPAIGN")][0] == [str(e) for e in range(300, 200, -1)] + ["7"]

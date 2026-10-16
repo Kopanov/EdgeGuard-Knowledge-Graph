@@ -32,6 +32,7 @@ from neo4j import time as _neo4j_time
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from description_ranking import CVE_DESCRIPTIONS
 from ioc_normalize import (
     canonicalize_lookup,
     indicator_type_filter,
@@ -239,8 +240,48 @@ def _node_props(node: Any) -> Dict[str, Any]:
     2026-10: FastAPI's encoder falls back to ``vars()`` for ``neo4j.time`` objects, so every
     ``last_updated`` / ``first_imported_at`` left the REST API as a ``{"_DateTime__date": …}``
     object. Every endpoint that returns raw node properties goes through this helper.
+
+    2026-10-16 (indicator aging): an Indicator written before its writes kept
+    ``source_confidence`` shows ``coalesce(source_confidence, confidence_score)`` as
+    ``source_confidence``, like the GraphQL and STIX readers.
     """
-    return {k: _jsonable(v) for k, v in dict(node or {}).items()}
+    props = {k: _jsonable(v) for k, v in dict(node or {}).items()}
+    if "Indicator" in (getattr(node, "labels", None) or ()) and props.get("source_confidence") is None:
+        if props.get("confidence_score") is not None:
+            props["source_confidence"] = props["confidence_score"]
+    return props
+
+
+# 2026-10-16: how recent an indicator is — the latest report of any source, or, without one, when
+# EdgeGuard created the node (``indicator_aging``). ``last_updated`` (the last database write) moved
+# with every full sync, so it no longer orders indicators.
+_INDICATOR_RECENCY = "coalesce(n.last_reported_at, n.first_imported_at)"
+
+# 2026-10-16: the recency key of ``/zone/{zone}``, which lists several labels, one clock for all of
+# them: an Indicator's latest report, otherwise when the node entered the graph (``first_imported_at``;
+# ``created_at`` for a Campaign, which the campaign builder creates without ``first_imported_at``).
+# None of these times moves when a sync or the campaign builder rewrites a node. Ordering the other
+# labels by ``last_updated`` (the last database write) put every node a sync or the builder had just
+# rewritten above an indicator reported in the latest run: the two clocks cannot be compared.
+_ZONE_RECENCY = "coalesce(n.last_reported_at, n.first_imported_at, n.created_at)"
+
+# 2026-10-16: of a CVE's twin nodes (``:CVE`` from ``merge_cve``, ``:Vulnerability`` from the per-item
+# fallback and the alert path), the description the source ranking keeps
+# (``description_ranking.CVE_DESCRIPTIONS``), as ``[rank, description_source, description]``: the
+# highest stored rank; at an equal rank the twin that names a source (a text written before the
+# ranking counts as the top source's, and the write rule lets that source's record replace it), then
+# the source id that sorts first, then the text; null when no twin has a text. The twins are written
+# by different paths and their texts can differ; ``head(collect(...))`` showed the twin the rows
+# returned first, which could be a lower-ranked text and change between calls.
+_TWIN_DESCRIPTION = (
+    "reduce(_best = null, _d IN collect(["
+    + CVE_DESCRIPTIONS.stored_rank_cypher("n")
+    + ", n.description_source, n.description]) | CASE WHEN _d[0] < 0 THEN _best "
+    "WHEN _best IS NULL OR _d[0] > _best[0] OR (_d[0] = _best[0] AND ("
+    "(_d[1] IS NOT NULL AND _best[1] IS NULL) OR (_d[1] IS NOT NULL AND _d[1] < _best[1]) "
+    "OR (coalesce(_d[1] = _best[1], _d[1] IS NULL AND _best[1] IS NULL) AND _d[2] < _best[2]))) "
+    "THEN _d ELSE _best END)"
+)
 
 
 try:
@@ -457,6 +498,13 @@ class ActorSummaryResponse(BaseModel):
     name: str
     aliases: List[str] = []
     description: Optional[str] = None
+    description_source: Optional[str] = Field(
+        default=None,
+        description=(
+            "The source whose text `description` is (its canonical id, e.g. 'mitre_attck'; 2026-10-16); "
+            "null when the actor has no description or it was written before 2026-10-16."
+        ),
+    )
     sophistication: Optional[str] = None
     motivation: Optional[str] = None
     confidence_score: Optional[float] = None
@@ -465,6 +513,15 @@ class ActorSummaryResponse(BaseModel):
     resolved_by: str = Field(description="How the actor was matched: 'name' (canonical) or 'alias'.")
     malware: List[str] = Field(default=[], description="Attributed malware names (up to 10).")
     malware_total: int = 0
+    malware_used: List[str] = Field(
+        default=[],
+        description=(
+            "Names of the malware the actor uses (USES_MALWARE: MITRE ATT&CK's 'uses', curated claims), "
+            "up to 10, sorted (2026-10-16). A campaign rests on either link, so `malware` and "
+            "`malware_used` together name the malware the actor's campaigns can rest on."
+        ),
+    )
+    malware_used_total: int = 0
     techniques: List[ActorTechniqueSummary] = Field(default=[], description="Employed techniques (up to 15).")
     technique_total: int = 0
     campaigns: List[str] = Field(default=[], description="Campaign names run by the actor (up to 5).")
@@ -819,12 +876,15 @@ async def get_zone_threats(
             if severity:
                 where_clause += " AND n.severity = $severity"
 
+            # Newest first by one clock for every label (``_ZONE_RECENCY``); nodes without the time
+            # last, ties by uuid.
             query = f"""
                 MATCH (n)
                 WHERE (n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Campaign)
                   AND {where_clause}
+                WITH n, {_ZONE_RECENCY} AS _recency
                 RETURN n
-                ORDER BY n.last_updated DESC
+                ORDER BY (_recency IS NULL), _recency DESC, n.uuid
                 LIMIT $limit
             """
 
@@ -942,11 +1002,13 @@ async def list_indicators(
             params = {**filter_params, "limit": limit, "offset": offset}
             where_clause = " AND ".join(conditions) if conditions else "1=1"
 
+            # 2026-10-16: newest first by the latest report (``_INDICATOR_RECENCY``), indicators
+            # without a time last, ties by type and value so pages are stable.
             query = f"""
                 MATCH (n:Indicator)
                 WHERE {where_clause}
                 RETURN n
-                ORDER BY n.last_updated DESC
+                ORDER BY ({_INDICATOR_RECENCY} IS NULL), {_INDICATOR_RECENCY} DESC, n.indicator_type, n.value
                 SKIP $offset
                 LIMIT $limit
             """
@@ -1032,9 +1094,14 @@ _CDB_EXPORT_MAX_ENTRIES = 50_000
 # line-oriented format.
 _CDB_KEY_FORBIDDEN_CHARS = (":", "\n", "\r")
 
-# 2026-10: newest first by the last sync that reported the entry (``n.last_updated``; Cypher sorts
-# null first in a descending order, hence the explicit null rank), ties by key; one row beyond the
-# cap so the route can tell a cut list from a complete one.
+# 2026-10: newest first (Cypher sorts null first in a descending order, hence the explicit null
+# rank), ties by key; one row beyond the cap so the route can tell a cut list from a complete one.
+# 2026-10-16: an indicator by its latest report, or when EdgeGuard created it (``_INDICATOR_RECENCY``),
+# so the entries the cap keeps no longer depend on when a sync last wrote them; a CVE (which does
+# not age) by the last sync that wrote it (``n.last_updated``), as before.
+_CDB_INDICATOR_ORDER_AND_LIMIT = (
+    f"ORDER BY ({_INDICATOR_RECENCY} IS NULL), {_INDICATOR_RECENCY} DESC, key LIMIT $cap + 1"
+)
 _CDB_ORDER_AND_LIMIT = "ORDER BY (n.last_updated IS NULL), n.last_updated DESC, key LIMIT $cap + 1"
 
 
@@ -1077,10 +1144,13 @@ async def export_wazuh_cdb(
         ``_CDB_KEY_FORBIDDEN_CHARS`` — excludes url/ipv6 types), count in
         the ``X-EdgeGuard-Skipped`` header.
       * At most ``_CDB_EXPORT_MAX_ENTRIES`` entries. Since 2026-10 the
-        entries are ordered newest first by ``n.last_updated`` (the last
-        sync that reported them; entries without it last), ties by key, so
-        the cap keeps the most recently updated entries and the order is
-        deterministic; before, the cap kept the alphabetically first keys.
+        entries are ordered newest first, ties by key, so the cap keeps the
+        most recent entries and the order is deterministic; before, the cap
+        kept the alphabetically first keys. Indicators are ordered by their
+        latest report, or when EdgeGuard created them
+        (``coalesce(n.last_reported_at, n.first_imported_at)``, 2026-10-16:
+        a full sync no longer reorders them); CVEs by ``n.last_updated`` (the
+        last sync that wrote them). Entries without the time come last.
         ``X-EdgeGuard-Truncated: true`` (and a log warning) says the list
         was cut; ``false`` that it is complete.
 
@@ -1099,7 +1169,7 @@ async def export_wazuh_cdb(
             match_clause = "MATCH (n:Indicator)"
             return_clause = (
                 "RETURN n.value AS key, n.indicator_type AS type, "
-                f"n.confidence_score AS confidence {_CDB_ORDER_AND_LIMIT}"
+                f"n.confidence_score AS confidence {_CDB_INDICATOR_ORDER_AND_LIMIT}"
             )
         else:
             conditions, params = _vulnerability_filter_conditions(None, zone_value)
@@ -1399,16 +1469,19 @@ async def graph_explore(
                          head(collect(n.cisa_notes)) AS cisa_notes,
                          head(collect(n.cisa_cwes)) AS cisa_cwes,
                          head(collect(n.version_constraints)) AS version_constraints,
-                         head(collect(n.description)) AS description
+                         // 2026-10-16: the description with the source it came from, both of one node:
+                         // of the twins, the one the source ranking keeps (``_TWIN_DESCRIPTION``).
+                         {_TWIN_DESCRIPTION} AS described
                     WITH cve_id, cvss_score, severity, attack_vector,
                          apoc.coll.toSet(zones_raw) AS zones,
                          cisa_exploit_add, cisa_action_due, cisa_notes,
-                         cisa_cwes, version_constraints, description
+                         cisa_cwes, version_constraints, described[2] AS description,
+                         described[1] AS description_source
                     ORDER BY coalesce(cvss_score, 0) DESC
                     LIMIT $limit
                     RETURN cve_id, cvss_score, severity, attack_vector, zones,
                            cisa_exploit_add, cisa_action_due, cisa_notes,
-                           cisa_cwes, version_constraints, description
+                           cisa_cwes, version_constraints, description, description_source
                 """
                 result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 vuln_ids = []
@@ -1429,6 +1502,7 @@ async def graph_explore(
                             "cisa_cwes": r.get("cisa_cwes", []),
                             "version_constraints": r.get("version_constraints"),
                             "description": (r.get("description") or "")[:200],
+                            "description_source": r.get("description_source"),
                             "sector": r.get("zones", ["global"])[0] if r.get("zones") else "global",
                         },
                     )
@@ -1689,17 +1763,27 @@ _ACTOR_SUMMARY_CYPHER = """
     OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
       WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
     WITH a, collect(DISTINCT m.name) AS malware_names
+    // 2026-10-16: the malware the actor uses (USES_MALWARE: MITRE's "uses", curated claims). A
+    // campaign rests on either link (``campaign_evidence``), so a campaign of an actor with only
+    // USES_MALWARE links lists its malware here; ``malware`` keeps its meaning (attributed).
+    // Sorted by name, so the first ten do not depend on the order the links were created.
+    OPTIONAL MATCH (a)-[:USES_MALWARE]->(u:Malware)
+      WHERE (u.edgeguard_managed = true OR u.edgeguard_enriched = true)
+    WITH a, malware_names, u ORDER BY u.name
+    WITH a, malware_names, collect(DISTINCT u.name) AS used_names
     OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
       WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
-    WITH a, malware_names, collect(DISTINCT t {.mitre_id, .name}) AS technique_rows
+    WITH a, malware_names, used_names, collect(DISTINCT t {.mitre_id, .name}) AS technique_rows
     OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
       WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
-    WITH a, malware_names, technique_rows, collect(DISTINCT c.name) AS campaign_names
-    RETURN a {.name, .aliases, .description, .sophistication, .motivation,
+    WITH a, malware_names, used_names, technique_rows, collect(DISTINCT c.name) AS campaign_names
+    RETURN a {.name, .aliases, .description, .description_source, .sophistication, .motivation,
               .primary_motivation, .confidence_score, .zone, .source} AS actor,
            a.name = toLower(trim($name)) AS resolved_by_name,
            malware_names[0..10] AS malware,
            size(malware_names) AS malware_total,
+           used_names[0..10] AS malware_used,
+           size(used_names) AS malware_used_total,
            technique_rows[0..15] AS techniques,
            size(technique_rows) AS technique_total,
            campaign_names[0..5] AS campaigns,
@@ -1723,8 +1807,9 @@ def _as_str_list(val: Any) -> List[str]:
 )
 @limiter.limit(_RATE_LIMIT_READ)
 async def actor_summary(request: Request, name: str):
-    """Summarize a threat actor: profile + attributed malware, employed
-    techniques, and campaigns (top-N lists with total counts).
+    """Summarize a threat actor: profile + attributed malware, the malware it
+    uses (2026-10-16), employed techniques, and campaigns (top-N lists with
+    total counts).
 
     Resolution is alias-aware and case-insensitive — ``name`` may be the
     canonical (lowercase-stored) actor name or any alias in its observed
@@ -1749,6 +1834,7 @@ async def actor_summary(request: Request, name: str):
             name=actor.get("name", ""),
             aliases=_as_str_list(actor.get("aliases")),
             description=actor.get("description"),
+            description_source=actor.get("description_source"),
             sophistication=actor.get("sophistication"),
             motivation=actor.get("motivation") or actor.get("primary_motivation"),
             confidence_score=actor.get("confidence_score"),
@@ -1757,6 +1843,8 @@ async def actor_summary(request: Request, name: str):
             resolved_by="name" if record["resolved_by_name"] else "alias",
             malware=[m for m in (record["malware"] or []) if m],
             malware_total=record["malware_total"] or 0,
+            malware_used=[m for m in (record["malware_used"] or []) if m],
+            malware_used_total=record["malware_used_total"] or 0,
             techniques=techniques,
             technique_total=record["technique_total"] or 0,
             campaigns=[c for c in (record["campaigns"] or []) if c],

@@ -56,6 +56,13 @@ def _queries(client: nc.Neo4jClient):
     return [c.args[0] for c in session.run.call_args_list]
 
 
+def _alert_tx(client: nc.Neo4jClient):
+    """The transaction the alert path writes in (2026-10-16: its MERGE statement, then the aging rule
+    in a second statement)."""
+    session = client.driver.session.return_value.__enter__.return_value
+    return session.begin_transaction.return_value.__enter__.return_value
+
+
 # ---------------------------------------------------------------------------
 # Marker on the create path only, enrichment on the match path
 # ---------------------------------------------------------------------------
@@ -143,14 +150,12 @@ class TestMarkerOnCreatePathOnly:
         client.create_indicator_from_alert(
             "1.2.3.4", "ipv4", "US-Gov", alert_data={"alert_id": "a-1"}, zones=["Energy", "us-gov"]
         )
-        session = client.driver.session.return_value.__enter__.return_value
-        kwargs = next(c.kwargs for c in session.run.call_args_list if "zone" in c.kwargs)
+        kwargs = next(c.kwargs for c in _alert_tx(client).run.call_args_list if "zone" in c.kwargs)
         assert kwargs["zone"] == ["energy"]
         assert kwargs["tag"] == "energy_ipv4"
         client2 = _client()
         client2.create_indicator_from_alert("1.2.3.4", "ipv4", "us-gov", alert_data={"alert_id": "a-2"})
-        session2 = client2.driver.session.return_value.__enter__.return_value
-        assert next(c.kwargs for c in session2.run.call_args_list if "zone" in c.kwargs)["zone"] == ["global"]
+        assert next(c.kwargs for c in _alert_tx(client2).run.call_args_list if "zone" in c.kwargs)["zone"] == ["global"]
 
     def test_unknown_zones_are_logged_at_debug_without_line_breaks(self, caplog):
         """Project rule: zone parameters are logged at DEBUG only, after stripping CR/LF (Bugbot on #149)."""

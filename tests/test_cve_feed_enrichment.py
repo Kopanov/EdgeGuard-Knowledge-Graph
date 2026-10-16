@@ -318,9 +318,10 @@ def _patch_other_jobs(monkeypatch):
         "merge_malware_attack_twins",
         "build_campaign_nodes",
         "calibrate_cooccurrence_confidence",
-        "decay_ioc_confidence",
     ):
         monkeypatch.setattr(enrichment_jobs, name, lambda c: {"n": 1})
+    # 2026-10-16: the aging job takes the run's as_of and reports the Indicators it changed.
+    monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", lambda c, as_of=None: {"changed": 1, "retired": 7})
 
 
 class TestRunner:
