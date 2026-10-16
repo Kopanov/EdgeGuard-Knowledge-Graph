@@ -4514,12 +4514,14 @@ class MISPToNeo4jSync:
                 item["pulse_tlp"] = otx_meta.get("pulse_tlp", "")
                 item["otx_industries"] = _meta_list(otx_meta, "otx_industries")
                 item["description"] = otx_meta.get("description", "")
-                # PR-N10 Fix #3 (7-agent audit Logic Tracker B1): pull
-                # ``malware_family`` and ``attributed_to`` out of OTX_META
-                # now that misp_writer.py serializes them. Pre-fix, these
-                # were never in OTX_META → ``i.malware_family`` was NULL
-                # on every OTX-sourced Indicator → Q9 INDICATES edges
-                # never fired for OTX items (the biggest source).
+                # PR-N10 Fix #3: ``malware_family`` and ``attributed_to``
+                # of OTX_META. 2026-10: both are always empty, because the
+                # OTX collector puts neither key on an indicator, so an OTX
+                # attribute gives the indicator no ``malware_family`` (what
+                # Q9 matches); read for compatibility.
+                # A pulse's families arrive as OTX_META.mf
+                # (``pulse_malware_families``, below), which
+                # build_relationships step 9b links.
                 item["malware_family"] = otx_meta.get("malware_family", "")
                 if isinstance(item["malware_family"], str):  # 2026-10: without an ATT&CK software id suffix
                     item["malware_family"] = split_attack_software_id(item["malware_family"])[0]

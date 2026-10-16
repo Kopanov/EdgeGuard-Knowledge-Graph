@@ -498,9 +498,10 @@ class TestEnrichment:
         assert "r.stated_zones = CASE WHEN r.stated_zones IS NULL THEN NULL" in edge_part
 
     def test_family_label_feeds_are_the_feeds_that_set_malware_family(self):
-        # ThreatFox, MalwareBazaar, Feodo Tracker and OTX write ``malware_family``; URLhaus,
-        # SSL Blacklist and VirusTotal do not, so crediting them would over-attribute the link.
+        # ThreatFox, MalwareBazaar and Feodo Tracker write ``malware_family``; URLhaus, SSL Blacklist,
+        # VirusTotal and OTX do not (2026-10: OTX was listed although its collector never writes one;
+        # its pulse families are linked by step 9b), so crediting them would over-attribute the link.
         import ast as _ast
 
         feeds = set(_ast.literal_eval(rp.FAMILY_LABEL_FEEDS))
-        assert feeds == {"threatfox", "malwarebazaar", "feodo_tracker", "alienvault_otx"}
+        assert feeds == {"threatfox", "malwarebazaar", "feodo_tracker"}
