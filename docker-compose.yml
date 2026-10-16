@@ -135,6 +135,9 @@ x-common-env: &common-env
   # Incremental MISP -> Neo4j sync writes only attributes changed in the window
   # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
   EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}
+  # Hours the incremental sync window reaches back before the last sync's start
+  # (dags/edgeguard_pipeline.py run_neo4j_sync). Invalid or negative = 1.
+  EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS: ${EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS:-1}
   # Client-side timeout (seconds) for Neo4j read/relationship queries (src/neo4j_client.py).
   # int() of the value, so compose carries the code default rather than an empty string.
   EDGEGUARD_NEO4J_READ_TIMEOUT: ${EDGEGUARD_NEO4J_READ_TIMEOUT:-3600}

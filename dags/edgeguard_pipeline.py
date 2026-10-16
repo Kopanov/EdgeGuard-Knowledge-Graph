@@ -1579,7 +1579,10 @@ def run_neo4j_sync(**context):
 
         # Window fix (same bug family as the tolerance fix in
         # should_run_neo4j_sync): derive the incremental fetch window from the
-        # state file's last successful sync (+1 day MERGE-idempotent overlap)
+        # state file's last successful sync (minus EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS,
+        # default 1h: MISP stamps attribute timestamps itself, so the overlap only
+        # covers Airflow/MISP clock skew and in-flight writes; a day-long overlap
+        # made the first sync after a baseline re-write the whole baseline)
         # instead of relying only on the fixed EDGEGUARD_SYNC_INTERVAL_DAYS
         # default. This guarantees coverage of everything since the last
         # successful run — across skipped runs, paused DAGs, or an Airflow
@@ -1588,15 +1591,29 @@ def run_neo4j_sync(**context):
         # unreadable (and a missing state file already forces a full sync).
         since = None
         if incremental:
+            _overlap_hours = 1.0
+            _overlap_raw = os.getenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "").strip()
+            if _overlap_raw:
+                try:
+                    _overlap_hours = float(_overlap_raw)
+                    if not 0 <= _overlap_hours < float("inf"):
+                        raise ValueError("must be a finite number >= 0")
+                except ValueError:
+                    logger.warning(
+                        "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS=%r — using the default of 1 hour",
+                        _overlap_raw,
+                    )
+                    _overlap_hours = 1.0
             try:
                 with open(state_file, "r") as f:
                     _raw = json.load(f).get("last_sync", "")
                 _last_sync_dt = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
-                since = _last_sync_dt - timedelta(days=1)
+                since = _last_sync_dt - timedelta(hours=_overlap_hours)
                 logger.info(
-                    "Incremental window derived from state file: since %s (last_sync %s − 1d overlap)",
+                    "Incremental window derived from state file: since %s (last_sync %s − %gh overlap)",
                     since.isoformat(),
                     _raw,
+                    _overlap_hours,
                 )
             except (OSError, ValueError, json.JSONDecodeError) as e:
                 logger.warning(

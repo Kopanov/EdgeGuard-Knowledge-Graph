@@ -56,6 +56,7 @@ FORWARDED = [
     ("EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES", "25"),
     ("EDGEGUARD_DEFAULT_TLP", "white"),
     ("EDGEGUARD_SYNC_ATTRIBUTE_FILTER", "true"),  # incremental sync writes only changed attributes
+    ("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "1"),  # incremental sync window overlap
     ("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", "30"),  # 2026-10 last_seen refresh of re-reported indicators
     ("EDGEGUARD_MISP_REFRESH_MAX_PER_RUN", "2000"),
     ("EDGEGUARD_MISP_REFRESH_MAX_SECONDS", "600"),

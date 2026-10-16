@@ -222,7 +222,28 @@ class TestRunNeo4jSyncWindowAndStamp:
             "window covers everything since the last successful sync — the fixed "
             "3d+1d window silently drops the excess after skips/pauses/outages"
         )
-        assert captured["since"] == last_sync - timedelta(days=1), "window must be last_sync − 1d overlap"
+        assert captured["since"] == last_sync - timedelta(hours=1), "window must be last_sync − 1h default overlap"
+
+    def test_overlap_env_override(self, dag_module, isolated_state, fake_sync_module, monkeypatch):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "6")
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=6)
+
+    @pytest.mark.parametrize("raw", ["abc", "-2", "", "nan", "inf"])
+    def test_invalid_overlap_env_falls_back_to_default(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, raw
+    ):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
 
     def test_state_file_stamped_with_start_time_not_completion(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
