@@ -139,6 +139,30 @@ class TestEventLookup:
         success, failed = writer.push_items(items)
         assert success == 0 and failed >= 1
 
+    def test_failed_lookup_does_not_log_the_all_already_present_message(self, monkeypatch, caplog):
+        writer, _posted, _sleeps = _writer(monkeypatch, [_Resp(200, {})])
+
+        def fail_lookup(*_a, **_k):
+            raise mw.MispTransientError("MISP 502 on event lookup")
+
+        monkeypatch.setattr(writer, "_get_or_create_event", fail_lookup)
+        items = [{"tag": "otx", "indicator_type": "ipv4", "value": "203.0.113.10", "zone": "energy"}]
+        with caplog.at_level(logging.INFO, logger="collectors.misp_writer"):
+            success, failed = writer.push_items(items)
+        assert success == 0 and failed == 1
+        assert not any("[DEDUP] All" in r.getMessage() for r in caplog.records)
+
+    def test_genuine_all_duplicates_batch_still_logs_the_dedup_message(self, monkeypatch, caplog):
+        writer, _posted, _sleeps = _writer(monkeypatch, [_Resp(200, {})])
+        monkeypatch.setattr(writer, "_get_or_create_event", lambda *a, **k: "9")
+        monkeypatch.setattr(writer, "_get_existing_attribute_keys", lambda *a, **k: {("ip-dst", "203.0.113.10")})
+        monkeypatch.setattr(writer, "_get_existing_source_attribute_keys", lambda *a, **k: set(), raising=False)
+        items = [{"tag": "otx", "indicator_type": "ipv4", "value": "203.0.113.10", "zone": "energy"}]
+        with caplog.at_level(logging.INFO, logger="collectors.misp_writer"):
+            success, failed = writer.push_items(items)
+        assert success == 0 and failed == 0
+        assert any("[DEDUP] All" in r.getMessage() for r in caplog.records)
+
 
 class _EventStore:
     """Fake MISP for the event lookup: ``/events/restSearch`` answers pages of event headers in id
