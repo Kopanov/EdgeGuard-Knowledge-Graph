@@ -3,18 +3,20 @@
 * MISP 2.5.45 ignores ``limit``, ``page`` and ``timestamp`` in the query string of
   ``GET /events/index`` and answers the whole listing on every page (measured read-only on the
   hosted MISP 2026-10-16: ``?limit=5&page=2`` and ``?limit=5&page=9`` both answered all 11 events;
-  named parameters and a POST body are honoured). From 500 events every page repeated the listing
-  up to the 100-page cap, and each event was processed once per page. The listing now
-  de-duplicates rows by event id, stops when a page brings no new id, and stops when a page holds
-  more rows than the requested limit.
+  named ``limit:`` / ``page:`` and a POST body are honoured, while only a named
+  ``searchtimestamp:`` or a POST-body ``timestamp`` narrows by time, a named ``timestamp:`` being
+  ignored too). From 500 events every page repeated the listing up to the 100-page cap, and each
+  event was processed once per page. The listing now de-duplicates rows by event id, stops when a
+  page brings no new id, and stops when a page holds more rows than the requested limit.
 * A failure on an index page after the first no longer ends the listing as if it were complete:
   transient ``requests`` errors re-run the listing (``@retry_with_backoff``), anything else raises
   ``_MispFallbackHardError``. A first-page answer that is not a listing (HTTP 200 with
   ``{"errors": ...}``) makes the path unusable instead of reading as "no events".
 * A listing cut at the page cap fails the run, also when no EdgeGuard event was among the rows
   listed, so the DAG keeps its cursor.
-* A non-JSON restSearch fallback page, and any other error while listing, raises instead of
-  returning the rows read so far.
+* A non-JSON restSearch fallback page, a non-transient error in the restSearch fallback (recorded
+  as ``rest_search`` / ``hard_error`` for the critical fallback alert), and any other error while
+  listing raise instead of returning the rows read so far.
 * The 3-strike connection bail-out counts the events it never reached, and failed events are not
   reported again as merge/load errors.
 
@@ -297,6 +299,23 @@ class TestRunVerdictOnAnIncompleteListing:
         assert sync.run(incremental=False) is False
         assert not sync.get_stats().get("zero_events")
 
+    def test_a_first_page_of_rows_without_an_id_is_not_an_empty_success(self, monkeypatch):
+        """Rows without an id on page 1 are kept: ``run()`` counts each one as a failed event.
+
+        The stop for a page that brings no new id applies only from page 2; on page 1 it would drop
+        such rows and the run would report an empty window as a success.
+        """
+
+        class _S:
+            def get(self, url, params=None, **_kw):
+                return _Resp(200, [{"Event": {"info": "EdgeGuard-otx-2026-10-16", "timestamp": "1700000000"}}])
+
+        sync, processed = _sync(monkeypatch, _S())
+        assert sync.run(incremental=False) is False
+        stats = sync.get_stats()
+        assert processed == [] and stats["events_failed"] == 1
+        assert not stats.get("zero_events")
+
     def test_a_listing_cut_at_the_page_cap_fails_the_run(self, monkeypatch):
         monkeypatch.setattr(rm, "MISP_EVENTS_INDEX_MAX_PAGES", 2)
         sync, processed = _sync(monkeypatch, _PagedIndex(page_size=3, pages=5))
@@ -369,11 +388,48 @@ class TestFallbackListing:
         with pytest.raises(rm._MispFallbackHardError, match="non-JSON on page 1"):
             self._fetch(_FallbackSession({1: _Resp(200, raise_json=True)}))
 
-    def test_an_unexpected_error_while_listing_raises_instead_of_listing_nothing(self, metrics):
+    def test_a_non_transient_request_error_after_a_full_page_is_a_fallback_hard_error(self, metrics):
+        """It used to return the first page as the listing; it must also record ``hard_error``.
+
+        Without the record only the warning alert (``engaged``) fired for a fallback that failed
+        mid-listing, unlike an HTTP 5xx on the same page.
+        """
+        session = _FallbackSession(
+            {
+                1: _Resp(200, {"response": [_row(i) for i in range(500)]}),
+                2: requests.exceptions.TooManyRedirects("Exceeded 30 redirects."),
+            }
+        )
+        with pytest.raises(rm._MispFallbackHardError, match="restSearch failed on page 2 .*TooManyRedirects"):
+            self._fetch(session)
+        assert session.posts == [1, 2]
+        assert metrics == [("pymisp", "engaged"), ("rest_search", "engaged"), ("rest_search", "hard_error")]
+
+    def test_a_non_transient_request_error_on_the_first_page_raises_instead_of_listing_nothing(self, metrics):
         """A non-transient request error is not retried and used to end in an empty listing."""
         session = _FallbackSession({1: requests.exceptions.InvalidURL("bad MISP_URL")})
-        with pytest.raises(rm._MispFallbackHardError, match="MISP event listing failed: InvalidURL"):
+        with pytest.raises(rm._MispFallbackHardError, match="restSearch failed on page 1 .*InvalidURL"):
             self._fetch(session)
+        assert ("rest_search", "hard_error") in metrics
+
+    def test_a_transient_fallback_error_is_left_to_the_retry(self, metrics):
+        """A timeout in the fallback re-runs the listing and is not a fallback hard error."""
+        session = _FallbackSession({1: requests.exceptions.ReadTimeout("read timed out")})
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            self._fetch(session)
+        assert session.posts == [1] * (rm.MAX_RETRIES + 1), "the listing is re-run by the retry"
+        assert ("rest_search", "hard_error") not in metrics
+
+    def test_an_unexpected_error_outside_the_fallback_raises_instead_of_listing_nothing(self, metrics):
+        """The outer handler used to log the error and return an empty listing."""
+
+        class _Broken:
+            def get(self, url, params=None, **_kw):
+                raise RuntimeError("session closed")
+
+        with pytest.raises(rm._MispFallbackHardError, match="MISP event listing failed: RuntimeError"):
+            self._fetch(_Broken())
+        assert metrics == [], "no fallback branch was reached, so no fallback alert fires"
 
 
 # ---------------------------------------------------------------------------

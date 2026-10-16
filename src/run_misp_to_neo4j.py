@@ -133,12 +133,13 @@ class _MispFallbackHardError(Exception):
     5. the primary ``/events/index`` (or ``/events``) listing failing on a
        page after the first with a non-transient error (see
        ``_fetch_edgeguard_events_via_requests_index``)
-    6. the restSearch fallback answering a non-JSON page, and any other
-       unexpected error while listing (the outer handler of
+    6. the restSearch fallback answering a non-JSON page or failing with
+       a non-transient error (recorded as ``rest_search`` / ``hard_error``),
+       and any other unexpected error while listing (the outer handler of
        ``fetch_edgeguard_events`` used to return the partial list)
 
-    All of them MUST surface to the operator. The previous fix (Bugbot
-    round 2) used a bare ``raise RuntimeError(...)`` — but the enclosing
+    All of them MUST surface to the operator. An earlier PR-N29 fix
+    used a bare ``raise RuntimeError(...)`` — but the enclosing
     ``except Exception as e: logger.error(...)`` blocks at lines ~1109
     (PyMISP fallback → swallowed back to requests-restSearch path) and
     ~1201 (outer broad) silently catch ``RuntimeError`` and turn the
@@ -459,10 +460,12 @@ def _fetch_edgeguard_events_via_requests_index(
     the complete listing, so ``run()`` succeeded and the DAG stamped its cursor past the events
     that were never listed.
 
-    Paging that the server ignores (2026-10): MISP 2.5.45 reads ``limit``, ``page`` and
-    ``timestamp`` of ``/events/index`` only from named parameters or the request body, never from
-    the query string, and then answers the whole listing on every page (measured on the hosted
-    MISP 2026-10-16). Without a guard, on a MISP with ``MISP_EVENTS_INDEX_PAGE_SIZE`` or more events
+    Paging that the server ignores (2026-10): MISP 2.5.45 reads ``limit`` and ``page`` of
+    ``/events/index`` only from named parameters (``limit:500/page:2``) or the request body, never
+    from the query string, and then answers the whole listing on every page; it narrows by time only
+    with a named ``searchtimestamp:`` or a request-body ``timestamp``, while the query-string
+    ``timestamp`` and a named ``timestamp:`` are both ignored (measured on the hosted MISP
+    2026-10-16). Without a guard, on a MISP with ``MISP_EVENTS_INDEX_PAGE_SIZE`` or more events
     every page would repeat the listing up to the page cap, and each event would be processed once
     per page. The loop therefore de-duplicates rows by event id, stops when a page brings no new id,
     and stops when a page holds more rows than the requested ``limit`` (the server ignored it, so
@@ -2277,6 +2280,22 @@ class MISPToNeo4jSync:
                     # "fallback running fine" from "fallback also failing."
                     record_misp_fetch_fallback("rest_search", "hard_error")
                     raise
+                except (
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError,
+                ):
+                    raise  # transient: @retry_with_backoff re-runs the listing
+                except Exception as exc:
+                    # 2026-10: any other error here (e.g. a request error that is not transient)
+                    # leaves the fallback listing as incomplete as an HTTP 5xx does. It reached the
+                    # outer handler without ``hard_error`` being recorded, so only the warning
+                    # fallback alert fired, not the critical one.
+                    record_misp_fetch_fallback("rest_search", "hard_error")
+                    raise _MispFallbackHardError(
+                        f"MISP fallback restSearch failed on page {page} ({len(events)} events collected): "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
 
                 # PR-N29: pagination already collected all events; downstream
                 # normalization runs on the ``events`` variable. Pre-N29 this
