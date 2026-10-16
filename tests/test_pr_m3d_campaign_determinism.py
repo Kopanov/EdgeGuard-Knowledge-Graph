@@ -138,15 +138,23 @@ class TestPartOfEdgesDeterministic:
         # outer `)` of the apoc call. Use a generous slice that
         # covers both shapes.
         link_block = body[li_start : li_start + 3000]
-        assert "ORDER BY i.first_imported_at DESC, i.value ASC" in link_block, (
+        # 2026-10-16: newest by the latest report, or when EdgeGuard created the node (indicator aging).
+        assert "ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC" in link_block, (
             "Step 3 must sort deterministically before the 100-slice"
         )
         # Ensure the ORDER BY comes BEFORE the collect
-        order_idx = link_block.find("ORDER BY i.first_imported_at")
-        # 2026-10 (relationship provenance): the slice collects the whole path (indicator plus the
-        # INDICATES / ATTRIBUTED_TO links the PART_OF edge inherits its provenance from).
-        collect_idx = link_block.find("collect({i: i, at: _at, ind: _ind})[0..100]")
-        assert 0 <= order_idx < collect_idx, "ORDER BY must precede the 100-path slice"
+        order_idx = link_block.find("ORDER BY coalesce(i.last_reported_at, i.first_imported_at)")
+        # 2026-10-16: the slice takes 100 distinct indicators (it took 100 paths, so an indicator
+        # reached through two member malware took two places); the provenance and evidence are read
+        # from every path of each indicator afterwards.
+        distinct_idx = link_block.find("WITH DISTINCT c, a, i")
+        collect_idx = link_block.find("collect(i)[0..100]")
+        assert 0 <= distinct_idx < order_idx < collect_idx, "DISTINCT, then ORDER BY, then the 100-indicator slice"
+        # The indicator key is (type, value): the type breaks a tie of date and value, so the order is total.
+        assert (
+            "ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC, i.indicator_type ASC"
+            in link_block
+        )
 
     def test_step3a_stamps_r_updated_at(self, source: str) -> None:
         """Every PART_OF MERGE MUST stamp ``r.updated_at = datetime()``
@@ -301,6 +309,8 @@ class TestPruneQueryReceivesRunStartAt:
                 "count": 0,
                 "campaigns": 0,
                 "removed": 0,
+                "deleted": 0,  # 2026-10-16: Step 1b
+                "names": [],
             }
             # For queries that return iterable results (qualifying_actors_query)
             result.__iter__ = lambda s: iter([])
@@ -320,9 +330,12 @@ class TestPruneQueryReceivesRunStartAt:
 
         enrichment_jobs.build_campaign_nodes(fake_client)
 
-        # Find the prune query in captured calls
+        # Find the indicator prune query in captured calls (2026-10-16: Step 2b, the malware
+        # membership prune, judges the evidence and takes no run_start_at).
         prune_calls = [
-            (query, kwargs) for query, kwargs in queries_captured if "DELETE r" in query and "PART_OF" in query
+            (query, kwargs)
+            for query, kwargs in queries_captured
+            if "DELETE r" in query and "(i:Indicator)-[r:PART_OF_CAMPAIGN]->" in query
         ]
         assert prune_calls, (
             f"expected a prune query (MATCH PART_OF + DELETE r); got queries: {[q[:80] for q, _ in queries_captured]}"

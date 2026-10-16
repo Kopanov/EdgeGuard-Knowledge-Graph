@@ -5,9 +5,11 @@ partner created and on one whose CVE has left the feed. ``merge_cve`` writes an 
 carries CISA's SSVC decision, one where CISA withdrew it, and a KEV record (which never touches it),
 after the record went through MISP and the sync (``tests/test_cve_ssvc_from_nvd.py``). The records of
 one CVE from NVD, OTX, the KEV and CISA ICS (real hosted MISP attributes) are merged in several orders:
-NVD's record sets ``description``, ``published`` and ``last_modified``, any other record fills them only
-where the node has none, and an OTX pulse reference fills nothing (``tests/test_cve_description_source.py``);
-a ResilMesh-native write keeps the values it does not carry. Same guards as
+NVD's record sets ``published`` and ``last_modified``, any other record fills them only where the node has
+none; the description follows the source ranking NVD > CISA KEV > CISA ICS > any other source with its
+``description_source`` (2026-10-16), and an OTX pulse reference gives none
+(``tests/test_cve_description_source.py``, every order: ``tests/test_description_ranking_neo4j.py``); a
+ResilMesh-native write keeps the values it does not carry. Same guards as
 ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``, writes only
 nodes labelled ``EdgeGuardIT``, refuses any other node.
 """
@@ -137,7 +139,7 @@ def test_an_nvd_record_sets_and_withdraws_ssvc_and_another_source_leaves_it(clie
 
 
 # ---------------------------------------------------------------- the CVE record's text (2026-10)
-RECORD_TEXT = ("description", "published", "last_modified")
+RECORD_TEXT = ("description", "description_source", "published", "last_modified")
 
 
 def _real_record(key: str) -> dict:
@@ -165,7 +167,11 @@ def _text(raw_driver, label: str, cve_id: str) -> dict:
 
 
 def _expected(item: dict) -> dict:
-    return {prop: item[prop] for prop in RECORD_TEXT if item.get(prop)}
+    """The node one record leaves on an empty CVE: its text with its source (2026-10-16), and its dates."""
+    node = {prop: item[prop] for prop in RECORD_TEXT if item.get(prop)}
+    if item.get("description"):
+        node["description_source"] = item["tag"]
+    return node
 
 
 @pytest.mark.parametrize(
@@ -176,7 +182,7 @@ def _expected(item: dict) -> dict:
         ("CISA-KEV", "NVD", "AlienVault-OTX"),
     ],
 )
-def test_nvd_record_sets_the_cve_text_and_other_records_only_fill_it(client, raw_driver, order):
+def test_nvd_record_sets_the_cve_text_and_dates_in_any_order(client, raw_driver, order):
     _create(raw_driver, "CVE", "CVE-2025-21042")
     for source in order:
         item = _real_record(f"CVE-2025-21042__source:{source}")
@@ -208,7 +214,10 @@ def test_an_otx_pulse_reference_is_no_description_and_the_kev_text_fills(client,
     reference, kev = synced(otx_pulse_reference()), _real_record("CVE-2015-5477__source:CISA-KEV")
     for item in (reference, kev) if first == "pulse_reference" else (kev, reference):
         assert client.merge_cve(item, item["tag"])
-    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {"description": kev["description"]}
+    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {
+        "description": kev["description"],
+        "description_source": "cisa_kev",
+    }
 
 
 def test_without_nvd_record_an_empty_description_is_filled_and_otx_adds_nothing(client, raw_driver):
@@ -218,7 +227,10 @@ def test_without_nvd_record_an_empty_description_is_filled_and_otx_adds_nothing(
     assert _text(raw_driver, "CVE", "CVE-2015-5477") == {"description": ""}, "OTX's pulse JSON is not a description"
     assert client.merge_cve(kev, "cisa_kev")
     assert client.merge_cve(otx, "alienvault_otx")
-    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {"description": kev["description"]}
+    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {
+        "description": kev["description"],
+        "description_source": "cisa_kev",
+    }
 
 
 def test_batch_and_resilmesh_paths_keep_nvd_text(client, raw_driver):

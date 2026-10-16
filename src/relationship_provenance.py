@@ -87,6 +87,32 @@ def prov_set(rel_var: str = "r") -> str:
     )
 
 
+def sorted_set(values: str) -> str:
+    """Cypher: the values of the list ``values``, each once, null dropped, as sorted strings
+    (2026-10-16), so a derived link's ``sources`` / ``source_refs`` do not depend on the order in
+    which the links it rests on were created or read."""
+    return f"apoc.coll.sort(apoc.coll.toSet([_sv IN {values} WHERE _sv IS NOT NULL | toString(_sv)]))"
+
+
+def capped_event_ids(ids: str, max_events: int = MAX_EVENT_IDS_PER_EDGE) -> str:
+    """Cypher: the MISP event ids of the list ``ids``, each once, at most ``max_events``, chosen and
+    ordered by a fixed rule (2026-10-16): the numeric ids from the highest down (MISP numbers its
+    events in creation order, so the newest are kept), then any id that is not a number, sorted.
+
+    The cut of ``apoc.coll.toSet(...)[0..N]`` kept the first ids in the order the links were read,
+    which is their creation order: two graphs built from the same MISP data in a different order (a
+    full and an incremental sync) kept different ids once the union held more than ``N``. The top
+    ``N`` by a fixed order is the same however the union is assembled, and an accumulating write
+    that keeps the top ``N`` of its stored list and the incoming ids keeps the top ``N`` of all of
+    them. Ids are compared as strings (an id stored as a number is read as its string)."""
+    return (
+        f"[_ids IN [apoc.coll.toSet([_ei IN {ids} WHERE _ei IS NOT NULL | toString(_ei)])] | "
+        "([_en IN reverse(apoc.coll.sort(apoc.coll.toSet("
+        "[_ei IN _ids WHERE toInteger(_ei) IS NOT NULL | toInteger(_ei)]))) | toString(_en)] "
+        f"+ apoc.coll.sort([_ei IN _ids WHERE toInteger(_ei) IS NULL]))[0..{max_events}]][0]"
+    )
+
+
 def inherited_prov_set(
     rel_var: str, edge_exprs: Sequence[str], max_events: int = MAX_EVENT_IDS_PER_EDGE, replace: bool = False
 ) -> str:
@@ -95,20 +121,23 @@ def inherited_prov_set(
     ``edge_exprs`` are Cypher expressions yielding the source links (e.g. ``"_at"``), whose
     ``sources`` / ``source_refs`` / ``misp_event_ids`` are added to ``rel_var``'s. With
     ``replace`` (2026-10) they become ``rel_var``'s: a link that rests on exactly those links
-    then names no evidence a later run removed or trimmed from them.
+    then names no evidence a later run removed or trimmed from them. The lists are sorted and the
+    events capped by a fixed rule (``sorted_set``, ``capped_event_ids``; 2026-10-16), so the result
+    does not depend on the order in which the links were created or read.
     """
 
     def union(field: str) -> str:
         parts = " + ".join(f"coalesce({e}.{field}, [])" for e in edge_exprs)
         # ``[] +`` keeps a list when a source link holds one of the lists as a plain string
-        # (apoc.coll.toSet raises on a string; the accumulating form is a list concatenation).
+        # (``sorted_set`` / ``capped_event_ids`` iterate over it and raise on a string; the
+        # accumulating form is a list concatenation).
         own = "[] + " if replace else f"coalesce({rel_var}.{field}, []) + "
-        return f"apoc.coll.toSet({own}{parts})"
+        return f"{own}{parts}"
 
     return (
-        f"{rel_var}.sources = {union('sources')}, "
-        f"{rel_var}.source_refs = {union('source_refs')}, "
-        f"{rel_var}.misp_event_ids = {union('misp_event_ids')}[0..{max_events}]"
+        f"{rel_var}.sources = {sorted_set(union('sources'))}, "
+        f"{rel_var}.source_refs = {sorted_set(union('source_refs'))}, "
+        f"{rel_var}.misp_event_ids = {capped_event_ids(union('misp_event_ids'), max_events)}"
     )
 
 
@@ -123,9 +152,15 @@ def aggregated_prov_set(
 
     ``pattern`` is a Cypher path pattern binding ``edge_var``, read as a pattern
     comprehension, e.g. ``"(a)<-[_at:ATTRIBUTED_TO]-(:Malware)"`` with ``edge_var="_at"``; a
-    pattern of several links names each of them (``["_xi", "_xa"]``). With ``replace``
+    pattern of several links names each of them (``["_xi", "_xa"]``). It may also be the head of
+    a list comprehension over links already collected (2026-10-16), e.g. ``"_e IN links"`` with
+    ``edge_var="_e"``, or ``"_p IN paths"`` with ``["_p[0]", "_p[1]"]``. With ``replace``
     (2026-10) the provenance of the matching links becomes ``rel_var``'s instead of being added
-    to it, so a derived link follows the removal and trimming of the links it rests on.
+    to it, so a derived link follows the removal and trimming of the links it rests on. The lists
+    are sorted and the events capped by a fixed rule (``sorted_set``, ``capped_event_ids``;
+    2026-10-16): the pattern comprehension reads the links in the order they were created, so a
+    cut of the unsorted union kept a different set of events on two graphs built from the same
+    MISP data in a different order.
     """
     edge_vars = [edge_var] if isinstance(edge_var, str) else list(edge_var)
 
@@ -136,12 +171,12 @@ def aggregated_prov_set(
             # strings would concatenate into one value. ``[] +`` makes every operand a list element.
             per_match = "[] + " + per_match
         own = "" if replace else f"coalesce({rel_var}.{field}, []) + "
-        return f"apoc.coll.toSet({own}reduce(_acc = [], _x IN [{pattern} | {per_match}] | _acc + _x))"
+        return f"{own}reduce(_acc = [], _x IN [{pattern} | {per_match}] | _acc + _x)"
 
     return (
-        f"{rel_var}.sources = {union('sources')}, "
-        f"{rel_var}.source_refs = {union('source_refs')}, "
-        f"{rel_var}.misp_event_ids = {union('misp_event_ids')}[0..{max_events}]"
+        f"{rel_var}.sources = {sorted_set(union('sources'))}, "
+        f"{rel_var}.source_refs = {sorted_set(union('source_refs'))}, "
+        f"{rel_var}.misp_event_ids = {capped_event_ids(union('misp_event_ids'), max_events)}"
     )
 
 

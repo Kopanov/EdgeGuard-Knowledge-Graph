@@ -306,9 +306,8 @@ def _sap_within_reports(meta: Dict[str, Any], key: str, marks: Any) -> None:
     Used only when the comment is over its budget: a mark then goes with its pulse's id, so the block keeps
     the marks of the pulse buckets the sync groups the IOC into. The sync stores every ``sap`` entry on the
     Indicator node, where step 2d reads it for the whole graph, so the mark of a pulse cut from
-    ``report_ids`` is lost on this IOC; the pulse's other IOCs carry it, and an IOC MISP already holds gets
-    it added to its stored copy (``MISPWriter._carry_marks``). The key is left out when no mark remains;
-    *marks* that are not a list leave ``meta`` unchanged.
+    ``report_ids`` is lost on this IOC; the pulse's other IOCs carry it. The key is left out when no mark
+    remains; *marks* that are not a list leave ``meta`` unchanged.
     """
     if not isinstance(marks, list):
         return
@@ -798,18 +797,17 @@ class StoredCopy(NamedTuple):
     """The stored copy of a re-reported indicator that a refresh would edit (2026-10).
 
     ``written`` is the attribute's MISP ``timestamp`` (MISP's last write, epoch seconds): the
-    incremental sync re-reads an attribute only when it moves, and decay follows the node's
-    ``last_updated``, which the sync sets. ``first_seen`` / ``last_seen`` are the source's claims
-    as MISP stores them; a refresh keeps them unless the source now claims a later ``last_seen``.
-    ``comment`` is the stored comment, kept only for an indicator that carries several-actor marks
-    (``MISPWriter._carry_marks``), otherwise None.
+    incremental sync re-reads an attribute only when it moves. ``first_seen`` / ``last_seen`` are
+    the source's claims as MISP stores them; a refresh keeps them unless the source now claims a
+    later ``last_seen``. Since 2026-10-16 the indicator ages from ``last_seen`` capped at
+    ``written`` (``written`` when there is no ``last_seen``; ``indicator_aging``), so a refresh
+    makes it younger only when the source's date moved, or, without one, to the time of the edit.
     """
 
     written: float
     uuid: str
     first_seen: Optional[str]
     last_seen: Optional[str]
-    comment: Optional[str] = None
 
 
 # 2026-10: the events ``_get_or_create_event`` creates (``EdgeGuard-{source}-{date}``). Only copies in
@@ -822,15 +820,13 @@ def _note_stored_copy(
     seen: Dict[Tuple[str, str], Optional[StoredCopy]],
     key: Tuple[str, str],
     attribute: Dict[str, Any],
-    keep_comment: bool = False,
 ) -> None:
     """Record for ``key`` the copy in an EdgeGuard event that MISP wrote last (2026-10).
 
     A source can hold an indicator in several events (pushed on different days before the
     cross-event check existed); the copy written last decides whether the indicator needs a
     refresh, and that copy is the one edited. A row whose ``Event.info`` is not an EdgeGuard event
-    name, or without uuid or readable ``timestamp``, is not recorded. With ``keep_comment`` the
-    copy's comment is recorded too (an indicator carrying several-actor marks, ``_carry_marks``).
+    name, or without uuid or readable ``timestamp``, is not recorded.
     """
     event = attribute.get("Event")
     info = event.get("info") if isinstance(event, dict) else None
@@ -845,13 +841,11 @@ def _note_stored_copy(
         return
     current = seen.get(key)
     if current is None or written > current.written:
-        comment = attribute.get("comment") if keep_comment else None
         seen[key] = StoredCopy(
             written=written,
             uuid=uuid,
             first_seen=attribute.get("first_seen") or None,
             last_seen=attribute.get("last_seen") or None,
-            comment=comment if isinstance(comment, str) else None,
         )
 
 
@@ -871,48 +865,6 @@ def _refreshed_last_seen(stored_copy: StoredCopy, reported: Any, now: float) -> 
             if first_at is None or reported_at >= first_at:
                 return str(reported)
     return stored_copy.last_seen
-
-
-_OTX_META_PREFIX = "OTX_META:"
-
-# 2026-10: a pulse naming several actors whose IOCs MISP already holds gets its mark added to the stored
-# copies of at most this many of them per run (``MISPWriter._carry_marks``). Step 2d reads the marks of
-# every indicator, so one copy is enough; a few keep it when an edit fails or a node is retired.
-MARK_CARRY_COPIES_PER_PULSE = 3
-
-
-def _otx_meta_marks(comment: Any) -> Optional[List[str]]:
-    """The ``sap`` marks of an ``OTX_META`` comment (2026-10); None when the comment is not a readable
-    ``OTX_META`` block (a JSON object after the prefix, as the sync reads it)."""
-    if not isinstance(comment, str) or not comment.startswith(_OTX_META_PREFIX):
-        return None
-    try:
-        meta = json.loads(comment[len(_OTX_META_PREFIX) :])
-    except ValueError:
-        return None
-    if not isinstance(meta, dict):
-        return None
-    marks = meta.get("sap")
-    return [str(x) for x in marks if x] if isinstance(marks, list) else []
-
-
-def _otx_meta_with_marks(comment: Any, marks: Sequence[str], budget: int = _META_COMMENT_BUDGET) -> Optional[str]:
-    """The stored ``OTX_META`` *comment* with *marks* added to its ``sap`` (2026-10), or None when the
-    comment is not a readable block, already holds every mark, or would exceed *budget* with them.
-
-    Nothing else in the block changes, and nothing is shortened to make room: the stored copy keeps every
-    report id and pair it was written with, and a mark that does not fit is carried by another copy.
-    """
-    stored = _otx_meta_marks(comment)
-    if stored is None:
-        return None
-    missing = [m for m in marks if m and m not in stored]
-    if not missing:
-        return None
-    meta = json.loads(str(comment)[len(_OTX_META_PREFIX) :])
-    meta["sap"] = stored + missing
-    edited = _OTX_META_PREFIX + json.dumps(meta, default=str)
-    return edited if len(edited) <= budget else None
 
 
 def _strip_non_bmp(text: str) -> str:
@@ -1318,7 +1270,6 @@ class MISPWriter:
         self,
         source_tag: str,
         stored_copy_of: Optional[Dict[Tuple[str, str], Optional[StoredCopy]]] = None,
-        comment_of: Optional[set] = None,
     ) -> set:
         """Build a set of (MISP attribute type, value) already pushed under
         ANY MISP event tagged with ``source_tag`` — across all events,
@@ -1327,9 +1278,9 @@ class MISPWriter:
         2026-10 (re-reported indicators): ``stored_copy_of`` maps the keys of the indicators a push
         reports to ``None``; for each of those keys that the listing finds in an EdgeGuard event,
         it is set to the ``StoredCopy`` MISP wrote last (uuid, ``timestamp``, ``first_seen``,
-        ``last_seen``, and for the keys in ``comment_of`` the comment). The rows the listing already
-        reads carry these fields and their event's ``info``, so this adds no request, and only the
-        keys asked for are kept: memory grows with the push, not with the source.
+        ``last_seen``). The rows the listing already reads carry these fields and their event's
+        ``info``, so this adds no request, and only the keys asked for are kept: memory grows with
+        the push, not with the source.
 
         PR-F7 (Issue #61 quick-fix): the per-event prefetch
         (:meth:`_get_existing_attribute_keys`) misses duplicates across
@@ -1468,7 +1419,7 @@ class MISPWriter:
                     key = (str(t), str(v))
                     keys.add(key)
                     if stored_copy_of is not None and key in stored_copy_of:
-                        _note_stored_copy(stored_copy_of, key, a, keep_comment=bool(comment_of) and key in comment_of)
+                        _note_stored_copy(stored_copy_of, key, a)
             if len(attrs) < page_limit:
                 break
             page += 1
@@ -2733,13 +2684,11 @@ class MISPWriter:
 
         2026-10 (several-actor marks): an OTX indicator carries the pulses that the collector judged,
         with the canonical threat-actor reference, to name several actors (``several_actor_pulses``,
-        ``OTX_META.sap``). The sync stores them on the Indicator node, where build_relationships step 2d
-        reads them. An indicator MISP already holds is not pushed, so when a pulse is edited to name
-        several actors, the mark would reach no node through it; the stored copies of up to
-        ``MARK_CARRY_COPIES_PER_PULSE`` of the pulse's held IOCs get the mark added to their comment
-        (``_carry_marks``) unless a held copy already carries it. The counts are
-        ``stats["attributes_marked"]`` / ``["attributes_mark_failed"]``; a failed edit is logged and does
-        not count as a failed push.
+        ``OTX_META.sap``), in the attribute it pushes. The writer never adds a mark to a stored copy:
+        MISP keeps what the sources said, and the mark is EdgeGuard's judgement. A pulse edited later
+        to name several actors, whose IOCs MISP already holds and which brings no new IOC, is therefore
+        marked on no Indicator node (a known limit, to be closed by a per-pulse MISP record); the
+        pulse's new IOCs carry the mark.
 
         PR-N4 — adaptive scaling for MISP-at-scale (closes the on-call
         report from 2026-04-21 where a 730d baseline lost ~11,500 attrs
@@ -2803,9 +2752,6 @@ class MISPWriter:
         # 2026-10: (type, value) of the indicators each source reports in this push — the
         # candidates for a last_seen refresh when MISP already holds them.
         reported_indicators: Dict[str, set] = {}
-        # 2026-10: the several-actor marks (``several_actor_pulses``) of each reported indicator, by
-        # source and (type, value): a stored copy that lacks them gets them added (``_carry_marks``).
-        reported_marks: Dict[str, Dict[Tuple[str, str], List[str]]] = {}
 
         for item in items:
             source = item.get("tag", "unknown")
@@ -2839,36 +2785,20 @@ class MISPWriter:
             if attr:
                 grouped[key].append(attr)
                 if "indicator_type" in item and "value" in item:
-                    attr_key = (attr.get("type"), attr.get("value"))
-                    reported_indicators.setdefault(source, set()).add(attr_key)
-                    marks = [str(x)[:64] for x in (item.get("several_actor_pulses") or []) if x]
-                    if marks:
-                        held_marks = reported_marks.setdefault(source, {}).setdefault(attr_key, [])
-                        held_marks.extend(m for m in marks if m not in held_marks)
+                    reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
 
         # 2026-10: per resolved source tag, the reported indicators whose stored copy the
         # cross-event prefetch should describe (see ``_get_existing_source_attribute_keys``).
         refresh_days = misp_refresh_last_seen_days()
         refresh_cutoff = time.time() - refresh_days * 86400
-        # The marked indicators are looked up even when the refresh is off, with their comment.
         stored_copies_by_tag: Dict[str, Dict[Tuple[str, str], Optional[StoredCopy]]] = {}
-        comments_by_tag: Dict[str, set] = {}
-        for _source, _keys in reported_indicators.items():
-            _tag = self.SOURCE_TAGS.get(_source, f"source:{_source}")
-            _marked = set(reported_marks.get(_source, {}))
-            _wanted = _keys if refresh_days > 0 else _marked
-            if not _wanted:
-                continue
-            _lookup = stored_copies_by_tag.setdefault(_tag, {})
-            for _key in _wanted:
-                _lookup.setdefault(_key, None)
-            comments_by_tag.setdefault(_tag, set()).update(_marked)
+        if refresh_days > 0:
+            for _source, _keys in reported_indicators.items():
+                _lookup = stored_copies_by_tag.setdefault(self.SOURCE_TAGS.get(_source, f"source:{_source}"), {})
+                for _key in _keys:
+                    _lookup.setdefault(_key, None)
         # (type, value) → (the stored copy to edit, last_seen of the re-reported item)
         refresh_due: Dict[Tuple[str, str], Tuple[StoredCopy, Optional[str]]] = {}
-        # 2026-10: pulse → [(type, value), ...] of its marked indicators MISP already holds, in push order,
-        # and the stored copy of each such indicator (``_carry_marks``).
-        held_by_mark: Dict[str, List[Tuple[str, str]]] = {}
-        held_copies: Dict[Tuple[str, str], StoredCopy] = {}
 
         # Resolve events + prefetch existing (type, value); build work queue (post-filter batch counts).
         total_success = 0
@@ -2945,14 +2875,11 @@ class MISPWriter:
                     cross_event_cache[source_tag] = set(known_source_keys[source_tag])
                 else:
                     cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(
-                        source_tag,
-                        stored_copy_of=stored_copies_by_tag.get(source_tag),
-                        comment_of=comments_by_tag.get(source_tag),
+                        source_tag, stored_copy_of=stored_copies_by_tag.get(source_tag)
                     )
             cross_event_keys = cross_event_cache[source_tag]
 
             before_ct = len(unique_attrs)
-            reported_attrs = unique_attrs
             # Step 1 — filter by per-event keys (attrs already in THIS event)
             after_per_event = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in per_event_keys]
             per_event_skipped = before_ct - len(after_per_event)
@@ -2970,19 +2897,6 @@ class MISPWriter:
                     _copy = _copies.get((a.get("type"), a.get("value")))
                     if _copy is not None and _copy.written < refresh_cutoff:
                         refresh_due[(a.get("type"), a.get("value"))] = (_copy, a.get("last_seen"))
-            # 2026-10: a marked indicator MISP holds (in this event or another) is not pushed: its stored
-            # copy is a candidate to carry the marks (``_carry_marks``).
-            _source_marks = reported_marks.get(source)
-            if _copies and _source_marks and len(unique_attrs) < before_ct:
-                _pushed = {(a.get("type"), a.get("value")) for a in unique_attrs}
-                for a in reported_attrs:
-                    _key = (a.get("type"), a.get("value"))
-                    _copy = _copies.get(_key)
-                    if _copy is None or _key in _pushed or _key in held_copies or _key not in _source_marks:
-                        continue
-                    held_copies[_key] = _copy
-                    for _mark in _source_marks[_key]:
-                        held_by_mark.setdefault(_mark, []).append(_key)
             skipped_ct = per_event_skipped + cross_event_skipped
             if skipped_ct:
                 self.stats["attrs_skipped_existing"] += skipped_ct
@@ -3425,13 +3339,9 @@ class MISPWriter:
                 total_failed += failed
 
         refreshed_note = ""
-        if held_by_mark:
-            marked, _mark_failed = self._carry_marks(held_by_mark, held_copies)
-            if marked:
-                refreshed_note = f"; {marked} existing attribute(s) given several-actor marks"
         if refresh_due:
             refreshed, _refresh_failed = self._refresh_stored_copies(refresh_due, refresh_days)
-            refreshed_note += f"; {refreshed} existing attribute(s) refreshed"
+            refreshed_note = f"; {refreshed} existing attribute(s) refreshed"
 
         # Final summary
         total_elapsed = time.time() - start_time
@@ -3450,82 +3360,6 @@ class MISPWriter:
 
         return total_success, total_failed
 
-    def _carry_marks(
-        self, held_by_mark: Dict[str, List[Tuple[str, str]]], held_copies: Dict[Tuple[str, str], StoredCopy]
-    ) -> Tuple[int, int]:
-        """Add several-actor marks to stored copies of indicators MISP already holds (2026-10).
-
-        ``held_by_mark`` maps a pulse the collector judged to name several actors to the (type, value) of
-        its IOCs that MISP holds and this push therefore skips, in push order; ``held_copies`` gives the
-        stored copy of each, with its comment. MISP does not push such an IOC again, so a pulse edited to
-        name several actors after its IOCs were stored would be marked on no Indicator node, and
-        build_relationships step 2d would keep linking the pairs written while it named one actor. A pulse
-        that a held copy already carries in ``OTX_META.sap`` needs nothing. For any other, up to
-        ``MARK_CARRY_COPIES_PER_PULSE`` copies get the mark added to their ``OTX_META.sap``
-        (``_otx_meta_with_marks``: nothing else changes, and a copy whose comment would exceed the budget,
-        or is no readable ``OTX_META`` block (written before every OTX indicator got one), is passed over
-        for the next). One ``update_attribute`` edit per copy, ``{"comment": ...}`` only:
-        MISP stamps the attribute anew, the incremental sync reads it again and the node accumulates the
-        mark. The edits are paced like the refresh edits and stop after
-        ``REFRESH_MAX_CONSECUTIVE_FAILURES`` failures in a row. Returns ``(marked, failed)``.
-        """
-        planned: Dict[Tuple[str, str], List[str]] = {}
-        unplaced: List[str] = []
-        carried = 0
-        for pulse, keys in held_by_mark.items():
-            if any(pulse in (_otx_meta_marks(held_copies[k].comment) or []) for k in keys):
-                carried += 1
-                continue
-            placed = 0
-            for key in keys:
-                marks = planned.get(key, []) + [pulse]
-                if _otx_meta_with_marks(held_copies[key].comment, marks) is None:
-                    continue
-                planned[key] = marks
-                placed += 1
-                if placed >= MARK_CARRY_COPIES_PER_PULSE:
-                    break
-            if not placed:
-                unplaced.append(pulse)
-        pause = misp_batch_throttle_seconds()
-        liveness_cb = getattr(self, "liveness_callback", None)
-        marked = failed = consecutive_failures = 0
-        stopped = ""
-        for done, (key, marks) in enumerate(planned.items(), 1):
-            stored_copy = held_copies[key]
-            comment = _otx_meta_with_marks(stored_copy.comment, marks)
-            if comment and self.update_attribute(
-                stored_copy.uuid, {"comment": comment}, written_after=stored_copy.written
-            ):
-                marked += 1
-                consecutive_failures = 0
-            else:
-                failed += 1
-                consecutive_failures += 1
-                if consecutive_failures >= REFRESH_MAX_CONSECUTIVE_FAILURES and done < len(planned):
-                    stopped = f" (stopped after {consecutive_failures} failed edits in a row)"
-                    break
-            if done % EDITS_PER_THROTTLE == 0 and done < len(planned):
-                if liveness_cb is not None:
-                    liveness_cb()
-                if pause:
-                    time.sleep(pause)
-        self.stats["attributes_marked"] = self.stats.get("attributes_marked", 0) + marked
-        self.stats["attributes_mark_failed"] = self.stats.get("attributes_mark_failed", 0) + failed
-        log = logger.warning if failed or unplaced else logger.info
-        log(
-            "[MARK] %d pulse(s) naming several actors with IOCs MISP already holds: %d already marked on a "
-            "stored copy; %d stored copies given the mark, %d failed; %d pulse(s) whose held copies cannot "
-            "take it (no room or no OTX_META block)%s",
-            len(held_by_mark),
-            carried,
-            marked,
-            failed,
-            len(unplaced),
-            stopped,
-        )
-        return marked, failed
-
     def _refresh_stored_copies(
         self, due: Dict[Tuple[str, str], Tuple[StoredCopy, Optional[str]]], refresh_days: int
     ) -> Tuple[int, int]:
@@ -3538,9 +3372,11 @@ class MISPWriter:
         the stored value unchanged (``_refreshed_last_seen``): the field holds what a source claimed,
         never the time of a run. The edit exists for its side effect: MISP stamps the attribute and
         its event with a new timestamp, so the incremental MISP → Neo4j sync reads the attribute
-        again and refreshes ``Indicator.last_updated`` before ``decay_ioc_confidence`` lowers or
-        retires a node the feed still lists, and the next refresh of the copy is due only one
-        interval later. MISP's answer must show a timestamp later than the stored one.
+        again, and the next refresh of the copy is due only one interval later. Since 2026-10-16
+        the indicator ages from the source's ``last_seen`` capped at that timestamp
+        (``indicator_aging``): the edit moves its age when the source's date moved, or, for a source
+        without a date, to the time of the edit. MISP's answer must show a timestamp later than
+        the stored one.
 
         The longest unwritten go first, at most ``EDGEGUARD_MISP_REFRESH_MAX_PER_RUN``. The edits
         are paced like the NVD edits (``EDGEGUARD_MISP_BATCH_THROTTLE_SEC`` after every

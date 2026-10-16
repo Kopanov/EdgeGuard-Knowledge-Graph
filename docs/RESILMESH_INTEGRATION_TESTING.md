@@ -97,9 +97,12 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
        "description": "Example vulnerability",
        # plus any other fields you compute/populate
    })
-   # 2026-10: description, published and last_modified only fill a CVE node that has none (NVD's
-   # record, written by the MISP → Neo4j sync, sets them), so on a CVE the sync already holds the
-   # description stays NVD's; cwe, ref_tags, cpe_type and result_impacts are kept when omitted.
+   # 2026-10: published and last_modified only fill a CVE node that has none (NVD's record, written
+   # by the MISP → Neo4j sync, sets them). 2026-10-16: description follows the sync's source ranking
+   # with description_source "resilmesh", below every registered feed: it fills a CVE without a
+   # description and never replaces a feed's text (NVD's, the KEV's, ...); it can replace the text of
+   # another unregistered source whose id sorts after it, such as stix_import's. cwe, ref_tags,
+   # cpe_type and result_impacts are kept when omitted.
 
    # Example: create bridge between EdgeGuard Vulnerability and ResilMesh CVE.
    # Use create_vulnerability_refers_to_cve (REFERS_TO edge); the historical
@@ -151,4 +154,4 @@ In this push model, ResilMesh consumes a Neo4j graph that is already populated w
 
 ---
 
-_Last updated: 2026-10-15 — `merge_resilmesh_cve` example: `description`, `published` and `last_modified` only fill a CVE node that has none, and the lists a call omits are kept. Prior: 2026-04-26 — PR-N33 docs audit: removed references to non-existent `create_vulnerability_maps_to_cve` (use `create_vulnerability_refers_to_cve` or rely on `bridge_vulnerability_cve`); marked `create_indicator_resolves_to_ip` / `create_malware_targets_host` as planned (not implemented at HEAD); clarified that CVSS edges are created internally by `merge_cve()` (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12). Prior: 2026-03-17._
+_Last updated: 2026-10-16 — `merge_resilmesh_cve` example: the description follows the sync's source ranking with `description_source` `resilmesh` (below every registered feed), as in RESILMESH_INTEGRATION_GUIDE.md; `published` and `last_modified` only fill. Prior: 2026-10-15 — `merge_resilmesh_cve` example: `description`, `published` and `last_modified` only fill a CVE node that has none, and the lists a call omits are kept. Prior: 2026-04-26 — PR-N33 docs audit: removed references to non-existent `create_vulnerability_maps_to_cve` (use `create_vulnerability_refers_to_cve` or rely on `bridge_vulnerability_cve`); marked `create_indicator_resolves_to_ip` / `create_malware_targets_host` as planned (not implemented at HEAD); clarified that CVSS edges are created internally by `merge_cve()` (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12). Prior: 2026-03-17._

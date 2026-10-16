@@ -48,6 +48,7 @@ if str(SRC) not in sys.path:
 os.environ.setdefault("NEO4J_PASSWORD", "test-pw-pr-n20")
 os.environ.setdefault("MISP_API_KEY", "test-key-pr-n20")
 
+from description_ranking import CVE_DESCRIPTIONS  # noqa: E402  (2026-10-16: the description's source ranking)
 
 # ===========================================================================
 # Fix #1 — RUNBOOK has the launch-path section (CLI vs DAG+pause)
@@ -306,16 +307,17 @@ class TestFix2PreflightScript:
 
 class TestFix3MergeVulnerabilitySymmetry:
     """2026-10: as on ``merge_cve``, NVD's record sets the dates (``extra_props``) and any other
-    record fills them where the node has none (``fill_props``)."""
+    record fills them where the node has none (``fill_props``); the description goes with its source
+    and rank to the source ranking (``description``, 2026-10-16)."""
 
     @staticmethod
-    def _merge(data: dict) -> dict:
+    def _merge(data: dict, source_id: str = "nvd") -> dict:
         from neo4j_client import Neo4jClient
 
         c = Neo4jClient.__new__(Neo4jClient)
         c.driver = MagicMock()
         c.merge_node_with_source = MagicMock(return_value=True)
-        assert c.merge_vulnerability(data) is True
+        assert c.merge_vulnerability(data, source_id=source_id) is True
         return c.merge_node_with_source.call_args.kwargs
 
     _DATA = {
@@ -335,16 +337,17 @@ class TestFix3MergeVulnerabilitySymmetry:
             f"merge_vulnerability must pass NVD's published to extra_props; got {extra_props.get('published')!r}"
         )
         assert extra_props.get("last_modified") == "2024-03-01T08:30:00.000"
-        assert extra_props.get("description") == "Symmetry test"
+        assert "description" not in extra_props
+        assert kwargs["description"] == CVE_DESCRIPTIONS.record("Symmetry test", "nvd")
         assert not kwargs.get("fill_props")
 
     def test_merge_vulnerability_other_record_fills_published_and_last_modified(self):
-        kwargs = self._merge(dict(self._DATA))
+        kwargs = self._merge(dict(self._DATA), source_id="cisa_kev")
         assert kwargs["fill_props"] == {
-            "description": "Symmetry test",
             "published": "2024-02-14T12:00:00.000",
             "last_modified": "2024-03-01T08:30:00.000",
         }
+        assert kwargs["description"] == CVE_DESCRIPTIONS.record("Symmetry test", "cisa_kev")
         assert (kwargs.get("extra_props") or {}).get("cvss_score") == 7.5
 
 
