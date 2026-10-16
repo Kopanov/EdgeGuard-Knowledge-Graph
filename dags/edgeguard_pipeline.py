@@ -1507,6 +1507,54 @@ def _on_neo4j_sync_failure(context):
             logger.warning(f"Failed to record the pending full sync request metric: {e}")
 
 
+_SYNC_WINDOW_OVERLAP_DEFAULT = timedelta(hours=1)
+_SYNC_WINDOW_OVERLAP_MIN = timedelta(seconds=60)
+_SYNC_WINDOW_OVERLAP_MAX_HOURS = 720.0
+
+
+def _sync_window_overlap() -> timedelta:
+    """``EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS`` as a ``timedelta`` (default 1 h, 2026-10).
+
+    The incremental sync reads from ``last_sync`` minus this overlap. MISP stamps attribute
+    timestamps itself, so the margin covers clock skew between the Airflow and MISP hosts and a
+    write that becomes visible after the sync read its event. That holds only while the sync reads
+    the MISP the collectors write to; a copy filled by MISP-to-MISP synchronisation or import keeps
+    the origin's timestamps and needs an overlap above the copy delay.
+
+    - Unset or empty: the default, without a warning (``docker-compose.yml`` forwards the variable).
+    - Not a number, negative, not finite or above 720 h: a warning and the default. The bound
+      keeps the subtraction from ``last_sync`` inside the ``datetime`` range, where a huge value
+      raised ``OverflowError`` and failed every run instead of falling back.
+    - From 0 up to 60 s: raised to 60 s with a warning. MISP timestamps are whole seconds, so a
+      smaller margin misses an attribute MISP stamped in the second the sync started (or a write
+      still in flight then) and the next window starts after it: it would never be synced.
+    """
+    raw = (os.getenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS") or "").strip()
+    if not raw:
+        return _SYNC_WINDOW_OVERLAP_DEFAULT
+    try:
+        hours = float(raw)
+    except ValueError:
+        hours = float("nan")
+    # NaN fails both comparisons, so non-numeric and "nan" land here as well as "inf".
+    if not 0 <= hours <= _SYNC_WINDOW_OVERLAP_MAX_HOURS:
+        logger.warning(
+            "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS=%r (expected hours from 0 to %g) — using the default of 1 hour",
+            raw,
+            _SYNC_WINDOW_OVERLAP_MAX_HOURS,
+        )
+        return _SYNC_WINDOW_OVERLAP_DEFAULT
+    overlap = timedelta(hours=hours)
+    if overlap < _SYNC_WINDOW_OVERLAP_MIN:
+        logger.warning(
+            "EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS=%r is below the minimum of 60 s — using 60 s (MISP timestamps "
+            "are whole seconds; a smaller overlap can skip an attribute written as the previous sync started)",
+            raw,
+        )
+        return _SYNC_WINDOW_OVERLAP_MIN
+    return overlap
+
+
 def run_neo4j_sync(**context):
     """Run the Neo4j sync pipeline."""
     import json
@@ -1580,42 +1628,30 @@ def run_neo4j_sync(**context):
         # Window fix (same bug family as the tolerance fix in
         # should_run_neo4j_sync): derive the incremental fetch window from the
         # state file's last successful sync (minus EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS,
-        # default 1h: MISP stamps attribute timestamps itself, so the overlap only
-        # covers Airflow/MISP clock skew and in-flight writes; a day-long overlap
-        # made the first sync after a baseline re-write the whole baseline)
-        # instead of relying only on the fixed EDGEGUARD_SYNC_INTERVAL_DAYS
-        # default. This guarantees coverage of everything since the last
-        # successful run — across skipped runs, paused DAGs, or an Airflow
-        # outage — where the fixed 3d+1d window would silently drop the
-        # excess. Falls back to the fixed window when the state file is
-        # unreadable (and a missing state file already forces a full sync).
+        # default 1h, at least 60 s, at most 720 h — see _sync_window_overlap; a
+        # day-long overlap made the first sync after a baseline re-write the whole
+        # baseline, 2026-10) instead of relying only on the fixed
+        # EDGEGUARD_SYNC_INTERVAL_DAYS default. This guarantees coverage of
+        # everything since the last successful run — across skipped runs, paused
+        # DAGs, or an Airflow outage — where the fixed 3d+1d window would silently
+        # drop the excess. Falls back to the fixed window when the state file is
+        # unreadable or its date leaves the datetime range once the overlap is
+        # subtracted (and a missing state file already forces a full sync).
         since = None
         if incremental:
-            _overlap_hours = 1.0
-            _overlap_raw = os.getenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "").strip()
-            if _overlap_raw:
-                try:
-                    _overlap_hours = float(_overlap_raw)
-                    if not 0 <= _overlap_hours < float("inf"):
-                        raise ValueError("must be a finite number >= 0")
-                except ValueError:
-                    logger.warning(
-                        "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS=%r — using the default of 1 hour",
-                        _overlap_raw,
-                    )
-                    _overlap_hours = 1.0
+            _overlap = _sync_window_overlap()
             try:
                 with open(state_file, "r") as f:
                     _raw = json.load(f).get("last_sync", "")
                 _last_sync_dt = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
-                since = _last_sync_dt - timedelta(hours=_overlap_hours)
+                since = _last_sync_dt - _overlap
                 logger.info(
-                    "Incremental window derived from state file: since %s (last_sync %s − %gh overlap)",
+                    "Incremental window derived from state file: since %s (last_sync %s − %g s overlap)",
                     since.isoformat(),
                     _raw,
-                    _overlap_hours,
+                    _overlap.total_seconds(),
                 )
-            except (OSError, ValueError, json.JSONDecodeError) as e:
+            except (OSError, ValueError, OverflowError, json.JSONDecodeError) as e:
                 logger.warning(
                     "Could not derive sync window from state file (%s) — "
                     "falling back to the fixed EDGEGUARD_SYNC_INTERVAL_DAYS window",

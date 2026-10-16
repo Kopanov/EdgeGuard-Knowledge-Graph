@@ -12,7 +12,9 @@ audit (multi-agent, adversarially challenged):
    Fix: stamp the sync START time + subtract a tolerance
    (``EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN``, default 60) in
    ``should_run_neo4j_sync``, and derive the incremental ``since`` from the
-   state file (+1d overlap) so coverage survives skips/pauses/outages.
+   state file (minus ``EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS``, default 1 h,
+   at least 60 s, at most 720 h; 2026-10, was 1 day) so coverage survives
+   skips/pauses/outages.
 
 2. **Backup gate on the DAG wipe path.** The PR-F2 backup-timestamp gate ran
    only inside ``edgeguard fresh-baseline`` (CLI). A UI/API trigger with
@@ -244,6 +246,75 @@ class TestRunNeo4jSyncWindowAndStamp:
         self._run(dag_module, monkeypatch)
 
         assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+
+    @pytest.mark.parametrize("raw", ["721", "2e7", "1e400"])
+    def test_overlap_above_bound_warns_and_does_not_fail_the_run(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """A huge value (2e7 h) used to raise OverflowError on ``last_sync − overlap`` and
+        fail every run; above 720 h it is invalid, logged and replaced by the default."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=1)
+        assert any(
+            "Invalid EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() and raw in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_overlap_at_bound_is_used(self, dag_module, isolated_state, fake_sync_module, monkeypatch):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", "720")
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(hours=720)
+
+    @pytest.mark.parametrize("raw", ["0", "0.0", "-0", "0.01", "1e-9"])
+    def test_overlap_below_floor_is_raised_to_60_seconds(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog, raw
+    ):
+        """0 (or anything under 60 s) removed the margin: MISP timestamps are whole seconds, so
+        an attribute stamped in the second the previous sync started was never read."""
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", raw)
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(seconds=60)
+        assert any("below the minimum of 60 s" in r.getMessage() for r in caplog.records)
+
+    def test_overlap_of_exactly_60_seconds_is_kept_without_warning(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch, caplog
+    ):
+        last_sync = datetime.now(timezone.utc) - timedelta(hours=10)
+        _write_state(isolated_state, last_sync)
+        monkeypatch.setenv("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS", str(1 / 60))
+
+        with caplog.at_level(logging.WARNING):
+            self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["since"] == last_sync - timedelta(seconds=60)
+        assert not any("EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS" in r.getMessage() for r in caplog.records)
+
+    def test_state_date_at_datetime_minimum_falls_back_to_fixed_window(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch
+    ):
+        """``last_sync − overlap`` below ``datetime.min`` raises OverflowError; the run falls
+        back to the fixed window like any unreadable state file instead of failing."""
+        _write_state(isolated_state, datetime(1, 1, 1, 0, 30, tzinfo=timezone.utc))
+
+        self._run(dag_module, monkeypatch)
+
+        assert _FakeSync.captured["incremental"] is True
+        assert _FakeSync.captured["since"] is None
 
     def test_state_file_stamped_with_start_time_not_completion(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
