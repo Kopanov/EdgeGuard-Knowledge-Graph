@@ -97,15 +97,32 @@ class TestPostcheckFailsWithoutTheChainMarkers:
         ep = _import_dag_module()
         with patch("subprocess_streaming.run_with_streaming_output", return_value=(0, [])):
             assert ep.run_build_relationships() == {"built": True, "returncode": 0}
+        store: dict = {}
+
+        class _Variable:
+            @staticmethod
+            def get(key, default=None):
+                return store.get(key, default)
+
+            @staticmethod
+            def set(key, value):
+                store[key] = value
+
+        mark_at_write: list = []
         sync = MagicMock()
-        sync.run.return_value = True
+        sync.run.side_effect = lambda **_kw: mark_at_write.append(store.get(ep.AGING_AS_OF_VARIABLE)) or True
         due = datetime(2026, 10, 16, 9, 12, tzinfo=timezone.utc)
-        with patch("run_misp_to_neo4j.MISPToNeo4jSync", return_value=sync) as sync_class:
+        with (
+            patch("run_misp_to_neo4j.MISPToNeo4jSync", return_value=sync) as sync_class,
+            patch.object(ep, "Variable", _Variable),
+        ):
             assert ep.run_baseline_full_sync(
                 ti=self._ti({"baseline_start": {"started": True}}), data_interval_end=due
             ) == {"synced": True}
-        # 2026-10-16: the full sync ages its writes at the time the baseline's enrichment uses.
+        # 2026-10-16: the full sync ages its writes at the time the baseline's enrichment uses, and
+        # raises the aging clock's mark to that time before its first write.
         sync_class.assert_called_once_with(aging_as_of=due)
+        assert mark_at_write == [due.isoformat()]
         with (
             patch("neo4j_client.Neo4jClient", return_value=MagicMock()),
             patch("enrichment_jobs.run_all_enrichment_jobs", return_value={}),

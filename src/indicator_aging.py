@@ -106,8 +106,8 @@ def evaluation_time(value: Any = None) -> datetime:
     """An evaluation time of the rule as an aware UTC datetime.
 
     ``value`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run; Airflow passes
-    pendulum datetimes), an ISO-8601 string, or None for now (the command line). A naive datetime
-    is UTC.
+    pendulum datetimes), raised to the aging clock's mark when that is later (``enrichment_as_of`` in
+    the DAG), an ISO-8601 string, or None for now (the command line). A naive datetime is UTC.
     """
     if value is None:
         return datetime.now(timezone.utc)

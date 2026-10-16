@@ -1556,9 +1556,10 @@ class Neo4jClient:
         """Evaluate the aging rule of this client's Indicator writes at ``value`` (2026-10-16).
 
         The sync of a DAG run passes the run's evaluation time (``data_interval_end``, ``run_after``
-        for a manual run), the time that run's aging job (``enrichment_jobs.decay_ioc_confidence``)
-        uses, so the sync's writes and the job agree on every node in between; None restores the
-        time of each write (the alert path, the command-line writers)."""
+        for a manual run, raised to the aging clock's mark when that is later: ``enrichment_as_of``
+        in the DAG), the time that run's aging job (``enrichment_jobs.decay_ioc_confidence``) uses,
+        so the sync's writes and the job agree on every node in between; None restores the time of
+        each write (the alert path, the command-line writers)."""
         self.aging_as_of = None if value is None else evaluation_time(value).isoformat()
 
     @retry_with_backoff(max_retries=MAX_RETRIES)

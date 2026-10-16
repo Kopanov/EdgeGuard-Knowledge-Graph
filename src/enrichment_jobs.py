@@ -92,8 +92,9 @@ def aging_as_of(value=None) -> datetime:
     ``indicator_aging.evaluation_time``, which the sync's writes use as well).
 
     ``value`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run; Airflow
-    passes pendulum datetimes), an ISO-8601 string, or None for now (the command line). A naive
-    datetime is UTC.
+    passes pendulum datetimes), raised to the aging clock's mark when that is later
+    (``enrichment_as_of`` in the DAG), an ISO-8601 string, or None for now (the command line). A
+    naive datetime is UTC.
     """
     return evaluation_time(value)
 
@@ -150,8 +151,9 @@ def decay_ioc_confidence(neo4j_client, as_of=None) -> Dict:
     ThreatActor, Technique, Tactic, Tool, Sector, Source, Alert) never ages. An Indicator with
     neither time (no EdgeGuard evidence) is counted and left untouched.
 
-    ``as_of`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run), passed
-    through ``run_all_enrichment_jobs``; None means now.
+    ``as_of`` is the DAG run's ``data_interval_end`` (``run_after`` for a manual run), raised to the
+    aging clock's mark when that is later (``enrichment_as_of`` in the DAG), passed through
+    ``run_all_enrichment_jobs``; None means now.
     """
     if not neo4j_client.driver:
         logger.error("decay_ioc_confidence: no Neo4j connection")

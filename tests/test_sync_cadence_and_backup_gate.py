@@ -308,6 +308,57 @@ class TestRunNeo4jSyncWindowAndStamp:
             assert jobs[-1] == expected, due
             assert store[dag_module.AGING_AS_OF_VARIABLE] == expected.isoformat(), "the mark never decreases"
 
+    def test_the_sync_raises_the_aging_mark_before_its_first_write(
+        self, dag_module, isolated_state, fake_sync_module, monkeypatch
+    ):
+        """2026-10-16: the sync of a run raises the aging clock's mark to the run's aging time before it
+        writes (``sync_aging_as_of``). A newer run whose sync aged Indicators at its time and then
+        failed, or whose aging job never ran, leaves that time as the mark, so an older run cleared
+        afterwards evaluates the rule at the newer time rather than moving those Indicators back."""
+        monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
+        monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "record_error", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
+        older = datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)
+        newer = datetime(2026, 10, 16, 3, 0, tzinfo=timezone.utc)
+        store = {dag_module.AGING_AS_OF_VARIABLE: older.isoformat()}
+
+        class _Variable(_StubVariable):
+            @staticmethod
+            def get(key, default=None):
+                return store.get(key, default)
+
+            @staticmethod
+            def set(key, value):
+                store[key] = value
+
+        monkeypatch.setattr(dag_module, "Variable", _Variable)
+        seen_at_write: list = []
+
+        class _FailingSync(_FakeSync):
+            def run(self, incremental=True, since=None, sector=None):
+                seen_at_write.append(store.get(dag_module.AGING_AS_OF_VARIABLE))
+                return False  # the sync wrote part of its window, then failed
+
+        monkeypatch.setattr(fake_sync_module, "MISPToNeo4jSync", _FailingSync)
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=200))
+
+        with pytest.raises(dag_module.AirflowException):
+            dag_module.run_neo4j_sync(data_interval_end=newer)
+
+        assert _FailingSync.init_kwargs == {"aging_as_of": newer}
+        assert seen_at_write == [newer.isoformat()], "the mark is the run's time before the first write"
+        assert dag_module.enrichment_as_of({"data_interval_end": older}) == newer, "an older run cleared later"
+        assert dag_module.enrichment_as_of({"data_interval_end": newer}) == newer, "the run's own job"
+
+        # An older run's sync neither lowers the mark nor ages its writes at its own, earlier time.
+        monkeypatch.setattr(fake_sync_module, "MISPToNeo4jSync", _FakeSync)
+        monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "record_neo4j_node_counts", lambda: True)
+        dag_module.run_neo4j_sync(data_interval_end=older)
+        assert _FakeSync.init_kwargs == {"aging_as_of": newer}
+        assert store[dag_module.AGING_AS_OF_VARIABLE] == newer.isoformat(), "the mark never decreases"
+
     def test_corrupt_state_file_falls_back_to_fixed_window(
         self, dag_module, isolated_state, fake_sync_module, monkeypatch
     ):
