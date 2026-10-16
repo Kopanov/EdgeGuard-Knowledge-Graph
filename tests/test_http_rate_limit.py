@@ -98,3 +98,52 @@ def test_request_403_no_retry_by_default():
         )
     assert r.status_code == 403
     assert m.call_count == 1
+
+
+def test_request_429_without_retry_returns_at_once():
+    """``retry_on_429=False`` (2026-10): for an endpoint whose 429 is a spent daily quota, the 429 is
+    returned without waiting; the default keeps retrying it."""
+    bad = requests.Response()
+    bad.status_code = 429
+    bad.headers = {"Retry-After": "36000"}
+
+    with (
+        patch("collectors.collector_utils.requests.request", return_value=bad) as m,
+        patch("collectors.collector_utils.time.sleep") as sleep,
+    ):
+        r = request_with_rate_limit_retries(
+            "GET",
+            "https://example.test/api",
+            session=None,
+            max_rate_limit_retries=3,
+            fallback_delay_sec=0.01,
+            retry_on_429=False,
+            context="test",
+        )
+    assert r.status_code == 429
+    assert m.call_count == 1
+    sleep.assert_not_called()
+
+
+def test_request_503_still_retried_when_429_retry_is_off():
+    bad = requests.Response()
+    bad.status_code = 503
+    bad.headers = {}
+
+    ok = requests.Response()
+    ok.status_code = 200
+    ok._content = b"{}"
+    ok.headers = {}
+
+    with patch("collectors.collector_utils.requests.request", side_effect=[bad, ok]) as m:
+        r = request_with_rate_limit_retries(
+            "GET",
+            "https://example.test/api",
+            session=None,
+            max_rate_limit_retries=3,
+            fallback_delay_sec=0.01,
+            retry_on_429=False,
+            context="test",
+        )
+    assert r.status_code == 200
+    assert m.call_count == 2

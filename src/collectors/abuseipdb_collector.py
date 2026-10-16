@@ -30,10 +30,10 @@ from collectors.collector_utils import (
     optional_api_key_effective,
     request_with_rate_limit_retries,
     retry_with_backoff,
+    state_dir,
     status_after_misp_push,
 )
 from collectors.misp_writer import MISPWriter
-from collectors.virustotal_budget import _STATE_DIR_ENV, _repo_root
 from config import SSL_VERIFY, detect_zones_from_text, resolve_collection_limit
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,7 @@ def _blacklist_cache_hours() -> float:
 
 def _blacklist_cache_path() -> str:
     """``<EDGEGUARD_STATE_DIR or <repo>/state>/abuseipdb_blacklist_cache.json`` (the ./state bind mount)."""
-    state_dir = os.getenv(_STATE_DIR_ENV) or os.path.join(_repo_root(), "state")
-    return os.path.join(state_dir, _CACHE_FILENAME)
+    return os.path.join(state_dir(), _CACHE_FILENAME)
 
 
 class AbuseIPDBCollector:
@@ -169,6 +168,12 @@ class AbuseIPDBCollector:
         if not self._check_rate_limit():
             return None
 
+        # 2026-10: a 429 from the blacklist endpoint means its daily quota is spent (5 requests per
+        # UTC day on the free plan); waiting up to 3 x 10 minutes for it cannot succeed and only
+        # delays the failure (and, through the ALL_DONE gates, the baseline's full sync). The
+        # blacklist request therefore returns a 429 at once; 502/503/504 are still retried.
+        retry_on_429 = endpoint != self.BLACKLIST_ENDPOINT
+
         # Do NOT wrap in a broad try/except — transient exceptions must
         # propagate to @retry_with_backoff. Only the shape-of-response
         # error branches return None (permanent failures: auth, parse).
@@ -182,6 +187,7 @@ class AbuseIPDBCollector:
             max_rate_limit_retries=3,
             fallback_delay_sec=60.0,
             retry_on_403=False,
+            retry_on_429=retry_on_429,
             context="AbuseIPDB",
         )
 
@@ -196,7 +202,9 @@ class AbuseIPDBCollector:
                 logger.error("AbuseIPDB: Malformed JSON in 200 response")
                 return None
         elif response.status_code == 429:
-            logger.warning("AbuseIPDB: Rate limit exceeded (429) after retries")
+            logger.warning(
+                "AbuseIPDB: rate limit exceeded (429)%s", " after retries" if retry_on_429 else " (daily quota)"
+            )
             return None
         elif response.status_code == 401:
             logger.error("AbuseIPDB: Authentication failed - check API key")
@@ -338,8 +346,10 @@ class AbuseIPDBCollector:
                     "AbuseIPDB: daily blacklist quota exhausted (429) — no cached blacklist available; "
                     "reporting as collector failure"
                 )
-                raise requests.exceptions.HTTPError("AbuseIPDB blacklist daily quota exhausted (429)")
-            if data and "data" in data:
+                raise requests.exceptions.HTTPError("AbuseIPDB daily blacklist quota exhausted (429)")
+            # 2026-10: only a non-empty answer is kept. An empty list reused for the rest of the
+            # day would stop a manual rerun from fetching a fresh one.
+            if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
                 self._save_blacklist_cache(params, data)
 
         results = []
@@ -353,24 +363,45 @@ class AbuseIPDBCollector:
         return results
 
     def _load_blacklist_cache(self, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Return the cached blacklist response for ``params`` if fresh enough, else None."""
+        """Return the cached blacklist response for ``params`` if still reusable, else None.
+
+        Reusable (2026-10): the same request parameters, a non-empty address list, fetched on the
+        current UTC date and at most ``EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`` ago. AbuseIPDB
+        counts its daily quota per UTC day, so an answer from an earlier day is never reused: the
+        new day's quota allows a fresh request (a run at an unusual hour would otherwise make the
+        next day's scheduled run skip its refresh).
+        """
         max_hours = _blacklist_cache_hours()
         if max_hours <= 0:
             return None
         try:
             with open(_blacklist_cache_path(), encoding="utf-8") as fh:
                 cached = json.load(fh)
-            age_hours = (time.time() - float(cached["fetched_at"])) / 3600.0
-            if cached["params"] != params or age_hours > max_hours or "data" not in cached["response"]:
+            response = cached["response"]
+            if cached["params"] != params or not isinstance(response.get("data"), list) or not response["data"]:
                 return None
-        except (OSError, ValueError, KeyError, TypeError):
+            fetched = datetime.fromtimestamp(float(cached["fetched_at"]), timezone.utc)
+        except (OSError, OverflowError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+        now = datetime.now(timezone.utc)
+        age_hours = (now - fetched).total_seconds() / 3600.0
+        if fetched.date() != now.date() or not 0 <= age_hours <= max_hours:
+            logger.info(
+                "AbuseIPDB: the cached blacklist was fetched %s (%.1fh ago), not on the current UTC quota day "
+                "within %.1fh — requesting a fresh one",
+                fetched.isoformat(timespec="seconds"),
+                age_hours,
+                max_hours,
+            )
             return None
         logger.info(
-            "AbuseIPDB: using cached blacklist (%.1fh old, max %.1fh) — skipping API call to preserve daily quota",
+            "AbuseIPDB: reusing the blacklist fetched %s (%.1fh old, same UTC quota day, max %.1fh) — "
+            "no request sent, the daily blacklist quota is preserved",
+            fetched.isoformat(timespec="seconds"),
             age_hours,
             max_hours,
         )
-        return cached["response"]
+        return response
 
     def _save_blacklist_cache(self, params: Dict[str, Any], response: Dict[str, Any]) -> None:
         """Atomically persist a successful blacklist response; never fails collection."""
@@ -574,7 +605,7 @@ class AbuseIPDBCollector:
             results = self.get_blacklist(confidence_minimum=confidence_minimum, limit=limit, baseline=baseline)
         except requests.exceptions.RequestException as exc:
             logger.error(
-                "AbuseIPDB: network failure after retries (%s: %s) — reporting as collector failure",
+                "AbuseIPDB: blacklist request failed (%s: %s) — reporting as collector failure",
                 type(exc).__name__,
                 exc,
             )
