@@ -577,6 +577,17 @@ def _misp_min_success_rate() -> float:
     return val
 
 
+# 2026-10: what a failure counted by ``MISPWriter.push_items`` can be. The items no MISP attribute
+# could be built from count as failed when they are all, or at least half
+# (``misp_writer.CONVERT_FAILED_MIN_SHARE``), of a source's items in the push, although MISP never
+# saw them, so an error that blamed MISP alone would point the operator away from the writer's
+# ``[CONVERT]`` line. Fewer such items are reported by that line and are not failures.
+MISP_PUSH_FAILURE_CAUSES = (
+    "failures are attributes MISP did not store and, for a source all or at least half of whose items "
+    "no MISP attribute could be built from, those items, logged by the writer as [CONVERT]"
+)
+
+
 def status_after_misp_push(
     source: str,
     num_items: int,
@@ -594,6 +605,12 @@ def status_after_misp_push(
 
     Always emits one grep-able ``COLLECTOR_SUMMARY`` log line per run —
     the at-a-glance operator surface Issue #62 asked for.
+
+    2026-10: ``push_items`` counts the items no MISP attribute could be built from as failed when
+    they are all, or at least half, of a source's items in the push (a payload that stopped
+    converting), so a failure is not necessarily one MISP reported; the error text names both
+    causes, so an operator also looks for the writer's ``[CONVERT]`` line. Fewer such items are
+    only reported by that line: a few bad records neither fail the run nor hold a cursor.
     """
     if num_items == 0:
         return make_status(source, True, count=0, failed=0)
@@ -612,15 +629,18 @@ def status_after_misp_push(
     ok = push_success_count > 0 or (push_success_count == 0 and push_failed_count == 0)
     err: Optional[str] = None
     if not ok and push_failed_count:
-        err = f"MISP push failed for all or part of batch ({push_failed_count} failures, 0 successes)"
+        err = (
+            f"MISP push failed for all or part of batch ({push_failed_count} failures, 0 successes; "
+            f"{MISP_PUSH_FAILURE_CAUSES})"
+        )
     elif ok and attempted > 0 and min_rate > 0.0 and rate < min_rate:
         # Issue #62 gate: partial silent loss. rate == min_rate passes.
         ok = False
         err = (
             f"MISP push success rate {rate:.3f} below EDGEGUARD_MISP_MIN_SUCCESS_RATE="
             f"{min_rate:.2f} ({push_success_count} pushed, {push_failed_count} failed, "
-            f"{attempted} attempted) — partial silent loss; see the COLLECTOR_SUMMARY "
-            f"line above and Issue #62"
+            f"{attempted} attempted; {MISP_PUSH_FAILURE_CAUSES}) — partial silent loss; see the "
+            f"COLLECTOR_SUMMARY line above and Issue #62"
         )
         logger.error(f"{source}: {err}")
     return make_status(source, ok, count=num_items, failed=push_failed_count, error=err)
