@@ -1,15 +1,14 @@
 # EdgeGuard Timestamp Semantic Model
 
-**Status:** Canonical (PR-M2, 2026-04). All timestamp handling in the
-pipeline conforms to this document. If a code change conflicts with
+**Status:** Canonical. All timestamp handling in the pipeline conforms
+to this document. If a code change conflicts with
 this spec, fix the code or update the spec — never let them drift.
 
 This document is the single source of truth for **what each timestamp
 field means**, **where each one lives**, and **how each one maps into
-STIX 2.1 export**. It exists because EdgeGuard has fixed timestamp bugs
-in three previous PRs and the recurring root cause was conceptual
-confusion between *"when did the source observe this?"* and *"when did
-EdgeGuard ingest this?"*.
+STIX 2.1 export**. It exists because the recurring cause of timestamp
+errors is confusion between *"when did the source observe this?"* and
+*"when did EdgeGuard ingest this?"*.
 
 ---
 
@@ -81,8 +80,7 @@ The single chokepoint is `coerce_iso()` in `src/source_truthful_timestamps.py`:
 - Returns: `Optional[str]` — a tz-aware ISO-8601 string (naive input gets
   `+00:00`; an aware input keeps its offset) or `None`
 - Naive datetime → assumes UTC, returns aware ISO
-- Naive ISO string → injects `+00:00` offset (PR-M2 fix; was returning
-  string unchanged, causing Finding 1's TZ shift)
+- Naive ISO string → injects `+00:00` offset
 - Unparseable input → `None` (refuses to export garbage)
 - Sentinel rejection: integer epochs 0 and negative (and overflow) are
   rejected; strings have no year floor (a source's pre-1970 claim passes)
@@ -103,19 +101,19 @@ them to EdgeGuard's canonical `first_seen` / `last_seen` keys (concepts
 
 | Source | Concept 1 (`first_seen`) | Concept 2 (`last_seen`) | Notes |
 |--------|--------------------------|-------------------------|-------|
-| **NVD CVE 2.0** | `cve.published` | `cve.lastModified` | NIST publication timestamps. Naive ISO (no `+00:00`) — must pass through `coerce_iso` to add UTC offset |
-| **OTX pulse** | `pulse.created` | `pulse.modified` | Aware ISO. Indicator-level `indicator.created` overrides pulse-level when present, and `indicator.modified` overrides `pulse.modified` the same way. Not on the reliable first-seen allowlist (`reliable_first_seen=False`): the sync drops both claims, so OTX `SOURCED_FROM` edges carry no `source_reported_*` (pulse dates are publication dates). The attribute's `last_seen` still dates the indicator's aging (`last_reported_at`) |
+| **NVD CVE 2.0** | `cve.published` | `cve.lastModified` | NIST publication timestamps. Naive ISO (no `+00:00`) — `nvd_collector.py` passes both through `coerce_iso` before emitting, which adds the UTC offset |
+| **OTX pulse** | `pulse.created` | `pulse.modified` | Aware ISO. Indicator-level `indicator.created` overrides pulse-level when present, and `indicator.modified` overrides `pulse.modified` the same way. **Missing → omit** (no `now()` fallback). Not on the reliable first-seen allowlist (`reliable_first_seen=False`): the sync drops both claims, so OTX `SOURCED_FROM` edges carry no `source_reported_*` (pulse dates are publication dates). The attribute's `last_seen` still dates the indicator's aging (`last_reported_at`) |
 | **MITRE ATT&CK** | STIX object's `created` | STIX object's `modified` | Aware ISO; canonical |
 | **CISA KEV** | `dateAdded` | (not exposed; omit) | Date-only string; `coerce_iso` normalizes to `T00:00:00+00:00` |
 | **CISA ICS advisory** | `initial_release_date` | `current_release_date` | CSAF aware ISO; earliest / latest over the advisories naming the CVE |
 | **VirusTotal** | `attributes.first_submission_date` | `attributes.last_submission_date` | Unix epoch int; `coerce_iso` converts. **Missing → omit** (do NOT fall back to `now()`) |
-| **ThreatFox** | `first_seen` | `last_seen` | `YYYY-MM-DD HH:MM:SS UTC`; `coerce_iso` strips the ` UTC` suffix (before 2026-10-13 the suffix made the value unparseable and both claims were dropped) |
+| **ThreatFox** | `first_seen` | `last_seen` | `YYYY-MM-DD HH:MM:SS UTC`; `coerce_iso` strips the ` UTC` suffix |
 | **URLhaus** | `dateadded` | `last_online` | Date or aware ISO |
 | **Feodo Tracker** | `first_seen_utc` (earliest row of the address) | `last_online` (date; the first-seen time when both fall on the same day) | Naive UTC string / date; `coerce_iso` normalizes |
 | **SSL Blacklist** | `Listingdate` | — | Naive UTC string; `coerce_iso` normalizes |
 | **MalwareBazaar** | `first_seen_utc` | — | Emitted as aware UTC ISO by the collector |
 | **AbuseIPDB blacklist** | (endpoint doesn't expose; omit) | `lastReportedAt` | **Reference pattern** for honest NULL |
-| **MISP collector** | `event.date` | (varies) | Re-syncs from another MISP. **Missing → omit** (PR-M2 fixes 10 NOW-leaks at lines 248, 282, 302, 346, 373, 396, 422, 443, 465, 484) |
+| **MISP collector** | `event.date` | (varies) | Re-syncs from another MISP. **Missing → omit** at every emit site |
 
 ### Layer 1 — Item dict (collector → MISP writer)
 
@@ -134,14 +132,13 @@ Every collector emits items with these canonical keys:
 ```
 
 Some collectors (CISA KEV, AbuseIPDB, ThreatFox / URLhaus, Feodo Tracker / SSL Blacklist,
-VirusTotal enrichment) still set a wall-clock `last_updated` on their items; `MISPWriter`
+VirusTotal enrichment) set a wall-clock `last_updated` on their items; `MISPWriter`
 does not send it, and the Neo4j writes set `n.last_updated = datetime()` whatever an item
 carries. New collectors must not add it.
 
-PR-M2 deletes `"last_updated": _coerce_to_iso(attr.get("timestamp"))`
-from `parse_attribute` (Finding 11). It was a dead key — `merge_indicators_batch`
-sets `n.last_updated = datetime()` server-side and never reads the
-collector-supplied value. Latent trap.
+`parse_attribute` (`run_misp_to_neo4j.py`) puts no `last_updated` key into
+the items it builds from MISP attributes: `merge_indicators_batch` sets
+`n.last_updated = datetime()` server-side and never reads a supplied value.
 
 ### Layer 2 — MISP attribute
 
@@ -150,7 +147,7 @@ populates the MISP 2.4.120+ native fields:
 
 - `Attribute.first_seen` ← item's `first_seen` (passed through `coerce_iso`)
 - `Attribute.last_seen`  ← item's `last_seen` (passed through `coerce_iso`)
-- **Re-reported indicators (2026-10):** when a collector run reports an indicator MISP already
+- **Re-reported indicators:** when a collector run reports an indicator MISP already
   holds for its source and MISP last wrote the stored copy (`Attribute.timestamp`) more than
   `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` ago (default 30), `MISPWriter.push_items` edits the copy
   so that MISP writes a new `Attribute.timestamp`, which brings it into the next incremental sync.
@@ -158,21 +155,20 @@ populates the MISP 2.4.120+ native fields:
   than the stored one, otherwise the stored value unchanged. Concept 2 therefore holds only dates
   the source sent: a refresh never writes the time of a run into it (Invariant 1 holds for
   edited attributes too), and Concept 1 does not move. See
-  [COLLECTORS.md](COLLECTORS.md#re-reported-indicators-2026-10).
+  [COLLECTORS.md](COLLECTORS.md#re-reported-indicators).
 
 **These are the source-truthful ones.** Do NOT confuse with:
 
 - `Attribute.timestamp` — MISP's internal write-time epoch int. NOT a
-  source claim. Used by MISP for sync/dedup. PR-M2 fixes Finding 3
-  where the manual STIX fallback was treating this as ISO.
+  source claim. Used by MISP for sync/dedup. It is an epoch, not ISO:
+  the manual STIX fallback passes it through `coerce_iso` before use.
 
 ### Layer 3 — Neo4j: nodes vs. SOURCED_FROM edges
 
 EdgeGuard's source-truthful subsystem stores per-source claims on the
 **`SOURCED_FROM` edge between the indicator node and its `Source`
-node**, not on the node itself. This is the architectural insight from
-PR S5 (2026-04): a node has multiple sources; each source's claim lives
-on its own edge.
+node**, not on the node itself, because a node has multiple sources and
+each source's claim lives on its own edge.
 
 #### Node properties (concepts 3 and 4 — EdgeGuard-internal)
 
@@ -181,7 +177,7 @@ on its own edge.
 | `n.first_imported_at` | 3 | Cypher `ON CREATE SET ... = datetime()` | Once, never overwritten |
 | `n.last_updated`      | 4 | Cypher `SET ... = datetime()` on every MERGE | Every sync |
 
-**Indicator aging times (2026-10-16, `src/indicator_aging.py`).** An Indicator also keeps, forward
+**Indicator aging times (`src/indicator_aging.py`).** An Indicator also keeps, forward
 only, the latest report of any source: `n.last_reported_at` = `min(T, coalesce(L, T))`, where T is
 the MISP attribute `timestamp` (when MISP recorded it, UTC) and L the source's own last-report date
 (the attribute's `last_seen`, concept 2, capped at T), with `n.last_reported_source`,
@@ -191,7 +187,7 @@ the MISP attribute `timestamp` (when MISP recorded it, UTC) and L the source's o
 `last_recorded_at`, `last_reported_at`, `last_reported_source` and `last_reported_ref` (not the
 basis kind). The indicator ages from `coalesce(n.last_reported_at, n.first_imported_at)`;
 `n.last_updated` (concept 4) is read neither for aging nor for ordering, so a re-sync of the same
-data no longer makes an indicator look new. `n.aging_since` is when the node's aging state began.
+data does not make an indicator look new. `n.aging_since` is when the node's aging state began.
 `n.aging_evaluated_at` is the time at which the node's aging values were last written: by a write,
 or by a job run that changed them; a job run that changes nothing leaves it unchanged. Every
 evaluation, a write or the job, applies the rule at the database's current time (`datetime()`, a
@@ -244,14 +240,14 @@ mapping.
 | STIX field | Required | Maps to | Notes |
 |------------|----------|---------|-------|
 | `created`              | ✅ | Concept 3 (`n.first_imported_at`) via `_producer_created_modified` | When the SDO was created in our system |
-| `modified`             | ✅ | 2026-10-16: the latest of `created`, `n.last_recorded_at` and `n.aging_since` (`_indicator_created_modified`; it read concept 4, `n.last_updated`, before) | When a source last reported it or its aging state last changed; never before `created` |
+| `modified`             | ✅ | The latest of `created`, `n.last_recorded_at` and `n.aging_since` (`_indicator_created_modified`); concept 4 (`n.last_updated`) is not read | When a source last reported it or its aging state last changed; never before `created` |
 | `valid_from`           | ✅ | Concept 1 (`r.source_reported_first_at`, MIN across edges) `??` Concept 3 (`n.first_imported_at`) `??` `now()` | See "valid_from fallback chain" below |
 | `valid_until`          | ⏵ | (omit unless we have a real expiry) | Don't synthesize |
 | `x_edgeguard_first_seen_at_source` | custom | Concept 1 (verbatim, MIN across edges) | Explicit preservation; absent if no source claim |
 | `x_edgeguard_last_seen_at_source`  | custom | Concept 2 (verbatim, MAX across edges) | Explicit preservation; absent if no source claim |
 | `x_edgeguard_first_imported_at`    | custom | Concept 3 | Explicit preservation |
 | `x_edgeguard_last_updated`         | custom | Concept 4 | Explicit preservation |
-| `x_edgeguard_first_seen_inferred`  | custom | `true` if `valid_from` came from the fallback chain (concept 3 or `now()`); absent / `false` otherwise | **PR-M2 addition.** Lets honest consumers filter for source-truthful evidence only |
+| `x_edgeguard_first_seen_inferred`  | custom | `true` if `valid_from` came from the fallback chain (concept 3 or `now()`); absent / `false` otherwise | Lets consumers filter for source-truthful evidence only |
 
 #### Vulnerability SDO (STIX 2.1 §3.4)
 
@@ -269,7 +265,7 @@ timeline is carried in extension properties:
 | `x_edgeguard_first_seen_at_source` | Concept 1, MIN across the CVE's `SOURCED_FROM` edges | Earliest source claim (NVD `published`, KEV `dateAdded`, ICS `initial_release_date`) |
 | `x_edgeguard_last_seen_at_source`  | Concept 2, MAX across the edges | Latest source claim |
 
-Only Indicator SDOs carry `x_edgeguard_first_seen_inferred`.
+Only Indicator SDOs carry `x_edgeguard_first_seen_inferred`; a Vulnerability SDO has no `valid_from`.
 
 #### Report SDO (manual STIX fallback)
 
@@ -285,14 +281,15 @@ Indicator/Vulnerability SDOs that the Report references via `object_refs`.
 | `published`   | `now()` | When we published the Report |
 | `object_refs` | The contained SDO IDs | Each refd SDO carries source-truthful timestamps internally |
 
-**PR-M2 fixes** (Findings 2, 3, 10): the previous manual fallback used
-`Event.date` (today) as Report `created`/`modified` AND used the raw
-MISP epoch int as Indicator `valid_from`. After PR-M2:
-- Report SDO `created`/`modified` stays as `now()` (correct)
+In the manual fallback:
+- Report SDO `created` / `modified` / `published` are `now()`; `Event.date`
+  (a date-only string, not a valid STIX timestamp) is not used
 - Each contained Indicator SDO gets the same `valid_from` chain as the
-  primary `_indicator_sdo` path (concept 1 → 3 → now, with inferred flag)
+  primary `_indicator_sdo` path (concept 1 → 3 → now, with the inferred
+  flag); `_attribute_to_stix21` passes the MISP `attribute.timestamp`
+  (a Unix epoch int) through `coerce_iso` before using it as `valid_from`
 
-### `valid_from` fallback chain — the rule for design choice (c)
+### `valid_from` fallback chain
 
 ```
 valid_from = source_reported_first_at IF available
@@ -325,81 +322,26 @@ audiences are served.
 
 ---
 
-## What changed in PR-M2
+## Windows and cursors
 
-The semantic model existed implicitly before; PR-M2 makes it explicit
-and closes the bugs that violated it:
+The same rules apply where a time window or a resume cursor is computed:
 
-### Producer-side (Layer 0 → Layer 1)
-
-- **F1.5** — `nvd_collector.py` now passes raw `published` / `lastModified`
-  through `coerce_iso` before emitting (defense in depth — was relying
-  on `coerce_iso` downstream)
-- **F4** — `vt_collector.py` no longer falls back to `datetime.now()` when
-  `first_submission_date` / `last_submission_date` is missing — omits
-  the field (honest NULL)
-- **F5** — `otx_collector.py` no longer falls back to `datetime.now()` when
-  `pulse.created` / `pulse.modified` is missing — omits the field
-- **misp_collector.py 10 NOW-leaks** (Agent 4 finding) — same
-  honest-NULL conversion at lines 248, 282, 302, 346, 373, 396, 422,
-  443, 465, 484
-- **F11** — `parse_attribute` no longer stuffs the dead `last_updated`
-  key into items (7 sites in `run_misp_to_neo4j.py`)
-
-### Pipeline (Layer 1 → Layer 2)
-
-- **F1** — `coerce_iso` full-string branch now injects `+00:00` when the
-  parsed datetime is naive (mirrors `_stix_ts` line 145 pattern). Closes
-  the Neo4j-parses-as-server-local TZ shift on every NVD ingest
-
-### Storage (Layer 3)
-
-No schema changes. Existing edge MIN/MAX CASE Cypher is correct under
-Invariant 2. Pre-existing data with naive timestamps stays as-is until
-re-ingested (see "Backwards compatibility" below).
-
-### Export (Layer 4)
-
-- **F2** — Manual STIX fallback now uses the same `valid_from` chain as
-  `_indicator_sdo`. Each contained Indicator SDO carries source-truthful
-  `valid_from` (or inferred-flag fallback)
-- **F3** — `_attribute_to_stix21` runs MISP `attribute.timestamp` (Unix
-  epoch int) through `coerce_iso` before using it as STIX `valid_from`.
-  No more raw-epoch-as-ISO leaks
-- **F10** — `event_date` wrapped through `_stix_ts(coerce_iso(...))`
-  for STIX validator compliance (largely auto-resolved by F2)
-- **NEW** — `x_edgeguard_first_seen_inferred = true` set on Indicator
-  SDOs whose `valid_from` came from the fallback chain (design choice (c));
-  a Vulnerability SDO has no `valid_from` and does not carry the flag
-
-### Cleanup
-
-- **F6** — `SECTOR_TIME_RANGES` `months * 30` → `int(months * 30.437)`.
-  Closes 10-day shoulder loss at the oldest end of a 24-month window
-- **F7** — `_event_covers_since` boundary widened by 1 day. Closes
-  3-hour-per-incremental-run cumulative loss
-- **F9** — OTX checkpoint resume adds `tzinfo=timezone.utc` guard after
-  `fromisoformat` to handle any naive checkpoint values from older
-  versions
-
----
-
-## Backwards compatibility
-
-The 730-day baseline has likely produced data with corrupted timestamps
-under the pre-PR-M2 bugs. Remediation strategy by bug class:
-
-| Bug | Remediable for existing data? | Action |
-|-----|------------------------------|--------|
-| F1 (NVD TZ shift)   | Yes — Cypher `+ duration({hours: server_offset})` if operator knows their offset | **Deferred to follow-up PR** (PR-M2-followup migration script). PR-M2 stops the bleeding |
-| F2, F3, F10 (STIX corruption) | Yes — STIX is a downstream view; re-export after PR-M2 produces correct bundles | **No action required**; next STIX export is correct |
-| F4, F5 (wall-clock NOW leak) | **No** — ground-truth was never stored; can't recover | Operator can `fresh-baseline` after PR-M2 lands for a clean slate, OR accept tainted records age out via decay (typical 90-365 day windows) |
-| F6, F7 (window/boundary)     | Yes — re-running baseline merges via MIN/MAX CASE without harm | Operator may re-run baseline if shoulder loss matters |
-| F11 (dead key)               | No-op — the dead key was never read | No action required |
-
-**Recommended operator action** after PR-M2 merges: run `edgeguard fresh-baseline`
-to repopulate the graph with clean timestamps. Existing tainted records
-will be replaced atomically; downtime is one baseline cycle.
+- **Sector window.** `get_sector_cutoff_date` (`src/config.py`; the start
+  date of `run_misp_to_neo4j --sector`) counts `int(months * 30.437)`
+  days, the average Gregorian month, so a 24-month window covers about
+  731 days and loses no shoulder at its oldest end.
+- **Incremental sync boundary.** When the MISP event index gives only the
+  date-only `Event.date` (00:00:00 UTC), `_event_covers_since`
+  (`src/run_misp_to_neo4j.py`) keeps an event whose day is on or after
+  the day before `since` (`ev_day.date() >= (since - 1 day).date()`).
+  `since` has a time of day and `Event.date` has none, so without the
+  margin events at the window floor can be lost on every incremental run;
+  the margin errs on the side of inclusion, and the few duplicates are
+  resolved by MERGE.
+- **OTX resume cursor.** The OTX checkpoint value
+  `otx_last_pulse_modified` is parsed with `fromisoformat` and given
+  `tzinfo=timezone.utc` when it is naive, so the resume cursor is always
+  tz-aware (Invariant 2).
 
 ---
 
@@ -443,14 +385,13 @@ Any change to `coerce_iso`, `_stix_ts`, or `_clamp_future_to_now` must:
 1. Preserve the contract documented above
 2. Pass the property tests in `tests/test_pr_m2_timestamp_semantic_model.py`
 3. Update this document if the contract changes
-4. Add a regression test pinning the old behavior is gone
+4. Add a regression test for the changed behaviour
 
 ---
 
 ## Test coverage
 
-`tests/test_pr_m2_timestamp_semantic_model.py` (introduced in PR-M2)
-exercises:
+`tests/test_pr_m2_timestamp_semantic_model.py` exercises:
 
 - **Helper unit tests** — `coerce_iso` accepts/rejects every input shape;
   always returns NULL or a tz-aware ISO-8601 string
@@ -458,7 +399,7 @@ exercises:
   pinned: forbidden `datetime.now()` fallbacks, required `coerce_iso`
   wrapping
 - **Pipeline integration** — multi-source MIN/MAX CASE with mixed-TZ
-  inputs (regression for the corruption Agent 2 identified)
+  inputs
 - **End-to-end CVE-2013 fixture** — feed `published="2013-05-29T00:00:00Z"`
   through the full pipeline; assert STIX Indicator's `valid_from == "2013-..."`,
   `created == today`, `x_edgeguard_first_seen_at_source == "2013-..."`,
@@ -476,9 +417,39 @@ exercises:
 - §3.2 Indicator SDO: https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html#_muftrcpnf89v
 - §3.4 Vulnerability SDO
 - §3.6 Report SDO
-- Flow audit: [`docs/flow_audits/04_timestamps_dates.md`](flow_audits/04_timestamps_dates.md)
 - Source registry: `src/source_registry.py`
 - Knowledge graph schema: [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md)
 - ResilMesh interop: [`docs/RESILMESH_INTEROPERABILITY.md`](RESILMESH_INTEROPERABILITY.md)
 
-_Last updated: 2026-10-17 — corrections against the code: a Vulnerability SDO's `created` / `modified` are EdgeGuard's `first_imported_at` / `last_updated` (NVD's dates are `x_edgeguard_published` / `x_edgeguard_last_modified`; only Indicator SDOs carry `x_edgeguard_first_seen_inferred`); OTX claims are dropped by the reliable first-seen allowlist; CISA ICS row added; `coerce_iso` keeps an aware input's offset and has no year floor for strings; an Indicator's `SOURCED_FROM` edge keeps the report values, not the basis kind; the four canonical timestamps plus the aging times; collectors that still set `last_updated`; a reliable source is marked by `reliable_first_seen=True` in `src/source_registry.py`. Prior: 2026-10-16 — `n.aging_evaluated_at`, the time at which an indicator's aging values were last written (a job run that changes nothing leaves it unchanged); every evaluation applies the rule at the database's current time, lifted to it when it is later. Same day: the kind of an indicator's latest report is recorded in `n.last_reported_basis`; the aging rule derives `n.aging_basis` from it. Same day: indicator aging times: `last_reported_at` (`min(T, coalesce(L, T))`, the source's `last_seen` capped at the MISP timestamp), `last_reported_source`, `last_reported_ref`, `last_recorded_at` and `aging_basis` on the Indicator and its `SOURCED_FROM` edge, forward only; the indicator ages from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX indicator's `modified` is the latest of `created`, `last_recorded_at` and `aging_since`._
+---
+
+## Appendix: data written by earlier versions
+
+The main text assumes a fresh baseline. A graph or MISP kept across an
+upgrade can hold timestamps written before the rules above; the remedy
+for all of them is a wipe and a fresh baseline (`edgeguard fresh-baseline`);
+the downtime is one baseline cycle.
+
+| Data written before | What it can hold | Repair without a fresh baseline |
+|---|---|---|
+| The `+00:00` injection in `coerce_iso` (2026-04) | NVD timestamps parsed by Neo4j as server-local time, shifted by the server's UTC offset on a non-UTC server | Cypher `+ duration({hours: <server offset>})` when the offset is known |
+| The honest-NULL rule (2026-04) | Wall-clock run times stored as source first / last seen (VirusTotal, OTX, MISP collector) | None: the source value was never stored; such records age out |
+| The 30.437-day month and the one-day sync margin (2026-04) | Events missing at the oldest end of a window or at an incremental boundary | Re-run the baseline; the MIN/MAX CASE merges without harm |
+| The ` UTC` suffix handling for ThreatFox (2026-10-13) | ThreatFox `SOURCED_FROM` edges without `source_reported_*` (the values were unparseable) | None other than a fresh baseline |
+
+STIX bundles need no repair: they are a view computed at export time.
+
+---
+
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Main text describes current behaviour only; the change notes of the timestamp model and its backwards-compatibility guide moved to History and the appendix.
+- 2026-10-17 — Corrected against the code: a Vulnerability SDO's `created` / `modified` are `first_imported_at` / `last_updated` (NVD's dates are `x_edgeguard_published` / `x_edgeguard_last_modified`; only Indicator SDOs carry the inferred flag); OTX claims dropped by the reliable first-seen allowlist; CISA ICS row; `coerce_iso` keeps an aware input's offset and has no year floor for strings; an Indicator's `SOURCED_FROM` edge keeps the report values, not the basis kind; collectors that set `last_updated`; reliable sources marked by `reliable_first_seen=True` in `src/source_registry.py`.
+- 2026-10-16 — Indicator aging times (`last_reported_at` with source, ref and basis, `last_recorded_at`, `aging_since`, `aging_evaluated_at`) on the Indicator and its `SOURCED_FROM` edge, forward only; aging from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX Indicator's `modified` changed from `last_updated` to the latest of `created`, `last_recorded_at` and `aging_since`.
+- 2026-10-13 — `coerce_iso` strips the ThreatFox ` UTC` suffix; before, both ThreatFox claims were unparseable and dropped.
+- 2026-10 — Re-reported indicators: `MISPWriter` edits stored copies that MISP last wrote more than `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` ago, so that they reach the next incremental sync.
+- 2026-04 — Timestamp semantic model made canonical: `coerce_iso` injects `+00:00` into naive ISO strings (NVD times had been parsed as server-local); VirusTotal, OTX and the MISP collector (10 sites) stopped writing wall-clock time as source dates; NVD passes its dates through `coerce_iso` before emitting; the unread `last_updated` key removed from `parse_attribute`.
+- 2026-04 — Export and windows: manual STIX fallback uses the `valid_from` chain and converts the MISP epoch through `coerce_iso`; `x_edgeguard_first_seen_inferred` added; sector window counts 30.437-day months; incremental boundary widened by one day; OTX resume cursor made tz-aware.
+- 2026-04 — Per-source claims stored on `SOURCED_FROM` edges instead of the node (source-truthful timestamps).
