@@ -4,7 +4,7 @@ Interactive browser-based visualization for the EdgeGuard knowledge graph. Built
 
 **File:** [`docs/visualization.html`](visualization.html)
 **API endpoint:** `GET /graph/explore`
-**Last updated:** 2026-10-15 — Quick Start: when the monitoring stack's Grafana holds port 3000, serve `docs/` on port 3001 and append `http://localhost:3001` to `EDGEGUARD_CORS_ORIGINS`; `limit` caps the rows each view reads, not the nodes; the CVE view's Cypher comment says which label carries the score and KEV fields (`:CVE`). Same day: the default view (`attacks`) matches `(Indicator)-[:INDICATES]->(Malware)`, the direction every writer creates (it matched the reverse direction and a `DROPS` type that nothing writes, and was always empty); edges point the way the graph relationship does and are listed once; Quick Start serves the page from an origin the default CORS allowlist accepts (opening the file directly is refused) and says how to add a presenter's origin with `EDGEGUARD_CORS_ORIGINS`; edge style table matches the page. Prior: 2026-04-26 — PR-N33 docs audit: clarified that the "Malware (default)" view's API enum value is `attacks` (was confusing — heading said "Malware" but the API parameter says `attacks`). Prior: 2026-03-27.
+**Last updated:** 2026-10-17 — the CVE view's `description` (first 200 characters) and `description_source` (of a CVE's twins, the text the source ranking keeps); the Cypher pattern comments use `//` (`--` is not a Cypher comment). Prior: 2026-10-15 — Quick Start: when the monitoring stack's Grafana holds port 3000, serve `docs/` on port 3001 and append `http://localhost:3001` to `EDGEGUARD_CORS_ORIGINS`; `limit` caps the rows each view reads, not the nodes; the CVE view's Cypher comment says which label carries the score and KEV fields (`:CVE`). Same day: the default view (`attacks`) matches `(Indicator)-[:INDICATES]->(Malware)`, the direction every writer creates (it matched the reverse direction and a `DROPS` type that nothing writes, and was always empty); edges point the way the graph relationship does and are listed once; Quick Start serves the page from an origin the default CORS allowlist accepts (opening the file directly is refused) and says how to add a presenter's origin with `EDGEGUARD_CORS_ORIGINS`; edge style table matches the page. Prior: 2026-04-26 — PR-N33 docs audit: clarified that the "Malware (default)" view's API enum value is `attacks` (was confusing — heading said "Malware" but the API parameter says `attacks`). Prior: 2026-03-27.
 
 ---
 
@@ -91,11 +91,11 @@ the malware families and sector triangles the row below.
 **Cypher pattern:**
 ```cypher
 MATCH (i:Indicator)-[:INDICATES]->(m:Malware)
--- Both ends EdgeGuard-created or enriched; zone filter on the indicator.
--- 2026-10: every writer (build_relationships, the MISP → Neo4j sync, the
--- alert path) creates (Indicator)-[:INDICATES]->(Malware). The view
--- matched (Malware)-[INDICATES|DROPS]->(Indicator) before — a direction
--- and a DROPS type that nothing writes — and was always empty.
+// Both ends EdgeGuard-created or enriched; zone filter on the indicator.
+// 2026-10: every writer (build_relationships, the MISP → Neo4j sync, the
+// alert path) creates (Indicator)-[:INDICATES]->(Malware). The view
+// matched (Malware)-[INDICATES|DROPS]->(Indicator) before — a direction
+// and a DROPS type that nothing writes — and was always empty.
 ```
 
 ### Actors
@@ -110,9 +110,9 @@ MATCH (i:Indicator)-[:INDICATES]->(m:Malware)
 ```cypher
 MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
 OPTIONAL MATCH (t)-[:IN_TACTIC]->(tac:Tactic)
--- EMPLOYS_TECHNIQUE is the actor→technique edge since the 2026-04 split
--- of the generic USES relationship. For malware/tool capability instead,
--- use IMPLEMENTS_TECHNIQUE.
+// EMPLOYS_TECHNIQUE is the actor→technique edge since the 2026-04 split
+// of the generic USES relationship. For malware/tool capability instead,
+// use IMPLEMENTS_TECHNIQUE.
 ```
 
 ### Indicators
@@ -131,7 +131,7 @@ ORDER BY n.confidence_score DESC
 
 ### CVEs (Vulnerability Landscape)
 
-**What it shows:** Vulnerabilities sized by CVSS score. CISA KEV entries are highlighted with a red glow and border.
+**What it shows:** Vulnerabilities sized by CVSS score. CISA KEV entries are highlighted with a red glow and border. Each CVE node carries `description` (first 200 characters) and `description_source` (2026-10-16): of a CVE's `:CVE` and `:Vulnerability` twins, the text the source ranking keeps (NVD > CISA KEV > CISA ICS > other; at an equal rank, the twin that names a source).
 
 **Layout:** Force-directed — critical/KEV CVEs appear largest.
 
@@ -141,10 +141,10 @@ ORDER BY n.confidence_score DESC
 ```cypher
 MATCH (n)
 WHERE (n:Vulnerability OR n:CVE) AND n.cve_id IS NOT NULL
--- The MISP → Neo4j sync writes :CVE nodes, which carry the score, the
--- severity and the CISA KEV fields (merge_cve); :Vulnerability nodes come
--- only from the per-item fallback and the alert path. Both labels are read
--- and grouped by cve_id, so a CVE / Vulnerability pair is one node.
+// The MISP → Neo4j sync writes :CVE nodes, which carry the score, the
+// severity and the CISA KEV fields (merge_cve); :Vulnerability nodes come
+// only from the per-item fallback and the alert path. Both labels are read
+// and grouped by cve_id, so a CVE / Vulnerability pair is one node.
 ```
 
 ---
