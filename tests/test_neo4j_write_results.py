@@ -278,6 +278,9 @@ class TestOtherWrites:
         assert results["errors"] == 1
         failed = [r.getMessage() for r in caplog.records if "FAILED" in r.getMessage()]
         assert len(failed) == 1 and "batch 1/2 FAILED" in failed[0], "the first batch's statement failed"
+        # The fake server lists every statement whose result it delivered, whether its transaction
+        # was later committed or rolled back: this shows that both batches' merge statements ran.
+        # The rollback of the first batch is covered by the transaction tests of the merge itself.
         assert count(server.committed, "UNWIND $groups AS g") == 2, "the second batch still runs"
 
 
