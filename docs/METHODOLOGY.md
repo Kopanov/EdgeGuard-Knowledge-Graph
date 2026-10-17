@@ -18,23 +18,27 @@
 | VirusTotal | REST API | Scheduled (`vt_collector`) | IOCs / enrichment |
 | AbuseIPDB | REST API | Scheduled | IP reputation |
 | URLhaus, ThreatFox, Feodo, SSLBL | CSV/API | Scheduled | Feeds (see `global_feed_collector.py`, `finance_feed_collector.py`) |
+| CISA ICS advisories | CSAF 2.0 download | Daily (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`) | CVEs, sectors stated by CISA |
+| MalwareBazaar | CSV export | Daily (flag-guarded, `EDGEGUARD_ENABLE_MALWAREBAZAAR`) | File hashes + malware family |
+| FIRST EPSS | CSV download | After each Neo4j sync and the baseline | EPSS scores on CVE nodes (written straight to Neo4j) |
 
 _Full inventory: [`DATA_SOURCES.md`](DATA_SOURCES.md)._
 
 ### 1.2 Collection Flow
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Source    │────▶│  Collector  │────▶│ Normalizer  │
-│   API/IO    │     │   (Python)  │     │   (Python)  │
-└─────────────┘     └─────────────┘     └─────────────┘
-                                              │
-                                              ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│    Neo4j   │◀────│   Loader    │◀────│Deduplicator │
-│  Database  │     │   (Python)  │     │   (Python)  │
-└─────────────┘     └─────────────┘     └─────────────┘
+Source API
+  → Collector (normalise, zone detection)
+  → MISPWriter (dedup against MISP, tags)
+  → MISP (hub)
+  → MISPToNeo4jSync (parse_attribute, dedupe per event, MERGE)
+  → Neo4j
+  → build_relationships
+  → enrichment jobs
 ```
+
+Collectors never write to Neo4j: the graph is loaded from MISP only. FIRST EPSS
+is the one feed written straight to Neo4j, by the enrichment job `enrich_cve_epss`.
 
 ---
 
@@ -49,7 +53,7 @@ Each source uses different attribute types. We normalize to a standard set:
 | `ipv4` | ip-src, ip-dst (IPv4 address) | IPv4 | IPv4 addresses |
 | `ipv6` | ip-src, ip-dst (IPv6 address) | IPv6 | IPv6 addresses: MISP has one type for both families, so the address decides (2026-10) |
 | `domain` | domain, hostname | domain | DNS names |
-| `url` | url, uri | URL | Web addresses |
+| `url` | url | URL | Web addresses |
 | `hash` | md5, sha1, sha256, sha512 — chosen by the length of the hex digest (2026-10) | MD5, SHA1, SHA256 (`FileHash-MD5` / `-SHA1` / `-SHA256`) | File hashes. Import hashes, PE hashes and JA3 fingerprints from OTX are not collected (2026-10) |
 | `x509-fingerprint-sha1` | x509-fingerprint-sha1 | — (SSLCertFingerprint is not collected) | SHA-1 fingerprints of TLS certificates (SSL Blacklist, 2026-10) |
 | `email` | email-src, email-dst | EMAIL, email | Email addresses (OTX e-mail indicators are no longer typed as domains, 2026-10) |
@@ -91,23 +95,12 @@ def normalize_indicator(source_type, value):
 
 ### 3.2 Word Boundary Matching
 
-We use regex word boundaries to prevent false positives:
-
-```python
-import re
-
-def detect_sector(text):
-    """Match keywords with word boundaries"""
-    text_lower = text.lower()
-    
-    for sector, keywords in SECTOR_KEYWORDS.items():
-        for keyword in keywords:
-            pattern = r'\b' + re.escape(keyword) + r'\b'
-            if re.search(pattern, text_lower):
-                return sector
-    
-    return DEFAULT_SECTOR  # 'global'
-```
+We use regex word boundaries to prevent false positives. Production matching is
+`config.detect_zones_from_text` / `detect_zones_from_item` (`src/config.py`): word-boundary
+regexes (`_SECTOR_PATTERNS`), context weights (title / alias / name 3.0, description 2.0,
+body 1.5, tag 1.0), negative keywords, and the threshold `ZONE_DETECT_THRESHOLD` 1.5
+(`EDGEGUARD_ZONE_DETECT_THRESHOLD`). Every zone whose score reaches the threshold is
+returned (multi-zone); when none does, the result is `['global']`.
 
 **Example False Positive Prevention:**
 | Keyword | Text | Match? | Why |
@@ -118,11 +111,15 @@ def detect_sector(text):
 
 ### 3.3 Sector Coverage
 
-| Sector | Primary Keywords | Secondary (Threat Context) |
-|--------|-----------------|---------------------------|
-| Healthcare | hospital, medical, patient | healthcare sector, medical device |
-| Energy | scada, grid, power | energy sector, power grid |
-| Finance | bank, payment, trading | banking trojan, financial theft |
+Examples from `SECTOR_KEYWORDS` (the full lists, including negative keywords, are in
+`src/config.py`). Single generic words such as `patient`, `grid`, `power`, `bank`,
+`payment` and `trading` are not keywords; the multi-word forms are:
+
+| Sector | Example keywords |
+|--------|-----------------|
+| Healthcare | hospital, medical, healthcare, patient data, medical device |
+| Energy | scada, power grid, electric grid, energy sector, ICS vendors and products (siemens, simatic …, § 3.6b) |
+| Finance | banking, banking trojan, payment gateway, trading platform, swift payment |
 
 ### 3.4 Current Data Distribution
 
@@ -157,22 +154,15 @@ We tested a hybrid approach (keyword + token overlap fallback) vs. keyword-only:
 
 **Conclusion:** Keep keyword as default. Hybrid provides no benefit on current data.
 
-### 3.6 Option 2: Malware Family Mapping (IMPLEMENTED)
+### 3.6 Malware Families (Not Used for Sectors)
 
-**Problem:** Public OSINT feeds lack sector tags for most IOCs.
-
-**Solution:** Use malware family names from threat feeds to auto-classify:
-
-| Source | Malware Families | Sector |
-|--------|-----------------|--------|
-| Feodo Tracker | Emotet, Dridex, TrickBot, QakBot | Finance |
-| SSL Blacklist | Vidar, RedLine, Raccy, FormBook | Finance |
-| MalwareBazaar | Multiple stealers | Finance |
-| OTX Pulses | Tagged malware | Auto-detected |
-
-**Implementation:** Added malware family names to `SECTOR_KEYWORDS['finance']` in `src/config.py`.
-
-**Result:** When feeds provide malware family names (e.g., "QakBot C&C server"), classification now works automatically.
+Malware family names are deliberately **not** sector keywords (`src/config.py`: conservative
+keywords, no malware families). A feed's family links an indicator to its `Malware` node
+(`INDICATES`, `malware_family`, `build_relationships` step 9). A sector comes from sector
+keywords in the record's text or from a sector the source states itself (OTX pulse
+`industries`; CISA ICS advisory sectors → `advisory_sector`). Feodo Tracker, SSL Blacklist and
+MalwareBazaar IOCs are therefore `global` unless their text names a sector:
+`detect_zones_from_text("QakBot C&C server")` returns `['global']`.
 
 ### 3.6b CPE Vendor and Product Vocabulary (2026-10)
 
@@ -184,7 +174,7 @@ We tested a hybrid approach (keyword + token overlap fallback) vs. keyword-only:
 
 ### 3.7 Future: LLM-Based Classification (Roadmap)
 
-For sources without sector tags or malware family names, we can use LLM classification:
+For sources without sector tags or sector keywords, we can use LLM classification:
 
 **Option A: Cloud API (MiniMax)**
 - Pros: High accuracy, no infrastructure
@@ -210,7 +200,7 @@ def classify_llm(text: str) -> str:
 ```
 
 **Recommended approach for EdgeGuard:**
-1. Start with keyword + malware family mapping
+1. Start with keyword classification (malware families link to `Malware` nodes, not to sectors; § 3.6)
 2. Add local LLM classification in Sprint 2
 3. Use Ollama with Granite-4 or Qwen-4 for inference
 
@@ -248,36 +238,49 @@ without re-architecting the SOURCED_FROM model.
 
 ```python
 def merge_node(existing, new):
-    # Always keep the most recent
-    existing.last_updated = max(
-        existing.last_updated, 
-        new.last_updated
-    )
+    # last_updated = the database's time of this write (datetime()), not a max
+    existing.last_updated = now()
     
     # Merge lists (sources, tags)
     existing.sources = list(set(existing.sources + new.sources))
     
-    # Take highest confidence
-    existing.confidence_score = max(
-        existing.confidence_score,
-        new.confidence_score
-    )
+    # Non-Indicator labels: keep the highest confidence.
+    # Indicators: source_confidence = max(incoming), and
+    # confidence_score = max(0.10, round(source_confidence × aging factor, 2))
+    # (src/indicator_aging.py)
+    if existing.label != "Indicator":
+        existing.confidence_score = max(
+            existing.confidence_score,
+            new.confidence_score
+        )
+    else:
+        existing.source_confidence = max(
+            existing.source_confidence,
+            new.confidence_score
+        )
+        existing.confidence_score = aged(existing.source_confidence)
     
     return existing
 ```
 
 ### 4.3 Confidence Scoring
 
+The values each collector sets on its items (layer 1 below says which of them reach Neo4j):
+
 | Source | Base Confidence | Rationale |
 |--------|---------------|-----------|
-| MITRE ATT&CK | 0.8 / 0.9 | Authoritative; `mitre_collector.py` writes 0.8 or 0.9 depending on relationship type |
+| MITRE ATT&CK | 0.7 (actors, malware, tools) / 0.8 (techniques) / 0.9 (tactics) | Authoritative; `mitre_collector.py` sets the value by object type |
 | CISA KEV | 0.9 (also affects NVD) | Government-confirmed exploitation. NVD CVEs ALSO get 0.9 when listed in CISA KEV (`nvd_collector.py`: `0.9 if cisa_exploit_add else 0.6`) |
 | NVD | 0.6 (default) / 0.9 (on CISA KEV) | CVE database; bumps to 0.9 when the same CVE is listed in CISA KEV |
 | AlienVault OTX | 0.5 | Community-driven, all 4 OTX emit sites use 0.5 |
-| MISP (push side) | 0.8 | `misp_writer.py` baseline confidence for EdgeGuard-pushed indicators |
 | MISP (collector / read side) | 0.5–0.8 | `misp_collector.py` per-attribute (0.5 for raw, 0.6/0.7/0.8 for tagged tiers) |
 | AbuseIPDB | `abuseConfidenceScore / 100.0` | Vendor-supplied 0-100 score divided to 0-1 range |
-| ThreatFox / global feeds | 0.5 / 0.6 / vendor-supplied | `global_feed_collector.py`; vendor-supplied takes precedence |
+| ThreatFox | `confidence_level / 100` (0.5 when absent) | Vendor-supplied (`global_feed_collector.py`) |
+| URLhaus | 0.6 | `global_feed_collector.py` |
+| MalwareBazaar | 0.7 (with a signature) / 0.6 | `global_feed_collector.py`; flag-guarded |
+| Feodo Tracker | 0.7 (active) / 0.4 (historical) | `finance_feed_collector.py` |
+| SSL Blacklist | 0.6 | `finance_feed_collector.py` |
+| CISA ICS advisories | 0.9 | Government advisory (`cisa_ics_collector.py`); flag-guarded |
 
 **Confidence Calculation (as actually implemented):**
 
@@ -288,8 +291,14 @@ def merge_node(existing, new):
 > Stage-2 fine-tuning dataset) don't learn semantics the system doesn't
 > have. The real model is three independent layers:
 
-1. **Source prior at ingest** — the per-source values in the table above,
-   set by each collector when the item is created.
+1. **Source prior** — each collector sets a confidence (table above). It
+   reaches Neo4j through MISP only as a band: `MISPWriter` tags each
+   indicator attribute `confidence:high` (≥ 0.8), `confidence:medium`
+   (≥ 0.5) or `confidence:low` (< 0.5), and the sync reads these back as
+   0.8 / 0.5 / 0.3; the highest banded value a source gave is the
+   indicator's `source_confidence`. CVE, Malware and ThreatActor attributes
+   carry no confidence tag and are stored at 0.5; Technique, Tactic and
+   Tool are stored at 0.8, 0.95 and 0.9.
 2. **Co-occurrence calibration** (post-sync, `enrichment_jobs.py`
    `calibrate_cooccurrence_confidence`): co-occurrence-derived `INDICATES`
    **and** `EXPLOITS` edges from large bulk-feed MISP events are
@@ -334,10 +343,14 @@ sources assert it; 2026-10), not folded into a single multiplier.
 | `EMPLOYS_TECHNIQUE` | MITRE | ThreatActor employs Technique (attribution — from STIX `uses`). *Split from generic `USES` in 2026-04.* |
 | `IMPLEMENTS_TECHNIQUE` | MITRE | Malware / Tool implements Technique (capability — from STIX `uses`). *Split from generic `USES` in 2026-04.* |
 | `USES_TECHNIQUE` | OTX | Indicator observed tied to Technique (from `attack_ids`) |
-| `ATTRIBUTED_TO` | OTX | Indicator associated with Malware (from pulse) |
-| `RESOLVES_TO` | DNS | Domain resolves to IP (needs DNS data) |
+| `ATTRIBUTED_TO` | Malware's own claim / OTX | Malware attributed to ThreatActor: exact `attributed_to` name or alias match (1.0), or named in the same OTX pulse when the pulse's actors are one actor (`otx_pulse`, 0.6) |
+| `INDICATOR_RESOLVES_TO` (planned) | DNS | Indicator → IP; not written today |
 | `EXPLOITS` | CVEs | Indicator exploits Vulnerability (exact CVE ID match) |
 | `INDICATES` | Malware | Indicator indicates Malware (same OTX pulse `otx_pulse` 0.6, or malware_family match 0.8; whole-event co-occurrence removed 2026-10) |
+
+Also written: `USES_MALWARE` / `USES_TOOL` (MITRE explicit, 0.95), `SUBTECHNIQUE_OF`, `IN_TACTIC`,
+`TARGETS` / `AFFECTS` (`zone_classification` 0.5, `advisory_sector` 0.9), `RUNS` /
+`PART_OF_CAMPAIGN` and `REFERS_TO`; see [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md), "Complete Relationship Schema".
 
 ### 5.2 Relationship Quality
 
@@ -345,7 +358,7 @@ sources assert it; 2026-10), not folded into a single multiplier.
 - **ATTRIBUTED_TO**: Exact (1.0) when the malware's own `attributed_to` names the actor; medium (0.6, `otx_pulse`) when malware and actor are named in the same OTX pulse and the pulse's actors are one actor (2026-10-15: a pulse naming several actors does not say which malware is whose and attributes nothing; aliases of one actor count as one). Whole-event co-occurrence attribution (one malware → up to 152 actors) was removed 2026-10
 - **EXPLOITS**: High quality - deterministic CVE ID match (confidence 1.0)
 - **INDICATES**: Medium quality - same OTX pulse (0.6, `otx_pulse`) or malware_family name match (0.8). The 0.5 whole-event co-occurrence level no longer exists (2026-10)
-- **RESOLVES_TO**: Requires external DNS data (not yet implemented)
+- **INDICATOR_RESOLVES_TO** (planned): requires external DNS data; not written today
 
 ---
 
@@ -492,4 +505,4 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-10-16 — an indicator carries `aging_evaluated_at`, the time at which its aging values were last written (a job run that changes nothing leaves it unchanged); the rule runs at the database's current time, lifted to it when it is later. Same day: § time decay replaced by the indicator aging: one rule for every Indicator from the latest report of any source (the source's date capped at the MISP time), ×0.85 / ×0.70 / ×0.55 of `source_confidence` from 90 / 180 / 365 days, retirement from 730 days; no Vulnerability tiers; `aging_*` properties instead of `last_decayed_tier`. Prior: 2026-10-15 — § 2.1 type mapping: `ipv6` from MISP `ip-src` / `ip-dst` by the address; `x509-fingerprint-sha1` for SSL Blacklist certificate fingerprints; a generic hash is typed by digest length (md5 / sha1 / sha256 / sha512); OTX non-file hashes are not collected; OTX `email` typed as e-mail; relationship corroboration visible through `r.sources[]`. Prior: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._
+_Last updated: 2026-10-17 — corrections against the code: the confidence table gives each collector's value (MITRE by object type; rows for ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker, SSL Blacklist and CISA ICS; the "MISP (push side)" row removed) and layer 1 says that only an indicator's band (0.8 / 0.5 / 0.3) reaches Neo4j, CVE, Malware and ThreatActor nodes being stored at 0.5; the collection flow runs through MISP; § 3.2 / § 3.3 describe the production zone matching and real keywords; § 3.6 says malware families are not sector keywords; CISA ICS, MalwareBazaar and FIRST EPSS in the source table; `ATTRIBUTED_TO` is Malware → ThreatActor and the planned DNS bridge is `INDICATOR_RESOLVES_TO`; the merge pseudo-code sets `last_updated` to the write time and ages Indicators; a MISP `uri` attribute is not read as a URL. Prior: 2026-10-16 — an indicator carries `aging_evaluated_at`, the time at which its aging values were last written (a job run that changes nothing leaves it unchanged); the rule runs at the database's current time, lifted to it when it is later. Same day: § time decay replaced by the indicator aging: one rule for every Indicator from the latest report of any source (the source's date capped at the MISP time), ×0.85 / ×0.70 / ×0.55 of `source_confidence` from 90 / 180 / 365 days, retirement from 730 days; no Vulnerability tiers; `aging_*` properties instead of `last_decayed_tier`. Prior: 2026-10-15 — § 2.1 type mapping: `ipv6` from MISP `ip-src` / `ip-dst` by the address; `x509-fingerprint-sha1` for SSL Blacklist certificate fingerprints; a generic hash is typed by digest length (md5 / sha1 / sha256 / sha512); OTX non-file hashes are not collected; OTX `email` typed as e-mail; relationship corroboration visible through `r.sources[]`. Prior: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._
