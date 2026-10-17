@@ -1,4 +1,4 @@
-## Resilience and Circuit Breaker Configuration
+# Resilience and Circuit Breaker Configuration
 
 EdgeGuard includes a resilience layer (`resilience.py`) that implements:
 
@@ -64,7 +64,7 @@ The next section shows how to override these values.
 
 ### 4. Overriding circuit breaker settings
 
-Currently, circuit breaker parameters are passed when each breaker is created, for example:
+Circuit breaker parameters are passed when each breaker is created, for example:
 
 ```python
 MISP_CIRCUIT_BREAKER = get_circuit_breaker('misp', failure_threshold=3, recovery_timeout=3600)
@@ -127,8 +127,12 @@ Use these in Grafana dashboards and alert rules to detect and respond to degrade
   - sustained increase in `edgeguard_collection_failures_total`,
   - `edgeguard_service_up == 0` for core services.
 
-
-
 ---
 
-_Last updated: 2026-10-17 — the breakers that exist (`misp`, `neo4j`, `nvd`, `otx` at 3 / 3600 s; `cisa`, `cisa_ics`, `mitre`, `threatfox`, `urlhaus`, `malwarebazaar`, `feodo`, `sslbl` at 3 / 1800 s; none for VirusTotal and AbuseIPDB, no `misp_to_neo4j` breaker); a breaker's state lives in its task process, and the state gauge keeps the last value written; `edgeguard_collection_failures_total` sources (`misp_to_neo4j`, `neo4j`, `otx`, `nvd`, `cisa`); Prometheus scrapes the `metrics` service in the Compose deployment; `EDGEGUARD_ENV=edge` selects no edge mode (it counts as production). Prior: 2026-04-26 — PR-N33 docs audit: verified — circuit-breaker behaviour described here is unchanged by the N26→N32 train (those PRs added new sentinel + alerts but did not modify circuit-breaker semantics). Footer refresh as part of the audit pass. Prior: 2026-03-17._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Change notes moved from the footer to this History section; the main text describes the current behaviour only.
+- 2026-10-17 — The breakers that exist are listed (`misp`, `neo4j`, `nvd`, `otx` at 3 / 3600 s; `cisa`, `cisa_ics`, `mitre`, `threatfox`, `urlhaus`, `malwarebazaar`, `feodo`, `sslbl` at 3 / 1800 s; none for VirusTotal and AbuseIPDB, no `misp_to_neo4j` breaker); a breaker's state lives in its task process and the state gauge keeps the last value written; the sources of `edgeguard_collection_failures_total`; Prometheus scrapes the `metrics` service in the Compose deployment; `EDGEGUARD_ENV=edge` selects no edge mode.
+- 2026-03-17 — First version.
