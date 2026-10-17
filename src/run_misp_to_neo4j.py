@@ -1492,6 +1492,26 @@ def _meta_list(meta: Dict[str, Any], key: str) -> List[str]:
 _NEO4J_INT_RANGE = (-(2**63), 2**63 - 1)
 
 
+# The numeric scores of a CVSS payload (2026-10-17): they must be finite numbers, whatever type the JSON gave.
+_CVSS_SCORE_KEYS = frozenset({"base_score", "impact_score", "exploitability_score"})
+
+
+def _finite_cvss_score(entry: Any) -> Optional[float]:
+    """``entry`` as a finite float, or None when it is not a number, or a string that reads as one, or is not finite."""
+    if isinstance(entry, bool):
+        return None
+    if isinstance(entry, (int, float)):
+        number = float(entry)
+    elif isinstance(entry, str):
+        try:
+            number = float(entry.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[Dict[str, Any]]:
     """``meta[key]``, a CVSS payload of ``NVD_META`` (``cvss_v31_data`` …), as a CVSS sub-node can hold it;
     None when it is absent or not a JSON object (2026-10).
@@ -1532,12 +1552,19 @@ def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[
         valid_name = (
             isinstance(name, str) and _PROP_NAME_RE.match(name) is not None and name not in CVSS_PAYLOAD_RESERVED_NAMES
         )
-        valid_value = (
-            entry is None
-            or isinstance(entry, (str, bool))
-            or (isinstance(entry, float) and math.isfinite(entry))
-            or (isinstance(entry, int) and _NEO4J_INT_RANGE[0] <= entry <= _NEO4J_INT_RANGE[1])
-        )
+        if name in _CVSS_SCORE_KEYS and entry is not None:
+            # A score is a finite number (2026-10-17): a string that reads as one ("9.8") becomes that
+            # number, and anything else ("1e309", "Infinity", "NaN", "N/A", a boolean) is dropped as a
+            # missing value, as a non-finite number is.
+            entry = _finite_cvss_score(entry)
+            valid_value = entry is not None
+        else:
+            valid_value = (
+                entry is None
+                or isinstance(entry, (str, bool))
+                or (isinstance(entry, float) and math.isfinite(entry))
+                or (isinstance(entry, int) and _NEO4J_INT_RANGE[0] <= entry <= _NEO4J_INT_RANGE[1])
+            )
         if valid_name and valid_value:
             payload[name] = entry
         else:

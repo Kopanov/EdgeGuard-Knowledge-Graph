@@ -326,7 +326,8 @@ class TestMalformedCvssPayload:
         assert item["cvss_v30_data"] is None and item["nvd_record"] is True
         assert (item["cvss_score"], item["cvss_version"]) == (None, None)
         (line,) = warnings
-        dropped = " (entries dropped: base_score)" if isinstance(base_score, (dict, list)) else ""
+        # An empty string is no number, so it is dropped like a map or a list (2026-10-17, scores are finite numbers).
+        dropped = " (entries dropped: base_score)" if isinstance(base_score, (dict, list, str)) else ""
         assert line.endswith(
             f"NVD_META.cvss_v30_data of CVE-2025-7223 has no base score{dropped} — the CVE is read without it"
         )
@@ -364,6 +365,61 @@ def _non_finite_values(obj) -> list:
     if isinstance(obj, (list, tuple)):
         return [v for x in obj for v in _non_finite_values(x)]
     return [obj] if _is_non_finite(obj) else []
+
+
+class TestCvssScoresGivenAsStrings:
+    """A score in ``NVD_META`` given as a JSON string (2026-10-17): one that reads as a finite number becomes that
+    number; ``"1e309"``, ``"Infinity"``, ``"-Infinity"``, ``"NaN"`` (any case, with spaces) and a string that is no
+    number are dropped as missing values, so the sub-node never holds them. A payload left without a base score
+    counts as absent, as for a non-finite number."""
+
+    KEY = "CVE-2025-7223__source:NVD"  # real hosted attribute; NVD gives CVSS 3.0 only
+
+    def _read(self, caplog, field: str, text: str):
+        from test_cve_description_source import _with_comment_meta, attribute, synced
+
+        attr = attribute(self.KEY)
+        v30 = json.loads(attr["comment"][len("NVD_META:") :])["cvss_v30_data"]
+        attr = _with_comment_meta(attr, cvss_v30_data={**v30, field: text})
+        with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
+            item = synced(attr)
+        return v30, item
+
+    @pytest.mark.parametrize("text", ["1e309", "Infinity", "-Infinity", "NaN", " nan ", "inf", "N/A"])
+    @pytest.mark.parametrize("field", ["impact_score", "exploitability_score"])
+    def test_a_sub_score_string_that_is_no_finite_number_is_dropped(self, caplog, field, text):
+        v30, item = self._read(caplog, field, text)
+        assert item["cvss_v30_data"] == {k: v for k, v in v30.items() if k != field}
+        assert (item["cvss_score"], item["cvss_version"]) == (7.8, "3.0")
+
+    @pytest.mark.parametrize("text", ["1e309", "Infinity", "-Infinity", "NaN", "N/A", ""])
+    def test_a_base_score_string_that_is_no_finite_number_leaves_the_payload_absent(self, caplog, text):
+        _, item = self._read(caplog, "base_score", text)
+        assert item["cvss_v30_data"] is None
+        assert (item["cvss_score"], item["severity"], item["cvss_version"]) == (None, "UNKNOWN", None)
+
+    def test_a_score_string_that_reads_as_a_number_becomes_that_number(self, caplog):
+        v30, item = self._read(caplog, "base_score", " 7.8 ")
+        assert item["cvss_v30_data"]["base_score"] == 7.8 and isinstance(item["cvss_v30_data"]["base_score"], float)
+        assert (item["cvss_score"], item["cvss_version"]) == (7.8, "3.0")
+
+    def test_a_boolean_score_is_dropped(self, caplog):
+        v30, item = self._read(caplog, "impact_score", True)
+        assert "impact_score" not in item["cvss_v30_data"]
+
+    @pytest.mark.parametrize("text", ["1e309", "Infinity", "NaN"])
+    def test_no_score_string_reaches_the_cvss_write(self, caplog, text):
+        for field in ("impact_score", "base_score"):
+            _, item = self._read(caplog, field, text)
+            client, session = _recording_client()
+            with patch.object(client, "merge_node_with_source", return_value=True):
+                assert client.merge_cve(item, source_id="nvd") is True
+            for call in session.run.call_args_list:
+                params = {k: v for k, v in call.kwargs.items()}
+                assert text not in [v for v in params.values() if isinstance(v, str)], field
+                for v in params.values():
+                    if isinstance(v, dict):
+                        assert text not in v.values(), field
 
 
 class TestNonFiniteCvssNumbers:
