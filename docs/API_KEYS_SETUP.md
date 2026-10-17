@@ -99,7 +99,7 @@ For connecting to a remote Neo4j server instead of localhost:
 export NEO4J_URI="bolt://your-neo4j-server.com:7687"
 export NEO4J_USER="neo4j"
 export NEO4J_PASSWORD="your-secure-password"
-export NEO4J_DATABASE="neo4j"  # Optional — explicit database name (multi-DB has been default since Neo4j 4.x)
+export NEO4J_DATABASE="neo4j"  # Optional — explicit database name on a multi-database server (Neo4j 4.x and later)
 ```
 
 ### Option 2: Connection Types
@@ -110,7 +110,7 @@ export NEO4J_DATABASE="neo4j"  # Optional — explicit database name (multi-DB h
 | Remote (TCP) | `bolt://hostname:7687` | Single remote server, no TLS |
 | Remote (TLS, system CA) | `bolt+s://hostname:7687` | Single remote server with strict TLS |
 | Remote (TLS, self-signed) | `bolt+ssc://hostname:7687` | Single remote server with self-signed cert |
-| Cluster (auto-routing) | `neo4j://hostname:7687` (or `neo4j+s://` for TLS) | Neo4j 5.x cluster — replaces the deprecated `bolt+routing://` scheme (removed in driver 5.x; this repo pins `neo4j~=5.27`). |
+| Cluster (auto-routing) | `neo4j://hostname:7687` (or `neo4j+s://` for TLS) | Neo4j 5.x cluster. Driver 5.x does not support the deprecated `bolt+routing://` scheme (this repo pins `neo4j~=5.27`). |
 
 ### Option 3: Docker Compose
 
@@ -119,8 +119,8 @@ If using Docker Compose for Neo4j:
 ```yaml
 services:
   neo4j:
-    # Track the production pin in the repo's top-level docker-compose.yml.
-    # Project moved to Neo4j CalVer in 2025; current pin: 2026.03.1-community.
+    # Keep in step with the pin in the repository's top-level docker-compose.yml
+    # (Neo4j CalVer version 2026.03.1-community).
     image: neo4j:2026.03.1-community
     environment:
       - NEO4J_AUTH=neo4j/your-secure-password
@@ -177,4 +177,10 @@ services:
 
 ---
 
-_Last updated: 2026-10-17 — the MISP key must be able to create events and add, edit and tag attributes (it said to use a read-only key for collection, which makes every collector push fail); `MISP_URL` falls back to `https://localhost:8443` when unset (it said required, no default); `NEO4J_DATABASE` unset means the server's default database (it said `neo4j`); AbuseIPDB and ThreatFox / abuse.ch key sections added, and `THREATFOX_API_KEY` is the abuse.ch Auth-Key MalwareBazaar also sends; `EDGEGUARD_ALLOW_UNAUTH` does not lift the key requirement in production. Prior: 2026-04-26 — PR-N33 docs audit: replaced deprecated `bolt+routing://` with `neo4j://` cluster URI scheme (driver 5.x); fixed `MISP_URL` "default" claim (it's required, no built-in default); added `EDGEGUARD_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, `VIRUSTOTAL_API_KEY` to the env-var summary; added `bolt+s://` / `bolt+ssc://` rows for TLS variants. Prior: 2026-03-17._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — The MISP key must be able to create events and add, edit and tag attributes (the guide advised a read-only key for collection, which makes every collector push fail); `MISP_URL` falls back to `https://localhost:8443` when unset (it said required, no default); `NEO4J_DATABASE` unset means the server's default database (it said `neo4j`); AbuseIPDB and ThreatFox / abuse.ch key sections added, with `THREATFOX_API_KEY` as the abuse.ch Auth-Key MalwareBazaar also sends; `EDGEGUARD_ALLOW_UNAUTH` does not lift the key requirement in production; main text limited to current behaviour, with the change history in this section.
+- 2026-04-26 — The `neo4j://` cluster URI scheme documented in place of the deprecated `bolt+routing://`; `bolt+s://` / `bolt+ssc://` rows added; `EDGEGUARD_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY` and `VIRUSTOTAL_API_KEY` added to the environment variable summary.
+- 2026-03-17 — Guide to obtaining the API keys of the threat intelligence sources.

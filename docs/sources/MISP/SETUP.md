@@ -29,11 +29,16 @@ See also: [SETUP_GUIDE.md](../../SETUP_GUIDE.md), [SECRETS_MANAGEMENT.md](../../
 
 EdgeGuard validates against two MISP images. They differ only in PHP SAPI:
 
-- **`harvarditsecurity/misp:latest`** — Apache mod_php; PHP config under `/etc/php/8.x/apache2/`. **Currently deployed for EdgeGuard.**
+- **`harvarditsecurity/misp:latest`** — Apache mod_php; PHP config under `/etc/php/8.x/apache2/`. **Deployed for EdgeGuard.**
 - **`coolacid/misp-docker:latest`** — php-fpm; PHP config under `/etc/php/<ver>/fpm/conf.d/`. The reference compose layout in this directory ([`docker-compose.yml`](docker-compose.yml) + [`php-overrides.ini`](php-overrides.ini)) is for this image.
 
-The TL;DR PHP / MySQL settings in [`MISP_TUNING.md`](../../MISP_TUNING.md) are identical for both; only the file paths differ.
+The TL;DR PHP / MySQL settings in [`MISP_TUNING.md`](../../MISP_TUNING.md) are identical for both; only the file paths differ. The reference `php-overrides.ini` in this directory sets larger values than the TL;DR (`memory_limit` 8G, `post_max_size` and `upload_max_filesize` 512M, `max_execution_time` and `max_input_time` 3600), meant for a MISP host with 16 GB or more; on a smaller host, edit it to the TL;DR values first.
 
 ---
 
-_Last updated: 2026-04-21 — Added image-choice section + MISP_TUNING.md cross-reference (PR-N4 round 2)._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — The image-choice section notes that the reference `php-overrides.ini` sets larger values than the TL;DR settings; history moved to this section.
+- 2026-04-21 — Image-choice section and the `MISP_TUNING.md` cross-reference added.
