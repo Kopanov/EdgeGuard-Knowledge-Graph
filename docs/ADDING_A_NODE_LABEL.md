@@ -4,9 +4,8 @@ This document is the **authoritative checklist** for introducing a new Neo4j
 node label (e.g. `Sensor`, `Endpoint`, `Identity`) into EdgeGuard so it
 participates in the deterministic-uuid contract from day one.
 
-The PR #34 audit (rounds 25-28) found that the same anti-pattern — adding a
-label to one source-of-truth list but forgetting another — recurred multiple
-times. The fix is twofold:
+The typical mistake is adding a label to one source-of-truth list and
+forgetting another. Two safeguards cover it:
 
 1. **Invariant tests** in `tests/test_round26_invariants.py` automatically
    catch most omissions (missing constraint, mismatched merge-key dict, etc.).
@@ -28,12 +27,13 @@ To add a label `Foo` with natural key `(field_a, field_b)`:
 [ ] 6. Merge function                 src/neo4j_client.py — merge_foo / create_foo_node
 ```
 
-If any of these are missing, the round-26 invariant tests fail loudly.
+If any of these are missing, the invariant tests in `tests/test_round26_invariants.py` fail loudly.
 
 > **No backfill step:** EdgeGuard is pre-release; no production graph carries
-> pre-uuid Foo nodes. The `merge_foo` write-time MERGE stamps `n.uuid` and
-> the relevant edge MERGEs stamp `r.src_uuid` / `r.trg_uuid` from the start,
-> so a fresh baseline rerun is the only "migration" needed for a new label.
+> Foo nodes without a uuid. The `merge_foo` write-time MERGE stamps `n.uuid` and
+> every edge MERGE in `src/build_relationships.py` / `src/neo4j_client.py`
+> stamps `r.src_uuid` / `r.trg_uuid` at write time, so a fresh baseline rerun
+> fully populates a new label's nodes and edges; no uuid backfill script exists.
 
 ---
 
@@ -100,17 +100,19 @@ constraints = [
 
 The constraint fields MUST exactly match `_NATURAL_KEYS["Foo"]`. Without
 this, two concurrent MERGEs on the same `(field_a, field_b)` can create
-duplicate nodes. Round 26's `test_every_natural_key_label_has_a_unique_constraint`
+duplicate nodes. `test_every_natural_key_label_has_a_unique_constraint`
 catches this.
 
-Exception (2026-10 shared-database contract): a label of the ResilMesh /
+Exception (shared-database contract): a label of the ResilMesh /
 CRUSOE data model whose key recurs legitimately in partner data gets no
-constraint. Add it to `SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT` in
-`src/neo4j_client.py` (today `Device`, `NetworkService`, `SoftwareVersion`,
+constraint, because a UNIQUE constraint would make the partner's own writes
+fail. Add it to `SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT` in
+`src/neo4j_client.py` (`Device`, `NetworkService`, `SoftwareVersion`,
 `Application`, `Role`, `User`) instead of writing a `CREATE CONSTRAINT`.
-It keeps its `_NATURAL_KEYS` entry and uuid; `create_constraints` drops any
-constraint an older build created for it, and the invariant test skips it
-and fails if a constraint is declared for it.
+It keeps its `_NATURAL_KEYS` entry and uuid; `create_constraints` drops such
+a constraint on every run (`DROP CONSTRAINT <name> IF EXISTS`), so a database
+that holds one converges without manual DDL, and the invariant test skips the
+label and fails if a constraint is declared for it.
 
 ### 5. Add a uuid index
 
@@ -165,36 +167,27 @@ def merge_foo(self, data: dict) -> bool:
 **Critical contract checklist for the merge function** (each pinned by a
 test):
 
-- ✅ The dict passed to `compute_node_uuid` MUST contain exactly the fields
+- The dict passed to `compute_node_uuid` MUST contain exactly the fields
   in `_NATURAL_KEYS["Foo"]` — no more, no less. Caught by
   `test_merge_key_dict_matches_natural_keys_for_every_helper`.
-- ✅ The Cypher MERGE WHERE clause MUST bind the same fields.
-- ✅ `ON CREATE SET n.uuid = $node_uuid` — stamp on creation.
-- ✅ `SET n.uuid = coalesce(n.uuid, $node_uuid)` — defensive idempotency.
-- ✅ `ON CREATE SET n.edgeguard_managed = true` and, verbatim, the
-  `_enriched_on_match_clause("n")` ON MATCH clause (2026-10 shared-database
+- The Cypher MERGE WHERE clause MUST bind the same fields.
+- `ON CREATE SET n.uuid = $node_uuid` — stamp on creation.
+- `SET n.uuid = coalesce(n.uuid, $node_uuid)` — defensive idempotency.
+- `ON CREATE SET n.edgeguard_managed = true` and, verbatim, the
+  `_enriched_on_match_clause("n")` ON MATCH clause (shared-database
   contract): the marker says EdgeGuard created the node, the ON MATCH clause
   marks a node another system created first as `edgeguard_enriched`. A node
   without the marker is left out by `--edgeguard-only` cleanup and the REST
   and GraphQL readers. Caught by
   `tests/test_shared_db_ownership.py::TestMarkerOnCreatePathOnly::test_every_node_merge_stamps_managed_on_create_and_enriched_on_match`.
-- ✅ `session.run(query, ..., timeout=NEO4J_READ_TIMEOUT)` — never omit the
+- `session.run(query, ..., timeout=NEO4J_READ_TIMEOUT)` — never omit the
   timeout. Caught by `test_every_session_run_has_explicit_timeout`.
-- ✅ Read the result inside the `try` (`.consume()` or `.single()`) so an
-  execution error reaches the `except` (2026-10-16). Caught by
+- Read the result inside the `try` (`.consume()` or `.single()`) so an
+  execution error reaches the `except`. Caught by
   `tests/test_neo4j_write_results.py::TestNoWriteResultIsDiscarded`.
-- ✅ Refuse to MERGE on missing natural-key fields (return `False`, not
+- Refuse to MERGE on missing natural-key fields (return `False`, not
   silently fall through). The invariant: every node in the graph has a
   valid uuid.
-
-### (Removed) Step 7 — backfill edges
-
-Earlier rounds of the n.uuid work shipped a `scripts/backfill_node_uuids.py`
-helper with an `EDGES_TO_BACKFILL` list. That script was deleted in the
-PR #41 cleanup pass — pre-release framework, no production graph to
-migrate, and every edge MERGE in `src/build_relationships.py` /
-`src/neo4j_client.py` now stamps `r.src_uuid` / `r.trg_uuid` at write
-time. A fresh baseline rerun fully populates the new label's edges.
 
 ---
 
@@ -253,8 +246,8 @@ node_uuid = compute_node_uuid("Foo", {"username": username, "domain": domain})
 ```
 
 Otherwise three different callers (missing key, explicit None, explicit "")
-each produce a DIFFERENT uuid for the same logical entity. PR #34 round 25
-caught this for `User`. Pinned by
+each produce a DIFFERENT uuid for the same logical entity. `User` normalizes
+its domain this way, pinned by
 `test_merge_resilmesh_user_normalizes_domain_none_and_empty`.
 
 ### Labels with no STIX equivalent
@@ -286,19 +279,16 @@ as a Cypher function.
 | 1. `_NATURAL_KEYS` | None directly — but downstream tests fail if missing | Yes |
 | 2. `NEO4J_TO_STIX_TYPE` | `test_neo4j_to_stix_type_map_is_frozen_for_threat_intel_core` | Yes for STIX parity |
 | 3. `_ALLOWED_NODE_LABELS` | None — but every MERGE call validates label | Yes |
-| 4. UNIQUE constraint | ✅ `test_every_natural_key_label_has_a_unique_constraint` | No |
+| 4. UNIQUE constraint | `test_every_natural_key_label_has_a_unique_constraint` | No |
 | 5. uuid index | None — but cloud-side O(n) MATCH at scale flags it | Yes |
-| 6. Merge function | ✅ `test_merge_key_dict_matches_natural_keys_for_every_helper` (key match) + `test_every_session_run_has_explicit_timeout` (timeout) + `test_every_node_merge_stamps_managed_on_create_and_enriched_on_match` (ownership marker) + `TestNoWriteResultIsDiscarded` (result read) | Partial |
+| 6. Merge function | `test_merge_key_dict_matches_natural_keys_for_every_helper` (key match) + `test_every_session_run_has_explicit_timeout` (timeout) + `test_every_node_merge_stamps_managed_on_create_and_enriched_on_match` (ownership marker) + `TestNoWriteResultIsDiscarded` (result read) | Partial |
 
-(Pre-PR-#41 there was a 7th row "EDGES_TO_BACKFILL" — dropped together with
-the backfill script; current contract is 6 touchpoints.)
-
-The "manual check needed" items are good candidates for future invariant
-tests if the same anti-pattern recurs.
+The "manual check needed" items are candidates for further invariant
+tests.
 
 ---
 
-### Unicode-safe natural keys (PR-N29 L1 + PR-N31)
+### Unicode-safe natural keys
 
 If your new label's natural key is a free-form **string** field (e.g.
 `name`, `tag`, `label`), apply the same `_ZERO_WIDTH_AND_BIDI_TRANSLATE`
@@ -316,4 +306,12 @@ the input shape already constrains the value space.
 
 ---
 
-_Last updated: 2026-10-17 — merge template and checklist follow the 2026-10 shared-database contract (`ON CREATE SET n.edgeguard_managed = true` and the `_enriched_on_match_clause` ON MATCH clause) and read the write result (`.consume()`), each with its test; step 4 names the partner-owned labels that get no constraint (`SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT`) and the composite-key examples say so; the validation step runs the ownership, write-result and timeout tests; the label-guard message, the 37-character filter and the Sector MERGE sites (steps 7a-7d, the sync's sector rows) match the code. Prior: 2026-04-26 — PR-N33 docs audit: removed contradictory "all 7 invariants" / Step-7 row (current contract is 6 touchpoints — Step 7 was dropped in PR #41 with the backfill script); added "Unicode-safe natural keys" subsection pointing at `_ZERO_WIDTH_AND_BIDI_TRANSLATE` for any new label whose natural key includes free-form strings (PR-N29 L1 + PR-N31). Prior: 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
+- 2026-10-17 — The merge template and checklist follow the shared-database contract (`ON CREATE SET n.edgeguard_managed = true` and the `_enriched_on_match_clause` ON MATCH clause) and read the write result (`.consume()`), each with its test; step 4 names the partner-owned labels without a constraint; the validation step runs the ownership, write-result and timeout tests; the label-guard message, the 37-character filter and the `Sector` MERGE sites match the code.
+- 2026-04-26 — The contract is six touchpoints (step 7, the edge backfill, was dropped with the backfill script); the "Unicode-safe natural keys" subsection was added for labels keyed on free-form strings.
+- 2026-04-18 — `scripts/backfill_node_uuids.py` and its `EDGES_TO_BACKFILL` list were deleted, because every edge MERGE stamps `r.src_uuid` / `r.trg_uuid` at write time and a fresh baseline replaces migration.
+- 2026-04-17 — First version of the checklist, written because the same omission (a label added to one source-of-truth list but not another) recurred during the per-node uuid work, which also found `User` nodes whose missing, null or empty domain gave different uuids.
