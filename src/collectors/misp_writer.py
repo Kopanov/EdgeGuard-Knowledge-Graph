@@ -592,8 +592,9 @@ _CONVERSION_REQUIRES: Dict[str, str] = {
 # every record: for a source of one item kind (the indicator feeds; NVD, CISA KEV and CISA ICS,
 # which deliver vulnerabilities) that is every item, for OTX and MITRE ATT&CK the share of that
 # kind. The threshold must lie far above the share one bad record has in a small incremental
-# window, because a counted failure keeps the source's cursor or ETag (OTX, MITRE ATT&CK, CISA ICS,
-# the cursor an NVD baseline seeds), so the next run reads the same record again and fails again.
+# window, because a counted failure keeps the source's cursor or ETag (MITRE ATT&CK, CISA ICS, the
+# cursor an NVD baseline seeds) or, for OTX, holds the cursor below the pulse of each counted item
+# (``MISPWriter.last_push_unstored_items``), so the next run reads the same record again and fails again.
 # At 0.5 one bad item fails a push only when the source has at most two items in it, and the cursor
 # moves at the first run whose window holds three or more; a payload change that breaks most of a
 # source's items still fails the run. A value such as 0.05 (the complement of the default
@@ -993,6 +994,12 @@ def _strip_non_bmp(text: str) -> str:
     return "".join(ch for ch in text if ord(ch) <= 0xFFFF)
 
 
+def _value_is_storable(attr: Dict) -> bool:
+    """False when the attribute's ``value`` holds 4-byte characters, which MISP cannot store."""
+    value = attr.get("value")
+    return not (isinstance(value, str) and any(ord(ch) > 0xFFFF for ch in value))
+
+
 def _make_attributes_storable(attributes: List[Dict]) -> List[Dict]:
     """Strip 4-byte characters from descriptive fields; drop attributes whose value needs them.
 
@@ -1003,7 +1010,7 @@ def _make_attributes_storable(attributes: List[Dict]) -> List[Dict]:
     storable: List[Dict] = []
     for attr in attributes:
         value = attr.get("value")
-        if isinstance(value, str) and any(ord(ch) > 0xFFFF for ch in value):
+        if not _value_is_storable(attr):
             logger.warning(
                 "[SKIP] attribute value contains 4-byte characters MISP cannot store: type=%s value=%r",
                 attr.get("type"),
@@ -2867,17 +2874,18 @@ class MISPWriter:
         this push: every item of the source failed conversion, or at least
         ``CONVERT_FAILED_MIN_SHARE`` of them did. A source whose payload stops converting thus fails
         ``status_after_misp_push``, while a few bad records neither turn a run red nor hold a
-        collector's cursor (OTX, CISA ICS, the NVD baseline seed) or ETag (MITRE ATT&CK), which
-        advance only after a push without failures. A (source, date) group left without
-        attributes reaches neither the event lookup nor MISP. With cross-event dedup on and a
-        complete listing of the source's attributes (or ``known_source_keys``), the cross-event
-        filter runs before ``_get_or_create_event``: a group MISP already holds entirely neither
-        looks up nor creates the day's event, and the refresh candidates of the group are decided
-        there. With dedup off or a listing that stopped early, the order stays: event, per-event
-        filter, cross-event filter, because partial keys can miss the copy in today's event and the
-        refresh decision needs the copy MISP wrote last. ``[DEDUP] All N items were already
-        present`` is logged only when nothing failed or was dropped, N being the attributes found
-        present.
+        collector's cursor or ETag: CISA ICS, the NVD baseline seed and MITRE ATT&CK move only after
+        a push without failures, OTX after a push with failures only up to the oldest pulse with an
+        item in ``last_push_unstored_items``, which lists the items of a systemic drop (below). A
+        (source, date) group left without attributes reaches neither the event lookup nor MISP.
+        With cross-event dedup on and a complete listing of the source's attributes (or
+        ``known_source_keys``), the cross-event filter runs before ``_get_or_create_event``: a
+        group MISP already holds entirely neither looks up nor creates the day's event, and the
+        refresh candidates of the group are decided there. With dedup off or a listing that stopped
+        early, the order stays: event, per-event filter, cross-event filter, because partial keys
+        can miss the copy in today's event and the refresh decision needs the copy MISP wrote last.
+        ``[DEDUP] All N items were already present`` is logged only when nothing failed or was
+        dropped, N being the attributes found present.
 
         2026-10 (several-actor marks): an OTX indicator carries the pulses that the collector judged,
         with the canonical threat-actor reference, to name several actors (``several_actor_pulses``,
@@ -2921,7 +2929,20 @@ class MISPWriter:
 
         See docs/MISP_TUNING.md for the full playbook (php.ini /
         my.cnf settings + when to apply each EdgeGuard env knob).
+
+        2026-10 (unstored items): after the call, ``self.last_push_unstored_items`` lists the
+        positions in *items* of the items MISP did not store because their batch, or their group's
+        event lookup, failed, and of the items of a systemic conversion drop (below). A cursor that
+        must not pass them (OTX) stops below them. A batch
+        failed when MISP stored none of it: HTTP 4xx, a batch error, HTTP 429 or 5xx after the
+        retries, and under strict accounting an HTTP 200 that confirms none of it; attributes
+        missing from a batch MISP partly stored are not listed. The items no attribute could be
+        built from are listed when their source's drop is systemic (``CONVERT_FAILED_MIN_SHARE``): a
+        payload the collector no longer reads, whose items a later run stores once the collector
+        reads it again; single bad records below the share are not. Values MISP can never store
+        (4-byte characters) are not listed either: a later run cannot store them.
         """
+        self.last_push_unstored_items: List[int] = []
         if not items:
             return 0, 0
 
@@ -2957,7 +2978,19 @@ class MISPWriter:
         not_converted: Dict[str, Dict[str, int]] = {}
         items_per_source: Dict[str, int] = {}
 
-        for item in items:
+        # 2026-10: (type, value) → positions in *items*, to name the items of a failed batch; per
+        # source, the positions of the items no attribute could be built from, listed as unstored
+        # when the source's drop is systemic.
+        item_positions_by_key: Dict[Tuple[Any, Any], List[int]] = {}
+        not_converted_positions: Dict[str, List[int]] = {}
+        unstored_positions: set = set()
+
+        def _note_unstored(attrs: List[Dict]) -> None:
+            for a in attrs:
+                if _value_is_storable(a):
+                    unstored_positions.update(item_positions_by_key.get((a.get("type"), a.get("value")), ()))
+
+        for item_position, item in enumerate(items):
             source = item.get("tag", "unknown")
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             key = (source, date)
@@ -2991,9 +3024,11 @@ class MISPWriter:
                     reason = f"{kind} with an empty {_CONVERSION_REQUIRES[kind]}"
                 source_reasons = not_converted.setdefault(str(source), {})
                 source_reasons[reason] = source_reasons.get(reason, 0) + 1
+                not_converted_positions.setdefault(str(source), []).append(item_position)
                 continue
 
             grouped.setdefault(key, []).append(attr)
+            item_positions_by_key.setdefault((attr.get("type"), attr.get("value")), []).append(item_position)
             if kind == "indicator":
                 reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
 
@@ -3011,6 +3046,9 @@ class MISPWriter:
                 not_converted_ct += dropped
                 if systemic:
                     not_converted_failed_ct += dropped
+                    # Listed as unstored (2026-10): a collector that reads the payload again can
+                    # store them, so they hold the OTX cursor like the items of a failed batch.
+                    unstored_positions.update(not_converted_positions.get(src, ()))
                 reasons = ", ".join(f"{count} {reason}" for reason, count in sorted(not_converted[src].items()))
                 verdict = "counted as failed" if systemic else "not counted as failed"
                 parts.append(f"{src}: {dropped} of {given} item(s), {verdict} ({reasons})")
@@ -3179,9 +3217,11 @@ class MISPWriter:
                 )
                 self.stats["errors"] += 1
                 total_failed += len(unique_attrs)
+                _note_unstored(unique_attrs)
                 continue
             if not event_id:
                 total_failed += len(unique_attrs)
+                _note_unstored(unique_attrs)
                 continue
 
             per_event_keys = self._get_existing_attribute_keys(event_id)
@@ -3563,6 +3603,8 @@ class MISPWriter:
                 # bad event doesn't destroy a whole NVD push.
                 try:
                     success, failed = self._push_batch(event_id, batch)
+                    if success == 0 and failed:
+                        _note_unstored(batch)  # HTTP 4xx, a batch error, or none confirmed (strict): none stored
                     # PR-N4 round 2 (Cross-Checker #2, Bug Hunter #5):
                     # require N CONSECUTIVE FULL SUCCESSES before
                     # resetting the failure counter. Pre-fix, a single
@@ -3595,6 +3637,7 @@ class MISPWriter:
                         exc,
                     )
                     success, failed = 0, len(batch)
+                    _note_unstored(batch)
                     self.stats["errors"] += 1
                     # PR-N4 round 2 (Cross-Checker #2): instance-scoped
                     # counter persists across push_items calls so a
@@ -3659,6 +3702,7 @@ class MISPWriter:
         else:
             logger.info("[OK] MISP push: no items provided")
 
+        self.last_push_unstored_items = sorted(unstored_positions)
         return total_success, total_failed
 
     def _refresh_stored_copies(
