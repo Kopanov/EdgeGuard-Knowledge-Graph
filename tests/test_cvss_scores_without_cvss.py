@@ -145,7 +145,7 @@ class TestSelectCvss:
         assert select_cvss({"cvss_v2_data": {"base_score": 10.0, "base_severity": ""}}) == (10.0, "HIGH", "2.0")
         assert severity_from_score(10.0, "3.1") == "CRITICAL"
 
-    @pytest.mark.parametrize("bad", ["1e309", float("inf"), float("nan"), -0.1, 10.1, "n/a"])
+    @pytest.mark.parametrize("bad", ["1e309", float("inf"), float("nan"), -0.1, 10.1, "n/a", 10**400])
     def test_rejected_scores_are_skipped_not_stored(self, bad):
         payloads = {
             "cvss_v31_data": {"base_score": bad},

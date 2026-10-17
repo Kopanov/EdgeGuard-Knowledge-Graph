@@ -403,6 +403,18 @@ class TestCvssScoresGivenAsStrings:
         assert item["cvss_v30_data"]["base_score"] == 7.8 and isinstance(item["cvss_v30_data"]["base_score"], float)
         assert (item["cvss_score"], item["cvss_version"]) == (7.8, "3.0")
 
+    @pytest.mark.parametrize("field", ["base_score", "impact_score"])
+    def test_an_integer_beyond_the_float_range_is_dropped_not_raised(self, caplog, field):
+        """A 400-digit JSON integer: json.loads keeps it as an int and float() of it raises OverflowError, which
+        must not fail the event's other attributes (2026-10-17)."""
+        v30, item = self._read(caplog, field, 10**400)
+        if field == "base_score":
+            assert item["cvss_v30_data"] is None
+            assert (item["cvss_score"], item["cvss_version"]) == (None, None)
+        else:
+            assert "impact_score" not in item["cvss_v30_data"]
+            assert (item["cvss_score"], item["cvss_version"]) == (7.8, "3.0")
+
     def test_a_boolean_score_is_dropped(self, caplog):
         v30, item = self._read(caplog, "impact_score", True)
         assert "impact_score" not in item["cvss_v30_data"]

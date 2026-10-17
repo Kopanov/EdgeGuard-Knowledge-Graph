@@ -1500,14 +1500,16 @@ def _finite_cvss_score(entry: Any) -> Optional[float]:
     """``entry`` as a finite float, or None when it is not a number, or a string that reads as one, or is not finite."""
     if isinstance(entry, bool):
         return None
-    if isinstance(entry, (int, float)):
-        number = float(entry)
-    elif isinstance(entry, str):
-        try:
+    try:
+        if isinstance(entry, (int, float)):
+            number = float(entry)
+        elif isinstance(entry, str):
             number = float(entry.strip())
-        except ValueError:
+        else:
             return None
-    else:
+    except (ValueError, OverflowError):
+        # OverflowError: a JSON integer beyond the float range (json.loads keeps it as an int); it is no
+        # usable score, and it must not fail the event's other attributes.
         return None
     return number if math.isfinite(number) else None
 
