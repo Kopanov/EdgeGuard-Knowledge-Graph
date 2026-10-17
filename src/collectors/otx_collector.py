@@ -903,14 +903,16 @@ class OTXCollector:
                         _advance_otx_incremental_cursor()
                     else:
                         # Partial failure (2026-10): the cursor stops below the oldest pulse with an
-                        # item MISP did not store because its batch failed, so the next run reads that
-                        # pulse again. It took the pulses of ``unique[:success]`` before, the first
-                        # items by position, which named the failed batch's pulses whenever an earlier
-                        # batch failed (or items were already present), and the cursor passed them.
-                        # Failures the writer does not list (items no attribute could be built from,
-                        # values MISP cannot store) do not hold it: a later run cannot store them
-                        # either. A writer that gives no list, or an unstored item of no known pulse,
-                        # leaves the cursor where it is.
+                        # item the writer lists as unstored (its batch or event lookup failed, or its
+                        # conversion dropped systemically: a payload change the collector must be
+                        # fixed for), so the next run reads that pulse again. It took the pulses of
+                        # ``unique[:success]`` before, the first items by position, which named the
+                        # failed batch's pulses whenever an earlier batch failed (or items were
+                        # already present), and the cursor passed them. Failures the writer does not
+                        # list (single records no attribute could be built from, values MISP cannot
+                        # store, attributes missing from a batch MISP partly stored) do not hold it.
+                        # A writer that gives no list, or an unstored item of no known pulse, leaves
+                        # the cursor where it is.
                         unstored = getattr(self.misp_writer, "last_push_unstored_items", None)
                         held_ids: set = set()
                         placed = isinstance(unstored, (list, tuple, set))
