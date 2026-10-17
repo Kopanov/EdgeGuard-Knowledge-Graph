@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
- "version": "2026.10.15",
- "generated_at": "2026-10-15",
+ "version": "2026.10.17",
+ "generated_at": "2026-10-17",
  "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged.",
  "generator": "scripts/build_canonical_threat_actors.py",
  "key_normalisation": "NFC, trimmed, lower-case (node_identity.canonicalize_merge_key for ThreatActor)",
@@ -81,20 +81,20 @@
   },
   {
    "role": "loaded_attack",
-   "file": "graph_threat_actors_20261015.json",
-   "sha256": "d96a00067719ed1aa0cb526ab5f1588c37a4ad6e81437f50d6f16dd9077e4402",
-   "exported_at": "2026-10-15T08:42:26+00:00",
-   "threat_actor_nodes": 899,
-   "attack_nodes": 195,
-   "attack_nodes_with_id": 192,
-   "attack_nodes_with_delivered_aliases": 195,
+   "file": "graph_threat_actors_20261017.json",
+   "sha256": "52b19d740a10309ab16639166bbbc83c6c35d3d3073d719962a8a5f976a6b131",
+   "exported_at": "2026-10-17T05:25:58+00:00",
+   "threat_actor_nodes": 859,
+   "attack_nodes": 189,
+   "attack_nodes_with_id": 188,
+   "attack_nodes_with_delivered_aliases": 189,
    "used": "the names of the ATT&CK-sourced ThreatActor nodes, and the aliases and group ids of the records MITRE delivered for them (the ATT&CK version EdgeGuard loaded)"
   },
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "571a8584ce461d25590bf8517bd8aac8164f5ec40a185d2554458ea2ab49880f",
-   "decisions": 37
+   "sha256": "23d30ce47e229cae4b33030f4a7f09383854713c20eb6dcbfeea2b875c91a80f",
+   "decisions": 40
   }
  ],
  "attribution": [
@@ -120,8 +120,8 @@
  "counts": {
   "actors": 1138,
   "attack_groups": 191,
-  "synonyms": 4469,
-  "ambiguous": 80
+  "synonyms": 4475,
+  "ambiguous": 77
  },
  "actors": [
   {
@@ -1299,6 +1299,7 @@
     "blind eagle",
     "blind eagle group",
     "blind eagle team",
+    "blindeagle",
     "tag-144",
     "tag-144 group",
     "tag-144 team"
@@ -1318,6 +1319,9 @@
      "apt-q-98",
      "blind eagle",
      "tag-144"
+    ],
+    "override": [
+     "blindeagle"
     ],
     "suffix_rule": [
      "aguilaciega group",
@@ -2141,6 +2145,7 @@
      "nobelium",
      "noblebaron",
      "solarstorm",
+     "stellarparticle",
      "the dukes",
      "unc2452",
      "unc3524",
@@ -4717,37 +4722,6 @@
     "suffix_rule": [
      "caliente bandits group",
      "caliente bandits team"
-    ]
-   }
-  },
-  {
-   "name": "Callisto",
-   "key": "callisto",
-   "mitre_attack": null,
-   "origins": [
-    "misp_galaxy:threat-actor"
-   ],
-   "records": [
-    "threat-actor/fbd279ab-c095-48dc-ba48-4bece3dd5b0f"
-   ],
-   "synonyms": [
-    "blue callisto",
-    "callisto team",
-    "cold relic",
-    "iron frontier",
-    "tag-53",
-    "unc4057"
-   ],
-   "synonym_origins": {
-    "misp_galaxy:threat-actor": [
-     "blue callisto",
-     "cold relic",
-     "iron frontier",
-     "tag-53",
-     "unc4057"
-    ],
-    "suffix_rule": [
-     "callisto team"
     ]
    }
   },
@@ -8080,6 +8054,7 @@
      "berserk bear",
      "bromine",
      "crouching yeti",
+     "dragonfly 2.0",
      "dymalloy",
      "energetic bear",
      "ghost blizzard",
@@ -13596,6 +13571,7 @@
      "emerald sleet",
      "patheticslug",
      "springtail",
+     "stolen pencil",
      "ta427",
      "thallium",
      "velvet chollima"
@@ -15386,8 +15362,17 @@
    "records": [
     "mitre-intrusion-set/918da025-04bd-48af-b6c4-f3e4d1b915eb"
    ],
-   "synonyms": [],
-   "synonym_origins": {}
+   "synonyms": [
+    "medusa"
+   ],
+   "synonym_origins": {
+    "override": [
+     "medusa"
+    ],
+    "suffix_rule": [
+     "medusa"
+    ]
+   }
   },
   {
    "name": "menuPass",
@@ -19078,6 +19063,23 @@
    }
   },
   {
+   "name": "qilin",
+   "key": "qilin",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [
+    "agenda"
+   ],
+   "synonym_origins": {
+    "override": [
+     "agenda"
+    ]
+   }
+  },
+  {
    "name": "QTFY",
    "key": "qtfy",
    "mitre_attack": null,
@@ -22304,14 +22306,22 @@
    "records": [
     "microsoft-activity-group/06630ccd-98ed-5aec-8083-e04c894bd2d6",
     "mitre-intrusion-set/9b36c218-4d80-4ec6-a68d-cc2886bbe410",
-    "threat-actor/7d99d2f7-adf0-44e4-9044-d18ff6842a16"
+    "threat-actor/7d99d2f7-adf0-44e4-9044-d18ff6842a16",
+    "threat-actor/fbd279ab-c095-48dc-ba48-4bece3dd5b0f"
    ],
    "synonyms": [
+    "blue callisto",
+    "bluecharlie",
+    "callisto",
     "callisto group",
+    "callisto team",
+    "cold relic",
     "cold river",
     "coldriver",
     "coldriver group",
     "coldriver team",
+    "gossamer bear",
+    "iron frontier",
     "nahr el bared",
     "nahr elbard",
     "reuse team",
@@ -22322,20 +22332,31 @@
     "star blizzard team",
     "ta446",
     "ta446 group",
-    "ta446 team"
+    "ta446 team",
+    "tag-53",
+    "unc4057"
    ],
    "synonym_origins": {
     "misp_galaxy:microsoft-activity-group": [
+     "bluecharlie",
      "callisto group",
      "coldriver",
+     "gossamer bear",
      "reuse team",
      "seaborgium",
      "ta446"
     ],
     "misp_galaxy:threat-actor": [
+     "blue callisto",
+     "bluecharlie",
+     "cold relic",
      "cold river",
+     "gossamer bear",
+     "iron frontier",
      "nahr el bared",
-     "nahr elbard"
+     "nahr elbard",
+     "tag-53",
+     "unc4057"
     ],
     "mitre": [
      "callisto group",
@@ -22349,7 +22370,11 @@
      "seaborgium",
      "ta446"
     ],
+    "override": [
+     "callisto"
+    ],
     "suffix_rule": [
+     "callisto team",
      "coldriver group",
      "coldriver team",
      "seaborgium group",
@@ -31625,21 +31650,6 @@
    }
   },
   {
-   "key": "bluecharlie",
-   "actors": [
-    "callisto",
-    "star blizzard"
-   ],
-   "origins": {
-    "callisto": [
-     "misp_galaxy:threat-actor"
-    ],
-    "star blizzard": [
-     "misp_galaxy:microsoft-activity-group"
-    ]
-   }
-  },
-  {
    "key": "boron",
    "actors": [
     "apt3",
@@ -31946,21 +31956,6 @@
    }
   },
   {
-   "key": "gossamer bear",
-   "actors": [
-    "callisto",
-    "star blizzard"
-   ],
-   "origins": {
-    "callisto": [
-     "misp_galaxy:threat-actor"
-    ],
-    "star blizzard": [
-     "misp_galaxy:microsoft-activity-group"
-    ]
-   }
-  },
-  {
    "key": "grizzly steppe",
    "actors": [
     "apt28",
@@ -32222,22 +32217,6 @@
     "salmon typhoon": [
      "misp_galaxy:microsoft-activity-group"
     ]
-   }
-  },
-  {
-   "key": "medusa",
-   "actors": [
-    "medusa group"
-   ],
-   "origins": {
-    "medusa group": [
-     "suffix_rule"
-    ]
-   },
-   "never_merge": {
-    "reason": "The name clashes with MedusaLocker, a different ransomware, and with the Medusa Android banking trojan. ATT&CK's G1051 is 'Medusa Group' and the suffix rule would map the bare name to it. The graph's 'medusa' node describes that same ransomware operation (it shares the Medusa ransomware family with G1051), but the bare name is not safe to merge.",
-    "date": "2026-10-15",
-    "status": "proposed"
    }
   },
   {

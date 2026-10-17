@@ -129,7 +129,8 @@ class TestLoader:
         assert ref.path == str(cta.DEFAULT_REFERENCE_PATH)
         assert ref.actor_count > 1000
         assert ref.canonical_for("Lazarus") == "lazarus group"
-        assert ref.canonical_for("medusa") is None  # never_merge
+        assert ref.canonical_for("medusa") == "medusa group"  # merged 2026-10-17 (was never_merge)
+        assert ref.canonical_for("bert") is None  # never_merge
 
     def test_empty_variable_keeps_the_default(self, monkeypatch):
         monkeypatch.setenv(ENV, "")  # docker-compose forwards an empty value

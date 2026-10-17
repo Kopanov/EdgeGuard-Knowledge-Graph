@@ -127,6 +127,34 @@
    "reason": "Spelling variant of ATT&CK's CyberAv3ngers (G1027; 61 relationships against 25); the galaxy's 'Cyber Av3ngers' record joins the ATT&CK group by its spacing, and the two nodes share IOCONTROL.",
    "date": "2026-10-15",
    "status": "proposed"
+  },
+  {
+   "names": ["blindeagle"],
+   "into": "apt-c-36",
+   "reason": "Spelling variant of Blind Eagle, which the galaxy lists as a synonym of APT-C-36 (G0099). On the graph of 2026-10-16 the 'blindeagle' node (38 relationships) shares Caminho, DCRat and Remcos RAT with the ATT&CK node.",
+   "date": "2026-10-17",
+   "status": "accepted"
+  },
+  {
+   "names": ["agenda"],
+   "into": "qilin",
+   "reason": "Agenda is the earlier name of the Qilin ransomware operation. On the graph of 2026-10-16 both nodes carry the Agenda ransomware family; neither name is in the galaxy, so the merge creates the actor 'qilin'.",
+   "date": "2026-10-17",
+   "status": "accepted"
+  },
+  {
+   "names": ["callisto"],
+   "into": "star blizzard",
+   "reason": "ATT&CK lists Callisto Group as an alias of Star Blizzard (G1033); the galaxy keeps Callisto as a cluster of its own, whose synonyms (TAG-53, UNC4057, Blue Callisto) name the same COLDRIVER activity. On the graph of 2026-10-16 the 'callisto' node carries LOSTKEYS, NOROBOT, YESROBOT, MAYBEROBOT and COLDCOPY, which public reporting attributes to COLDRIVER / Star Blizzard.",
+   "date": "2026-10-17",
+   "status": "accepted"
+  },
+  {
+   "names": ["medusa"],
+   "into": "medusa group",
+   "reason": "Replaces the never_merge of 2026-10-15. The graph's 'medusa' node names the Medusa ransomware operation: on the graph of 2026-10-16 its only malware is the Medusa ransomware family, which ATT&CK's G1051 'Medusa Group' also carries. MedusaLocker and the Medusa Android banking trojan are malware names, not this actor, and stay malware.",
+   "date": "2026-10-17",
+   "status": "accepted"
   }
  ],
  "never_merge": [
@@ -148,12 +176,6 @@
    "names": ["ta488"],
    "actor": "void blizzard",
    "reason": "Not merged: the threat-actor galaxy lists TA488 as a synonym of Void Blizzard, a vendor equivalence that is not universally accepted; the two graph nodes share no malware or pulse. A wrong merge is worse than a missed one.",
-   "date": "2026-10-15",
-   "status": "proposed"
-  },
-  {
-   "names": ["medusa"],
-   "reason": "The name clashes with MedusaLocker, a different ransomware, and with the Medusa Android banking trojan. ATT&CK's G1051 is 'Medusa Group' and the suffix rule would map the bare name to it. The graph's 'medusa' node describes that same ransomware operation (it shares the Medusa ransomware family with G1051), but the bare name is not safe to merge.",
    "date": "2026-10-15",
    "status": "proposed"
   },
