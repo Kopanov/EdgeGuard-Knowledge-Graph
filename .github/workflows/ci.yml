@@ -129,7 +129,7 @@ jobs:
           EDGEGUARD_IT_NEO4J_USER: neo4j
           EDGEGUARD_IT_NEO4J_PASSWORD: edgeguard-ci-only
           EDGEGUARD_IT_NEO4J_REQUIRED: "1"
-        run: pytest tests/test_actor_alias_merge_neo4j.py tests/test_explainability_neo4j.py tests/test_cve_epss_ssvc_neo4j.py tests/test_attribution_single_actor_reports_neo4j.py tests/test_export_paths_neo4j.py tests/test_malware_twin_merge_neo4j.py tests/test_reobserved_indicator_neo4j.py tests/test_node_counts_neo4j.py tests/test_entity_description_neo4j.py tests/test_description_ranking_neo4j.py tests/test_indicator_aging_neo4j.py tests/test_sector_evidence_neo4j.py tests/test_technique_flag_and_family_credit_neo4j.py -v -rs
+        run: pytest tests/test_actor_alias_merge_neo4j.py tests/test_explainability_neo4j.py tests/test_cve_epss_ssvc_neo4j.py tests/test_attribution_single_actor_reports_neo4j.py tests/test_export_paths_neo4j.py tests/test_malware_twin_merge_neo4j.py tests/test_reobserved_indicator_neo4j.py tests/test_node_counts_neo4j.py tests/test_entity_description_neo4j.py tests/test_description_ranking_neo4j.py tests/test_indicator_aging_neo4j.py tests/test_sector_evidence_neo4j.py tests/test_technique_flag_and_family_credit_neo4j.py tests/test_kev_update_neo4j.py -v -rs
 
   # ── Docker build + image vulnerability scan ───────────────────────────────
   docker:

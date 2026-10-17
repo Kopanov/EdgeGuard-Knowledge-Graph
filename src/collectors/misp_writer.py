@@ -651,6 +651,12 @@ class KnownAttribute(NamedTuple):
     # Digest of the ``NVD_META`` comment (``nvd_meta_digest``); None when the comment has none.
     meta_digest: Optional[str]
     tags: Tuple[str, ...]
+    # 2026-10 (KEV revisions): the attribute's MISP ``timestamp`` (epoch seconds; None when the listing
+    # row has none), whether it sits in an event EdgeGuard created (``Event.info`` starts with
+    # ``EdgeGuard-``), and its parsed ``NVD_META`` (only with ``keep_meta``, for the logs of an edit).
+    written: Optional[float] = None
+    own_event: bool = True
+    meta: Optional[Dict[str, Any]] = None
 
 
 _NVD_META_PREFIX = "NVD_META:"
@@ -659,6 +665,12 @@ _NVD_META_PREFIX = "NVD_META:"
 _NVD_META_UNORDERED_KEYS = ("cwe", "ref_tags", "cpe_type", "affected_products")
 # Tag families that describe NVD's current score: an update replaces them.
 _REPLACED_VULNERABILITY_TAG_PREFIXES = ("severity:", "cvss:")
+# 2026-10: a KEV edit also replaces the tag ``ransomware:known``, the only ransomware tag EdgeGuard writes.
+# CISA can revert an entry's ransomware use from Known to Unknown, and the KEV collector is the only writer
+# of that tag, so the stored copy then keeps CISA's latest statement instead of a stale tag. Only that tag:
+# any other ``ransomware:`` tag (a machine tag of MISP's ``ransomware`` taxonomy an analyst attached, such
+# as ``ransomware:type="crypto-ransomware"``) is not EdgeGuard's and is left alone.
+KEV_REPLACED_TAGS = ("severity:", "cvss:", "ransomware:known")
 
 
 # Bounds of the CISA ICS provenance in ``NVD_META`` (2026-10-16): a CVE is named by a few advisories,
@@ -714,6 +726,15 @@ def nvd_meta_digest(meta: Dict[str, Any]) -> str:
     ``None``, ``[]``, ``{}``) counts as absent, so a key a later EdgeGuard version adds with an
     empty value does not make every stored copy look changed.
     """
+    data = normalised_nvd_meta(meta)
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def normalised_nvd_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """An ``NVD_META`` payload as ``nvd_meta_digest`` compares it: ``last_modified`` and ``attack_vector``
+    left out, keys with empty values dropped, the unordered lists sorted. Shared with the logs of an
+    edit (``vulnerability_update.meta_changed_keys``, 2026-10), so the keys an edit names are exactly
+    the ones that changed its digest."""
     data = json.loads(json.dumps(meta, default=str))
     data.pop("last_modified", None)
     data.pop("attack_vector", None)
@@ -722,32 +743,49 @@ def nvd_meta_digest(meta: Dict[str, Any]) -> str:
         value = data.get(key)
         if isinstance(value, list):
             data[key] = sorted(value, key=lambda v: json.dumps(v, sort_keys=True))
-    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return data
 
 
-def _nvd_meta_digest_of_comment(comment: Any) -> Optional[str]:
-    """``nvd_meta_digest`` of an attribute comment, or None when it carries no readable ``NVD_META``."""
+def nvd_meta_of_comment(comment: Any) -> Optional[Dict[str, Any]]:
+    """The parsed ``NVD_META`` of an attribute comment, or None when it carries none or it is not
+    readable (2026-10)."""
     if not isinstance(comment, str) or not comment.startswith(_NVD_META_PREFIX):
         return None
     try:
         meta = json.loads(comment[len(_NVD_META_PREFIX) :])
     except ValueError:
         return None
-    return nvd_meta_digest(meta) if isinstance(meta, dict) else None
+    return meta if isinstance(meta, dict) else None
 
 
-def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -> Tuple[List[str], List[str]]:
+def _nvd_meta_digest_of_comment(comment: Any) -> Optional[str]:
+    """``nvd_meta_digest`` of an attribute comment, or None when it carries no readable ``NVD_META``."""
+    meta = nvd_meta_of_comment(comment)
+    return nvd_meta_digest(meta) if meta is not None else None
+
+
+def _vulnerability_tag_changes(
+    current: Sequence[str],
+    desired: Sequence[str],
+    replaced: Sequence[str] = _REPLACED_VULNERABILITY_TAG_PREFIXES,
+) -> Tuple[List[str], List[str]]:
     """Tags to attach and to detach so a stored CVE attribute matches a rebuilt one.
 
-    ``severity:`` and ``cvss:`` tags describe NVD's current score and are replaced. Zone, KEV,
-    ransomware and source tags are only added: zones accumulate on the graph node, so detaching a
-    zone tag would not remove the zone there. ``zone:Global`` is added only to an attribute with no
-    zone tag (a sector tag already says more). A ``tlp:`` tag is added only when the attribute has
-    none (someone may have raised it in MISP). Tags of any other family are left alone.
+    The tags ``replaced`` names are replaced: an entry ending in ``:`` names a family (every tag with
+    that prefix), any other entry one tag (2026-10). By default the families ``severity:`` and
+    ``cvss:``, which describe NVD's current score; a KEV edit also passes the tag ``ransomware:known``
+    (``KEV_REPLACED_TAGS``, 2026-10), so a reverted ransomware use detaches it. Zone, KEV and source
+    tags, and ``ransomware:known`` outside KEV edits, are only added: zones accumulate on the graph node,
+    so detaching a zone tag would not remove the zone there. ``zone:Global`` is added only to an
+    attribute with no zone tag (a sector tag already says more). A ``tlp:`` tag is added only when the
+    attribute has none (someone may have raised it in MISP). Tags of any other family, every other
+    ``ransomware:`` tag included, are left alone.
 
     Names compare without case: MISP resolves a tag name case-insensitively, so ``CVSS:low`` in its
     tag table stands for ``cvss:low``.
     """
+    replaced_families = tuple(entry.lower() for entry in replaced if entry.endswith(":"))
+    replaced_names = {entry.lower() for entry in replaced if not entry.endswith(":")}
     current_lower = {tag.lower() for tag in current}
     has_tlp = any(tag.startswith("tlp:") for tag in current_lower)
     has_zone = any(tag.startswith("zone:") for tag in current_lower)
@@ -763,7 +801,8 @@ def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -
     detach = sorted(
         tag
         for tag in set(current)
-        if tag.lower().startswith(_REPLACED_VULNERABILITY_TAG_PREFIXES) and tag.lower() not in desired_lower
+        if (tag.lower() in replaced_names or tag.lower().startswith(replaced_families))
+        and tag.lower() not in desired_lower
     )
     return attach, detach
 
@@ -1602,13 +1641,18 @@ class MISPWriter:
             logger.debug("MISP event %s: prefetched %s existing attribute keys", eid, len(keys))
         return keys
 
-    def index_source_attributes(self, source_tag: str, attr_type: str) -> Dict[str, List[KnownAttribute]]:
+    def index_source_attributes(
+        self, source_tag: str, attr_type: str, *, keep_meta: bool = False
+    ) -> Dict[str, List[KnownAttribute]]:
         """Every ``attr_type`` attribute MISP holds under ``source_tag``, by upper-case value.
 
         NVD incremental runs (2026-10) use it to tell a new CVE from a known one and to compare a
         known CVE with NVD's current record. Each attribute keeps its uuid, event, tag names and a
         digest of its ``NVD_META`` comment; the comments themselves are not kept (the 140,000 NVD
-        attributes of the 730-day baseline carry about 0.5 GB of them).
+        attributes of the 730-day baseline carry about 0.5 GB of them). Each also keeps its MISP
+        ``timestamp`` and whether its event is one EdgeGuard created (``Event.info`` starting with
+        ``EdgeGuard-``, the rule of the indicator refresh), and, with ``keep_meta`` (KEV runs, about
+        1,800 attributes; 2026-10), its parsed ``NVD_META``.
 
         Unlike the duplicate prefetch, which degrades to a partial key set, this listing is complete
         or the call fails: a CVE missing from a partial listing would be pushed again as new.
@@ -1670,12 +1714,22 @@ class MISPWriter:
                 tags = tuple(
                     sorted(str(t.get("name")) for t in attr.get("Tag") or [] if isinstance(t, dict) and t.get("name"))
                 )
+                meta = nvd_meta_of_comment(attr.get("comment"))
+                try:
+                    written: Optional[float] = float(attr.get("timestamp"))
+                except (TypeError, ValueError):
+                    written = None
+                event = attr.get("Event")
+                info = event.get("info") if isinstance(event, dict) else None
                 index.setdefault(value, []).append(
                     KnownAttribute(
                         uuid=uuid,
                         event_id=str(attr.get("event_id") or ""),
-                        meta_digest=_nvd_meta_digest_of_comment(attr.get("comment")),
+                        meta_digest=nvd_meta_digest(meta) if meta is not None else None,
                         tags=tags,
+                        written=written,
+                        own_event=isinstance(info, str) and info.startswith(_OWN_EVENT_PREFIX),
+                        meta=meta if keep_meta else None,
                     )
                 )
                 listed += 1
@@ -2323,15 +2377,20 @@ class MISPWriter:
         return attribute
 
     def plan_vulnerability_update(
-        self, vuln: Dict, known: Sequence[KnownAttribute]
+        self,
+        vuln: Dict,
+        known: Sequence[KnownAttribute],
+        *,
+        replaced_tags: Sequence[str] = _REPLACED_VULNERABILITY_TAG_PREFIXES,
     ) -> List[Tuple[KnownAttribute, Dict[str, Any]]]:
         """The edits that bring MISP's stored copies of a CVE in line with the vulnerability item.
 
         The item is turned into the attribute a new push would write (``create_vulnerability_attribute``)
         and compared with each stored copy: ``NVD_META`` by digest (``nvd_meta_digest``, so a change
-        only to ``last_modified`` needs no edit) and the tags by family (``_vulnerability_tag_changes``).
-        Each copy that differs gets one edit: the new comment, ``first_seen`` / ``last_seen``, and the
-        tags to attach or detach. Empty when every copy matches.
+        only to ``last_modified`` needs no edit) and the tags by family (``_vulnerability_tag_changes``;
+        ``replaced_tags`` names the families and tags an edit replaces, ``KEV_REPLACED_TAGS`` for KEV,
+        2026-10). Each copy that differs gets one edit: the new comment, ``first_seen`` /
+        ``last_seen``, and the tags to attach or detach. Empty when every copy matches.
         """
         attribute = self.create_vulnerability_attribute(vuln)
         if not attribute:
@@ -2343,7 +2402,7 @@ class MISPWriter:
         ]
         plans: List[Tuple[KnownAttribute, Dict[str, Any]]] = []
         for stored in known:
-            attach, detach = _vulnerability_tag_changes(stored.tags, desired_tags)
+            attach, detach = _vulnerability_tag_changes(stored.tags, desired_tags, replaced_tags)
             if stored.meta_digest == digest and not attach and not detach:
                 continue
             changes: Dict[str, Any] = {"comment": comment}

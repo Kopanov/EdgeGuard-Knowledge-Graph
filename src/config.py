@@ -549,11 +549,40 @@ NVD_EXTRA_CVE_IDS_MAX = 2000
 
 
 def kev_baseline_whole_catalogue() -> bool:
-    """``EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE`` (default true): baseline KEV takes every entry.
+    """``EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE`` (default true): a KEV run takes every entry.
 
-    ``false`` restores the ``dateAdded`` window of the baseline length.
+    Since 2026-10 every KEV run, not only a baseline, compares the whole catalogue with the stored MISP
+    copies. ``false`` restores the ``dateAdded`` window of the baseline length (a baseline's
+    ``baseline_days``, ``EDGEGUARD_BASELINE_DAYS`` for the other runs).
     """
     return _env_bool("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true")
+
+
+# ---------------------------------------------------------------------------
+# CISA KEV revisions (2026-10)
+# ---------------------------------------------------------------------------
+# CISA revises catalogue entries in place (ransomware use Unknown → Known, a moved due date, a
+# rewritten description) and gives no per-entry modification date. Every KEV run therefore
+# compares the whole catalogue with EdgeGuard's stored MISP copies: a CVE MISP lacks is added, a
+# stored copy that differs is edited in place (``collectors.vulnerability_update``). Before, an
+# incremental run took only the entries added within the last 30 days and MISPWriter dropped every
+# entry MISP already held as a duplicate, so no revision reached MISP or the graph; every revision
+# measured between 2026-05-22 and 2026-10-16 hit an entry older than 30 days.
+
+
+def kev_update_existing() -> bool:
+    """``EDGEGUARD_KEV_UPDATE_EXISTING`` (default true): a KEV run edits the stored MISP copy of a
+    catalogue entry when CISA's entry changed. ``false`` leaves stored copies as they are; entries
+    MISP lacks are still added."""
+    return _env_bool("EDGEGUARD_KEV_UPDATE_EXISTING", "true")
+
+
+def kev_max_edits_per_run() -> int:
+    """``EDGEGUARD_KEV_MAX_EDITS_PER_RUN`` (default 500, at least 1): stored KEV copies one run edits
+    at most. The rest are deferred, not failed: the comparison is stateless, so the next run plans
+    them again. Additions are not capped (the catalogue holds about 1,800 entries); a run's explicit
+    limit lowers this cap and cuts the additions."""
+    return max(1, _env_int("EDGEGUARD_KEV_MAX_EDITS_PER_RUN", 500))
 
 
 def nvd_baseline_kev_sweep() -> bool:
@@ -796,7 +825,12 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   entries were never reported again and aged while still listed. EDGEGUARD_FEODO_MAX_PER_RUN and
 #   EDGEGUARD_SSLBL_MAX_PER_RUN size the cap to the list, EDGEGUARD_ABUSEIPDB_MAX_PER_RUN is the
 #   request's limit (see their definitions).
-OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb"})
+#   cisa, cisa_kev (2026-10): every run compares the whole KEV catalogue (about 1,800 entries) with
+#   the stored MISP copies; a cut at 200 left revisions of older entries unseen.
+#   EDGEGUARD_KEV_MAX_EDITS_PER_RUN caps the edits; additions are not capped.
+OWN_RUN_CAP_SOURCES = frozenset(
+    {"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb", "cisa", "cisa_kev"}
+)
 
 
 def get_effective_limit(source: str = None, default_limit: int = None) -> Optional[int]:

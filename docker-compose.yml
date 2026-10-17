@@ -106,7 +106,6 @@ x-common-env: &common-env
   EDGEGUARD_FEODO_MAX_PER_RUN: ${EDGEGUARD_FEODO_MAX_PER_RUN:-15000}
   EDGEGUARD_SSLBL_MAX_PER_RUN: ${EDGEGUARD_SSLBL_MAX_PER_RUN:-20000}
   EDGEGUARD_ABUSEIPDB_MAX_PER_RUN: ${EDGEGUARD_ABUSEIPDB_MAX_PER_RUN:-10000}
-  EDGEGUARD_CISA_INCREMENTAL_DAYS: ${EDGEGUARD_CISA_INCREMENTAL_DAYS:-30}
   # VirusTotal free-tier budget (src/collectors/virustotal_budget.py): daily lookups, per-run cap,
   # MISP candidate window. The ledger lives in the ./state bind mount.
   EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET: ${EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET:-400}
@@ -129,6 +128,11 @@ x-common-env: &common-env
   # 2026-10: known-exploited CVEs outside the baseline window (whole KEV catalogue, NVD KEV sweep,
   # CVE ids fetched by id) — see README "Settings".
   EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE: ${EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE:-true}
+  # CISA KEV revisions (2026-10): every KEV run compares the whole catalogue with the stored MISP
+  # copies and edits those CISA revised, at most EDGEGUARD_KEV_MAX_EDITS_PER_RUN per run (the rest
+  # follow on the next run); false = add new entries only. Defaults mirror src/config.py.
+  EDGEGUARD_KEV_MAX_EDITS_PER_RUN: ${EDGEGUARD_KEV_MAX_EDITS_PER_RUN:-500}
+  EDGEGUARD_KEV_UPDATE_EXISTING: ${EDGEGUARD_KEV_UPDATE_EXISTING:-true}
   EDGEGUARD_NVD_BASELINE_KEV_SWEEP: ${EDGEGUARD_NVD_BASELINE_KEV_SWEEP:-true}
   EDGEGUARD_NVD_EXTRA_CVE_IDS: ${EDGEGUARD_NVD_EXTRA_CVE_IDS:-}
   EDGEGUARD_DEFAULT_TLP: ${EDGEGUARD_DEFAULT_TLP:-white}

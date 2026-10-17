@@ -527,6 +527,10 @@ class EdgeGuardPipeline:
                                 "misp_event_id": None,
                             },
                             source_id=_stix_object_source(obj),
+                            # 2026-10: this reduced record is not the source's (no NVD_META, no CVSS, no
+                            # KEV fields), so it never replaces the record on the SOURCED_FROM edge of
+                            # the MISP event's source; it is written only when it creates the edge.
+                            refresh_raw_data=False,
                         )
                         if ok:
                             stats["vulnerabilities"] += 1
