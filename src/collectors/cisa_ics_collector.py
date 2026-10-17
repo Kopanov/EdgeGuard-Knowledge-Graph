@@ -241,13 +241,6 @@ def path_published_date(path: str) -> Optional[datetime]:
         return None
 
 
-def _to_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _parse_cvss_v3_vector(vector: str) -> Dict[str, str]:
     """Expand a CVSS v3.x vector string into NVD-style component names."""
     out: Dict[str, str] = {}
@@ -279,7 +272,8 @@ def extract_cvss(vuln: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns a dict with ``cvss_v31_data`` / ``cvss_v30_data`` (one populated, or
     both None), ``cvss_score``, ``severity``, ``attack_vector``, ``result_impacts``.
-    A block without a valid base score is not a CVSS (2026-10: it used to become 0.0 / HIGH).
+    A block without a valid base score is not a CVSS (2026-10: it used to become 0.0 / HIGH); a
+    missing impact or exploitability sub-score is None (2026-10: it used to become 0.0).
     """
     for entry in vuln.get("scores") or []:
         if not isinstance(entry, dict):
@@ -309,8 +303,11 @@ def extract_cvss(vuln: Dict[str, Any]) -> Dict[str, Any]:
             "availability_impact": str(v3.get("availabilityImpact") or comps.get("availability_impact", "")).upper(),
             "base_score": base_score,
             "base_severity": base_severity,
-            "impact_score": _to_float(v3.get("impactScore")),
-            "exploitability_score": _to_float(v3.get("exploitabilityScore")),
+            # 2026-10: CSAF's cvss_v3 block carries no impact or exploitability sub-score, so these are
+            # None (not written to the CVSS sub-node) unless the block gives a valid one. They were 0.0,
+            # which the graph showed as CISA's sub-scores.
+            "impact_score": clamp_cvss_score(v3.get("impactScore")),
+            "exploitability_score": clamp_cvss_score(v3.get("exploitabilityScore")),
         }
         version = str(v3.get("version") or "")
         if not version and vector.startswith("CVSS:"):

@@ -1355,6 +1355,55 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
     return decorator
 
 
+# 2026-10: names a CVSS payload entry cannot have (``run_misp_to_neo4j._meta_cvss_payload`` drops them).
+# ``Neo4jClient._merge_cvss_node`` sets the sub-node's identity and bookkeeping itself, passes its own
+# statement parameters beside the payload's, and gives ``session.run`` its query, parameters and timeout,
+# so such an entry replaced the sub-node's ``uuid`` or made the write fail. No collector writes one.
+CVSS_PAYLOAD_RESERVED_NAMES = frozenset(
+    {
+        "cve_id",
+        "uuid",
+        "tag",
+        "last_updated",
+        "edgeguard_managed",
+        "edgeguard_enriched",
+        "created",
+        "cve_uuid",
+        "cvss_uuid",
+        "feed",
+        "misp_event_id",
+        "query",
+        "parameters",
+        "timeout",
+    }
+)
+
+
+def _cvss_legacy_sources_cypher(node: str) -> str:
+    """2026-10: the feeds a ``HAS_CVSS_*`` edge without ``sources`` (written before relationship
+    provenance) counts as asserted by: the CVSS sub-node's ``tag``, the feed that first wrote it, named as
+    ``Neo4jClient._merge_cvss_node`` names a feed (``default``, the tag of an item without one, is
+    ``misp``); none when the sub-node has no tag. ``_merge_cvss_node`` reads it in its NVD guard and seeds
+    such an edge's ``sources`` with it before adding its own feed, so a later write still sees that feed."""
+    return (
+        f"CASE WHEN {node}.tag IS NULL OR {node}.tag = '' THEN [] "
+        f"WHEN {node}.tag = 'default' THEN ['misp'] ELSE [{node}.tag] END"
+    )
+
+
+def _cve_sub_write_failed(exc: Exception, what: str) -> bool:
+    """The error handling of ``merge_cve``'s sub-writes: the CVSS sub-nodes, the NVD-owned data and
+    the CVE score (2026-10). A retryable error (``_is_retryable_neo4j_error``) is raised again, so the
+    method's ``@retry_with_backoff`` retries it and raises it once the retries are spent, as for
+    ``merge_node_with_source``; a terminal error is logged at ERROR and returned as False, which
+    ``merge_cve`` returns, so the sync counts the CVE as an error. Until 2026-10 these writes logged
+    every error at WARNING, retryable ones included, and the CVE counted as synced."""
+    if _is_retryable_neo4j_error(exc):
+        raise exc
+    logger.error("%s (terminal): %s: %s", what, type(exc).__name__, exc)
+    return False
+
+
 def _alert_default_tlp() -> str:
     """TLP stamped on alert-created indicators: ``config.EDGEGUARD_DEFAULT_TLP`` (``white`` when
     config is unavailable, e.g. in a bare unit test)."""
@@ -3323,7 +3372,10 @@ class Neo4jClient:
         ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector`` from those sub-nodes
         (2026-10; the record's own ``cvss_score`` / ``severity`` / ``attack_vector`` are not written).
         ``published`` and ``last_modified`` are set by NVD's record (``nvd_record``) and only filled,
-        where the node has none, by any other record (2026-10). ``description`` and
+        where the node has none, by any other record (2026-10); so are ``cwe``, ``ref_tags``,
+        ``cpe_type``, ``result_impacts``, ``reference_urls`` and ``affected_products`` (2026-10, a
+        record of the NVD source counting as NVD's), and a CVSS sub-node NVD has asserted keeps NVD's
+        payload (``_merge_cvss_node``). ``description`` and
         ``description_source`` follow the source ranking NVD > CISA KEV > CISA ICS > any other source
         (``description_ranking.CVE_DESCRIPTIONS``, 2026-10-16). ``cisa_exploit_add``,
         ``cisa_action_due``, ``cisa_required_action`` and ``cisa_vulnerability_name`` are set by a CISA
@@ -3332,6 +3384,10 @@ class Neo4jClient:
         the edge holds the source's latest record; ``refresh_raw_data=False`` writes it only when the
         edge is created, for a caller whose record is not the source's (the STIX import of
         ``run_pipeline``, a reduced record under the MISP event's source id).
+
+        Returns False when the node's MERGE or one of the sub-writes (CVSS sub-nodes, NVD-owned data,
+        score) fails with a terminal error (2026-10); a retryable error that outlasts its retries is
+        raised.
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -3401,12 +3457,20 @@ class Neo4jClient:
         # had them only inside ``SOURCED_FROM.raw_data``. ``reference_urls`` and
         # ``affected_products`` ride along for parity with the batch path (CPE
         # strings are what a vendor/product sector rule needs).
+        # 2026-10: like the dates, NVD's record sets the lists and any other record only fills a list the
+        # node does not have. Before, the record merged last set them, so a CISA ICS record merged after
+        # NVD's replaced NVD's CPE strings with product names, NVD's references with the advisory's URL
+        # and NVD's CWE with CISA's. Of the other records only CISA ICS gives these lists, from one
+        # attribute per CVE in MISP, so the result does not depend on the order. An item of the NVD
+        # source without ``nvd_record`` counts as NVD's record (the lists come only with ``NVD_META``).
+        from_nvd = bool(data.get("nvd_record")) or source_registry.canonical_source_id(source_id) == "nvd"
+        record_lists = extra_props if from_nvd else fill_props
         for _list_prop in ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products"):
             _val = data.get(_list_prop)
             if isinstance(_val, list) and _val:
                 _clean = [str(x) for x in _val if x is not None and str(x) != ""]
                 if _clean:  # never overwrite an existing list with an empty one
-                    extra_props[_list_prop] = _clean
+                    record_lists[_list_prop] = _clean
         # 2026-10: NVD's record status (``["rejected"]`` or ``["active"]``, from ``NVD_META``) on the
         # node, replaced on every write so a rejection that arrives with an update reaches the graph.
         # Before, it stayed in ``SOURCED_FROM.raw_data`` only (0 of 141,730 CVE nodes had it on
@@ -3432,31 +3496,32 @@ class Neo4jClient:
         )
         if not ok:
             return False
+        # 2026-10: each sub-write retries a retryable error and raises it once its retries are spent; a
+        # terminal error makes it return False, the remaining sub-writes still run, and merge_cve returns
+        # False, so the sync counts the CVE as an error. Before, the three helpers logged every error at
+        # WARNING, retryable ones included, and the CVE counted as synced.
+        failed_sub_writes = 0
         # Create CVSS sub-nodes (ResilMesh schema)
         tag = data.get("tag", "default")
-        if data.get("cvss_v40_data"):
-            self._merge_cvss_node(
-                cve_id, tag, "CVSSv40", "HAS_CVSS_v40", data["cvss_v40_data"], misp_event_id=data.get("misp_event_id")
-            )
-        if data.get("cvss_v31_data"):
-            self._merge_cvss_node(
-                cve_id, tag, "CVSSv31", "HAS_CVSS_v31", data["cvss_v31_data"], misp_event_id=data.get("misp_event_id")
-            )
-        if data.get("cvss_v30_data"):
-            self._merge_cvss_node(
-                cve_id, tag, "CVSSv30", "HAS_CVSS_v30", data["cvss_v30_data"], misp_event_id=data.get("misp_event_id")
-            )
-        if data.get("cvss_v2_data"):
-            self._merge_cvss_node(
-                cve_id, tag, "CVSSv2", "HAS_CVSS_v2", data["cvss_v2_data"], misp_event_id=data.get("misp_event_id")
-            )
-        if data.get("nvd_record"):
-            self._replace_nvd_owned_cve_data(cve_id, data)
+        for label, rel_type, key in (
+            ("CVSSv40", "HAS_CVSS_v40", "cvss_v40_data"),
+            ("CVSSv31", "HAS_CVSS_v31", "cvss_v31_data"),
+            ("CVSSv30", "HAS_CVSS_v30", "cvss_v30_data"),
+            ("CVSSv2", "HAS_CVSS_v2", "cvss_v2_data"),
+        ):
+            if data.get(key) and not self._merge_cvss_node(
+                cve_id, tag, label, rel_type, data[key], misp_event_id=data.get("misp_event_id")
+            ):
+                failed_sub_writes += 1
+        if data.get("nvd_record") and not self._replace_nvd_owned_cve_data(cve_id, data):
+            failed_sub_writes += 1
         # Last step: any code that adds or removes CVSS sub-nodes of this CVE must run before it,
         # or the node keeps a score derived from sub-nodes that no longer apply.
-        self._set_cve_score_from_cvss(cve_id)
-        return True
+        if not self._set_cve_score_from_cvss(cve_id):
+            failed_sub_writes += 1
+        return failed_sub_writes == 0
 
+    @retry_with_backoff(max_retries=3)
     def _replace_nvd_owned_cve_data(self, cve_id: str, data: Dict) -> bool:
         """Remove from the node what NVD's record no longer has (2026-10).
 
@@ -3473,13 +3538,19 @@ class Neo4jClient:
           nodes with ``cwe`` had NVD as their only source);
         - a CVSS sub-node of a version the record no longer has is removed when EdgeGuard manages it
           and NVD is the only feed that asserted it (``sources`` of its ``HAS_CVSS_*`` edge, or the
-          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too;
+          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too. On
+          a sub-node another feed also asserted, NVD is taken out of ``sources`` and the record's event
+          out of ``misp_event_ids`` of both edges (2026-10), as a rebuild from the same records gives:
+          the sub-node no longer counts as NVD's (``_merge_cvss_node``), so the other feed's next
+          record sets its payload. Until that record the sub-node keeps the values it has, NVD's;
+          before, NVD stayed in ``sources``, and the other feed's records only filled the sub-node;
         - CISA's SSVC decision points (``ssvc_exploitation``, ``ssvc_automatable``,
           ``ssvc_technical_impact``, with ``ssvc_version`` and ``ssvc_timestamp``; 2026-10) are set
           from the record on any node, and removed when the record has none: no other source supplies
           them, so a decision CISA changed or withdrew never stays from an earlier record.
 
-        Failure is logged and leaves the node as it was, like ``_merge_cvss_node``.
+        A retryable error is retried and then raised, a terminal one logged and returned as False, which
+        ``merge_cve`` returns (``_cve_sub_write_failed``, 2026-10); either leaves the node as it was.
         """
         if not self.driver or not cve_id:
             return False
@@ -3503,17 +3574,29 @@ class Neo4jClient:
         WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id AND s.edgeguard_managed = true
           AND coalesce(r.sources, [s.tag]) = ['nvd']
         DETACH DELETE s
+        WITH DISTINCT c
+        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]-(s)
+        WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id
+          AND 'nvd' IN r.sources AND any(feed IN r.sources WHERE feed <> 'nvd')
+        SET r.sources = [feed IN r.sources WHERE feed <> 'nvd'],
+            r.misp_event_ids = [event IN r.misp_event_ids WHERE event <> $nvd_event_id]
         """
         try:
             with self.driver.session() as session:
                 session.run(
-                    query, cve_id=cve_id, absent_rel_types=absent, **lists, **ssvc, timeout=NEO4J_READ_TIMEOUT
+                    query,
+                    cve_id=cve_id,
+                    absent_rel_types=absent,
+                    nvd_event_id=str(data.get("misp_event_id") or ""),
+                    **lists,
+                    **ssvc,
+                    timeout=NEO4J_READ_TIMEOUT,
                 ).consume()
             return True
         except Exception as e:
-            logger.warning(f"Failed to replace the NVD data of CVE {cve_id}: {e}")
-            return False
+            return _cve_sub_write_failed(e, f"Failed to replace the NVD data of CVE {cve_id}")
 
+    @retry_with_backoff(max_retries=3)
     def _set_cve_score_from_cvss(self, cve_id: str) -> bool:
         """Set the CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector``
         from its CVSS sub-nodes (v3.1 → v3.0 → v2 → v4.0); no CVSS → null score, version and attack
@@ -3522,8 +3605,9 @@ class Neo4jClient:
 
         Runs after every ``merge_cve`` (2026-10), whichever source the record came from, so a
         record without CVSS (OTX, KEV, an NVD record awaiting analysis) cannot erase another
-        source's score and a CVSS 3.1 from CISA ICS outranks NVD's CVSS 4.0. Failure is logged
-        and leaves the previous values, like ``_merge_cvss_node``.
+        source's score and a CVSS 3.1 from CISA ICS outranks NVD's CVSS 4.0. A retryable error is
+        retried and then raised, a terminal one logged and returned as False (``_cve_sub_write_failed``,
+        2026-10); either leaves the previous values.
         """
         if not self.driver or not cve_id:
             return False
@@ -3532,9 +3616,9 @@ class Neo4jClient:
                 session.run(_CVE_SCORE_FROM_CVSS_QUERY, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT).consume()
             return True
         except Exception as e:
-            logger.warning(f"Failed to set the CVSS score of CVE {cve_id}: {e}")
-            return False
+            return _cve_sub_write_failed(e, f"Failed to set the CVSS score of CVE {cve_id}")
 
+    @retry_with_backoff(max_retries=3)
     def _merge_cvss_node(
         self,
         cve_id: str,
@@ -3559,6 +3643,22 @@ class Neo4jClient:
         2026-10 (relationship provenance): both edges also name the feed that
         delivered the score (``r.sources``, the CVE's source tag, normally ``nvd``)
         and the MISP event that carried it (``r.misp_event_ids``).
+
+        2026-10 (NVD precedence): one sub-node per CVE and version holds NVD's and CISA ICS's
+        score alike. Once NVD has asserted it (``'nvd'`` in ``sources`` of the CVE's edge to it,
+        or the node's ``tag`` where the edge predates ``sources``), another feed's payload only
+        fills a property the node lacks (``_set_if_absent_clause``), so the node holds NVD's payload
+        whatever the order of the records; NVD's own write and a write to a sub-node only other
+        feeds asserted set the payload. ``r.sources`` and ``r.misp_event_ids`` still name every feed
+        and event. An edge that predates ``sources`` gets the feed the guard read from the node's
+        ``tag`` (``_cvss_legacy_sources_cypher``) before the writing feed is added, so a sub-node NVD
+        asserted that way stays NVD's on the next write too; a new edge names the writing feed only.
+        Before, every write set its whole payload and the record merged last won. An NVD
+        record without the version takes NVD out of ``sources`` (``_replace_nvd_owned_cve_data``), so
+        the other feed's next write sets its payload again.
+
+        A retryable error is retried and then raised, a terminal one logged and returned as False,
+        which ``merge_cve`` returns (``_cve_sub_write_failed``, 2026-10).
         """
         if not self.driver or not cve_id:
             return False
@@ -3572,7 +3672,9 @@ class Neo4jClient:
             prop_assignments = []
             for k in filtered_cvss:
                 _validate_prop_name(k)
-                prop_assignments.append(f"n.{k} = ${k}")
+                prop_assignments.append(
+                    f"n.{k} = CASE WHEN nvd_owned THEN {_set_if_absent_clause(f'n.{k}', f'${k}')} ELSE ${k} END"
+                )
             set_clause = ", ".join(prop_assignments) if prop_assignments else "n.created = true"
 
             cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
@@ -3583,12 +3685,17 @@ class Neo4jClient:
             MERGE (n:{label} {{cve_id: $cve_id}})
             ON CREATE SET n.uuid = $cvss_uuid, n.edgeguard_managed = true
             ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
+            WITH cve, n, {_cvss_legacy_sources_cypher("n")} AS legacy_sources
+            WITH cve, n, legacy_sources, ($feed <> 'nvd' AND EXISTS {{
+                MATCH (cve)-[x:{rel_type}]->(n) WHERE 'nvd' IN coalesce(x.sources, legacy_sources)
+            }}) AS nvd_owned
             SET {set_clause},
                 n.tag = coalesce(n.tag, $tag),
                 n.last_updated = datetime(),
                 n.uuid = coalesce(n.uuid, $cvss_uuid)
             MERGE (cve)-[r1:{rel_type}]->(n)
                 ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
+                ON MATCH SET r1.sources = coalesce(r1.sources, legacy_sources)
             SET r1.src_uuid = coalesce(r1.src_uuid, $cve_uuid),
                 r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid),
                 r1.edgeguard_managed = true,
@@ -3596,6 +3703,7 @@ class Neo4jClient:
                 r1.misp_event_ids = {_dedup_concat_optional_clause("r1.misp_event_ids", "$misp_event_id", require_nonempty_string=True)}
             MERGE (n)-[r2:{rel_type}]->(cve)
                 ON CREATE SET r2.src_uuid = $cvss_uuid, r2.trg_uuid = $cve_uuid
+                ON MATCH SET r2.sources = coalesce(r2.sources, legacy_sources)
             SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
                 r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid),
                 r2.edgeguard_managed = true,
@@ -3630,8 +3738,7 @@ class Neo4jClient:
             )
             return True
         except Exception as e:
-            logger.warning(f"Failed to merge {label} for CVE {cve_id}: {e}")
-            return False
+            return _cve_sub_write_failed(e, f"Failed to merge {label} for CVE {cve_id}")
 
     def merge_malware(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
         """MERGE a Malware node with source tracking.

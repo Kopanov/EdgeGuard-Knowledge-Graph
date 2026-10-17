@@ -297,11 +297,37 @@ def test_parse_realistic_sample_yields_items_with_expected_shape():
     assert v31["vector_string"] == "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N"
     assert v31["attack_vector"] == "LOCAL" and v31["privileges_required"] == "HIGH"
     assert v31["base_score"] == 6.0 and v31["base_severity"] == "MEDIUM"
+    # CSAF's cvss_v3 block has no impact / exploitability sub-score: None, not an invented 0.0 (2026-10).
+    assert v31["impact_score"] is None and v31["exploitability_score"] is None
     assert first["result_impacts"] == ["HIGH", "HIGH", "NONE"]
     # Second item: lower-case CVE upper-cased, NETWORK vector.
     assert items[1]["attack_vector"] == "NETWORK" and items[1]["severity"] == "HIGH"
     # Never wall-clock: timestamps must come from the advisory, not now().
     assert "last_updated" not in first
+
+
+@pytest.mark.parametrize(
+    "block, expected",
+    [
+        ({}, (None, None)),  # CSAF 2.0 as CISA publishes it: no sub-scores
+        ({"impactScore": 5.2, "exploitabilityScore": "0.8"}, (5.2, 0.8)),
+        ({"impactScore": 0.0, "exploitabilityScore": 3.9}, (0.0, 3.9)),  # a given 0.0 stays
+        ({"impactScore": "n/a", "exploitabilityScore": 11.0}, (None, None)),  # unparseable, outside 0-10
+    ],
+)
+def test_cvss_sub_scores_are_none_unless_the_advisory_gives_them(block, expected):
+    """2026-10: a missing impact or exploitability sub-score is None (not written to the CVSS sub-node),
+    not 0.0. The collector sent 0.0 for every CSAF block, and the graph showed invented 0.0 sub-scores
+    (1,114 CVSSv31 and 25 CVSSv30 sub-nodes CISA ICS alone asserted, hosted graph of 2026-10-16)."""
+    v3 = {
+        "baseScore": 7.3,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L",
+        "version": "3.1",
+        **block,
+    }
+    payload = mod.extract_cvss({"scores": [{"cvss_v3": v3}]})["cvss_v31_data"]
+    assert (payload["impact_score"], payload["exploitability_score"]) == expected
 
 
 def test_timestamps_omitted_when_advisory_has_no_dates():
