@@ -953,6 +953,19 @@ groups:
         # build_relationships had started. The rule looks at syncs from the
         # last 36 h only, so an older sync stamp left in the metrics volume
         # (for example before the completion gauge existed) cannot fire it.
+        #
+        # 2026-10-16: the scheduled sync DAG's build_relationships skips while
+        # a baseline holds the baseline lock. A run_neo4j_sync that started
+        # before the lock still completes and stamps the sync, and the
+        # build_relationships after it skips and stamps nothing, so a sync is
+        # no longer always followed by build_relationships. The rule is
+        # silent while a baseline run is in progress (the listener plugin's
+        # gauge, as EdgeGuardDAGRunStuck reads it): the baseline's full sync
+        # and its own build_relationships stamp both times again. A baseline
+        # that ends before them (a failed run) leaves the skipped sync's stamp
+        # without a completion; the annotation names that case. A silent
+        # death of a scheduled build_relationships while a baseline runs is
+        # not reported either; the baseline rebuilds the relationships.
         expr: |
           (
             edgeguard_neo4j_sync_last_success_timestamp
@@ -966,6 +979,10 @@ groups:
           (
             (time() - edgeguard_neo4j_sync_last_success_timestamp) < (36 * 60 * 60)
           )
+          unless on()
+          (
+            edgeguard_dag_run_in_progress_start_timestamp{dag_id="edgeguard_baseline"} > 0
+          )
         for: 10m
         labels:
           severity: critical
@@ -977,10 +994,22 @@ groups:
             build_relationships attempt, retries included, has ended) and no
             build_relationships completion has been stamped since
             (``edgeguard_build_relationships_last_completion_timestamp``).
-            build_relationships runs directly after the sync and stamps
+            build_relationships runs after the sync and stamps
             the gauge ONLY when it reaches the
             ``[BUILD_RELATIONSHIPS SUMMARY]`` log line — no stamp =
             subprocess died before reaching the end.
+
+            Not a death (2026-10-16): the scheduled sync DAG's
+            build_relationships skips while a baseline holds the baseline
+            lock (log line ``build_relationships skipped: EdgeGuard baseline
+            is running``, task state ``skipped``) and stamps nothing after a
+            sync that started before the lock. The rule is silent while the
+            baseline runs; it fires after a baseline that ended before its
+            own full sync and build_relationships (a failed run). Check the
+            sync DAG run's build_relationships state first; if it skipped,
+            the next build_relationships that completes (the resumed
+            baseline's or the next scheduled sync's) builds the
+            relationships, and nothing died.
 
             Common causes (ranked by likelihood):
               1. Airflow worker OOM-killed (exit 137). Check:

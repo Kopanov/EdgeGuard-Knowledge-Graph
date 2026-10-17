@@ -128,8 +128,18 @@ class _MispFallbackHardError(Exception):
     3. requests-restSearch returning HTTP 5xx mid-pagination
     4. EITHER branch hitting the ``_FALLBACK_MAX_PAGES`` safety cap
 
-    All four MUST surface to the operator. The previous fix (Bugbot
-    round 2) used a bare ``raise RuntimeError(...)`` — but the enclosing
+    2026-10, same contract for the rest of the event listing:
+
+    5. the primary ``/events/index`` (or ``/events``) listing failing on a
+       page after the first with a non-transient error (see
+       ``_fetch_edgeguard_events_via_requests_index``)
+    6. the restSearch fallback answering a non-JSON page or failing with
+       a non-transient error (recorded as ``rest_search`` / ``hard_error``),
+       and any other unexpected error while listing (the outer handler of
+       ``fetch_edgeguard_events`` used to return the partial list)
+
+    All of them MUST surface to the operator. An earlier PR-N29 fix
+    used a bare ``raise RuntimeError(...)`` — but the enclosing
     ``except Exception as e: logger.error(...)`` blocks at lines ~1109
     (PyMISP fallback → swallowed back to requests-restSearch path) and
     ~1201 (outer broad) silently catch ``RuntimeError`` and turn the
@@ -415,6 +425,23 @@ def _item_report_ids(item: Dict[str, Any]) -> set:
 INDEX_FETCH_STATE: Dict[str, bool] = {"truncated": False}
 
 
+def _is_misp_index_listing(payload: Any) -> bool:
+    """True for the payload shapes ``normalize_misp_event_index_payload`` reads as an event listing.
+
+    2026-10: anything else (for example HTTP 200 with ``{"errors": ...}``) is an error answer, not
+    an empty listing; before, it was read as "no events" and the run reported an empty success.
+    """
+    if isinstance(payload, list):
+        return True
+    if isinstance(payload, dict):
+        return (
+            isinstance(payload.get("response"), list)
+            or isinstance(payload.get("events"), list)
+            or isinstance(payload.get("Event"), dict)
+        )
+    return False
+
+
 def _fetch_edgeguard_events_via_requests_index(
     session: requests.Session,
     misp_base: str,
@@ -423,7 +450,26 @@ def _fetch_edgeguard_events_via_requests_index(
     """
     Try MISP event index endpoints (paginated). Returns:
       - list (possibly empty) if an index path responded successfully;
-      - None if no index URL worked (caller may fall back to PyMISP/restSearch).
+      - None if no index URL worked on its first page (caller may fall back to PyMISP/restSearch).
+
+    Raises (2026-10) when a page after the first fails, because the pages read so far are not the
+    whole listing: ``requests`` ConnectionError / Timeout / ChunkedEncodingError are re-raised so
+    ``fetch_edgeguard_events``'s ``@retry_with_backoff`` re-runs the listing; any other failure (a
+    non-200 answer, a non-JSON answer, a payload that is not a listing, another request error)
+    raises ``_MispFallbackHardError``. Before, the loop stopped and returned the rows read so far as
+    the complete listing, so ``run()`` succeeded and the DAG stamped its cursor past the events
+    that were never listed.
+
+    Paging that the server ignores (2026-10): MISP 2.5.45 reads ``limit`` and ``page`` of
+    ``/events/index`` only from named parameters (``limit:500/page:2``) or the request body, never
+    from the query string, and then answers the whole listing on every page; it narrows by time only
+    with a named ``searchtimestamp:`` or a request-body ``timestamp``, while the query-string
+    ``timestamp`` and a named ``timestamp:`` are both ignored (measured on the hosted MISP
+    2026-10-16). Without a guard, on a MISP with ``MISP_EVENTS_INDEX_PAGE_SIZE`` or more events
+    every page would repeat the listing up to the page cap, and each event would be processed once
+    per page. The loop therefore de-duplicates rows by event id, stops when a page brings no new id,
+    and stops when a page holds more rows than the requested ``limit`` (the server ignored it, so
+    that answer is the whole listing).
 
     PR-K2 §1-2 — server-side ``timestamp`` narrowing:
     when ``since`` is not None, pass ``timestamp = int(since.timestamp())``
@@ -445,11 +491,14 @@ def _fetch_edgeguard_events_via_requests_index(
     path into parity. Older MISP versions that ignore the ``timestamp``
     param degrade gracefully — the client-side ``_event_covers_since``
     filter at the post-loop comprehension stays as defense-in-depth.
+    2026-10: MISP 2.5.45 ignores this query-string ``timestamp`` (see
+    above), so on that version only the client-side filter narrows.
     """
     base = misp_base.rstrip("/")
     INDEX_FETCH_STATE["truncated"] = False
     for path in ("/events/index", "/events"):
         pages: List[Dict[str, Any]] = []
+        seen_ids: set = set()
         path_unusable = False
         truncated = False
         for page in range(1, MISP_EVENTS_INDEX_MAX_PAGES + 1):
@@ -466,21 +515,62 @@ def _fetch_edgeguard_events_via_requests_index(
                 )
             except requests.RequestException as exc:
                 logger.warning("[FETCH] GET %s page=%s: %s", path, page, exc)
-                path_unusable = page == 1
-                break
-            if resp.status_code != 200:
                 if page == 1:
                     path_unusable = True
-                break
-            try:
-                payload = resp.json()
-            except ValueError:
-                path_unusable = page == 1
-                break
+                    break
+                # A later page failing leaves the listing incomplete: never hand back the pages read
+                # so far as the whole listing. Transient errors re-run the listing (@retry_with_backoff).
+                if isinstance(
+                    exc,
+                    (
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ChunkedEncodingError,
+                    ),
+                ):
+                    raise
+                raise _MispFallbackHardError(f"MISP index {path} page {page}: {exc}") from exc
+            failure = None
+            payload = None
+            if resp.status_code != 200:
+                failure = f"HTTP {resp.status_code}"
+            else:
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    failure = "a non-JSON answer"
+            if failure is None and not _is_misp_index_listing(payload):
+                # e.g. HTTP 200 with {"errors": ...}: an error object, not an empty listing.
+                failure = f"a {type(payload).__name__} that is not an event listing"
+            if failure is not None:
+                if page == 1:
+                    path_unusable = True
+                    break
+                raise _MispFallbackHardError(
+                    f"MISP index {path} answered {failure} on page {page} after {page - 1} good page(s) "
+                    f"({len(pages)} rows): the listing is incomplete"
+                )
             norm = normalize_misp_event_index_payload(payload)
             if not norm:
                 break
-            pages.extend(norm)
+            new_rows = []
+            for ev in norm:
+                eid = ev.get("id")
+                if eid is None:
+                    # Kept: run() counts a row without an id as a failed event.
+                    new_rows.append(ev)
+                elif str(eid) not in seen_ids:
+                    seen_ids.add(str(eid))
+                    new_rows.append(ev)
+            if page > 1 and not any(ev.get("id") is not None for ev in new_rows):
+                # Only events already listed: the server ignored ``page`` and answered the whole
+                # listing again, so the listing is complete.
+                break
+            pages.extend(new_rows)
+            if len(norm) > MISP_EVENTS_INDEX_PAGE_SIZE:
+                # More rows than the requested ``limit``: the server ignored it and answered the
+                # whole listing, so a next page would only repeat it.
+                break
             if len(norm) < MISP_EVENTS_INDEX_PAGE_SIZE:
                 break
             if page == MISP_EVENTS_INDEX_MAX_PAGES:
@@ -492,7 +582,7 @@ def _fetch_edgeguard_events_via_requests_index(
             INDEX_FETCH_STATE["truncated"] = True
             logger.warning(
                 "[FETCH] Index %s stopped at the page cap (%d pages × %d rows = %d events): events beyond the cap "
-                "are not synced this run — raise EDGEGUARD_MISP_MAX_PAGES or narrow the window",
+                "were not listed and the run is reported as failed — raise EDGEGUARD_MISP_MAX_PAGES",
                 path,
                 MISP_EVENTS_INDEX_MAX_PAGES,
                 MISP_EVENTS_INDEX_PAGE_SIZE,
@@ -1879,6 +1969,11 @@ class MISPToNeo4jSync:
 
         Returns:
             List of MISP event dicts
+
+        Raises:
+            ``_MispFallbackHardError`` when the listing cannot be completed (2026-10: also a failed
+            later index page and any unexpected error, which used to return the partial list), and
+            the transient ``requests`` errors once ``@retry_with_backoff`` has used its retries.
         """
         events: List[Any] = []
 
@@ -2102,7 +2197,15 @@ class MISPToNeo4jSync:
                                 f"({len(events)} events collected). Investigate MISP backend; "
                                 f"do NOT treat partial fallback as complete."
                             )
-                        page_data = response.json()
+                        # 2026-10: a non-JSON answer (e.g. a proxy's HTML page with HTTP 200) ended up
+                        # in the outer handler, which returned the pages read so far as the listing.
+                        try:
+                            page_data = response.json()
+                        except ValueError as exc:
+                            raise _MispFallbackHardError(
+                                f"MISP fallback restSearch answered non-JSON on page {page} after {page - 1} "
+                                f"good pages ({len(events)} events collected)"
+                            ) from exc
                         # PR-N29 (multi-agent audit, 2026-04-24, HIGH-3 / Cross-Checker):
                         # MISP can return HTTP 200 with an ``{"errors": ...}`` body
                         # (e.g. ACL filter matched zero, broken sync user, malformed
@@ -2177,6 +2280,22 @@ class MISPToNeo4jSync:
                     # "fallback running fine" from "fallback also failing."
                     record_misp_fetch_fallback("rest_search", "hard_error")
                     raise
+                except (
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError,
+                ):
+                    raise  # transient: @retry_with_backoff re-runs the listing
+                except Exception as exc:
+                    # 2026-10: any other error here (e.g. a request error that is not transient)
+                    # leaves the fallback listing as incomplete as an HTTP 5xx does. It reached the
+                    # outer handler without ``hard_error`` being recorded, so only the warning
+                    # fallback alert fired, not the critical one.
+                    record_misp_fetch_fallback("rest_search", "hard_error")
+                    raise _MispFallbackHardError(
+                        f"MISP fallback restSearch failed on page {page} ({len(events)} events collected): "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
 
                 # PR-N29: pagination already collected all events; downstream
                 # normalization runs on the ``events`` variable. Pre-N29 this
@@ -2214,6 +2333,9 @@ class MISPToNeo4jSync:
             raise
         except Exception as e:
             logger.error(f"Error fetching events: {type(e).__name__}: {e}")
+            # 2026-10: a failure after the listing started must not hand back a partial (or empty)
+            # list as the complete one: run() would report success and the DAG would stamp last_sync.
+            raise _MispFallbackHardError(f"MISP event listing failed: {type(e).__name__}: {e}") from e
 
         normalized = normalize_misp_event_index_payload(events)
         if normalized:
@@ -4392,12 +4514,14 @@ class MISPToNeo4jSync:
                 item["pulse_tlp"] = otx_meta.get("pulse_tlp", "")
                 item["otx_industries"] = _meta_list(otx_meta, "otx_industries")
                 item["description"] = otx_meta.get("description", "")
-                # PR-N10 Fix #3 (7-agent audit Logic Tracker B1): pull
-                # ``malware_family`` and ``attributed_to`` out of OTX_META
-                # now that misp_writer.py serializes them. Pre-fix, these
-                # were never in OTX_META → ``i.malware_family`` was NULL
-                # on every OTX-sourced Indicator → Q9 INDICATES edges
-                # never fired for OTX items (the biggest source).
+                # PR-N10 Fix #3: ``malware_family`` and ``attributed_to``
+                # of OTX_META. 2026-10: both are always empty, because the
+                # OTX collector puts neither key on an indicator, so an OTX
+                # attribute gives the indicator no ``malware_family`` (what
+                # Q9 matches); read for compatibility.
+                # A pulse's families arrive as OTX_META.mf
+                # (``pulse_malware_families``, below), which
+                # build_relationships step 9b links.
                 item["malware_family"] = otx_meta.get("malware_family", "")
                 if isinstance(item["malware_family"], str):  # 2026-10: without an ATT&CK software id suffix
                     item["malware_family"] = split_attack_software_id(item["malware_family"])[0]
@@ -5538,6 +5662,20 @@ class MISPToNeo4jSync:
                 events_index_total = 0
                 return False
 
+            if not events and self.stats.get("events_index_truncated"):
+                # 2026-10: no EdgeGuard event among the rows the cap allowed says nothing about the
+                # rows beyond it, so an empty window is not a success here.
+                msg = (
+                    "MISP event index stopped at the page cap (EDGEGUARD_MISP_MAX_PAGES="
+                    f"{MISP_EVENTS_INDEX_MAX_PAGES} x EDGEGUARD_MISP_PAGE_SIZE={MISP_EVENTS_INDEX_PAGE_SIZE}) "
+                    "with no EdgeGuard event listed: the listing is incomplete"
+                )
+                logger.error(msg)
+                self._last_sync_failure_reason = msg
+                self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
+                record_collection_failure("misp_to_neo4j", msg)
+                return False
+
             if not events:
                 logger.warning(
                     "No events to sync — MISP returned zero events for the window (since=%s, sector=%s). "
@@ -5674,7 +5812,13 @@ class MISPToNeo4jSync:
                                 "Check: docker compose ps neo4j / docker compose logs neo4j"
                             )
                             # The retry-pass bail-out below will count everything
-                            # in failed_events once and only once. Don't count here.
+                            # in failed_events once and only once. 2026-10: the events
+                            # this loop never reached are counted here, so the coverage-gap
+                            # invariant (index_total == processed + failed) holds; each of
+                            # them would have ended as exactly one failure.
+                            for _rem in sorted_events[ev_idx + 1 :]:
+                                total_errors += 1
+                                self.stats["events_failed"] += 1
                             break  # Stop burning through events with a dead Neo4j
                         logger.warning("Attempting Neo4j reconnect after connection failure...")
                         try:
@@ -5972,12 +6116,20 @@ class MISPToNeo4jSync:
             # Verdict: every skipped or failed unit of work (events that could not be
             # fetched or processed, items whose merge failed, relationship rows dropped
             # by permanent batch failures) marks the run as failed. Success is recorded
-            # only when nothing was lost.
-            run_ok = total_errors == 0 and relationships_failed == 0
+            # only when nothing was lost. 2026-10: an event listing cut at the page cap lost the
+            # events beyond it, so it fails the run too (the DAG then keeps its cursor).
+            index_truncated = bool(self.stats.get("events_index_truncated"))
+            run_ok = total_errors == 0 and relationships_failed == 0 and not index_truncated
             if run_ok:
                 record_collection_success("misp_to_neo4j")
             else:
                 reasons = []
+                if index_truncated:
+                    reasons.append(
+                        f"the MISP event index stopped at the page cap (EDGEGUARD_MISP_MAX_PAGES="
+                        f"{MISP_EVENTS_INDEX_MAX_PAGES} x EDGEGUARD_MISP_PAGE_SIZE={MISP_EVENTS_INDEX_PAGE_SIZE}): "
+                        "events beyond the cap were not synced"
+                    )
                 events_unfetchable = int(self.stats.get("events_unfetchable", 0) or 0)
                 if events_unfetchable:
                     reasons.append(
@@ -5988,9 +6140,11 @@ class MISPToNeo4jSync:
                     reasons.append(
                         f"{events_failed - events_unfetchable} event(s) failed or were skipped after retries"
                     )
-                # Unfetchable events count once in total_errors (the per-event error element); the
-                # merge/load text applies only to errors from sync_to_neo4j itself.
-                merge_errors = max(0, total_errors - events_unfetchable)
+                # Every failed event (unfetchable ones included) counts once in total_errors; the
+                # merge/load text applies only to errors from sync_to_neo4j itself. 2026-10: only the
+                # unfetchable events were subtracted, so retry-exhausted, bailed-out and id-less events
+                # were also reported as merge/load errors.
+                merge_errors = max(0, total_errors - events_failed)
                 if merge_errors:
                     # PR-N19 Fix #3: point operators at the [MERGE-RETURNED-FALSE]
                     # grep token so the "N errors" summary is traceable to specific

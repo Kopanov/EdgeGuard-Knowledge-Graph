@@ -107,6 +107,8 @@ def _fake_client(candidate_rows, *, apply_exc=None, restamped=0, candidate_exc=N
     session.run = run
     session.__enter__ = lambda s: s
     session.__exit__ = lambda *a: False
+    # Each merge batch runs in an explicit transaction (2026-10-16): its statements reach ``run`` too.
+    session.begin_transaction.return_value = session
 
     client = MagicMock()
     client.driver = MagicMock()

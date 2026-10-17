@@ -788,6 +788,20 @@ class TestPRN31BuildCampaignNodesHappyPath:
         _ej, _sess, _captured, results = self._run_capturing()
         assert results["campaigns_deleted"] == 0
 
+    def test_step5_counts_the_campaigns_stamped_since_the_run_started(self):
+        """2026-10-16: Step 5 counts the active campaigns whose ``last_updated`` is at or after the run's
+        start, read from the database's clock that Step 1 stamps with. It compared
+        ``duration.between(c.last_updated, datetime()).minutes`` with 5, and ``.minutes`` is a component
+        of the duration, not its length (a campaign stamped two days earlier has 0 minutes). The
+        statement's semantics on Neo4j: ``tests/test_explainability_neo4j.py``."""
+        _ej, sess, captured, _results = self._run_capturing()
+        step5 = sess.run.call_args_list[-1]
+        assert "MATCH (c:Campaign)" in captured[-1] and "count(c)" in captured[-1]
+        assert "duration.between" not in captured[-1], "a duration component is not an elapsed time"
+        assert "c.last_updated >= datetime($run_start_at)" in captured[-1]
+        assert step5.kwargs.get("run_start_at") == "2026-10-15T12:00:00Z", "the database's clock, read at the start"
+        assert captured[-1] is _ej._CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, "the statement the Neo4j case runs"
+
     def test_every_step_reads_the_same_evidence_definition(self):
         """2026-10-16: an actor qualifies, a campaign survives, a malware is a member and an indicator
         joins by one definition (``campaign_evidence``): ATTRIBUTED_TO (malware → actor) or
