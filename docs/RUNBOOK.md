@@ -229,8 +229,10 @@ Each entry: symptom → detection signal → remediation.
     A malformed CVSS payload in an attribute's `NVD_META` is not a write error: the sync checks each
     payload when it reads the attribute, reads one that is not a JSON object as absent and drops an
     entry that is not a property (a map or list value, a name with other characters than letters,
-    digits and underscores), and logs `[META] NVD_META.<payload> of <CVE> ...` at WARNING; the CVE
-    counts as synced. Correct the attribute's comment in MISP if the payload should be there.
+    digits and underscores, a number that is not finite: `Infinity`, `-Infinity`, `NaN` or `1e309`
+    in the JSON), reads a payload left without a base score as absent, and logs
+    `[META] NVD_META.<payload> of <CVE> ...` at WARNING; the CVE counts as synced. Correct the
+    attribute's comment in MISP if the payload should be there.
 - **Remediation.**
   1. If `retries_exhausted`: pause the DAG, let Neo4j recover, manually
      re-trigger the sync task once load drops. Consider scaling Neo4j

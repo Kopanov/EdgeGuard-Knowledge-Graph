@@ -303,6 +303,72 @@ class TestCveSubWrites:
         assert not any("(terminal)" in m or "[MERGE-RETURNED-FALSE]" in m for m in messages)
         assert sync.stats["vulnerabilities_synced"] == 1
 
+    @pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN", "1e309"])
+    def test_a_non_finite_cvss_number_is_not_written(self, bolt, caplog, literal):
+        """2026-10-17: ``json.loads`` reads these literals of ``NVD_META`` as floats that are not finite, and the
+        payload check let them through as numbers, so the CVSS sub-node held them (the GraphQL API cannot
+        return one). Now the entry is dropped and a payload left without a base score counts as absent: the
+        CVE syncs, no CVSS write fails, and no parameter the driver sends holds a number that is not finite.
+        Here a non-finite base score of CVSS 3.1 and a non-finite impact sub-score of CVSS 3.0."""
+        import json
+        import math
+
+        import run_misp_to_neo4j as rm
+
+        meta = {
+            "cvss_v31_data": {
+                "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "base_score": "__LITERAL__",
+                "base_severity": "CRITICAL",
+            },
+            "cvss_v30_data": {
+                "vector_string": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "base_score": 7.5,
+                "base_severity": "HIGH",
+                "impact_score": "__LITERAL__",
+                "exploitability_score": 3.9,
+            },
+            "cwe": ["CWE-79"],
+            "published": "2026-10-01T00:00:00",
+        }
+        attribute = {
+            "type": "vulnerability",
+            "value": "CVE-2026-1002",
+            "comment": "NVD_META:" + json.dumps(meta).replace('"__LITERAL__"', literal),
+            "uuid": "5d7c3b0e-3d6b-4c39-9a51-0f3b2f6b1002",
+            "Tag": [{"name": "source:NVD"}, {"name": "tlp:white"}],
+        }
+        read = json.loads(attribute["comment"][len("NVD_META:") :])
+        assert not math.isfinite(read["cvss_v31_data"]["base_score"])
+        assert not math.isfinite(read["cvss_v30_data"]["impact_score"])
+
+        server, client = bolt()
+        sync = rm.MISPToNeo4jSync(neo4j_client=client)
+        with caplog.at_level(logging.WARNING):
+            item, _ = sync.parse_attribute(attribute, {"id": 5, "info": "EdgeGuard-nvd-2026-10-13", "Tag": []})
+            assert item["cvss_v31_data"] is None
+            assert "impact_score" not in item["cvss_v30_data"] and item["cvss_v30_data"]["base_score"] == 7.5
+            assert (item["cvss_score"], item["cvss_version"]) == (7.5, "3.0")
+            assert sync._sync_to_neo4j_chunk([item]) == (1, 0)
+        assert sync.stats["vulnerabilities_synced"] == 1
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("(terminal)" in m or "[MERGE-RETURNED-FALSE]" in m for m in messages)
+        assert any("NVD_META.cvss_v31_data of CVE-2026-1002 has no base score" in m for m in messages)
+        assert any("NVD_META.cvss_v30_data of CVE-2026-1002: entries that are not" in m for m in messages)
+        # The writes the driver sent: CVSS 3.0 without the sub-score, no CVSS 3.1, nothing non-finite.
+        assert count(server.committed, "MERGE (n:CVSSv30") == 1 and count(server.runs, "MERGE (n:CVSSv31") == 0
+        assert not any("n.impact_score" in q for q in server.runs)
+
+        def floats(value):
+            if isinstance(value, dict):
+                return [f for v in value.values() for f in floats(v)]
+            if isinstance(value, (list, tuple)):
+                return [f for v in value for f in floats(v)]
+            return [value] if isinstance(value, float) else []
+
+        sent = [f for params in server.parameters for f in floats(params)]
+        assert 7.5 in sent and all(math.isfinite(f) for f in sent)
+
 
 class TestRelationshipGroups:
     """``create_misp_relationships_batch``: the groups share one session; each group's error is its own."""

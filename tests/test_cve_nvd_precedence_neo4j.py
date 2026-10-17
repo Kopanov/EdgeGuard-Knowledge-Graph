@@ -11,7 +11,9 @@ order in which the sync reads their records:
   ``reference_urls``, ``affected_products``); any other record only fills a list the node does not have.
 
 An NVD record without a CVSS version CISA ICS also gives takes NVD out of that sub-node's ``sources``, and
-CISA ICS's next record sets its values and the CVE's score again.
+CISA ICS's next record sets its values and the CVE's score again. An edge written before ``sources`` existed
+counts as asserted by the sub-node's ``tag`` and keeps that feed in ``sources`` when CISA ICS writes it, so
+the sub-node stays NVD's on every later write (2026-10-17).
 
 The ``EXISTS`` guard and the ``CASE`` per property cannot be shown with a mocked session, so this module
 runs the real writers: the CISA ICS collector's item of a CSAF advisory (``SAMPLE_ADVISORY`` of
@@ -26,6 +28,7 @@ any other node.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import sys
 import uuid
@@ -141,10 +144,14 @@ def _nvd_item() -> Dict[str, Any]:
     }
 
 
-def _sync(client, item: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+def _sync(client, item: Dict[str, Any], event: Dict[str, Any], literal: Optional[str] = None) -> Dict[str, Any]:
     """One item through MISP and the sync, as production writes it: MISPWriter's attribute, the sync's
-    item, ``merge_cve``."""
+    item, ``merge_cve``. ``literal`` replaces every ``"__LITERAL__"`` value in the attribute's comment
+    verbatim (a JSON number MISPWriter would not write, such as ``1e309``)."""
     attribute = MISPWriter.__new__(MISPWriter).create_vulnerability_attribute(item)
+    if literal is not None:
+        assert '"__LITERAL__"' in attribute["comment"]
+        attribute["comment"] = attribute["comment"].replace('"__LITERAL__"', literal)
     attribute["uuid"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"edgeguard-it:{item['cve_id']}:{item['tag']}"))
     parsed, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(attribute, event)
     assert parsed is not None
@@ -191,6 +198,63 @@ def test_nvd_payload_holds_the_shared_cvss_sub_node_in_either_order(client, raw_
         "3.1",
         "NETWORK",
     ), "the CVE's score follows the sub-node"
+
+
+def _legacy_nvd_sub_node(driver, cve_id: str) -> None:
+    """NVD's CVSSv31 sub-node of ``cve_id`` as a graph written before relationship provenance holds it: NVD's
+    payload and ``tag`` on the sub-node, both ``HAS_CVSS_v31`` edges without ``sources`` or ``misp_event_ids``."""
+    with driver.session() as session:
+        session.run(
+            f"MATCH (c:CVE:{LABEL} {{cve_id: $cve}}), (n:CVSSv31:{LABEL} {{cve_id: $cve}}) "
+            "SET n += $payload, n.tag = 'nvd' "
+            "CREATE (c)-[:HAS_CVSS_v31 {edgeguard_managed: true}]->(n), "
+            "(n)-[:HAS_CVSS_v31 {edgeguard_managed: true}]->(c)",
+            cve=cve_id,
+            payload=NVD_V31,
+        ).consume()
+
+
+def _cvss31_edges(driver, cve_id: str) -> List[Tuple[List[str], List[str]]]:
+    """``sources`` and ``misp_event_ids`` of both ``HAS_CVSS_v31`` edges (CVE to sub-node and back), sorted."""
+    with driver.session() as session:
+        rows = session.run(
+            "MATCH (:CVE {cve_id: $cve})-[r:HAS_CVSS_v31]-(:CVSSv31) RETURN r.sources AS s, r.misp_event_ids AS e",
+            cve=cve_id,
+        )
+        return [(sorted(row["s"] or []), sorted(row["e"] or [])) for row in rows]
+
+
+def test_an_edge_without_sources_stays_nvds_through_cisa_ics_writes(client, raw_driver):
+    """A sub-node NVD asserted on a graph written before ``sources`` existed (the guard reads the sub-node's
+    ``tag``). CISA ICS's first write keeps NVD's payload and leaves NVD in ``sources`` of both edges beside
+    CISA ICS; its second write still keeps NVD's payload. Until 2026-10-17 the first write set ``sources`` to
+    ``['cisa_ics']`` alone, the tag was no longer read, and the second write replaced NVD's payload."""
+    _nodes(raw_driver, CVE)
+    _legacy_nvd_sub_node(raw_driver, CVE)
+    assert _cvss31_edges(raw_driver, CVE) == [([], [])] * 2, "the edges predate sources"
+
+    _sync(client, _ics_item(), ICS_EVENT)
+    props, sources, events = _cvss31(raw_driver, CVE)
+    assert {k: props.get(k) for k in NVD_V31} == NVD_V31, "the first CISA ICS write keeps NVD's payload"
+    assert (sources, events) == (["cisa_ics", "nvd"], ["140"]), "NVD stays in sources beside CISA ICS"
+    assert _cvss31_edges(raw_driver, CVE) == [(["cisa_ics", "nvd"], ["140"])] * 2, "both edges"
+
+    revised = {
+        "baseScore": 7.2,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+    }
+    _sync(client, _ics_item(score=revised), ICS_EVENT)
+    props, sources, events = _cvss31(raw_driver, CVE)
+    assert {k: props.get(k) for k in NVD_V31} == NVD_V31, "the second CISA ICS write still keeps NVD's payload"
+    assert (sources, events) == (["cisa_ics", "nvd"], ["140"])
+    node = _cve(raw_driver, CVE)
+    assert (node["cvss_score"], node["severity"], node["cvss_version"], node["attack_vector"]) == (
+        9.8,
+        "CRITICAL",
+        "3.1",
+        "NETWORK",
+    ), "the CVE's score follows NVD's sub-node"
 
 
 def test_a_sub_node_only_cisa_ics_asserted_follows_its_latest_record(client, raw_driver):
@@ -299,3 +363,43 @@ def test_a_revised_cisa_ics_record_does_not_change_the_lists_it_filled(client, r
     _sync(client, _ics_item(), ICS_EVENT)
     _sync(client, _ics_item(product="700 Series Gen2"), ICS_EVENT)
     assert _cve(raw_driver, CVE)["affected_products"] == ["Red Lion Controls 700 Series"]
+
+
+def _non_finite(props: Dict[str, Any]) -> List[str]:
+    return sorted(k for k, v in props.items() if isinstance(v, float) and not math.isfinite(v))
+
+
+@pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN", "1e309"])
+def test_a_non_finite_cvss_number_in_nvd_meta_is_not_written(client, raw_driver, literal):
+    """``json.loads`` reads these literals of ``NVD_META`` as floats that are not finite (2026-10-17). NVD's
+    record with such a base score of CVSS 3.1 and such an impact sub-score of CVSS 3.0: the CVE syncs, the 3.1
+    payload counts as absent (no sub-node edge), the 3.0 sub-node is written without the sub-score, the CVE is
+    scored from CVSS 3.0, and no property of any node or relationship holds a number that is not finite."""
+    _nodes(raw_driver, CVE)
+    item = _nvd_item()
+    item["cvss_v31_data"] = {**NVD_V31, "base_score": "__LITERAL__"}
+    item["cvss_v30_data"] = {
+        **NVD_V31,
+        "vector_string": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "impact_score": "__LITERAL__",
+    }
+    parsed = _sync(client, item, NVD_EVENT, literal=literal)
+    assert parsed["cvss_v31_data"] is None and "impact_score" not in parsed["cvss_v30_data"]
+
+    with raw_driver.session() as session:
+        v31_edges = session.run(
+            "MATCH (:CVE {cve_id: $cve})-[r:HAS_CVSS_v31]-() RETURN count(r) AS c", cve=CVE
+        ).single()["c"]
+        (v30,) = [
+            row["p"]
+            for row in session.run(
+                "MATCH (:CVE {cve_id: $cve})-[:HAS_CVSS_v30]->(n) RETURN properties(n) AS p", cve=CVE
+            )
+        ]
+        nodes = [row["p"] for row in session.run(f"MATCH (n:{LABEL}) RETURN properties(n) AS p")]
+        rels = [row["p"] for row in session.run(f"MATCH (:{LABEL})-[r]-(:{LABEL}) RETURN properties(r) AS p")]
+    assert v31_edges == 0, "the CVSS 3.1 payload without a finite base score is absent"
+    assert "impact_score" not in v30 and (v30["base_score"], v30["exploitability_score"]) == (9.8, 3.9)
+    assert [k for p in nodes + rels for k in _non_finite(p)] == [], "a number that is not finite was written"
+    node = _cve(raw_driver, CVE)
+    assert (node["cvss_score"], node["severity"], node["cvss_version"]) == (9.8, "CRITICAL", "3.0")

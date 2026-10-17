@@ -70,13 +70,15 @@ class FakeBolt:
     "times": int}``; the first rule that matches a statement and has ``times`` left answers that
     statement's ``PULL``/``DISCARD`` with ``FAILURE`` (``code``, ``message``) and uses up one time.
     A rule with ``"drop": True`` closes the connection instead, as a network failure would.
-    ``runs`` holds every statement received, in order; ``failures`` and ``committed`` the statements
-    whose result was answered with ``FAILURE`` and with ``SUCCESS``.
+    ``runs`` holds every statement received, in order, and ``parameters`` the parameters of each, as
+    the driver packed them; ``failures`` and ``committed`` the statements whose result was answered with
+    ``FAILURE`` and with ``SUCCESS``.
     """
 
     def __init__(self, fail_rules: Optional[List[Dict]] = None):
         self.fail_rules = fail_rules or []
         self.runs: List[str] = []
+        self.parameters: List[Dict] = []
         self.failures: List[str] = []
         self.committed: List[str] = []
         self._lock = threading.Lock()
@@ -140,6 +142,7 @@ class FakeBolt:
                     last_query = fields[0]
                     with self._lock:
                         self.runs.append(last_query)
+                        self.parameters.append(fields[1] if len(fields) > 1 else {})
                     conn.sendall(_pack(SUCCESS, [{"fields": self._fields_for(last_query), "t_first": 1}]))
                 elif tag in (b"\x3f", b"\x2f"):  # PULL, DISCARD
                     rule = self._rule_for(last_query or "")

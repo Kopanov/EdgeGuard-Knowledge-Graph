@@ -1379,6 +1379,18 @@ CVSS_PAYLOAD_RESERVED_NAMES = frozenset(
 )
 
 
+def _cvss_legacy_sources_cypher(node: str) -> str:
+    """2026-10: the feeds a ``HAS_CVSS_*`` edge without ``sources`` (written before relationship
+    provenance) counts as asserted by: the CVSS sub-node's ``tag``, the feed that first wrote it, named as
+    ``Neo4jClient._merge_cvss_node`` names a feed (``default``, the tag of an item without one, is
+    ``misp``); none when the sub-node has no tag. ``_merge_cvss_node`` reads it in its NVD guard and seeds
+    such an edge's ``sources`` with it before adding its own feed, so a later write still sees that feed."""
+    return (
+        f"CASE WHEN {node}.tag IS NULL OR {node}.tag = '' THEN [] "
+        f"WHEN {node}.tag = 'default' THEN ['misp'] ELSE [{node}.tag] END"
+    )
+
+
 def _cve_sub_write_failed(exc: Exception, what: str) -> bool:
     """The error handling of ``merge_cve``'s sub-writes: the CVSS sub-nodes, the NVD-owned data and
     the CVE score (2026-10). A retryable error (``_is_retryable_neo4j_error``) is raised again, so the
@@ -3638,7 +3650,10 @@ class Neo4jClient:
         fills a property the node lacks (``_set_if_absent_clause``), so the node holds NVD's payload
         whatever the order of the records; NVD's own write and a write to a sub-node only other
         feeds asserted set the payload. ``r.sources`` and ``r.misp_event_ids`` still name every feed
-        and event. Before, every write set its whole payload and the record merged last won. An NVD
+        and event. An edge that predates ``sources`` gets the feed the guard read from the node's
+        ``tag`` (``_cvss_legacy_sources_cypher``) before the writing feed is added, so a sub-node NVD
+        asserted that way stays NVD's on the next write too; a new edge names the writing feed only.
+        Before, every write set its whole payload and the record merged last won. An NVD
         record without the version takes NVD out of ``sources`` (``_replace_nvd_owned_cve_data``), so
         the other feed's next write sets its payload again.
 
@@ -3670,8 +3685,9 @@ class Neo4jClient:
             MERGE (n:{label} {{cve_id: $cve_id}})
             ON CREATE SET n.uuid = $cvss_uuid, n.edgeguard_managed = true
             ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
-            WITH cve, n, ($feed <> 'nvd' AND EXISTS {{
-                MATCH (cve)-[x:{rel_type}]->(n) WHERE 'nvd' IN coalesce(x.sources, [n.tag])
+            WITH cve, n, {_cvss_legacy_sources_cypher("n")} AS legacy_sources
+            WITH cve, n, legacy_sources, ($feed <> 'nvd' AND EXISTS {{
+                MATCH (cve)-[x:{rel_type}]->(n) WHERE 'nvd' IN coalesce(x.sources, legacy_sources)
             }}) AS nvd_owned
             SET {set_clause},
                 n.tag = coalesce(n.tag, $tag),
@@ -3679,6 +3695,7 @@ class Neo4jClient:
                 n.uuid = coalesce(n.uuid, $cvss_uuid)
             MERGE (cve)-[r1:{rel_type}]->(n)
                 ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
+                ON MATCH SET r1.sources = coalesce(r1.sources, legacy_sources)
             SET r1.src_uuid = coalesce(r1.src_uuid, $cve_uuid),
                 r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid),
                 r1.edgeguard_managed = true,
@@ -3686,6 +3703,7 @@ class Neo4jClient:
                 r1.misp_event_ids = {_dedup_concat_optional_clause("r1.misp_event_ids", "$misp_event_id", require_nonempty_string=True)}
             MERGE (n)-[r2:{rel_type}]->(cve)
                 ON CREATE SET r2.src_uuid = $cvss_uuid, r2.trg_uuid = $cve_uuid
+                ON MATCH SET r2.sources = coalesce(r2.sources, legacy_sources)
             SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
                 r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid),
                 r2.edgeguard_managed = true,

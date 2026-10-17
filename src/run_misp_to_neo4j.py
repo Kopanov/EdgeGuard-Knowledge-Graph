@@ -18,6 +18,7 @@ Production-ready features:
 import gc
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1505,6 +1506,14 @@ def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[
     not a property, or has a name the writer keeps for itself (``CVSS_PAYLOAD_RESERVED_NAMES``: the sub-node's
     ``uuid``, ``timeout`` …), is dropped; both are logged with the CVE. The payloads the collectors write pass
     unchanged.
+
+    A number that is not finite (``Infinity``, ``-Infinity``, ``NaN`` or ``1e309`` in the JSON, which
+    ``json.loads`` reads as such floats) is dropped as well, as a missing value (2026-10-17): the sub-node
+    would hold it, the GraphQL API cannot return it (a GraphQL ``Float`` is finite) and a JSON export would
+    not be valid JSON. A payload left without a base score is malformed and counts as absent, like one that
+    is not an object: a sub-node of it would have no score, and an earlier score of the same version would
+    stay on the node. An empty object (``{}``, which an NVD record without the version carries) counts as
+    absent without a warning, as before.
     """
     value = meta.get(key)
     if value is None:
@@ -1525,13 +1534,22 @@ def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[
         )
         valid_value = (
             entry is None
-            or isinstance(entry, (str, bool, float))
+            or isinstance(entry, (str, bool))
+            or (isinstance(entry, float) and math.isfinite(entry))
             or (isinstance(entry, int) and _NEO4J_INT_RANGE[0] <= entry <= _NEO4J_INT_RANGE[1])
         )
         if valid_name and valid_value:
             payload[name] = entry
         else:
             dropped.append(str(name)[:40])
+    if (payload or dropped) and payload.get("base_score") in (None, ""):
+        logger.warning(
+            "[META] NVD_META.%s of %s has no base score%s — the CVE is read without it",
+            key,
+            cve_id,
+            f" (entries dropped: {', '.join(sorted(dropped))})" if dropped else "",
+        )
+        return None
     if dropped:
         logger.warning(
             "[META] NVD_META.%s of %s: entries that are not CVSS properties dropped: %s",
