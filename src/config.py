@@ -828,8 +828,13 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   cisa, cisa_kev (2026-10): every run compares the whole KEV catalogue (about 1,800 entries) with
 #   the stored MISP copies; a cut at 200 left revisions of older entries unseen.
 #   EDGEGUARD_KEV_MAX_EDITS_PER_RUN caps the edits; additions are not capped.
+#   cisa_ics (2026-10): a run reads the advisories changed since its cursor (minus 24 h), oldest
+#   first; the 200 limit counted (advisory, CVE) items and stopped inside the window, so an advisory
+#   naming 200 or more CVEs (350-378 on three advisories of the 2026-10-16 baseline) held the cursor
+#   at itself for good while every run succeeded. EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN (default
+#   1200 advisory files; at most 46 changed on one day in two years) is the per-run limit here.
 OWN_RUN_CAP_SOURCES = frozenset(
-    {"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb", "cisa", "cisa_kev"}
+    {"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb", "cisa", "cisa_kev", "cisa_ics"}
 )
 
 
