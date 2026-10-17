@@ -30,7 +30,7 @@ Sign off on the **same git commit** you will deploy.
 
 References: [preflight_ci.sh](../scripts/preflight_ci.sh), [.github/workflows/ci.yml](../.github/workflows/ci.yml), [Makefile](../Makefile).
 
-**Python:** Use **3.12+** for local `make ci` / `preflight_ci.sh` parity with CI ([`pyproject.toml`](../pyproject.toml) `requires-python`). Apache Airflow **3.2** supports Python **3.10–3.14** upstream; this repository standardizes on **3.12**. Airflow was bumped from **2.11** to **3.2** in April 2026 — if you are upgrading an existing deployment see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) before deploying.
+**Python:** Use **3.12+** for local `make ci` / `preflight_ci.sh` parity with CI ([`pyproject.toml`](../pyproject.toml) `requires-python`). The repository runs Apache Airflow **3.3.2** (base image `apache/airflow:3.3.2-python3.12`, October 2026; **2.11** → **3.2** in April 2026), which supports Python **3.10–3.14** upstream; this repository standardizes on **3.12**. If you are upgrading an existing deployment see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) and [§ 3.2 → 3.3.2](AIRFLOW_DAGS.md#32--332-october-2026) before deploying.
 
 `preflight_ci.sh` sets a dummy `NEO4J_PASSWORD` for DagBag import — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting.
 
@@ -77,9 +77,9 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 | [ ] | Baseline DAG unpaused | Airflow UI → `edgeguard_baseline` | `is_paused_upon_creation=False`; verify DAG is active |
 | [ ] | MISP preflight | Run a tier DAG once; open `misp_health_check` logs | **`healthy`** / **`healthy_for_collection`** (API + DB); workers only if **`EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS=true`** ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)) |
 | [ ] | Collector tasks | Logs for `collect_*` | Status dict; skips show `skipped` + reason class; real failures → task failed as designed |
-| [ ] | Neo4j sync gate | Observe `full_neo4j_sync` / short-circuit | Matches [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
+| [ ] | Neo4j sync gate | Observe `check_sync_needed` in `edgeguard_neo4j_sync` (skipped within 24 h of the last sync start or while a baseline holds the lock) | Matches [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
 | [ ] | Baseline smoke (recommended) | [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) | Short window + cap; logs show effective limits |
-| [ ] | Schema migrations applied (if upgrading from a pre-2026-04 graph) | [MIGRATIONS.md](MIGRATIONS.md) | Run the hand-applied Cypher scripts in `migrations/` per the runbook — pause DAGs, backup, execute, verify post-flight counts, resume. The 2026-04 `specialize_uses_technique` migration splits `USES→Technique` into `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` and MUST run once before the first sync after the upgrade. |
+| [ ] | Graph built by the current code (if upgrading from a pre-2026-04 graph) | [MIGRATIONS.md](MIGRATIONS.md) | There are no Cypher migration scripts: rebaseline against the current code (backup, then `edgeguard fresh-baseline`). For graphs that cannot be wiped, use the operator scripts in MIGRATIONS.md § "Operator scripts in `scripts/`". |
 
 ---
 
@@ -121,4 +121,4 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 ---
 
-_Last updated: 2026-10-15 — REST API health row: `/health` answers 503 while degraded (the row documented HTTP 200 in every state). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: verified `python src/edgeguard.py preflight`, `python src/health_check.py`, `make health`, `EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS` all exist at HEAD. The "All 7 checks pass" wording is approximate (the actual `cmd_preflight` count varies by configuration); operators should rely on green/red signal rather than count. Prior: 2026-04-26 PR-N33 docs audit (cross-linked BASELINE_LAUNCH_CHECKLIST as the launch-day pre-flight); 2026-04-06._
+_Last updated: 2026-10-17 — Python paragraph: the repository runs Airflow 3.3.2 (it said 3.2); Neo4j sync gate row: the gate is `check_sync_needed` in `edgeguard_neo4j_sync` (`full_neo4j_sync` is the baseline's task and has no gate); migrations row: no Cypher migration scripts exist (the named `specialize_uses_technique` migration does not exist), a pre-2026-04 graph is rebaselined or handled with the operator scripts of MIGRATIONS.md. Prior: 2026-10-15 — REST API health row: `/health` answers 503 while degraded (the row documented HTTP 200 in every state). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: verified `python src/edgeguard.py preflight`, `python src/health_check.py`, `make health`, `EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS` all exist at HEAD. The "All 7 checks pass" wording is approximate (the actual `cmd_preflight` count varies by configuration); operators should rely on green/red signal rather than count. Prior: 2026-04-26 PR-N33 docs audit (cross-linked BASELINE_LAUNCH_CHECKLIST as the launch-day pre-flight); 2026-04-06._

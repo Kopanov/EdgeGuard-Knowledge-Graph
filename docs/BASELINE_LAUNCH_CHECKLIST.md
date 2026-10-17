@@ -46,18 +46,21 @@ max-age, alert wiring) in addition to the original 8 sanity checks.
 **Command:**
 
 ```bash
-EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
+EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path=dag
 ```
 
-**Pass criteria:** exit code 0, all 12 checks green. Specifically:
+**Pass criteria:** exit code 0, all 12 checks green. Without
+`--launch-path=dag` the script assumes the legacy CLI path, warns (which
+fails under STRICT=1) and skips check [5]. Specifically:
 
 * `[1] required env vars present` — NEO4J_PASSWORD, MISP_API_KEY, MISP_URL
-* `[2] Neo4j reachable + APOC + indexes`
+* `[2] Neo4j reachable + APOC + indexes` — through `docker compose exec neo4j cypher-shell` when the Compose neo4j service runs, else `cypher-shell -a $NEO4J_URL` (default bolt://localhost:7687; the script reads NEO4J_URL, not NEO4J_URI, and logs in as user `neo4j`)
 * `[3] MISP API reachable + auth valid`
 * `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; `--launch-path=cli` refers only to the legacy in-process `run_pipeline.py --baseline` path)
-* `[5] IF DAG path: 5 scheduled DAGs PAUSED` (Issue #57 — required to prevent the incremental collectors AND `edgeguard_neo4j_sync` racing the baseline)
+* `[5] IF DAG path: 5 scheduled DAGs PAUSED` (Issue #57 — an unpaused DAG is a warning (a failure under STRICT=1): the baseline lock makes scheduled tasks skip at start, and pausing guarantees that none is mid-write)
 * `[6] Airflow worker RAM ≥ 4 GB`
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
+* `[7b] alertmanager.yml has no placeholder / un-rendered ${...} pager key`
 * `[8] no stale baseline_lock sentinel`
 * `[9..10]` (existing checks)
 * `[11] PR-N29 invariants` — sentinel class, retries=0, 48h lock
@@ -91,6 +94,8 @@ for the full procedure. Short form:
 EDGEGUARD_BASELINE_DAYS=7
 EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000
 
+docker compose up -d airflow   # not restart: picks up the .env values
+
 # trigger via Airflow
 airflow dags trigger edgeguard_baseline
 ```
@@ -98,8 +103,13 @@ airflow dags trigger edgeguard_baseline
 **Pass criteria:**
 
 * Smoke baseline completes without raising `_MispFallbackHardError`
-* Prometheus shows `edgeguard_misp_fetch_fallback_active_total` exists
-  as a series (even if value=0 — proves the counter is registered)
+* `edgeguard_misp_fetch_fallback_active_total` has no series unless the
+  fallback engaged (a labelled counter without pre-initialised label
+  sets), so on a healthy smoke run
+  `sum(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"})`
+  returns no data or 0. To prove the alert wiring, check that
+  `EdgeGuardMispFetchFallbackHardError` is loaded (Prometheus /rules) and
+  routed (item [3]).
 * Post-run, the 7-day graph has the expected node + relationship counts
   for the smoke window
 
@@ -148,11 +158,12 @@ no code change. Mirror whatever pattern you use for the existing
 
 ---
 
-### [4] MISP event count vs `_FALLBACK_MAX_PAGES = 200` cap
+### [4] MISP event count vs the index page cap and `_FALLBACK_MAX_PAGES = 200`
 
-**What:** check whether the populated MISP has more EdgeGuard events
-than the fallback safety cap can paginate. The cap is 200 pages × 500
-events = 100,000 events. If MISP legitimately has more, the fallback
+**What:** check whether the populated MISP has more events than the
+primary index listing (below) or the fallback safety cap can paginate.
+The fallback cap is 200 pages × 500 events = 100,000 events. If MISP
+legitimately has more, the fallback
 will raise `_MispFallbackHardError` mid-baseline (PR-N29 made this
 visible — but it still needs the cap raised in advance, not at
 hour 18 of a 32-hour run).
@@ -171,7 +182,16 @@ headers with ``eventinfo=%EdgeGuard%``, so on MISP 2.4.177 or later the
 number above is an upper bound; an older MISP ignores that filter and the
 fallback walks every event, i.e. the number above)
 
-**Pass criteria:** event count < 100,000.
+The primary `/events/index` listing stops at `EDGEGUARD_MISP_MAX_PAGES` ×
+`EDGEGUARD_MISP_PAGE_SIZE` (100 × 500 = 50,000 listed events, counted before
+the EdgeGuard filter), and since 2026-10-16 a listing cut at that cap fails
+the sync. On a MISP that honours paging, set `EDGEGUARD_MISP_MAX_PAGES` ≥
+`ceil(count / 500) × 1.2` in `.env` (forwarded by docker-compose.yml) when the
+count is ≥ 50,000. A MISP that ignores the query-string paging (2.5.45)
+returns the whole listing on page 1.
+
+**Pass criteria:** event count < 50,000 (index cap) and < 100,000 (fallback
+cap), or both caps raised.
 
 **If event count ≥ 100,000:**
 
@@ -188,8 +208,9 @@ fallback walks every event, i.e. the number above)
 ### [5] Disk + RAM headroom for projected scale
 
 **What:** confirm the host has enough Neo4j data-disk space + heap RAM
-for the expected end state. Pre-2-year historical: documented at
-~350,000 nodes / ~700,000 relationships. OOM at hour 26 of a 32-hour
+for the expected end state. Expected end state of a 730-day baseline
+(the hosted baseline loaded 2026-10-16): ~553,000 nodes / ~2.7M
+relationships. OOM at hour 26 of a 32-hour
 dagrun is the worst failure mode — recovery requires the procedure
 in [`docs/BACKUP.md`](BACKUP.md) § "Restore procedure" and 6+ hours of
 operator time.
@@ -209,9 +230,13 @@ docker compose exec neo4j neo4j-admin server memory-recommendation
 
 * Free disk ≥ 50 GB on the Neo4j data volume (current footprint ×4 for
   WAL + index rebuilds during heavy MERGE)
-* `dbms.memory.heap.max_size` ≥ 8 GB (4 GB minimum, 8 GB recommended
-  for 350k-node baseline; 16 GB if you can spare)
-* `dbms.memory.pagecache.size` ≥ 4 GB
+* Heap (`NEO4J_HEAP_MAX`, passed as `server.memory.heap.max_size`)
+  ≥ 12 GB and page cache (`NEO4J_PAGECACHE`, `server.memory.pagecache.size`)
+  ≥ 8 GB for a ~2.7M-relationship baseline (README § Recommended Memory
+  Settings); on a host with less than 32 GB for the Neo4j container,
+  docs/DOCKER_SETUP_GUIDE.md allows an 8 GB heap or a 4 GB page cache
+* `NEO4J_TX_MEMORY_MAX` ≥ 8 GB (the compose default is 4 GB, at which
+  `build_relationships` ran out of transaction memory)
 
 **If it fails:** stop. There is no graceful recovery from mid-baseline
 OOM. Either:
@@ -220,6 +245,35 @@ OOM. Either:
 * Reduce baseline scope (`EDGEGUARD_BASELINE_DAYS=365` for a 1-year
   baseline as a fallback), and run that one first while procurement
   catches up
+
+---
+
+### [6] PR-N32 unicode-bypass audit
+
+**What:** check whether legacy `Malware`/`ThreatActor`/`Tool` nodes
+exist with zero-width / bidi-control chars in their names — created
+BEFORE the PR-N29 L1 placeholder filter landed. Read-only audit; no
+mutation.
+
+**Command:**
+
+```bash
+./scripts/audit_legacy_unicode_bypass_nodes.py
+```
+
+**Pass criteria:** total suspicious count = 0 OR ≤ 10 with operator
+spot-check OK.
+
+**If audit returns ≥ 1 suspicious node:**
+
+| Count    | Action                                                                 |
+|----------|------------------------------------------------------------------------|
+| 0        | ✅ pass — close PR-N32 as a no-op                                      |
+| 1–10     | One-shot Cypher per node (rename / re-merge / delete); no PR needed   |
+| > 10     | 🛑 build a proper PR-N32 migration BEFORE the baseline. The baseline doesn't fix legacy data. |
+
+The audit script's recommendation block tells you which bucket you're
+in and what to do.
 
 ---
 
@@ -242,8 +296,9 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    `fix/entity-description-source`) and the description source ranking (2026-10-16: a
    description is the text of the highest-ranked source that gave one, NVD > CISA KEV > CISA
    ICS > any other source for a CVE, MITRE ATT&CK > a curated source > any other source for an
-   entity, named in `description_source`; branch `fix/campaigns-descriptions-aging`), or later:
-   that state holds the 2026-10 relationship,
+   entity, named in `description_source`; branch `fix/campaigns-descriptions-aging`), or later,
+   in any case a `main` at or after eef87be that also holds #231 (CVE NVD precedence), the
+   state `scripts/verify_fresh_baseline.py` is written for: that state holds the 2026-10 relationship,
    CVE, indicator-type and curated-package changes the re-feed must run with. A `main`
    after #193 without the CVE rule re-feeds `OTX_META` JSON, OTX pulse names and the text of
    whichever KEV, OTX or ICS record merged last as CVE descriptions; without the entity rule
@@ -261,9 +316,13 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    Airflow metadata DB and rebuild the image — `docker compose build airflow && docker
    compose up -d --force-recreate airflow` — following
    [AIRFLOW_DAGS.md § 3.2 → 3.3.2](AIRFLOW_DAGS.md#32--332-october-2026).
-   `edgeguard version` must print `2026.10.10` (or later) and `edgeguard doctor` must
-   report Airflow `3.3.x` with no drift warning; the DAG list must load with zero parse
-   errors.
+   The CalVer printed by `edgeguard version` stays `2026.10.10` across these changes, so
+   check the commit, not the version: `git merge-base --is-ancestor eef87be HEAD && echo ok`
+   must print `ok`, and so must `test -f tests/test_cve_nvd_precedence.py && echo ok` (the
+   CVE NVD-precedence change, #231). `edgeguard version` also prints the git short SHA of
+   the checkout.
+   `edgeguard doctor` must report Airflow `3.3.x` with no drift warning; the DAG list must
+   load with zero parse errors.
    A graph that is kept instead of re-fed needs one repair after this deploy (2026-10): the
    CVE descriptions and dates written before it are those of the record merged last (raw
    `OTX_META` JSON, OTX pulse names, CISA's KEV text, CISA ICS dates). Remove the descriptions
@@ -312,7 +371,7 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    must be deleted by hand first or `ownership_marker_on_nodes` fails. The first sync of this
    build also drops the six UNIQUE constraints EdgeGuard used to hold on partner labels
    (`device_key`, `networkservice_key`, `softwareversion_key`, `application_key`, `role_key`,
-   `user_key`) — no manual DDL needed. The gate
+   `user_key`) — no manual DDL needed. The command then runs the backup gate
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
    finishes, run `python scripts/verify_fresh_baseline.py` (needs `NEO4J_HTTP_URL` or
@@ -331,9 +390,9 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    instead of writing into a half-wiped store ([RUNBOOK § 7](RUNBOOK.md#7-baseline-chain-stopped-after-a-failed-step-postcheck-pr-n27-2026-10)).
 5. **Hand back.** Return the acceptance JSON
    (`python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json`),
-   the two snapshot paths and the `edgeguard_baseline` DAG run id. The informational
-   checks `uses_malware_complete` / `uses_tool_complete` become real once the MITRE
-   collector of this build has run. Three relationship types exist for the first time
+   the two snapshot paths and the `edgeguard_baseline` DAG run id.
+   `uses_malware_complete` / `uses_tool_complete` are mandatory as soon as a MITRE actor
+   exists. Three relationship types exist for the first time
    after this re-feed — `SUBTECHNIQUE_OF`, `USES_MALWARE`, `USES_TOOL` (definitions in
    [RESILMESH_INTEROPERABILITY.md § 3.2](RESILMESH_INTEROPERABILITY.md)) — and
    `TARGETS` now also runs from actors and malware to sectors, so the Cypher model's
@@ -381,33 +440,6 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
      `python scripts/verify_fresh_baseline.py --require-malwarebazaar`. The history builds up
      over the daily runs; there is no bulk load.
 
-### [6] PR-N32 unicode-bypass audit
-
-**What:** check whether legacy `Malware`/`ThreatActor`/`Tool` nodes
-exist with zero-width / bidi-control chars in their names — created
-BEFORE the PR-N29 L1 placeholder filter landed. Read-only audit; no
-mutation.
-
-**Command:**
-
-```bash
-./scripts/audit_legacy_unicode_bypass_nodes.py
-```
-
-**Pass criteria:** total suspicious count = 0 OR ≤ 10 with operator
-spot-check OK.
-
-**If audit returns ≥ 1 suspicious node:**
-
-| Count    | Action                                                                 |
-|----------|------------------------------------------------------------------------|
-| 0        | ✅ pass — close PR-N32 as a no-op                                      |
-| 1–10     | One-shot Cypher per node (rename / re-merge / delete); no PR needed   |
-| > 10     | 🛑 build a proper PR-N32 migration BEFORE the baseline. The baseline doesn't fix legacy data. |
-
-The audit script's recommendation block tells you which bucket you're
-in and what to do.
-
 ---
 
 ## Launch decision
@@ -421,18 +453,28 @@ See RUNBOOK § "Baseline launch path" for the full procedure:
 1. Pause the 5 scheduled DAGs (`edgeguard_daily`, `edgeguard_medium_freq`,
    `edgeguard_pipeline`, `edgeguard_low_freq`, `edgeguard_neo4j_sync`)
    so they don't race the baseline.
-2. `airflow dags trigger edgeguard_baseline`
-3. Watch the `baseline_complete` task. After it completes, unpause
-   the 5 scheduled DAGs.
+2. `edgeguard fresh-baseline --days 730 --wipe-all` (destructive, see
+   § [7] step 4) or `edgeguard baseline --days 730` (additive)
+3. Watch `baseline_complete` and `baseline_release_lock`; unpause the 5
+   scheduled DAGs after the lock is released. After a failed run the lock
+   stays until the run is resumed and succeeds or 48 h have passed, and
+   until then the scheduled DAGs skip.
 
-**Docs correction (2026-06):** the `baseline_in_progress.lock` sentinel
-at `checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`)
-is **NOT** written by the baseline DAG (the DAG-side lock tasks were
-de-scoped in PR-F2; Issue #57) — only the legacy in-process
-`python src/run_pipeline.py --baseline` path writes it. For DAG-launched
-baselines the manual pause above is therefore the ONLY mutex, not
-defense-in-depth. Issue #57 tracks the DB-backed mutex that will
-replace the manual-pause step.
+**Baseline lock (Issue #57, closed 2026-10):** the `edgeguard_baseline`
+DAG takes the lock itself. `baseline_acquire_lock` writes
+`checkpoints/baseline_in_progress.lock` with the DAG run as holder before
+`baseline_clean`, and `baseline_release_lock` removes it only after a
+successful run. While it is held, the collectors of the scheduled DAGs
+skip (`skip_reason_class=baseline_in_progress`), and `check_sync_needed`,
+`run_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` of
+`edgeguard_neo4j_sync` skip when they start. A failed run keeps the lock
+so that clearing the failed task resumes under the mutex; the liveness
+check prunes it once the run state is success, or when it is older than
+`EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48 h). A refusal of
+`baseline_clean` before the wipe (a typo'd `fresh_baseline`, an invalid
+`wipe_scope`, the backup gate) releases the lock. Pausing the 5 scheduled
+DAGs is still recommended: a task that is already running when the lock
+is taken finishes its write.
 
 ---
 
@@ -442,10 +484,15 @@ replace the manual-pause step.
   `EdgeGuardMispFetchFallbackHardError` (critical) alerts. Both are
   PR-N31; both should be SILENT for the entire run if everything is
   healthy.
-* Watch `edgeguard_pipeline_duration_seconds` for the 3 critical-chain
-  tasks (`full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`).
-  Each should complete within its expected envelope (RUNBOOK has the
-  envelopes).
+* Watch the three critical-chain tasks' durations (`full_neo4j_sync`,
+  `build_relationships`, `run_enrichment_jobs`) in the Airflow UI (Gantt /
+  task duration) against their limits (6 h / 5 h / 5 h). Prometheus records
+  only the sync's duration (`edgeguard_neo4j_sync_duration_seconds`,
+  `edgeguard_pipeline_duration_seconds{pipeline_type="misp_to_neo4j"}`,
+  buckets up to 600 s), per-job enrichment durations
+  (`edgeguard_enrichment_duration_seconds{enricher_type}`) and the last
+  completion of build_relationships
+  (`edgeguard_build_relationships_last_completion_timestamp`).
 * The `EdgeGuardSyncCoverageGap` alert is what catches silent
   truncation between MISP attribute count and processed count.
 
@@ -473,23 +520,25 @@ It exits non-zero when any of these fail. A warning (`[WARN]`; in the JSON `ok: 
 |---|---|
 | Edges labelled `misp_cooccurrence` (`match_type`, or the legacy `source_id` / `source_ids` on a graph built before 2026-10) | 0 |
 | `match_type = 'mitre_explicit'` edges whose source node has no MITRE source | 0 |
-| `ATTRIBUTED_TO` edges without a `match_type` | 0; median actors per malware in single digits |
+| `ATTRIBUTED_TO` edges without a `match_type` | 0; median actors per malware ≤ 10 |
 | NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | judged only on CVEs published > 45 days ago (NVD assigns reference tags and CPE configurations during analysis, weeks after publication — day-old CVEs have neither); thresholds 50 / 20 / 20 / 50 %; measured 2026-10-10 on the 730-day event: 93 / 57 / 58 / 91 %. Informational when fewer than 100 analysed CVEs are present (short smoke baselines) |
 | `T1047`, `T1021.006`, `T1543.003`, `T1222.001`, `T1546.003`, Tool `S0005` | present (requires the MISP Import Regexp fix before re-import) |
-| `ThreatActor` names containing `,` or ` and ` | 0 |
+| `ThreatActor` names containing `,`, ` and ` or ` & ` | 0 |
 | `tlp` property (`tlp_on_every_node`) | on every EdgeGuard node parsed from a MISP attribute. Since 2026-10 the sync gives an attribute without a `tlp:` tag the level `EDGEGUARD_DEFAULT_TLP` and logs `[TLP] MISP attribute <uuid> has no tlp: tag`, so lost tags show in the sync log, not in this check |
 | `edgeguard_managed` | on every node EdgeGuard created and every EdgeGuard edge; a node a partner created first that EdgeGuard wrote to carries `edgeguard_enriched = true` instead |
-| ICS (when `EDGEGUARD_ENABLE_MITRE_ICS`) | techniques with `attack_domain = 'ics'` link only to ICS tactics |
+| ATT&CK domains (`in_tactic_same_domain`, always) | no `IN_TACTIC` between a technique and a tactic of different `attack_domain`. With `--require-ics` (`ics_techniques_present`), at least one `attack_domain = 'ics'` technique |
 | CISA ICS (when `EDGEGUARD_ENABLE_CISA_ICS`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges; with `--require-cisa-ics` also the sectors its advisories state linked as `advisory_sector` once its records carry their zones (see "Sector evidence" below) |
 | MalwareBazaar (when `EDGEGUARD_ENABLE_MALWAREBAZAAR`) | `Source {source_id: 'malwarebazaar'}` present with at least one sha256 hash indicator sourced from it (`--require-malwarebazaar`) |
 | Revoked ATT&CK objects (`no_revoked_attack_techniques`, `no_revoked_attack_groups`, `no_revoked_attack_software`; `revoked_group_names_folded` is a **warning**) | no `Technique` carries an id `src/reference/attack_revoked_ids.json` lists, no `ThreatActor` from MITRE is a revoked group and no `Malware` / `Tool` from MITRE is revoked software (by name); a warning when an actor from another source bears a revoked group's name (the alias merge folds it into the successor). Informational without Technique nodes / MITRE actors / MITRE software; all three fail when the map cannot be read. A graph built before 2026-10 fails them (2026-10-15: 158 techniques, 6 groups, 1 piece of software) |
 | Explainability (`translated_links_record_cited_ids`; `actor_merges_recorded` is informational) | every `USES_TECHNIQUE` link from an indicator to the successor of a revoked id in its `attack_ids` names that id in `r.cited_ids`; the count of actors with `merged_from` and of the names folded into them. Informational without such links; fails when the map cannot be read. A graph built before 2026-10 fails it (2026-10-15: 1,218 links, none recorded) |
 | Sub-technique hierarchy (`subtechnique_of_complete`) | every dotted-id `Technique` whose parent exists has a `SUBTECHNIQUE_OF` edge to it (493 on the September graph; 0 missing) |
-| Group → software (`uses_malware_complete`, `uses_tool_complete`) | every MITRE `uses_malware` / `uses_tools` claim whose target node exists has its edge (informational until the MITRE collector of the R6 build has run) |
+| Group → software (`uses_malware_complete`, `uses_tool_complete`) | every MITRE `uses_malware` / `uses_tools` claim whose target node exists has its edge. Informational only while the graph has no MITRE actor; once one exists, zero claims fails the check (the `m` / `s` lists were lost in transit) |
+| Pulse-scoped INDICATES (`pulse_indicates_complete`) | every family an indicator's OTX pulse named (`pulse_malware_families`) whose Malware node exists (by name, without the ATT&CK id suffix, through folded names) has its `INDICATES` edge. Informational while no indicator carries pulse families |
 | Malware twins (`malware_attack_twins_folded`, 2026-10) | no `Malware` node from another source is named after an ATT&CK software id (`cobalt strike - s0154`, the MISP galaxy naming OTX uses), or carries such an alias of its own name, while the enrichment job `merge_malware_attack_twins` would fold it: into the MITRE `Malware` node of that id (read from the record MITRE delivered) or of that base name, or, for software without one, into the `Malware` node of its base name (`mimikatz - s0002` into `mimikatz`). A twin with neither (an ATT&CK tool no pulse has yet named by its base name) is reported, not failed. One whose id and base name lead to more than one MITRE node fails; the job skips it on every run, so it needs a decision by hand. Informational when no node is named with an id. After one run of the enrichment jobs without failed batches (`errors=0` on the job's `complete` line), only the ambiguous twins and the twins without a target remain, so the check passes when no ambiguous twin remains. Size of the problem on the graph of 2026-10-14: 136 twins holding 16,005 `INDICATES` links (how many of them have a MITRE target was not measured) |
+| `no_global_sector_edges` | no `TARGETS` / `AFFECTS` edge ends at `Sector {name: 'global'}` (`global` is the no-sector marker) |
 | Sector coverage (`sector_coverage`, informational) | `ThreatActor` / `Malware` → `Sector` `TARGETS` present for finance, energy, healthcare (2026-10: ~200/100/100 actors and ~750/400/320 malware on the September graph); energy CVEs well above the 234 of the keyword-only vocabulary |
-| ResilMesh conformance | relationship names and directions unchanged; `HAS_CVSS_*` bidirectional |
-| Relationship sources (`relationships_name_their_source`, `provenance_lists_are_lists`) | every EdgeGuard relationship built from the sources has a non-empty `r.sources`; `sources`, `source_refs`, `misp_event_ids` (and node `zone`, `source`) are lists, never strings |
+| ResilMesh conformance | relationship types not written by EdgeGuard are listed (informational); every CVSSv30 / CVSSv31 / CVSSv40 node has one edge from and one edge to a CVE (`cvss_bidirectional`) |
+| Relationship sources (`relationships_name_their_source`, `provenance_lists_are_lists`) | every EdgeGuard relationship built from the sources has a non-empty `r.sources`; `sources`, `source_refs`, `misp_event_ids` (and node `zone`, `source`, and the `SOURCED_FROM` lists `zones`, `stated_zones`, `stated_refs`) are lists, never strings |
 | Provenance per relationship type (`relationship_provenance_complete`) | every EdgeGuard edge carries what its writers guarantee: `sources`, `source_refs`, `misp_event_ids` and `match_type` on the links built by `build_relationships` and the sync; the three lists, `match_type` (`campaign_grouping`, 2026-10-15) and `evidence_types` (2026-10-16) on `RUNS` and `PART_OF_CAMPAIGN`; the three lists on `REFERS_TO` (enrichment job, no evidence label); `sources` and `misp_event_ids` on `HAS_CVSS_*`; `source` (a string), `source_refs` and `misp_event_ids` on `SOURCED_FROM`. Presence is judged: an empty `misp_event_ids` list is legitimate (a link whose records name no MISP event) and only counted per type |
 | Dropped relationship keys (`no_legacy_relationship_properties`) | no relationship of an EdgeGuard type carries `source_id`, `source_ids` or `report_ids` (other types are listed, never failed on); every `Source` node keeps `source_id`, its key |
 | Campaign membership (`campaign_membership_is_part_of_campaign`) | no `PART_OF` ends at a `Campaign`; every `PART_OF_CAMPAIGN` runs from a `Malware` or `Indicator` to a `Campaign`. `PART_OF` stays ResilMesh's (IP → Subnet, the OrganizationUnit hierarchy) |
@@ -550,7 +599,7 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-16 — "Fresh-baseline acceptance": the sector-evidence checks (sector links name only the feeds that gave the sector and cite only the CISA ICS advisories that name it; `advisory_sector` only on AFFECTS where CISA stated it, and on every sector CISA stated, required under `--require-cisa-ics` once the CISA ICS records carry their zones and not with `--legacy-graph`; confidence follows the label) and the description-source and aging checks (`--legacy-graph` for an older graph). Same day: step 0: create the collector pool `edgeguard_collectors` in the running container before the `git pull`, and check it with `airflow pools list` after the recreate. Same day: fallback event count: the fallback walks `/events/restSearch` for event headers with `eventinfo=%EdgeGuard%` (it sent `search`, which MISP ignores); on a MISP older than 2.4.177 it walks every event. Same day: `campaigns_have_evidence` judges a `RUNS` without evidence also on a graph without EdgeGuard campaigns. Same day: `attribution_from_single_actor_reports`: the indicator marks come from the IOCs the collector pushed; the MISP writer marks no stored copy. Same day: step 0 names the indicator aging (one rule from the latest report, retirement after 730 days, the per-source measurement after the baseline) and extension definition 1.7.0. Same day: step 0 names the description source ranking (`description_source`; CVE NVD > CISA KEV > CISA ICS > any other source, entity MITRE ATT&CK > a curated source > any other source) and STIX extension definition 1.6.0; the re-feed description line says every description names its source. Same day: campaign acceptance: `campaign_malware_attributed` is now `campaign_malware_has_evidence` (a malware member may rest on `USES_MALWARE` too), the new check `campaigns_have_evidence` fails on a campaign without evidence or a `RUNS` without it, and `relationship_provenance_complete` requires `match_type` and `evidence_types` on `RUNS` and `PART_OF_CAMPAIGN`; the consumer changes of the re-feed name the campaign evidence and the STIX extension definition 1.5.0. Same day: `attribution_from_single_actor_reports`: the pulses naming several actors include those marked on indicators (as in step 2d; judged with the canonical reference, also on IOCs MISP already holds), and the check is informational when the graph holds no same-pulse attribution. Prior: 2026-10-15 — step 0: without the entity rule, MISP holds for each family and adversary the description of the first pulse that named it (was: every pulse's). Same day: step 0: the minimum `main` also holds the entity description rule (MITRE's record sets a `Malware`, `ThreatActor` or `Tool` description; OTX gives families and adversaries none), and a kept graph runs that repair's cleanup before the same full sync. Same day: acceptance table: `attribution_from_single_actor_reports` and `campaign_malware_attributed`. Same day: acceptance table: Malware twins (`malware_attack_twins_folded`: twins the job folds into an ATT&CK node or into the node of their base name, what remains after one run); step 2: `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE` keeps its default. Same day: step 0: the minimum is a `main` that holds the CVE description rule (was `main` after #193 and the documentation update that follows it); the repair also removes OTX pulse references. Same day: step 0: the repair of CVE descriptions and dates on a graph that is kept (cleanup statement, then one full sync); step 5: CVE description and dates are NVD's. Same day: acceptance table: FIRST EPSS and CISA's SSVC (`cve_epss_and_ssvc`, warning); step 5: EPSS and SSVC on `CVE`, STIX extension definition 1.4.0. Same day: acceptance table: the explainability check (`translated_links_record_cited_ids`, and `actor_merges_recorded` as information); STIX extension definition 1.3.0. Same day: the revoked ATT&CK object checks (`no_revoked_attack_techniques`, `no_revoked_attack_groups`, `no_revoked_attack_software`, and the warning `revoked_group_names_folded`). Same day: acceptance table: the data contracts of the 2026-10 relationship-provenance, campaign-membership and CVE-score changes (`relationship_provenance_complete`, `no_legacy_relationship_properties`, `campaign_membership_is_part_of_campaign`, `cve_score_from_cvss`), the per-source presence warning (`default_sources_delivered`), the rows of the existing provenance checks, and where lost TLP tags now show (the sync log); the co-occurrence row checks `match_type` (and the legacy `source_id` / `source_ids`); § [7] step 4: the clean step's 60 minutes, batched relationship deletion, `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the refusal of the collectors after a failed clean; step 5: what changes for consumers (`PART_OF_CAMPAIGN`, relationship provenance, CVE scores, STIX provenance, curated `EXPLOITS`); after #189: the delete timeout is forwarded by `docker-compose.yml` and used by `edgeguard clear misp`; step 0: the minimum is `main` after #193 and the documentation update that follows it (was `ca9cdae`); step 5: `CVE.attack_vector`, IPv6 and certificate-fingerprint indicator types, STIX extension definition 1.2.0, curated TLP. Prior: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-17 — [1]: the preflight runs with `--launch-path=dag` (without it the script assumes the legacy CLI path, warns, which fails under `EDGEGUARD_PREFLIGHT_STRICT=1`, and skips check [5]), an unpaused DAG is a warning, check [2] reads `NEO4J_URL` and logs in as `neo4j`, and check [7b] is listed; [2]: `docker compose up -d airflow` after the `.env` additions, and the fallback counter has no series on a healthy run, so the loaded alert rule is checked instead; [4]: the primary index listing stops at 50,000 listed events by default and a listing cut there fails the sync (2026-10-16); [5]: the expected end state of a 730-day baseline (~553,000 nodes / ~2.7M relationships, the hosted baseline loaded 2026-10-16) and the memory thresholds for it (heap 12 GB, page cache 8 GB, transaction cap 8 GB); § [6] now precedes § [7]; § [7] step 0: the minimum is a `main` at or after eef87be with #231, checked by commit because the CalVer stays `2026.10.10`; step 4: the command runs the backup gate (the sentence lacked its subject); step 5: the group → software checks are mandatory once a MITRE actor exists; Launch decision: the DAG holds the baseline lock (Issue #57, closed 2026-10; it said the DAG writes no sentinel and the pause is the only mutex), the launch command is `edgeguard fresh-baseline --days 730 --wipe-all` or `edgeguard baseline --days 730`, and the scheduled DAGs are unpaused after `baseline_release_lock`; During the run: the critical-chain durations are read in the Airflow UI (Prometheus records only the sync's duration); acceptance table: rows for `no_global_sector_edges`, `pulse_indicates_complete` and `in_tactic_same_domain`, actor names with ` & `, the fan-out median ≤ 10, the conformance row (relationship types informational, `cvss_bidirectional` on CVSSv30 / CVSSv31 / CVSSv40) and the `SOURCED_FROM` list properties. Prior: 2026-10-16 — "Fresh-baseline acceptance": the sector-evidence checks (sector links name only the feeds that gave the sector and cite only the CISA ICS advisories that name it; `advisory_sector` only on AFFECTS where CISA stated it, and on every sector CISA stated, required under `--require-cisa-ics` once the CISA ICS records carry their zones and not with `--legacy-graph`; confidence follows the label) and the description-source and aging checks (`--legacy-graph` for an older graph). Same day: step 0: create the collector pool `edgeguard_collectors` in the running container before the `git pull`, and check it with `airflow pools list` after the recreate. Same day: fallback event count: the fallback walks `/events/restSearch` for event headers with `eventinfo=%EdgeGuard%` (it sent `search`, which MISP ignores); on a MISP older than 2.4.177 it walks every event. Same day: `campaigns_have_evidence` judges a `RUNS` without evidence also on a graph without EdgeGuard campaigns. Same day: `attribution_from_single_actor_reports`: the indicator marks come from the IOCs the collector pushed; the MISP writer marks no stored copy. Same day: step 0 names the indicator aging (one rule from the latest report, retirement after 730 days, the per-source measurement after the baseline) and extension definition 1.7.0. Same day: step 0 names the description source ranking (`description_source`; CVE NVD > CISA KEV > CISA ICS > any other source, entity MITRE ATT&CK > a curated source > any other source) and STIX extension definition 1.6.0; the re-feed description line says every description names its source. Same day: campaign acceptance: `campaign_malware_attributed` is now `campaign_malware_has_evidence` (a malware member may rest on `USES_MALWARE` too), the new check `campaigns_have_evidence` fails on a campaign without evidence or a `RUNS` without it, and `relationship_provenance_complete` requires `match_type` and `evidence_types` on `RUNS` and `PART_OF_CAMPAIGN`; the consumer changes of the re-feed name the campaign evidence and the STIX extension definition 1.5.0. Same day: `attribution_from_single_actor_reports`: the pulses naming several actors include those marked on indicators (as in step 2d; judged with the canonical reference, also on IOCs MISP already holds), and the check is informational when the graph holds no same-pulse attribution. Prior: 2026-10-15 — step 0: without the entity rule, MISP holds for each family and adversary the description of the first pulse that named it (was: every pulse's). Same day: step 0: the minimum `main` also holds the entity description rule (MITRE's record sets a `Malware`, `ThreatActor` or `Tool` description; OTX gives families and adversaries none), and a kept graph runs that repair's cleanup before the same full sync. Same day: acceptance table: `attribution_from_single_actor_reports` and `campaign_malware_attributed`. Same day: acceptance table: Malware twins (`malware_attack_twins_folded`: twins the job folds into an ATT&CK node or into the node of their base name, what remains after one run); step 2: `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE` keeps its default. Same day: step 0: the minimum is a `main` that holds the CVE description rule (was `main` after #193 and the documentation update that follows it); the repair also removes OTX pulse references. Same day: step 0: the repair of CVE descriptions and dates on a graph that is kept (cleanup statement, then one full sync); step 5: CVE description and dates are NVD's. Same day: acceptance table: FIRST EPSS and CISA's SSVC (`cve_epss_and_ssvc`, warning); step 5: EPSS and SSVC on `CVE`, STIX extension definition 1.4.0. Same day: acceptance table: the explainability check (`translated_links_record_cited_ids`, and `actor_merges_recorded` as information); STIX extension definition 1.3.0. Same day: the revoked ATT&CK object checks (`no_revoked_attack_techniques`, `no_revoked_attack_groups`, `no_revoked_attack_software`, and the warning `revoked_group_names_folded`). Same day: acceptance table: the data contracts of the 2026-10 relationship-provenance, campaign-membership and CVE-score changes (`relationship_provenance_complete`, `no_legacy_relationship_properties`, `campaign_membership_is_part_of_campaign`, `cve_score_from_cvss`), the per-source presence warning (`default_sources_delivered`), the rows of the existing provenance checks, and where lost TLP tags now show (the sync log); the co-occurrence row checks `match_type` (and the legacy `source_id` / `source_ids`); § [7] step 4: the clean step's 60 minutes, batched relationship deletion, `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the refusal of the collectors after a failed clean; step 5: what changes for consumers (`PART_OF_CAMPAIGN`, relationship provenance, CVE scores, STIX provenance, curated `EXPLOITS`); after #189: the delete timeout is forwarded by `docker-compose.yml` and used by `edgeguard clear misp`; step 0: the minimum is `main` after #193 and the documentation update that follows it (was `ca9cdae`); step 5: `CVE.attack_vector`, IPv6 and certificate-fingerprint indicator types, STIX extension definition 1.2.0, curated TLP. Prior: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._

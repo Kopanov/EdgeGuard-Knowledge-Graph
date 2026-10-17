@@ -399,12 +399,14 @@ class TestBravoOpsRunbookGuidance:
         assert "Bravo-ops" in rb, "RUNBOOK must have Bravo-ops memory-posture section"
 
     def test_runbook_documents_tx_memory_max_cap(self):
-        """The key Bravo recommendation: NEO4J_TX_MEMORY_MAX ≤ 4g on an
-        8 GB worker to avoid MemoryLimitExceededException inside APOC TX."""
+        """NEO4J_TX_MEMORY_MAX for a baseline is 8g: at 4g build_relationships hit
+        MemoryLimitExceededException inside the APOC transactions (2026-04-19 baseline).
+        2026-10: this test pinned the inverted advice "≤ 4g", which the RUNBOOK gave until then."""
         rb = self._runbook()
-        assert "NEO4J_TX_MEMORY_MAX" in rb, "RUNBOOK must reference NEO4J_TX_MEMORY_MAX"
-        # Must mention the 4g cap (the specific recommendation)
-        assert "4g" in rb or "≤ 4" in rb, "RUNBOOK must specify the ≤ 4g TX memory cap"
+        tx_lines = [ln for ln in rb.splitlines() if "NEO4J_TX_MEMORY_MAX" in ln]
+        assert tx_lines, "RUNBOOK must reference NEO4J_TX_MEMORY_MAX"
+        assert any("8g" in ln for ln in tx_lines), "RUNBOOK must give the 8g transaction memory cap for a baseline"
+        assert "≤ 4g" not in rb and "<= 4g" not in rb, "RUNBOOK must not advise a transaction memory cap of 4g or less"
 
     def test_runbook_documents_silent_death_alert(self):
         rb = self._runbook()
