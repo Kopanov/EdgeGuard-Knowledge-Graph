@@ -1,6 +1,6 @@
 # EdgeGuard × ResilMesh integration guide
 
-> **2026-03-21 — Code alignment:** Cross-layer helpers exist on **`Neo4jClient`** (`src/neo4j_client.py`). Verify names with `grep "def create_" src/neo4j_client.py`. The **contract** for what production **writes today** (e.g. **`REFERS_TO`** Vuln↔CVE, **`EXPLOITS`**, **`INDICATES`** Indicator→Malware) is **[RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md)** — some rows below are **ResilMesh target shapes**, not all implemented as named methods.
+> **Code alignment:** Cross-layer helpers exist on **`Neo4jClient`** (`src/neo4j_client.py`). Verify names with `grep "def create_" src/neo4j_client.py`. The **contract** for what production **writes today** (e.g. **`REFERS_TO`** Vuln↔CVE, **`EXPLOITS`**, **`INDICATES`** Indicator→Malware) is **[RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md)** — some rows below are **ResilMesh target shapes**, not all implemented as named methods.
 
 ## How EdgeGuard integrates with ResilMesh
 
@@ -47,7 +47,7 @@ EdgeGuard serves as the **Threat Intelligence Enrichment Layer** for ResilMesh. 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-> **Status (2026-10):** everything up to the response builder is implemented and tested; the
+> **Status:** everything up to the response builder is implemented and tested; the
 > "Back to ResilMesh via NATS" step is the target design — no code path publishes the response yet.
 
 ---
@@ -126,7 +126,7 @@ client.merge_resilmesh_cve({
 })
 ```
 
-`published` and `last_modified` only fill a CVE node that has none (2026-10): NVD's record, written by the MISP → Neo4j sync, sets them, and a call without them leaves the stored values in place. `description` follows the source ranking of the sync (2026-10-16): the call writes it with `description_source` `"resilmesh"`, a source below every registered feed, so it fills a CVE without a description and never replaces a feed's text (NVD's, the KEV's, …); `merge_resilmesh_vulnerability` does the same on a `Vulnerability` node. `cpe_type`, `result_impacts`, `ref_tags` and `cwe` are set when the call carries them and kept when it does not (2026-10; a call without them removed NVD's lists).
+`published` and `last_modified` only fill a CVE node that has none: NVD's record, written by the MISP → Neo4j sync, sets them, and a call without them leaves the stored values in place. `description` follows the source ranking of the sync: the call writes it with `description_source` `"resilmesh"`, a source below every registered feed, so it fills a CVE without a description and never replaces a feed's text (NVD's, the KEV's, …); `merge_resilmesh_vulnerability` does the same on a `Vulnerability` node. `cpe_type`, `result_impacts`, `ref_tags` and `cwe` are set when the call carries them and kept when it does not.
 
 ---
 
@@ -160,7 +160,7 @@ client.merge_resilmesh_cve({
 | Component is App | `create_component_has_identity_application()` | `(:Component)-[:HAS_IDENTITY]->(:Application)` | Component identity |
 | Vuln refers to CVE | `create_vulnerability_refers_to_cve()` | `(:Vulnerability)-[:REFERS_TO]->(:CVE)` | Vuln mapping |
 | CVE refers to Vuln | `create_cve_refers_to_vulnerability()` | `(:CVE)-[:REFERS_TO]->(:Vulnerability)` | CVE mapping |
-| CVE has CVSS | *(internal: `_merge_cvss_node` inside `merge_cve()`)* | `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` | Scoring link — created automatically by `Neo4jClient.merge_cve()` when CVSS data is present in the input. There is **no** standalone `create_cve_has_cvss()` helper today (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12 because the relationship is fully derived from CVSS sub-node creation in `_merge_cvss_node`). |
+| CVE has CVSS | *(internal: `_merge_cvss_node` inside `merge_cve()`)* | `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` | Scoring link — created automatically by `Neo4jClient.merge_cve()` when CVSS data is present in the input. There is **no** standalone `create_cve_has_cvss()` or `create_cve_has_cvss_v*` helper, because the relationship is fully derived from CVSS sub-node creation in `_merge_cvss_node`. |
 | Indicator → IP (planned) | *(no method yet — see INTEROP § cross-layer bridges)* | `INDICATOR_RESOLVES_TO` planned | Use **`IP.address`** for future matching. Note: the planned edge name is **`INDICATOR_RESOLVES_TO`** (NOT `RESOLVES_TO`) to avoid collision with ISIM's `(IP)-[:RESOLVES_TO]->(DomainName)`. |
 | Vuln ↔ CVE bridge | `create_vulnerability_refers_to_cve()` / `create_cve_refers_to_vulnerability()` | `(:Vulnerability)-[:REFERS_TO]->(:CVE)` (+ reverse) | Also created by **`enrichment_jobs.bridge_vulnerability_cve()`** |
 | Malware → Host | *(not implemented)* | `(:Malware)-[:TARGETS]->(:Host)` | Listed in INTEROP as **not** in scheduled pipeline |
@@ -206,10 +206,9 @@ client.merge_cve(
 #   HAS_CVSS_v31 edges in a transaction of its own; a failed sub-write makes merge_cve return False.
 ```
 
-The four standalone `create_cve_has_cvss_v2/v30/v31/v40` helpers were
-removed in PR #33 round 12 because the relationship is fully derived
-from CVSS sub-node creation. Calling them on the current API will
-raise `AttributeError`.
+`Neo4jClient` has no standalone `create_cve_has_cvss_v2/v30/v31/v40`
+helpers, because the relationship is fully derived from CVSS sub-node
+creation; calling such a name raises `AttributeError`.
 
 ---
 
@@ -326,7 +325,7 @@ response = processor.process_alert(alert_data)
 # Without recording the alert: processor.enrich_alert_read_only(alert_data)
 #   (demo/alert_enrichment_demo.py, DEMO.md)
 
-# Step 3: Publish to NATS — target design, not implemented (2026-10). The current handler
+# Step 3: Publish to NATS — target design, not implemented. The handler
 # (`alert_processor.handle_resilmesh_alert`) returns the response to its caller; no code
 # path publishes it. Subject and response schema are pending agreement with ResilMesh.
 await nats_client.publish("resilmesh.enriched.alerts", json.dumps(response.to_dict()))
@@ -539,8 +538,8 @@ RETURN type(r) as relationship_type, count(r) as count
 ORDER BY count DESC;
 
 // Verify bridge relationships (planned: Indicator → IP via INDICATOR_RESOLVES_TO,
-// distinct from ISIM's IP → DomainName RESOLVES_TO. The edge is not yet created
-// by EdgeGuard at HEAD — see RESILMESH_INTEROPERABILITY.md § cross-layer bridges.)
+// distinct from ISIM's IP → DomainName RESOLVES_TO. EdgeGuard does not create the
+// edge yet — see RESILMESH_INTEROPERABILITY.md § cross-layer bridges.)
 // MATCH (i:Indicator)-[r:INDICATOR_RESOLVES_TO]->(ip:IP)
 // RETURN i.value as indicator, ip.address as resolved_ip;
 
@@ -639,12 +638,11 @@ tag = "test"  # Non-descriptive
 ```
 
 ### 2. Temporal Tracking
-Per the **PR #41 source-truthful architecture** (see
-[`migrations/2026_04_first_seen_at_source.md`](../migrations/2026_04_first_seen_at_source.md)),
+In the source-truthful timestamp model ([TIMESTAMPS.md](TIMESTAMPS.md)),
 the node carries only DB-local timestamps; per-source observation
 claims live on the `SOURCED_FROM` edge. Do NOT write `first_seen` on
-the node — that field was retired because it conflated DB-local
-import time with source-claimed first-observation time.
+the node: it would conflate DB-local import time with source-claimed
+first-observation time.
 
 ```python
 now = datetime.now(timezone.utc).isoformat()
@@ -668,7 +666,7 @@ edge_data = {
 The ResilMesh helpers `merge_host`, `merge_device`, `merge_subnet`, `merge_networkservice`,
 `merge_softwareversion`, `merge_application`, `merge_role`, `merge_component`, `merge_mission`,
 `merge_organizationunit`, `merge_missiondependency`, `merge_resilmesh_user`, `merge_resilmesh_cve` and
-`merge_node` still set `first_seen` (the first EdgeGuard write) on the node; `merge_ip` and
+`merge_node` set `first_seen` (the first EdgeGuard write) on the node; `merge_ip` and
 `merge_resilmesh_vulnerability` set `first_imported_at`.
 
 ### 3. Zone Handling
@@ -692,7 +690,7 @@ except Exception as e:
 
 ## Summary
 
-EdgeGuard's ResilMesh integration today (2026-10):
+EdgeGuard's ResilMesh integration today:
 
 - ✅ **Shared Neo4j database** — EdgeGuard writes the threat-intelligence layer (`Indicator`, `Malware`, `ThreatActor`, `Campaign`, `Technique`, `Tactic`, `Tool`, `Sector`, `Source`, `CVE` + `CVSSv*`) with `edgeguard_managed` on every node it creates and `edgeguard_enriched` on partner nodes it writes to; 22 relationship types, every edge stamped (`edgeguard_managed`, provenance), and every claim between threat-intelligence entities evidence-labelled (`match_type`); the structural `SOURCED_FROM`, `HAS_CVSS_*`, `REFERS_TO` and `INVOLVES` carry no `match_type`.
 - ✅ **Schema-compatible helpers** for the ResilMesh topology / identity / mission labels and their relationships (the tables above) — available to an alert or import path; the scheduled pipeline does not write them.
@@ -711,9 +709,17 @@ The integration enables **context-aware threat detection** that combines:
 *Integration Guide Version: 2.1*  
 *For ResilMesh and EdgeGuard Engineers*
 
-
 ---
 
-_Last updated: 2026-10-17 — 22 relationship types (it said 21). Same day: documentation audit against the code: the relationship examples call `create_softwareversion_on_host`, `create_ip_part_of_subnet` (`subnet_range`) and `create_networkservice_on_host` with their real arguments (no `tag`); `merge_cve` takes a data dict, and its CVSS sub-writes run in transactions of their own; the unit-test example counts nodes and `ON` edges directly (`get_stats` counts only EdgeGuard labels and has no relationship counts); the manual Cypher uses `//` comments, selects and cleans up the test nodes by key, and follows `INDICATES` / `EXPLOITS` to `CVE` (nothing writes `ATTRIBUTED_TO` from an indicator); `SOURCED_FROM.imported_at` is set on create only, and the ResilMesh helpers that still write node `first_seen`; `zone` is a list (no `zones` property); the summary names the edges without `match_type`. Prior: 2026-10-16 — `merge_resilmesh_cve` / `merge_resilmesh_vulnerability`: the description follows the sync's source ranking with `description_source` `resilmesh` (below every registered feed: it fills a node without a description and never replaces a feed's text). Same day: alert flow steps 4, 6 and 7 and the code example state what the alert path writes and reads: no IP or Host node, no network context (planned), the enrichment through `AlertProcessor` (the example called a stub that returns sample data). Prior: 2026-10-15 — `merge_resilmesh_cve` keeps `cpe_type`, `result_impacts`, `ref_tags` and `cwe` when a call omits them. Same day: `merge_resilmesh_cve` only fills `description`, `published` and `last_modified`; NVD's record sets them. Prior: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
+_Last updated: 2026-10-17_
 
-_Prior: 2026-04-28 — PR-N34 fixup of PR-N33 slip: corrected edge name `HAS_CVSSv*` → `HAS_CVSS_v*` (actual edges in `neo4j_client.py:_merge_cvss_node` use underscore + lowercase v + version: `HAS_CVSS_v2 / HAS_CVSS_v30 / HAS_CVSS_v31 / HAS_CVSS_v40`). Per-version mentions in code blocks + verification Cypher all corrected. Prior: 2026-04-26 PR-N33 docs audit (removed calls to deleted `create_cve_has_cvss()` helper, now internal to `merge_cve()` via `_merge_cvss_node`; fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` to avoid ISIM collision). 2026-04-18 PR #41 cleanup pass._
+## History
+
+- 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: 22 relationship types; the relationship examples call the helpers with their real arguments (no `tag`); `merge_cve` takes a data dict and runs its CVSS sub-writes in transactions of their own; the test examples count nodes and `ON` edges directly; the manual Cypher selects and cleans up the test nodes by key and follows `INDICATES` / `EXPLOITS` to `CVE`; `SOURCED_FROM.imported_at` is set on create only; `zone` is a list.
+- 2026-10-16 — `merge_resilmesh_cve` / `merge_resilmesh_vulnerability` write the description with `description_source` `resilmesh`, below every registered feed; the alert flow and its code example state what the alert path writes and reads (the example called a stub that returned sample data).
+- 2026-10-15 — `merge_resilmesh_cve` only fills `description`, `published` and `last_modified` and keeps the lists a call omits (a call without them had removed NVD's lists).
+- 2026-10-11 — The alert-flow steps 8–9, the publish step of the code example and the summary state what is implemented and what is planned.
+- 2026-04-28 — CVSS edge names corrected to `HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`.
+- 2026-04-26 — Calls to the removed `create_cve_has_cvss_v*` helpers dropped (`merge_cve` creates the CVSS edges); the planned Indicator → IP edge named `INDICATOR_RESOLVES_TO` to avoid a collision with ISIM's `RESOLVES_TO`.
+- 2026-04-18 — Node `first_seen` retired for EdgeGuard nodes in favour of DB-local node timestamps and source claims on `SOURCED_FROM` (historical record: [`migrations/2026_04_first_seen_at_source.md`](../migrations/2026_04_first_seen_at_source.md)).
+- 2026-03-21 — Cross-layer helper names aligned with `Neo4jClient`.

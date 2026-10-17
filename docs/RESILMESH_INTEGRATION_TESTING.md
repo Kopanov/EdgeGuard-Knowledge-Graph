@@ -47,8 +47,8 @@ python -m pytest tests/test_resilmesh_schema.py -q
 
 The file is a pytest module (run as a plain script it only defines its test functions and checks nothing). It needs no Neo4j, creates no nodes and applies no constraints. It checks that:
 
-- `Neo4jClient` has these node merges: `merge_ip`, `merge_host`, `merge_device`, `merge_subnet`, `merge_node`, `merge_softwareversion`, `merge_application`, `merge_networkservice`, `merge_resilmesh_cve`, `merge_resilmesh_user`, `merge_role`, `merge_component`, `merge_mission`, `merge_organizationunit`, `merge_missiondependency` and `merge_resilmesh_vulnerability`. CVSS nodes come from `merge_cve`; the standalone `merge_cvss*` mergers were removed.
-- `Neo4jClient` has the relationship helpers it names: `create_softwareversion_on_host`, `create_role_to_device`, `create_role_assigned_to_user`, `create_device_has_identity_host`, `create_host_is_a_node`, `create_ip_part_of_subnet`, `create_subnet_part_of_subnet`, `create_networkservice_on_host`, `create_vulnerability_in_softwareversion` and `create_cve_refers_to_vulnerability`. **CVSS edges (`HAS_CVSS_v*`: `HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`)** are NOT exposed as standalone helpers — they are created automatically by `merge_cve()` via `_merge_cvss_node` when CVSS data is present in the input dict (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12).
+- `Neo4jClient` has these node merges: `merge_ip`, `merge_host`, `merge_device`, `merge_subnet`, `merge_node`, `merge_softwareversion`, `merge_application`, `merge_networkservice`, `merge_resilmesh_cve`, `merge_resilmesh_user`, `merge_role`, `merge_component`, `merge_mission`, `merge_organizationunit`, `merge_missiondependency` and `merge_resilmesh_vulnerability`. CVSS nodes come from `merge_cve`; there are no standalone `merge_cvss*` mergers.
+- `Neo4jClient` has the relationship helpers it names: `create_softwareversion_on_host`, `create_role_to_device`, `create_role_assigned_to_user`, `create_device_has_identity_host`, `create_host_is_a_node`, `create_ip_part_of_subnet`, `create_subnet_part_of_subnet`, `create_networkservice_on_host`, `create_vulnerability_in_softwareversion` and `create_cve_refers_to_vulnerability`. **CVSS edges (`HAS_CVSS_v*`: `HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`)** are NOT exposed as standalone helpers — they are created automatically by `merge_cve()` via `_merge_cvss_node` when CVSS data is present in the input dict; there are no `create_cve_has_cvss_v*` helpers.
 - `Neo4jClient` has the EdgeGuard core methods it names (`merge_indicator`, `merge_cve`, `merge_node_with_source`, `create_constraints`, `create_indexes`, …).
 - `_ALLOWED_NODE_LABELS` holds the ResilMesh and EdgeGuard labels.
 
@@ -91,16 +91,16 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
        "description": "Example vulnerability",
        # plus any other fields you compute/populate
    })
-   # 2026-10: published and last_modified only fill a CVE node that has none (NVD's record, written
-   # by the MISP → Neo4j sync, sets them). 2026-10-16: description follows the sync's source ranking
+   # published and last_modified only fill a CVE node that has none (NVD's record, written
+   # by the MISP → Neo4j sync, sets them). description follows the sync's source ranking
    # with description_source "resilmesh", below every registered feed: it fills a CVE without a
    # description and never replaces a feed's text (NVD's, the KEV's, ...); it can replace the text of
    # another unregistered source whose id sorts after it, such as stix_import's. cwe, ref_tags,
    # cpe_type and result_impacts are kept when omitted.
 
    # Example: create the bridge between a ResilMesh Vulnerability (keyed on cve_id) and the CVE.
-   # Use create_vulnerability_refers_to_cve (REFERS_TO edge); the historical
-   # create_vulnerability_maps_to_cve helper does NOT exist. Or rely on
+   # Use create_vulnerability_refers_to_cve (REFERS_TO edge); there is no
+   # create_vulnerability_maps_to_cve helper. Or rely on
    # enrichment_jobs.bridge_vulnerability_cve() to auto-create the bridge.
    client.create_vulnerability_refers_to_cve(cve_id="CVE-2024-12345")
    ```
@@ -120,7 +120,7 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
 
 - Ingest and normalize threat intelligence; write the threat-intelligence layer and `CVE` + `CVSSv*` into the shared database. CVSS sub-nodes + `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` edges (`HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`) are created internally by `merge_cve()` via `_merge_cvss_node` — not via standalone helpers.
 - `REFERS_TO` between a ResilMesh `Vulnerability` that carries `cve_id` and its `CVE`, through the automatic `enrichment_jobs.bridge_vulnerability_cve()` (the helpers `create_vulnerability_refers_to_cve` / `create_cve_refers_to_vulnerability` write the same edge from custom code).
-- Not yet: `Indicator` → `IP` / `Host` — **planned** via `create_indicator_resolves_to_ip` (planned `INDICATOR_RESOLVES_TO` edge) and `create_malware_targets_host`. Not yet implemented in `neo4j_client.py` at HEAD; do not require these in smoke tests.
+- Not yet: `Indicator` → `IP` / `Host` — **planned** via `create_indicator_resolves_to_ip` (planned `INDICATOR_RESOLVES_TO` edge) and `create_malware_targets_host`. Not implemented in `neo4j_client.py`; do not require these in smoke tests.
 
 **ResilMesh responsibilities:**
 
@@ -146,4 +146,12 @@ ResilMesh then works on a Neo4j graph that holds **both**:
 
 ---
 
-_Last updated: 2026-10-17 — documentation audit against the code: `tests/test_resilmesh_schema.py` is a pytest module that needs no Neo4j (run with `python -m pytest`; as a plain script it checks nothing), the methods and labels it checks are listed, the removed `merge_cvss*` mergers are no longer named; the recommended split follows RESILMESH_INTEROPERABILITY.md §4 and §6 (ResilMesh writes its topology, mission and scanner data, EdgeGuard the threat intelligence and `CVE` + `CVSSv*`, the ResilMesh helpers serve tests and imports); no indicator/CVE-to-asset bridge exists yet; edge names `HAS_CVSS_v*`. Prior: 2026-10-16 — `merge_resilmesh_cve` example: the description follows the sync's source ranking with `description_source` `resilmesh` (below every registered feed), as in RESILMESH_INTEGRATION_GUIDE.md; `published` and `last_modified` only fill. Prior: 2026-10-15 — `merge_resilmesh_cve` example: `description`, `published` and `last_modified` only fill a CVE node that has none, and the lists a call omits are kept. Prior: 2026-04-26 — PR-N33 docs audit: removed references to non-existent `create_vulnerability_maps_to_cve` (use `create_vulnerability_refers_to_cve` or rely on `bridge_vulnerability_cve`); marked `create_indicator_resolves_to_ip` / `create_malware_targets_host` as planned (not implemented at HEAD); clarified that CVSS edges are created internally by `merge_cve()` (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12). Prior: 2026-03-17._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: `tests/test_resilmesh_schema.py` is a pytest module that needs no Neo4j (as a plain script it checks nothing) and the methods and labels it checks are listed; the recommended split follows RESILMESH_INTEROPERABILITY.md §4 and §6 (ResilMesh writes its topology, mission and scanner data, EdgeGuard the threat intelligence and `CVE` + `CVSSv*`); no indicator- or CVE-to-asset bridge exists yet.
+- 2026-10-16 — `merge_resilmesh_cve` example: the description follows the sync's source ranking with `description_source` `resilmesh`, below every registered feed.
+- 2026-10-15 — `merge_resilmesh_cve` example: `description`, `published` and `last_modified` only fill a CVE node that has none, and the lists a call omits are kept.
+- 2026-04-26 — The non-existent `create_vulnerability_maps_to_cve` replaced by `create_vulnerability_refers_to_cve` / `bridge_vulnerability_cve`; `create_indicator_resolves_to_ip` and `create_malware_targets_host` marked as planned; CVSS edges come from `merge_cve()` (the `create_cve_has_cvss_v*` helpers were removed).
+- 2026-03-17 — Earliest recorded revision.
