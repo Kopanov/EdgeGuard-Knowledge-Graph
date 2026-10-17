@@ -371,6 +371,13 @@ class TestBravoOpsPrometheusAlerts:
         assert "severity: critical" in silent_death_block, (
             "silent-death alert must be critical severity (OOM = data-loss)"
         )
+        # 2026-10: the remediation advised lowering NEO4J_TX_MEMORY_MAX to 4g, the value at which
+        # build_relationships ran out of transaction memory; it now sets the cap to 8g or more.
+        flat = " ".join(silent_death_block.split())
+        assert "lower ``NEO4J_TX_MEMORY_MAX``" not in flat, "silent-death remediation must not lower the tx cap"
+        assert "``NEO4J_TX_MEMORY_MAX`` to 8g or more" in flat
+        assert "memory posture for the next baseline" in flat, "remediation must cite the RUNBOOK heading"
+        assert "## Bravo-ops: memory posture for the next baseline" in (REPO_ROOT / "docs" / "RUNBOOK.md").read_text()
 
     def test_apoc_partial_alert_defined(self):
         src = self._alerts_src()
@@ -399,12 +406,14 @@ class TestBravoOpsRunbookGuidance:
         assert "Bravo-ops" in rb, "RUNBOOK must have Bravo-ops memory-posture section"
 
     def test_runbook_documents_tx_memory_max_cap(self):
-        """The key Bravo recommendation: NEO4J_TX_MEMORY_MAX ≤ 4g on an
-        8 GB worker to avoid MemoryLimitExceededException inside APOC TX."""
+        """NEO4J_TX_MEMORY_MAX for a baseline is 8g: at 4g build_relationships hit
+        MemoryLimitExceededException inside the APOC transactions (2026-04-19 baseline).
+        2026-10: this test pinned the inverted advice "≤ 4g", which the RUNBOOK gave until then."""
         rb = self._runbook()
-        assert "NEO4J_TX_MEMORY_MAX" in rb, "RUNBOOK must reference NEO4J_TX_MEMORY_MAX"
-        # Must mention the 4g cap (the specific recommendation)
-        assert "4g" in rb or "≤ 4" in rb, "RUNBOOK must specify the ≤ 4g TX memory cap"
+        tx_lines = [ln for ln in rb.splitlines() if "NEO4J_TX_MEMORY_MAX" in ln]
+        assert tx_lines, "RUNBOOK must reference NEO4J_TX_MEMORY_MAX"
+        assert any("8g" in ln for ln in tx_lines), "RUNBOOK must give the 8g transaction memory cap for a baseline"
+        assert "≤ 4g" not in rb and "<= 4g" not in rb, "RUNBOOK must not advise a transaction memory cap of 4g or less"
 
     def test_runbook_documents_silent_death_alert(self):
         rb = self._runbook()

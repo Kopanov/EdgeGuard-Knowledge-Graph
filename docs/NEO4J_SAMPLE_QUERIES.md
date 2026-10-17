@@ -31,7 +31,7 @@ ORDER BY count DESC
 
 ## Vulnerabilities
 
-> **Label note (verified 2026-05-25 against the live graph):** the MISP→Neo4j sync routes every CVE through `merge_cve()` → the **`:CVE`** label (`src/run_misp_to_neo4j.py:3415`). The older **`:Vulnerability`** label is legacy and is **empty** on current baselines (the production snapshot held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may still hold legacy nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
+> **Label note (verified 2026-05-25 against the live graph):** the MISP→Neo4j sync routes every CVE through `merge_cve()` → the **`:CVE`** label (`MISPToNeo4jSync._sync_to_neo4j_chunk` in `src/run_misp_to_neo4j.py`: CVEs with and without CVSS sub-nodes alike). The older **`:Vulnerability`** label is legacy and is **empty** on current baselines (the production snapshot held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may still hold legacy nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
 
 > **Scores (2026-10):** `c.cvss_score` / `c.severity` are the base score and rating of the CVE's first CVSS in the order v3.1 → v3.0 → v2 → v4.0, and `c.cvss_version` names the version. A CVE without any CVSS (rejected, or awaiting NVD analysis without a CNA score) has a null score and severity `UNKNOWN`. Graphs built before 2026-10 show such CVEs as 3.0 / LOW.
 >
@@ -64,7 +64,7 @@ ORDER BY cves DESC
 ```
 
 ### Find healthcare-tagged CVEs
-Sectors are stored on the **`zone`** property (list of strings) at MERGE time. After the post-sync `apply_sector_labels()` call (see `src/neo4j_client.py:1580`), nodes ALSO get secondary labels (e.g. `:CVE :Healthcare`). For portable queries — pre or post `apply_sector_labels` — use the `zone` property:
+Sectors are stored on the **`zone`** property (list of strings) at MERGE time. After the post-sync `apply_sector_labels()` call (`Neo4jClient.apply_sector_labels` in `src/neo4j_client.py`, run at the end of every sync; `global` is never a label), nodes ALSO get secondary labels (e.g. `:CVE :Healthcare`). For portable queries — pre or post `apply_sector_labels` — use the `zone` property:
 
 ```cypher
 MATCH (c:CVE)
@@ -139,9 +139,10 @@ LIMIT 5
 ```cypher
 // PR-N33 docs audit (2026-04-26): the previous `WHERE 'Windows' IN t.platforms`
 // query was broken — `merge_technique` in src/neo4j_client.py never sets
-// `t.platforms` (only `tactic_phases`, `detection`, `is_subtechnique`,
-// `name`, `description` are written), so the query silently returned
-// zero rows. Use `tactic_phases` instead, which IS populated:
+// `t.platforms` (it writes `tactic_phases`, `detection`, `is_subtechnique`
+// (from the dotted id), `attack_domain`, `deprecated`, `name`, `description`
+// and `description_source`), so the query silently returned zero rows.
+// Use `tactic_phases` instead, which IS populated:
 MATCH (t:Technique)
 WHERE 'lateral-movement' IN t.tactic_phases
 RETURN t.mitre_id, t.name
@@ -157,9 +158,12 @@ Requires **`uses_techniques`** on **`Malware`** (from MITRE collector + MISP **`
 
 ```cypher
 MATCH (m:Malware)-[r:IMPLEMENTS_TECHNIQUE]->(t:Technique)
-RETURN m.name, t.mitre_id, t.name, r.confidence_score
+WHERE r.match_type = 'mitre_explicit'
+RETURN m.name, t.mitre_id, t.name, r.match_type, r.confidence_score
 LIMIT 25
 ```
+
+Drop the `WHERE` to also see the OTX-reported links (`otx_pulse`, 0.6, step 6b, 2026-10) and the curated ones (0.85).
 
 > **History:** Prior to 2026-04 this edge was a generic `USES`. It was renamed to `IMPLEMENTS_TECHNIQUE` to distinguish malware/tool capability from actor attribution (`EMPLOYS_TECHNIQUE`). Both collapse back to STIX 2.1 `relationship_type: "uses"` on export. To query all three specialized types at once:
 >
@@ -337,6 +341,8 @@ LIMIT 25
 
 ### Backfill candidates — edges WITHOUT misp_event_ids
 
+Only for a graph built before PR-N26 (2026-04). The script copies every MISP event of the node onto an edge with an empty list, not the per-source / per-sector events the pipeline writes since 2026-10, so it is not needed on a graph built since then.
+
 ```cypher
 // Run before scripts/backfill_edge_misp_event_ids.py to estimate scope.
 // Pre-PR-N26 edges have no array; post-PR-N26 edges always do.
@@ -348,6 +354,6 @@ RETURN type(r) AS edge_type, count(r) AS gap
 
 ---
 
-_Last updated: 2026-10-16 — "Measuring CISA ICS and ATT&CK for ICS": CISA's sector statements by label (`advisory_sector` on `AFFECTS`) and through `SOURCED_FROM.stated_zones`, the advisories a sector link cites (only those that name the sector, `stated_refs`), `IN_TACTIC` from an ICS technique to an ICS tactic, the warning that a filter on `zone_classification` alone misses them, and ATT&CK for ICS through the links into ICS techniques; a link to a `Sector` names only the feeds that gave the sector. Prior: 2026-10-15 — attack-vector note (`c.attack_vector` from the CVSS that gives the score, NVD's words, null without CVSS) and the network-exploitable CVE sample; edge-provenance section: `r.misp_event_ids[]` is on every relationship built from the sources (no longer only the four PR-N26 types); the MISP-event pivot states that events are per-source, per-day buckets, and a report-level pivot on `r.source_refs[]` was added. Prior: 2026-10-14 — score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW) and the sample for CVEs without a CVSS 3.x / 2 score; added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
+_Last updated: 2026-10-17 — the `IMPLEMENTS_TECHNIQUE` sample filters on `mitre_explicit` (OTX-reported and curated links share the type since 2026-10); the code references name `MISPToNeo4jSync._sync_to_neo4j_chunk` and `Neo4jClient.apply_sector_labels` instead of stale line numbers; the properties `merge_technique` writes; the backfill-candidates query is for graphs built before PR-N26 only. Prior: 2026-10-16 — "Measuring CISA ICS and ATT&CK for ICS": CISA's sector statements by label (`advisory_sector` on `AFFECTS`) and through `SOURCED_FROM.stated_zones`, the advisories a sector link cites (only those that name the sector, `stated_refs`), `IN_TACTIC` from an ICS technique to an ICS tactic, the warning that a filter on `zone_classification` alone misses them, and ATT&CK for ICS through the links into ICS techniques; a link to a `Sector` names only the feeds that gave the sector. Prior: 2026-10-15 — attack-vector note (`c.attack_vector` from the CVSS that gives the score, NVD's words, null without CVSS) and the network-exploitable CVE sample; edge-provenance section: `r.misp_event_ids[]` is on every relationship built from the sources (no longer only the four PR-N26 types); the MISP-event pivot states that events are per-source, per-day buckets, and a report-level pivot on `r.source_refs[]` was added. Prior: 2026-10-14 — score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW) and the sample for CVEs without a CVSS 3.x / 2 score; added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
 
 *Save queries to test the prototype*

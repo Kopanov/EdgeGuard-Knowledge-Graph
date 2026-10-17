@@ -18,7 +18,7 @@ ResilMesh defines a **mission/asset/vulnerability graph** in Neo4j using the nod
 In EdgeGuard, the ResilMesh schema and bridges are implemented via:
 
 - `src/neo4j_client.py` – `merge_*` and `create_*` methods for ResilMesh nodes and relationships.
-- `tests/test_resilmesh_schema.py` – test script that validates the combined schema (ResilMesh + EdgeGuard TI).
+- `tests/test_resilmesh_schema.py` – pytest checks (no Neo4j) of the ResilMesh helper methods and labels.
 
 ---
 
@@ -29,38 +29,32 @@ There are two main options:
 - **Push**: EdgeGuard writes directly into the ResilMesh Neo4j schema using `Neo4jClient` ResilMesh methods.
 - **Pull**: ResilMesh reads from EdgeGuard’s TI graph and does the mapping itself.
 
-**Recommended**: **Push from EdgeGuard into the ResilMesh schema**, because:
+**Recommended ([RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) §4, §6):** ResilMesh writes its own topology, identity, mission and scanner data (`Host`, `IP`, `Vulnerability`, `SoftwareVersion`, `IN`, `ON`, …). EdgeGuard writes the threat-intelligence layer and `CVE` + `CVSSv*` into the same database, plus `REFERS_TO` where a `Vulnerability` carries `cve_id`. The ResilMesh `merge_*` / `create_*` helpers in `neo4j_client.py` are schema-compatible tools for tests and imports; no scheduled EdgeGuard path calls them.
 
-- EdgeGuard already:
-  - Normalizes CVEs, vulns, indicators and zones.
-  - Has `merge_resilmesh_*` and bridge relationships implemented.
-- It keeps data transformation logic close to the TI ingestion code and in one place.
-
-Pull is still possible (ResilMesh connects to EdgeGuard’s Neo4j as a read-only source), but then **they** must reimplement the mapping logic that EdgeGuard already has.
+Pull is also possible (ResilMesh reads EdgeGuard's nodes from the shared Neo4j, through the APIs, or as STIX 2.1 bundles from `/stix/export/*`).
 
 ---
 
 ### 3. Testing the schema integration (unit-level)
 
-Use `test_resilmesh_schema.py` to validate that all ResilMesh node/relationship shapes and bridges exist and work.
+Use `tests/test_resilmesh_schema.py` to check that the ResilMesh helper methods and labels exist.
 
 From the repo root:
 
 ```bash
-python3 tests/test_resilmesh_schema.py
+python -m pytest tests/test_resilmesh_schema.py -q
 ```
 
-This script:
+The file is a pytest module (run as a plain script it only defines its test functions and checks nothing). It needs no Neo4j, creates no nodes and applies no constraints. It checks that:
 
-- Verifies that `Neo4jClient` implements all required ResilMesh methods:
-  - Node merges: `merge_ip`, `merge_host`, `merge_device`, `merge_subnet`, `merge_softwareversion`, `merge_application`, `merge_networkservice`, `merge_resilmesh_cve`, `merge_cvssv2`, `merge_cvssv30`, `merge_cvssv31`, `merge_cvssv40`, `merge_resilmesh_user`, `merge_role`, `merge_component`, `merge_mission`, `merge_organizationunit`, `merge_missiondependency`, `merge_resilmesh_vulnerability`, etc.
-  - Relationships: `create_softwareversion_on_host`, `create_role_assigned_to_user`, `create_device_has_identity_host`, `create_host_has_identity_device`, `create_ip_part_of_subnet`, `create_subnet_part_of_organizationunit`, `create_mission_for_organizationunit`, `create_mission_supports_component`, `create_component_provided_by_host`, `create_vulnerability_in_softwareversion`, `create_cve_refers_to_vulnerability`, `create_vulnerability_refers_to_cve`, `create_node_is_connected_to_node`, etc. **CVSS edges (`HAS_CVSSv*`)** are NOT exposed as standalone helpers — they are created automatically by `merge_cve()` via `_merge_cvss_node` when CVSS data is present in the input dict (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12).
-  - Bridge-style methods that **do exist**: `create_vulnerability_refers_to_cve`, `create_cve_refers_to_vulnerability` (plus automatic **`bridge_vulnerability_cve`** from `enrichment_jobs`). **Planned / not in `neo4j_client`:** `create_indicator_resolves_to_ip` (planned edge type: `INDICATOR_RESOLVES_TO`, NOT `RESOLVES_TO`, to avoid ISIM collision), `create_malware_targets_host`. There is no `create_vulnerability_maps_to_cve` — use `create_vulnerability_refers_to_cve` instead, or rely on `bridge_vulnerability_cve` to auto-create the REFERS_TO edge during enrichment.
-- Optionally creates sample nodes and relationships to assert that:
-  - ResilMesh nodes can be created without errors.
-  - Constraints and indexes are applied successfully.
+- `Neo4jClient` has these node merges: `merge_ip`, `merge_host`, `merge_device`, `merge_subnet`, `merge_node`, `merge_softwareversion`, `merge_application`, `merge_networkservice`, `merge_resilmesh_cve`, `merge_resilmesh_user`, `merge_role`, `merge_component`, `merge_mission`, `merge_organizationunit`, `merge_missiondependency` and `merge_resilmesh_vulnerability`. CVSS nodes come from `merge_cve`; the standalone `merge_cvss*` mergers were removed.
+- `Neo4jClient` has the relationship helpers it names: `create_softwareversion_on_host`, `create_role_to_device`, `create_role_assigned_to_user`, `create_device_has_identity_host`, `create_host_is_a_node`, `create_ip_part_of_subnet`, `create_subnet_part_of_subnet`, `create_networkservice_on_host`, `create_vulnerability_in_softwareversion` and `create_cve_refers_to_vulnerability`. **CVSS edges (`HAS_CVSS_v*`: `HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`)** are NOT exposed as standalone helpers — they are created automatically by `merge_cve()` via `_merge_cvss_node` when CVSS data is present in the input dict (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12).
+- `Neo4jClient` has the EdgeGuard core methods it names (`merge_indicator`, `merge_cve`, `merge_node_with_source`, `create_constraints`, `create_indexes`, …).
+- `_ALLOWED_NODE_LABELS` holds the ResilMesh and EdgeGuard labels.
 
-**Expected outcome**: All required methods are present and sample nodes/relationships can be created in a running Neo4j instance.
+Bridge-style methods that **do exist**: `create_vulnerability_refers_to_cve`, `create_cve_refers_to_vulnerability` (plus automatic **`bridge_vulnerability_cve`** from `enrichment_jobs`). **Planned / not in `neo4j_client`:** `create_indicator_resolves_to_ip` (planned edge type: `INDICATOR_RESOLVES_TO`, NOT `RESOLVES_TO`, to avoid ISIM collision), `create_malware_targets_host`. There is no `create_vulnerability_maps_to_cve` — use `create_vulnerability_refers_to_cve` instead, or rely on `bridge_vulnerability_cve` to auto-create the REFERS_TO edge during enrichment.
+
+**Expected outcome**: every test passes, so every method and label the file names is present. Creating nodes and relationships in a running Neo4j is a separate check (the unit-test example in [RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md) § Testing the Integration).
 
 ---
 
@@ -104,54 +98,52 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
    # another unregistered source whose id sorts after it, such as stix_import's. cwe, ref_tags,
    # cpe_type and result_impacts are kept when omitted.
 
-   # Example: create bridge between EdgeGuard Vulnerability and ResilMesh CVE.
+   # Example: create the bridge between a ResilMesh Vulnerability (keyed on cve_id) and the CVE.
    # Use create_vulnerability_refers_to_cve (REFERS_TO edge); the historical
    # create_vulnerability_maps_to_cve helper does NOT exist. Or rely on
    # enrichment_jobs.bridge_vulnerability_cve() to auto-create the bridge.
    client.create_vulnerability_refers_to_cve(cve_id="CVE-2024-12345")
    ```
 
-   You can follow the patterns used in `tests/test_resilmesh_schema.py` for realistic examples (IP → Host → Component → Mission, etc.).
+   `tests/test_resilmesh_schema.py` only checks that the helpers exist; for calls with real arguments see the relationship examples in [RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md).
 
 4. **Inspect the resulting graph in Neo4j Browser**
    - Verify that:
      - ResilMesh node labels (`Mission`, `Component`, `OrganizationUnit`, `Host`, `Subnet`, `Vulnerability`, `CVE`, `CVSSv*`, etc.) exist with the properties defined in the CSVs.
-     - Bridge relationships (e.g. TI indicators/CVEs linked to ResilMesh hosts, components, software versions) appear as expected.
+     - EdgeGuard's `CVE` / `CVSSv*` nodes appear, and, where ResilMesh wrote `Vulnerability` nodes with `cve_id`, the `REFERS_TO` edges of `bridge_vulnerability_cve`. No bridge from indicators or CVEs to hosts, components or software versions exists yet (`INDICATOR_RESOLVES_TO`, `Malware → Host` and the `SoftwareVersion` bridge are planned).
 
 ---
 
 ### 5. Who should run what (EdgeGuard vs ResilMesh)
 
-**EdgeGuard responsibilities (push model):**
+**EdgeGuard responsibilities:**
 
-- Ingest and normalize threat intelligence.
-- Map:
-  - `Indicator` → `IP` / `Host` — **planned** via `create_indicator_resolves_to_ip` (planned `INDICATOR_RESOLVES_TO` edge) and `create_malware_targets_host`. Not yet implemented in `neo4j_client.py` at HEAD; do not require these in smoke tests.
-  - EdgeGuard `Vulnerability` ↔ `CVE` via `create_vulnerability_refers_to_cve` / `create_cve_refers_to_vulnerability` + the automatic `enrichment_jobs.bridge_vulnerability_cve()`. CVSS sub-nodes + `(:CVE)-[:HAS_CVSSv*]->(:CVSSv*)` edges are created internally by `merge_cve()` via `_merge_cvss_node` — not via standalone helpers.
-- Maintain bridge relationships between TI and mission/asset graph.
+- Ingest and normalize threat intelligence; write the threat-intelligence layer and `CVE` + `CVSSv*` into the shared database. CVSS sub-nodes + `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` edges (`HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`) are created internally by `merge_cve()` via `_merge_cvss_node` — not via standalone helpers.
+- `REFERS_TO` between a ResilMesh `Vulnerability` that carries `cve_id` and its `CVE`, through the automatic `enrichment_jobs.bridge_vulnerability_cve()` (the helpers `create_vulnerability_refers_to_cve` / `create_cve_refers_to_vulnerability` write the same edge from custom code).
+- Not yet: `Indicator` → `IP` / `Host` — **planned** via `create_indicator_resolves_to_ip` (planned `INDICATOR_RESOLVES_TO` edge) and `create_malware_targets_host`. Not yet implemented in `neo4j_client.py` at HEAD; do not require these in smoke tests.
 
 **ResilMesh responsibilities:**
 
-- Define and maintain the **asset and mission** side:
-  - `Mission`, `Component`, `OrganizationUnit`, `NetworkService`, `SoftwareVersion`, etc.
-  - The relationships between them (`PROVIDED_BY`, `SUPPORTS`, `PART_OF`, etc.).
+- Define and maintain the **asset, mission and scanner** side:
+  - `Host`, `IP`, `Mission`, `Component`, `OrganizationUnit`, `NetworkService`, `SoftwareVersion`, the scanner's `Vulnerability`, etc.
+  - The relationships between them (`PROVIDED_BY`, `SUPPORTS`, `PART_OF`, `IN`, `ON`, etc.).
 - Optionally run their own analysis/queries on the enriched graph.
 
-In this push model, ResilMesh consumes a Neo4j graph that is already populated with **both**:
+ResilMesh then works on a Neo4j graph that holds **both**:
 
-- Their mission/asset topology, and
-- EdgeGuard’s mapped threat intelligence.
+- Their mission/asset topology and scanner findings, and
+- EdgeGuard's threat intelligence and `CVE` + `CVSSv*` nodes, joined to the findings by `REFERS_TO`.
 
 ---
 
 ### 6. Summary
 
-- The ResilMesh Neo4j schema (from the CSVs) is implemented in `neo4j_client.py`.
-- Bridge methods allow you to connect EdgeGuard’s TI graph into that schema.
-- **Recommended:** EdgeGuard **pushes** into the ResilMesh schema using those methods, and `tests/test_resilmesh_schema.py` + manual Neo4j inspection are used to verify that the integration is working end-to-end.
+- `neo4j_client.py` has schema-compatible `merge_*` / `create_*` helpers for the ResilMesh labels (from the CSVs), for tests and imports; no scheduled EdgeGuard path calls them.
+- **Recommended:** each system writes its own layer into the shared database (RESILMESH_INTEROPERABILITY.md §4, §6): ResilMesh the topology, identity, mission and scanner data, EdgeGuard the threat intelligence and `CVE` + `CVSSv*`, joined by `REFERS_TO`.
+- `python -m pytest tests/test_resilmesh_schema.py -q` checks that the helpers and labels exist; manual Neo4j inspection (§4) checks the shared graph.
 
 
 
 ---
 
-_Last updated: 2026-10-16 — `merge_resilmesh_cve` example: the description follows the sync's source ranking with `description_source` `resilmesh` (below every registered feed), as in RESILMESH_INTEGRATION_GUIDE.md; `published` and `last_modified` only fill. Prior: 2026-10-15 — `merge_resilmesh_cve` example: `description`, `published` and `last_modified` only fill a CVE node that has none, and the lists a call omits are kept. Prior: 2026-04-26 — PR-N33 docs audit: removed references to non-existent `create_vulnerability_maps_to_cve` (use `create_vulnerability_refers_to_cve` or rely on `bridge_vulnerability_cve`); marked `create_indicator_resolves_to_ip` / `create_malware_targets_host` as planned (not implemented at HEAD); clarified that CVSS edges are created internally by `merge_cve()` (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12). Prior: 2026-03-17._
+_Last updated: 2026-10-17 — documentation audit against the code: `tests/test_resilmesh_schema.py` is a pytest module that needs no Neo4j (run with `python -m pytest`; as a plain script it checks nothing), the methods and labels it checks are listed, the removed `merge_cvss*` mergers are no longer named; the recommended split follows RESILMESH_INTEROPERABILITY.md §4 and §6 (ResilMesh writes its topology, mission and scanner data, EdgeGuard the threat intelligence and `CVE` + `CVSSv*`, the ResilMesh helpers serve tests and imports); no indicator/CVE-to-asset bridge exists yet; edge names `HAS_CVSS_v*`. Prior: 2026-10-16 — `merge_resilmesh_cve` example: the description follows the sync's source ranking with `description_source` `resilmesh` (below every registered feed), as in RESILMESH_INTEGRATION_GUIDE.md; `published` and `last_modified` only fill. Prior: 2026-10-15 — `merge_resilmesh_cve` example: `description`, `published` and `last_modified` only fill a CVE node that has none, and the lists a call omits are kept. Prior: 2026-04-26 — PR-N33 docs audit: removed references to non-existent `create_vulnerability_maps_to_cve` (use `create_vulnerability_refers_to_cve` or rely on `bridge_vulnerability_cve`); marked `create_indicator_resolves_to_ip` / `create_malware_targets_host` as planned (not implemented at HEAD); clarified that CVSS edges are created internally by `merge_cve()` (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12). Prior: 2026-03-17._

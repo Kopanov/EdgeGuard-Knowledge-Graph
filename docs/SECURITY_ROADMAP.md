@@ -47,12 +47,16 @@ operators who have not yet configured the allowlist.
 - `source_trust.py` implements the creator-org allowlist check
 - Unicode-aware name normalization (NFKC + casefold) defeats
   homoglyph attacks
-- **Zero-width / bidi-control / variation-selector character stripping
-  in natural-key canonicalization** (`src/node_identity.py:_ZERO_WIDTH_AND_BIDI_TRANSLATE`,
-  shipped PR-N29 L1 with 17 chars, extended PR-N31 to 35 chars
-  including CGJ U+034F + Variation Selectors VS1–VS16 + ALM U+061C).
-  Defeats invisible-character key poisoning (e.g. `"unknown​"`
-  bypassing the placeholder filter). The PR-N32 read-only audit
+- **Zero-width / bidi-control / variation-selector characters** (37,
+  `node_identity._ZERO_WIDTH_AND_BIDI_CHARS`; shipped PR-N29 L1 with 17,
+  extended PR-N31 with CGJ U+034F + Variation Selectors VS1–VS16 + ALM
+  U+061C) are stripped before the placeholder-name check
+  (`is_placeholder_name`) and in the read-side IOC normalization
+  (`ioc_normalize.refang`). This defeats invisible-character placeholder
+  bypass (e.g. `"unknown​"` passing the placeholder filter). Natural keys
+  themselves keep these characters (canonicalization applies NFC + trim
+  only), so a name with a trailing U+200B and the same name without it
+  remain two nodes. The PR-N32 read-only audit
   script `scripts/audit_legacy_unicode_bypass_nodes.py` checks for
   legacy nodes that may have escaped this filter pre-PR-N29 L1.
   Cross-script confusables (Cyrillic 'о' U+043E vs Latin 'o' U+006F)
@@ -73,9 +77,10 @@ state is now **always visible** — not silent.
   - `INFO` line when the defense is ACTIVE: `MISP tag-impersonation
     defense ACTIVE (EDGEGUARD_ENV=prod, trusted_uuids=3,
     trusted_names=0).`
-  - `WARNING` line when the defense is DISABLED, including the
-    dev environment (which is the default):
-    `MISP tag-impersonation defense is DISABLED (EDGEGUARD_ENV=dev)
+  - `WARNING` line when the defense is DISABLED, in every environment —
+    including when `EDGEGUARD_ENV` is unset (logged as
+    `EDGEGUARD_ENV=unset`; Compose forwards it empty unless `.env` sets it):
+    `MISP tag-impersonation defense is DISABLED (EDGEGUARD_ENV=unset)
     — all source-truthful claims accepted without creator-org
     verification...`
 
@@ -83,10 +88,17 @@ state is now **always visible** — not silent.
   `edgeguard_misp_tag_impersonation_defense_disabled`
   - Value `1` → defense DISABLED
   - Value `0` → defense ENABLED
-  - Labelless by design; read once at metrics-server boot
+  - Labelless by design. Set when a process imports
+    `src/metrics_server.py`, from that process's environment; on the
+    Compose stack every Airflow task process that loads it writes the
+    value (multi-process mode, the most recent write is served by the
+    `metrics` service)
 
 **Why widen from the prior prod/staging-only warning:**
-`EDGEGUARD_ENV` defaults to `dev` in `src/config.py:17`. Under the
+At the time of PR-I, `EDGEGUARD_ENV` defaulted to `dev` in `src/config.py:17`
+(today `config.EDGEGUARD_ENV` defaults to `dev` at `src/config.py:26`, a
+label only; the API security gate `config.is_production_env()` treats
+unset as production). Under the
 original gating (PR #44's `_warn_if_disabled_in_prod`), a brand-new
 deployment would silently inherit "defense off + no warning" until an
 operator remembered to flip the env var. Every new installation
@@ -111,7 +123,9 @@ rule can catch.
       source_reported_first_at aggregates. Configure
       EDGEGUARD_TRUSTED_MISP_ORG_UUIDS and/or
       EDGEGUARD_TRUSTED_MISP_ORG_NAMES to enable the defense, then
-      restart the metrics server. See docs/SECURITY_ROADMAP.md.
+      recreate the airflow container (docker compose up -d airflow; on
+      a bare-metal install restart the collector and metrics-server
+      processes). See docs/SECURITY_ROADMAP.md.
 ```
 
 ### 📋 Tier 3 — Fail-closed boot refusal (planned, post-Tier 2)
@@ -150,8 +164,13 @@ exposure to surface any unexpected interaction.
    EDGEGUARD_TRUSTED_MISP_ORG_UUIDS=uuid-of-primary,uuid-of-backup
    ```
 
-3. **Restart the collector and metrics server.** Both processes read
-   the env var at boot.
+3. **Recreate the Airflow container** (`docker compose up -d airflow`; a
+   `restart` keeps the old environment). Every Airflow task process that
+   loads `metrics_server` writes the gauge (multi-process mode, the most
+   recent write wins), and the `metrics` service serves it, so it reads
+   `0` after the first task run in the recreated container. Restarting
+   the `metrics` service alone has no effect. On a bare-metal install,
+   restart the collector and metrics-server processes.
 
 4. **Verify.** Check the log for
    `MISP tag-impersonation defense ACTIVE` (INFO) and the gauge
@@ -179,7 +198,13 @@ exposure to surface any unexpected interaction.
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: added explicit Tier-1
+_Last updated: 2026-10-17 — documentation audit: the zero-width / bidi table (37 characters,
+not 35) is applied before the placeholder-name check and in the read-side IOC refang, not in
+natural-key canonicalization (keys keep these characters); the disabled-defense WARNING logs
+`EDGEGUARD_ENV=unset` when the variable is unset, and the API security gate treats unset as
+production; the gauge is written by every Airflow task process that loads `metrics_server` and
+served by the `metrics` service, so an allowlist change needs `docker compose up -d airflow`.
+Prior: 2026-04-26 — PR-N33 docs audit: added explicit Tier-1
 sub-bullet for the PR-N29 L1 + PR-N31 zero-width / bidi-control /
 variation-selector character stripping in natural-key canonicalization
 (35 chars total at HEAD; pairs with `scripts/audit_legacy_unicode_bypass_nodes.py`

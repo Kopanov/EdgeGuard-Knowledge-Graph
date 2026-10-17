@@ -376,32 +376,33 @@ def cmd_doctor(args):
         all_ok = False
 
     # Check Airflow DAG state if webserver is reachable
-    # PR (security S6) — Red Team Tier S: previously used
-    # ``os.getenv("AIRFLOW_API_PASSWORD", "airflow")`` which silently
-    # used the literal default ``"airflow"`` when unset. Combined with
-    # the equivalent default user ``"airflow"`` already in
-    # airflow_client.py, this exposed the Airflow REST API (DAG triggering,
-    # task-instance reset) to anyone who could reach port 8082 with
-    # ``airflow:airflow``. Now: if no password set, SKIP the deeper API
-    # check (we still know from the /health probe above whether the
-    # webserver is reachable). Operator must set AIRFLOW_API_PASSWORD
-    # explicitly to enable the DAG-list diagnostic.
+    # No password default: the code previously used
+    # ``os.getenv("AIRFLOW_API_PASSWORD", "airflow")``, which silently
+    # used the literal default ``"airflow"`` when unset, exposing the
+    # Airflow REST API (DAG triggering, task-instance reset) to anyone who
+    # could reach port 8082 with ``airflow:airflow``. No password is
+    # defaulted.
+    # 2026-10: the DAG list goes through ``airflow_client.get_registered_dags``
+    # (``/api/v2`` with a JWT from ``POST /auth/token`` on Airflow 3,
+    # ``/api/v1`` with HTTP Basic when ``AIRFLOW_API_VERSION=v1``). The
+    # former direct ``GET /api/v1/dags`` call is not served by Airflow 3, so
+    # the list printed nothing. Credentials: AIRFLOW_API_USER /
+    # AIRFLOW_API_PASSWORD, else the Simple auth manager's generated password
+    # file (readable inside the Airflow container); without either the check
+    # is reported as skipped.
     airflow_password = os.getenv("AIRFLOW_API_PASSWORD", "").strip()
-    if airflow_ok and not airflow_password:
-        info(
-            "AIRFLOW_API_PASSWORD not set — skipping DAG state check. "
-            "Set the env var to enable detailed DAG diagnostics."
-        )
-    if airflow_ok and airflow_password:
+    if airflow_ok:
         try:
-            resp = requests.get(
-                f"{airflow_url}/api/v1/dags",
-                timeout=10,
-                auth=(os.getenv("AIRFLOW_API_USER", "airflow"), airflow_password),
-            )
-            if resp.status_code == 200:
-                dags = resp.json().get("dags", [])
-                eg_dags = [d for d in dags if d.get("dag_id", "").startswith("edgeguard")]
+            import airflow_client as ac
+
+            dags = ac.get_registered_dags()
+            if dags and "error" in dags[0]:
+                if airflow_password:
+                    warn(f"Could not list Airflow DAGs: {dags[0]['error']}")
+                else:
+                    info(f"DAG state check skipped: {dags[0]['error']}")
+            else:
+                eg_dags = [d for d in dags if str(d.get("dag_id", "")).startswith("edgeguard")]
                 paused = [d["dag_id"] for d in eg_dags if d.get("is_paused")]
                 active = [d["dag_id"] for d in eg_dags if not d.get("is_paused")]
                 if paused:
@@ -410,8 +411,8 @@ def cmd_doctor(args):
                     ok(f"Active DAGs: {', '.join(active)}")
                 if not eg_dags:
                     warn("No EdgeGuard DAGs found in Airflow — check dags/ folder mount")
-        except Exception:
-            pass  # Non-critical — webserver may not support API auth
+        except Exception as e:  # Non-critical diagnostic
+            info(f"DAG state check failed: {e}")
 
     # Check baseline configuration
     info("Checking baseline configuration...")
@@ -612,7 +613,10 @@ _MEMORY_RECOMMENDATIONS = (
         "compose_service": "neo4j",
         "min_gb": 4.0,
         "rec_gb": 8.0,
-        "rationale": "350K-node baseline + build_relationships needs ≥4G, 8G recommended",
+        "rationale": (
+            "build_relationships needs ≥4G heap, 8G recommended; a 730-day baseline (~550K nodes, ~2.7M rels, "
+            "2026-10-16) uses 12G (baseline-capable profile, docs/DOCKER_SETUP_GUIDE.md)"
+        ),
     },
     {
         "key": "neo4j_page_cache",
@@ -624,7 +628,7 @@ _MEMORY_RECOMMENDATIONS = (
         "compose_service": "neo4j",
         "min_gb": 2.0,
         "rec_gb": 4.0,
-        "rationale": "Caches Neo4j store files; 4G recommended for 350K-node graph",
+        "rationale": "Caches Neo4j store files; 4G recommended, 8G for a 730-day baseline (baseline-capable profile)",
     },
     {
         "key": "neo4j_tx_memory",
@@ -841,15 +845,20 @@ def _doctor_memory_check() -> None:
     print()
     host_ram_gb = _probe_host_ram_gb()
     if host_ram_gb is not None:
-        # Recommended host RAM = sum of recommended Neo4j memory + ~6G for
-        # MISP + Airflow + headroom. ~14G effective floor on self-hosted.
+        # Thresholds of the verdict: 8G / 16G, which suit small test runs only. The compose
+        # stack's memory limits come to ~23G with its defaults (Neo4j container 8G, Airflow
+        # 12G, Postgres 2G, API and GraphQL 512M each), and MISP on the same host needs 8G+
+        # more (docs/MEMORY_TUNING.md, "Host RAM").
         rec_host_gb = 16.0
         min_host_gb = 8.0
         verdict = _verdict_for_memory(host_ram_gb, min_host_gb, rec_host_gb)
         verdict_glyph = _verdict_glyph(verdict)
         print(f"  {'Host RAM':<32}  {host_ram_gb:>9.1f}G  {min_host_gb:.0f}G    {rec_host_gb:.0f}G    {verdict_glyph}")
         if verdict in ("warn", "fail"):
-            print(f"  {' ' * 32}  → Self-hosted (Neo4j 8G + MISP 4G + Airflow 2G + overhead) needs 16G+")
+            print(
+                f"  {' ' * 32}  → Compose memory limits ~23G with the defaults (Neo4j 8G, Airflow 12G, "
+                "Postgres 2G, APIs 1G); MISP on the same host needs 8G+ more (docs/MEMORY_TUNING.md)"
+            )
     else:
         info("Host RAM: unable to probe (non-Linux/macOS or sysctl unavailable)")
 
@@ -2561,16 +2570,21 @@ def cmd_fresh_baseline(args) -> int:
             print(file=sys.stderr)
             print("Take a backup:", file=sys.stderr)
             print("  See docs/BACKUP.md for the full procedure.", file=sys.stderr)
-            print("  Quick command (self-hosted Neo4j):", file=sys.stderr)
-            print("    docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups", file=sys.stderr)
-            print("  Then update .env:", file=sys.stderr)
-            print(
-                '    echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env',
-                file=sys.stderr,
-            )
+            # 2026-10: the former quick command (`docker compose exec neo4j neo4j-admin database
+            # dump ...`) ran an online dump, which Neo4j Community refuses, into a container path
+            # with no host mount.
+            print("  Neo4j Community dumps offline only: stop the neo4j service first and dump", file=sys.stderr)
+            print("  into a directory mounted from the host (docs/BACKUP.md).", file=sys.stderr)
+            print("  Then record the backup time in .env and in this shell:", file=sys.stderr)
+            print("    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)", file=sys.stderr)
+            print('    echo "EDGEGUARD_LAST_BACKUP_AT=$TS" >> .env', file=sys.stderr)
+            # 2026-10: this command reads EDGEGUARD_LAST_BACKUP_AT from its own process
+            # environment (baseline_clean.check_recent_backup_timestamp); it does not read .env,
+            # so the hint also exports the value for the re-run.
+            print("    export EDGEGUARD_LAST_BACKUP_AT=$TS", file=sys.stderr)
             # `up -d` (recreate), NOT `restart`: compose interpolates .env into
             # the container environment at CREATE time only — a plain restart
-            # keeps the stale value and the gate would refuse again.
+            # keeps the stale value and the DAG-side gate (baseline_clean) would refuse.
             print("    docker compose up -d api graphql airflow", file=sys.stderr)
             print(file=sys.stderr)
             print("Or bypass for dev/test ONLY (data loss acceptable):", file=sys.stderr)

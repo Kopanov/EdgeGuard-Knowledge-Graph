@@ -361,6 +361,10 @@ _CONTAINER_NAME_DOC_ONLY_ALLOWLIST: dict[str, str] = {
         "MISP is not in EdgeGuard compose, this is the conventional name on the "
         "operator's MISP host"
     ),
+    "misp_db_1": (
+        "MySQL container of the reference MISP compose (docs/sources/MISP/docker-compose.yml, "
+        "service misp_db); MISP is not in EdgeGuard compose (BACKUP.md MySQL dump and restore)"
+    ),
 }
 
 

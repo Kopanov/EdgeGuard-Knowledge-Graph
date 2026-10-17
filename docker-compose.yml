@@ -66,7 +66,7 @@ x-common-env: &common-env
   EDGEGUARD_BASELINE_COLLECTION_LIMIT: ${EDGEGUARD_BASELINE_COLLECTION_LIMIT:-}
   # MISP→Neo4j: items per Python sync chunk (default 500 in code); lower to reduce OOM. "0" or "all" = single pass (risky).
   EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE: ${EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE:-}
-  # Relationship UNWIND batch for create_misp_relationships_batch (default 2000 in code if unset/empty).
+  # Relationship UNWIND batch for create_misp_relationships_batch (default 500 in code if unset/empty).
   EDGEGUARD_REL_BATCH_SIZE: ${EDGEGUARD_REL_BATCH_SIZE:-}
   # Opt-in gc.collect() after each node merge chunk (diagnostics; leave unset in production).
   EDGEGUARD_DEBUG_GC: ${EDGEGUARD_DEBUG_GC:-}
@@ -126,7 +126,8 @@ x-common-env: &common-env
   EDGEGUARD_NVD_MAX_PER_RUN: ${EDGEGUARD_NVD_MAX_PER_RUN:-5000}
   EDGEGUARD_NVD_UPDATE_EXISTING: ${EDGEGUARD_NVD_UPDATE_EXISTING:-true}
   # 2026-10: known-exploited CVEs outside the baseline window (whole KEV catalogue, NVD KEV sweep,
-  # CVE ids fetched by id) — see README "Settings".
+  # CVE ids fetched by id) — see README "Environment Variables" (EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE,
+  # EDGEGUARD_NVD_BASELINE_KEV_SWEEP, EDGEGUARD_NVD_EXTRA_CVE_IDS).
   EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE: ${EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE:-true}
   # CISA KEV revisions (2026-10): every KEV run compares the whole catalogue with the stored MISP
   # copies and edits those CISA revised, at most EDGEGUARD_KEV_MAX_EDITS_PER_RUN per run (the rest
@@ -141,6 +142,16 @@ x-common-env: &common-env
   # OTX page ceilings (50 pulses per page); a baseline that reaches its ceiling logs a warning.
   EDGEGUARD_OTX_BASELINE_MAX_PAGES: ${EDGEGUARD_OTX_BASELINE_MAX_PAGES:-200}
   EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES: ${EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES:-25}
+  # 2026-10: duplicate avoidance before a MISP push, the OTX incremental window and the sector
+  # (zone) keyword thresholds, documented as .env settings but not forwarded until now (a value in
+  # .env never reached the containers). Defaults mirror src/config.py; the two booleans need the
+  # explicit default because config._env_bool reads a set-but-empty value as false.
+  EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS: ${EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS:-true}
+  EDGEGUARD_MISP_CROSS_EVENT_DEDUP: ${EDGEGUARD_MISP_CROSS_EVENT_DEDUP:-true}
+  EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS: ${EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS:-3}
+  EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC: ${EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC:-300}
+  EDGEGUARD_ZONE_DETECT_THRESHOLD: ${EDGEGUARD_ZONE_DETECT_THRESHOLD:-1.5}
+  EDGEGUARD_ZONE_ITEM_THRESHOLD: ${EDGEGUARD_ZONE_ITEM_THRESHOLD:-1.5}
   # Re-reported indicators (2026-10, src/collectors/misp_writer.py): the stored copy of an
   # indicator a source reports again is edited when MISP last wrote it more than this many days ago
   # (0 = off), at most EDGEGUARD_MISP_REFRESH_MAX_PER_RUN edits (0 = no cap) and
@@ -160,8 +171,9 @@ x-common-env: &common-env
   # (dags/edgeguard_pipeline.py _sync_window_overlap). At least 60 s; negative,
   # non-numeric or above 720 = 1.
   EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS: ${EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS:-1}
-  # Client-side timeout (seconds) for Neo4j read/relationship queries (src/neo4j_client.py).
-  # int() of the value, so compose carries the code default rather than an empty string.
+  # Transaction timeout (seconds) of the pipeline's Neo4j statements (src/neo4j_client.py): the
+  # server aborts a statement that runs longer. int() of the value, so compose carries the code
+  # default rather than an empty string.
   EDGEGUARD_NEO4J_READ_TIMEOUT: ${EDGEGUARD_NEO4J_READ_TIMEOUT:-3600}
   EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE: ${EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE:-true}
   # Canonical threat-actor reference the actor alias merge reads (src/canonical_threat_actors.py);
@@ -210,7 +222,9 @@ services:
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-512m}
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-2g}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-1g}
-      # Per-transaction memory cap — prevents one bad UNWIND query from exhausting the heap
+      # Memory cap of all running transactions together (dbms.memory.transaction.total.max; a
+      # per-transaction limit would be db.memory.transaction.max, not set) — keeps transactions
+      # from exhausting the heap
       NEO4J_dbms_memory_transaction_total_max: ${NEO4J_TX_MEMORY_MAX:-4g}
     volumes:
       - neo4j_data:/data
@@ -219,15 +233,13 @@ services:
     deploy:
       resources:
         limits:
-          # PR-A audit fix (Prod Readiness HIGH): default bumped 4g→8g. The
-          # 4g default was too small for any baseline run (the per-tx max alone
-          # is 4g per ${NEO4J_TX_MEMORY_MAX:-4g} above, leaving zero headroom
-          # for heap+pagecache+OS); fresh-clone deployments would OOM on the
-          # first ``docker compose up`` baseline. 8g matches the JVM-default
-          # math (heap_max 2g + pagecache 1g + tx_max 4g + ~1g OS = 8g floor).
-          # Production deployments should still set NEO4J_CONTAINER_MEMORY_LIMIT
-          # explicitly per docs/DOCKER_SETUP_GUIDE.md (recommended 32g for the
-          # 730d baseline workload).
+          # Default raised from 4g to 8g. The container limit must exceed
+          # heap + page cache + off-heap overhead (2g + 1g + ~1-3g with the
+          # defaults); NEO4J_TX_MEMORY_MAX limits transaction memory inside
+          # that budget and is not added to it (docs/DOCKER_SETUP_GUIDE.md
+          # memory-math note). Production deployments set
+          # NEO4J_CONTAINER_MEMORY_LIMIT explicitly (32g for the 730-day
+          # baseline).
           memory: ${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}
     networks:
       - edgeguard_net
@@ -290,9 +302,10 @@ services:
     deploy:
       resources:
         limits:
-          # PR-A audit fix (Prod Readiness MED): default bumped 512m→2g. Airflow
-          # 3.x emits per-task heartbeats every 30s × 11 collectors during a
-          # baseline running 24h+; a 512m metadata DB is undersized for that
+          # Default raised from 512m to 2g. In
+          # Airflow 3.x the supervisor of every running task sends a heartbeat
+          # every 5 s ([workers] min_heartbeat_interval) during a baseline
+          # running 24h+; a 512m metadata DB is undersized for that
           # write load and leads to slow scheduler queries (visible as DAG
           # task scheduling latency). 2g matches typical Airflow 3.x guidance
           # for a single-node LocalExecutor stack.
@@ -429,7 +442,8 @@ services:
       AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8082"
       # The Airflow 3.x API server requires an explicit JWT secret (it signs the
       # tokens issued by POST /auth/token and the execution API tokens) — without
-      # it the API server fails to start ("jwt_secret not set"). Generate once with:
+      # it the API server fails to start ("The value api_auth/jwt_secret must be
+      # set!"). Generate once with:
       #   python3 -c "import secrets; print(secrets.token_urlsafe(64))"
       # and put the value in .env as AIRFLOW_API_AUTH_JWT_SECRET. A
       # stable secret is required across restarts so issued tokens
@@ -445,16 +459,24 @@ services:
       # and the API server's DAG run hooks (edgeguard_dag_run_in_progress_start_timestamp).
       AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/plugins
       AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
-      # Long collectors (e.g. NVD 15–30+ min) exceed Airflow's default zombie threshold (~600s).
-      AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD: ${AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD:-3600}
-      # Heartbeats + zombie scan: default local_task_job_heartbeat_sec=0 makes heartbeat interval fall back
-      # to scheduler_zombie_task_threshold (see Airflow 2.7+ docs) — bad for LocalExecutor clarity. Explicit
-      # 30s heartbeats; 60s zombie scan (default 10s) reduces scheduler churn during heavy task startup.
-      AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC: ${AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC:-30}
-      AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL: ${AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL:-60}
+      # Task heartbeat timeout (2026-10: set under the Airflow 3 option names). The scheduler fails a
+      # task whose last heartbeat is older than [scheduler] task_instance_heartbeat_timeout (Airflow
+      # default 300 s); compose sets 3600 s. It looks for such tasks every
+      # task_instance_heartbeat_timeout_detection_interval seconds (Airflow default 10; 60 here
+      # reduces scheduler churn during heavy task startup). Airflow 3 renamed these options without
+      # an alias and ignores the former names (SCHEDULER_ZOMBIE_TASK_THRESHOLD,
+      # ZOMBIE_DETECTION_INTERVAL), which this file set until 2026-10, so the Airflow defaults applied.
+      # The former LOCAL_TASK_JOB_HEARTBEAT_SEC is not set: the Airflow 3 task supervisor sends a
+      # heartbeat every [workers] min_heartbeat_interval (default 5 s), and no Airflow 3.3.2 code reads
+      # its successor [scheduler] task_instance_heartbeat_sec. Value in effect:
+      #   docker compose exec airflow airflow config get-value scheduler task_instance_heartbeat_timeout
+      AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT: ${AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT:-3600}
+      AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT_DETECTION_INTERVAL: ${AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT_DETECTION_INTERVAL:-60}
       # Use Fernet key for secrets — generate with:
       #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      # Not read by EdgeGuard code: the DAG tasks connect with NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD.
+      # When set, Airflow only registers it as the connection neo4j_default.
       AIRFLOW_CONN_NEO4J_DEFAULT: ${AIRFLOW_CONN_NEO4J_DEFAULT:-}
       # Prometheus metrics (2026-10): PROMETHEUS_MULTIPROC_DIR switches prometheus_client to its
       # multi-process mode — every Airflow task process writes its metric values to this shared
@@ -498,6 +520,12 @@ services:
       # Variables the code parses with int()/float() carry the code default here, because a
       # set-but-empty value would raise at import; the others tolerate empty.
       EDGEGUARD_MISP_PUSH_BATCH_SIZE: ${EDGEGUARD_MISP_PUSH_BATCH_SIZE:-}
+      # Adaptive push scaling and back-off (MISPWriter.push_items, docs/MISP_TUNING.md; forwarded since
+      # 2026-10): the bounded parsers treat empty as the code default (50000, 100000, 3, 300.0).
+      EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD: ${EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD:-}
+      EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD: ${EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD:-}
+      EDGEGUARD_MISP_BACKOFF_THRESHOLD: ${EDGEGUARD_MISP_BACKOFF_THRESHOLD:-}
+      EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC: ${EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC:-}
       EDGEGUARD_MISP_BATCH_THROTTLE_SEC: ${EDGEGUARD_MISP_BATCH_THROTTLE_SEC:-}
       EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC: ${EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC:-}
       EDGEGUARD_MISP_EVENT_LOCK_PATH: ${EDGEGUARD_MISP_EVENT_LOCK_PATH:-/tmp/edgeguard_misp_get_or_create_event.lock}
@@ -597,14 +625,18 @@ services:
     restart: unless-stopped
     # PR-A audit fix (Red Team HIGH): use the ``__main__`` block in
     # src/query_api.py instead of the uvicorn CLI flags, so the EDGEGUARD_API_HOST
-    # / EDGEGUARD_API_KEY safety check (lines 88-102 of src/query_api.py) actually
+    # / EDGEGUARD_API_KEY safety check (the module-level startup check in
+    # src/query_api.py, ``_IS_PROD`` / ``_BIND_HOST``) actually
     # gates the bind. The previous ``--host 0.0.0.0`` CLI flag bypassed the env-var
     # check: the Python module saw EDGEGUARD_API_HOST=127.0.0.1 (default), the A6
     # check passed, then uvicorn bound 0.0.0.0 anyway — making the API reachable
     # from any other container on edgeguard_net WITHOUT auth. Now: the module
-    # reads EDGEGUARD_API_HOST at startup, the safety check refuses to start
-    # unless either EDGEGUARD_API_KEY is set OR the host is loopback OR the
-    # operator opts in via EDGEGUARD_ALLOW_UNAUTH=1.
+    # reads EDGEGUARD_API_HOST at startup. In production (EDGEGUARD_ENV unset,
+    # empty or any value other than dev / development / local / staging / test)
+    # it refuses to start without EDGEGUARD_API_KEY, whatever
+    # EDGEGUARD_ALLOW_UNAUTH says. In non-production it refuses to start unless
+    # EDGEGUARD_API_KEY is set OR the host is loopback OR the operator opts in
+    # via EDGEGUARD_ALLOW_UNAUTH=1.
     #
     # PR-A audit fix (Red Team CRITICAL C1, follow-up): the safety check has
     # to remain at 0.0.0.0 in compose because Docker port-forwarding from
@@ -632,14 +664,20 @@ services:
       EDGEGUARD_API_WORKERS: "2"
       EDGEGUARD_ENABLE_ADMIN_QUERY: ${EDGEGUARD_ENABLE_ADMIN_QUERY:-false}
       EDGEGUARD_ADMIN_TOKEN: ${EDGEGUARD_ADMIN_TOKEN:-}
+      # slowapi per-IP rate limits of the REST API (forwarded since 2026-10; empty = the code
+      # defaults 60/minute and 10/minute, query_api._env_rate_limit).
+      EDGEGUARD_RATE_LIMIT_READ: ${EDGEGUARD_RATE_LIMIT_READ:-}
+      EDGEGUARD_RATE_LIMIT_ADMIN: ${EDGEGUARD_RATE_LIMIT_ADMIN:-}
       # PR-A audit fix (Bugbot MED on commit b2c0479): the .env.example
       # documents EDGEGUARD_ALLOW_UNAUTH=1 as the "LAST RESORT" escape
-      # hatch when an operator wants to bypass the api/graphql safety
-      # check (src/query_api.py:96 + src/graphql_api.py:101). But Compose
-      # only forwards explicitly listed env vars to containers — without
-      # this line, setting EDGEGUARD_ALLOW_UNAUTH=1 in .env had NO effect
-      # and the container kept crashing with the documented RuntimeError.
-      # Forward it explicitly so the documented escape hatch works.
+      # hatch of the non-loopback bind check (the startup checks in
+      # src/query_api.py and src/graphql_api.py). It applies only when
+      # EDGEGUARD_ENV is a non-production label (dev, development, local,
+      # staging, test); in production EDGEGUARD_API_KEY is required whatever
+      # it says. Compose only forwards explicitly listed env vars to
+      # containers — without this line, setting EDGEGUARD_ALLOW_UNAUTH=1 in
+      # .env had NO effect. Forward it explicitly so the documented escape
+      # hatch works.
       EDGEGUARD_ALLOW_UNAUTH: ${EDGEGUARD_ALLOW_UNAUTH:-}
       PYTHONPATH: /app/src
     depends_on:
@@ -691,9 +729,15 @@ services:
       EDGEGUARD_GRAPHQL_PLAYGROUND: ${EDGEGUARD_GRAPHQL_PLAYGROUND:-false}
       # Query depth cap of the GraphQL validation rules (code default when empty).
       EDGEGUARD_GRAPHQL_MAX_DEPTH: ${EDGEGUARD_GRAPHQL_MAX_DEPTH:-}
+      # Root fields one operation executes (aliases and fragment spreads expanded) and the expanded
+      # selection budget checked before validation (forwarded since 2026-10; empty = the code
+      # defaults 15 and 2000, graphql_api._env_positive_int).
+      EDGEGUARD_GRAPHQL_MAX_ALIASES: ${EDGEGUARD_GRAPHQL_MAX_ALIASES:-}
+      EDGEGUARD_GRAPHQL_MAX_SELECTIONS: ${EDGEGUARD_GRAPHQL_MAX_SELECTIONS:-}
       # PR-A audit fix (Bugbot MED on commit b2c0479): symmetric with the
       # api service above — forward EDGEGUARD_ALLOW_UNAUTH so the .env.example
-      # escape hatch documentation actually works for graphql too.
+      # escape hatch documentation actually works for graphql too (non-production
+      # EDGEGUARD_ENV only; in production EDGEGUARD_API_KEY is always required).
       EDGEGUARD_ALLOW_UNAUTH: ${EDGEGUARD_ALLOW_UNAUTH:-}
       PYTHONPATH: /app/src
     depends_on:

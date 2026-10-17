@@ -1,6 +1,6 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Last Updated:** 2026-10-16 (§ 9 AbuseIPDB: at most one blacklist request per run, none when a run reuses the same day's answer; AbuseIPDB row 7: the daily blacklist quota and the reused answer; per-run caps of AbuseIPDB, Feodo Tracker and SSL Blacklist, rows 7, 9 and 10, § 2, § 8, § 9; 2026-10-15: FIRST EPSS row 15 added; CISA's SSVC decision points come with the NVD records, row 2; measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
+**Last Updated:** 2026-10-17 (see footer; 2026-10-16: § 9 AbuseIPDB: at most one blacklist request per run, none when a run reuses the same day's answer; AbuseIPDB row 7: the daily blacklist quota and the reused answer; per-run caps of AbuseIPDB, Feodo Tracker and SSL Blacklist, rows 7, 9 and 10, § 2, § 8, § 9; 2026-10-15: FIRST EPSS row 15 added; CISA's SSVC decision points come with the NVD records, row 2; measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
 **Total Sources:** 15 (10 active + 2 placeholders + 2 flag-guarded, off by default + 1 post-sync enrichment feed, on by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
@@ -49,7 +49,7 @@
 | URL | https://otx.alienvault.com/api/v1/pulses/subscribed |
 | Format | JSON API |
 | Auth | API Key required |
-| Update | On-demand (50 pulses per run) |
+| Update | Every 30 minutes (`edgeguard_pipeline` → `collect_otx`): pulses modified since the stored cursor (`otx_last_pulse_modified` minus `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC`, 300 s; without a cursor the last `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS`, 3), in pages of 100 up to `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` (25), with at most `EDGEGUARD_INCREMENTAL_LIMIT` (200) pulses processed per run. A baseline reads pages of 50 pulses (the baseline limit when one is set) up to `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (200) |
 | Classification | ✅ Keyword-based on the whole pulse (name, tags, description, indicators), plus OTX's own `industries` |
 
 **What we get:**
@@ -74,12 +74,11 @@
 | Format | CSV |
 | Auth | None (public) |
 | Update | Daily |
-| Classification | ✅ Malware family → Finance mapping |
+| Classification | Keyword detector on the listing reason (Global in practice; no malware family is mapped to a sector) |
 
 **What we get:**
 - SSL certificate SHA1 fingerprints, stored as MISP `x509-fingerprint-sha1` attributes and `x509-fingerprint-sha1` Indicators (2026-10; they were typed as file `sha1` hashes before)
-- Malware family name (Vidar, RedLine, etc.)
-- Listing reason
+- Listing reason (for example `Dridex C&C`), used only for sector detection. It is not written to MISP, and no malware family is emitted
 
 **How classified:**
 - Keyword detector on the listing reason; no malware family is mapped to a sector by name (Method 2 below), so the rows are tagged Global
@@ -119,8 +118,8 @@
 | URL | `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` (per `src/collectors/cisa_collector.py:81`) |
 | Format | JSON |
 | Auth | None (public) |
-| Update | Daily |
-| Classification | ⚠️ CVE descriptions searched |
+| Update | Every 4 hours (`edgeguard_medium_freq` → `collect_cisa`) and baseline |
+| Classification | Keyword detector on vendor, product and short description |
 
 **What we get:**
 - CVE IDs
@@ -130,11 +129,11 @@
 - Known ransomware campaign use (`known_ransomware_use` on the `CVE` node; 2026-10: no CVSS score is derived from it — the catalogue carries none, and the node's score comes from its CVSS sub-nodes)
 
 **How classified:**
-- Description text searched for sector keywords
+- Vendor, product and short description searched for sector keywords
 
 **Scope (2026-10):** every run, the baseline and the run every 4 hours, takes the **whole catalogue** (1,748 entries on 2026-10-16), not only the entries added within a window: a KEV entry is a CVE known to be exploited, so its age is no reason to leave it out (Log4Shell, added 2021-12, fell outside a 730-day window). `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false` restores the `dateAdded` window of the baseline length; an entry outside it is then neither added nor edited, so it follows no revision, and where NVD's record (the NVD KEV sweep) alone gives its KEV fields, that record only fills them on the `CVE` node. `EDGEGUARD_CISA_INCREMENTAL_DAYS` (the 30-day window of incremental runs) is retired.
 
-**Revisions (2026-10):** CISA revises entries in place (26 ransomware uses Unknown → Known, a moved due date and an extended description between 2026-05-22 and 2026-10-16, all on entries older than 30 days) and publishes no per-entry modification date. Every run therefore compares each catalogue entry with EdgeGuard's stored MISP copy: a CVE MISP lacks is added, a copy that differs is edited in place (its `NVD_META` and tags, `ransomware:known` included), so MISP holds CISA's latest statement and the sync carries it to the `CVE` node, whose four KEV fields the KEV record owns. At most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) edits per run, the rest on the next run; `EDGEGUARD_KEV_UPDATE_EXISTING=false` adds new entries only. An entry removed from the catalogue is counted and logged, not removed. `notes`, `cwes` and `forensicTriage` are not collected. Details: [COLLECTORS.md § 3](COLLECTORS.md#revisions-every-run-compares-the-catalogue-with-misp-2026-10).
+**Revisions (2026-10):** CISA revises entries in place (26 ransomware uses Unknown → Known, a moved due date and an extended description between 2026-05-22 and 2026-10-16, all on entries older than 30 days) and publishes no per-entry modification date. Every run therefore compares each catalogue entry with EdgeGuard's stored MISP copy: a CVE MISP lacks is added, a copy that differs is edited in place (its `NVD_META` and tags, `ransomware:known` included), so MISP holds CISA's latest statement and the sync carries it to the `CVE` node, whose four KEV fields the KEV record owns. At most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) edits per run, the rest on the next run; `EDGEGUARD_KEV_UPDATE_EXISTING=false` adds new entries only. An entry removed from the catalogue is counted and logged, not removed. `notes`, `cwes` and `forensicTriage` are not stored in MISP (`cwes` and `notes` are read onto the item but not written to `NVD_META`). Details: [COLLECTORS.md § 3](COLLECTORS.md#revisions-every-run-compares-the-catalogue-with-misp-2026-10).
 
 ---
 
@@ -146,8 +145,8 @@
 | URL | `https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/` (`index.txt`, `changes.csv`, `<year>/<advisory>.json`) — per `src/collectors/cisa_ics_collector.py` |
 | Format | CSAF 2.0 JSON, one file per advisory (`ICSA-*`, `ICSMA-*`) |
 | Auth | None (public GitHub raw); TLP:WHITE |
-| Update | Daily (`edgeguard_daily` → `collect_cisa_ics`), only when `EDGEGUARD_ENABLE_CISA_ICS=true` |
-| Classification | ✅ Fixed table on the advisory's `"Critical infrastructure sectors"` note: `Energy → energy`, `Healthcare and Public Health → healthcare`, `Financial Services → finance`; anything else → `global` |
+| Update | Daily (`edgeguard_daily` → `collect_cisa_ics`) and baseline tier 2, only when `EDGEGUARD_ENABLE_CISA_ICS=true` |
+| Classification | ✅ Fixed table on the advisory's `"Critical infrastructure sectors"` note: `Energy → energy`, `Healthcare and Public Health → healthcare`, `Financial Services → finance`; other sectors contribute nothing; `global` only when no sector maps |
 
 **What we get:**
 - CVE IDs with CWE, CVSS v3.x score/vector (→ `CVSSv31`/`CVSSv30` sub-nodes), vulnerability summary. A CSAF score block has no impact or exploitability sub-score, so the sub-node gets none (2026-10-16; the collector sent 0.0). On a CVE NVD also describes, NVD's values hold: a sub-node NVD has asserted and NVD's lists (CWE, references, products) are only filled by CISA's record where they lack a value, whatever the order of the sync (2026-10-16; the record merged last won). When NVD's record drops a CVSS version CISA also gives, CISA's next record sets that sub-node's values again
@@ -217,9 +216,9 @@
 |-----------|-------|
 | URL | https://services.nvd.nist.gov/rest/json/cves/2.0 |
 | Format | JSON API |
-| Auth | API Key (free) |
-| Update | On-demand |
-| Classification | ⚠️ Description searched |
+| Auth | API key optional (free; without it requests are paced 6.5 s apart) |
+| Update | Every 8 hours (`edgeguard_low_freq` → `collect_nvd`) and baseline |
+| Classification | Keyword detector on the description and the CPE vendor/product text (`detect_zones_from_item`) |
 
 **API constraints (collector behavior):** NVD CVE 2.0 requires **`pubStartDate` and `pubEndDate` together** when filtering by published date. Each request is limited to **at most 120 consecutive days**. The collector anchors the window on **now (UTC)**. **Incremental** runs (2026-10) read every CVE modified since a stored cursor (**`lastModStartDate` / `lastModEndDate`**, read in time slices of at most 120 days, one answer of up to 2,000 records each; without a cursor the last `EDGEGUARD_NVD_INCREMENTAL_DAYS` days, default 14). They add the CVEs MISP does not hold yet when these lie in the baseline's scope (published within `EDGEGUARD_BASELINE_DAYS`, on KEV, or named in `EDGEGUARD_NVD_EXTRA_CVE_IDS`), and they edit the MISP attribute of a CVE MISP holds when NVD's data for it changed. NVD's later analysis (CVSS, CPE, CWE, description, KEV fields) and rejections reach the graph, including data NVD withdrew (list values on CVE nodes whose only source is NVD, and CVSS sub-nodes only NVD asserted). Each request reads one time slice, so records NVD changes during the read are not skipped. A run makes at most `EDGEGUARD_NVD_MAX_PER_RUN` (5,000) MISP writes ([COLLECTORS.md § 2](COLLECTORS.md)) (see [CVE API](https://nvd.nist.gov/developers/vulnerabilities), [workflows](https://nvd.nist.gov/developers/api-workflows)). **Baseline** mode **splits** `[now − baseline_days, now]` into multiple ≤120-day publication windows. No age filter is applied after the fetch (2026-10; the former sector time-range check had not fired on NVD's zone-less timestamps since v2026.3.28 and was removed). **Known-exploited CVEs outside the windows (2026-10):** after the windows, a baseline also fetches the NVD record of every CVE on CISA's KEV list (`hasKev`, about 1,700 records in one page; `EDGEGUARD_NVD_BASELINE_KEV_SWEEP`, default on) and of the CVE ids listed in `EDGEGUARD_NVD_EXTRA_CVE_IDS` (one request each), whatever their publication date. A failed supplementary request is logged and skipped, never fails the baseline. **NIST attribution:** This product uses data from the NVD API but is not endorsed or certified by the NVD.
 
@@ -233,18 +232,8 @@
 
 ---
 
-### 7. MISP
-**Items:** 4 | **Zone:** Healthcare 100%
-
-| Attribute | Value |
-|-----------|-------|
-| URL | https://localhost:8443/api/events |
-| Format | JSON API |
-| Auth | API Key |
-| Update | Manual |
-| Classification | ✅ Keyword-based |
-
-**Status:** Minimal data - only test event
+### 7. MISP (the staging hub, not a source)
+MISP is the staging hub every collector pushes into (361,546 attributes after the first 730-day baseline, see above), not a source. `MISPCollector` is an optional path that no DAG runs ([COLLECTORS.md § 11](COLLECTORS.md#11-misp-collector)).
 
 ---
 
@@ -330,7 +319,11 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-## Issues & Fixes Needed
+## Historical notes (2026-03)
+
+The two lists below record the state and the open questions of 2026-03; they do not describe the current deployment.
+
+### Issues & Fixes Needed (2026-03)
 
 | Issue | Impact | Fix |
 |-------|--------|-----|
@@ -341,7 +334,7 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-## For Prep Meeting Discussion
+### For Prep Meeting Discussion (2026-03)
 
 1. **Architecture:** MISP vs Direct Collectors - which approach?
 2. **Finance gap:** Public feeds limited - discuss FS-ISAC membership
@@ -351,4 +344,4 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-16 — § 4b CISA ICS, *What we get*: no impact or exploitability sub-score on a CVSS sub-node (CSAF gives none; it was 0.0), and on a CVE NVD also describes, NVD's CVSS sub-node and lists hold whatever the order of the sync (a CVSS version NVD's record drops goes back to CISA's next record). Same day: § 4 CISA KEV: every run (the baseline and the run every 4 hours) takes the whole catalogue and compares it with EdgeGuard's MISP copies; revised entries are edited in place (at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` per run, `EDGEGUARD_KEV_UPDATE_EXISTING`), removals are counted and logged only, with `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false` an entry outside the window follows no revision, and `EDGEGUARD_CISA_INCREMENTAL_DAYS` is retired (it said incremental runs keep a 30-day window); the catalogue holds 1,748 entries (it said about 1,500). Same day: § 4b CISA ICS: one item per CVE (the advisories naming one CVE are merged); the advisory ids, CISA's raw sector names and the zones of each advisory travel in `NVD_META` into the `SOURCED_FROM.raw_data` of the CVE and as `cisa_ics:<advisory id>` record references, a sector link citing only the advisories that name its sector (the section said `ics_sectors` was delivered; it never left the collector); a CISA sector is an `advisory_sector` statement at 0.9 on AFFECTS, meaning "deployed in". Same day: § 9 AbuseIPDB: at most one blacklist request per run, none when a run reuses the answer fetched earlier on the same UTC day (it said one per run, the daily run one and a baseline one more); the daily and the baseline runs share one cache key. Same day: AbuseIPDB row 7: the blacklist's size on the 730-day baseline, the free plan's 5 blacklist requests per UTC day, the answer reused for the rest of its UTC day and the failed task on a 429. Same day: the AbuseIPDB run reports at most 10,000 blacklist addresses, which AbuseIPDB chooses; only the Feodo Tracker and SSL Blacklist runs report the whole list they read. Same day: rows 7, 9 and 10, § 2, § 8 and the new § 9 AbuseIPDB: per-run caps of SSL Blacklist (20,000), Feodo Tracker (15,000) and AbuseIPDB (10,000, one blacklist request per run, the most one request returns on the free plan); each run reports the whole list, the newest kept when a cap is reached; § 2 classification as measured (keyword detector, Global); § 8b: the sync runs every 72 hours. Prior: 2026-10-15 — § 1 OTX: a pulse's description is stored on no item (it was given to the pulse's families and adversaries as their description) and still feeds sector classification, which scans the whole pulse and adds OTX's `industries` (the section named only tags and name). Same day: ThreatFox and URLhaus rows and § 3: the whole window per run, up to `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) / `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000), the newest kept when a cap is reached. Same day: FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._
+_Last updated: 2026-10-17 — the header date follows this line. Same day: § 1 OTX *Update*: every 30 minutes from a stored cursor, at most 200 pulses processed per run, and the baseline's page limits (it said on demand, 50 pulses per run); § 2 SSL Blacklist: keyword detector on the listing reason, no malware family, and the listing reason does not reach MISP; § 4 CISA KEV: every 4 hours and in the baseline, vendor, product and short description searched, `notes` and `cwes` read onto the item but not stored in MISP; § 4b CISA ICS: also in baseline tier 2, unmapped sectors contribute nothing; § 6 NVD: API key optional, every 8 hours and in the baseline, CPE text searched too; § 7 MISP is the staging hub, not a source; the 2026-03 issue list and meeting questions moved under *Historical notes (2026-03)*. Prior: 2026-10-16 — § 4b CISA ICS, *What we get*: no impact or exploitability sub-score on a CVSS sub-node (CSAF gives none; it was 0.0), and on a CVE NVD also describes, NVD's CVSS sub-node and lists hold whatever the order of the sync (a CVSS version NVD's record drops goes back to CISA's next record). Same day: § 4 CISA KEV: every run (the baseline and the run every 4 hours) takes the whole catalogue and compares it with EdgeGuard's MISP copies; revised entries are edited in place (at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` per run, `EDGEGUARD_KEV_UPDATE_EXISTING`), removals are counted and logged only, with `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false` an entry outside the window follows no revision, and `EDGEGUARD_CISA_INCREMENTAL_DAYS` is retired (it said incremental runs keep a 30-day window); the catalogue holds 1,748 entries (it said about 1,500). Same day: § 4b CISA ICS: one item per CVE (the advisories naming one CVE are merged); the advisory ids, CISA's raw sector names and the zones of each advisory travel in `NVD_META` into the `SOURCED_FROM.raw_data` of the CVE and as `cisa_ics:<advisory id>` record references, a sector link citing only the advisories that name its sector (the section said `ics_sectors` was delivered; it never left the collector); a CISA sector is an `advisory_sector` statement at 0.9 on AFFECTS, meaning "deployed in". Same day: § 9 AbuseIPDB: at most one blacklist request per run, none when a run reuses the answer fetched earlier on the same UTC day (it said one per run, the daily run one and a baseline one more); the daily and the baseline runs share one cache key. Same day: AbuseIPDB row 7: the blacklist's size on the 730-day baseline, the free plan's 5 blacklist requests per UTC day, the answer reused for the rest of its UTC day and the failed task on a 429. Same day: the AbuseIPDB run reports at most 10,000 blacklist addresses, which AbuseIPDB chooses; only the Feodo Tracker and SSL Blacklist runs report the whole list they read. Same day: rows 7, 9 and 10, § 2, § 8 and the new § 9 AbuseIPDB: per-run caps of SSL Blacklist (20,000), Feodo Tracker (15,000) and AbuseIPDB (10,000, one blacklist request per run, the most one request returns on the free plan); each run reports the whole list, the newest kept when a cap is reached; § 2 classification as measured (keyword detector, Global); § 8b: the sync runs every 72 hours. Prior: 2026-10-15 — § 1 OTX: a pulse's description is stored on no item (it was given to the pulse's families and adversaries as their description) and still feeds sector classification, which scans the whole pulse and adds OTX's `industries` (the section named only tags and name). Same day: ThreatFox and URLhaus rows and § 3: the whole window per run, up to `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) / `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000), the newest kept when a cap is reached. Same day: FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

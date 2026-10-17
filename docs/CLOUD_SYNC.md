@@ -37,8 +37,9 @@ Wiring is in [src/neo4j_client.py](../src/neo4j_client.py),
 ### Step 1 — define the natural key
 
 For every node label, EdgeGuard's UNIQUE constraint already nominates which
-properties identify a node uniquely. `src/node_identity.py
-_LABEL_NATURAL_KEY_FIELDS` is the single Python-side mirror of those keys:
+properties identify a node uniquely. `src/node_identity.py _NATURAL_KEYS` is
+the single Python-side mirror of those keys (`_LABEL_NATURAL_KEY_FIELDS` is
+its lowercase view). The table lists the threat-intelligence labels:
 
 | Neo4j label | Natural key fields | STIX type used in canonical string |
 |---|---|---|
@@ -56,6 +57,14 @@ _LABEL_NATURAL_KEY_FIELDS` is the single Python-side mirror of those keys:
 
 ¹ Tool is the documented STIX-parity exception — see "Caveats" below.
 
+`_NATURAL_KEYS` also covers the ResilMesh topology labels (IP `address`,
+Host `hostname`, Device `device_id`, Subnet `range`, NetworkService `port` +
+`protocol`, SoftwareVersion `version`, Application `name`, Role
+`permission`), User (`username`, `domain`; type `x-edgeguard-user`) and Alert
+(`alert_id`; type `x-edgeguard-alert`). A label without an entry in
+`NEO4J_TO_STIX_TYPE` uses its lowercased label name as the type in the
+canonical string.
+
 ### Step 2 — build the canonical string
 
 The serialization rule (`canonical_node_key` in `node_identity.py`) is:
@@ -65,7 +74,8 @@ canonical = f"{stix_type}:{natural_key_string}".lower()
 ```
 
 …where `natural_key_string` joins the per-label key fields with `|` in the
-documented order. Concrete examples:
+documented order, after each field value is NFC-normalized, trimmed and has
+`|` escaped as `%7C` (`canonicalize_field_value`). Concrete examples:
 
 | Logical entity | Canonical string |
 |---|---|
@@ -124,9 +134,9 @@ stamped).
 
 - `EDGEGUARD_NODE_UUID_NAMESPACE` — changing it invalidates every uuid in
   every running Neo4j AND every STIX bundle ever shipped.
-- `_LABEL_NATURAL_KEY_FIELDS` — changing the field order or set for a
-  label changes the canonical string for every existing node of that
-  label.
+- `_NATURAL_KEYS` (and its lowercase view `_LABEL_NATURAL_KEY_FIELDS`) —
+  changing the field order or set for a label changes the canonical string
+  for every existing node of that label.
 - `NEO4J_TO_STIX_TYPE` — changing a mapping breaks STIX parity.
 - The `.lower()` at the end of `canonical_node_key` — changing it breaks
   STIX parity.
@@ -144,7 +154,7 @@ information available at the time of the MERGE.
 
 Used by every MISP-derived edge MERGE in the codebase, including:
 
-- All 11 query templates in `Neo4jClient.create_misp_relationships_batch`
+- All 17 query templates in `Neo4jClient.create_misp_relationships_batch`
 - All 6 standalone `Neo4jClient.create_*_relationship` helpers
 - All 20 link steps in `src/build_relationships.py`
 - The REFERS_TO bridge in `src/enrichment_jobs.py`
@@ -164,8 +174,8 @@ SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
 ```
 
 If `i.uuid` is null (e.g. ingested before this PR, backfill hasn't run yet),
-the coalesce keeps `r.src_uuid` null too — and the backfill will fix both
-in a single pass later. No silent drift.
+the coalesce keeps `r.src_uuid` null too — a fresh baseline stamps both (no
+backfill ships). No silent drift.
 
 PR #33 used to have a separate "Mechanism A" (Python-side precomputation
 of endpoint uuids, threaded into UNWIND row dicts) for
@@ -191,9 +201,11 @@ literal. Three places use this:
   `create_vulnerability_sector_relationship` — Sector uuid pre-computed
   via `compute_node_uuid("Sector", {"name": sec})` and passed as
   `$sector_uuid`.
-- **Sector** auto-CREATE in `build_relationships.py` 7a (TARGETS) and
-  7b (AFFECTS) — the 4 known sector uuids precomputed at module load
-  and embedded as a Cypher CASE expression.
+- **Sector** auto-CREATE in `build_relationships.py` steps 7a–7d
+  (Indicator, ThreatActor and Malware TARGETS; Vulnerability/CVE AFFECTS) —
+  the sector uuids are precomputed at module load from `VALID_ZONES` and
+  embedded as a Cypher CASE expression (`_SECTOR_UUID_CASE`); `global` is
+  never linked.
 - **Campaign** auto-CREATE in `enrichment_jobs.build_campaign_nodes` —
   pre-fetch qualifying actor names, compute `compute_node_uuid("Campaign",
   {"name": f"{actor_name} Campaign"})` for each, pass as a `$campaign_uuids`
@@ -319,32 +331,48 @@ reasons; the identifier is the same either way.
 
 ### Recipe 1 — push deltas keyed by uuid
 
-This is the production path the 2026-04 PR is designed for. Producer side (local):
+This is the production path the 2026-04 PR is designed for. Producer side
+(local). `$since` is the time of the previous successful push, and
+`$primary_labels` is the list of labels that carry a uuid
+(`node_identity.supported_labels()`, the keys of `_NATURAL_KEYS`). A node can
+also carry secondary sector labels (`:Finance`, `:Healthcare`, …, added by
+`Neo4jClient.apply_sector_labels`), so the delta names the node's primary
+label separately from its full label list:
 
 ```cypher
-// Nightly: collect everything written or modified in the last 24h.
+// Nightly: collect every node written or aged since the previous push.
+// Every write sets last_updated; the indicator aging job sets
+// aging_evaluated_at and does not touch last_updated.
 MATCH (n)
-WHERE n.last_updated >= datetime() - duration({days: 1})
+WHERE (n.last_updated >= datetime($since) OR n.aging_evaluated_at >= datetime($since))
   AND n.uuid IS NOT NULL
-RETURN labels(n) AS labels, n.uuid AS uuid, properties(n) AS props
+RETURN [l IN labels(n) WHERE l IN $primary_labels][0] AS label,
+       labels(n) AS labels, n.uuid AS uuid, properties(n) AS props
 ```
 
 ```cypher
 MATCH (a)-[r]->(b)
-WHERE r.updated_at >= datetime() - duration({days: 1})
+WHERE r.updated_at >= datetime($since)
   AND r.src_uuid IS NOT NULL AND r.trg_uuid IS NOT NULL
 RETURN type(r) AS rel_type,
        r.src_uuid AS src_uuid, r.trg_uuid AS trg_uuid,
        properties(r) AS props
 ```
 
-Consumer side (cloud) — for each node delta:
+Consumer side (cloud) — for each node delta. The MERGE matches on the
+primary label only, so a node that gained a sector label locally still
+matches its cloud copy; `apoc.create.addLabels` then adds the labels it
+lacks. The delta goes in as both the on-create and the on-match
+properties, so a change to an existing node (aging, a KEV revision, NVD
+data) reaches the cloud copy:
 
 ```cypher
 UNWIND $node_deltas AS d
-CALL apoc.merge.node(d.labels, {uuid: d.uuid}, d.props, {})
+CALL apoc.merge.node([d.label], {uuid: d.uuid}, d.props, d.props)
 YIELD node
-RETURN count(node)
+CALL apoc.create.addLabels(node, d.labels)
+YIELD node AS labelled
+RETURN count(labelled)
 ```
 
 For each edge delta — **MUST use label-scoped MATCH** (see warning below):
@@ -358,25 +386,30 @@ UNWIND $edge_deltas AS e
 // Neo4j returns first.
 MATCH (a) WHERE a.uuid = e.src_uuid AND e.src_label IN labels(a)
 MATCH (b) WHERE b.uuid = e.trg_uuid AND e.trg_label IN labels(b)
-CALL apoc.merge.relationship(a, e.rel_type, {}, e.props, b, {})
+CALL apoc.merge.relationship(a, e.rel_type, {}, e.props, b, e.props)
 YIELD rel
 RETURN count(rel)
 ```
 
+The on-match properties use `+=` semantics: a property removed locally
+stays on the cloud copy, so also compare the two graphs periodically (full
+snapshot comparison, see the reconciliation below).
+
 This means the producer-side edge serialization must include the connected
-nodes' labels:
+nodes' primary labels:
 
 ```cypher
 // Producer side — include src_label / trg_label in every edge delta.
+// labels(a)[0] could be a sector label; pick the primary label instead.
 MATCH (a)-[r]->(b)
-WHERE r.updated_at >= datetime() - duration({days: 1})
+WHERE r.updated_at >= datetime($since)
   AND r.src_uuid IS NOT NULL AND r.trg_uuid IS NOT NULL
-RETURN type(r)             AS rel_type,
-       r.src_uuid          AS src_uuid,
-       r.trg_uuid          AS trg_uuid,
-       labels(a)[0]        AS src_label,
-       labels(b)[0]        AS trg_label,
-       properties(r)       AS props
+RETURN type(r)                                      AS rel_type,
+       r.src_uuid                                   AS src_uuid,
+       r.trg_uuid                                   AS trg_uuid,
+       [l IN labels(a) WHERE l IN $primary_labels][0] AS src_label,
+       [l IN labels(b) WHERE l IN $primary_labels][0] AS trg_label,
+       properties(r)                                AS props
 ```
 
 The uuid index (`CREATE INDEX <label>_uuid` in
@@ -394,6 +427,26 @@ The uuid index (`CREATE INDEX <label>_uuid` in
 > resolving an edge endpoint or a STIX SDO id back to Neo4j. The label
 > is implicit in every edge document via the `src_label` / `trg_label`
 > fields shown above.
+
+**The delta carries no deletions.** Campaigns and campaign links without
+evidence (`enrichment_jobs.build_campaign_nodes`), CVSS sub-nodes that NVD
+no longer supplies (`Neo4jClient._replace_nvd_owned_cve_data`) and merged
+duplicate actors and malware disappear locally but stay in the cloud.
+Reconcile periodically: run the query below on both sides, compare the
+`(label, uuid)` pairs and delete the cloud-only ones, label-scoped:
+
+```cypher
+// On LOCAL and CLOUD
+MATCH (n) WHERE n.uuid IS NOT NULL
+RETURN [l IN labels(n) WHERE l IN $primary_labels][0] AS label, n.uuid AS uuid
+```
+
+```cypher
+// CLOUD: $cloud_only = the pairs found only on the cloud side
+UNWIND $cloud_only AS d
+MATCH (n) WHERE n.uuid = d.uuid AND d.label IN labels(n)
+DETACH DELETE n
+```
 
 ### Recipe 2 — extract a self-describing subgraph for an LLM / RAG store
 
@@ -429,12 +482,16 @@ given a subset and still reason about the relationships because every
 ### Recipe 3 — re-derive after pipeline change (reproducibility check)
 
 ```bash
-# 1. Snapshot current graph for comparison
-neo4j-admin database dump neo4j --to-path=/backups
-mv /backups/neo4j.dump /backups/before-rebuild.dump
+# 1. Snapshot current graph for comparison: stop Neo4j and dump offline
+#    as in BACKUP.md (Community Edition refuses to dump a database in use;
+#    needs the ./backups/neo4j:/backups mount described there)
+docker compose stop neo4j
+docker compose run --rm neo4j neo4j-admin database dump neo4j --to-path=/backups --overwrite-destination=true
+docker compose start neo4j
+mv backups/neo4j/neo4j.dump backups/neo4j/before-rebuild.dump
 
 # 2. Wipe + re-ingest from MISP (simulates a from-scratch rebuild)
-python -c "from neo4j_client import Neo4jClient; Neo4jClient().run('MATCH (n) DETACH DELETE n')"
+edgeguard clear neo4j --force   # dev/test only; batched delete of every node, recorded in the destructive-ops audit trail
 python -m run_misp_to_neo4j --full   # re-runs the production ingest
 
 # 3. Sample uuids from before vs after — must match for any (label, natural_key)
@@ -540,7 +597,7 @@ snapshot. Steps:
    500K-node / 1M-edge graph.
 
 3. **Initialize the cloud schema** by running the standard EdgeGuard startup
-   sequence — this creates the 25 UNIQUE constraints + 43 uuid indexes
+   sequence — this creates the 19 UNIQUE constraints + 25 `<label>_uuid` indexes
    declared in `Neo4jClient.create_constraints` / `create_indexes`:
 
    ```bash
@@ -570,9 +627,10 @@ snapshot. Steps:
    `last_updated` filter):
 
    ```cypher
-   // LOCAL: extract every node with a uuid
+   // LOCAL: extract every node with a uuid ($primary_labels as in Recipe 1)
    MATCH (n) WHERE n.uuid IS NOT NULL
-   RETURN labels(n) AS labels, n.uuid AS uuid, properties(n) AS props
+   RETURN [l IN labels(n) WHERE l IN $primary_labels][0] AS label,
+          labels(n) AS labels, n.uuid AS uuid, properties(n) AS props
    ```
 
    Stream those into the cloud receiver and apply via:
@@ -580,12 +638,13 @@ snapshot. Steps:
    ```cypher
    // CLOUD: MERGE by uuid (label-scoped to handle CVE/Vulnerability twins)
    UNWIND $rows AS d
-   CALL apoc.merge.node(d.labels, {uuid: d.uuid}, d.props, {}) YIELD node
-   RETURN count(node)
+   CALL apoc.merge.node([d.label], {uuid: d.uuid}, d.props, d.props) YIELD node
+   CALL apoc.create.addLabels(node, d.labels) YIELD node AS labelled
+   RETURN count(labelled)
    ```
 
    Then for edges (extract LOCAL, apply CLOUD with the label-scoped MATCH
-   pattern from Recipe 1 lines 358-364).
+   pattern of Recipe 1's edge-delta consumer).
 
 6. **Verify counts match** between local and cloud per-label and per-rel-type.
    ```cypher
@@ -598,7 +657,8 @@ snapshot. Steps:
    and verify the response is identical.
 
 After this initial population, switch to Recipe 1 (delta push) for ongoing
-sync. Cadence: nightly is typical; hourly works for low-volume environments.
+sync, with its periodic reconciliation for deletions. Cadence: nightly is
+typical; hourly works for low-volume environments.
 
 ---
 
@@ -614,16 +674,21 @@ operations — incremental MERGEs leave no audit trail.
 Pre-flight before every sync:
 
 ```bash
-# CLOUD-side: snapshot before any sync run
-neo4j-admin database dump neo4j --to-path=/backups/cloud-pre-sync-$(date +%F-%H%M).dump
+# CLOUD-side: snapshot before any sync run. The dump runs offline (Community Edition
+# refuses a database in use); --to-path is a directory, which receives neo4j.dump.
+STAMP=$(date +%F-%H%M)
+systemctl stop neo4j
+mkdir -p /backups/cloud-pre-sync-$STAMP
+neo4j-admin database dump neo4j --to-path=/backups/cloud-pre-sync-$STAMP --overwrite-destination=true
+systemctl start neo4j
 ```
 
 To restore:
 
 ```bash
-# CLOUD-side: stop Neo4j, restore, restart
+# CLOUD-side: stop Neo4j, restore, restart (--from-path is the directory that holds neo4j.dump)
 systemctl stop neo4j
-neo4j-admin database load neo4j --from-path=/backups/cloud-pre-sync-2026-04-17-1400.dump --overwrite-destination
+neo4j-admin database load neo4j --from-path=/backups/cloud-pre-sync-2026-04-17-1400 --overwrite-destination=true
 systemctl start neo4j
 ```
 
@@ -648,11 +713,11 @@ emergencies:
 MATCH (n) SET n.uuid = null;
 MATCH ()-[r]->() SET r.src_uuid = null, r.trg_uuid = null;
 
-// Drop the 43 uuid indexes (otherwise they sit empty)
-SHOW INDEXES YIELD name WHERE name ENDS WITH '_uuid'
-CALL { WITH name CALL db.index.fulltext.drop(name) RETURN count(*) AS dropped }
-RETURN sum(dropped);
-// (Adjust drop syntax to match your Neo4j version.)
+// Drop the 25 uuid indexes (range indexes; otherwise they sit empty).
+// List them:
+SHOW INDEXES YIELD name WHERE name ENDS WITH '_uuid' RETURN name;
+// then, for each name returned:
+DROP INDEX <name> IF EXISTS;
 ```
 
 ### Rollback D — re-stamp uuids after a canonicalization change
@@ -665,7 +730,7 @@ rebaseline.
 
 ```bash
 # Dev / test only — never on a graph anyone else is reading.
-python scripts/clear_neo4j.py --yes
+python scripts/clear_neo4j.py --force   # deletes the nodes with EdgeGuard labels, recreates the Source nodes, clears the collector checkpoints
 edgeguard baseline   # or trigger the edgeguard_baseline DAG
 ```
 
@@ -679,7 +744,7 @@ from a small driver script — both code paths re-compute the uuid via
 
 EdgeGuard maintains TWO Neo4j labels for the same logical CVE:
 
-- `(:CVE)` — NVD-canonical, ResilMesh-shared. Created by the NVD collector.
+- `(:CVE)` — NVD-canonical, ResilMesh-shared. Created by the MISP → Neo4j sync (`Neo4jClient.merge_cve`) from the CVE attributes in MISP; NVD's record takes precedence for the fields it supplies. The label belongs to the ResilMesh schema, which the shared database also uses.
 - `(:Vulnerability)` — EdgeGuard-managed, MISP-derived. Created by the MISP sync.
 
 Both use `cve_id` as the natural key, and both are deliberately mapped to STIX
@@ -724,14 +789,10 @@ vs EdgeGuard-derived state) and pinned by
   `OrganizationUnit`, `MissionDependency`, `Node`) are not in
   `_NATURAL_KEYS` yet — they don't get uuids. Documented as a deferred
   follow-up. Use full dump/restore for those if needed.
-- **Standalone `create_*_relationship` helpers** (e.g.
-  `create_indicator_malware_relationship`) don't stamp `r.src_uuid` /
-  `r.trg_uuid` at runtime — they're legacy / individual-call paths. The
-  backfill picks them up by joining endpoint `n.uuid` (zero loss).
 - **Tool**'s natural key in Neo4j is `mitre_id`, but the STIX exporter uses
   `name`. Tool SDO IDs do NOT have UUID parity with Neo4j `n.uuid`. Worth
   reconciling in a follow-up if Tool round-trips become important.
 
 ---
 
-_Last updated: 2026-10-15 — wording only: the PR #33 review finding is stated without naming the review tool. Prior: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-17 — Rollback A dumps offline and passes directories to `--to-path` / `--from-path`, as Recipe 3 and BACKUP.md do. Same day: documentation audit: Recipe 1 and the full snapshot merge with the delta as on-match properties too (`{}` left changed nodes and edges stale in the cloud); the delta selects aged indicators (`aging_evaluated_at`) since `$since`, names the primary label (secondary sector labels made `apoc.merge.node` miss and `labels(a)[0]` pick a sector) and gets a reconciliation for deletions; Recipe 3 dumps offline and wipes with `edgeguard clear neo4j --force` (a `Neo4jClient()` that never connected deleted nothing); 19 UNIQUE constraints and 25 range `<label>_uuid` indexes, with a Rollback C that compiles; 17 batch templates; sector steps 7a–7d; CVE nodes created by the MISP → Neo4j sync; the standalone helpers stamp `r.src_uuid` / `r.trg_uuid` (caveat removed); `_NATURAL_KEYS` as the mirror, field canonicalization and the topology/User/Alert labels; Rollback D uses `clear_neo4j.py --force` (`--yes` is not an option). Prior: 2026-10-15 — wording only: the PR #33 review finding is stated without naming the review tool. Prior: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._

@@ -16,8 +16,8 @@
 
 `edgeguard fresh-baseline` permanently deletes:
 
-- All EdgeGuard nodes + edges in Neo4j (~350K nodes / ~700K edges on a
-  730-day baseline)
+- All EdgeGuard nodes + edges in Neo4j (about 550K nodes / 2.7M
+  relationships on the 730-day baseline loaded on 2026-10-16)
 - All EdgeGuard-tagged events in MISP (~8K events on a real-world deployment)
 - All collector checkpoints (per-source incremental cursors)
 
@@ -27,15 +27,25 @@ threat-intel collection. This document is the recovery story.
 ## Quick reference
 
 ```bash
-# 1. Take a backup BEFORE running fresh-baseline
-docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups
-docker compose exec misp /var/www/MISP/app/Console/cake admin event export json /backups/misp-events.json
+# 1. Take a backup BEFORE running fresh-baseline.
+#    Neo4j: offline dump (Community Edition); needs the ./backups/neo4j mount
+#    described in "Self-hosted Neo4j" below.
+docker compose stop airflow api graphql neo4j
+docker compose run --rm neo4j neo4j-admin database dump neo4j --to-path=/backups --overwrite-destination=true
+docker compose start neo4j airflow api graphql
+#    MISP: dump its MySQL database where MISP runs, outside EdgeGuard's
+#    compose project (container name of the reference compose in
+#    docs/sources/MISP/; adapt it to your deployment — see "MISP backup").
+docker exec misp_db_1 sh -c 'mysqldump -u misp -p"$MYSQL_PASSWORD" misp' > backups/misp-$(date +%F).sql
 
 # 2. Update the freshness timestamp the gate checks.
 #    `up -d` (RECREATE), not `restart` — compose interpolates .env into the
 #    container environment at CREATE time only; a plain restart keeps the
 #    stale value and the DAG-side gate would still refuse.
-echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env
+#    The host CLI reads its own environment, not .env, hence the export.
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "EDGEGUARD_LAST_BACKUP_AT=$TS" >> .env
+export EDGEGUARD_LAST_BACKUP_AT=$TS
 docker compose up -d api graphql airflow
 
 # 3. NOW you can run the destructive command
@@ -114,33 +124,43 @@ ceremony, and per-collector cursor state is not user-meaningful data.
 
 ### Self-hosted Neo4j (Docker Compose, the default)
 
-The `neo4j-admin database dump` tool is the canonical online-backup utility
-for Neo4j Community Edition. It pauses writes briefly during the dump
-(usually < 1 second on a 350K-node graph) and produces a single `.dump` file.
+`neo4j-admin database dump` produces a single `.dump` file. On Neo4j
+Community Edition (the `neo4j:2026.03.1-community` image of
+`docker-compose.yml`) it refuses a database that is in use, and Community
+has no `STOP DATABASE`, so the dump runs while the Neo4j server is stopped.
+
+**Required once — a backup mount.** `docker-compose.yml` mounts only
+`/data`, `/logs` and `/plugins` on the `neo4j` service. Add a host
+directory as `/backups` to its volumes, so that the dump outlives the
+container that writes it and the restore below can read it:
+
+```yaml
+# docker-compose.yml — add to the neo4j service's volumes
+volumes:
+  - ./backups/neo4j:/backups
+```
+
+The host directory must be writable by the container's `neo4j` user
+(uid 7474), e.g. `mkdir -p backups/neo4j && sudo chown 7474:7474 backups/neo4j`.
+The MISP dumps and checkpoint copies of this document go to `backups/`
+itself, which stays writable by your own user.
 
 ```bash
-# Create backups dir + dump
-docker compose exec neo4j mkdir -p /backups
-docker compose exec neo4j neo4j-admin database dump neo4j \
+# Stop the writers and Neo4j, dump offline, start again
+docker compose stop airflow api graphql neo4j
+docker compose run --rm neo4j neo4j-admin database dump neo4j \
     --to-path=/backups \
     --overwrite-destination=true
+docker compose start neo4j airflow api graphql
 
 # Verify the dump exists + has a sane size
-docker compose exec neo4j ls -lh /backups/neo4j.dump
+ls -lh backups/neo4j/neo4j.dump
 # Expected: 100MB-2GB depending on graph size
 ```
 
-**Dump file location:** `/backups/neo4j.dump` inside the `neo4j` container.
-For host-side persistence, mount a volume:
-
-```yaml
-# docker-compose.yml — add to neo4j service
-volumes:
-  - ./backups:/backups
-```
-
-Then `./backups/neo4j.dump` is on the host filesystem — copy/sync to
-durable storage (S3, BorgBackup, etc.) per your retention policy.
+**Dump file location:** `./backups/neo4j/neo4j.dump` on the host filesystem —
+copy/sync to durable storage (S3, BorgBackup, etc.) per your retention
+policy.
 
 ### Cloud Neo4j (Aura)
 
@@ -161,19 +181,28 @@ anchor for `restore` operations.
 ### MISP backup
 
 MISP stores events in a MySQL database + raw JSON exports. Either is sufficient
-for restoration:
+for restoration. MISP is not part of EdgeGuard's `docker-compose.yml`, so run
+these commands where MISP runs, against its own containers.
 
-**Option A — MySQL dump (canonical):**
+**Option A — MySQL dump (canonical):** run the dump where MISP's MySQL runs.
+For the reference compose in `docs/sources/MISP/` (MySQL in the separate
+`misp_db` service, container `misp_db_1`, user and database `misp`):
 
 ```bash
-docker compose exec misp mysqldump -u misp -p$MYSQL_PASSWORD misp > backups/misp-$(date +%F).sql
+docker exec misp_db_1 sh -c 'mysqldump -u misp -p"$MYSQL_PASSWORD" misp' > backups/misp-$(date +%F).sql
 ```
+
+Adapt the container name to your MISP deployment; all-in-one images run
+MySQL in the MISP container itself. The single quotes make
+`$MYSQL_PASSWORD` expand inside the container, not in the host shell.
 
 **Option B — MISP CakePHP event export (MISP-aware):**
 
 ```bash
-docker compose exec misp /var/www/MISP/app/Console/cake admin event export json /backups/misp-events.json
+docker exec <misp-container> /var/www/MISP/app/Console/cake admin event export json /backups/misp-events.json
 ```
+
+The export file is written inside the MISP container.
 
 Option B is preferred when restoring to a different MISP instance (handles
 MISP version drift); Option A is faster for same-instance restore.
@@ -183,8 +212,8 @@ MISP version drift); Option A is faster for same-instance restore.
 ### Worked example: fresh-baseline failed at 14:05 UTC
 
 **Scenario:** Operator triggered `edgeguard fresh-baseline` at 14:00 UTC.
-`baseline_clean_task` succeeded (Neo4j wiped, MISP cleared, checkpoints
-cleared) at 14:01. `baseline_full_sync_task` failed at 14:05 with a MISP
+Task `baseline_clean` succeeded (Neo4j wiped, MISP cleared, checkpoints
+cleared) at 14:01. Task `full_neo4j_sync` failed at 14:05 with a MISP
 rate-limit error. The graph is now empty; the operator needs to restore
 to the 13:55 state (last backup taken at 13:50).
 
@@ -200,7 +229,7 @@ docker compose stop airflow api graphql
 # Stop neo4j to release the DB lock
 docker compose stop neo4j
 
-# Restore (overwrites current data)
+# Restore (overwrites current data; reads ./backups/neo4j/neo4j.dump through the mount above)
 docker compose run --rm neo4j neo4j-admin database load neo4j \
     --from-path=/backups \
     --overwrite-destination=true
@@ -212,7 +241,8 @@ docker compose start neo4j
 **Step 3 — Restore MISP events:**
 
 ```bash
-docker compose exec misp mysql -u misp -p$MYSQL_PASSWORD misp < backups/misp-2026-04-19.sql
+# Reference compose in docs/sources/MISP/; adapt the container name to your MISP deployment
+docker exec -i misp_db_1 sh -c 'mysql -u misp -p"$MYSQL_PASSWORD" misp' < backups/misp-2026-04-19.sql
 ```
 
 **Step 4 — Reset incremental checkpoints to pre-baseline state:**
@@ -225,8 +255,9 @@ cp backups/baseline_checkpoint-2026-04-19.json checkpoints/baseline_checkpoint.j
 ```
 
 If no checkpoint backup exists, the next incremental run will re-collect
-the source's full lookback window (typically 3 days per
-`EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS`).
+each source's incremental window (OTX 3 days, NVD 14 days, CISA ICS 30
+days, the ThreatFox and URLhaus feeds' 7 and 30 days; CISA KEV reads the
+whole catalogue every run).
 
 **Step 5 — Restart and verify:**
 
@@ -245,17 +276,19 @@ take a fresh backup + retry.
 | Graph size | Neo4j dump | Neo4j restore | MISP dump | MISP restore |
 |---|---|---|---|---|
 | 50K nodes (dev) | ~30s | ~1 min | ~10s | ~30s |
-| 350K nodes (production baseline) | ~3 min | ~5-10 min | ~2 min | ~5 min |
+| 350K nodes (April 2026 baseline) | ~3 min | ~5-10 min | ~2 min | ~5 min |
 | 1M nodes (extreme) | ~10 min | ~30-60 min | ~10 min | ~20 min |
 
 Times are SSDs on a workstation; spinning disk + cloud storage adds 2-5×.
 
 ## What's NOT in this procedure (yet)
 
-These are tracked in [Issue #53 (PR-E backlog)](../../issues/53):
+These are tracked in [Issue #53 (PR-E backlog)](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/53):
 
-- **Audit-trail JSONL** for destructive operations — the operator who
-  triggered `fresh-baseline` + when + with what conf
+- ~~Audit-trail JSONL~~ — shipped in PR #147: `src/destructive_ops_audit.py`
+  appends one line per Neo4j wipe and CVSS de-duplication to
+  `EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH` (default `logs/destructive_ops.jsonl`).
+  It does not yet record who triggered `fresh-baseline` or the DAG run conf.
 - **Automated pre-flight backup hook** — option to take the snapshot AS
   part of `fresh-baseline` rather than as a manual prerequisite
 - **Backup-validation script** — verify the dump is restorable without
@@ -269,9 +302,9 @@ update into a wrapper.
 
 - [docs/AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — `edgeguard_baseline` task chain (additive vs destructive modes)
 - [docs/DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md) — Neo4j memory + storage sizing (relevant for dump sizing)
-- [Issue #53](../../issues/53) — operational hardening backlog (audit trail, automated backup hook)
-- [README.md § Roadmap & Status](../README.md#-roadmap--status) — current production-ready vs in-progress scope
+- [Issue #53](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/53) — operational hardening backlog (automated backup hook, backup validation; the audit trail shipped in PR #147)
+- [README.md § Roadmap & Status](../README.md#%EF%B8%8F-roadmap--status) — current production-ready vs in-progress scope
 
 ---
 
-_Last updated: 2026-06-11 — PR #125: the backup-timestamp gate is now ALSO enforced by the baseline_clean DAG task for UI/API triggers (previously CLI-only); quick-reference step 2 corrected to `docker compose up -d` (recreate) — plain `restart` does not re-read .env interpolations. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: verified — no factual drift. All commands (`docker compose exec neo4j neo4j-admin database dump …`) match the live `docker-compose.yml` `neo4j:` service; `EDGEGUARD_BACKUP_MAX_AGE_HOURS` env var exists and is read at `src/edgeguard.py:2341` (default 240h). Footer added as part of the audit trail._
+_Last updated: 2026-10-17 — the 350K-node row of the restore times is the April 2026 baseline on which they were measured. Same day: documentation audit: the Neo4j dump runs offline (Community Edition refuses a database in use) and needs a backup mount (`./backups/neo4j:/backups`) on the `neo4j` service, which `docker-compose.yml` does not have; the MISP dump and restore run in MISP's own containers (MySQL in `misp_db_1` in the reference compose), not through EdgeGuard's compose project; the quick reference exports `EDGEGUARD_LAST_BACKUP_AT` to the host shell, because the CLI reads its own environment, not `.env`; Airflow task ids `baseline_clean` / `full_neo4j_sync`; incremental windows per source; the audit-trail JSONL shipped in PR #147; node count of the 2026-10-16 baseline; absolute issue links and the README anchor. Prior: 2026-06-11 — PR #125: the backup-timestamp gate is now ALSO enforced by the baseline_clean DAG task for UI/API triggers (previously CLI-only); quick-reference step 2 corrected to `docker compose up -d` (recreate) — plain `restart` does not re-read .env interpolations. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: verified — no factual drift. All commands (`docker compose exec neo4j neo4j-admin database dump …`) match the live `docker-compose.yml` `neo4j:` service; `EDGEGUARD_BACKUP_MAX_AGE_HOURS` env var exists and is read at `src/edgeguard.py:2341` (default 240h). Footer added as part of the audit trail._

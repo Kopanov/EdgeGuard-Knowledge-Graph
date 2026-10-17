@@ -24,11 +24,11 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | **Knowledge Graph Schema** | ✅ Ready | Full node/relationship design, UNIQUE constraints |
 | **MISP Integration** | ✅ Ready | Writer with sanitization, retry, rate limiting |
 | **Airflow DAGs** | ✅ Ready | **6** DAGs; `max_active_runs=1` + `dagrun_timeout` on all; `on_failure_callback`/`on_success_callback`; baseline `is_paused_upon_creation=False`; `ShortCircuitOperator` on Neo4j sync |
-| **Data Collectors** | ✅ Ready | 10 active collectors → MISP → Neo4j |
+| **Data Collectors** | ✅ Ready | 10 active collectors by default (12 with the flag-guarded CISA ICS and MalwareBazaar) → MISP → Neo4j |
 | **Neo4j Client** | ✅ Ready | Constraints, indexes, batch ops, sector labels applied |
-| **Health Checks** | ✅ Ready | MISP health sensor + Docker service healthchecks |
+| **Health Checks** | ✅ Ready | MISP preflight task (`misp_health_check`, PythonOperator) + Docker service healthchecks |
 | **Documentation** | ✅ Ready | 20+ docs updated to match current code |
-| **Production CLI** | ✅ Ready | 16 commands: `preflight`, `stats --full`, `dag status/kill`, `checkpoint status/clear`, `doctor`, `heal`, `validate`, `monitor` |
+| **Production CLI** | ✅ Ready | 15 top-level commands, among them `preflight`, `stats --full`, `dag status/kill`, `checkpoint status/clear`, `doctor`, `heal`, `validate`, `monitor` |
 | **Security Hardening** | ✅ Ready | Input sanitization, injection guards, SSL, rate limiting |
 | **Monitoring/Metrics** | ⚠️ Partially | Metrics of every Airflow task process are served by the `metrics` compose service on **8001** (loopback publish for local access; Prometheus scrapes `metrics:8001` over `edgeguard_net`, 2026-10); alert rules evaluate in Prometheus; Alertmanager loads without secrets and delivers to Slack once `prometheus/secrets/slack_api_url` is provided (2026-10); **the e-mail and PagerDuty receivers are placeholders** (no notification is delivered until a webhook, mailbox or rendered key is configured); Grafana dashboard. |
 | **CI/CD Pipeline** | ✅ Ready | GitHub Actions: lint, type-check, unit tests, Docker build, security scan |
@@ -160,7 +160,8 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | API Rate Limits | ✅ | `docs/DATA_SOURCES_RATE_LIMITS.md` |
 | MISP Source Config | ✅ | `docs/MISP_SOURCES.md` |
 | Methodology | ✅ | `docs/METHODOLOGY.md` |
-| Airflow DAG Design | ✅ | `docs/AIRFLOW_DAGS.md` |
+| Airflow DAG Design | ✅ | `docs/AIRFLOW_DAG_DESIGN.md` |
+| Airflow DAG operations | ✅ | `docs/AIRFLOW_DAGS.md` |
 | Prometheus Setup | ✅ | `docs/PROMETHEUS_SETUP.md` |
 | Resilience Config | ✅ | `docs/RESILIENCE_CONFIG.md` |
 | Setup Guide | ✅ | `docs/SETUP_GUIDE.md` |
@@ -182,7 +183,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Fill optional API keys | `OTX_API_KEY`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, … in `.env` | Optional |
 | Large MISP→Neo4j backfill / OOM on sync | Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default `500`; try `250` if still OOM). **`0`** / **`all`** = single pass (OOM risk — not recommended for huge backfills); see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | If needed |
 | Start full stack (Neo4j + Airflow + Postgres + REST + GraphQL) | `docker compose up -d` (root compose). **MISP is NOT in this compose** — run/connect to a separate MISP deployment via `MISP_URL`. | Required |
-| Run **launch-day pre-flight** | `EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh` — see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) | Before first baseline |
+| Run **launch-day pre-flight** | `EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path=dag` — see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) | Before first baseline |
 | Run baseline (first run) | Trigger Airflow DAG `edgeguard_baseline` (Airflow UI or `airflow dags trigger edgeguard_baseline`) — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | First run |
 | Start monitoring stack | `make monitoring` (= `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d`; both files, one Compose project) | Recommended |
 
@@ -214,7 +215,7 @@ docker compose up -d
 # 3. Run the launch-day pre-flight (catches missing creds, broken APOC,
 #    stale baseline_lock, PR-N29 invariants reverted — see [11] in
 #    docs/BASELINE_LAUNCH_CHECKLIST.md)
-EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
+EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path=dag
 
 # 4. Trigger the baseline DAG (first run). Wraps full_neo4j_sync +
 #    build_relationships + run_enrichment_jobs — see AIRFLOW_DAGS.md.
@@ -244,4 +245,4 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-*Last updated: 2026-10-15 — monitoring: the stack starts with both compose files (Prometheus scrapes `metrics:8001` over `edgeguard_net`); Alertmanager loads without secrets, Slack via `prometheus/secrets/slack_api_url`. Same day: wording only: automated code review is described without naming the tool. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected "Start full stack (Neo4j + Airflow + MISP)" → "(Neo4j + Airflow + Postgres + REST + GraphQL)" — MISP is NOT in the EdgeGuard compose stack and must be deployed separately. Added explicit `MISP_URL` callout in the Quick-Start block. Prior: 2026-04-26 PR-N33 docs audit (replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands; removed stale "Upgrade to Airflow 3.x" TODO); 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*
+*Last updated: 2026-10-17 — 15 top-level CLI commands (it said 16). Same day: the launch-day pre-flight runs with `--launch-path=dag` (without it the script assumes the legacy CLI path, warns, which fails under `EDGEGUARD_PREFLIGHT_STRICT=1`, and skips the DAG-pause check); the MISP health check is the `misp_health_check` PythonOperator (the sensor was replaced); the documentation table names `docs/AIRFLOW_DAG_DESIGN.md` for the DAG design and `docs/AIRFLOW_DAGS.md` for operations; the collector count names the two flag-guarded collectors. Prior: 2026-10-15 — monitoring: the stack starts with both compose files (Prometheus scrapes `metrics:8001` over `edgeguard_net`); Alertmanager loads without secrets, Slack via `prometheus/secrets/slack_api_url`. Same day: wording only: automated code review is described without naming the tool. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected "Start full stack (Neo4j + Airflow + MISP)" → "(Neo4j + Airflow + Postgres + REST + GraphQL)" — MISP is NOT in the EdgeGuard compose stack and must be deployed separately. Added explicit `MISP_URL` callout in the Quick-Start block. Prior: 2026-04-26 PR-N33 docs audit (replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands; removed stale "Upgrade to Airflow 3.x" TODO); 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*

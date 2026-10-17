@@ -21,9 +21,10 @@ de-risk the **730-day baseline production-test**.
 
 ## Why this document exists
 
-EdgeGuard's data path is 10 collectors → MISP → Neo4j → STIX/GraphQL/
-REST, with deterministic merge, zone detection, cross-event dedup,
-creator-org trust checks, and resumable checkpoints along the way.
+EdgeGuard's data path is 12 collectors (10 always on, MalwareBazaar and
+CISA ICS flag-guarded) → MISP → Neo4j → STIX/GraphQL/REST, with
+deterministic merge, zone detection, cross-event dedup, creator-org trust
+checks, and resumable checkpoints along the way.
 Any single file shows a fragment. This document shows the whole.
 
 **The motivating use case:** the 2-year historical baseline
@@ -58,7 +59,7 @@ two-hour read.
 
 Diagrams rot. Every diagram in this file:
 
-1. **References real symbols.** Function names, class names, env vars, and file paths appear as plain text labels. `tests/test_architecture_flow_pins.py` greps these against `src/` — if a referenced symbol vanishes, the test fails and forces an update here.
+1. **References real symbols.** Function names, class names, env vars, and file paths appear as plain text labels. File paths, env vars, CLI subcommands and container names are checked by `tests/test_architecture_flow_pins.py` — if a referenced one vanishes, the test fails and forces an update here; function and class names are not yet pinned.
 2. **Lives close to the code.** Modules whose behavior a diagram describes get a link to the corresponding section from their top-of-file docstring (e.g. `src/run_misp_to_neo4j.py` points at §1).
 3. **States its scope.** Each diagram section declares which files it covers and which failure modes it illuminates.
 4. **Gets updated in the same PR that changes the flow.** A PR that changes the flow but not the diagram will be failed by the pin-test.
@@ -106,7 +107,7 @@ Target: complete before the next 730-day baseline attempt.
 - [ ] §1 Baseline sequence diagram (Mermaid `sequenceDiagram`)
 - [ ] §2 Checkpoint state machine (Mermaid `stateDiagram-v2`)
 - [ ] §3 Collector → MISP → Neo4j flow (Mermaid `flowchart`)
-- [ ] `tests/test_architecture_flow_pins.py` — grep-tests for every symbol named in §1-§3
+- [x] `tests/test_architecture_flow_pins.py` — env vars, CLI subcommands, container names and `src/*.py` paths (function symbols not yet pinned)
 - [ ] Docstring cross-references in `src/run_misp_to_neo4j.py`, `src/collectors/misp_writer.py`, `src/baseline_checkpoint.py`, `src/collectors/nvd_collector.py`
 
 ### PR-J2 — Tier 2 (production-ready-useful)
@@ -135,7 +136,7 @@ Target: complete before the next 730-day baseline attempt.
 **Files covered:**
 - `src/edgeguard.py` (CLI entry points `cmd_baseline`, `cmd_fresh_baseline`)
 - `src/run_pipeline.py` (orchestration)
-- `src/collectors/*_collector.py` (10 collectors — tier-1/2/3 sequencing per PR-F4)
+- `src/collectors/*_collector.py` (12 collectors — tier-1/2/3 sequencing per PR-F4)
 - `src/collectors/misp_writer.py` (write-side)
 - `src/run_misp_to_neo4j.py` (sync to Neo4j)
 - `src/build_relationships.py` (post-sync edges)
@@ -181,7 +182,7 @@ Target: complete before the next 730-day baseline attempt.
 
 > 🚧 **PR-J1 — to be written.** Tier 1. Covers the highest-traffic path; answers ~40% of "why does my data look like this?" questions.
 
-**Scope:** A single IOC's journey from collector output (dict with `indicator_type` + `value` + zone hints) through `MISPWriter.push_items` (dedup, tag resolution, event creation) through `MISPToNeo4jSync._sync_single_item` / `_sync_bulk` (batch merge) to the final `:Indicator` / `:CVE` / `:Malware` node with `SOURCED_FROM` edges.
+**Scope:** A single IOC's journey from collector output (dict with `indicator_type` + `value` + zone hints) through `MISPWriter.push_items` (dedup, tag resolution, event creation) through `MISPToNeo4jSync.sync_to_neo4j` (Python chunks: `Neo4jClient.merge_indicators_batch` for indicators, `merge_cve` for CVEs, the per-label merges for ATT&CK entities, malware and actors, `_sync_single_item` for any other item) to the final `:Indicator` / `:CVE` / `:Malware` node with `SOURCED_FROM` edges.
 
 **Files covered:**
 - `src/collectors/collector_utils.py` (shared validation)
@@ -210,7 +211,7 @@ Target: complete before the next 730-day baseline attempt.
 
 > 📋 **PR-J2 — to be written.** Tier 2.
 
-**Scope:** The four incremental DAGs (`edgeguard_medium_freq` 30min, `edgeguard_pipeline` 4h, `edgeguard_low_freq` 8h, `edgeguard_daily`) — how each one picks collectors, handles the 2-3 day re-read window, skips already-known events, and interacts (or should not interact) with an in-progress baseline.
+**Scope:** The four incremental collector DAGs (`edgeguard_pipeline` OTX every 30 min, `edgeguard_medium_freq` CISA + VirusTotal every 4 h, `edgeguard_low_freq` NVD every 8 h, `edgeguard_daily` 02:00 UTC) and `edgeguard_neo4j_sync` (every 72 h; its incremental window starts 1 h before the last sync's start, `EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS`) — how each one picks collectors, skips already-known events, and interacts (or should not interact) with an in-progress baseline.
 
 **Files covered:**
 - `dags/edgeguard_pipeline.py`
@@ -223,7 +224,7 @@ Target: complete before the next 730-day baseline attempt.
 - Parent-DAG orphan processes (PR-F6)
 - `fresh_baseline` DAG-conf typo that reached production (PR-F5 + PR-F8)
 - Stale event-index pagination on MISP
-- Timezone drift on the 2-3 day window
+- Timezone drift on the sync window overlap
 
 ---
 
@@ -300,9 +301,9 @@ Target: complete before the next 730-day baseline attempt.
 - **Symbol references:** fence function names in backticks, file paths in backticks with forward slashes.
 - **Cross-links:** `[label](#section-anchor)` within this file; `[label](../file.md#anchor)` across files.
 
-## Appendix B — Self-validation (lands with PR-J1)
+## Appendix B — Self-validation (shipped with PR-J1; symbol pinning still planned)
 
-`tests/test_architecture_flow_pins.py` (to be created) will:
+`tests/test_architecture_flow_pins.py` checks today: env vars, CLI subcommands, container names and file paths. Planned:
 
 1. Parse this file for backticked tokens matching symbol patterns (`_[a-z_]+`, `[A-Z][a-zA-Z]+`, `[A-Z_]{3,}`).
 2. For each token, grep `src/` for a definition (`def X`, `class X`, `X =`, `X:` env var).
@@ -313,4 +314,4 @@ This keeps the cost of lying in a diagram at exactly "CI fails," which is the on
 
 ---
 
-_Last updated: 2026-10-15 — deployment topology: the Prometheus scrape path is `metrics:8001` over `edgeguard_net`. Same day: wording only: use case 2 and one failure-mode label no longer name review tools. Prior: 2026-04-28 — PR-J1 SHIPPED `tests/test_architecture_flow_pins.py` (v1: env vars + CLI subcommands + container names + src/*.py file paths). Replaced the PR-N33 "pin-test doesn't yet exist" callout with the active "pin-test enforces these claims" status. The first run surfaced 4 real drift items the audit train (PR-N33 → PR-N36) missed — most notably a stale `python -m edgeguard baseline` block in `README.md` that nobody had cross-verified. Prior: 2026-04-26 PR-N33 docs audit (aspirational status callout)._
+_Last updated: 2026-10-17 — corrections against the code: 12 collectors (2 flag-guarded); § 3 names `sync_to_neo4j` and the merges it calls (`_sync_bulk` does not exist); § 4 the real DAG schedules and the sync's 1 h window overlap; the pin-test checks env vars, CLI subcommands, container names and file paths, not function names. Prior: 2026-10-15 — deployment topology: the Prometheus scrape path is `metrics:8001` over `edgeguard_net`. Same day: wording only: use case 2 and one failure-mode label no longer name review tools. Prior: 2026-04-28 — PR-J1 SHIPPED `tests/test_architecture_flow_pins.py` (v1: env vars + CLI subcommands + container names + src/*.py file paths). Replaced the PR-N33 "pin-test doesn't yet exist" callout with the active "pin-test enforces these claims" status. The first run surfaced 4 real drift items the audit train (PR-N33 → PR-N36) missed — most notably a stale `python -m edgeguard baseline` block in `README.md` that nobody had cross-verified. Prior: 2026-04-26 PR-N33 docs audit (aspirational status callout)._

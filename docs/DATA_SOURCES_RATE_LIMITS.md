@@ -1,6 +1,6 @@
 # EdgeGuard Data Sources - API Documentation & Rate Limits
 
-**Last Updated:** 2026-10-16  
+**Last Updated:** 2026-10-17  
 **Purpose:** Complete reference for setting up a new EdgeGuard instance. For integration behaviour (e.g. NVD published-date windows), see [`DATA_SOURCES.md`](DATA_SOURCES.md).
 
 ---
@@ -10,8 +10,8 @@
 | Source | API Required | Rate Limit | Cost | Data Format |
 |--------|-------------|------------|------|-------------|
 | AlienVault OTX | ✅ Yes | 30 requests/min (free) | Free | JSON |
-| NVD | ✅ Yes (free) | 50 requests/30 sec (with key) | Free | JSON |
-| CISA KEV | ❌ No | No limit (CSV download) | Free | JSON |
+| NVD | Optional (free; recommended) | 50 requests/30 sec with a key, 5 without | Free | JSON |
+| CISA KEV | ❌ No | No limit (JSON download) | Free | JSON |
 | MITRE ATT&CK | ❌ No | No limit (STIX download) | Free | STIX 2.1 |
 | VirusTotal | ✅ Yes | 4 requests/min, 500/day (free) | Free tier used; paid plans from $50/month | JSON |
 | AbuseIPDB | ✅ Yes | 1,000 `check` requests/day, 5 `blacklist` requests per UTC day (free) | $50+/month | JSON |
@@ -41,7 +41,7 @@
 | **Data Provided** | IPs, domains, URLs, hashes, malware families, CVEs |
 | **Update Frequency** | Real-time (pulses) |
 
-**API Key获取:**
+**Getting an API key:**
 1. Create account at https://otx.alienvault.com
 2. Go to Settings → API Key
 3. Copy your OTX API key
@@ -59,14 +59,14 @@
 
 | Aspect | Details |
 |--------|---------|
-| **API Required** | Yes (free API key recommended) |
-| **Registration** | Free registration required |
+| **API Required** | Optional (free API key recommended; without one the collector paces requests 6.5 s apart) |
+| **Registration** | Free registration, only to obtain a key |
 | **Rate Limit (No Key)** | 5 requests/30 seconds |
 | **Rate Limit (With Key)** | 50 requests/30 seconds |
 | **Data Provided** | CVE records, CVSS scores, CPEs |
 | **Update Frequency** | Daily (new CVEs) |
 
-**API Key获取:**
+**Getting an API key:**
 1. Register at https://nvd.nist.gov/developers/request-an-api-key
 2. Wait for approval (usually automatic)
 3. Use key in the **`apiKey`** request header (NVD 2.0; value is case-sensitive)
@@ -110,7 +110,7 @@
 | **Format** | STIX 2.1 |
 | **Update Frequency** | Quarterly releases |
 
-**Data Download (ground truth — this is what `src/collectors/mitre_collector.py:58` actually fetches at HEAD):**
+**Data Download (ground truth — `MITRECollector.attack_url` in `src/collectors/mitre_collector.py`; with `EDGEGUARD_ENABLE_MITRE_ICS=true` (default off) also the ATT&CK for ICS bundle `https://raw.githubusercontent.com/mitre/cti/master/ics-attack/ics-attack.json`, `MITRE_ICS_ATTACK_URL` in `src/config.py`, overridable):**
 - **Currently used (legacy):** `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` — the STIX 2.0/2.1 enterprise bundle from MITRE's `mitre/cti` repo.
 - **Recommended for future migration:** https://github.com/mitre-attack/attack-stix-data is MITRE's newer canonical STIX 2.1 dataset; planned for a follow-up PR but **not yet wired** into the collector. Don't update the docs to claim it's the "canonical dataset EdgeGuard ingests" until the collector actually points there.
 
@@ -133,7 +133,7 @@
 | **Data Provided** | File hashes, URLs, IPs, domains, malware analysis |
 | **Update Frequency** | Real-time |
 
-**API Key获取:**
+**Getting an API key:**
 1. Create account at https://www.virustotal.com
 2. Go to Settings → API Key
 3. Copy your API key
@@ -162,7 +162,7 @@
 | **Data Provided** | IP reputation, abuse reports, confidence score |
 | **Update Frequency** | Real-time reports |
 
-**API Key获取:**
+**Getting an API key:**
 1. Create account at https://www.abuseipdb.com/register
 2. Go to API Key section
 3. Free tier provides 1,000 `check` lookups and 5 `blacklist` downloads per UTC day
@@ -270,14 +270,15 @@
 
 ## Setup Checklist for New Instance
 
-### Required API Keys (Free Tier)
+### API Keys (free tier; OTX, VirusTotal, AbuseIPDB and ThreatFox are skipped without their key, NVD runs slower without one)
 
-| Source | Key Name in config.py | Signup URL |
+| Source | Environment variable | Signup URL |
 |--------|----------------------|------------|
 | AlienVault OTX | `OTX_API_KEY` | https://otx.alienvault.com |
 | NVD | `NVD_API_KEY` | https://nvd.nist.gov/developers |
 | VirusTotal | `VIRUSTOTAL_API_KEY` | https://www.virustotal.com |
 | AbuseIPDB | `ABUSEIPDB_API_KEY` | https://www.abuseipdb.com |
+| ThreatFox (also sent by MalwareBazaar when set) | `THREATFOX_API_KEY` | https://auth.abuse.ch/ |
 
 ### Optional (Recommended for Production)
 
@@ -300,6 +301,7 @@ export OTX_API_KEY="your-otx-key"
 export NVD_API_KEY="your-nvd-key"
 export VIRUSTOTAL_API_KEY="your-virustotal-key"
 export ABUSEIPDB_API_KEY="your-abuseipdb-key"
+export THREATFOX_API_KEY="your-abuse-ch-auth-key"
 
 # Neo4j
 export NEO4J_URI="bolt://localhost:7687"
@@ -354,4 +356,4 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-10-16 — § 3 CISA KEV: the line of the collector that names the feed URL (`cisa_collector.py:81`). Same day: § 6 AbuseIPDB, the quick reference table and the rate-limit recommendations: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests, and how EdgeGuard uses them (a blacklist 429 fails `collect_abuseipdb` at once; a fetched, non-empty answer is reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`). Prior: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._
+_Last updated: 2026-10-17 — quick reference table and § 2 NVD: the NVD key is optional (5 requests per 30 s without it; it said required); quick reference table: the KEV feed is a JSON download; § 4 MITRE: the download is `MITRECollector.attack_url` (it cited line 58), plus the ATT&CK for ICS bundle with `EDGEGUARD_ENABLE_MITRE_ICS=true`; the "Getting an API key" labels are in English; setup checklist: `THREATFOX_API_KEY` added, every source key is optional (the collector is skipped without it, NVD runs slower), and the column names the environment variable (the AbuseIPDB and ThreatFox keys are read in the collectors, not in `config.py`). Prior: 2026-10-16 — § 3 CISA KEV: the line of the collector that names the feed URL (`cisa_collector.py:81`). Same day: § 6 AbuseIPDB, the quick reference table and the rate-limit recommendations: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests, and how EdgeGuard uses them (a blacklist 429 fails `collect_abuseipdb` at once; a fetched, non-empty answer is reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`). Prior: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._

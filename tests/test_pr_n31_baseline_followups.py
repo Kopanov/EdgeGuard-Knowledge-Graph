@@ -481,9 +481,10 @@ class TestPRN31RunbookSection:
         assert "EdgeGuardMispFetchFallbackActive" in block
 
     def test_section_explains_no_auto_retry(self):
-        """Critical operator detail: PR-N29 H1 set retries=0 on the
-        critical chain. The RUNBOOK MUST say this explicitly so
-        operators don't wait for an auto-retry that won't come."""
+        """Critical operator detail: the baseline's ``full_neo4j_sync`` has
+        retries=0 (PR-N29 H1), so after a fallback failure nothing retries it;
+        the scheduled ``run_neo4j_sync`` has retries=2. The RUNBOOK MUST say
+        this explicitly so operators don't wait for an auto-retry that won't come."""
         text = self.RUNBOOK_FILE.read_text()
         idx = text.find("### 8. MISP fetch fallback")
         block = text[idx : idx + 6000]

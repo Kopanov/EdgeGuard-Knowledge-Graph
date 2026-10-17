@@ -6,15 +6,15 @@ Use **Python 3.12+** (see `pyproject.toml` `requires-python`; CI uses 3.12).
 
 1. **Install dev deps:** `pip install -r requirements-dev.txt`
 2. **Lint & format:** `make lint` (or `ruff check` / `ruff format --check` as in CI)
-3. **Types (optional but recommended):** `make type-check`
+3. **Types (optional but recommended):** `make type-check` (checks `src/`; CI runs Mypy on `src/` and `scripts/`)
 4. **Tests:** `make test` — same env vars as CI (`NEO4J_*`, `MISP_*` dummies are set by the Makefile)
 
-CI runs **Ruff**, **Mypy**, **pytest** (with coverage floor 30%), **Docker build**, and **pip-audit** — see [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+CI runs **Ruff**, **Mypy** (`src/` and `scripts/`), **pytest** (with coverage floor 30%), a **Neo4j integration** test, **Docker builds** of both images with **Trivy** image scans, and **pip-audit** — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## New CLI / version behavior
 
 - **`edgeguard version`** / **`edgeguard update`** — covered by `tests/test_edgeguard_cli_light.py` (update path mocks `subprocess.call` so `install.sh` is not executed in CI).
-- **CalVer** — bump `[project].version` in `pyproject.toml` only when cutting a release; see [`VERSIONING.md`](VERSIONING.md).
+- **CalVer** — bump `[project].version` in `pyproject.toml` only when cutting a release; see [`docs/VERSIONING.md`](docs/VERSIONING.md).
 
 ## Commits
 
@@ -26,4 +26,4 @@ If you run Airflow on the host (not only via repo `docker-compose.yml`), **do no
 
 ---
 
-_Last updated: 2026-03-20_
+_Last updated: 2026-10-17 — documentation audit: the CI and versioning links resolve from the repository root; the CI list names the Neo4j integration job and the Trivy scans of both images, and Mypy's scope (`src/` and `scripts/` in CI, `src/` in `make type-check`). Prior: 2026-03-20_

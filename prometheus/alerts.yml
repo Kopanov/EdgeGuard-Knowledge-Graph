@@ -1022,9 +1022,11 @@ groups:
 
             Remediation:
               1. Check Airflow task state + exit code; if 137 → OOM.
-              2. Raise ``AIRFLOW_MEMORY_LIMIT`` to 12g and/or lower
-                 ``NEO4J_TX_MEMORY_MAX`` to 4g (see docs/RUNBOOK.md §
-                 "Bravo-ops: memory posture for next baseline").
+              2. Raise ``AIRFLOW_MEMORY_LIMIT`` to 12g and set
+                 ``NEO4J_TX_MEMORY_MAX`` to 8g or more (the compose
+                 default is 4g, at which build_relationships hit
+                 MemoryLimitExceededException); see docs/RUNBOOK.md §
+                 "Bravo-ops: memory posture for the next baseline".
               3. Re-trigger the baseline after raising memory.
 
       - alert: EdgeGuardApocBatchPartial

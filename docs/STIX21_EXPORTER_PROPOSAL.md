@@ -11,9 +11,11 @@ external dependency remains.
 ## 1. Problem
 
 EdgeGuard and ResilMesh share a Neo4j instance. ResilMesh owns the
-asset/vulnerability layer (Host, Device, IP, Mission, Component,
-Vulnerability, CVE, CVSSv*). EdgeGuard owns the threat-intel layer
-(Indicator, Malware, ThreatActor, Technique, Tool, Campaign). The
+asset layer and scanner findings (Host, Device, IP, Mission, Component,
+Vulnerability). EdgeGuard owns the threat-intel layer (Indicator,
+Malware, ThreatActor, Technique, Tool, Campaign) and writes CVE +
+CVSSv* into the shared labels (`edgeguard_managed` on the nodes it
+creates, `edgeguard_enriched` on partner nodes it writes to). The
 layers meet at `CVE` and the bridging edges `REFERS_TO` / `HAS_CVSS_v*`.
 
 ResilMesh partners want to pull our threat-intel as **STIX 2.1**
@@ -41,10 +43,10 @@ Accept: application/stix+json;version=2.1
 
 | object_type | identifier         | Returns                                           |
 |-------------|--------------------|---------------------------------------------------|
-| `indicator` | raw value          | Indicator + 1-hop (Malware, CVE, Technique, Sector) |
-| `actor`     | name or alias      | Actor + Malware + Techniques + Campaigns (depth 2) |
-| `technique` | MITRE ATT&CK ID    | Technique + Actors/Malware/Tools/Indicators using it |
-| `cve`       | CVE ID             | CVE + Indicators that exploit it + Sectors         |
+| `indicator` | raw value          | Indicator + 1-hop (Malware, CVE, Technique, Sector, Campaign) |
+| `actor`     | name or alias      | Actor + attributed Malware + Techniques + the attributed malware's techniques + Campaigns + USES_MALWARE / USES_TOOL software + exploited CVEs + targeted Sectors |
+| `technique` | MITRE ATT&CK ID    | Technique + Actors/Malware/Tools/Indicators using it + parent and sub-techniques |
+| `cve`       | CVE ID             | CVE + exploiting Indicators, ThreatActors and Malware + affected Sectors |
 
 Response body is a STIX 2.1 `bundle` SDO, JSON-encoded. The media type
 is `application/stix+json;version=2.1` (OASIS section 3.1). Bundle ID
@@ -85,11 +87,10 @@ curl -H 'X-API-Key: ...' \
 - SDO/SRO construction goes through the `stix2` SDK (pinned to `~=3.0`
   in `pyproject.toml`) so the library enforces schema and timestamps.
   Final serialisation is `json.loads(obj.serialize())` → plain dict.
-- Pattern strings for `indicator` SDOs reuse the existing helper
-  `MISPToNeo4jSync._value_to_stix_pattern` (lazy import, no
-  duplication). Zone metadata helpers (`apply_edgeguard_zone_metadata_to_stix_dict`)
-  are available for future use but not wired in for the prototype (see
-  §10).
+- Pattern strings for `indicator` SDOs are built in the exporter
+  (`_build_pattern`, STIX 2.1 patterning grammar). Zone metadata is
+  emitted as `x_edgeguard_zones` on every SDO whose node has zones
+  (`_attach_zones`, §7 item 4).
 
 ## 4. Node → SDO mapping
 
@@ -104,7 +105,7 @@ curl -H 'X-API-Key: ...' \
 | `Campaign`    | `campaign`                                   |                                                          |
 | `CVE`         | `vulnerability` + `external_references[cve]` |                                                          |
 | `Vulnerability` | `vulnerability`                            | Deduplicated with CVE by `cve_id`                        |
-| `Sector`      | `identity` with `identity_class:"class"`     | `sectors:[<name>]`                                       |
+| `Sector`      | `identity` with `identity_class:"class"`     | `name` = the zone; `sectors` = its `industry-sector-ov` value (`finance` → `financial-services`, `healthcare`, `energy`; none for `global`) |
 
 Decision: use `intrusion-set` rather than `threat-actor` by default.
 MITRE ATT&CK models named groups (APT28, FIN7, ...) as `intrusion-set`
@@ -121,19 +122,22 @@ boolean property on the node if that changes.
 | `(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`     | `relationship(uses)` src=tool tgt=attack-pattern                       | STIX 2.1 `tool → attack-pattern` vocab.                                                                               |
 | `(Indicator)-[:USES_TECHNIQUE]->(Technique)`      | `relationship(indicates)` src=indicator tgt=attack-pattern             | STIX 2.1 only defines `indicator → attack-pattern = indicates`; there is no `uses` vocab entry with indicator src.    |
 | `(Indicator)-[:INDICATES]->(Malware)`             | `relationship(indicates)`                                              | Direct vocabulary match.                                                                                              |
-| `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)`   | `relationship(indicates)`                                              | STIX has no `exploits` predicate. `indicates` is the closest vocabulary term — see §7.                                |
-| `(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)`       | `relationship(attributed-to)` src=malware tgt=intrusion-set            |                                                                                                                      |
-| `(Campaign)-[:ATTRIBUTED_TO]->(ThreatActor)`      | `relationship(attributed-to)` src=campaign tgt=intrusion-set           |                                                                                                                      |
+| `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)`   | `relationship(related-to)`                                             | The STIX 2.1 relationship summary table defines no `indicator → vulnerability` pair — see §7.                        |
+| `(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)`       | `relationship(uses)` src=intrusion-set tgt=malware (reversed)          | `attributed-to` is defined only for campaign / intrusion-set sources; MITRE ATT&CK models the pair as `intrusion-set uses malware`. |
+| `(ThreatActor)-[:RUNS]->(Campaign)`               | `relationship(attributed-to)` src=campaign tgt=intrusion-set (reversed) | The table defines `campaign attributed-to intrusion-set`.                                                           |
 | `(Technique)-[:IN_TACTIC]->(Tactic)`              | *(no SRO)* — emitted as `kill_chain_phases` property on attack-pattern | STIX 2.1 ATT&CK convention.                                                                                           |
-| `(Indicator)-[:TARGETS]->(Sector)`                | `relationship(targets)` src=indicator tgt=identity                     |                                                                                                                      |
-| `(Vulnerability\|CVE)-[:AFFECTS]->(Sector)`       | `relationship(affects)` src=vulnerability tgt=identity                 | TARGETS is reserved for Indicator → Sector; Vuln/CVE → Sector is AFFECTS (PR #33 round 11).                            |
+| `(Indicator)-[:TARGETS]->(Sector)`                | `relationship(related-to)` src=indicator tgt=identity                  | `indicator` has no `targets` relationship in the table.                                                              |
+| `(Vulnerability\|CVE)-[:AFFECTS]->(Sector)`       | `relationship(related-to)` src=vulnerability tgt=identity              | `affects` is not a STIX 2.1 relationship type, and `vulnerability` has no outgoing relationships in the table. In the graph, TARGETS is reserved for Indicator / ThreatActor / Malware → Sector; Vuln/CVE → Sector is AFFECTS (PR #33 round 11). |
+
+The full mapping, including the 2026-10 relationships, is `_SRO_BY_EDGE` in `src/stix_exporter.py`, served as `relationship_mappings` by `GET /stix/types`.
 
 **Edge type semantics.** Pre-release fresh start emits the post-PR-#24
 specialised types directly: `EMPLOYS_TECHNIQUE` (attribution: ThreatActor
 / Campaign → Technique), `IMPLEMENTS_TECHNIQUE` (capability: Malware /
 Tool → Technique), `USES_TECHNIQUE` (observation: Indicator → Technique).
-All three collapse back to STIX 2.1 `relationship_type: "uses"` on
-export.
+`EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE` collapse back to STIX 2.1
+`relationship_type: "uses"` on export; `USES_TECHNIQUE` is exported as
+`indicates`.
 
 References:
 
@@ -150,8 +154,10 @@ Every SDO/SRO gets a `type--<UUIDv5>` ID, computed as:
 uuid.uuid5(EDGEGUARD_STIX_NAMESPACE, f"{type}:{natural_key}".lower())
 ```
 
-where `EDGEGUARD_STIX_NAMESPACE` is a fixed UUIDv4 constant hard-coded
-in `stix_exporter.py`. Natural keys per type:
+where `EDGEGUARD_STIX_NAMESPACE` is a fixed UUID constant
+(`5f2e1f9a-6a1b-5e0f-9b25-ed9ea2d574cb`, equal to
+`node_identity.EDGEGUARD_NODE_UUID_NAMESPACE`) hard-coded in
+`stix_exporter.py`. Natural keys per type:
 
 | SDO type            | Natural key                  |
 |---------------------|------------------------------|
@@ -162,7 +168,7 @@ in `stix_exporter.py`. Natural keys per type:
 | `tool`              | `{name}`                     |
 | `campaign`          | `{name}`                     |
 | `vulnerability`     | `{cve_id}`                   |
-| `identity` (sector) | `sector|{name}`              |
+| `identity` (sector) | `{name}`                     |
 | `relationship`      | `{source_ref}|{rel}|{target_ref}` |
 
 Consequences:
@@ -180,19 +186,17 @@ Consequences:
   the cross-environment sync contract this enables.
 - The bundle envelope ID is **content-deterministic UUIDv5** —
   `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted SDO ids))` — so
-  bundles are reproducible up to the `x_edgeguard_source.generated_at`
-  timestamp (frozen via `EDGEGUARD_DETERMINISTIC_BUNDLE` for fully
-  byte-identical output). This was promoted from "random UUIDv4 per
+  bundles are reproducible up to the producer identity's
+  `x_edgeguard_generated_at` (omitted when `EDGEGUARD_DETERMINISTIC_BUNDLE`
+  is set, for byte-identical output). This was promoted from "random UUIDv4 per
   request" in earlier drafts.
 
 ## 7. Open semantic questions (confirm with ResilMesh before merge)
 
-1. **`EXPLOITS` → `indicates` vs `related-to`.** We picked `indicates`
-   because it is a defined vocab term for `indicator → vulnerability`
-   and it preserves the "this is a sign of" semantics. The alternative
-   is the generic `related-to`, which is schema-valid but carries less
-   meaning. ResilMesh should confirm whichever matches their downstream
-   scoring logic.
+1. **`EXPLOITS` (indicator → vulnerability): resolved as `related-to`.**
+   The STIX 2.1 relationship summary table defines no
+   `indicator → vulnerability` pair, so the exporter emits `related-to`.
+   ResilMesh should confirm this matches their downstream scoring logic.
 2. **`Indicator → Technique` as `indicates` (not `uses`).** STIX 2.1
    does not define `uses` with `indicator` source_ref. Filing this as
    `indicates` is the only vocabulary-correct option.
@@ -227,9 +231,11 @@ The four prototype endpoints all return **bounded** neighbourhoods
 so no pagination is required in the prototype. Hot spots:
 
 - `export_technique("T1059")` → "Command and Scripting Interpreter"
-  will link to many malware families. If a response exceeds a size
-  threshold (say 5 MB) we will introduce a `?limit=` query parameter
-  and a continuation token keyed by object ID.
+  links to many malware families. Every export takes `?limit=` (default
+  100, maximum 500; values outside `[1, 500]` return 422). It bounds each
+  related-node collection after ordering it by its natural key, so
+  `T1059` returns at most `limit` actors, malware, tools and indicators.
+  A continuation token is not implemented.
 - Full-graph or time-range bulk export is explicitly out of scope; that
   is a TAXII endpoint, not this one (see §10).
 
@@ -261,9 +267,10 @@ Tracked as separate tickets; do **not** expand this PR:
   delta STIX bundles over webhooks / TAXII `added_after`.
 - ~~**FU-4: Zone metadata export.**~~ **Done (2026-04).** The
   `x_edgeguard_*` custom-property namespace is now in use. Currently
-  emitted: `x_edgeguard_zones`, `x_edgeguard_misp_event_ids`,
-  `x_edgeguard_misp_attribute_ids`. Confidence and decay score remain
-  open if/when ResilMesh asks for them.
+  emitted: every property of the EdgeGuard extension definition
+  (version 1.7.0, `EDGEGUARD_EXTENSION_PROPERTIES`; see
+  RESILMESH_QUICKSTART_STIX.md § EdgeGuard extension definition),
+  including the indicator's confidence and aging.
 - **FU-5: Per-partner API keys & audit log.** See §9.
 - **FU-6: Bundle signing / provenance.** Sign bundles with a JWS so
   ResilMesh can verify EdgeGuard as the origin.
@@ -273,9 +280,10 @@ Tracked as separate tickets; do **not** expand this PR:
   fingerprints (`x509-fingerprint-sha1` →
   `[x509-certificate:hashes.'SHA-1' = …]`). User accounts, registry
   keys etc. remain.
-- **FU-8: Relationship metadata.** Carry `confidence_score`,
-  `match_type`, `created_at` from Neo4j onto the SRO as custom
-  properties.
+- ~~**FU-8: Relationship metadata.**~~ **Done (2026-10-14, extension
+  definition 1.1.0):** SROs carry `confidence`, `external_references`,
+  `x_edgeguard_match_type`, `x_edgeguard_sources`,
+  `x_edgeguard_source_refs` and `x_edgeguard_misp_event_ids`.
 
 ## 11. Testing
 
@@ -284,7 +292,7 @@ driver with `MagicMock`. They verify:
 
 - Actor with two techniques → 1 `intrusion-set`, 2 `attack-pattern`,
   2 `uses` SROs
-- Actor with attributed malware → `attributed-to` SRO
+- Actor with attributed malware → `intrusion-set uses malware` SRO (no `attributed-to`)
 - Indicator `INDICATES` malware → `indicates` SRO
 - Deterministic IDs stable across exporter instances
 - Technique `kill_chain_phases` emitted as property, not as SRO
@@ -293,7 +301,7 @@ shim was REMOVED in PR-N1 — no backward-compat matching to test for.
 The exporter only matches the specialized triple
 (EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE / USES_TECHNIQUE). See
 RESILMESH_INTEROPERABILITY.md § 3.2.1. -->
-- `edgeguard_managed` filter present in Cypher (no ResilMesh leakage)
+- `edgeguard_managed = true OR edgeguard_enriched = true` filter in every query: nodes EdgeGuard created or enriched are exported; a partner node EdgeGuard never wrote to is not
 - Empty bundle when seed is not found
 
 Integration against a real Neo4j is a follow-up — the prototype
@@ -311,4 +319,4 @@ intentionally does not add Docker fixtures.
 
 ---
 
-_Last updated: 2026-10-15 — FU-7: x509 certificate fingerprint patterns done; file names and e-mail addresses were already covered by `_build_pattern`. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id determinism (was "random UUIDv4", actually content-deterministic UUIDv5 over sorted SDO ids); promoted the dev-vs-prod namespace claim from "if it turns out to be a problem we'll fix" to "shipped behavior with import-time parity check between EDGEGUARD_STIX_NAMESPACE and node_identity.EDGEGUARD_NODE_UUID_NAMESPACE"; removed §11 test bullet "Legacy USES rel type still matched" (USES shim was removed in PR-N1, contradicted by RESILMESH_INTEROPERABILITY.md § 3.2.1). Prior: 2026-04-18 PR #41 cleanup._
+_Last updated: 2026-10-17 — documentation audit against the code: §1 ownership (ResilMesh the asset layer and scanner findings, EdgeGuard writes CVE + CVSSv*); §2 what each export returns; §3 patterns from `_build_pattern`, zones emitted; §4 sector `identity` (`name`, `industry-sector-ov` `sectors`); §5 the exported relationship types (`EXPLOITS`, indicator `TARGETS` and `AFFECTS` are `related-to`, `ATTRIBUTED_TO` is `intrusion-set uses malware`, `RUNS` is `campaign attributed-to intrusion-set`, `USES_TECHNIQUE` is `indicates`) and a pointer to `_SRO_BY_EDGE`; §6 the namespace is a fixed UUID (not UUIDv4), the sector key is `{name}`, `x_edgeguard_generated_at` on the producer identity; §7 item 1 resolved as `related-to`; §8 `?limit=` exists; FU-4 and FU-8 done; §11 test bullets. Prior: 2026-10-15 — FU-7: x509 certificate fingerprint patterns done; file names and e-mail addresses were already covered by `_build_pattern`. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id determinism (was "random UUIDv4", actually content-deterministic UUIDv5 over sorted SDO ids); promoted the dev-vs-prod namespace claim from "if it turns out to be a problem we'll fix" to "shipped behavior with import-time parity check between EDGEGUARD_STIX_NAMESPACE and node_identity.EDGEGUARD_NODE_UUID_NAMESPACE"; removed §11 test bullet "Legacy USES rel type still matched" (USES shim was removed in PR-N1, contradicted by RESILMESH_INTEROPERABILITY.md § 3.2.1). Prior: 2026-04-18 PR #41 cleanup._

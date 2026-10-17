@@ -10,7 +10,7 @@ This guide is an **operator checklist** for running the full EdgeGuard Compose s
 
 - **Docker Desktop** (or Docker Engine + Compose v2) with enough **RAM allocated to the Docker VM** for Neo4j + Airflow + anything else you run.
 - **Disk:** tens of GB free for images and volumes (Neo4j grows with data).
-- **RAM:** there is no single magic number. If you give Neo4j a **12g heap and 8g pagecache**, the host (and Docker VM) needs **well above 20g** just for that service, plus Airflow, Postgres, APIs, and optional MISP. A **32g** workstation is a reasonable target for that class of tuning; smaller hosts should use smaller `NEO4J_*` values or accept slower baselines.
+- **RAM:** there is no single magic number. If you give Neo4j a **12g heap and 8g pagecache** (the baseline-capable profile below: ~25g typical RSS in a **32g** container), the container limits of Neo4j (32g), Airflow (12g), its Postgres (2g) and the API and GraphQL services (512m each) add up to about **47g**: plan about **48g** for the host (and Docker VM), more if MISP runs on the same host. Smaller hosts should use smaller `NEO4J_*` values (see "If your host has < 32g RAM" below) or accept slower baselines.
 - **Airflow image:** the repo’s **`Dockerfile.airflow`** extends **`apache/airflow:3.3.2-python3.12`** (upgraded from 2.11.x in the April 2026 Airflow 2→3 migration, then 3.2.0 → 3.3.2 in October 2026 to clear base-image CVEs; see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md) and [§ 3.2 → 3.3.2](AIRFLOW_DAGS.md#32--332-october-2026)) — task code runs on **Python 3.12**. After changing the base tag, rebuild the **`edgeguard-airflow`** image (see [SETUP_GUIDE.md](SETUP_GUIDE.md)).
 
 **Security:** put real passwords and API keys only in **`.env`** (never committed). Copy from [`.env.example`](../.env.example). Do not paste production secrets into chat or docs.
@@ -29,10 +29,12 @@ MISP_URL=https://your-misp-hostname:443
 MISP_API_KEY=your-misp-api-key-here
 
 # Large Neo4j — RECOMMENDED for baseline-capable workstation (730-day
-# historical window, ~350K nodes, ~600K edges).
+# historical window; the baseline loaded on 2026-10-16 has ~550K nodes,
+# ~2.7M relationships).
 #
-# Memory math — IMPORTANT: tx_memory is a CAP on transaction allocations
-# (heap + off-heap combined), NOT a separate region. So actual peak RSS:
+# Memory math — IMPORTANT: tx_memory sets dbms.memory.transaction.total.max,
+# the memory ALL running transactions together may use (heap + off-heap
+# combined). It is a limit, NOT a separate region. So actual peak RSS:
 #   12g heap (committed at startup, INITIAL=MAX)
 # +  8g pagecache (committed at startup, off-heap)
 # +  ~3-5g JVM/Bolt/threads/transaction off-heap
@@ -50,7 +52,7 @@ MISP_API_KEY=your-misp-api-key-here
 NEO4J_HEAP_INITIAL=12g
 NEO4J_HEAP_MAX=12g
 NEO4J_PAGECACHE=8g
-NEO4J_TX_MEMORY_MAX=8g              # Per-transaction CAP (heap+off-heap combined; not additive to heap)
+NEO4J_TX_MEMORY_MAX=8g              # dbms.memory.transaction.total.max: all running transactions together (a limit, not additive to heap)
 NEO4J_CONTAINER_MEMORY_LIMIT=32g
 
 # Baseline DAG (optional env overrides — see BASELINE_SMOKE_TEST.md)
@@ -61,9 +63,14 @@ EDGEGUARD_BASELINE_COLLECTION_LIMIT=0
 # EDGEGUARD_MISP_HTTP_HOST=localhost
 # EDGEGUARD_SSL_VERIFY=false
 
-# Airflow scheduler — long tasks (defaults already set in docker-compose.yml; override if needed)
-# AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD=3600
-# AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC=30
+# Airflow scheduler — long tasks (task heartbeat timeout). Since 2026-10 docker-compose.yml
+# passes the Airflow 3 options to the airflow service, so they can be overridden here:
+# AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT=3600 (Airflow default 300 s) and
+# AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT_DETECTION_INTERVAL=60 (Airflow default 10).
+# Until then it passed the Airflow 2 names (SCHEDULER_ZOMBIE_TASK_THRESHOLD,
+# LOCAL_TASK_JOB_HEARTBEAT_SEC, ZOMBIE_DETECTION_INTERVAL), which Airflow 3 renamed without an
+# alias and ignores. No Airflow 3.3.2 code reads task_instance_heartbeat_sec, the successor of
+# LOCAL_TASK_JOB_HEARTBEAT_SEC, so compose does not set it. See HEARTBEAT.md.
 
 # Airflow memory: default 12g for production (100K+ attribute events need 8-12GB).
 # Lower to 4g only for small test deployments.
@@ -90,13 +97,13 @@ On some setups, Compose **ignores** `deploy` unless you use Swarm or a compatibl
 
 ### Recommended Neo4j memory profiles
 
-> **Memory math note** (subtle but load-bearing): `NEO4J_TX_MEMORY_MAX` is a **CAP** on what a single transaction can allocate (heap + off-heap combined), NOT a separate memory region added on top. A heavy transaction allocating up to its 8g cap pulls from the already-committed 12g heap; it does NOT add to the heap+pagecache budget. The "Working-set" column below reflects this: it's `heap + pagecache + off-heap-overhead`, not `heap + pagecache + tx_max`.
+> **Memory math note** (subtle but load-bearing): `NEO4J_TX_MEMORY_MAX` sets `dbms.memory.transaction.total.max`: the memory all running transactions together may use (heap + off-heap combined). It is a limit, NOT a separate memory region added on top. A per-transaction limit would be `db.memory.transaction.max`, which this stack does not set. Transactions using up to the 8g limit pull from the already-committed 12g heap; they do NOT add to the heap+pagecache budget. The "Working-set" column below reflects this: it's `heap + pagecache + off-heap-overhead`, not `heap + pagecache + tx_max`.
 
 | Profile | Heap initial | Heap max | Pagecache | TX max | Container | Typical RSS peak | Headroom | Use case |
 |---------|-------------|----------|-----------|--------|-----------|------------------|----------|----------|
-| **Tiny dev** (compose defaults) | 512m | 2g | 1g | 8g | 8g | ~3g | 5g | Smoke tests, an empty container. Container default is **8g** per `docker-compose.yml:121` (`${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`) after the PR-A bump from 4g. |
+| **Tiny dev** (compose defaults) | 512m | 2g | 1g | 4g | 8g | ~3g | 5g | Smoke tests, an empty container. Container default is **8g** (`${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`, the `neo4j` service's `deploy.resources.limits.memory` in `docker-compose.yml`) after the PR-A bump from 4g. |
 | **Mid box** | 4g | 4g | 4g | 4g | 16g | ~10g | 6g | Single-source incremental syncs |
-| **Baseline-capable** (recommended; `.env.example` has these uncommented as the default) | **12g** | 12g | 8g | 8g | **32g** | ~25g | 7g | Full 730-day baseline + 350K-node graph |
+| **Baseline-capable** (recommended; set these five in `.env` — `.env.example` lists them commented out, so without them the compose defaults of the Tiny dev row apply) | **12g** | 12g | 8g | 8g | **32g** | ~25g | 7g | Full 730-day baseline (~550K nodes on the baseline of 2026-10-16) |
 
 Where the "Typical RSS peak" comes from for the baseline-capable profile:
 
@@ -122,7 +129,7 @@ The 32g cgroup limit gives ~7g headroom over typical peak — well above Neo4j's
 **If your host has < 32g RAM** for the Neo4j container alone, drop the working set. Lossless options:
 - `NEO4J_HEAP_INITIAL=NEO4J_HEAP_MAX=8g` + everything else the same → ~21g typical RSS, fits comfortably in a 28g container. Slightly worse query performance under heavy concurrent load, no OOM.
 - Or `NEO4J_PAGECACHE=4g` → ~21g typical RSS, fits a 28g container. Pagecache helps repeat-query latency but is already 16× the typical graph size (~500MB raw); reducing it slows index-heavy scans but is acceptable on small test graphs.
-- Going below `NEO4J_TX_MEMORY_MAX=8g` is NOT recommended — that's the cap the 2026-04-19 baseline hit and is what `build_relationships` needs for the `apoc.periodic.iterate` batches over a populated graph.
+- Going below `NEO4J_TX_MEMORY_MAX=8g` is NOT recommended — that's the total transaction-memory limit the 2026-04-19 baseline hit and is what `build_relationships` needs for the `apoc.periodic.iterate` batches over a populated graph.
 - Going below `NEO4J_HEAP_INITIAL=NEO4J_HEAP_MAX` (e.g. initial=4g, max=8g) is operational-debt-only — under steady load, the heap will quickly grow to max anyway, but you'll pay multiple GC pauses to get there. Prefer setting both to the same value.
 
 ---
@@ -136,6 +143,8 @@ docker compose down -v
 ```
 
 That drops named volumes declared in this compose file (`neo4j_data`, Airflow logs/db/postgres, etc.).
+
+`docker compose down -v` does not touch the bind-mounted `./state` and `./checkpoints` directories (sync watermark, VirusTotal budget ledger, collector cursors, baseline lock). For a clean slate, also remove their contents while the stack is down: `rm -rf ./state/* ./checkpoints/*`. On Linux the files belong to the container user (uid 50000), so use `sudo`. Removing the VirusTotal ledger also resets the count of the day's VirusTotal lookups.
 
 If you remove volumes **by name manually**, the prefix is **the Compose project name** (usually the **directory name** of the project). A colleague’s commands like `docker volume rm edgeguard-knowledge-graph_neo4j_data` only work when the project name matches. List what you have:
 
@@ -156,7 +165,7 @@ docker compose up -d
 
 The `airflow` service creates the Airflow pool `edgeguard_collectors` on every start (2026-10: every collector task runs in it); `docker compose logs airflow | grep 'collector pool'` shows `[edgeguard] collector pool edgeguard_collectors set to <n> slots` once it is set.
 
-**Upgrading a running stack to the collector pool (2026-10):** `./dags` is re-parsed live, but the pool is only created when the `airflow` container is recreated, and until it exists the collectors of new DAG runs are never scheduled (no failure alert). So, in this order: (1) before pulling, `docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`; (2) pull; (3) only when no baseline is running (a recreate kills running tasks), `docker compose build airflow && docker compose up -d airflow`; (4) check with `docker exec edgeguard_airflow airflow pools list`. Details: [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10).
+**Upgrading a running stack to the collector pool (2026-10):** `./dags` is re-parsed live, but the pool is only created when the `airflow` container is recreated, and until it exists the collectors of new DAG runs are never scheduled (no failure alert). So, in this order: (1) before pulling, `docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`; (2) pull; (3) only when no baseline is running (a recreate kills running tasks), `docker compose build && docker compose up -d` (rebuilds the Airflow image and the `edgeguard-kg` image that `api` and `graphql` bake `src/` into, and recreates every service whose image or configuration changed; the `metrics` service reads `./src` from a bind mount, so run `docker compose restart metrics` when it was not recreated); (4) check with `docker exec edgeguard_airflow airflow pools list`. Details: [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10).
 
 Wait for healthchecks (often **~60s** for Neo4j/Airflow), then:
 
@@ -178,7 +187,7 @@ Any **`docker run …`** recipe is **image-specific**. In particular:
 After MISP is up, validate from the Airflow container (adjust URL):
 
 ```bash
-docker compose exec airflow curl -vk “$MISP_URL” -o /dev/null
+docker compose exec airflow sh -c 'curl -vk "$MISP_URL" -o /dev/null'   # uses the container's MISP_URL
 ```
 
 ### MISP performance tuning (large baselines)
@@ -208,7 +217,7 @@ The pipeline includes built-in throttling to pace writes to MISP:
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Seconds to pause between each batch of 500 attributes pushed to MISP, and after every 50 attribute edits of an NVD incremental run. Prevents rapid-fire POSTs from overwhelming Apache. |
+| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Seconds to pause between MISP push batches (500 attributes by default, fewer on very large events) and after every 50 attribute edits (NVD incremental updates, CISA KEV revisions, refreshes of re-reported indicators). Prevents rapid-fire POSTs from overwhelming Apache. |
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | `2.0` | Seconds to pause between fetching consecutive MISP events during sync. Gives MISP time to free memory after serving large events. |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Events exceeding this attribute count are deferred to the end of sync. Smaller events (MITRE, CISA) process first so critical data lands even if a large event OOM-kills the worker. |
 
@@ -243,7 +252,7 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 **5. Signs of MISP memory pressure:**
 - `ReadTimeout` or `ConnectionError` in pipeline logs
-- Circuit breaker opening after 4 failed retries
+- MISP circuit breaker of the MISP → Neo4j sync opening: 3 consecutive recorded failures (failed MISP health checks or failed sync runs) in the same process, after which it stays open for an hour
 - MISP container OOM-killed (check `docker inspect <container> | grep OOMKilled`)
 - `dmesg | grep -i oom` on the host showing MISP processes killed
 
@@ -276,6 +285,6 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 ---
 
-_Last updated: 2026-10-16 — collector pool `edgeguard_collectors`: created by the `airflow` service on every start, the upgrade order for a running stack (pool before the pull, recreate only when no baseline runs), and resizing by `docker compose up -d airflow`. Prior: 2026-10-15 — wording only: the 2026-04-19 regression is described without personal names. Prior: 2026-04-26 — PR-N33 docs audit: corrected "Tiny dev" container default 4g → 8g (matches `docker-compose.yml:121` `${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`).
+_Last updated: 2026-10-17 — documentation audit: `NEO4J_TX_MEMORY_MAX` sets `dbms.memory.transaction.total.max` (all running transactions together), not a per-transaction cap; Tiny dev TX max 4g (the compose default) and the baseline-capable values are listed commented out in `.env.example`, so they must be set in `.env`; host RAM from the container limits (about 47g, plan 48g); the compose file passes the Airflow 3 heartbeat-timeout names since 2026-10 (Airflow 3.3 ignored the Airflow 2 names it passed before), so they can be set in `.env`; `docker compose down -v` keeps `./state` and `./checkpoints`; the upgrade step rebuilds every image (`api` and `graphql` bake `src/`); the MISP check uses the container's `MISP_URL`; the batch throttle also paces KEV revisions and indicator refreshes; the MISP circuit breaker opens after 3 recorded failures; node count of the 2026-10-16 baseline. Prior: 2026-10-16 — collector pool `edgeguard_collectors`: created by the `airflow` service on every start, the upgrade order for a running stack (pool before the pull, recreate only when no baseline runs), and resizing by `docker compose up -d airflow`. Prior: 2026-10-15 — wording only: the 2026-04-19 regression is described without personal names. Prior: 2026-04-26 — PR-N33 docs audit: corrected "Tiny dev" container default 4g → 8g (matches `docker-compose.yml:121` `${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`).
 
 Prior: 2026-04-19 — added Recommended Neo4j memory profiles table (Tiny dev / Mid box / Baseline-capable) after the 2026-04-19 overnight baseline regression. Baseline-capable profile bumped per the findings of that run: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX per Neo4j Operations Manual; eliminates GC pauses from resizing), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). Memory-math note clarifies that `tx_memory` is a CAP on transaction allocations, not additive to heap+pagecache._

@@ -31,7 +31,7 @@ graph TB
 
     subgraph EdgeGuard Pipeline
         COLL[Collectors<br/>10 sources + 2 flag-guarded]
-        MISP[(MISP 2.4.x<br/>Single Source of Truth<br/>port 8443)]
+        MISP[(MISP 2.4 / 2.5<br/>Single Source of Truth<br/>port 8443)]
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
         BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ provenance on every edge: sources, source_refs, misp_event_ids"]
@@ -49,7 +49,7 @@ graph TB
     end
 
     subgraph Integrations
-        NATS[NATS Alerts<br/>port 4222]
+        NATS["NATS Alerts (ResilMesh)<br/>port 4222<br/>consumer not deployed"]
         GRAFANA[Grafana<br/>port 3000]
         PROM[Prometheus<br/>port 9090]
     end
@@ -64,7 +64,7 @@ graph TB
     BREL --> ENRICH
     ENRICH --> NEO4J
     NEO4J --> REST & GQL
-    REST & GQL --> NATS
+    NATS -.->|"planned: alert enrichment via alert_processor"| NEO4J
     METRICS --> PROM --> GRAFANA
     AF -->|schedules| COLL & SYNC & BREL & ENRICH
 ```
@@ -80,7 +80,7 @@ flowchart LR
         C2[NVD] --> MW
         C3[CISA] --> MW
         C4[MITRE] --> MW
-        C5[Others<br/>7 more] --> MW
+        C5["Others<br/>8 more (2 flag-guarded)"] --> MW
     end
 
     subgraph MISP
@@ -95,18 +95,21 @@ flowchart LR
         NORMAL --> DEDUP[Deduplicate]
         PAGED --> DEDUP
         DEDUP --> CHUNK[Chunk at 500 items]
-        CHUNK -->|UNWIND node merge<br/>1000/batch| NEO4J_MERGE[Neo4j MERGE<br/>Indicators + Vulnerabilities]
+        CHUNK -->|UNWIND node merge<br/>1000/batch| NEO4J_MERGE["Neo4j MERGE<br/>Indicators, CVEs, techniques, tactics,<br/>actors, malware, tools"]
     end
 
     subgraph Step 4-5: Enrich
         NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>batchSize 5000]
         REL --> BRIDGE[CVE Bridge]
-        BRIDGE --> AGING[Indicator aging]
+        BRIDGE --> ALIAS[Actor alias merge]
+        ALIAS --> TWIN[Malware twin merge]
+        TWIN --> AGING[Indicator aging]
         AGING --> CAMP[Campaign Builder]
-        CAMP --> CALIB[Legacy co-occurrence calibration (no-op since 2026-10)]
+        CAMP --> CALIB["Legacy co-occurrence calibration (no-op since 2026-10)"]
+        CALIB --> EPSS[FIRST EPSS]
     end
 
-    CALIB --> GRAPH[(Knowledge Graph)]
+    EPSS --> GRAPH[(Knowledge Graph)]
 ```
 
 ---
@@ -131,6 +134,7 @@ graph TB
     V -->|REFERS_TO| CVE
     CVE -->|REFERS_TO| V
     CVE -->|HAS_CVSS_v*| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
+    CVSS -->|HAS_CVSS_v*| CVE
     T -->|IN_TACTIC| TAC[Tactic]
     T -->|SUBTECHNIQUE_OF| T
     TA -->|USES_MALWARE| M
@@ -150,7 +154,8 @@ graph TB
     %% HAS_CVSS_v* expands to four concrete edge types written by
     %% _merge_cvss_node inside merge_cve(): HAS_CVSS_v2, HAS_CVSS_v30,
     %% HAS_CVSS_v31, HAS_CVSS_v40 (per neo4j_client.py — note the
-    %% underscore + lowercase v + version).
+    %% underscore + lowercase v + version), each in both directions
+    %% (CVE to CVSS and CVSS to CVE), as in the ResilMesh model.
     %%
     %% Provenance (2026-10): every relationship built from the sources
     %% carries r.sources[] (who asserts it), r.source_refs[] (their record
@@ -199,7 +204,7 @@ gantt
     edgeguard_low_freq (NVD)        :done, 08:00, 08:30
 
     section Daily
-    edgeguard_daily (MITRE+6 more)  :02:00, 02:45
+    edgeguard_daily (MITRE+7 more)  :02:00, 02:45
 
     section Neo4j Sync
     edgeguard_neo4j_sync (every 72 h) :03:00, 04:00
@@ -211,18 +216,22 @@ gantt
 
 ```mermaid
 flowchart LR
-    A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_preflight<br/>Health check]
+    A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_health_check<br/>Health check]
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 8h timeout]
-    C --> D[build_relationships<br/>20 link steps → many edge types incl. INDICATES (family + same-pulse), EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL]
+    C --> D["build_relationships<br/>20 link steps → many edge types incl. INDICATES (family + same-pulse), EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL"]
     D --> E[run_enrichment_jobs<br/>7 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
-    A -->|skip: last sync started < 24h ago| SKIP[All downstream<br/>SKIPPED]
+    A -->|"skip: a baseline holds the lock, or the last sync started < 24 h ago (force_sync bypasses the 24 h guard)"| SKIP[All downstream<br/>SKIPPED]
 
     style SKIP fill:#fbbf24,stroke:#d97706,color:#000
     style A fill:#3b82f6,stroke:#2563eb,color:#fff
     style C fill:#10b981,stroke:#059669,color:#fff
 ```
+
+`run_neo4j_sync` (and its retries), `build_relationships` and `run_enrichment_jobs` each skip
+(`AirflowSkipException`) when a baseline has taken the lock before they start (2026-10-16); the
+tasks downstream of a skipped task skip with it.
 
 ---
 
@@ -251,9 +260,11 @@ flowchart TD
 ```
 
 **PR-N29 H1 carve-out (operator-relevant):** the four baseline critical-chain
-tasks — `baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`,
-`baseline_run_enrichment_jobs` — override `retries=0` (`dags/edgeguard_pipeline.py:2772,
-2927, 2953, 2971`). A single failure on any of these tasks immediately marks
+tasks — `baseline_clean`, `full_neo4j_sync`, `build_relationships`,
+`run_enrichment_jobs` (top-level task ids of `edgeguard_baseline`; only
+`baseline_clean` carries the `baseline_` prefix) — override `retries=0` (see
+their task definitions in `dags/edgeguard_pipeline.py`); `source_key_check`
+also runs once. A single failure on any of these tasks immediately marks
 the DAG run FAILED rather than auto-retrying. This is intentional: a 5–6h
 critical-chain task that retries once would burn 12h of the 32h `dagrun_timeout`
 cap and could leave the graph mid-mutated. Combined with the
@@ -271,20 +282,16 @@ flowchart TD
     CHECK -->|Yes: Large event| PAGED[Paged Streaming<br/>5000 attrs/page]
     CHECK -->|No: Normal event| NORMAL[Process all in memory]
 
-    PAGED --> PAGE_LOOP[For each page:<br/>parse + dedup + sync<br/>then gc.collect + sleep 2s]
-    PAGE_LOOP --> BUILD_REL_P[Build cross-item rels<br/>static caps: actors 500,<br/>techniques 500, malware 500,<br/>indicators 2000, vulns 1000]
+    PAGED --> PAGE_LOOP["For each page:<br/>parse + dedup + sync<br/>then gc.collect + query_pause<br/>(EDGEGUARD_QUERY_PAUSE_SECONDS, default 0)"]
+    PAGE_LOOP --> BUILD_REL_P["Build report-scoped rels after all pages<br/>(same OTX pulse only)<br/>per-pulse caps: indicators 2000,<br/>malware 50, actors 10"]
 
     NORMAL --> DEDUP_N[Deduplicate items]
-    DEDUP_N --> BUILD_REL_N[Build cross-item rels<br/>same static caps]
+    DEDUP_N --> BUILD_REL_N["Build report-scoped rels<br/>same per-pulse caps"]
 
-    BUILD_REL_P & BUILD_REL_N --> DYN{Cross-product<br/>> 50K rels?}
-    DYN -->|Yes| REDUCE[Dynamic sampling:<br/>proportional cap reduction<br/>all types scaled down]
-    DYN -->|No| CHUNK
-    REDUCE --> CHUNK[Node sync: 500 items/chunk<br/>UNWIND node merge: 1000/batch<br/>Rel UNWIND: 500/batch, 60s timeout<br/>Post-sync: apoc.periodic.iterate 5000/batch]
+    BUILD_REL_P & BUILD_REL_N --> CHUNK["Node sync: 500 items/chunk<br/>UNWIND node merge: 1000/batch<br/>Rel UNWIND: 500/batch (EDGEGUARD_REL_BATCH_SIZE), 600 s timeout<br/>Post-sync: apoc.periodic.iterate 5000/batch"]
     CHUNK --> NEO4J[(Neo4j)]
 
     style PAGED fill:#3b82f6,stroke:#2563eb,color:#fff
-    style SKIP_REL fill:#f59e0b,stroke:#d97706,color:#000
     style CHUNK fill:#10b981,stroke:#059669,color:#fff
 ```
 
@@ -294,18 +301,18 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    subgraph "Job 1/4: CVE Bridge"
+    subgraph "Job 1/7: CVE Bridge"
         BR1[Vulnerability] -->|matching cve_id| BR2[CVE]
         BR2 -->|REFERS_TO| BR1
     end
 
-    subgraph "Job 2/4: Campaign Builder"
-        CB1[ThreatActor] --> CB2{Has ATTRIBUTED_TO<br/>Malware with active<br/>INDICATES Indicator?}
+    subgraph "Job 5/7: Campaign Builder"
+        CB1[ThreatActor] --> CB2{"Actor has ATTRIBUTED_TO or USES_MALWARE malware<br/>with an active INDICATES indicator?"}
         CB2 -->|Yes| CB3[Create/reactivate Campaign]
-        CB3 --> CB4[Link: RUNS + PART_OF_CAMPAIGN<br/>Deactivate empty campaigns]
+        CB3 --> CB4["Link: RUNS + PART_OF_CAMPAIGN (r.evidence_types)<br/>No evidence left: delete campaign + links<br/>Evidence but no active indicator: inactive"]
     end
 
-    subgraph "Job 3/4: Calibration (pre-computed event sizes)"
+    subgraph "Job 6/7: Calibration (legacy, no-op on a fresh baseline)"
         CAL0[Pre-compute: one COUNT<br/>per MISP event] --> CAL1[Group events by tier]
         CAL1 --> CAL2{Event size tier}
         CAL2 -->|1-10| CAL3[conf = 0.50]
@@ -315,7 +322,7 @@ flowchart LR
         CAL2 -->|> 500| CAL6[conf = 0.30]
     end
 
-    subgraph "Indicator aging (before the campaigns; 2026-10-16)"
+    subgraph "Job 4/7: Indicator aging (before the campaigns, 2026-10-16)"
         D1[Every Indicator,<br/>whoever supplied it] --> D2{Days since the<br/>latest report}
         D2 -->|from 90d| D3[source_confidence x 0.85]
         D2 -->|from 180d| D4[source_confidence x 0.70]
@@ -324,6 +331,10 @@ flowchart LR
     end
 ```
 
+`run_all_enrichment_jobs` (`src/enrichment_jobs.py`) runs seven jobs in this order: 1/7 the CVE bridge,
+2/7 the actor alias merge, 3/7 the Malware ATT&CK-id twin merge, 4/7 the indicator aging, 5/7 the
+campaign builder, 6/7 the calibration and 7/7 FIRST EPSS. Jobs 2/7, 3/7 and 7/7 are not drawn above.
+
 ---
 
 ## Technology Stack
@@ -331,19 +342,19 @@ flowchart LR
 | Layer | Technology | Version |
 |-------|-----------|---------|
 | Graph Database | Neo4j Community | 2026.03 |
-| Threat Intel Platform | MISP | 2.4.x |
-| Orchestration | Apache Airflow | 3.2 |
+| Threat Intel Platform | MISP | 2.4 / 2.5 (hosted instance 2.5.45; the writer's exact `eventinfo` lookup needs 2.4.177 or later, older versions page through) |
+| Orchestration | Apache Airflow | 3.3 (image 3.3.2) |
 | REST API | FastAPI + Uvicorn | latest |
 | GraphQL API | Strawberry | latest |
 | Messaging | NATS | latest |
 | Monitoring | Prometheus + Grafana | latest |
 | Data Format | STIX 2.1 | standard |
 | Language | Python | 3.12+ |
-| Versioning | CalVer | 2026.4.x |
+| Versioning | CalVer | 2026.10.x |
 
 ---
 
-*Last updated: 2026-10-16 — § 4 and § 5: the sync DAG runs every 72 hours and skips its chain when the last sync started less than 24 hours ago. Same day: enrichment: the indicator aging (one rule for every Indicator from its latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730; no Vulnerability tiers) runs before the campaign builder. Prior: 2026-10-15 — §5: `run_neo4j_sync` timeout 8h (was 4h). Same day: enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
+*Last updated: 2026-10-17 — § 2: the sync's Neo4j MERGE writes indicators, CVEs, techniques, tactics, actors, malware and tools (it said indicators and vulnerabilities). Same day: corrections against the code: § 1 NATS has no deployed consumer and the APIs do not publish to it; MISP 2.4 / 2.5; § 2 eight further collectors and the seven enrichment jobs; § 3 `HAS_CVSS_v*` in both directions; § 4 MITRE + 7 daily collectors; § 5 task `neo4j_health_check`, the baseline-lock skips and `force_sync`; § 6 the baseline task ids (`full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`); § 7 report-scoped linking with per-pulse caps, `query_pause` and the 600 s relationship timeout (no cross-product sampling); § 8 jobs numbered of seven and the campaign evidence (`ATTRIBUTED_TO` or `USES_MALWARE`); technology stack versions (Airflow 3.3, CalVer 2026.10.x). Prior: 2026-10-16 — § 4 and § 5: the sync DAG runs every 72 hours and skips its chain when the last sync started less than 24 hours ago. Same day: enrichment: the indicator aging (one rule for every Indicator from its latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730; no Vulnerability tiers) runs before the campaign builder. Prior: 2026-10-15 — §5: `run_neo4j_sync` timeout 8h (was 4h). Same day: enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
 
 *Prior: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
 

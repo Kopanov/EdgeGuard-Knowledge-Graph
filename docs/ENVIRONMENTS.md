@@ -6,25 +6,25 @@ EdgeGuard is designed to run in multiple environments (local dev, staging, produ
 
 ### 1. Environment flag: `EDGEGUARD_ENV`
 
-EdgeGuard reads a simple environment flag:
+`EDGEGUARD_ENV` decides whether the REST and GraphQL APIs run in production mode:
 
 ```bash
-export EDGEGUARD_ENV="dev"   # or "stage", "prod", "edge", etc.
+export EDGEGUARD_ENV="dev"   # non-production labels: dev, development, local, staging, test
 ```
 
-- Default is `dev` if not set.
-- Used to:
-  - Make logs and monitoring easier to interpret.
-  - Allow future environment‑specific behavior (e.g. different intervals or feature toggles) without changing code.
+- The check is fail-closed (`config.is_production_env()`): only `dev`, `development`, `local`, `staging` and `test` are non-production. Unset or empty is treated as **production**, and so is every other value — `stage`, `prod` and `edge` included.
+- In production the REST and GraphQL APIs refuse to start without `EDGEGUARD_API_KEY`, whatever `EDGEGUARD_ALLOW_UNAUTH` says; `/docs` and `/redoc` are off, `/openapi.json` is served to key holders only, and GraphQL introspection is blocked. In non-production an API without a key starts only on a loopback bind, or with `EDGEGUARD_ALLOW_UNAUTH=1`.
+- `config.EDGEGUARD_ENV` (default `dev`, printed below) is only a label for logs; the security gate does not use that default.
 
 **Suggested values:**
 
-- `dev`  – local development on your laptop.
-- `stage` – staging/pre‑production environment.
+- `dev` – local development on your laptop.
+- `staging` – staging/pre‑production environment (not `stage`, which counts as production).
 - `prod` – production deployment.
-- `edge` – edge device / gateway deployments (limited resources, closer to the sensors).
 
-You can see the current environment in Python via:
+An edge device / gateway deployment runs as production unless it is given one of the non-production labels.
+
+You can see the current label in Python via:
 
 ```python
 # Requires src/ on PYTHONPATH (the editable `pip install -e .` does this;
@@ -39,7 +39,7 @@ print(EDGEGUARD_ENV)
 
 To keep dependencies clean and reproducible, use a dedicated environment per project/deployment.
 
-**Version:** EdgeGuard requires **Python 3.12+** (`requires-python` in `pyproject.toml`, CI, and `Dockerfile`). Apache Airflow **3.2** (upgraded from 2.11 in April 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md)) supports Python 3.10–3.14 upstream; this repository standardizes on 3.12 for a single supported interpreter line.
+**Version:** EdgeGuard requires **Python 3.12+** (`requires-python` in `pyproject.toml`, CI, and `Dockerfile`). Apache Airflow **3.3** (3.2 from April 2026, upgraded from 2.11 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md); 3.3.2 since October 2026) supports Python 3.10–3.14 upstream; this repository standardizes on 3.12 for a single supported interpreter line.
 
 **Pinned component versions** (PR #36 — explicit and verifiable at runtime):
 
@@ -102,7 +102,9 @@ conda activate edgeguard_env
 pip install .[api,monitoring]
 
 # 3. Set environment flags and credentials
+#    (an unrecognised label such as "edge" counts as production: the APIs need EDGEGUARD_API_KEY)
 export EDGEGUARD_ENV="edge"
+export EDGEGUARD_API_KEY="$(openssl rand -hex 32)"
 export MISP_URL="https://your-misp-server:8443"
 export MISP_API_KEY="your-misp-api-key"
 export NEO4J_URI="bolt://your-neo4j-server:7687"
@@ -157,10 +159,10 @@ All four are also in `.env.example`.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | `1000` | Attributes per MISP POST. Lower on memory-constrained MISP hosts that 500 on large batches. |
+| `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | `500` | Attributes per MISP push batch (`MISPWriter.push_items` default; the adaptive scaling lowers it on large events). Lower on memory-constrained MISP hosts that answer HTTP 500 on large batches. |
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Seconds between failed-event retry passes. Gives MISP time to recover from transient 5xx. |
-| `EDGEGUARD_BASELINE_LOCK_PATH` | `checkpoints/baseline_in_progress.lock` | Cross-process sentinel that blocks a manual `edgeguard baseline` run from racing the scheduled incremental DAG. |
-| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `86400` (24h) | Max age before a stale lock is auto-cleared (e.g. after a crash on a different host — the PID-liveness check only works on the same host). |
+| `EDGEGUARD_BASELINE_LOCK_PATH` | `checkpoints/baseline_in_progress.lock` | Sentinel held by a running baseline: the `edgeguard_baseline` DAG run (from `baseline_acquire_lock`; `edgeguard baseline` triggers that DAG) or an in-process `run_pipeline.py --baseline`. While another run holds it, the scheduled collectors and the sync DAG's `run_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` skip. |
+| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `172800` (48 h, above the baseline DAG's 32 h `dagrun_timeout`) | Max age before a stale lock is auto-cleared (e.g. after a crash on a different host — the PID-liveness check only works on the same host). |
 
 See [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) for the wider set of Airflow-related
 variables introduced with the 3.2 upgrade, and [MIGRATIONS.md](MIGRATIONS.md)
@@ -168,7 +170,7 @@ for the operator runbook that references the baseline lock.
 
 ### 6. Summary checklist
 
-- [ ] `EDGEGUARD_ENV` set appropriately (`dev`, `stage`, `prod`, `edge`, …).
+- [ ] `EDGEGUARD_ENV` set appropriately (`dev`, `staging`, `prod`; unset = production).
 - [ ] Dedicated Python/conda environment created for EdgeGuard.
 - [ ] Dependencies installed via `pip install .[...]` with the right extras for your use case.
 - [ ] All credentials provided via environment variables (no secrets in code).
@@ -176,4 +178,4 @@ for the operator runbook that references the baseline lock.
 
 ---
 
-_Last updated: 2026-10-15 — wording only: the pinned-versions note carries no personal name. Prior: 2026-04-26 — PR-N33 docs audit: clarified `from config import …` requires `src/` on PYTHONPATH (or editable install); removed unverified "3s pause between chunks" claim from `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` description (the only documented inter-batch throttle is `EDGEGUARD_MISP_BATCH_THROTTLE_SEC=5.0` on the MISP-push side). Prior: 2026-04-15 MISP sync tuning + baseline mutex env vars._
+_Last updated: 2026-10-17 — documentation audit: `EDGEGUARD_ENV` is the fail-closed production gate (`config.is_production_env`: unset, empty, `stage`, `edge` and any other value outside dev/development/local/staging/test are production, so the APIs require `EDGEGUARD_API_KEY`); the edge recipe sets the key; suggested values `dev` / `staging` / `prod`; MISP push batch default 500; the baseline lock is held by the `edgeguard_baseline` DAG run (or `run_pipeline.py --baseline`) and makes the scheduled collectors and sync writes skip, max age 172800 s (48 h); Airflow 3.3.2. Prior: 2026-10-15 — wording only: the pinned-versions note carries no personal name. Prior: 2026-04-26 — PR-N33 docs audit: clarified `from config import …` requires `src/` on PYTHONPATH (or editable install); removed unverified "3s pause between chunks" claim from `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` description (the only documented inter-batch throttle is `EDGEGUARD_MISP_BATCH_THROTTLE_SEC=5.0` on the MISP-push side). Prior: 2026-04-15 MISP sync tuning + baseline mutex env vars._

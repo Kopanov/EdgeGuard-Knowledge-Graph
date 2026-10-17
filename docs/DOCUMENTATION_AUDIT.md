@@ -1,5 +1,7 @@
 # Documentation ↔ codebase audit index
 
+> **Reading the statuses.** Each Verified date records when that row was last checked against the code (most are 2026-03-20 … 2026-04-26; DEMO 2026-10-16). Docs have changed since, so each doc's own `_Last updated_` footer is the current record. Values quoted in the pass summaries are as of that pass (e.g. the `AIRFLOW_MEMORY_LIMIT` default was 4g in 2026-03 and is 12g now).
+
 **Purpose:** (1) **Traceability** for papers/reviews — each table row ties a doc to code/config. (2) **Navigation** — what to read in order and what overlaps.
 
 ---
@@ -8,7 +10,7 @@
 - **Verified** — Reviewed against code/config on last audit date; known drift fixed in the same pass.
 - **Narrative** — Mostly process/architecture prose; few machine-verifiable claims.
 
-**Last full pass:** 2026-03-24 — **MISP event discovery** = **`/events/index`** pagination + client filter + **`Accept: application/json`** on sync session; **`restSearch`** fallback; **`misp_health`** **`healthy`** = API+DB (workers optional; **`EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS`** for strict); **Airflow** **`AIRFLOW_MEMORY_LIMIT`** (default **4g**), scheduler zombie/heartbeat env vars; **Prometheus** scrape **8001**; **api/graphql** **`Dockerfile`** **`chown /app/src`**. Prior **2026-03-21** pass: per-event MISP→Neo4j, **`EDGEGUARD_REL_BATCH_SIZE`**, **HEARTBEAT.md**, SSL env aliases, etc.
+**Last full pass:** 2026-03-24 — **MISP event discovery** = **`/events/index`** pagination + client filter + **`Accept: application/json`** on sync session; **`restSearch`** fallback; **`misp_health`** **`healthy`** = API+DB (workers optional; **`EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS`** for strict); **Airflow** **`AIRFLOW_MEMORY_LIMIT`** (default **4g** at that pass; **12g** since), scheduler zombie/heartbeat env vars; **Prometheus** scrape **8001**; **api/graphql** **`Dockerfile`** **`chown /app/src`**. Prior **2026-03-21** pass: per-event MISP→Neo4j, **`EDGEGUARD_REL_BATCH_SIZE`**, **HEARTBEAT.md**, SSL env aliases, etc.
 
 **Targeted pass 2026-04-16 — MISP attribute UUID + edge provenance** (PR #32, branch `fix/misp-attribute-uuid-traceability`): forward fix in `src/run_misp_to_neo4j.py` (`parse_attribute` now stamps `misp_attribute_id = attr.uuid` on all 7 item types) and `src/collectors/misp_collector.py` (aligned to `attr.uuid`). New `Indicator.misp_attribute_id` index. New `r.misp_event_ids[]` on every relationship MERGEd by `create_misp_relationships_batch`. Latent scalar→array bugs fixed in `mark_inactive_nodes`, `calibrate_cooccurrence_confidence`, `build_relationships.py` INDICATES co-occurrence, and `run_pipeline.py` co-occurrence. New STIX exporter custom properties `x_edgeguard_misp_event_ids` / `x_edgeguard_misp_attribute_ids` via `_attach_misp_provenance` (mirrors `_attach_zones`). Backfill migration was deleted in the pre-release cleanup pass (no production graph to migrate; a fresh baseline rerun is the canonical heal path). Docs touched: ARCHITECTURE.md, KNOWLEDGE_GRAPH.md, TECHNICAL_SPEC.md, MIGRATIONS.md, AIRFLOW_DAG_DESIGN.md, STIX21_EXPORTER_PROPOSAL.md, RESILMESH_INTEROPERABILITY.md, RESILMESH_QUICKSTART_STIX.md, this file.
 
@@ -33,7 +35,7 @@
 | Document | Topic | Verified against | Status |
 |----------|--------|------------------|--------|
 | [README.md](../README.md) | Quick start, **upgrade**, ports, DAG overview, MISP index discovery + env, **`AIRFLOW_MEMORY_LIMIT`**, **HEARTBEAT.md**, **collection/sync limits** | `install.sh`, `docker-compose.yml`, `Dockerfile`, `Dockerfile.airflow`, `dags/edgeguard_pipeline.py`, `src/config.py`, `src/run_misp_to_neo4j.py`, `src/misp_health.py`, `docs/COLLECTION_AND_SYNC_LIMITS.md`, `docs/HEARTBEAT.md` | Verified (2026-04-26) |
-| [../CONTRIBUTING.md](../CONTRIBUTING.md) | PR checklist, local CI parity, **Python 3.12+**, generated Airflow files | `.github/workflows/ci.yml`, `Makefile`, `.gitignore`, `pyproject.toml`, `tests/test_*cli*` | Verified (2026-04-26) — root copy is canonical; `docs/CONTRIBUTING.md` is a stale duplicate slated for stub-replacement |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | PR checklist, local CI parity, **Python 3.12+**, generated Airflow files | `.github/workflows/ci.yml`, `Makefile`, `.gitignore`, `pyproject.toml`, `tests/test_*cli*` | Verified (2026-04-26) — root copy is canonical; `docs/CONTRIBUTING.md` is a stub pointing to it (PR-N37) |
 
 ---
 
@@ -111,12 +113,12 @@
 | [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) | 7-day mini-baseline procedure (DAG vs CLI vs Variables) | `dags/edgeguard_pipeline.py` (`edgeguard_baseline`), `src/config.py` (`EDGEGUARD_BASELINE_DAYS`, `EDGEGUARD_BASELINE_COLLECTION_LIMIT`) | Verified (2026-04-15) |
 | [MEMORY_TUNING.md](MEMORY_TUNING.md) | Per-component memory recommendations; `edgeguard doctor --memory` output | `docker-compose.yml`, `src/edgeguard.py` | Verified (2026-04-06) |
 | [MISP_TUNING.md](MISP_TUNING.md) | MISP PHP/MySQL settings for large baselines; adaptive scaling tiers | `src/run_misp_to_neo4j.py`, `src/collectors/misp_writer.py` | Verified (2026-04-15) |
-| [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md) | Mermaid diagrams of pipeline + retry/fallback flows | `dags/edgeguard_pipeline.py`, `src/run_misp_to_neo4j.py` | Needs refresh (2026-04-06) — diagrams predate PR-N29 fallback hardening |
-| [ARCHITECTURE_FLOW.md](ARCHITECTURE_FLOW.md) | Roadmap for diagram/integrity-test pins (`tests/test_architecture_flow_pins.py` planned) | (planned) | Roadmap — pin-test not yet implemented |
+| [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md) | Mermaid diagrams of pipeline + retry/fallback flows | `dags/edgeguard_pipeline.py`, `src/run_misp_to_neo4j.py` | Verified (2026-04-28, PR-N34) |
+| [ARCHITECTURE_FLOW.md](ARCHITECTURE_FLOW.md) | Diagram roadmap + doc-reference pins | `tests/test_architecture_flow_pins.py` (shipped PR-J1 #118) | Pins enforced in CI; diagrams 4–8 (PR-J2/J3) still to be written |
 | [CLOUD_SYNC.md](CLOUD_SYNC.md) | Cross-environment sync via `n.uuid` + `r.src_uuid` / `r.trg_uuid`; cloud Neo4j replay recipe | `src/node_identity.py`, `src/neo4j_client.py`, `src/build_relationships.py`, `src/enrichment_jobs.py`, `src/stix_exporter.py` | Verified (2026-04-26) |
 | [DEPLOYMENT_READINESS_CHECKLIST.md](DEPLOYMENT_READINESS_CHECKLIST.md) | Broad pre-deploy posture; complement to `BASELINE_LAUNCH_CHECKLIST.md` (focused launch-day pre-flight) | `pyproject.toml`, `docker-compose.yml`, `scripts/preflight_baseline.sh` | Verified (2026-04-26) |
 | [GRAPH_EXPLORER.md](GRAPH_EXPLORER.md) | Per-zone Neo4j Browser views; API enum (`attacks` / `actors` / `indicators` / `vulnerabilities`) | `src/query_api.py` | Verified (2026-04-26) |
-| [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md) | STIX 2.1 quickstart (`/stix-flow` endpoint, content-deterministic bundle id) | `src/stix_exporter.py`, `src/query_api.py` | Verified (2026-04-26) |
+| [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md) | STIX 2.1 quickstart (`/stix/types` and `/stix/export/{object_type}/{identifier}` endpoints, content-deterministic bundle id) | `src/stix_exporter.py`, `src/query_api.py` | Verified (2026-04-26) |
 | [SECURITY_ROADMAP.md](SECURITY_ROADMAP.md) | Tiered security roadmap (NFKC + zero-width strip in PR-N29 L1 / PR-N31; trust-boundary defenses) | `src/node_identity.py`, `src/source_trust.py` | Verified (2026-04-26) |
 | [STIX21_EXPORTER_PROPOSAL.md](STIX21_EXPORTER_PROPOSAL.md) | STIX 2.1 exporter design + namespace parity + content-deterministic bundles | `src/stix_exporter.py`, `src/node_identity.py` | Verified (2026-04-26) |
 | [AIRFLOW_DAG_DESIGN.md](AIRFLOW_DAG_DESIGN.md) | DAG-design rationale (tier1/2/3, baseline carve-out for `retries=0`) | `dags/edgeguard_pipeline.py` | Verified (2026-04-26) |
@@ -127,11 +129,11 @@
 
 ## How to cite code in a paper
 
-Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules), `src/config.py` (`get_effective_limit`, `SECTOR_TIME_RANGES`), `src/collectors/nvd_collector.py` (NVD 120-day published-date windows).
+Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules), `src/config.py` (`get_effective_limit`), `src/baseline_config.py` (`resolve_baseline_days`, the 730-day baseline window), `src/collectors/nvd_collector.py` (NVD 120-day published-date windows).
 
 ---
 
-_Last updated: 2026-10-16 — DEMO row: the read-only alert enrichment demo and the workflow demonstration commands, verified against the code (the row named a mock publisher, since removed); it also covers the demo's exit codes for a failed enrichment query or an alert the processor raises on, and `docs/demo.html`, whose relationship table and enrichment example now state what the code writes and returns. Prior: 2026-10-15 — wording only: the PR #126 entry states the documentation rule instead of naming a review tool's rule file. Prior: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
+_Last updated: 2026-10-17 — documentation audit: a note under the title says each Verified date is the date of that row's last check and that pass summaries quote values of their pass (`AIRFLOW_MEMORY_LIMIT` 4g then, 12g now); rows that contradicted this file's own PR entries are corrected (CONTRIBUTING: `docs/CONTRIBUTING.md` is the PR-N37 stub; ARCHITECTURE_DIAGRAMS verified by PR-N34; ARCHITECTURE_FLOW: the pin-test shipped in PR-J1); the STIX quickstart row names the real `/stix/types` and `/stix/export/...` routes; the citation hint names `resolve_baseline_days` instead of `SECTOR_TIME_RANGES`, which no collector reads. Prior: 2026-10-16 — DEMO row: the read-only alert enrichment demo and the workflow demonstration commands, verified against the code (the row named a mock publisher, since removed); it also covers the demo's exit codes for a failed enrichment query or an alert the processor raises on, and `docs/demo.html`, whose relationship table and enrichment example now state what the code writes and returns. Prior: 2026-10-15 — wording only: the PR #126 entry states the documentation rule instead of naming a review tool's rule file. Prior: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
 
 The PR-N26 → PR-N32 train added significant capabilities that earlier
 versions of this index did not cover. Added rows for: TIMESTAMPS,
