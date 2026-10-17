@@ -1,5 +1,7 @@
 # Migration: per-source timestamps on `SOURCED_FROM` edges
 
+> **Historical record** of the 2026-04 change to per-source timestamps on `SOURCED_FROM` edges, not maintained; the current model is described in [docs/TIMESTAMPS.md](../docs/TIMESTAMPS.md).
+
 **Date:** 2026-04
 **PR:** S5 — source-truthful timestamp restoration + edge-based provenance
 **Backfill required:** No (NULL means "we don't know"; organic re-population

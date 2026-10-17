@@ -1,5 +1,7 @@
 # Proposal: STIX 2.1 graph exporter for ResilMesh integration
 
+> **Historical record** of the STIX 2.1 exporter design proposal, not maintained; the current exporter is described in [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md) and implemented in `src/stix_exporter.py`.
+
 Status: DRAFT — prototype implementation in `src/stix_exporter.py` and
 `GET /stix/export/{object_type}/{identifier}` in `src/query_api.py`.
 

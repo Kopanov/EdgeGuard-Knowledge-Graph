@@ -1,13 +1,14 @@
 # Flow Audits — Consolidated Findings Index
 
-> **Historical record (2026-04-20/21).** This index and reports 01–09 describe the code and the
+> **Historical record** of the 2026-04-20/21 flow audits, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+
+> This index and reports 01–09 describe the code and the
 > plan as of those dates. Most Tier-A items were later addressed (PR-M1, PR-M2, PR-M3a–d and
 > later work), but the large-event split (MA-H2) is still tracked as
 > [Issue #61](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/61), and no PR-M4 shipped. Issue #57 (baseline lock) shipped in
 > 2026-10: the `edgeguard_baseline` DAG now holds the lock itself. `decay_ioc_confidence` now
-> applies the indicator aging rule (`src/indicator_aging.py`). For the current baseline procedure
-> see [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and
-> [RUNBOOK.md](../RUNBOOK.md). The file:line pointers below are not maintained.
+> applies the indicator aging rule (`src/indicator_aging.py`). The file:line pointers below are
+> not maintained.
 
 This directory holds multi-agent audit reports that drive the bug-fix
 work on the main pipeline. Organized for **730-day baseline

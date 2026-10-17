@@ -1,5 +1,7 @@
 # Migration: PR-N26 — Backfill `r.misp_event_ids[]` on TARGETS / EXPLOITS / INDICATES / AFFECTS edges
 
+> **Historical record**: a one-off repair for graphs written before these edges carried `r.misp_event_ids[]`, not maintained; the current repair scripts are listed in [docs/MIGRATIONS.md § Appendix](../docs/MIGRATIONS.md#appendix-data-written-by-earlier-versions) and the current edge provenance is described in [docs/KNOWLEDGE_GRAPH.md](../docs/KNOWLEDGE_GRAPH.md).
+
 **Status:** Operator action — runbook only. NOT auto-run by CI / DAGs.
 
 **Prerequisites:** PR-N26 code merged. APOC plugin loaded on target Neo4j.

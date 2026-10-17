@@ -32,4 +32,10 @@ For ad-hoc identification of an arbitrary checkout, use **`edgeguard version`** 
 
 ---
 
-_Last updated: 2026-10-17 — documentation audit: no Docker image carries a version label, so it is no longer named; the version also feeds the REST / GraphQL OpenAPI `version` and `edgeguard_version` of enriched alerts. Prior: 2026-04-26 — PR-N33 docs audit: refreshed example version. Prior: 2026-04-24._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Removed the Docker image version label from "Where it appears" (no image carries one) and added the REST / GraphQL OpenAPI `version` and the `edgeguard_version` of enriched alerts; the main text describes current behavior only.
+- 2026-04-26 — Refreshed the example version.
+- 2026-04-24 — Earlier revision of the policy; no change details recorded.

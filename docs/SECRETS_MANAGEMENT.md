@@ -115,8 +115,8 @@ several **infrastructure** secrets — all listed in `.env.example`:
 | Secret | Purpose |
 |---|---|
 | `EDGEGUARD_API_KEY` | EdgeGuard REST and GraphQL API auth (FastAPI on `:8000` and `:4001`). Required in production, i.e. whenever `EDGEGUARD_ENV` is not `dev` / `development` / `local` / `staging` / `test` (unset counts as production), whatever `EDGEGUARD_ALLOW_UNAUTH` says. In those non-production envs it may be empty only with a loopback bind or `EDGEGUARD_ALLOW_UNAUTH=1`. |
-| `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | Source-truthful timestamp creator-org allow-list (PR #44 — defends against MISP tag impersonation). |
-| `AIRFLOW_API_AUTH_JWT_SECRET` | Airflow 3.x JWT signing key (`[api_auth] jwt_secret`, passed as `AIRFLOW__API_AUTH__JWT_SECRET`), shared by the scheduler and the API server. A new option in Airflow 3; the 2.x `[webserver] secret_key` maps to `[api] secret_key`, not to this one. |
+| `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | Source-truthful timestamp creator-org allow-list (defends against MISP tag impersonation; see [SECURITY_ROADMAP.md](SECURITY_ROADMAP.md)). |
+| `AIRFLOW_API_AUTH_JWT_SECRET` | Airflow 3.x JWT signing key (`[api_auth] jwt_secret`, passed as `AIRFLOW__API_AUTH__JWT_SECRET`), shared by the scheduler and the API server. The option exists from Airflow 3 on; the Airflow 2.x `[webserver] secret_key` maps to `[api] secret_key`, not to this one. |
 | `AIRFLOW_FERNET_KEY` | Airflow Fernet encryption for Variables / Connections. |
 | `GRAFANA_ADMIN_PASSWORD` | Grafana admin login (default user is admin). |
 | `PROMETHEUS_ADMIN_PASSWORD` | Placeholder only — nothing in the repository reads it (Prometheus basic auth needs your own web-config or proxy). |
@@ -134,10 +134,14 @@ Generate strong values for all of these except the `PROMETHEUS_ADMIN_PASSWORD` p
 - [ ] `EDGEGUARD_SSL_VERIFY=true` in production.
 - [ ] Optional keys (`OTX_API_KEY`, `NVD_API_KEY`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`) configured if corresponding collectors are enabled.
 - [ ] `/admin/query` enabled only when needed and protected with `EDGEGUARD_ADMIN_TOKEN` + network controls.
-- [ ] `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `_NAMES` populated for the MISP source-truthful timestamp defense (PR #44).
-
-
+- [ ] `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `_NAMES` populated for the MISP source-truthful timestamp defense.
 
 ---
 
-_Last updated: 2026-10-17 — documentation audit: `credentials/api_keys.yaml` is read line by line as `KEY=value` (not YAML) and only without the `VIRUSTOTAL_API_KEY` env var, so the example is `KEY=value` again; `EDGEGUARD_API_KEY` is required in production whatever `EDGEGUARD_ALLOW_UNAUTH` says (that switch and the loopback bind apply only to the non-production labels); `AIRFLOW_API_AUTH_JWT_SECRET` is `[api_auth] jwt_secret`, a new Airflow 3 option; `PROMETHEUS_ADMIN_PASSWORD` is read by nothing. Prior: 2026-04-26 — PR-N33 docs audit: fixed malformed YAML example for `credentials/api_keys.yaml` (was shell `KEY=value`, now YAML mapping `KEY: value`); added new § 5.1 "API + Airflow + monitoring secrets (production-required)" covering `EDGEGUARD_API_KEY`, `AIRFLOW_API_AUTH_JWT_SECRET`, `AIRFLOW_FERNET_KEY`, `GRAFANA_ADMIN_PASSWORD`, `PROMETHEUS_ADMIN_PASSWORD`, `EDGEGUARD_TRUSTED_MISP_ORG_*`; updated § 6 summary checklist to match. Prior: 2026-03-17._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Corrected the `credentials/api_keys.yaml` format (`KEY=value` lines, read only when `VIRUSTOTAL_API_KEY` is not set in the environment), the production rule for `EDGEGUARD_API_KEY`, the Airflow 3 option behind `AIRFLOW_API_AUTH_JWT_SECRET` and the unread `PROMETHEUS_ADMIN_PASSWORD`; the main text describes current behavior only and the change history is kept here.
+- 2026-04-26 — Added § 5.1 on the API, Airflow and monitoring secrets required in production (including the creator-org allow-list of the MISP tag-impersonation defense) and aligned the § 6 checklist; the `credentials/api_keys.yaml` example was rewritten as a YAML mapping, which the 2026-10-17 entry reverts.
+- 2026-03-17 — Earlier revision of the guide; no change details recorded.

@@ -1,5 +1,7 @@
 # Flow Audit §6 — MISP Aggregation + Attribute Dedup
 
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+
 **Date:** 2026-04-20 afternoon
 **Scope:** `src/collectors/misp_writer.py`, `src/run_misp_to_neo4j.py` index-side fetch, `src/source_registry.py`, `src/config.py` SOURCE_TAGS
 **Goal:** At 730d scale (~500K-1M attrs over ~50-200 events), no duplicates, no silent truncation, no partial-failure aborts

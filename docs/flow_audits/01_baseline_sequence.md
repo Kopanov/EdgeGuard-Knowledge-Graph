@@ -1,5 +1,7 @@
 # Flow Audit §1 — Baseline Sequence
 
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+
 **Date:** 2026-04-20
 **Commit audited:** `8e39f88` (post PR-F9/G1/I/J merge)
 **Scope:** Full `edgeguard baseline --days N` / `fresh-baseline` run, CLI + Airflow DAG paths

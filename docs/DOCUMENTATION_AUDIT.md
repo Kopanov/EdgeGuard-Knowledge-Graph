@@ -1,5 +1,7 @@
 # Documentation ↔ codebase audit index
 
+> **Historical record** of the documentation ↔ codebase audits (2026-03-20 to 2026-10-17), not maintained; the current documentation map is [README § Documentation](../README.md#-documentation), and each document's own History section records its changes.
+
 > **Reading the statuses.** Each Verified date records when that row was last checked against the code (most are 2026-03-20 … 2026-04-26; DEMO 2026-10-16). Docs have changed since, so each doc's own `_Last updated_` footer is the current record. Values quoted in the pass summaries are as of that pass (e.g. the `AIRFLOW_MEMORY_LIMIT` default was 4g in 2026-03 and is 12g now).
 
 **Purpose:** (1) **Traceability** for papers/reviews — each table row ties a doc to code/config. (2) **Navigation** — what to read in order and what overlaps.

@@ -1,5 +1,7 @@
 # Flow Audit §8 — Post-sync Relationship Construction
 
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+
 **Date:** 2026-04-20 afternoon
 **Scope:** `src/build_relationships.py` (12 link queries), `src/enrichment_jobs.py`, `src/neo4j_client.py` relationship helpers
 **Goal:** Graph-integrity bugs — wrong direction, duplicate edges, missing provenance, non-idempotent enrichment
