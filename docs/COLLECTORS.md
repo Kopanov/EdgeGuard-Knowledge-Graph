@@ -104,17 +104,17 @@ All collectors return items with these common fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Item type: `indicator`, `vulnerability`, `malware`, `actor`, `technique` |
+| `type` | string | Item type: `vulnerability`, `malware`, `actor`, `technique`, `tactic`, `tool` (indicators carry `indicator_type` instead) |
 | `zone` | list | **All matching zones as array** (e.g., `['finance', 'healthcare']`) |
 | `tag` | string | Source tag for MISP |
-| `sources` | list | List of source identifiers |
+| `source` | list | Source identifiers (the collector's tag) |
 | `confidence_score` | float | 0.0-1.0 confidence rating |
-| `first_seen` | tz-aware ISO-8601, **OPTIONAL** | Source's claim about when it first observed this entity (concept 1 in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md)). **Omit when source field is absent — never substitute wall-clock NOW** (PR-M2 §4-F4 / F5). |
-| `last_seen` | tz-aware ISO-8601, **OPTIONAL** | Source's claim about when it last updated this entity (concept 2). Same omit-when-absent rule. |
+| `first_seen` | ISO-8601 or a feed date string, normalised to tz-aware UTC by MISPWriter (`coerce_iso`), **OPTIONAL** | Source's claim about when it first observed this entity (concept 1 in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md)). **Omit when source field is absent — never substitute wall-clock NOW** (PR-M2 §4-F4 / F5). |
+| `last_seen` | ISO-8601 or a feed date string, normalised to tz-aware UTC by MISPWriter (`coerce_iso`), **OPTIONAL** | Source's claim about when it last updated this entity (concept 2). Same omit-when-absent rule. |
 
 **Note:** The `zone` property is always an array. The old `zones` property has been removed.
 
-**Removed in PR-M2:** the `last_updated` key on collector items (Finding 11). It was a dead key — Cypher MERGE sets `n.last_updated = datetime()` server-side and never reads the collector-supplied value. Concepts 3 (`first_imported_at`) and 4 (`last_updated`) are EdgeGuard-internal and always set server-side; collectors must NOT emit them.
+**`last_updated` on collector items.** The NVD, OTX, MITRE, CISA ICS, MalwareBazaar and VirusTotal (`vt_collector`) items carry no `last_updated` key (PR-M2 removed it). The CISA KEV, AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist and `virustotal_collector` items still carry it (wall-clock time). MISPWriter never reads it, so it reaches neither MISP nor the graph: Cypher MERGE sets `n.last_updated = datetime()` server-side. Concepts 3 (`first_imported_at`) and 4 (`last_updated`) are EdgeGuard-internal and always set server-side. New collectors must not emit it.
 
 **Honest-NULL invariant.** If a collector's source doesn't expose a first/last-seen field, OMIT the key from the item dict — do not substitute `datetime.now()`. The downstream MIN/MAX CASE on the `SOURCED_FROM` edge preserves any prior real claim from another source. The reference pattern is `src/collectors/abuseipdb_collector.py` (blacklist endpoint omits `first_seen` because the API doesn't expose it). See [`docs/TIMESTAMPS.md`](TIMESTAMPS.md) for the full semantic model.
 
@@ -144,18 +144,11 @@ Collects threat intelligence pulses from AlienVault OTX, including:
 ### Zone Detection
 ```python
 def detect_sectors(self, text: str) -> List[str]:
-    """Detect ALL sectors from pulse text using word boundary matching."""
-    import re
-    text_lower = text.lower()
-    matched_sectors = set()
-    
-    for sector, keywords in SECTOR_KEYWORDS.items():
-        for keyword in keywords:
-            pattern = r'\b' + re.escape(keyword) + r'\b'
-            if re.search(pattern, text_lower):
-                matched_sectors.add(sector)
-    
-    return list(matched_sectors) if matched_sectors else ['global']
+    return detect_zones_from_text(text)   # weighted scorer, config.py
+
+pulse_text = json.dumps(pulse).lower()    # the whole pulse
+sectors = self.detect_sectors(pulse_text)
+# + OTX industries mapped by config.OTX_INDUSTRY_ZONE_ALIASES; 'global' dropped once a sector is present
 ```
 
 ### Example Output
@@ -167,7 +160,7 @@ def detect_sectors(self, text: str) -> List[str]:
     'value': '192.168.1.100',
     'zone': ['finance', 'healthcare'],  # Array of all matching zones
     'tag': 'alienvault_otx',
-    'sources': ['alienvault_otx'],
+    'source': ['alienvault_otx'],
     'first_seen': '2024-01-15T10:30:00Z',
     # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.5,
@@ -194,7 +187,7 @@ def detect_sectors(self, text: str) -> List[str]:
     # no 'description' (2026-10: the pulse's text describes the report, not the family)
     'zone': ['finance', 'healthcare'],  # Array of all matching zones
     'tag': 'alienvault_otx',
-    'sources': ['alienvault_otx'],
+    'source': ['alienvault_otx'],
     'confidence_score': 0.5,
     'reported_techniques': ['T1059', 'T1071'],  # ATT&CK from pulse attack_ids (2026-10: reported, not MITRE-explicit)
     'pulse_id': '6aa4409a4290cc035d81500c',   # source report id → report-scoped INDICATES / ATTRIBUTED_TO
@@ -209,7 +202,7 @@ def detect_sectors(self, text: str) -> List[str]:
     'description': 'Referenced in OTX pulse: Emotet Banking Trojan IOCs',  # the MISP comment; never a CVE description (2026-10)
     'zone': ['finance', 'healthcare'],  # Array of all matching zones
     'tag': 'alienvault_otx',
-    'sources': ['alienvault_otx'],
+    'source': ['alienvault_otx'],
     'first_seen': '2024-01-15T10:30:00Z',
     # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.5,
@@ -227,7 +220,7 @@ def detect_sectors(self, text: str) -> List[str]:
     # no 'description' (2026-10: the pulse's text describes the report, not the actor)
     'zone': ['finance'],
     'tag': 'alienvault_otx',
-    'sources': ['alienvault_otx'],
+    'source': ['alienvault_otx'],
     'confidence_score': 0.5,
     'reported_techniques': ['T1059', 'T1071'],  # 2026-10
     'aliases': [],
@@ -270,7 +263,7 @@ NVD 2.0 requires **`pubStartDate` and `pubEndDate` together**; each window **≤
 - **Window.** `lastModStartDate` = cursor − `EDGEGUARD_NVD_CURSOR_OVERLAP_SEC` (default 3,600 s, at least 60 s, so a record NVD stamps with a clock behind the worker's is still read), `lastModEndDate` = now. Without a cursor (after a wipe, or on a deployment that never stored one), the run reads the last `EDGEGUARD_NVD_INCREMENTAL_DAYS` days (default 14).
 - **Reading in slices.** The window is read in time slices, oldest first, each with a single request (`_iter_lastmod_slices`). NVD evaluates the query again for every request, so paging is unsafe: a record modified again while the window is paged leaves the result, and the records behind it move down past a page boundary (on 2026-10-14, 75 of 19,520 records left a 14-day window while it was paged). A single answer has no page boundary, and a record modified again during the run only moves after the window's end, where the next run reads it.
   - A window whose `totalResults` exceeds one answer (2,000) is split by time into slices of about 1,500 records; no slice spans more than 120 days. An answer that holds fewer records than its `totalResults` although it had room for more is not split further: its records are handled and the read counts as incomplete.
-  - A slice narrower than 2 seconds that still holds more than 2,000 records is paged instead. When `totalResults` drops between its pages, the stretch below the current index is read again; a further drop meanwhile, or an empty page before the end, marks the read incomplete.
+  - A slice that cannot be split into parts of at least 2 seconds (one narrower than 4 seconds) and still holds more than 2,000 records is paged instead. When `totalResults` drops between its pages, the stretch below the current index is read again; a further drop meanwhile, or an empty page before the end, marks the read incomplete.
   - Each slice is handled before the next is read, so memory stays at one slice.
 - **CVEs MISP does not hold yet** (no `source:NVD` attribute) are added when they lie in the scope a baseline collects: published within `EDGEGUARD_BASELINE_DAYS` of now (default 730), on CISA's KEV list (`cisaExploitAdd`), or listed in `EDGEGUARD_NVD_EXTRA_CVE_IDS`. NVD also modifies older CVEs (1,002 published more than 24 months earlier in the 14 days to 2026-10-14); those are not added. The scope follows the `EDGEGUARD_BASELINE_DAYS` environment variable on the worker, default 730; the Airflow Variable `BASELINE_DAYS` and a run's `baseline_days` are not read. A test value left in place (such as 7) narrows the scope.
 - **CVEs MISP holds.** The run lists them with `MISPWriter.index_source_attributes` once the first record has been read: the complete listing of `source:NVD` attributes, non-exportable tags included (`includeAllTags`). A listing that fails writes nothing, since a partial one would make stored CVEs look new. Each read CVE is rebuilt and compared with each stored copy:
@@ -326,7 +319,7 @@ NVD 2.0 requires **`pubStartDate` and `pubEndDate` together**; each window **≤
     'description': 'SQL injection vulnerability in hospital management system...',
     'zone': ['healthcare'],  # Array of all matching zones
     'tag': 'nvd',
-    'sources': ['nvd'],
+    'source': ['nvd'],
     'first_seen': '2024-01-10T00:00:00Z',
     # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.9,  # 0.9 when on CISA KEV, 0.6 otherwise
@@ -378,9 +371,9 @@ def detect_sectors(self, text: str) -> list:
     'description': 'Remote code execution in power grid management software...',
     'zone': ['energy', 'finance'],  # Array of all matching zones
     'tag': 'cisa_kev',
-    'sources': ['cisa_kev'],
+    'source': ['cisa_kev'],
     'first_seen': '2024-01-15',
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
+    'last_updated': '2024-01-15T09:00:00+00:00',  # still emitted (wall-clock time); MISPWriter never reads it
     'confidence_score': 0.9,  # High confidence - confirmed exploited
     'severity': 'UNKNOWN',
     'cvss_score': None,
@@ -479,7 +472,7 @@ def detect_sectors(self, text):
     'description': 'Adversaries may send spearphishing emails with malicious attachments...',
     'zone': ['global'],  # Array of all matching zones
     'tag': 'mitre_attck',
-    'sources': ['mitre_attck'],
+    'source': ['mitre_attck'],
     'platforms': ['Windows', 'macOS', 'Linux'],
     'data_sources': ['Application Log', 'File', 'Network Traffic'],
     'deprecated': False,  # True for an object ATT&CK deprecated (2026-10); revoked objects are skipped
@@ -494,7 +487,7 @@ def detect_sectors(self, text):
     'description': 'APT29 is a threat group that has been attributed to the Russian government...',
     'zone': ['healthcare', 'finance'],  # Array of all matching zones
     'tag': 'mitre_attck',
-    'sources': ['mitre_attck'],
+    'source': ['mitre_attck'],
     'confidence_score': 0.7,
     'uses_techniques': ['T1566', 'T1059'],  # From STIX actor→technique **uses** (example)
 }
@@ -508,7 +501,7 @@ def detect_sectors(self, text):
     'description': 'Conti is a ransomware family that has been used in attacks against healthcare...',
     'zone': ['healthcare', 'finance', 'energy'],  # Array of all matching zones
     'tag': 'mitre_attck',
-    'sources': ['mitre_attck'],
+    'source': ['mitre_attck'],
     'confidence_score': 0.7,
     'uses_techniques': ['T1486', 'T1490'],  # From STIX malware→technique **uses** (example)
 }
@@ -521,9 +514,9 @@ def detect_sectors(self, text):
     'description': 'Credential dumping tool...',
     'zone': ['global'],
     'tag': 'mitre_attck',
-    'sources': ['mitre_attck'],
+    'source': ['mitre_attck'],
     'tool_types': ['credential-theft'],
-    'confidence_score': 0.95,
+    'confidence_score': 0.7,
     'uses_techniques': ['T1003.001', 'T1078'],
 }
 ```
@@ -537,12 +530,8 @@ def detect_sectors(self, text):
 **DAG:** `edgeguard_daily` (`collect_abuseipdb`)
 
 ### What It Does
-Fetches IP reputation / blacklist data from the AbuseIPDB API v2 and pushes indicators to MISP, including:
-- Abuse confidence score, total reports, and unique reporter count (`num_distinct_users`)
-- Reverse DNS (`domain`), associated `hostnames`
-- ISP, country code, usage type
-- Tor exit node and whitelist flags
-- Top 5 report objects per IP
+Fetches IP reputation / blacklist data from the AbuseIPDB API v2 and pushes indicators to MISP:
+- The blacklist (`GET /blacklist`, `confidenceMinimum` 90): for each address, the abuse confidence score (`confidence_score` = score / 100), the country code and `lastReportedAt` (the last-seen time the source reports; the endpoint gives no first-seen date). MISP receives the address, `last_seen`, the tags and the comment `AbuseIPDB confidence: N%, Country: XX`. Reverse DNS, hostnames, ISP, usage type, the Tor and whitelist flags and reports come only from the `check` endpoint (`check_ip`, `enrich_ip`), which no DAG task calls.
 
 ### Source
 - **Base URL:** `https://api.abuseipdb.com/api/v2`
@@ -561,7 +550,7 @@ At most one `GET /blacklist` request per run, as before, and none when the run r
 - **Which addresses.** AbuseIPDB chooses which addresses fill the request; an answer that fills it is logged (`the blacklist answer fills the request …`), because the blacklist may list more. An answer longer than the request keeps the addresses reported most recently (`lastReportedAt`) and logs a warning.
 
 ### Zone detection
-Typically **`global`** or derived from feed context — see `collect()` implementation for scoring → zone mapping.
+`detect_zones_from_text` on the country code and, when the answer carries them, ISP, usage type and domain (the blacklist answer does not); `global` when nothing matches.
 
 ---
 
@@ -589,7 +578,7 @@ What a lookup adds to the graph:
 
 VirusTotal deliberately sends no `malware_family` and no `reference`: both are single-valued on the node and the last writer wins, so a corroborating source would overwrite the family reported by ThreatFox or MalwareBazaar. For the same reason a lookup creates no `INDICATES` edge by itself. MD5, SHA-1, file size and sandbox verdicts are not carried. The label and rule names travel in the shared feed-metadata comment (`TF_META`), written only when VirusTotal returns them.
 
-Hashes are looked up **once**: the ledger remembers every delivered lookup, including hashes unknown to VirusTotal (HTTP 404), so no lookup is repeated across runs. An enriched hash is remembered only after its MISP push succeeded. The ledger is the only record of what was looked up (MISP cannot tell which hashes of other sources were enriched): if the file is lost, hashes inside the candidate window are looked up again, which costs quota but creates no duplicate attributes. The query shape was confirmed against a live MISP 2.5 on 2026-10-12 (HTTP 200, `response.Attribute` list).
+Hashes are looked up **once** while the ledger remembers them. It keeps the most recent 20,000 delivered lookups (`LOOKED_UP_MAX`), hashes unknown to VirusTotal (HTTP 404) included, so a remembered hash is not looked up again. An enriched hash is remembered only after its MISP push succeeded. The ledger is the only record of what was looked up (MISP cannot tell which hashes of other sources were enriched): if the file is lost, hashes inside the candidate window are looked up again, which costs quota but creates no duplicate attributes. The query shape was confirmed against a live MISP 2.5 on 2026-10-12 (HTTP 200, `response.Attribute` list).
 
 ### Free-tier safety (never blocks the workflow)
 
@@ -640,7 +629,7 @@ def _detect_zones_from_attributes(self, attrs):
 ```
 
 ### `virustotal_collector.py` (`VirusTotalCollector`) — not scheduled
-`src/collectors/virustotal_collector.py` is an older module (`run_virustotal_enrichment_collection` in the DAG file, `virustotal_enrich` in `run_pipeline`) that lists `/files` — a premium endpoint — and offers `query_domain` / `query_hash` / `query_ip` helpers. No DAG schedules it; it shares the key and the 4/min limiter but not the daily ledger. Use `VTCollector` for production runs.
+`src/collectors/virustotal_collector.py` is an older module (`run_virustotal_enrichment_collection` in the DAG file, `virustotal_enrich` in `run_pipeline`) that lists `/files` — a premium endpoint — and offers `query_domain` / `query_hash` / `query_ip` helpers. No DAG schedules it; it uses the same key and its own 4/min limiter (not `VTCollector`'s), and not the daily ledger. Use `VTCollector` for production runs.
 
 ---
 
@@ -674,7 +663,7 @@ Both collectors use `detect_zones_from_text()` on malware names and listing reas
 
 ```python
 # Feodo Collector
-zones = detect_zones_from_text(malware.lower())
+zones = detect_zones_from_text(" ".join(rec["families"]).lower())   # every family of the merged address
 
 # SSL Blacklist Collector
 zones = detect_zones_from_text(reason)
@@ -687,7 +676,7 @@ The keyword detector deliberately contains no malware family names (families are
 - **Parsing.** CSV with every field quoted and CRLF line endings, read with the `csv` module; the header row is recognised by name.
 - **One record per address.** The feed has one row per address and port, and a re-used address appears again under another family: 7,980 rows describe 7,607 addresses (290 addresses on several rows, 81 with more than one family). MISP holds one attribute per value, so rows are merged per address: earliest `first_seen`, latest `last_online`, every port, every family. The primary family is that of the most recently active row.
 - **Actionable or historical.** A server counts as recently active when its `last_online` date is within 30 days of the collection day (`FEODO_ACTIVE_DAYS`). The `c2_status` column is not used for this: it is only as fresh as the feed (the single "online" row of 2026-10-12 was last seen online on 2026-03-12). Recently active: `confidence:medium`, MISP detection flag set. Everything else: `confidence:low`, `to_ids=false`. abuse.ch advises against blocking on the complete history because addresses are re-used. On 2026-10-12 all 7,607 servers were historical.
-- **Not rewritten.** EdgeGuard does not update an attribute MISP already holds, so confidence and detection flag are those of the first collection.
+- **Not rewritten.** EdgeGuard does not rewrite the confidence tag or the detection flag of an attribute MISP already holds (the refresh of a re-reported indicator edits `last_seen` only, 2026-10), so both stay as they were at the first collection.
 - **Outages (Feodo Tracker and SSL Blacklist).** A timeout, a connection error, a truncated transfer or an HTTP 429 / 5xx after the retries is raised as a transient error: the Airflow task is skipped (`transient_external_error`) and the alert path is used; it no longer fails the task. An open circuit breaker skips the run (`feodo_circuit_breaker_open`, `sslbl_circuit_breaker_open`). HTTP 401 / 403 skips (`*_auth_denied`). Any other HTTP status, or a defect in the code, fails the task. A body that is not the CSV yields zero items and a warning.
 
 | Graph element | Value | From |
@@ -741,9 +730,9 @@ Each row is the SHA-1 fingerprint of a TLS certificate seen on malware infrastru
     'value': 'a1b2c3d4e5f6...',
     'zone': ['global'],  # Array of all matching zones
     'tag': 'ssl_blacklist',
-    'sources': ['ssl_blacklist'],
+    'source': ['ssl_blacklist'],
     'first_seen': '2024-01-10',
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
+    'last_updated': '2024-01-15T09:00:00+00:00',  # still emitted (wall-clock time); MISPWriter never reads it
     'confidence_score': 0.6,
     'listing_reason': 'dridex'
 }
@@ -765,7 +754,7 @@ Collects universal threat feeds that apply to all zones, including:
 
 ### Sources
 - **ThreatFox:** `https://threatfox-api.abuse.ch/api/v1/`
-- **URLhaus:** `https://urlhaus.abuse.ch/downloads/csv_recent/`
+- **URLhaus:** `https://urlhaus.abuse.ch/downloads/csv_recent/`. When it cannot be read, the run falls back to `https://urlhaus.abuse.ch/downloads/csv_top10k/`, and the task fails only when both fail
 
 ### Per-run caps (2026-10)
 
@@ -801,10 +790,10 @@ zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
     'value': 'malware-c2.example.com',
     'zone': ['finance', 'healthcare'],  # Array of all matching zones
     'tag': 'threatfox',
-    'sources': ['threatfox'],
+    'source': ['threatfox'],
     'first_seen': '2024-01-14T10:00:00Z',
     'last_seen': '2024-01-15T08:00:00Z',     # Most recent observation
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
+    'last_updated': '2024-01-15T09:00:00+00:00',  # still emitted (wall-clock time); MISPWriter never reads it
     'confidence_score': 0.75,
     'malware_family': 'emotet',
     'threat_type': 'botnet_cc',
@@ -820,9 +809,9 @@ zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
     'value': 'http://evil-site.com/malware.exe',
     'zone': ['healthcare'],  # Array of all matching zones
     'tag': 'urlhaus',
-    'sources': ['urlhaus'],
+    'source': ['urlhaus'],
     'first_seen': '2024-01-14',
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
+    'last_updated': '2024-01-15T09:00:00+00:00',  # still emitted (wall-clock time); MISPWriter never reads it
     'confidence_score': 0.6,
     'threat_type': 'malware_download',
     'tags': 'exe,windows'
@@ -968,7 +957,7 @@ Collects CISA ICS-CERT advisories (`ICSA-*`) and ICS medical advisories (`ICSMA-
 - **Listing files:** `index.txt` (all advisories as `YYYY/<file>.json`, ~3,960 entries 2010–2026, newest first) and `changes.csv` (`"YYYY/<file>.json","<ISO timestamp>"`, no header, newest first)
 - **Per advisory:** `document.tracking.{id,initial_release_date,current_release_date}`, `document.title`, `document.notes[]`, `document.references[]` (`category: self` → cisa.gov URL), `product_tree.branches[]` (vendor → product_name), `vulnerabilities[]` (`cve`, `cwe`, `notes`, `scores[].cvss_v3`)
 - **API Key:** Not required · **Licence:** TLP:WHITE ("Disclosure is not limited")
-- **Mode selection:** baseline → `index.txt` filtered to the years inside `baseline_days` and pre-filtered on the day-of-year encoded in the file name (`icsa-26-281-01` → 2026-10-08, with a 45-day margin), fetched newest-first, then filtered by `initial_release_date >= cutoff`; incremental → `changes.csv` rows newer than the stored cursor (`checkpoints/baseline_checkpoint.json` → `cisa_ics.incremental.cisa_ics_last_change_ts`, minus a 24 h overlap; first run uses `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS`, default 30). The cursor advances **only after a clean MISP push** (`failed == 0`), like the OTX/MITRE cursors.
+- **Mode selection:** baseline → `index.txt` filtered to the years inside `baseline_days` and pre-filtered on the day-of-year encoded in the file name (`icsa-26-281-01` → 2026-10-08, with a 45-day margin), fetched newest-first, then filtered by `initial_release_date >= cutoff`; incremental → `changes.csv` rows newer than the stored cursor (`checkpoints/baseline_checkpoint.json` → `cisa_ics.incremental.cisa_ics_last_change_ts`, minus a 24 h overlap; first run uses `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS`, default 30). The cursor advances only when every selected advisory was fetched (`fetch_failed == 0`) and the MISP push had no failure (`failed == 0`), or, on a run without items, when no fetch failed. A baseline does not set it.
 
 ### Zone Mapping (source-asserted, fixed table)
 
@@ -1032,7 +1021,7 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
 # replaced both): a CVE NVD also holds shows NVD's lists and CVSS, the advisory's only where NVD gives none.
 ```
 
-### Flags & knobs (`src/config.py`, section "CISA ICS advisories collector (2026-10)")
+### Flags & knobs (`src/config.py`, section "CISA ICS advisories collector (2026-10)"; `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS` and the 24 h cursor overlap are in `src/collectors/cisa_ics_collector.py`)
 
 | Env var | Default | Meaning |
 |---|---|---|
@@ -1103,7 +1092,7 @@ Both variables are forwarded into the containers by `docker-compose.yml` (`x-com
     'mime_type': 'application/x-executable',
     'reporter': 'abuse_ch',
     'reference': 'https://bazaar.abuse.ch/sample/38cbdf41…/',   # sample page; triggers TF_META
-    'tags': ['elf'],                        # TF_META.tags → tf_tags in Neo4j
+    'tags': ['elf'],                        # TF_META.tags → raw_data of the SOURCED_FROM edge (no node property)
 }
 ```
 
@@ -1162,7 +1151,7 @@ upper bound for a single baseline run.
 |-----------|-----------------|-------------------------|----------------------------|
 | **NVD** | Full windowed collection (no artificial run-level cap on baseline) | `resultsPerPage <= 2000`; `pubStartDate..pubEndDate` must span `<= 120` days per request | Already iterates 120-day windows via `iter_nvd_published_windows`. PR-M1 adds a defensive WARNING + ignore if an incremental-style `limit` env is present in baseline (prevents ~99% silent truncation) |
 | **OTX** | `max_pages = 200` × `50/page` ≈ 10k pulses (~7 min runtime, 2 s between pages) | No publicly documented pulse cap; effective throttle ≈ 30 req/min on the free tier | Current settings produce **~100k nodes + relationships** on a 730-day run. `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (default 200, forwarded by `docker-compose.yml`) sets the ceiling; a baseline that stops at it with a full last page logs a warning (2026-10) |
-| **CISA KEV** | Full KEV snapshot per run, compared with EdgeGuard's MISP copies in every run (2026-10) | Public JSON, no auth, no rate limit; no per-entry modification date | Revised entries edited in place, at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) per run ([§ 3](#revisions-every-run-compares-the-catalogue-with-misp-2026-10)); `notes`, `cwes` and `forensicTriage` are not collected |
+| **CISA KEV** | Full KEV snapshot per run, compared with EdgeGuard's MISP copies in every run (2026-10) | Public JSON, no auth, no rate limit; no per-entry modification date | Revised entries edited in place, at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) per run ([§ 3](#revisions-every-run-compares-the-catalogue-with-misp-2026-10)); `notes`, `cwes` and `forensicTriage` are not stored in MISP (`cwes` and `notes` are read onto the item but not written to `NVD_META`) |
 | **MITRE ATT&CK** | Full STIX 2.1 bundle per run | Public GitHub raw file, no rate limit | No change planned |
 | **MISP (local)** | Full MISP server content matching the filter | Bounded by local MISP; no external quota | No change planned |
 | **AbuseIPDB** | At most one blacklist request per run, of at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (10,000) addresses, baseline and daily (2026-10; the incremental default of 200 does not apply) | Free plan: at most 10,000 addresses per blacklist request; 5 blacklist requests per UTC day; `check` quota 1,000 per day (the source key check) | A fetched blacklist is reused for the rest of its UTC day, and a 429 fails the task (2026-10, [§ 5](#5-abuseipdb-collector)); a plan that returns more per request needs `AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST` raised; the number of requests stays at most one per run, none when the answer is reused |
@@ -1293,4 +1282,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-16 — § 12 CISA ICS, *Example Output*: a CSAF score block gives no impact or exploitability sub-score, so the item's CVSS payload carries None for both (it carried 0.0, which the graph showed); the item's lists only fill a CVE node without them and a CVSS sub-node NVD has asserted keeps NVD's values; § 2 NVD, *Incremental runs*: another record's lists and CISA ICS's CVSS payload no longer replace NVD's, and an NVD record without a CVSS version CISA ICS also gives takes NVD out of that sub-node's `sources`, so CISA ICS's next record sets its values (the score paragraph said a withdrawn version no longer scores the node, which then holds only from that record on). Same day: § 3 CISA KEV, *Revisions*: every run (the baseline and the 4-hourly run) compares the whole catalogue with EdgeGuard's MISP copies, adds the CVEs MISP lacks and edits in place the copies of entries CISA revised (`NVD_META` and tags; `ransomware:known` detached on a revert, no other `ransomware:` tag touched), with the listing (which copies are compared and edited, and which are synced but not kept in step), comparison, cap (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN`), stop rules, removals, status counters, log lines, effect on the graph (the STIX import never replaces the edge's record) and limits; `EDGEGUARD_CISA_INCREMENTAL_DAYS` retired; *Scope*: with `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false` an entry outside the window does not follow revisions, and NVD's record only fills its KEV fields; *Duplicate avoidance* names the KEV path; § 2 NVD: NVD's record only fills the four KEV fields; the ceiling table's KEV row. Same day: *Duplicate avoidance*: items no MISP attribute can be built from count as failed pushes only when they are all or at least half of the source's items in the push (`CONVERT_FAILED_MIN_SHARE`, the value justified); fewer are reported by the `[CONVERT]` line (per source: how many of its items, the reasons, whether counted as failed; writer stats `items_not_converted` and `items_not_converted_failed`), so a few bad records neither fail a run nor hold the OTX, CISA ICS or NVD-baseline cursor or the MITRE ATT&CK ETag; the status error states that rule next to MISP as a cause. Same day: *Duplicate avoidance*: `MISPWriter.push_items` checks a complete cross-event listing (or `known_source_keys`) before the day's event is looked up, so a (source, date) group MISP already holds entirely, or one without attributes, neither looks up nor creates an event (dedup off or a listing that stopped early keeps the old order); items no MISP attribute can be built from are logged as `[CONVERT]` (they were dropped silently); `[DEDUP] All N items were already present` only when nothing failed or was dropped, N being the attributes found present; a listing that stopped early keeps the event lookup first because the refresh of a re-reported indicator needs the copy MISP wrote last. Same day: § 12 CISA ICS: one item per CVE (`merge_items_per_cve`, the union of the advisories' sectors, ids and references, the zones of each advisory, the newest advisory's text, the larger advisory id first among advisories of the same date, the same in any order); the advisory ids, CISA's raw sector names and the zones of each advisory (`advisory_zones`) travel in `NVD_META` into `SOURCED_FROM.raw_data` and as `cisa_ics:<advisory id>` record references, a sector link citing only the advisories that name its sector (`stated_refs`); a mapped sector is an `advisory_sector` statement at 0.9 on AFFECTS ("deployed in", never TARGETS). Same day: § 5 AbuseIPDB: at most one blacklist request per run, none when the run reuses the answer fetched earlier on the same UTC day (it said one per run, the daily run one and a baseline one more), also in the baseline limits table; "Blacklist quota and cached answer": the daily and the baseline runs share one cache key (`{confidenceMinimum: 90, limit: 10000}` with the default settings), so on a day with both the run that collects second reuses the first one's answer within the maximum age, and a lower `EDGEGUARD_MAX_ENTRIES` or baseline `BASELINE_COLLECTION_LIMIT` gives a run its own request. Same day: § 5 AbuseIPDB: new subsection "Blacklist quota and cached answer" (a blacklist 429 is the spent daily quota of 5 requests and fails the task at once, without the rate-limit backoff; a non-empty answer is kept in `state/abuseipdb_blacklist_cache.json` and reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`; an empty answer is not kept), the free plan's blacklist quota in the source and run-limit rows. Same day: § 5 "Blacklist quota and cached answer": the 02:00 UTC daily run reuses an answer that a run with its parameters fetched after 00:00 UTC that day (a failed daily task cleared after midnight), and otherwise sends a request; an answer from an earlier UTC day is not reused. Same day: `MISPCollector` limits: the sync's `restSearch` fallback is paginated and asks for event headers only (the page still named the single `limit: 1000` request). Same day: the kind of date of an indicator's latest report is recorded as `last_reported_basis`, from which the aging rule derives `aging_basis`. Same day: the re-reported section: Feodo Tracker and SSL Blacklist report the whole list a run reads, AbuseIPDB at most 10,000 blacklist addresses, chosen by AbuseIPDB, so a listed address outside that answer is not refreshed. Same day: per-run caps of AbuseIPDB (§ 5: one blacklist request per run, its limit at most the free plan's 10,000) and of Feodo Tracker and SSL Blacklist (§ 7), in the baseline limits table and the re-reported section: each run reports the whole list, so every listed entry's stored copy is refreshed; the SSL Blacklist column header is recognised by its name. Same day: § 1 OTX: the MISP writer adds no several-actor mark to a stored copy (MISP keeps what the sources said); a pulse edited to name several actors whose IOCs MISP already holds and which brings no new IOC is not marked, a known limit. Same day: new section "The source date an indicator ages from": per source, what `last_seen` holds, read for the indicator's report time `min(T, coalesce(L, T))`; the re-reported section states how the refresh moves the indicator's age (only when the source's date moved, or to the time of the edit for a source without one) and that an indicator re-reported within the interval keeps its older date until it has passed. Same day: OTX CVE references, the NVD record fields, the KEV and CISA ICS notes and the MITRE descriptions: a CVE's description follows the source ranking NVD > CISA KEV > CISA ICS > any other source, an entity's (Technique and Tactic included) MITRE ATT&CK > a curated source > any other source, each with `description_source`; the dates stay NVD's (others fill). Same day: OTX: `OTX_META.pa` holds the first pair of each family and adversary before the later pulses' pairs; the several-actor mark accumulates on `Indicator.several_actor_pulses`, which step 2d and the acceptance check read, and reaches IOCs MISP already holds through their stored copies; a mark judged without the canonical reference is kept apart (`sapn`) and never stored. Same day: a technique's `MITRE_TACTIC_PHASES` block goes through the metadata guards. Prior: 2026-10-15 — OTX: a pulse's description is stored on no item and still decides every item's zone through sector detection; an OTX-only entity's `pulse_ids[]` hold the pulse that first named it and the other pulses of that run; MITRE: where MISPWriter writes the description (after the block, else the whole comment) and its cut lengths for techniques and tactics (255). Same day: OTX: malware-family and adversary items carry no description (the pulse's text described the report and replaced ATT&CK's); MITRE: descriptions set a `Malware`, `ThreatActor` or `Tool` node's description, other sources only fill it, and tactics carry ATT&CK's description. Same day: ThreatFox / URLhaus per-run caps sized to each feed's window, newest kept when reached (§ 8 and the baseline limits table); new section "Re-reported indicators" (the refresh of a stored copy MISP last wrote more than `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` ago, which keeps the source's dates and moves MISP's timestamp; only copies in EdgeGuard events; `EDGEGUARD_MISP_REFRESH_MAX_PER_RUN`, `EDGEGUARD_MISP_REFRESH_MAX_SECONDS` and the stop after 5 failed edits in a row; which indicators it reaches (Feodo Tracker, SSL Blacklist and AbuseIPDB only their first 200 entries per daily run); its cost in MISP and in the incremental sync; bound and limit) and the duplicate-avoidance bullet; OTX: the same-run dedup keeps the most restrictive pulse TLP; a metadata comment that is not a JSON object is read as no metadata, and list elements other than strings and numbers are dropped. Same day: OTX: the collector decides on a pulse's whole adversary list whether its actors are one actor; pairs carry the pulse (`family::adversary::pulse`) and a pulse naming several actors is marked on its items (`several_actor_pulses`). Same day: § 1 OTX: family names lose the ATT&CK software id suffix of the MISP galaxy naming (`"Cobalt Strike - S0154"` → `Cobalt Strike`, the original kept as an alias), and `malware_families` objects named by `display_name` or `id` are read. Same day: OTX: the pulse reference of a `cve_references` item is never a CVE description. Same day: a CVE's description and dates come from NVD's record; KEV, CISA ICS and OTX records only fill them, and an OTX indicator's `OTX_META` comment is never a description. Same day: NVD: CISA's SSVC decision points travel with the record (`NVD_META` key `ssvc`) and are set on the CVE node from NVD's record only; a stored copy without them is edited once. Same day: MITRE ATT&CK: revoked and deprecated objects (revoked objects skipped, their names given to the successor, a revoked technique the map does not list kept with an `[ATTACK-REVOKED]` warning; deprecated objects kept and marked). Same day: § 2 NVD: every CVSS version NVD supplies is kept; `attack_vector` is NVD's word for the scoring CVSS's attack vector (`None` without CVSS), and the KEV, OTX and ICS records send none; the NVD_META digest ignores `attack_vector`; § 7 SSL Blacklist: fingerprints are collected as `x509-fingerprint-sha1` (MISP type `x509-fingerprint-sha1`, `[x509-certificate:hashes.'SHA-1' = …]` in STIX) instead of `sha1` file hashes; what reaches the graph; overview: "MISP push: attribute types and characters" (generic hashes typed by digest length, 4-byte characters stripped or the attribute skipped and counted as failed, default TLP at sync for an untagged attribute); § 1 OTX indicator types (non-file hashes not collected, e-mail addresses typed as e-mail); § 3 KEV baseline scope (whole catalogue) and ransomware use without a derived score; the source-truthful helper note no longer names a review tool; after #189: the OTX baseline page ceiling is the forwarded setting `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (removed from the planned list). Prior: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._
+_Last updated: 2026-10-17 — *Common Output Fields*: items carry `source` (a list; the examples said `sources`), the item types include `tactic` and `tool` and indicators carry `indicator_type`, feed dates are normalised by MISPWriter, and the CISA KEV, AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist and `virustotal_collector` items still carry a `last_updated` key MISPWriter never reads (it said PR-M2 removed it everywhere); § 1 OTX: zone detection is `detect_zones_from_text` on the whole pulse plus OTX industries; § 2 NVD: a slice narrower than 4 seconds is paged; § 4 MITRE: the tool example's confidence is 0.7; § 5 AbuseIPDB: the blacklist gives score, country and `lastReportedAt` only (domain, hostnames, ISP, usage type, Tor and whitelist flags and reports come from the `check` endpoint, which no DAG task calls), and the zone detector's input; § 6 VirusTotal: the ledger remembers the most recent 20,000 lookups, and `virustotal_collector` has its own limiter; § 7 Feodo Tracker: the zone text is every family of the merged address, and a stored copy's `last_seen` is refreshed while confidence and detection flag stay; § 8 URLhaus: the `csv_top10k` fallback; § 12 CISA ICS: the cursor also waits for every advisory to be fetched and a baseline does not set it, and `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS` is read in the collector module; § 13 MalwareBazaar: `tags` stays in the `SOURCED_FROM` edge's `raw_data`; baseline limits table: KEV `notes` and `cwes` are read onto the item but not stored in MISP. Prior: 2026-10-16 — § 12 CISA ICS, *Example Output*: a CSAF score block gives no impact or exploitability sub-score, so the item's CVSS payload carries None for both (it carried 0.0, which the graph showed); the item's lists only fill a CVE node without them and a CVSS sub-node NVD has asserted keeps NVD's values; § 2 NVD, *Incremental runs*: another record's lists and CISA ICS's CVSS payload no longer replace NVD's, and an NVD record without a CVSS version CISA ICS also gives takes NVD out of that sub-node's `sources`, so CISA ICS's next record sets its values (the score paragraph said a withdrawn version no longer scores the node, which then holds only from that record on). Same day: § 3 CISA KEV, *Revisions*: every run (the baseline and the 4-hourly run) compares the whole catalogue with EdgeGuard's MISP copies, adds the CVEs MISP lacks and edits in place the copies of entries CISA revised (`NVD_META` and tags; `ransomware:known` detached on a revert, no other `ransomware:` tag touched), with the listing (which copies are compared and edited, and which are synced but not kept in step), comparison, cap (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN`), stop rules, removals, status counters, log lines, effect on the graph (the STIX import never replaces the edge's record) and limits; `EDGEGUARD_CISA_INCREMENTAL_DAYS` retired; *Scope*: with `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false` an entry outside the window does not follow revisions, and NVD's record only fills its KEV fields; *Duplicate avoidance* names the KEV path; § 2 NVD: NVD's record only fills the four KEV fields; the ceiling table's KEV row. Same day: *Duplicate avoidance*: items no MISP attribute can be built from count as failed pushes only when they are all or at least half of the source's items in the push (`CONVERT_FAILED_MIN_SHARE`, the value justified); fewer are reported by the `[CONVERT]` line (per source: how many of its items, the reasons, whether counted as failed; writer stats `items_not_converted` and `items_not_converted_failed`), so a few bad records neither fail a run nor hold the OTX, CISA ICS or NVD-baseline cursor or the MITRE ATT&CK ETag; the status error states that rule next to MISP as a cause. Same day: *Duplicate avoidance*: `MISPWriter.push_items` checks a complete cross-event listing (or `known_source_keys`) before the day's event is looked up, so a (source, date) group MISP already holds entirely, or one without attributes, neither looks up nor creates an event (dedup off or a listing that stopped early keeps the old order); items no MISP attribute can be built from are logged as `[CONVERT]` (they were dropped silently); `[DEDUP] All N items were already present` only when nothing failed or was dropped, N being the attributes found present; a listing that stopped early keeps the event lookup first because the refresh of a re-reported indicator needs the copy MISP wrote last. Same day: § 12 CISA ICS: one item per CVE (`merge_items_per_cve`, the union of the advisories' sectors, ids and references, the zones of each advisory, the newest advisory's text, the larger advisory id first among advisories of the same date, the same in any order); the advisory ids, CISA's raw sector names and the zones of each advisory (`advisory_zones`) travel in `NVD_META` into `SOURCED_FROM.raw_data` and as `cisa_ics:<advisory id>` record references, a sector link citing only the advisories that name its sector (`stated_refs`); a mapped sector is an `advisory_sector` statement at 0.9 on AFFECTS ("deployed in", never TARGETS). Same day: § 5 AbuseIPDB: at most one blacklist request per run, none when the run reuses the answer fetched earlier on the same UTC day (it said one per run, the daily run one and a baseline one more), also in the baseline limits table; "Blacklist quota and cached answer": the daily and the baseline runs share one cache key (`{confidenceMinimum: 90, limit: 10000}` with the default settings), so on a day with both the run that collects second reuses the first one's answer within the maximum age, and a lower `EDGEGUARD_MAX_ENTRIES` or baseline `BASELINE_COLLECTION_LIMIT` gives a run its own request. Same day: § 5 AbuseIPDB: new subsection "Blacklist quota and cached answer" (a blacklist 429 is the spent daily quota of 5 requests and fails the task at once, without the rate-limit backoff; a non-empty answer is kept in `state/abuseipdb_blacklist_cache.json` and reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`; an empty answer is not kept), the free plan's blacklist quota in the source and run-limit rows. Same day: § 5 "Blacklist quota and cached answer": the 02:00 UTC daily run reuses an answer that a run with its parameters fetched after 00:00 UTC that day (a failed daily task cleared after midnight), and otherwise sends a request; an answer from an earlier UTC day is not reused. Same day: `MISPCollector` limits: the sync's `restSearch` fallback is paginated and asks for event headers only (the page still named the single `limit: 1000` request). Same day: the kind of date of an indicator's latest report is recorded as `last_reported_basis`, from which the aging rule derives `aging_basis`. Same day: the re-reported section: Feodo Tracker and SSL Blacklist report the whole list a run reads, AbuseIPDB at most 10,000 blacklist addresses, chosen by AbuseIPDB, so a listed address outside that answer is not refreshed. Same day: per-run caps of AbuseIPDB (§ 5: one blacklist request per run, its limit at most the free plan's 10,000) and of Feodo Tracker and SSL Blacklist (§ 7), in the baseline limits table and the re-reported section: each run reports the whole list, so every listed entry's stored copy is refreshed; the SSL Blacklist column header is recognised by its name. Same day: § 1 OTX: the MISP writer adds no several-actor mark to a stored copy (MISP keeps what the sources said); a pulse edited to name several actors whose IOCs MISP already holds and which brings no new IOC is not marked, a known limit. Same day: new section "The source date an indicator ages from": per source, what `last_seen` holds, read for the indicator's report time `min(T, coalesce(L, T))`; the re-reported section states how the refresh moves the indicator's age (only when the source's date moved, or to the time of the edit for a source without one) and that an indicator re-reported within the interval keeps its older date until it has passed. Same day: OTX CVE references, the NVD record fields, the KEV and CISA ICS notes and the MITRE descriptions: a CVE's description follows the source ranking NVD > CISA KEV > CISA ICS > any other source, an entity's (Technique and Tactic included) MITRE ATT&CK > a curated source > any other source, each with `description_source`; the dates stay NVD's (others fill). Same day: OTX: `OTX_META.pa` holds the first pair of each family and adversary before the later pulses' pairs; the several-actor mark accumulates on `Indicator.several_actor_pulses`, which step 2d and the acceptance check read, and reaches IOCs MISP already holds through their stored copies; a mark judged without the canonical reference is kept apart (`sapn`) and never stored. Same day: a technique's `MITRE_TACTIC_PHASES` block goes through the metadata guards. Prior: 2026-10-15 — OTX: a pulse's description is stored on no item and still decides every item's zone through sector detection; an OTX-only entity's `pulse_ids[]` hold the pulse that first named it and the other pulses of that run; MITRE: where MISPWriter writes the description (after the block, else the whole comment) and its cut lengths for techniques and tactics (255). Same day: OTX: malware-family and adversary items carry no description (the pulse's text described the report and replaced ATT&CK's); MITRE: descriptions set a `Malware`, `ThreatActor` or `Tool` node's description, other sources only fill it, and tactics carry ATT&CK's description. Same day: ThreatFox / URLhaus per-run caps sized to each feed's window, newest kept when reached (§ 8 and the baseline limits table); new section "Re-reported indicators" (the refresh of a stored copy MISP last wrote more than `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` ago, which keeps the source's dates and moves MISP's timestamp; only copies in EdgeGuard events; `EDGEGUARD_MISP_REFRESH_MAX_PER_RUN`, `EDGEGUARD_MISP_REFRESH_MAX_SECONDS` and the stop after 5 failed edits in a row; which indicators it reaches (Feodo Tracker, SSL Blacklist and AbuseIPDB only their first 200 entries per daily run); its cost in MISP and in the incremental sync; bound and limit) and the duplicate-avoidance bullet; OTX: the same-run dedup keeps the most restrictive pulse TLP; a metadata comment that is not a JSON object is read as no metadata, and list elements other than strings and numbers are dropped. Same day: OTX: the collector decides on a pulse's whole adversary list whether its actors are one actor; pairs carry the pulse (`family::adversary::pulse`) and a pulse naming several actors is marked on its items (`several_actor_pulses`). Same day: § 1 OTX: family names lose the ATT&CK software id suffix of the MISP galaxy naming (`"Cobalt Strike - S0154"` → `Cobalt Strike`, the original kept as an alias), and `malware_families` objects named by `display_name` or `id` are read. Same day: OTX: the pulse reference of a `cve_references` item is never a CVE description. Same day: a CVE's description and dates come from NVD's record; KEV, CISA ICS and OTX records only fill them, and an OTX indicator's `OTX_META` comment is never a description. Same day: NVD: CISA's SSVC decision points travel with the record (`NVD_META` key `ssvc`) and are set on the CVE node from NVD's record only; a stored copy without them is edited once. Same day: MITRE ATT&CK: revoked and deprecated objects (revoked objects skipped, their names given to the successor, a revoked technique the map does not list kept with an `[ATTACK-REVOKED]` warning; deprecated objects kept and marked). Same day: § 2 NVD: every CVSS version NVD supplies is kept; `attack_vector` is NVD's word for the scoring CVSS's attack vector (`None` without CVSS), and the KEV, OTX and ICS records send none; the NVD_META digest ignores `attack_vector`; § 7 SSL Blacklist: fingerprints are collected as `x509-fingerprint-sha1` (MISP type `x509-fingerprint-sha1`, `[x509-certificate:hashes.'SHA-1' = …]` in STIX) instead of `sha1` file hashes; what reaches the graph; overview: "MISP push: attribute types and characters" (generic hashes typed by digest length, 4-byte characters stripped or the attribute skipped and counted as failed, default TLP at sync for an untagged attribute); § 1 OTX indicator types (non-file hashes not collected, e-mail addresses typed as e-mail); § 3 KEV baseline scope (whole catalogue) and ransomware use without a derived score; the source-truthful helper note no longer names a review tool; after #189: the OTX baseline page ceiling is the forwarded setting `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (removed from the planned list). Prior: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._

@@ -18,7 +18,7 @@ Collectors create/update MISP events whose **`Event.info`** looks like **`EdgeGu
 
 ### Collector → MISP duplicate avoidance
 
-**Daily `Event.info`** (`…-{date}`) means MISP does **not** globally dedupe the same IOC across different EdgeGuard events. **`MISPWriter`** can **prefetch** existing **`(type, value)`** on the **target** event (paginated **`POST …/attributes/restSearch`**) and skip redundant adds when **`EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS`** is enabled, and lists the source's attributes across every EdgeGuard event (**`EDGEGUARD_MISP_CROSS_EVENT_DEDUP`**). Since 2026-10-16 a complete cross-event listing is checked before the day's event is looked up, so a re-run MISP already holds entirely creates no `EdgeGuard-{source}-{date}` event; nor does a group whose items all fail conversion. Such items (an unknown item type, an empty value) are reported by a `[CONVERT]` log line and count as failed pushes only when they are all or at least half of a source's items in the push, and `[DEDUP] All N items were already present` is logged only when nothing failed or was dropped. **OTX** and **MITRE** also use **incremental cursors** / **conditional HTTP** so fewer items reach the push path. Full behavior and defaults: [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance* and [README.md](../README.md) (environment table).
+**Daily `Event.info`** (`…-{date}`) means MISP does **not** globally dedupe the same IOC across different EdgeGuard events. **`MISPWriter`** can **prefetch** existing **`(type, value)`** on the **target** event (paginated **`POST …/attributes/restSearch`**) and skip redundant adds when **`EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS`** is enabled, and lists the source's attributes across every MISP event that carries the source tag (**`EDGEGUARD_MISP_CROSS_EVENT_DEDUP`**). Since 2026-10-16 a complete cross-event listing is checked before the day's event is looked up, so a re-run MISP already holds entirely creates no `EdgeGuard-{source}-{date}` event; nor does a group whose items all fail conversion. Such items (an unknown item type, an empty value) are reported by a `[CONVERT]` log line and count as failed pushes only when they are all or at least half of a source's items in the push, and `[DEDUP] All N items were already present` is logged only when nothing failed or was dropped. **OTX**, **NVD** and **CISA ICS** keep **incremental cursors** and **MITRE** uses **conditional HTTP**, so fewer items reach the push path. **CISA KEV** compares the whole catalogue with its stored copies. Full behavior and defaults: [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance* and [README.md](../README.md) (environment table).
 
 **`fetch_edgeguard_events()`** first uses paginated **`/events/index`** (or **`/events`**) for a lightweight event list (no attribute scan), then filters client-side: **`Event.info`** contains **`EDGEGUARD_MISP_EVENT_SEARCH`** (default **`EdgeGuard`**) or **`org.name`** is **`EdgeGuard`**. That avoids **`restSearch`** timeouts on instances with very large events (e.g. URLhaus / SSL blacklist attribute counts). If the index is unavailable, it falls back to **paginated** PyMISP / **`restSearch`** for event headers only (`metadata`), filtered with `eventinfo` `%<EDGEGUARD_MISP_EVENT_SEARCH>%` (MISP 2.4.177 or later; an older MISP answers every event) and then by the same client-side filter as the index (2026-10; the `search` key sent before is not a restSearch parameter, so every event of the store came back with all of its attributes) (PR-N29 H3: `_FALLBACK_PAGE_SIZE=500` × `_FALLBACK_MAX_PAGES=200` = 100K-event safety cap; cap-hit raises `_MispFallbackHardError` rather than silently truncating — see [`RUNBOOK.md`](RUNBOOK.md) § 8 for the operator triage tree). The fallback path emits the `[MISP-FETCH-FALLBACK-ACTIVE]` log token and increments the `edgeguard_misp_fetch_fallback_active_total{branch,outcome}` Counter (PR-N31), which fires the `EdgeGuardMispFetchFallbackActive` (warning) and `EdgeGuardMispFetchFallbackHardError` (critical) Prometheus alerts. If sync logs **"No events"** but the UI shows EdgeGuard events, confirm deployed code matches the repo and see **[AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)** § *MISP → Neo4j sync logs "No events"*.
 
@@ -30,9 +30,9 @@ Collectors create/update MISP events whose **`Event.info`** looks like **`EdgeGu
 
 ---
 
-## Source catalog (13 slots)
+## Source catalog
 
-Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**13** rows: **11** active + **2** placeholders). The table below is the same inventory in compact form.
+Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **10** active, **2** placeholders, **2** flag-guarded collectors that are off by default (CISA ICS Advisories and MalwareBazaar), and the FIRST EPSS post-sync enrichment, which writes to Neo4j without MISP). The table below is the same inventory in compact form.
 
 | Source | Type | Status | Pushes to MISP | Notes |
 |--------|------|--------|----------------|--------|
@@ -44,12 +44,15 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**13** rows: **11** acti
 | AbuseIPDB | API | Active | Yes | Optional key |
 | ThreatFox | API | Active | Yes | Abuse.ch key |
 | URLhaus | API | Active | Yes | |
-| Feodo Tracker | CSV | Active | Yes | Finance-heavy families |
+| Feodo Tracker | CSV | Active | Yes | Botnet C&C (keyword detector: Global in practice) |
 | SSL Blacklist | CSV | Active | Yes | |
 | Energy sector | — | Placeholder | No | Needs membership / feed |
 | Healthcare sector | — | Placeholder | No | Needs membership / feed |
+| CISA ICS Advisories | CSAF JSON (GitHub raw) | Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, off) | Yes | CVE ↔ sector as CISA states it |
+| MalwareBazaar | CSV export | Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, off) | Yes | sha256 + family label |
+| FIRST EPSS | gzip CSV | Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, on) | No (writes to Neo4j) | Exploit-prediction score on existing CVE nodes |
 
-**Optional `MISPCollector`:** pulls from MISP **`/events`** with **its own** limits; **not** wired into default baseline collector step 2. This is **not** counted as one of the **12** DATA_SOURCES slots.
+**Optional `MISPCollector`:** pulls from MISP **`/events`** with **its own** limits; **not** wired into default baseline collector step 2. It is not counted among the DATA_SOURCES.md sources.
 
 **Sector mix in your graph:** Depends on feeds, classifier, and time range. Use Neo4j (`MATCH (n) RETURN labels(n), count(*)`) or the MISP UI — **do not** rely on static percentage tables in old docs.
 
@@ -67,6 +70,8 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**13** rows: **11** acti
 | `AbuseIPDBCollector` | AbuseIPDB | Yes |
 | `ThreatFoxCollector`, `URLhausCollector` | abuse.ch | Yes |
 | `FeodoCollector`, `SSLBlacklistCollector` | Feodo / SSLBL CSV | Yes |
+| `CISAICSCollector` | CISA ICS Advisories (flag-guarded) | Yes |
+| `MalwareBazaarCollector` | MalwareBazaar (flag-guarded) | Yes |
 | `EnergyCollector`, `HealthcareCollector` | Placeholders | No |
 
 ---
@@ -87,7 +92,7 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**13** rows: **11** acti
 
 ### Tier 3 — ISAC / membership feeds
 
-FS-ISAC, Health-ISAC, CISA ICS, etc. — out of scope for default collectors; ingest via MISP or future connectors.
+FS-ISAC, Health-ISAC, etc.: no collector; ingest via MISP or future connectors. CISA ICS advisories have the flag-guarded `cisa_ics` collector.
 
 ### Tier 4 — Extra OSINT (ideas)
 
@@ -105,10 +110,11 @@ Collectors embed structured metadata as JSON in MISP attribute comments using th
 
 | Prefix | Source | Fields |
 |--------|--------|--------|
-| `OTX_META:` | AlienVault OTX | attack_ids, targeted_countries, tags, references, author_name, adversary, TLP, industries, the indicator's own description (not the pulse's); the pulses that listed the IOC (`pulse_id`, `report_ids`), their families (`mf`), their `family::adversary::pulse` pairs (`pa`, the first pair of each family and adversary before the later pulses' pairs) and those of them naming several actors (`sap`, judged with the canonical threat-actor reference and stored on `Indicator.several_actor_pulses`; `sapn`, judged by name without it, used by the sync's run only) |
-| `TF_META:` | ThreatFox | malware_malpedia, reference, reporter, tags, threat_type_desc, last_seen, confidence_level |
+| `OTX_META:` | AlienVault OTX | attack_ids, targeted_countries, pulse_tags, pulse_references, pulse_author, pulse_tlp, otx_industries, pulse_name, indicator_role, is_active, the indicator's own description (not the pulse's); the pulses that listed the IOC (`pulse_id`, `report_ids`), their families (`mf`), their `family::adversary::pulse` pairs (`pa`, the first pair of each family and adversary before the later pulses' pairs) and those of them naming several actors (`sap`, judged with the canonical threat-actor reference and stored on `Indicator.several_actor_pulses`; `sapn`, judged by name without it, used by the sync's run only) |
+| `TF_META:` | ThreatFox, URLhaus, Feodo Tracker, MalwareBazaar, VirusTotal | malware_malpedia, reference, tags, last_seen, threat_type_desc, malware_family, reporter, attributed_to, threat_type, ioc_id, malware_alias; url_status, last_online, threat_label, yara_rules and sigma_rules only when the item carries them |
 | `MITRE_USES_TECHNIQUES:` | MITRE ATT&CK; AlienVault OTX (malware families, adversaries) | Technique IDs from STIX uses relationships (`t`), an OTX pulse's ATT&CK ids and pulse id (`rt`, `pid`); ATT&CK's description of the entity follows on the next line. The block is never a description (2026-10), and the sync takes no description from an OTX attribute: one written before 2026-10 carries the pulse's description there |
-| `NVD_META:` | NVD | CVSS data, CWE, references, affected products |
+| `NVD_META:` | NVD, CISA KEV, CISA ICS | CVSS payloads, CWE, references, affected products, status, `ssvc`; KEV: the four cisa_* fields and known_ransomware_use; CISA ICS: advisory_ids, advisory_zones, ics_sectors |
+| `MITRE_TACTIC_PHASES:` | MITRE ATT&CK techniques | `p`: the technique's tactic phases (at most 20); ATT&CK's description follows on the next line |
 
 These are parsed by `run_misp_to_neo4j.py` during the MISP→Neo4j sync to populate enrichment fields on Neo4j nodes. Maximum comment length: 4000 characters. A longer `OTX_META` or `TF_META` block is shortened with a warning, never cut mid-token, so the JSON always parses: lists first, in a fixed order, then long strings, then optional keys. Since 2026-10 `OTX_META.pa` is shortened before `report_ids` and `mf`, from the end (the later pulses' pairs first), `sap` and `sapn` keep the marks of the pulses still in `pulse_id` + `report_ids` (a mark goes with its pulse's id; the sync stores every `sap` entry on the indicator, so a dropped mark is lost on that IOC and travels on the pulse's other IOCs), and each shortened list keeps the longest part that fits. The MISP writer never edits a stored `OTX_META` comment (2026-10): the several-actor mark is EdgeGuard's judgement and goes only into the attributes it pushes, so a pulse edited to name several actors whose IOCs MISP already holds and which brings no new IOC is not marked (a known limit, to be closed by a per-pulse MISP record). Before, an IOC that many pulses list kept few of its report ids and families: 120 pulses naming several actors and 10 naming one kept 1 of 129 report ids and 1 of 8 families.
 
@@ -119,7 +125,7 @@ These are parsed by `run_misp_to_neo4j.py` during the MISP→Neo4j sync to popul
 | Approach | Status |
 |----------|--------|
 | Keyword (`SECTOR_KEYWORDS` in `config.py`) | Default |
-| Malware-family hints (Feodo, SSLBL, …) | Active |
+| Malware family → sector through graph relationships (no family keywords) | Active |
 | LLM / hybrid | Not in default path |
 
 ---
@@ -158,4 +164,4 @@ Early prototypes discussed skipping MISP. **Current product path** is **collecto
 
 ---
 
-_Last updated: 2026-10-16 — *Collector → MISP duplicate avoidance*: items that fail conversion count as failed pushes only when they are all or at least half of a source's items in the push; fewer are only reported (`[CONVERT]`). Same day: *Collector → MISP duplicate avoidance*: a complete cross-event listing is checked before the day's event is looked up, so a re-run MISP already holds entirely, or a group whose items all fail conversion, creates no `EdgeGuard-{source}-{date}` event; items that fail conversion are logged as `[CONVERT]`. Same day: the writer's event lookup sends `eventinfo` (exact name) with `metadata` and pages up to 40 × 500 event headers on a MISP older than 2.4.177; the sync's `restSearch` fallback asks for event headers with `eventinfo` `%EdgeGuard%` and keeps EdgeGuard rows client-side (`info` and `search` are not restSearch parameters). Same day: the MISP writer never edits a stored `OTX_META` comment: the several-actor mark goes only into the attributes it pushes (a known limit for a pulse edited to name several actors whose IOCs MISP already holds). Same day: `OTX_META` within its 4000 characters: the first pair of each family and adversary before the later pulses' pairs, `pa` shortened before `report_ids` and `mf`, `sap` / `sapn` kept to the pulses still listed, each shortened list as long as fits; `sapn` (a mark judged without the canonical reference); the writer adds a mark to stored copies of held IOCs. Prior: 2026-10-15 — Metadata Comment Prefixes: `OTX_META` carries the indicator's own description, not the pulse's; `MITRE_USES_TECHNIQUES` is written for OTX families and adversaries too, the text after it is ATT&CK's description, and neither the block nor an OTX attribute's text is a description. Prior: 2026-04-26 — PR-N33 docs audit: documented PR-N29 fallback hardening (paginated restSearch + `_MispFallbackHardError` sentinel + safety cap) and PR-N31 observability (Counter + 2 Prometheus alerts). Prior: 2026-03-28._
+_Last updated: 2026-10-17 — *Source catalog*: 15 sources as in DATA_SOURCES.md, with CISA ICS Advisories and MalwareBazaar (flag-guarded collectors that push to MISP; Tier 3 said CISA ICS had no default collector) and FIRST EPSS; Feodo Tracker and the classification table: no family is mapped to a sector by keyword; *Metadata Comment Prefixes*: the OTX_META keys as written (`pulse_tags`, `pulse_author`, …; no `adversary` key), TF_META from ThreatFox, URLhaus, Feodo Tracker, MalwareBazaar and VirusTotal without a `confidence_level` key, NVD_META from NVD, CISA KEV and CISA ICS, and `MITRE_TACTIC_PHASES`; *Collector → MISP duplicate avoidance*: the cross-event listing covers every MISP event carrying the source tag, and NVD and CISA ICS keep cursors too. Prior: 2026-10-16 — *Collector → MISP duplicate avoidance*: items that fail conversion count as failed pushes only when they are all or at least half of a source's items in the push; fewer are only reported (`[CONVERT]`). Same day: *Collector → MISP duplicate avoidance*: a complete cross-event listing is checked before the day's event is looked up, so a re-run MISP already holds entirely, or a group whose items all fail conversion, creates no `EdgeGuard-{source}-{date}` event; items that fail conversion are logged as `[CONVERT]`. Same day: the writer's event lookup sends `eventinfo` (exact name) with `metadata` and pages up to 40 × 500 event headers on a MISP older than 2.4.177; the sync's `restSearch` fallback asks for event headers with `eventinfo` `%EdgeGuard%` and keeps EdgeGuard rows client-side (`info` and `search` are not restSearch parameters). Same day: the MISP writer never edits a stored `OTX_META` comment: the several-actor mark goes only into the attributes it pushes (a known limit for a pulse edited to name several actors whose IOCs MISP already holds). Same day: `OTX_META` within its 4000 characters: the first pair of each family and adversary before the later pulses' pairs, `pa` shortened before `report_ids` and `mf`, `sap` / `sapn` kept to the pulses still listed, each shortened list as long as fits; `sapn` (a mark judged without the canonical reference); the writer adds a mark to stored copies of held IOCs. Prior: 2026-10-15 — Metadata Comment Prefixes: `OTX_META` carries the indicator's own description, not the pulse's; `MITRE_USES_TECHNIQUES` is written for OTX families and adversaries too, the text after it is ATT&CK's description, and neither the block nor an OTX attribute's text is a description. Prior: 2026-04-26 — PR-N33 docs audit: documented PR-N29 fallback hardening (paginated restSearch + `_MispFallbackHardError` sentinel + safety cap) and PR-N31 observability (Counter + 2 Prometheus alerts). Prior: 2026-03-28._

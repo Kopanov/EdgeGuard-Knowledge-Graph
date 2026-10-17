@@ -932,10 +932,11 @@ class TestBugbotRound2Fixes:
         adaptive scaling DEPENDS on it (turning it off defeats the
         whole point of PR-N4)."""
         d = self._docs()
-        idx = d.find("EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS")
-        assert idx != -1
-        # Find the row containing the env var
-        row = d[idx : idx + 800]
+        # The knob table's row (2026-10: the section's lead paragraph now names the variable
+        # first, in the list of settings docker-compose.yml forwards).
+        idx = d.find("| `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS`")
+        assert idx != -1, "MISP_TUNING.md must have a knob-table row for EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS"
+        row = d[idx : d.find("\n", idx)]
         assert "adaptive scaling" in row.lower() or "existing_attrs_count" in row.lower(), (
             "round-2 doc fix: prefetch row must explain the adaptive-scaling dependency"
         )

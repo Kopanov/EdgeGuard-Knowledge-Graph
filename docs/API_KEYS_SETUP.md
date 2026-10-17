@@ -62,6 +62,32 @@ This guide explains how to obtain API keys for all the threat intelligence sourc
 
 ---
 
+### AbuseIPDB
+
+1. Register at [https://www.abuseipdb.com/register](https://www.abuseipdb.com/register)
+2. Log in, open **API** in your account area and click **Create Key**
+3. Copy the key
+4. Set it in your environment:
+   ```bash
+   export ABUSEIPDB_API_KEY="your-abuseipdb-key"
+   ```
+
+**Note:** The free plan allows 1,000 `check` requests and 5 `blacklist` requests per UTC day. Without the key the AbuseIPDB collector is skipped (optional source).
+
+---
+
+### ThreatFox / abuse.ch
+
+1. Sign in at [https://auth.abuse.ch/](https://auth.abuse.ch/) and create an Auth-Key (one key serves every abuse.ch platform)
+2. Set it in your environment:
+   ```bash
+   export THREATFOX_API_KEY="your-abuse-ch-auth-key"
+   ```
+
+**Note:** Without the key the ThreatFox collector is skipped (optional source). MalwareBazaar needs no key; when `THREATFOX_API_KEY` is set, it sends the same key as `Auth-Key`.
+
+---
+
 ## Neo4j Remote Connection
 
 For connecting to a remote Neo4j server instead of localhost:
@@ -109,18 +135,18 @@ services:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MISP_URL` | MISP server URL | *(required, no default — Compose example: `https://misp.local`)* |
+| `MISP_URL` | MISP server URL | `https://localhost:8443` when unset (`src/config.py`; `docker-compose.yml` sets `https://misp.local`). Set it explicitly on every deployment |
 | `MISP_API_KEY` | MISP API authentication | *(required)* |
-| `EDGEGUARD_API_KEY` | EdgeGuard REST API auth (production-required; `EDGEGUARD_ALLOW_UNAUTH=true` only for local dev) | *(required in production)* |
+| `EDGEGUARD_API_KEY` | EdgeGuard REST and GraphQL API auth. Required in production whatever `EDGEGUARD_ALLOW_UNAUTH` says; in non-production (`EDGEGUARD_ENV` = `dev`, `development`, `local`, `staging` or `test`) required on a non-loopback bind unless `EDGEGUARD_ALLOW_UNAUTH=1` | *(required in production)* |
 | `OTX_API_KEY` | AlienVault OTX API key | *(optional)* |
 | `NVD_API_KEY` | NVD API key | *(optional)* |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB API key (used by `src/collectors/abuseipdb_collector.py`) | *(optional)* |
-| `THREATFOX_API_KEY` | ThreatFox API key (used by `src/collectors/global_feed_collector.py`) | *(optional)* |
+| `THREATFOX_API_KEY` | abuse.ch Auth-Key (ThreatFox; also sent by MalwareBazaar when set; used by `src/collectors/global_feed_collector.py`) | *(optional)* |
 | `VIRUSTOTAL_API_KEY` | VirusTotal API key | *(optional)* |
 | `NEO4J_URI` | Neo4j connection URI | `bolt://localhost:7687` |
 | `NEO4J_USER` | Neo4j username | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j password | *(required, no default)* |
-| `NEO4J_DATABASE` | Neo4j database name | `neo4j` |
+| `NEO4J_DATABASE` | Database for every Neo4j session (multi-database servers only) | *(unset: the pipeline uses the server's default database; the scripts that query over HTTP, such as `scripts/verify_fresh_baseline.py`, use `neo4j`)* |
 | `EDGEGUARD_SSL_VERIFY` | Enable SSL verification for HTTPS (MISP, collectors). Fallback: `SSL_VERIFY` if unset/empty. Not used: `SSL_CERT_VERIFY`. | `true` |
 
 ---
@@ -140,7 +166,7 @@ services:
    - Revoke old keys promptly
 
 4. **Restrict key permissions when possible**
-   - MISP: Use read-only keys for collection
+   - MISP: the key in `MISP_API_KEY` must belong to a MISP user whose role can create events and add, edit and tag attributes. The collectors write through `MISPWriter` (`POST /events`, `POST /events/{id}`, `POST /attributes/edit/{uuid}`), so a read-only key makes every collector push fail. Give a separate read-only key only to consumers that just read MISP.
    - OTX: Free tier is sufficient for most use cases
 
 5. **Enable SSL in production**
@@ -151,4 +177,4 @@ services:
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: replaced deprecated `bolt+routing://` with `neo4j://` cluster URI scheme (driver 5.x); fixed `MISP_URL` "default" claim (it's required, no built-in default); added `EDGEGUARD_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, `VIRUSTOTAL_API_KEY` to the env-var summary; added `bolt+s://` / `bolt+ssc://` rows for TLS variants. Prior: 2026-03-17._
+_Last updated: 2026-10-17 — the MISP key must be able to create events and add, edit and tag attributes (it said to use a read-only key for collection, which makes every collector push fail); `MISP_URL` falls back to `https://localhost:8443` when unset (it said required, no default); `NEO4J_DATABASE` unset means the server's default database (it said `neo4j`); AbuseIPDB and ThreatFox / abuse.ch key sections added, and `THREATFOX_API_KEY` is the abuse.ch Auth-Key MalwareBazaar also sends; `EDGEGUARD_ALLOW_UNAUTH` does not lift the key requirement in production. Prior: 2026-04-26 — PR-N33 docs audit: replaced deprecated `bolt+routing://` with `neo4j://` cluster URI scheme (driver 5.x); fixed `MISP_URL` "default" claim (it's required, no built-in default); added `EDGEGUARD_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, `VIRUSTOTAL_API_KEY` to the env-var summary; added `bolt+s://` / `bolt+ssc://` rows for TLS variants. Prior: 2026-03-17._

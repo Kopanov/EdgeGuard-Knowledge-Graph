@@ -106,8 +106,12 @@ docker stats misp misp-db --no-stream      # current usage
 
 > See **"Where MISP runs"** above for which path applies to your
 > image (`harvarditsecurity` uses Apache `/etc/php/8.x/apache2/`;
-> `coolacid` uses fpm `/etc/php/<ver>/fpm/conf.d/`). The values
-> below are identical for both images.
+> `coolacid` uses fpm `/etc/php/<ver>/fpm/conf.d/`). The reference
+> `php-overrides.ini` for `coolacid` sets larger values (`memory_limit`
+> 8G, `post_max_size` and `upload_max_filesize` 512M,
+> `max_execution_time` and `max_input_time` 3600). Use them only on a
+> MISP host with 16 GB or more. On an 8 GB host, edit the file to the
+> TL;DR values below before `docker compose up -d`.
 
 ### PHP — `php.ini` (Apache mod_php) or `conf.d/zz-edgeguard.ini` (php-fpm)
 
@@ -157,12 +161,17 @@ docker compose restart misp misp_db
 ```
 
 **For `coolacid/misp-docker:latest`** — use the reference compose +
-`php-overrides.ini` already in this repo:
+`php-overrides.ini` already in this repo. The reference
+`php-overrides.ini` sets `memory_limit = 8G`, `post_max_size` and
+`upload_max_filesize` 512M and `max_execution_time` /
+`max_input_time` 3600, not the TL;DR values; on a host with less than
+16 GB, edit the copied file to the TL;DR values first:
 ```bash
 # Use the reference layout
 cp docs/sources/MISP/docker-compose.yml /path/to/your/misp-deploy/
 cp docs/sources/MISP/php-overrides.ini /path/to/your/misp-deploy/
 cd /path/to/your/misp-deploy/
+# On an 8 GB host: edit php-overrides.ini to the TL;DR values here
 docker compose up -d
 ```
 
@@ -187,17 +196,27 @@ down to whatever rate the un-tuned MISP can handle.
 
 EdgeGuard's `MISPWriter.push_items` adapts per-event automatically.
 The thresholds below are env-tunable — defaults are sane for the MISP
-settings above.
+settings above. The variables are read from the Airflow worker's
+environment, and `docker-compose.yml` forwards every one of them from
+`.env` to the Airflow service. It has forwarded
+`EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS`,
+`EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD`,
+`EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD`,
+`EDGEGUARD_MISP_BACKOFF_THRESHOLD` and
+`EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC` since 2026-10 (an empty value
+of the last four means the code default); before, a value set
+in `.env` for those five did not reach the container, and the code
+defaults applied.
 
 | Env var | Default | When to change |
 |---|---|---|
 | `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | `500` | Hard ceiling; the adaptive logic downscales below this when the target event is large. Lower it (e.g. `200`) only if you're stuck on un-tuned MISP and want to slow down even small events. |
-| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Sleep between batches. The adaptive logic widens this to `15s` / `30s` for large/huge events. NVD incremental runs also sleep it after every 50 attribute edits (not widened). |
+| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Sleep between batches. The adaptive logic widens this to `15s` / `30s` for large/huge events. Attribute edits also sleep it after every 50 edits, without widening: the NVD incremental run, the CISA KEV in-place edits (every run compares the whole catalogue) and the `last_seen` refresh of indicators a source reports again (2026-10). |
 | `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` | `50000` | Above this attribute count on the target event, EdgeGuard switches to `batch_size=100, throttle=15s`. Lower if your MISP is undersized. |
 | `EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD` | `100000` | Above this, switches to `batch_size=50, throttle=30s`. |
 | `EDGEGUARD_MISP_BACKOFF_THRESHOLD` | `3` | Number of consecutive 5xx batch failures before EdgeGuard inserts an extended cooldown. **Valid range: 2–100.** Setting `1` would trigger the 5-min cooldown after a single failure (which `@retry_with_backoff` already handles internally), turning every transient 5xx into a multi-hour stall — values below 2 are silently clamped to the default 3 with a WARN. |
 | `EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC` | `300.0` | Cooldown duration. 5 min is enough for MISP's PHP to recycle and MySQL to free transaction locks. |
-| `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` | `true` | Cross-event dedup. **Leave on** — the adaptive scaling tier resolution depends on `existing_attrs_count` which is computed from the prefetch result. With prefetch off, the writer has no per-event size signal and falls back to the configured default batch/throttle for every event, which is exactly the un-adaptive behaviour PR-N4 tried to fix. Turning it off only makes sense if you have an external dedup layer (rare). |
+| `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` | `true` | Master switch of the duplicate check before a push: existing `(type, value)` on the target event (its count also drives the adaptive tier) and, with `EDGEGUARD_MISP_CROSS_EVENT_DEDUP` (default `true`), among the attributes that carry the source's tag in any MISP event. **Leave on** — the adaptive scaling tier resolution depends on `existing_attrs_count` which is computed from the prefetch result. With prefetch off, the writer has no per-event size signal and falls back to the configured default batch/throttle for every event, which is exactly the un-adaptive behaviour PR-N4 tried to fix. Turning it off only makes sense if you have an external dedup layer (rare). |
 
 ### Adaptive scaling tiers (the rule EdgeGuard applies per event)
 
@@ -219,30 +238,28 @@ small CISA event still uses default batching.
 | `edgeguard_misp_push_permanent_failure_total` | `source` | Each increment = one batch (default 500 attrs) lost after `@retry_with_backoff(max_retries=4)` exhausted. **Non-zero rate is the operator signal that backend is undersized.** Labelled by `source` only (PR-N4 round 2 dropped `event_id` to keep cardinality bounded — each MISP run creates a date-stamped event, which would generate one new time series per source per day). |
 | `edgeguard_misp_push_backoff_triggered_total` | `source` | Each increment = EdgeGuard entered an extended cooldown (default 5 min) after N consecutive 5xx failures. Distinguishes "occasional flap" from "sustained backend overload." |
 
-### Suggested alert rules
+### Alert rules (shipped)
+
+Both rules ship in `prometheus/alerts.yml` (group
+`edgeguard_pipeline_observability`), one series per `source`:
 
 ```yaml
 - alert: EdgeGuardMispBatchPermanentFailure
-  expr: sum(rate(edgeguard_misp_push_permanent_failure_total[5m])) > 0
+  expr: sum by (source) (rate(edgeguard_misp_push_permanent_failure_total[5m])) > 0
   for: 5m
-  annotations:
-    summary: "EdgeGuard losing MISP batches permanently"
-    description: |
-      MISP rejected one or more attribute batches after EdgeGuard's
-      retry budget exhausted. Each failure is ~500 attributes lost.
-      Check MISP backend RAM / PHP memory_limit / MySQL innodb_buffer_pool_size.
-      See docs/MISP_TUNING.md.
+  labels:
+    severity: critical
 
 - alert: EdgeGuardMispSustainedBackoff
-  expr: sum(rate(edgeguard_misp_push_backoff_triggered_total[15m])) > 1
+  expr: sum by (source) (increase(edgeguard_misp_push_backoff_triggered_total[15m])) > 1
   for: 15m
-  annotations:
-    summary: "EdgeGuard MISPWriter in extended cooldown >1×/15min"
-    description: |
-      MISPWriter is hitting consecutive 5xx failures often enough to
-      enter the 5-minute cooldown more than once per 15 minutes.
-      Backend is sustained-degraded. Tune MISP per docs/MISP_TUNING.md.
+  labels:
+    severity: warning
 ```
+
+Do not use `rate(...) > 1` for the backoff rule: `rate()` is per
+second, so that expression means more than one cooldown per second
+(900 per 15 minutes) and in practice never fires.
 
 ---
 
@@ -280,6 +297,10 @@ rate going up rather than down, roll back in this order:
    EDGEGUARD_MISP_PUSH_BATCH_SIZE=100           # was 500
    EDGEGUARD_MISP_BATCH_THROTTLE_SEC=15.0       # was 5.0
    ```
+   Set them in the Airflow worker's environment (`.env` on Compose;
+   `docker-compose.yml` has forwarded
+   `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` since 2026-10, before which
+   that line had no effect there).
    This makes EdgeGuard work *with* the un-tuned MISP. It is slower
    (a 730d baseline that would have taken 4h now takes 8–10h) but
    correctness is preserved.
@@ -319,3 +340,7 @@ the recommended posture.
 - PHP `memory_limit`: https://www.php.net/manual/en/ini.core.php
 - InnoDB `innodb_buffer_pool_size`:
   https://dev.mysql.com/doc/refman/8.0/en/innodb-buffer-pool-resize.html
+
+---
+
+_Last updated: 2026-10-17 — the reference `php-overrides.ini` for `coolacid` sets larger values than the TL;DR (8G, 512M, 3600 s; for hosts with 16 GB or more), where the page said the values were identical for both images; `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` also paces the CISA KEV in-place edits and the `last_seen` refresh of re-reported indicators; `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` is the master switch of the per-event and the cross-event duplicate check; the two alert rules are the ones shipped in `prometheus/alerts.yml` (`sum by (source)`, and `increase()` for the backoff rule, whose documented `rate(...) > 1` never fired); `docker-compose.yml` forwards the prefetch switch and the four threshold and back-off knobs since 2026-10. Prior: 2026-10-15 — NVD incremental runs sleep `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` after every 50 attribute edits. Prior: 2026-04-21 — first version (PR-N4)._
