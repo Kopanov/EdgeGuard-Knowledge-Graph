@@ -49,13 +49,23 @@ The sentinel records who holds it:
   32 h ``dagrun_timeout``). ``baseline_release_lock`` removes it after a
   successful run. A ``failed`` run keeps the sentinel (clearing the failed
   task resumes the same run, which must stay under the mutex) until the age
-  cap; a ``success`` state prunes it. Acquiring again for the same run id is
+  cap; a ``success`` state prunes it. Exception (2026-10-16): a refusal of
+  ``baseline_clean`` before the wipe (conf typo, ``wipe_scope``, backup gate)
+  releases it, and ``baseline_clean`` and ``baseline_start`` take it again
+  when they run; the collectors refuse while no baseline holds it, and the
+  full sync, the baseline's ``build_relationships`` and its enrichment
+  refuse unless the sentinel names their own DAG run
+  (``is_own_dag_run_sentinel``). Acquiring again for the same run id is
   idempotent (task retries, manual re-runs).
 
   The collector tasks of that same DAG run pass their run identity to
   ``baseline_skip_reason(own_holder=...)`` and are not skipped by the sentinel
   their own run holds; a sentinel of another run or of an in-process baseline
-  still skips them. ``baseline_acquire_lock`` checks this before the
+  still skips them. Since 2026-10-16 the baseline's ``build_relationships``
+  passes its run identity as well, and the writing tasks of the scheduled
+  sync DAG (``run_neo4j_sync``, ``build_relationships``,
+  ``run_enrichment_jobs``) call ``baseline_skip_reason`` at their start, not
+  only ``check_sync_needed``. ``baseline_acquire_lock`` checks this before the
   destructive step and fails the run if the own collectors would be skipped.
 
 Why not Airflow pools / ExternalTaskSensor

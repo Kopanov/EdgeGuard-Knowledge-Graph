@@ -106,7 +106,9 @@ class TestFix1AlertRulesWired:
             expr = rule["expr"]
             import re
 
-            metric_names = re.findall(r"\bedgeguard_\w+", expr)
+            # 2026-10-16: label matchers are removed first; their values are no metric names
+            # (``{dag_id="edgeguard_baseline"}`` in EdgeGuardBuildRelationshipsSilentDeath).
+            metric_names = re.findall(r"\bedgeguard_\w+", re.sub(r"\{[^}]*\}", "", expr))
             assert metric_names, f"alert {rule['alert']!r} expr references no metric: {expr}"
             for metric in metric_names:
                 assert f'"{metric}"' in metrics_src, (
