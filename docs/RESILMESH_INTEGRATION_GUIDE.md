@@ -169,32 +169,21 @@ client.merge_resilmesh_cve({
 
 #### Software on Host
 ```python
-client.create_softwareversion_on_host(
-    version="Apache/2.4.41",
-    hostname="hospital-server-01",
-    tag="healthcare"
-)
+client.create_softwareversion_on_host(version="Apache/2.4.41", hostname="hospital-server-01")
 ```
 
 #### IP in Subnet
 ```python
-client.create_ip_part_of_subnet(
-    address="192.168.1.100",
-    range="192.168.1.0/24",
-    tag="healthcare"
-)
+client.create_ip_part_of_subnet(address="192.168.1.100", subnet_range="192.168.1.0/24")
 ```
 
 #### Service on Host
 ```python
-client.create_networkservice_on_host(
-    port=443,
-    protocol="tcp",
-    hostname="hospital-server-01",
-    tag="healthcare",
-    status="open"
-)
+client.create_networkservice_on_host(port=443, protocol="tcp", hostname="hospital-server-01", status="open")
 ```
+
+These helpers take no `tag` argument; they MATCH the two nodes by their keys and write only the
+relationship (and, for a network service, its `status`).
 
 #### CVE to CVSS
 
@@ -206,16 +195,15 @@ contains CVSS data. There is no standalone helper to call:
 ```python
 # CVSS data flows through merge_cve, not via a separate helper.
 client.merge_cve(
-    cve_id="CVE-2021-43297",
-    description="Apache Log4j2 JNDI features...",
-    cvss_v31_data={
-        "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
-        "base_score": 9.8,
+    {
+        "cve_id": "CVE-2021-43297",
+        "description": "Apache Log4j2 JNDI features...",
+        "cvss_v31_data": {"vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", "base_score": 9.8},
     },
     source_id="nvd",
 )
-# → MERGE the CVSSv31 node + the (:CVE)-[:HAS_CVSS_v31]->(:CVSSv31) edge
-#   inside _merge_cvss_node, in the same transaction as the CVE itself.
+# → merge_cve MERGEs the CVE, then _merge_cvss_node MERGEs the CVSSv31 node and both
+#   HAS_CVSS_v31 edges in a transaction of its own; a failed sub-write makes merge_cve return False.
 ```
 
 The four standalone `create_cve_has_cvss_v2/v30/v31/v40` helpers were
@@ -394,11 +382,10 @@ def test_create_all_resilmesh_nodes(client):
     
     # ... test other node types
     
-    # Verify
-    stats = client.get_stats()
-    assert stats['IP'] >= 1
-    assert stats['Host'] >= 1
-    assert stats['Device'] >= 1
+    # Verify (get_stats counts only EdgeGuard labels and has no relationship counts by type)
+    with client.driver.session() as s:
+        for label in ("IP", "Host", "Device"):
+            assert s.run(f"MATCH (n:{label}) RETURN count(n) AS c").single()["c"] >= 1
 
 def test_create_all_resilmesh_relationships(client):
     """Test that all ResilMesh relationships can be created"""
@@ -419,11 +406,11 @@ def test_create_all_resilmesh_relationships(client):
     })
     
     # Test relationship
-    client.create_softwareversion_on_host("1.0", "test-host", "test")
+    client.create_softwareversion_on_host("1.0", "test-host")
     
-    # Verify
-    stats = client.get_stats()
-    assert stats['relationships'].get('ON', 0) >= 1
+    # Verify (get_stats has no relationship counts by type)
+    with client.driver.session() as s:
+        assert s.run("MATCH (:SoftwareVersion)-[r:ON]->(:Host) RETURN count(r) AS c").single()["c"] >= 1
 
 def test_alert_processing(client):
     """Test complete alert processing pipeline"""
@@ -532,13 +519,17 @@ echo "=== Integration Test Complete ==="
 ### Manual Testing with Cypher
 
 ```cypher
--- Verify all ResilMesh node types exist
-MATCH (n) 
-WHERE n.tag = 'healthcare' OR n.tag = 'test'
-RETURN labels(n)[0] as node_type, count(n) as count
+// Verify the test nodes exist (by key or list membership: merge_ip stores `tag` as a list,
+// merge_host / merge_device / merge_softwareversion store no `tag`)
+MATCH (n)
+WHERE (n:IP AND 'test' IN coalesce(n.tag, []))
+   OR (n:Host AND n.hostname = 'test-host')
+   OR (n:SoftwareVersion AND n.version = '1.0')
+   OR (n:Device AND n.device_id = 'dev-001')
+RETURN labels(n)[0] AS node_type, count(n) AS count
 ORDER BY count DESC;
 
--- Verify ResilMesh relationships
+// Verify ResilMesh relationships
 MATCH ()-[r]->()
 WHERE type(r) IN ['ON', 'TO', 'ASSIGNED_TO', 'HAS_IDENTITY', 'IS_A',
                   'HAS_ASSIGNED', 'PART_OF', 'FOR', 'SUPPORTS',
@@ -547,21 +538,26 @@ WHERE type(r) IN ['ON', 'TO', 'ASSIGNED_TO', 'HAS_IDENTITY', 'IS_A',
 RETURN type(r) as relationship_type, count(r) as count
 ORDER BY count DESC;
 
--- Verify bridge relationships (planned: Indicator → IP via INDICATOR_RESOLVES_TO,
--- distinct from ISIM's IP → DomainName RESOLVES_TO. The edge is not yet created
--- by EdgeGuard at HEAD — see RESILMESH_INTEROPERABILITY.md § cross-layer bridges.)
--- MATCH (i:Indicator)-[r:INDICATOR_RESOLVES_TO]->(ip:IP)
--- RETURN i.value as indicator, ip.address as resolved_ip;
+// Verify bridge relationships (planned: Indicator → IP via INDICATOR_RESOLVES_TO,
+// distinct from ISIM's IP → DomainName RESOLVES_TO. The edge is not yet created
+// by EdgeGuard at HEAD — see RESILMESH_INTEROPERABILITY.md § cross-layer bridges.)
+// MATCH (i:Indicator)-[r:INDICATOR_RESOLVES_TO]->(ip:IP)
+// RETURN i.value as indicator, ip.address as resolved_ip;
 
--- Test enrichment chain (uses CVE → Vulnerability bridge created by
--- enrichment_jobs.bridge_vulnerability_cve)
+// Test enrichment chain: an indicator INDICATES malware and EXPLOITS the CVE its own CVE tag names
 MATCH (i:Indicator {value: '192.168.1.100'})
-OPTIONAL MATCH (i)-[:ATTRIBUTED_TO]->(m:Malware)
-OPTIONAL MATCH (i)-[:EXPLOITS]->(v:Vulnerability)-[:REFERS_TO]->(c:CVE)
+OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
+OPTIONAL MATCH (i)-[:EXPLOITS]->(c:CVE)
 RETURN i.value, collect(DISTINCT m.name), collect(DISTINCT c.cve_id);
 
--- Clean up test data
-MATCH (n) WHERE n.tag = 'test' DETACH DELETE n;
+// Clean up the test nodes, only those EdgeGuard created
+MATCH (n)
+WHERE n.edgeguard_managed = true
+  AND ((n:IP AND 'test' IN coalesce(n.tag, []))
+    OR (n:Host AND n.hostname = 'test-host')
+    OR (n:SoftwareVersion AND n.version = '1.0')
+    OR (n:Device AND n.device_id = 'dev-001'))
+DETACH DELETE n;
 ```
 
 ---
@@ -592,10 +588,10 @@ Warning: Constraint creation: Constraint already exists
 ```
 **Solution:**
 ```cypher
--- List existing constraints
+// List existing constraints
 SHOW CONSTRAINTS;
 
--- Drop and recreate if needed
+// Drop and recreate if needed
 DROP CONSTRAINT constraint_name IF EXISTS;
 ```
 
@@ -605,12 +601,12 @@ Enrichment latency > 500ms
 ```
 **Solution:**
 ```cypher
--- Check for missing indexes
+// Check for missing indexes
 SHOW INDEXES;
 
--- Analyze query performance
+// Analyze query performance
 EXPLAIN MATCH (i:Indicator {value: $value})
-OPTIONAL MATCH (i)-[:ATTRIBUTED_TO]->(m:Malware)
+OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
 RETURN i, m;
 ```
 
@@ -662,21 +658,24 @@ node_data = {
 # Honest-NULL: only set if the source genuinely reported the value;
 # do not synthesize from the import wall clock.
 edge_data = {
-    "imported_at":               now,            # set every merge
+    "imported_at":               now,            # ON CREATE only: when EdgeGuard first linked this source (immutable)
     "updated_at":                now,            # set every merge
     "source_reported_first_at":  source_first,   # MIN-CASE; may be None
     "source_reported_last_at":   source_last,    # MAX-CASE; may be None
 }
 ```
 
+The ResilMesh helpers `merge_host`, `merge_device`, `merge_subnet`, `merge_networkservice`,
+`merge_softwareversion`, `merge_application`, `merge_role`, `merge_component`, `merge_mission`,
+`merge_organizationunit`, `merge_missiondependency`, `merge_resilmesh_user`, `merge_resilmesh_cve` and
+`merge_node` still set `first_seen` (the first EdgeGuard write) on the node; `merge_ip` and
+`merge_resilmesh_vulnerability` set `first_imported_at`.
+
 ### 3. Zone Handling
 Use multi-zone support for cross-sector threats:
 ```python
 zones = tags if tags else [zone]
-data = {
-    "zone": zone,       # Primary zone
-    "zones": zones      # All applicable zones
-}
+data = {"zone": zones}  # zone is a list on every node (Alert included); the alert path keeps only VALID_ZONES names
 ```
 
 ### 4. Error Handling
@@ -695,7 +694,7 @@ except Exception as e:
 
 EdgeGuard's ResilMesh integration today (2026-10):
 
-- ✅ **Shared Neo4j database** — EdgeGuard writes the threat-intelligence layer (`Indicator`, `Malware`, `ThreatActor`, `Campaign`, `Technique`, `Tactic`, `Tool`, `Sector`, `Source`, `CVE` + `CVSSv*`) with `edgeguard_managed` on every node it creates and `edgeguard_enriched` on partner nodes it writes to; 21 relationship types, every edge stamped and evidence-labelled (`match_type`).
+- ✅ **Shared Neo4j database** — EdgeGuard writes the threat-intelligence layer (`Indicator`, `Malware`, `ThreatActor`, `Campaign`, `Technique`, `Tactic`, `Tool`, `Sector`, `Source`, `CVE` + `CVSSv*`) with `edgeguard_managed` on every node it creates and `edgeguard_enriched` on partner nodes it writes to; 21 relationship types, every edge stamped (`edgeguard_managed`, provenance), and every claim between threat-intelligence entities evidence-labelled (`match_type`); the structural `SOURCED_FROM`, `HAS_CVSS_*`, `REFERS_TO` and `INVOLVES` carry no `match_type`.
 - ✅ **Schema-compatible helpers** for the ResilMesh topology / identity / mission labels and their relationships (the tables above) — available to an alert or import path; the scheduled pipeline does not write them.
 - ✅ **Vulnerability ↔ CVE bridge job** (`REFERS_TO`, both directions) for any `Vulnerability` node carrying `cve_id`.
 - ✅ **Inbound alert enrichment** — `resilmesh.alerts.zone.*` → `Alert` node, `Indicator`, `INVOLVES`, enrichment chain.
@@ -715,6 +714,6 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-_Last updated: 2026-10-16 — `merge_resilmesh_cve` / `merge_resilmesh_vulnerability`: the description follows the sync's source ranking with `description_source` `resilmesh` (below every registered feed: it fills a node without a description and never replaces a feed's text). Same day: alert flow steps 4, 6 and 7 and the code example state what the alert path writes and reads: no IP or Host node, no network context (planned), the enrichment through `AlertProcessor` (the example called a stub that returns sample data). Prior: 2026-10-15 — `merge_resilmesh_cve` keeps `cpe_type`, `result_impacts`, `ref_tags` and `cwe` when a call omits them. Same day: `merge_resilmesh_cve` only fills `description`, `published` and `last_modified`; NVD's record sets them. Prior: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
+_Last updated: 2026-10-17 — documentation audit against the code: the relationship examples call `create_softwareversion_on_host`, `create_ip_part_of_subnet` (`subnet_range`) and `create_networkservice_on_host` with their real arguments (no `tag`); `merge_cve` takes a data dict, and its CVSS sub-writes run in transactions of their own; the unit-test example counts nodes and `ON` edges directly (`get_stats` counts only EdgeGuard labels and has no relationship counts); the manual Cypher uses `//` comments, selects and cleans up the test nodes by key, and follows `INDICATES` / `EXPLOITS` to `CVE` (nothing writes `ATTRIBUTED_TO` from an indicator); `SOURCED_FROM.imported_at` is set on create only, and the ResilMesh helpers that still write node `first_seen`; `zone` is a list (no `zones` property); the summary names the edges without `match_type`. Prior: 2026-10-16 — `merge_resilmesh_cve` / `merge_resilmesh_vulnerability`: the description follows the sync's source ranking with `description_source` `resilmesh` (below every registered feed: it fills a node without a description and never replaces a feed's text). Same day: alert flow steps 4, 6 and 7 and the code example state what the alert path writes and reads: no IP or Host node, no network context (planned), the enrichment through `AlertProcessor` (the example called a stub that returns sample data). Prior: 2026-10-15 — `merge_resilmesh_cve` keeps `cpe_type`, `result_impacts`, `ref_tags` and `cwe` when a call omits them. Same day: `merge_resilmesh_cve` only fills `description`, `published` and `last_modified`; NVD's record sets them. Prior: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
 
 _Prior: 2026-04-28 — PR-N34 fixup of PR-N33 slip: corrected edge name `HAS_CVSSv*` → `HAS_CVSS_v*` (actual edges in `neo4j_client.py:_merge_cvss_node` use underscore + lowercase v + version: `HAS_CVSS_v2 / HAS_CVSS_v30 / HAS_CVSS_v31 / HAS_CVSS_v40`). Per-version mentions in code blocks + verification Cypher all corrected. Prior: 2026-04-26 PR-N33 docs audit (removed calls to deleted `create_cve_has_cvss()` helper, now internal to `merge_cve()` via `_merge_cvss_node`; fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` to avoid ISIM collision). 2026-04-18 PR #41 cleanup pass._

@@ -139,7 +139,8 @@ package's level, so it is never exported less restricted than the
 package, whatever its endpoints' markings.
 
 Each SDO built from a Neo4j node with zone tags carries
-`x_edgeguard_zones: ["healthcare", "global", ...]`. Filter bundles by
+`x_edgeguard_zones: ["healthcare", "energy"]` (a node in a sector never
+also carries `global`; a node in no sector carries `["global"]`). Filter bundles by
 sector on the ResilMesh side without re-querying the graph.
 
 **Indicator patterns.** The `pattern` of an `indicator` follows the
@@ -165,8 +166,8 @@ MISP provenance also carries:
   MISP events without round-tripping through Neo4j.
 - `x_edgeguard_misp_attribute_ids: ["uuid-a", ...]` — every MISP attribute
   UUID that contributed to this entity, from `misp_attribute_ids[]`.
-  Present on Indicator-derived SDOs (the only nodes where MISP attribute
-  UUIDs are populated).
+  Present on every SDO whose node a MISP attribute wrote: indicators,
+  vulnerabilities, malware, intrusion-sets, attack-patterns and tools.
 
 Both fields are omitted entirely when the source node has no MISP
 references — bundles do not grow empty fields on every object.
@@ -197,7 +198,7 @@ the provenance of the graph relationship it comes from:
   since revoked: the ids the sources cited (an OTX pulse citing `T1562` gives a link to `T1685`
   with `["T1562"]`; definition version 1.3.0);
 - `x_edgeguard_evidence_types` — only on a campaign link (`campaign attributed-to intrusion-set`,
-  `campaign uses malware`, `indicator indicates campaign`): the relationship types of the graph
+  `indicator indicates campaign`): the relationship types of the graph
   links it rests on, `ATTRIBUTED_TO` and `USES_MALWARE` between the actor and a malware, and
   `INDICATES` on an indicator's link (`["ATTRIBUTED_TO", "USES_MALWARE"]`; definition version 1.5.0,
   2026-10-16).
@@ -206,8 +207,8 @@ An `intrusion-set` the actor alias merge folded other actor nodes into carries
 `x_edgeguard_merged_from`: their names (`["cl0p"]` on `clop`; version 1.3.0). The intrusion-set ids
 of those names, derived from the names, no longer appear in exports.
 
-An SDO with a `description` (`vulnerability`, `malware`, `intrusion-set`, `tool`, `attack-pattern`,
-`x-mitre-tactic`) carries `x_edgeguard_description_source`: the source whose text the description is,
+An SDO with a `description` (`vulnerability`, `malware`, `intrusion-set`, `tool`, `attack-pattern`)
+carries `x_edgeguard_description_source`: the source whose text the description is,
 the one a fixed ranking keeps among the sources that gave one (`vulnerability`: NVD, CISA KEV, CISA ICS,
 then any other source; the others: MITRE ATT&CK, a curated source, then any other source), e.g.
 `"nvd"`, `"cisa_kev"`, `"mitre_attck"` (version 1.6.0, 2026-10-16). It is absent on an object whose
@@ -352,11 +353,13 @@ vulnerability, indicator / vulnerability → sector identity). Since
 2026-10 the bundles also carry `intrusion-set uses malware / tool` (the
 graph's `USES_MALWARE` / `USES_TOOL`), `malware exploits vulnerability`
 and `intrusion-set targets vulnerability` (`EXPLOITS` from malware and
-actors), `intrusion-set / malware targets identity` (`TARGETS` a sector),
-`campaign uses malware` and `indicator indicates campaign`
-(`PART_OF_CAMPAIGN`), and `subtechnique-of` (`SUBTECHNIQUE_OF`, the type
-MITRE ATT&CK's own STIX uses). Not exported as SROs: `IN_TACTIC` (a
-kill-chain phase on the `attack-pattern`), `SOURCED_FROM`, `REFERS_TO`,
+actors), `intrusion-set targets identity` (an actor's `TARGETS` a sector),
+`indicator indicates campaign` (an indicator's `PART_OF_CAMPAIGN`), and
+`subtechnique-of` (`SUBTECHNIQUE_OF`, the type MITRE ATT&CK's own STIX
+uses). `relationship_mappings` also lists `malware targets identity` and
+`campaign uses malware`; no export walks a malware's sector or campaign
+links today, so no bundle carries them. Not exported as SROs: `IN_TACTIC`
+(a kill-chain phase on the `attack-pattern`), `SOURCED_FROM`, `REFERS_TO`,
 `HAS_CVSS_*` and `INVOLVES`.
 
 ## 6. One-shot smoke script
@@ -412,8 +415,8 @@ file an issue with `stix-exporter` in the title.
 
 | Concern                                      | Owner     |
 |-----------------------------------------------|-----------|
-| Threat-intel graph (Indicator, Actor, Malware, Technique, Tool, Campaign) | EdgeGuard |
-| Asset / vulnerability layer (Host, Device, CVE, CVSS) | ResilMesh |
+| Threat-intel graph (Indicator, Actor, Malware, Technique, Tool, Campaign) and the CVE + CVSS nodes EdgeGuard writes from NVD, CISA KEV and CISA ICS (shared labels: `edgeguard_managed` when EdgeGuard created them, `edgeguard_enriched` when a partner did) | EdgeGuard |
+| Asset layer and scanner findings (Host, Device, IP, SoftwareVersion, Vulnerability) | ResilMesh |
 | The STIX exporter itself                      | EdgeGuard |
 | Downstream scoring / alerting on received bundles | ResilMesh |
 | Bundle signing, TAXII, per-partner auth (future) | EdgeGuard |
@@ -423,4 +426,4 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-16 — relationship provenance: `x_edgeguard_match_type` `advisory_sector` (90) on a vulnerability's sector link where CISA's ICS advisory states the sector ("deployed in"), and the cisa.gov page of the advisory in `external_references`, on a sector link only the advisories that name that sector. Same day: an indicator's `modified` after the aging rollout on a kept graph can be earlier than before: re-ingest the full bundle once. Same day: the aging of an indicator, extension definition 1.7.0 (`x_edgeguard_last_reported_at`, `x_edgeguard_last_reported_source`, `x_edgeguard_last_reported_ref`, `x_edgeguard_source_confidence`, `x_edgeguard_aging_basis`, `x_edgeguard_aging_tier`, `x_edgeguard_active`, `x_edgeguard_retired_by`) and the indicator's `modified` from its reports and aging. Same day: `x_edgeguard_description_source` on an SDO with a description: the source whose text it is, by the fixed source ranking (extension definition 1.6.0). Same day: `x_edgeguard_evidence_types` on the SROs of campaign links (the relationship types a campaign link rests on; extension definition 1.5.0). Prior: 2026-10-15 — `/stix/types`: each `returns` names the 2026-10 relationships, and `relationship_mappings` lists the graph relationship → STIX relationship table; STIX timestamps of nodes the sync wrote with `datetime()` carry at most six fractional digits (the nine the driver printed made every such export fail with HTTP 500). Same day: FIRST EPSS and CISA's SSVC decision points on `vulnerability` (extension definition 1.4.0). Same day: explainability: `x_edgeguard_cited_ids` on SROs and `x_edgeguard_merged_from` on intrusion-sets (extension definition 1.3.0). Same day: `x_edgeguard_status` on `vulnerability` (NVD's record status; extension definition 1.2.0); § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`); relationship-type paragraph lists the 2026-10 mappings (`USES_MALWARE` / `USES_TOOL`, `EXPLOITS` from actors and malware, actor / malware `TARGETS`, `PART_OF_CAMPAIGN`, `subtechnique-of`) and the relationships not exported as SROs; bounds on `external_references` (20) and `x_edgeguard_source_refs` (200); extension definition versions (1.1.0: relationship provenance; 1.2.0: `x_edgeguard_status`). Prior: 2026-10-14 — every relationship exported with its provenance (`confidence`, `external_references`, `x_edgeguard_match_type`, `x_edgeguard_sources`, `x_edgeguard_source_refs`, `x_edgeguard_misp_event_ids`), curated-package claims included; `depth` table extended. Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._
+_Last updated: 2026-10-17 — documentation audit against the code: no bundle carries `malware targets identity` or `campaign uses malware` (listed in `relationship_mappings`, but no export walks a malware's sector or campaign links), so `x_edgeguard_evidence_types` appears on `campaign attributed-to intrusion-set` and `indicator indicates campaign` only; `x_edgeguard_misp_attribute_ids` on every SDO whose node a MISP attribute wrote (not only indicators); the `x_edgeguard_zones` example (a node in a sector never also carries `global`); `x_edgeguard_description_source` lists no `x-mitre-tactic` (no export emits one); § 9: EdgeGuard writes the CVE + CVSS nodes, ResilMesh the asset layer and scanner findings. Prior: 2026-10-16 — relationship provenance: `x_edgeguard_match_type` `advisory_sector` (90) on a vulnerability's sector link where CISA's ICS advisory states the sector ("deployed in"), and the cisa.gov page of the advisory in `external_references`, on a sector link only the advisories that name that sector. Same day: an indicator's `modified` after the aging rollout on a kept graph can be earlier than before: re-ingest the full bundle once. Same day: the aging of an indicator, extension definition 1.7.0 (`x_edgeguard_last_reported_at`, `x_edgeguard_last_reported_source`, `x_edgeguard_last_reported_ref`, `x_edgeguard_source_confidence`, `x_edgeguard_aging_basis`, `x_edgeguard_aging_tier`, `x_edgeguard_active`, `x_edgeguard_retired_by`) and the indicator's `modified` from its reports and aging. Same day: `x_edgeguard_description_source` on an SDO with a description: the source whose text it is, by the fixed source ranking (extension definition 1.6.0). Same day: `x_edgeguard_evidence_types` on the SROs of campaign links (the relationship types a campaign link rests on; extension definition 1.5.0). Prior: 2026-10-15 — `/stix/types`: each `returns` names the 2026-10 relationships, and `relationship_mappings` lists the graph relationship → STIX relationship table; STIX timestamps of nodes the sync wrote with `datetime()` carry at most six fractional digits (the nine the driver printed made every such export fail with HTTP 500). Same day: FIRST EPSS and CISA's SSVC decision points on `vulnerability` (extension definition 1.4.0). Same day: explainability: `x_edgeguard_cited_ids` on SROs and `x_edgeguard_merged_from` on intrusion-sets (extension definition 1.3.0). Same day: `x_edgeguard_status` on `vulnerability` (NVD's record status; extension definition 1.2.0); § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`); relationship-type paragraph lists the 2026-10 mappings (`USES_MALWARE` / `USES_TOOL`, `EXPLOITS` from actors and malware, actor / malware `TARGETS`, `PART_OF_CAMPAIGN`, `subtechnique-of`) and the relationships not exported as SROs; bounds on `external_references` (20) and `x_edgeguard_source_refs` (200); extension definition versions (1.1.0: relationship provenance; 1.2.0: `x_edgeguard_status`). Prior: 2026-10-14 — every relationship exported with its provenance (`confidence`, `external_references`, `x_edgeguard_match_type`, `x_edgeguard_sources`, `x_edgeguard_source_refs`, `x_edgeguard_misp_event_ids`), curated-package claims included; `depth` table extended. Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._
