@@ -790,9 +790,28 @@ class TestBuildRelationshipsSilentDeath:
             "( edgeguard_neo4j_sync_last_success_timestamp > on() "
             "(edgeguard_build_relationships_last_completion_timestamp or on() vector(0)) ) "
             "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) > (15 * 60 * 60 + 25 * 60) ) "
-            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) < (36 * 60 * 60) )"
+            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) < (36 * 60 * 60) ) "
+            'unless on() ( edgeguard_dag_run_in_progress_start_timestamp{dag_id="edgeguard_baseline"} > 0 )'
         )
         assert "edgeguard_dag_last_success_timestamp" not in expr, "no longer tied to any baseline task"
+
+    def test_silent_while_a_baseline_run_is_in_progress(self, dags):
+        """2026-10-16: the sync DAG's build_relationships skips while a baseline holds the baseline lock. A
+        run_neo4j_sync that started before the lock completes and stamps the sync; the build_relationships
+        after it skips and stamps no completion, and the rule fired 15 h 25 min later although nothing
+        died. It is now silent while a run of the baseline DAG is in progress, read from the gauge the
+        listener plugin writes (0 once the run ends), as EdgeGuardDAGRunStuck reads it."""
+        expr = _norm(_rule("EdgeGuardBuildRelationshipsSilentDeath")["expr"])
+        clause = expr.split(" unless on() ", 1)
+        assert len(clause) == 2 and " unless " not in clause[0], "the suppression applies to the whole rule"
+        selector = re.fullmatch(r"\( (edgeguard_\w+)\{dag_id=\"(\w+)\"\} > 0 \)", clause[1])
+        assert selector is not None, clause[1]
+        assert selector.group(1) == metrics_server.DAG_RUN_START._name
+        assert selector.group(2) in dags and dags[selector.group(2)].schedule is None, "the manual baseline DAG"
+        # The task whose skip leaves the sync stamp without a completion goes through the lock check.
+        source = (_DAGS / "edgeguard_pipeline.py").read_text()
+        body = source.split("def run_build_relationships(", 1)[1].split("\ndef ", 1)[0]
+        assert '_skip_while_baseline_holds_lock("build_relationships", context)' in body
 
     def test_the_threshold_waits_for_every_attempt(self, dags):
         """A first attempt killed at its limit is retried: the rule must not page while a retry may still

@@ -80,7 +80,7 @@
 ### 3. CISA KEV (Known Exploited Vulnerabilities)
 
 **Website:** https://www.cisa.gov/known-exploited-vulnerabilities-catalog  
-**Data Feed:** `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` (this is what `src/collectors/cisa_collector.py:70` actually fetches; the `/json` URL the website used to redirect to no longer resolves).
+**Data Feed:** `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` (this is what `src/collectors/cisa_collector.py:81` actually fetches; the `/json` URL the website used to redirect to no longer resolves).
 
 | Aspect | Details |
 |--------|---------|
@@ -354,4 +354,4 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-10-16 — § 6 AbuseIPDB, the quick reference table and the rate-limit recommendations: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests, and how EdgeGuard uses them (a blacklist 429 fails `collect_abuseipdb` at once; a fetched, non-empty answer is reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`). Prior: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._
+_Last updated: 2026-10-16 — § 3 CISA KEV: the line of the collector that names the feed URL (`cisa_collector.py:81`). Same day: § 6 AbuseIPDB, the quick reference table and the rate-limit recommendations: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests, and how EdgeGuard uses them (a blacklist 429 fails `collect_abuseipdb` at once; a fetched, non-empty answer is reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`). Prior: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._

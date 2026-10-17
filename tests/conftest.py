@@ -5,6 +5,7 @@ without needing an installed package.
 
 import os
 import sys
+import uuid
 
 import pytest
 
@@ -50,6 +51,22 @@ def _no_abuseipdb_blacklist_cache(monkeypatch):
     setting themselves.
     """
     monkeypatch.setenv("EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS", "0")
+
+
+@pytest.fixture(autouse=True)
+def _baseline_lock_outside_the_repo(monkeypatch, tmp_path_factory):
+    """Keep the baseline lock sentinel out of ``<repo>/checkpoints`` (2026-10-16).
+
+    ``baseline_start`` and ``baseline_clean`` take the baseline lock for their DAG run
+    (``_retake_baseline_lock``), and a test that calls them with a context whose run id is set (a
+    ``MagicMock`` DAG run included) would write ``checkpoints/baseline_in_progress.lock`` in the
+    checkout. A sentinel left there would make every later test that runs a collector or a sync
+    task skip for the baseline it names. Each test gets its own path under the session's temporary
+    directory (nothing is created unless a test takes the lock); tests of the lock set their own
+    path, which overrides this one.
+    """
+    path = tmp_path_factory.getbasetemp() / "baseline_lock" / f"{uuid.uuid4().hex}.lock"
+    monkeypatch.setenv("EDGEGUARD_BASELINE_LOCK_PATH", str(path))
 
 
 @pytest.fixture(autouse=True)

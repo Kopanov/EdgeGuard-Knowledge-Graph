@@ -40,10 +40,17 @@ MAX_EVENT_IDS_PER_EDGE = 200
 MITRE_FEEDS = '["mitre_attck"]'
 OTX_FEEDS = '["alienvault_otx"]'
 # Feeds whose records set ``Indicator.malware_family`` (what Q9 matches): ThreatFox
-# (``malware_printable``), MalwareBazaar (``signature``), Feodo Tracker (``malware``) and OTX
-# (``OTX_META.malware_family``). URLhaus, SSL Blacklist and VirusTotal set none (VirusTotal's
-# sandbox family and popular threat label feed zone detection and ``threat_label`` only).
-FAMILY_LABEL_FEEDS = '["threatfox", "malwarebazaar", "feodo_tracker", "alienvault_otx"]'
+# (``malware_printable``), MalwareBazaar (``signature``) and Feodo Tracker (``malware``). URLhaus,
+# SSL Blacklist and VirusTotal set none (VirusTotal's sandbox family and popular threat label feed
+# zone detection and ``threat_label`` only), and neither does OTX (2026-10): its collector puts no
+# ``malware_family`` on an indicator, so ``OTX_META.malware_family`` is always empty, and crediting
+# OTX on a Q9 link named a feed that did not state the family. The families an OTX pulse names reach
+# the indicator as ``pulse_malware_families``; build_relationships step 9b links those, with OTX's
+# provenance, to the ``Malware`` node whose name is the family name, that name without an ATT&CK
+# software id, or the node the twin merge folded a node of either name into (``merged_from``). Q9
+# also matches ``m.aliases`` and ``m.family``: a pulse that names the family only by such another
+# name of the node gives that link no OTX credit.
+FAMILY_LABEL_FEEDS = '["threatfox", "malwarebazaar", "feodo_tracker"]'
 # Variables bound by ``prov_with``; a later ``WITH`` must carry them through to the ``SET``.
 PROV_VARS = "_feeds, _prov_refs, _prov_events"
 

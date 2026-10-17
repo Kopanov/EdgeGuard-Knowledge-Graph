@@ -12,10 +12,10 @@ real payloads (``tests/fixtures/nvd_incremental_2026_10_14.json``, see its ``_pr
 
 - ``FakeNvd`` answers lastMod requests as NVD CVE API 2.0 does: zone-less timestamps, results in
   publication order and evaluated again for every page, the envelope of a real page;
-- ``FakeMisp`` answers MISPWriter as MISP 2.5 does: the attribute listing by tag, event lookup and
-  creation, the event edit that adds attributes, and the attribute edit
-  (``AttributesController::edit``: new comment and timestamps; tags attached, or detached when
-  marked ``deleted``).
+- ``FakeMisp`` (``tests/misp_fakes.py``, shared with the KEV update path since 2026-10) answers
+  MISPWriter as MISP 2.5 does: the attribute listing by tag, event lookup and creation, the event
+  edit that adds attributes, and the attribute edit (``AttributesController::edit``: new comment and
+  timestamps; tags attached, or detached when marked ``deleted``).
 """
 
 from __future__ import annotations
@@ -33,6 +33,9 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+from misp_fakes import FakeMisp as SharedFakeMisp  # noqa: E402
+from misp_fakes import Response as _Response  # noqa: E402
 
 from collectors import misp_writer, nvd_collector  # noqa: E402
 from collectors.misp_writer import MISPWriter  # noqa: E402
@@ -73,18 +76,6 @@ def stored_attribute_with_ssvc(cve_id: str) -> dict:
     meta["ssvc"] = nvd_collector.cisa_ssvc(nvd_record(cve_id)["cve"].get("metrics"))
     attr["comment"] = "NVD_META:" + json.dumps(meta)
     return attr
-
-
-class _Response:
-    def __init__(self, status_code: int, body):
-        self.status_code = status_code
-        self._body = body
-        self.headers: dict = {}
-        self.text = json.dumps(body)[:300]
-        self.content = self.text.encode()
-
-    def json(self):
-        return copy.deepcopy(self._body)
 
 
 class FakeNvd:
@@ -128,111 +119,12 @@ class FakeNvd:
         return _Response(200, body)
 
 
-class FakeMisp:
-    """MISP 2.5 REST answers over an in-memory attribute store (see the module docstring)."""
+class FakeMisp(SharedFakeMisp):
+    """MISP 2.5 REST answers over an in-memory attribute store (``tests/misp_fakes.py``): the stored
+    copies sit in the NVD baseline's event, and MISP stamps writes at ``NOW``."""
 
     def __init__(self, attributes=()):
-        self.attributes = [copy.deepcopy(a) for a in attributes]
-        self.events = {a["event_id"]: "EdgeGuard-nvd-2026-10-13" for a in self.attributes}
-        self.posts: list = []
-        self.headers: dict = {}
-        self.edit_status: dict = {}  # uuid -> HTTP status MISP answers to its edit
-        self.edits_not_stored: set = set()  # uuids MISP answers 200 for without storing the edit
-        self.adds_not_stored: set = set()  # values MISP answers 200 for without storing them
-        self.adds_without_list = False  # answer additions without the event's attribute list
-        self.listing_status = None  # HTTP status of every attribute listing request
-
-    def post(self, url, json=None, **_kwargs):
-        path = url.split("misp.test", 1)[1]
-        self.posts.append((path, copy.deepcopy(json)))
-        if path == "/attributes/restSearch":
-            return self._rest_search(json or {})
-        if path == "/events/restSearch":
-            # MISP's exact Event.info filter (``eventinfo``, honoured from 2.4.177 on).
-            info = (json or {}).get("eventinfo")
-            return _Response(
-                200, {"response": [{"Event": {"id": i, "info": n}} for i, n in self.events.items() if n == info]}
-            )
-        if path == "/events":
-            event_id = str(200 + len(self.events))
-            self.events[event_id] = json["Event"]["info"]
-            return _Response(200, {"Event": {"id": event_id, "info": json["Event"]["info"]}})
-        if path.startswith("/attributes/edit/"):
-            return self._edit(path.rsplit("/", 1)[1], (json or {}).get("Attribute") or {})
-        if path.startswith("/events/"):
-            return self._add(path.rsplit("/", 1)[1], (json or {}).get("Attribute") or [])
-        return _Response(404, {})
-
-    def get(self, url, **_kwargs):
-        return _Response(404, {})
-
-    def edits(self) -> list:
-        return [(p.rsplit("/", 1)[1], body["Attribute"]) for p, body in self.posts if p.startswith("/attributes/edit/")]
-
-    def added_values(self) -> list:
-        return [
-            a["value"]
-            for p, body in self.posts
-            if p.startswith("/events/") and p != "/events/restSearch"
-            for a in (body or {}).get("Attribute", [])
-        ]
-
-    def by_value(self, value: str) -> dict:
-        return next(a for a in self.attributes if a["value"] == value)
-
-    def _rest_search(self, body: dict):
-        if self.listing_status is not None:
-            return _Response(self.listing_status, {"errors": "listing failed"})
-        if "eventid" in body:
-            rows = [a for a in self.attributes if a["event_id"] == str(body["eventid"])]
-        else:
-            rows = [
-                a
-                for a in self.attributes
-                if set(body.get("tags") or []) <= {t["name"] for t in a.get("Tag", [])}
-                and a["type"] == body.get("type", a["type"])
-            ]
-        if "value" in body:
-            wanted = set(body["value"]) if isinstance(body["value"], list) else {body["value"]}
-            rows = [a for a in rows if a["value"] in wanted]
-        page, limit = int(body.get("page", 1)), int(body.get("limit", 5000))
-        return _Response(200, {"response": {"Attribute": rows[(page - 1) * limit : page * limit]}})
-
-    def _add(self, event_id: str, attributes: list):
-        for attr in attributes:
-            if attr["value"] in self.adds_not_stored:
-                continue
-            stored = copy.deepcopy(attr)
-            stored.update(id=str(3000000 + len(self.attributes)), uuid=str(uuid.uuid4()), event_id=event_id)
-            stored["Tag"] = [{"id": "0", "name": t["name"]} for t in attr.get("Tag", [])]
-            self.attributes.append(stored)
-        if self.adds_without_list:
-            return _Response(200, {"Event": {"id": event_id}})
-        return _Response(
-            200, {"Event": {"id": event_id, "Attribute": [a for a in self.attributes if a["event_id"] == event_id]}}
-        )
-
-    def listings(self) -> list:
-        return [body for p, body in self.posts if p == "/attributes/restSearch" and "tags" in (body or {})]
-
-    def _edit(self, attr_uuid: str, changes: dict):
-        if attr_uuid in self.edit_status:
-            return _Response(self.edit_status[attr_uuid], {"name": "Could not edit Attribute", "errors": {}})
-        attr = next((a for a in self.attributes if a["uuid"] == attr_uuid), None)
-        if attr is None:
-            return _Response(404, {"name": "Invalid attribute"})
-        if attr_uuid not in self.edits_not_stored:
-            for key in ("comment", "first_seen", "last_seen"):
-                if key in changes:
-                    attr[key] = changes[key]
-            for tag in changes.get("Tag", []):
-                names = [t["name"] for t in attr["Tag"]]
-                if tag.get("deleted"):
-                    attr["Tag"] = [t for t in attr["Tag"] if t["name"] != tag["name"]]
-                elif tag["name"] not in names:
-                    attr["Tag"].append({"id": "0", "name": tag["name"]})
-            attr["timestamp"] = str(int(NOW.timestamp()))
-        return _Response(200, {"Attribute": copy.deepcopy(attr)})
+        super().__init__(attributes, event_info="EdgeGuard-nvd-2026-10-13", clock=NOW.timestamp)
 
 
 class CursorStore:

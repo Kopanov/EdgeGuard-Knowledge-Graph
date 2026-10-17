@@ -70,7 +70,7 @@ the change to take effect. Revert by unsetting + restarting.
 | `EdgeGuardNeo4jIneffectiveBatch` | critical | `rate(edgeguard_neo4j_merge_ineffective_batch_total[5m]) > 0` for 5m |
 | `EdgeGuardNeo4jBatchPermanentFailure` | critical | `rate(edgeguard_neo4j_batch_permanent_failure_total[5m]) > 0` for 5m |
 | `EdgeGuardMergeRejectPlaceholderSpike` | warning | `increase(edgeguard_merge_reject_placeholder_total[15m]) > 10` for 15m |
-| `EdgeGuardBuildRelationshipsSilentDeath` | critical | a sync completed 15 h 25 min to 36 h ago (every build_relationships attempt has ended) and no build_relationships completion stamped since (PR-N21; 2026-10 the two timestamps) |
+| `EdgeGuardBuildRelationshipsSilentDeath` | critical | a sync completed 15 h 25 min to 36 h ago (every build_relationships attempt has ended) and no build_relationships completion stamped since, while no baseline run is in progress (PR-N21; 2026-10 the two timestamps; 2026-10-16 silent during a baseline) |
 | `EdgeGuardApocBatchPartial` | warning | `increase(edgeguard_apoc_batch_partial_total[15m]) > 0` (PR-N21) |
 | `EdgeGuardMispFetchFallbackActive` | warning | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="engaged"}[10m])) > 0` for 10m (PR-N31 — sustained fallback engagement signals primary `/events/index` is broken) |
 | `EdgeGuardMispFetchFallbackHardError` | **critical** | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"}[5m])) > 0` for 1m (PR-N31 — `_MispFallbackHardError` sentinel raised; baseline run already failed since `retries=0` on critical chain) |
@@ -268,13 +268,17 @@ Each entry: symptom → detection signal → remediation.
 
 ### 7. Baseline chain stopped after a failed step; postcheck (PR-N27, 2026-10)
 
-**7a. Collectors and `full_neo4j_sync` refuse to run (2026-10).**
+**7a. Collectors, `full_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` refuse to run (2026-10).**
 
 - **Symptom.** The `tier1_core` / `tier2_feeds` collector tasks (a
   flag-guarded source that is switched off still skips) and
   `full_neo4j_sync` fail at start, without their retry, with `[BASELINE] <step>: baseline_start
   is <state> in this run — refusing to run after a failed baseline_clean /
-  baseline_start` (or `... did not succeed (no XCom marker) ...`).
+  baseline_start` (or `... did not succeed (no XCom marker) ...`), or with
+  `... no baseline holds the baseline lock ...` (the collectors and the three
+  writers), or `... is held by <holder>, not by this run ...` (the three
+  writers only: `full_neo4j_sync`, `build_relationships` and
+  `run_enrichment_jobs`; the collectors stand down instead and succeed).
 - **What it means.** `baseline_clean` or `baseline_start` did not succeed
   in this DAG run. The tier groups and `full_neo4j_sync` keep
   `trigger_rule=ALL_DONE`, so that one failed source does not stop the
@@ -296,6 +300,28 @@ Each entry: symptom → detection signal → remediation.
   Fix the cause, then clear `baseline_clean` together with its downstream
   tasks (it has `retries=0`); the run resumes under the baseline lock it
   still holds.
+  A refusal before the wipe (`[BASELINE_CONF]` typo of `fresh_baseline`,
+  invalid `wipe_scope`, `BASELINE_CLEAN refused` by the backup gate) wipes
+  nothing and releases the lock (2026-10-16), so the corrected trigger is
+  not refused by it: trigger the baseline again with the corrected conf, or,
+  after an environment fix (`EDGEGUARD_LAST_BACKUP_AT` set and the container
+  recreated), clear `baseline_clean`, which takes the lock again before the
+  wipe. Clear it rather than marking it success: a `baseline_clean` marked
+  success skips the wipe. `baseline_start` takes the lock again in either
+  case. A `baseline_start` marked success by hand takes nothing: the
+  collectors, `full_neo4j_sync`, `build_relationships` and
+  `run_enrichment_jobs` then refuse with `no baseline holds the baseline
+  lock`; clear `baseline_start`, which takes it, then those tasks. While
+  another baseline holds the lock (another DAG run, or
+  `run_pipeline --baseline`), the collectors of this run stand down
+  (`[BASELINE] <SOURCE> NOT collected — the baseline lock is held by another
+  run`; the task succeeds), but `full_neo4j_sync`, `build_relationships` and
+  `run_enrichment_jobs` run whatever the collectors' outcome, so they refuse
+  unless the lock names this run: `the baseline lock (...) is held by
+  <holder>, not by this run (...)` (2026-10-16; before, `full_neo4j_sync`
+  wrote the full MISP → Neo4j sync during the other baseline's wipe or
+  refill). Let that baseline finish (remove the sentinel only if it is
+  stale); to go on with this run, clear `baseline_start`, then those tasks.
 
 **7b. Postcheck on Airflow 3 (the shipped image).**
 
@@ -311,8 +337,12 @@ Each entry: symptom → detection signal → remediation.
   leaf counts as success; before 2026-10 such a run could end `success`
   with `run_enrichment_jobs` failed. Triage the task named in the message.
 
-**7c. Baseline postcheck skipped due to upstream failure — Airflow 2 (PR-N27).**
+**7c. Baseline postcheck skipped due to upstream failure — Airflow 2 only, not supported (PR-N27).**
 
+- **Applies to.** Only an Airflow 2 deployment, whose task instance has
+  `get_dagrun()`. EdgeGuard runs on Airflow 3 (`requirements.txt` pins
+  `apache-airflow~=3.3`; the image, `Dockerfile.airflow`, runs 3.3.2), where
+  this path cannot run: the postcheck fails the run as described in 7b.
 - **Symptom.** Airflow `baseline_postcheck` task log contains a
   `[BASELINE-POSTCHECK-SKIPPED]` ERROR line; postcheck task state =
   `skipped` instead of `success` / `failed`.
@@ -323,9 +353,15 @@ Each entry: symptom → detection signal → remediation.
   `AirflowSkipException` — INTENTIONALLY abstaining from running
   invariants because they would trivially violate (Campaign=0,
   Indicator=0, Source=0) for upstream reasons, NOT a real data-integrity
-  breach. The DAG is correctly marked FAILED via the original upstream
-  task state; `baseline_complete` is also skipped so the operator
-  doesn't see "BASELINE Complete!" on a failed run.
+  breach. The skip propagates to `baseline_complete` and to
+  `baseline_release_lock`, the run's only leaf task; Airflow derives the
+  run state from the leaf tasks and counts a skipped leaf as success, so
+  the run ends `success`, not `failed` (corrected 2026-10-16; 7b states the
+  same rule). No alert reports it: `EdgeGuardDAGRunFailures` counts
+  failures of the scheduled collector and sync tasks only, never a baseline
+  run, on Airflow 3 as well. The baseline lock is pruned once its liveness
+  check reads the run state `success`. On this path the run state does not
+  show the failure; the postcheck log does.
 - **What it does NOT mean.** It does NOT mean an invariant violation.
   Don't investigate INV-1/2/3 (Campaign=0 etc.) as the root cause.
 - **Triage.**
@@ -338,9 +374,6 @@ Each entry: symptom → detection signal → remediation.
      verify PR-N28 is deployed; placeholder rejections should now
      surface as `[MERGE-PLACEHOLDER-REJECTED]` INFO logs and NOT crash
      the sync.
-- **No alert needed.** The DAG-level FAILED state is already alerted
-  via `EdgeGuardDAGRunFailures`; `[BASELINE-POSTCHECK-SKIPPED]` is
-  documentation, not a separate-page-worthy event.
 
 ### 8. MISP fetch fallback (`_MispFallbackHardError`) — PR-N29 / PR-N31
 
@@ -363,10 +396,20 @@ Each entry: symptom → detection signal → remediation.
      sync user, malformed query).
   2. **unexpected payload type** — MISP returned a non-list, non-
      dict-with-response payload (typical: server-side schema bug or
-     proxy injecting an HTML error page).
+     proxy injecting an HTML error page). A `restSearch` page that is
+     not JSON at all raises `restSearch answered non-JSON on page N`
+     (2026-10-16; before, the rows read so far were returned as the
+     listing).
   3. **non-200 mid-pagination** — `response.status_code != 200` on
      a page after the first (typical: MISP-PHP-FPM exhaustion partway
-     through a 50-page walk).
+     through a 50-page walk). A `restSearch` request that fails with
+     an error other than a timeout or a dropped connection (for
+     example a redirect loop) counts the same way and raises
+     `MISP fallback restSearch failed on page N (M events collected):
+     <error>` (2026-10-16; before, the rows read so far were returned
+     as the listing). A timeout or a dropped connection re-runs the
+     listing four times first and then fails the task with the
+     `requests` error, without `hard_error`.
   4. **safety-cap hit** — fallback paginated through
      `_FALLBACK_MAX_PAGES = 200` (~100K events) without hitting a
      short-read terminator. MISP legitimately has more events than
@@ -405,6 +448,38 @@ Each entry: symptom → detection signal → remediation.
 - **Re-run.** After remediation, re-trigger the failed DAG run.
   PR-N29 H1 set `retries=0` on the critical chain — there is no
   auto-retry. The dagrun MUST be manually re-triggered to run.
+- **The primary listing fails the same way (2026-10-16).** These
+  messages come from the `/events/index` (or `/events`) listing or
+  from outside the fallback branches, so no fallback alert fires; the
+  sync task fails, keeps the state file (`last_sync`), and Airflow
+  retries `run_neo4j_sync` (`full_neo4j_sync` has no retry). Grep
+  `MISP index /events` for the first two:
+  - `MISP index /events/index answered HTTP 5xx | a non-JSON answer |
+    a dict that is not an event listing on page N after N-1 good
+    page(s) (M rows): the listing is incomplete` — a page after the
+    first failed. Triage as for mode (3).
+  - `MISP index /events/index page N: <requests error>` — a page
+    after the first failed with a request error that is not a
+    timeout or a dropped connection (for example a redirect loop). A
+    timeout or a dropped connection on such a page re-runs the
+    listing four times first, then fails the task with the
+    `requests` error itself (for example `ReadTimeout: …`).
+  - `MISP event listing failed: <error>` — an unexpected error
+    outside the index pages and the fallback branches (for example in
+    the code that reads the listing). Before, the sync went on with
+    the rows read so far, or with none, and stamped the state file. A
+    request error inside the `restSearch` fallback is mode (3) above.
+  - `MISP event index stopped at the page cap
+    (EDGEGUARD_MISP_MAX_PAGES=… x EDGEGUARD_MISP_PAGE_SIZE=…)` — the
+    listing filled every page up to the cap, so events beyond it
+    were not listed (the reason ends `events beyond the cap were not
+    synced`, or `with no EdgeGuard event listed: the listing is
+    incomplete` when none of the listed rows was an EdgeGuard event).
+    Raise `EDGEGUARD_MISP_MAX_PAGES` on the Airflow worker and clear
+    the task. A MISP that ignores the query-string `limit` / `page`
+    (MISP 2.5.45 answers the whole listing on every page) does not
+    reach the cap: the listing stops at the first page with more rows
+    than `limit` or with no new event id.
 - **Why the sentinel exists.** Pre-PR-N29 the fallback silently
   truncated at `limit=1000` with no pagination; the
   `EdgeGuardSyncCoverageGap` alert compared a truncated processed-
@@ -423,6 +498,8 @@ Each entry: symptom → detection signal → remediation.
   - 300 s for the REST API and STIX export queries.
 
   A driver opened directly by a CLI command or a script carries none.
+
+  The actor alias merge and the Malware twin merge run each batch (the merge, the two uuid re-stamps and the list normalisation) in one transaction (2026-10-16), so `EDGEGUARD_NEO4J_READ_TIMEOUT` limits the four statements together; at that limit the batch rolls back whole and the `[NEO4J-TIMEOUT]` line names it (`[ACTOR-ALIAS-MERGE] merge batch i/n …` or `[MALWARE-TWIN-MERGE] merge batch i/n …`).
 - **Symptom.** A task fails with `[NEO4J-TIMEOUT] the server aborted a statement at its N s transaction timeout: <statement>`.
 - **Log probe.**
   ```bash
@@ -475,6 +552,41 @@ Each entry: symptom → detection signal → remediation.
   To turn the cache off, set `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS=0` in `.env` and recreate the Airflow containers.
 - **One state directory.** The cache assumes that every task process reads the same state directory, as on the Compose deployment (one Airflow container with the LocalExecutor and the `./state` bind mount, § "Shared state directories"). Workers on separate hosts without a shared directory each miss the cache: no data is lost, but a retry spends another request.
 
+## CISA KEV revisions (2026-10)
+
+Every `collect_cisa` run (`edgeguard_medium_freq`, every 4 hours, and the baseline) compares the whole KEV catalogue with EdgeGuard's `source:CISA-KEV` copies in MISP: a CVE MISP lacks is added, a copy of an entry CISA revised (ransomware use, due date, required action, name, description) is edited in place, at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) per run ([COLLECTORS.md § 3](COLLECTORS.md#revisions-every-run-compares-the-catalogue-with-misp-2026-10)). The incremental MISP → Neo4j sync then re-reads the edited attributes.
+
+- **What the logs show.** One summary line per run:
+  ```bash
+  docker logs edgeguard_airflow 2>&1 | grep -E 'CISA KEV: catalogue|\[KEV-UPDATE\]|CISA KEV: .*(only in events|no longer in the catalogue|could not be listed|left for the next run)'
+  # CISA KEV: catalogue 2026.10.16 (2026-10-16T17:15:48.8752Z) of 1748 entries, 1748 in scope; 9 added, 2 updated,
+  #   1737 unchanged, 0 stored and not updated, 0 only in other events, 0 deferred, 0 failed; 0 stored and no longer in the catalogue
+  # [KEV-UPDATE] CVE-2026-63077 attribute <uuid> event <id>: known_ransomware_use; tags +ransomware:known
+  ```
+  - `[KEV-UPDATE] … MISP did not confirm the edit (planned: …)` (WARNING), next to the writer's `[UPDATE-FAILED]` or `[UNCONFIRMED-EDIT]` line for the same attribute: the edit counts as failed, the run fails when its writes fall below `EDGEGUARD_MISP_MIN_SUCCESS_RATE`, and the next run plans the edit again.
+  - `… left for the next run (edit cap 500 …)`: the cap or a stop rule (`EDGEGUARD_MISP_REFRESH_MAX_SECONDS` spent, 5 failed edits in a row) deferred edits; not a failure.
+  - `… only in events EdgeGuard did not create (…)` (WARNING): those CVEs are neither added nor edited. When its count is close to the catalogue size, MISP's attribute listing no longer returns each row's `Event` (`info`), and no copy is edited; check the MISP version before anything else.
+  - `… no longer in the catalogue (…)` (WARNING): CISA removed entries; their MISP copies and node fields are kept.
+  - `MISP: the source:CISA-KEV attributes could not be listed (…)` (ERROR): nothing was written and the task fails; the next run compares again.
+  - The task's return value holds `kev_update` (`added`, `updated`, `unchanged`, `deferred`, `failed`, `not_written`, `changed_keys`, `foreign_only`, `stored_not_in_catalogue`, `stop_reasons`); Airflow shows it as the task's XCom `return_value`.
+- **The first runs on a MISP kept from before 2026-10-15.** KEV copies written before the KEV score fix carry ransomware-derived `severity:` / `cvss:` tags and no `known_ransomware_use` in `NVD_META`, so every one compares as changed once: about 1,740 edits on the hosted MISP of 2026-10-13, 500 per run, over four runs (12 to 16 hours). Each run's edits move the timestamp of the KEV event that holds the copies, so the next incremental sync downloads that event (about 1,750 attributes) and merges the edited attributes. A wipe and a new baseline avoid it: then the first run edits none. To spread it further, lower `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`; `EDGEGUARD_KEV_UPDATE_EXISTING=false` stops editing (new entries are still added).
+- **Acceptance after a wipe and a new baseline.** The first `collect_cisa` run after the baseline logs `0 updated`, `unchanged` close to the catalogue size, `0 only in other events` and `0 failed`.
+- **Live check after deploy (once).** That an edit moves the MISP event's timestamp, which the incremental sync selects events by, rests on MISP 2.5's code, not on a test against MISP. Check it on the first edit: the first natural revision (about 5 a month) or, on a kept MISP, the first run.
+  1. Take a CVE from a `[KEV-UPDATE]` line and the time of that line.
+  2. MISP holds the new copy, and its event's timestamp is not earlier than the edit:
+     ```bash
+     curl -s -H "Authorization: $MISP_API_KEY" -H "Accept: application/json" -H "Content-Type: application/json" \
+          -d '{"returnFormat": "json", "type": "vulnerability", "value": "CVE-2026-63077", "tags": ["source:CISA-KEV"], "includeAllTags": true}' \
+          "$MISP_URL/attributes/restSearch" | jq '.response.Attribute[] | {uuid, event_id, timestamp, tags: [.Tag[].name]}'
+     curl -s -H "Authorization: $MISP_API_KEY" -H "Accept: application/json" "$MISP_URL/events/view/<event_id>" | jq '.Event | {id, info, timestamp}'
+     ```
+     Both timestamps are epoch seconds after the edit's time. An event timestamp before it means MISP did not move it: the sync would miss every KEV and NVD edit, so stop and report it.
+  3. After the next incremental sync (`edgeguard_neo4j_sync`), the node and its KEV edge hold the new record:
+     ```cypher
+     MATCH (c:CVE {cve_id: 'CVE-2026-63077'})-[r:SOURCED_FROM]->(:Source {source_id: 'cisa_kev'})
+     RETURN c.known_ransomware_use, c.cisa_action_due, c.last_updated, r.updated_at, r.raw_data;
+     ```
+
 ## Bravo-ops: memory posture for the next baseline
 
 After the 2026-04-04 baseline was OOM-killed (exit 137) during
@@ -506,7 +618,7 @@ Both fire on the new counters `build_relationships` now emits:
 
 | Alert | Fires when | Severity | What to do |
 |---|---|---|---|
-| `EdgeGuardBuildRelationshipsSilentDeath` | a MISP→Neo4j sync completed between 15 h 25 min and 36 h ago (`edgeguard_neo4j_sync_last_success_timestamp`) and `edgeguard_build_relationships_last_completion_timestamp` is older (2026-10; build_relationships follows the sync directly; 5 h per attempt, two retries in the scheduled DAG) | critical | subprocess died silently (exit 137 OOM, SIGKILL, TX memory exhausted). Check docker stats + Neo4j logs for `MemoryLimit`. Raise memory ceilings, re-trigger. |
+| `EdgeGuardBuildRelationshipsSilentDeath` | a MISP→Neo4j sync completed between 15 h 25 min and 36 h ago (`edgeguard_neo4j_sync_last_success_timestamp`) and `edgeguard_build_relationships_last_completion_timestamp` is older, while no `edgeguard_baseline` run is in progress (2026-10; build_relationships runs after the sync; 5 h per attempt, two retries in the scheduled DAG) | critical | subprocess died silently (exit 137 OOM, SIGKILL, TX memory exhausted). Check docker stats + Neo4j logs for `MemoryLimit`. Raise memory ceilings, re-trigger. First check the sync DAG run's `build_relationships`: since 2026-10-16 it skips while a baseline holds the baseline lock (log line `build_relationships skipped: EdgeGuard baseline is running`, state `skipped`), and a sync that started before the lock is then followed by no completion. The rule is silent while the baseline runs and fires after a baseline that ended before its own full sync and build_relationships (a failed run); nothing died, and the next build_relationships that completes builds the relationships. |
 | `EdgeGuardApocBatchPartial` | any `apoc.periodic.iterate` in build_relationships returned non-empty `errorMessages` in last 15m | warning | partial data loss in that step. Grep `[PARTIAL]` in worker logs for the step identifier and error detail; re-run that single step or accept partial and move on. |
 
 Verify both load cleanly on baseline day:
@@ -594,14 +706,27 @@ The 730-day baseline runs for ~32h (matches the baseline DAG's
 `checkpoints/baseline_in_progress.lock` sentinel at task start and skip
 while the `edgeguard_baseline` DAG holds it (`baseline_acquire_lock`,
 taken before the destructive `baseline_clean` step; released by
-`baseline_release_lock` after a successful run). The baseline's own
-collector tasks are not skipped by the lock of their own run; a log line
+`baseline_release_lock` after a successful run). In `edgeguard_neo4j_sync`
+every task that writes checks it, not only the first task
+`check_sync_needed`: `run_neo4j_sync` (and its retries), `build_relationships`
+and `run_enrichment_jobs` skip at their start too (2026-10-16). The
+baseline's own collector tasks and its `build_relationships` are not skipped
+by the lock of their own run; a log line
 `[BASELINE] <SOURCE> NOT collected — the baseline lock is held by another
 run` means a second baseline was started. A failed run keeps the
-lock so that clearing the failed task resumes under the mutex; an
+lock so that clearing the failed task resumes under the mutex, except
+after a refusal of `baseline_clean` before the wipe, which releases it
+(2026-10-16; § 7a); an
 abandoned run's sentinel is reaped at the age cap, or remove it by hand:
 `docker compose exec airflow rm /opt/airflow/checkpoints/baseline_in_progress.lock`.
-This is Issue #57 (root cause
+A collector, `full_neo4j_sync`, `build_relationships` or
+`run_enrichment_jobs` of a run that no longer holds the lock (released,
+reaped or removed) refuses while no baseline holds it, with `no baseline
+holds the baseline lock`; clear `baseline_start` first, which takes it again
+(2026-10-16). While another baseline holds it, the collectors of that run
+stand down and `full_neo4j_sync`, `build_relationships` and
+`run_enrichment_jobs` refuse with `is held by <holder>, not by this run`
+(§ 7a). This is Issue #57 (root cause
 in `docs/flow_audits/01_baseline_sequence.md` Finding 1, the 2026-04-19
 MISP-PHP-FPM exhaustion + 14.7% NVD loss), closed in 2026-10. The
 holder's liveness is the DAG-run state read through the Airflow REST
@@ -851,6 +976,8 @@ The job's other warnings name pairs it did not merge:
 
 The final line, `[ACTOR-ALIAS-MERGE] complete — …`, counts each kind.
 
+Each batch of pairs is one transaction (2026-10-16): a line `batch i/n FAILED (k pairs rolled back)` means that none of its pairs merged, `errors` counts the batch, and the next run merges its pairs again. Before, the merge of such a batch stood when a statement after it failed, and the relationships it moved could keep the folded node's uuid in `src_uuid` / `trg_uuid`. The Malware twin merge runs its batches the same way.
+
 A conflict or a blocked pair after an ATT&CK release usually means the reference predates the release: rebuild it (below).
 
 **Attribution from a source report (2026-10).** The OTX collector, the MISP→Neo4j sync, `build_relationships` step 2d and the acceptance check `attribution_from_single_actor_reports` read the same reference to decide whether a pulse's actors are one actor. Without it the collector, the sync and step 2d each log `[ATTRIBUTION] canonical reference unavailable (<reason>)` once (the acceptance check reports it in its detail), and they behave as follows: the collector and the sync count every name as an actor, so the aliases of one actor count as several and the pulse attributes nothing (since 2026-10-16 the collector writes such a pulse into `several_actor_pulses_by_name`, `OTX_META.sapn` / `MITRE_USES_TECHNIQUES.sapn`, which the sync uses for its own run and never stores on a node; the pulse's pairs come when it is collected again with the reference, as new IOCs carry them); step 2d links only the pairs whose pulse it can tell names one actor by name (the aliases of one actor count as several, and a name the alias merge folded away finds no node) and removes nothing; the acceptance check is informational. The sync logs `[ATTRIBUTION] report <pulse> names several actors: its malware is attributed to none of them` for each such pulse and counts them in its summary. Step 2d and the acceptance check also take the pulses the collector marked on indicators (`Indicator.several_actor_pulses`, 2026-10-16) as naming several actors, as the collector judged them with the reference, whether or not step 2d has it; step 2d logs `[ATTRIBUTION] N pulse(s) name several actors (M marked on K indicator(s) by the OTX collector)`, and a failed read of either source skips the step and fails the run. A pulse edited to name several actors after MISP stored its IOCs gets its mark only through its new IOCs: the MISP writer adds no mark to a stored copy (2026-10: MISP keeps what the sources said; the `[MARK]` comment edits were removed), so a pulse whose IOCs MISP already holds and which brings no new IOC is not marked, a known limit to be closed by a per-pulse MISP record. A mark on a node is never cleared by a later run. Should one be wrong (written by an earlier release from a judgement by name), remove the pulse ids from the nodes, then run step 2d again; the stored copies in MISP still carry the mark, so a full sync brings it back until they are corrected too:
@@ -922,7 +1049,7 @@ When the release revokes groups, take a new MISP galaxy dump as well, so that th
 
 OTX names malware families as the MISP ATT&CK galaxy does (`"Cobalt Strike - S0154"`). Before 2026-10 every such name became a `Malware` node of its own beside the ATT&CK node, and the family's indicators split between the two (136 twins, 16,005 `INDICATES` links on the graph of 2026-10-14). The collectors and the sync now name the node by the base name; the enrichment job `merge_malware_attack_twins` folds the twins a graph already holds into the ATT&CK node (for software without a MITRE `Malware` node, into the node of the base name once one exists), so a graph built before needs no new baseline: the next `run_enrichment_jobs` repairs it (`docs/KNOWLEDGE_GRAPH.md`, "Malware named after an ATT&CK software id").
 
-**What it logs.** `[MALWARE-TWIN-MERGE] batch i/n: merged … duplicate(s) into … target Malware node(s)` per batch and a final `[MALWARE-TWIN-MERGE] complete — candidates=… merged=… base_name_targets=… no_target=… skipped_ambiguous=… errors=… restamped_edges=…`. Most twins whose ATT&CK id no MITRE `Malware` node has are ATT&CK tools (Mimikatz `S0002`), which are `Tool` nodes and never merge targets. Once a later pulse has created the node of the base name (`mimikatz`, named so by the collector since 2026-10), such a twin folds into it, so indicators written before do not link two nodes; `base_name_targets` counts these, with a sample in the log. `no_target` counts the twins with neither target; they stay as they are, with a sample in the log. A `(ambiguous)` warning names a twin whose id and base name lead to more than one MITRE node (its id to one and its base name to another, or two MITRE nodes of one id): the job skips it on every run, so decide by hand which node it is. `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE=false` turns the job into a dry run that logs the pairs (`DRY RUN … Sample (target node, twin)`).
+**What it logs.** `[MALWARE-TWIN-MERGE] batch i/n: merged … duplicate(s) into … target Malware node(s)` per batch and a final `[MALWARE-TWIN-MERGE] complete — candidates=… merged=… base_name_targets=… no_target=… skipped_ambiguous=… errors=… restamped_edges=…`. Most twins whose ATT&CK id no MITRE `Malware` node has are ATT&CK tools (Mimikatz `S0002`), which are `Tool` nodes and never merge targets. Once a later pulse has created the node of the base name (`mimikatz`, named so by the collector since 2026-10), such a twin folds into it, so indicators written before do not link two nodes; `base_name_targets` counts these, with a sample in the log. `no_target` counts the twins with neither target; they stay as they are, with a sample in the log. A `(ambiguous)` warning names a twin whose id and base name lead to more than one MITRE node (its id to one and its base name to another, or two MITRE nodes of one id): the job skips it on every run, so decide by hand which node it is. `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE=false` turns the job into a dry run that logs the pairs (`DRY RUN … Sample (target node, twin)`). A `batch i/n FAILED (k pairs rolled back)` line is a batch that changed nothing; its twins fold on the next run (one transaction per batch, as in the actor alias merge).
 
 **Checking a graph.** `python scripts/verify_fresh_baseline.py` fails `malware_attack_twins_folded` while a twin the job folds, or an ambiguous one, is still a node, and lists the twins without a target; it applies the job's own rule, so its figures are exact. A quick, approximate count on the graph (read-only; names only, with single spaces around the hyphen, so twins that state their id only through an alias, or with other whitespace, are not counted):
 
@@ -1022,7 +1149,7 @@ A wipe and a new baseline need none of this. A graph that is kept is repaired on
    // published 2025-09-12T08:15:44.743000+00:00 (a later NVD update moves last_modified)
    ```
 
-A CVE without an NVD record shows the KEV's text when the KEV lists it, else CISA ICS's, else another source's, whatever the order of the events. The KEV and CISA ICS texts are those of the first record MISP stored: only NVD edits its stored copies (`MISPWriter.plan_vulnerability_update`), and MISPWriter skips a KEV or CISA ICS attribute its source already holds, so a revised KEV entry or ICS advisory reaches neither MISP nor the graph (the graph-side rule, under which a source's revised record replaces its own text, is in [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Descriptions and their source"). Its dates are the CISA ICS record's (the advisory's release dates), the only other record in MISP that gives dates: MISP holds one CISA ICS attribute per CVE, from the first advisory that named it (MISPWriter skips the CVE in later advisories), so the dates do not depend on the order either. They stay outside the ranking, since they are the advisory's dates rather than the CVE's, and NVD's record replaces them.
+A CVE without an NVD record shows the KEV's text when the KEV lists it, else CISA ICS's, else another source's, whatever the order of the events. The KEV text is the catalogue's latest: since 2026-10 every KEV run edits the stored copy of an entry CISA revised ([CISA KEV revisions](#cisa-kev-revisions-2026-10)), and the sync's rule, under which a source's revised record replaces its own text, carries it to the node ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Descriptions and their source"). The CISA ICS text is that of the first record MISP stored: MISPWriter skips a CISA ICS attribute its source already holds, so a revised ICS advisory reaches neither MISP nor the graph. Its dates are the CISA ICS record's (the advisory's release dates), the only other record in MISP that gives dates: MISP holds one CISA ICS attribute per CVE, from the first advisory that named it (MISPWriter skips the CVE in later advisories), so the dates do not depend on the order either. They stay outside the ranking, since they are the advisory's dates rather than the CVE's, and NVD's record replaces them.
 
 ## Repairing Malware, ThreatActor and Tool descriptions (2026-10)
 
@@ -1177,7 +1304,12 @@ curl -H "Authorization: $MISP_API_KEY" \
 Every per-source ingest carries the raw MISP attribute JSON pickled
 into `r.raw_data` on the `SOURCED_FROM` edge
 (`src/neo4j_client.py:_upsert_sourced_relationship`). Useful when you
-need the original payload without a round-trip to MISP.
+need the original payload without a round-trip to MISP. On a `CVE` the
+edge holds the source's latest record, replaced on every write from a MISP
+attribute (2026-10); on other labels, the record that created the edge. The
+opt-in STIX import (`run_pipeline --stix-flow`) writes a reduced record under
+the MISP event's source id only when it creates the edge, never over the
+record the sync wrote.
 
 ```cypher
 MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'})
@@ -1309,11 +1441,11 @@ means re-runs are safe:
 - `scripts/backfill_cve_dates_from_nvd_meta.py` — historical CVE date backfill migration (PR-N22)
 - `scripts/backfill_edge_misp_event_ids.py` — edge `r.misp_event_ids[]` backfill (PR-N26; pairs with `migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`)
 - `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only audit of legacy unicode-bypass nodes (PR-N32; surface for `BASELINE_LAUNCH_CHECKLIST.md` item `[6]`)
-- `src/run_misp_to_neo4j.py:_MispFallbackHardError` — sentinel exception raised by the paginated MISP fetch fallback on any of 4 hard-failure modes (errors-payload, unexpected-shape, non-200, cap-hit; PR-N29 audit HIGH-1/2/3 + PR-N31 metric/alert wiring; see § 8 above)
+- `src/run_misp_to_neo4j.py:_MispFallbackHardError` — sentinel exception raised by the paginated MISP fetch fallback on any of 4 hard-failure modes (errors-payload, unexpected-shape, non-200, cap-hit; PR-N29 audit HIGH-1/2/3 + PR-N31 metric/alert wiring; see § 8 above), and since 2026-10-16 also by the primary event listing (a failed later index page, any other listing error)
 
 ---
 
-_Last updated: 2026-10-16 — Kill-switch table and failure mode 5 (Neo4j batch permanent failure): the batch MERGEs, single-item merges, relationship groups and other writes read their result where their retry and error handling see the error (an error the server meets while executing or committing a statement arrives with the result), so their execution errors now retry or count instead of counting as written; `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` stops only the zero-write check; what to watch in the first sync after the deploy (`[BATCH-PERMANENT-FAILURE]`, `[MERGE-RETURNED-FALSE]` with the client's `merge_node_with_source FAILED` or `SOURCED_FROM relationship error (terminal)`, which name the node and source, and retries exhausted); the CVE sub-writes do not yet fail the sync (WARNING only). Same day: *Post-run summary grep* (`COLLECTOR_SUMMARY`): the items no MISP attribute could be built from count among the push failures only when they are all or at least half of a source's items in the push (a payload that stopped converting, fixed in the collector or the source's payload); fewer are reported by the `[CONVERT]` WARNING and neither fail the run nor hold its cursor; how to tell the two `[CONVERT]` lines apart. Same day: *Post-run summary grep*: the `[CONVERT]` line of the MISP writer, per source, for the items no MISP attribute could be built from, which MISP never saw. Same day: after a baseline, the acceptance script's sector-evidence checks (a sector link names only the feeds that gave the sector and cites only the CISA ICS advisories that name it; `advisory_sector` only on AFFECTS where CISA stated it, and on every sector CISA stated, which `--require-cisa-ics` requires once the `cisa_ics` edges carry `zones` and not with `--legacy-graph`; confidence follows the label), its description-source and aging checks with `--legacy-graph` for an older graph, its reports, and how to measure CISA ICS and ATT&CK for ICS. Same day: *MISP → Neo4j sync schedule*, after a baseline: the first scheduled sync reads the attributes changed since the incremental window overlap before the baseline's full sync started (`EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS`, default 1 h; it said one day). Same day: "AbuseIPDB daily blacklist quota": the daily and the baseline runs share one cache key (`{confidenceMinimum: 90, limit: 10000}` with the default settings), so on a day with both the run that collects second reuses the first one's answer within the maximum age, and a lower `EDGEGUARD_MAX_ENTRIES` or baseline `BASELINE_COLLECTION_LIMIT` gives a run its own request; a cleared task sends no request when such an answer exists. Same day: new section "AbuseIPDB daily blacklist quota (429, 2026-10)": a red `collect_abuseipdb` with "daily blacklist quota exhausted (429)" means the 5 blacklist requests of the UTC day are spent and the task's retries get the 429 again (no rate-limit backoff for that request); clear only that task after 00:00 UTC, and for a baseline the data reaches Neo4j at the next sync; the cache file `state/abuseipdb_blacklist_cache.json`, which runs reuse it (same parameters, same UTC day, at most `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS` old), how to force a fresh request, and the one shared state directory it assumes. Same day: "AbuseIPDB daily blacklist quota": the 02:00 UTC daily run reuses an answer that a run with its parameters fetched after 00:00 UTC that day (a failed daily task cleared after midnight), and otherwise sends a request; an answer from an earlier UTC day is never reused. Same day: fallback triage: the `restSearch` probe asks for event headers only (`metadata`), and the safety cap on a MISP older than 2.4.177 counts events of any kind. Same day: indicator aging rollout, *Clearing a failed enrichment task or sync*: a cleared task evaluates no earlier than the node's stored time; a write that commits before the job locks a node is what the job evaluates; the one case that leaves a node behind the latest evaluation for a while (a write whose statement started before an aging job that changed nothing, committing a newer report after it) until the next write or job. Same day: indicator aging rollout: the aging runs at the database's current time, lifted to a node's `aging_evaluated_at` (the time at which its aging values were last written) when that is later, and no DAG run passes a time, so a cleared task, an older run or a baseline overlapping a scheduled sync evaluates at the time it runs and never moves a node's aging backwards; the first aging job after the deployment writes `aging_evaluated_at` once on every Indicator with a time that no write has stored it on; what the job logs. Same day: indicator aging rollout: STIX consumers of a kept graph re-ingest the full bundle once (an indicator's `modified` can move back); CVE descriptions: the KEV and CISA ICS texts are those of the first record MISP stored (only NVD edits its stored copies). Same day: new section "MISP → Neo4j sync schedule": every 72 hours, the 24-hour skip guard, the first sync after a baseline (within 96 hours of its full sync), `EdgeGuardNeo4jSyncStale` (122 h, also in the alert table) and the settings no longer read; `force_sync` bypasses the 24-hour guard. Same day: attribution: the MISP writer adds no several-actor mark to a stored copy; a pulse edited to name several actors whose IOCs MISP already holds and which brings no new IOC is not marked, a known limit. Same day: new section "Indicator aging rollout": after deployment one full sync writes the new aging properties on every Indicator, then the per-source measurement (per tier, retired, by basis, no time) before the 730 days are confirmed; what the job logs; changing the rule (`EDGEGUARD_AGING_*`); the refresh of re-reported indicators and the known limit of the alert and command-line writers. Same day: "Repairing CVE descriptions and dates" and "Repairing Malware, ThreatActor and Tool descriptions": the description follows a fixed source ranking with `description_source` (CVE: NVD > CISA KEV > CISA ICS > any other source; entity, Technique and Tactic: MITRE ATT&CK > a curated source > any other source), a description without a source counts as the top source's, the cleanup statements also remove `description_source`, a new step removes the other descriptions without a source on nodes EdgeGuard created before the full sync, and the checks read `description_source`; a CVE without an NVD record shows the KEV's text over CISA ICS's whatever the order, and keeps CISA ICS's dates; new subsection "Whose text a description is, and every source's text" under "Retrieving raw MISP data from a Neo4j node". Same day: `EdgeGuardNeo4jFullSyncRequestPending` (a requested full sync that failed on its last attempt; it clears 3 days after the last failure) in "Requesting a full MISP → Neo4j sync" and the paging table; the CVE description repair names the shared full sync with the entity description repair, as that section does; step 2d and the acceptance check read the pulses marked on indicators, the MISP writer marks stored copies of held IOCs (`[MARK]`), a mark judged without the reference is not stored, and a repair for a wrong mark. Prior: 2026-10-15 — `EdgeGuardBuildRelationshipsSilentDeath` compares the last successful sync with the last build_relationships completion (new gauge `edgeguard_build_relationships_last_completion_timestamp`), so it no longer fires during a baseline's collection phase or while a build_relationships retry may still complete. Same day: `EdgeGuardBuildRelationshipsSilentDeath` described by the series it reads (the latest successful baseline task). Same day: "Repairing CVE descriptions and dates", steps 1–2: the placeholder "CVE from <source>" is matched only with a lowercase source id and removed only from a node EdgeGuard created or wrote to, as for the entity placeholders. Same day: "Repairing Malware, ThreatActor and Tool descriptions", steps 1–2: a placeholder is matched only with a lowercase source id after "from" and removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`), so a partner's text such as "Threat actor from Iran" stays. Same day: new section "Repairing Malware, ThreatActor and Tool descriptions": MITRE's record sets the description and other sources only fill it; the MITRE collector's next run repairs nothing (ETag 304, existing attributes skipped), one full sync does after removing descriptions that are metadata blocks or placeholders and the OTX pulse text on nodes MITRE does not describe (decision: such nodes show none); Tactic nodes keep none on a kept MISP. Same day: new section "Requesting a full MISP → Neo4j sync": `NEO4J_FULL_SYNC` is cleared only after the full sync succeeded, the mode line in the task log, that no incremental sync runs while the request stands, the alert after the last failed attempt and the recovery step, the 8-hour task limit and the 68-hour DAG run limit. Same day: "Canonical threat-actor reference": what each component reading it does without it ([ATTRIBUTION] warnings). Same day: new section "Malware ATT&CK-id twin merge": what the job logs (including the twins that fold into the node of their base name and the ambiguous ones it skips), the dry run, the acceptance check, an approximate count query and what remains after the job. Same day: "Repairing CVE descriptions and dates": an OTX pulse reference and the placeholder "CVE from <source>" are no CVE description, and steps 1–2 also remove them; the metadata-block rule is stated for CVEs; a CVE without an NVD record keeps the first record's text and dates when that source revises its record. Same day: new section "Repairing CVE descriptions and dates": a CVE's description and dates come from NVD's record (other records only fill them); a kept graph is repaired by removing descriptions that are metadata blocks, then one full sync (`NEO4J_FULL_SYNC`, `force_sync`). Same day: new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-16 — "Canonical threat-actor reference" and "Malware ATT&CK-id twin merge": each merge batch is one transaction, so `batch i/n FAILED (k pairs rolled back)` means the batch changed nothing and its pairs merge on the next run; *Neo4j statement timeouts*: `EDGEGUARD_NEO4J_READ_TIMEOUT` limits such a batch as a whole, and its `[NEO4J-TIMEOUT]` line names the batch. Same day: § 8: the primary MISP event listing fails the sync task on a failed later page, a listing cut at the page cap, a non-JSON fallback page or any other listing error (messages and remedies, including the request-error form of a failed later index page); a `restSearch` request error that is not a timeout or a dropped connection is mode (3) and records `hard_error`; on a MISP that ignores the query-string paging each event is listed once; *See also*: the sentinel is also raised by the primary event listing. Same day: baseline lock: in `edgeguard_neo4j_sync`, `run_neo4j_sync` (and its retries), `build_relationships` and `run_enrichment_jobs` skip at their start while a baseline holds the lock, not only `check_sync_needed` (*Baseline launch path*); a refusal of `baseline_clean` before the wipe (`fresh_baseline` typo, invalid `wipe_scope`, backup gate) releases the lock, and `baseline_clean` (cleared) and `baseline_start` take it again before the run goes on, and the collectors and `full_neo4j_sync` refuse while no baseline holds it (a `baseline_start` marked success by hand, a lock reaped or removed; clear `baseline_start`; § 7a, *Baseline launch path*), and `full_neo4j_sync`, the baseline's `build_relationships` and its `run_enrichment_jobs` also while another baseline holds it, where the collectors stand down (§ 7a); § 7c (the Airflow 2 postcheck skip) states that the run then ends `success`, not `failed`, that no alert reports a failed baseline run, and that the path does not run on the supported Airflow 3; `EdgeGuardBuildRelationshipsSilentDeath` is silent while a baseline run is in progress, and its row names the skipped `build_relationships` of the sync DAG (it said build_relationships follows the sync directly). Same day: *CISA KEV revisions*: what the logs and the task's `kev_update` show, the first runs on a MISP kept from before 2026-10-15 (about 1,740 edits over four runs), the acceptance after a wipe and a new baseline, and the one live check after deploy that an edit moves the MISP event's timestamp and reaches the node at the next sync; *Repairing CVE descriptions*: the KEV text is the catalogue's latest (it said a revised KEV entry reaches neither MISP nor the graph); *Path 3*: a CVE's `SOURCED_FROM.raw_data` holds the source's latest record, and the STIX import's reduced record never replaces it. Same day: Kill-switch table and failure mode 5 (Neo4j batch permanent failure): the batch MERGEs, single-item merges, relationship groups and other writes read their result where their retry and error handling see the error (an error the server meets while executing or committing a statement arrives with the result), so their execution errors now retry or count instead of counting as written; `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` stops only the zero-write check; what to watch in the first sync after the deploy (`[BATCH-PERMANENT-FAILURE]`, `[MERGE-RETURNED-FALSE]` with the client's `merge_node_with_source FAILED` or `SOURCED_FROM relationship error (terminal)`, which name the node and source, and retries exhausted); the CVE sub-writes do not yet fail the sync (WARNING only). Same day: *Post-run summary grep* (`COLLECTOR_SUMMARY`): the items no MISP attribute could be built from count among the push failures only when they are all or at least half of a source's items in the push (a payload that stopped converting, fixed in the collector or the source's payload); fewer are reported by the `[CONVERT]` WARNING and neither fail the run nor hold its cursor; how to tell the two `[CONVERT]` lines apart. Same day: *Post-run summary grep*: the `[CONVERT]` line of the MISP writer, per source, for the items no MISP attribute could be built from, which MISP never saw. Same day: after a baseline, the acceptance script's sector-evidence checks (a sector link names only the feeds that gave the sector and cites only the CISA ICS advisories that name it; `advisory_sector` only on AFFECTS where CISA stated it, and on every sector CISA stated, which `--require-cisa-ics` requires once the `cisa_ics` edges carry `zones` and not with `--legacy-graph`; confidence follows the label), its description-source and aging checks with `--legacy-graph` for an older graph, its reports, and how to measure CISA ICS and ATT&CK for ICS. Same day: *MISP → Neo4j sync schedule*, after a baseline: the first scheduled sync reads the attributes changed since the incremental window overlap before the baseline's full sync started (`EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS`, default 1 h; it said one day). Same day: "AbuseIPDB daily blacklist quota": the daily and the baseline runs share one cache key (`{confidenceMinimum: 90, limit: 10000}` with the default settings), so on a day with both the run that collects second reuses the first one's answer within the maximum age, and a lower `EDGEGUARD_MAX_ENTRIES` or baseline `BASELINE_COLLECTION_LIMIT` gives a run its own request; a cleared task sends no request when such an answer exists. Same day: new section "AbuseIPDB daily blacklist quota (429, 2026-10)": a red `collect_abuseipdb` with "daily blacklist quota exhausted (429)" means the 5 blacklist requests of the UTC day are spent and the task's retries get the 429 again (no rate-limit backoff for that request); clear only that task after 00:00 UTC, and for a baseline the data reaches Neo4j at the next sync; the cache file `state/abuseipdb_blacklist_cache.json`, which runs reuse it (same parameters, same UTC day, at most `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS` old), how to force a fresh request, and the one shared state directory it assumes. Same day: "AbuseIPDB daily blacklist quota": the 02:00 UTC daily run reuses an answer that a run with its parameters fetched after 00:00 UTC that day (a failed daily task cleared after midnight), and otherwise sends a request; an answer from an earlier UTC day is never reused. Same day: fallback triage: the `restSearch` probe asks for event headers only (`metadata`), and the safety cap on a MISP older than 2.4.177 counts events of any kind. Same day: indicator aging rollout, *Clearing a failed enrichment task or sync*: a cleared task evaluates no earlier than the node's stored time; a write that commits before the job locks a node is what the job evaluates; the one case that leaves a node behind the latest evaluation for a while (a write whose statement started before an aging job that changed nothing, committing a newer report after it) until the next write or job. Same day: indicator aging rollout: the aging runs at the database's current time, lifted to a node's `aging_evaluated_at` (the time at which its aging values were last written) when that is later, and no DAG run passes a time, so a cleared task, an older run or a baseline overlapping a scheduled sync evaluates at the time it runs and never moves a node's aging backwards; the first aging job after the deployment writes `aging_evaluated_at` once on every Indicator with a time that no write has stored it on; what the job logs. Same day: indicator aging rollout: STIX consumers of a kept graph re-ingest the full bundle once (an indicator's `modified` can move back); CVE descriptions: the KEV and CISA ICS texts are those of the first record MISP stored (only NVD edits its stored copies). Same day: new section "MISP → Neo4j sync schedule": every 72 hours, the 24-hour skip guard, the first sync after a baseline (within 96 hours of its full sync), `EdgeGuardNeo4jSyncStale` (122 h, also in the alert table) and the settings no longer read; `force_sync` bypasses the 24-hour guard. Same day: attribution: the MISP writer adds no several-actor mark to a stored copy; a pulse edited to name several actors whose IOCs MISP already holds and which brings no new IOC is not marked, a known limit. Same day: new section "Indicator aging rollout": after deployment one full sync writes the new aging properties on every Indicator, then the per-source measurement (per tier, retired, by basis, no time) before the 730 days are confirmed; what the job logs; changing the rule (`EDGEGUARD_AGING_*`); the refresh of re-reported indicators and the known limit of the alert and command-line writers. Same day: "Repairing CVE descriptions and dates" and "Repairing Malware, ThreatActor and Tool descriptions": the description follows a fixed source ranking with `description_source` (CVE: NVD > CISA KEV > CISA ICS > any other source; entity, Technique and Tactic: MITRE ATT&CK > a curated source > any other source), a description without a source counts as the top source's, the cleanup statements also remove `description_source`, a new step removes the other descriptions without a source on nodes EdgeGuard created before the full sync, and the checks read `description_source`; a CVE without an NVD record shows the KEV's text over CISA ICS's whatever the order, and keeps CISA ICS's dates; new subsection "Whose text a description is, and every source's text" under "Retrieving raw MISP data from a Neo4j node". Same day: `EdgeGuardNeo4jFullSyncRequestPending` (a requested full sync that failed on its last attempt; it clears 3 days after the last failure) in "Requesting a full MISP → Neo4j sync" and the paging table; the CVE description repair names the shared full sync with the entity description repair, as that section does; step 2d and the acceptance check read the pulses marked on indicators, the MISP writer marks stored copies of held IOCs (`[MARK]`), a mark judged without the reference is not stored, and a repair for a wrong mark. Prior: 2026-10-15 — `EdgeGuardBuildRelationshipsSilentDeath` compares the last successful sync with the last build_relationships completion (new gauge `edgeguard_build_relationships_last_completion_timestamp`), so it no longer fires during a baseline's collection phase or while a build_relationships retry may still complete. Same day: `EdgeGuardBuildRelationshipsSilentDeath` described by the series it reads (the latest successful baseline task). Same day: "Repairing CVE descriptions and dates", steps 1–2: the placeholder "CVE from <source>" is matched only with a lowercase source id and removed only from a node EdgeGuard created or wrote to, as for the entity placeholders. Same day: "Repairing Malware, ThreatActor and Tool descriptions", steps 1–2: a placeholder is matched only with a lowercase source id after "from" and removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`), so a partner's text such as "Threat actor from Iran" stays. Same day: new section "Repairing Malware, ThreatActor and Tool descriptions": MITRE's record sets the description and other sources only fill it; the MITRE collector's next run repairs nothing (ETag 304, existing attributes skipped), one full sync does after removing descriptions that are metadata blocks or placeholders and the OTX pulse text on nodes MITRE does not describe (decision: such nodes show none); Tactic nodes keep none on a kept MISP. Same day: new section "Requesting a full MISP → Neo4j sync": `NEO4J_FULL_SYNC` is cleared only after the full sync succeeded, the mode line in the task log, that no incremental sync runs while the request stands, the alert after the last failed attempt and the recovery step, the 8-hour task limit and the 68-hour DAG run limit. Same day: "Canonical threat-actor reference": what each component reading it does without it ([ATTRIBUTION] warnings). Same day: new section "Malware ATT&CK-id twin merge": what the job logs (including the twins that fold into the node of their base name and the ambiguous ones it skips), the dry run, the acceptance check, an approximate count query and what remains after the job. Same day: "Repairing CVE descriptions and dates": an OTX pulse reference and the placeholder "CVE from <source>" are no CVE description, and steps 1–2 also remove them; the metadata-block rule is stated for CVEs; a CVE without an NVD record keeps the first record's text and dates when that source revises its record. Same day: new section "Repairing CVE descriptions and dates": a CVE's description and dates come from NVD's record (other records only fill them); a kept graph is repaired by removing descriptions that are metadata blocks, then one full sync (`NEO4J_FULL_SYNC`, `force_sync`). Same day: new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._

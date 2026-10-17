@@ -1073,6 +1073,8 @@ _NVD_CVSS_VERSIONS = (
 # skips an advisory's CVE that MISP already holds), so the first record that fills them is the same in
 # any order. The description and its source: ``description_ranking``.
 _CVE_RECORD_DATE_PROPS = ("published", "last_modified")
+# 2026-10: the CVE properties a CISA KEV record sets and any other record only fills (``merge_cve``).
+_KEV_OWNED_CVE_PROPS = ("cisa_exploit_add", "cisa_action_due", "cisa_required_action", "cisa_vulnerability_name")
 
 
 def _batch_record_date_clauses(node: str, row: str) -> List[str]:
@@ -2431,6 +2433,7 @@ class Neo4jClient:
         extra_props: Dict = None,
         fill_props: Optional[Dict] = None,
         description: Optional[RankedDescription] = None,
+        refresh_raw_data: bool = False,
     ) -> bool:
         """
         Merge a node with proper source tracking.
@@ -2460,6 +2463,9 @@ class Neo4jClient:
                 high as the stored description's (``description_ranking``). A label with a
                 description ranking takes ``description`` and ``description_source`` only from
                 here, never from ``extra_props`` or ``fill_props``.
+            refresh_raw_data: Replace ``SOURCED_FROM.raw_data`` with this record on every write
+                (2026-10, ``merge_cve``), so the edge holds the source's latest record; otherwise it is
+                written when the edge is created only.
 
         Returns:
             True if successful
@@ -2918,6 +2924,7 @@ class Neo4jClient:
                 zones=zone,
                 stated_zones=data.get("stated_zones"),
                 stated_refs=data.get("stated_refs"),
+                refresh_raw_data=refresh_raw_data,
             )
 
         except (
@@ -3003,9 +3010,16 @@ class Neo4jClient:
         zones: Optional[List[str]] = None,
         stated_zones: Optional[List[str]] = None,
         stated_refs: Optional[List[str]] = None,
+        refresh_raw_data: bool = False,
     ) -> bool:
         """Create or update SOURCED_FROM relationship with raw data + per-source
         timestamps on the edge.
+
+        2026-10 (source revisions): ``r.raw_data`` is written when the edge is created and, with
+        ``refresh_raw_data`` (a CVE write from a MISP attribute, ``merge_cve``), replaced on every write,
+        so the edge of a CVE holds its source's latest record: a KEV or NVD copy edited in MISP reaches
+        the edge at the next sync. Other labels, and the CVE write of the opt-in STIX import (a reduced
+        record, not the source's), keep the record that created the edge.
 
         2026-10-16 (sector evidence): the edge accumulates the zones this source's records gave the node
         (``r.zones``), the part of them the source stated itself (``r.stated_zones``) and which record
@@ -3121,6 +3135,9 @@ class Neo4jClient:
                     THEN datetime($source_reported_last_at)
                 ELSE r.source_reported_last_at
             END"""
+        if refresh_raw_data:
+            query += """,
+            r.raw_data = $raw_data"""
         if report is not None:
             query += f""",
             {edge_report_items("r", "$report", "$source_id")}"""
@@ -3296,7 +3313,7 @@ class Neo4jClient:
             extra_props["hostnames"] = data["hostnames"]
         return self.merge_node_with_source("Indicator", key_props, data, source_id, extra_props=extra_props or None)
 
-    def merge_cve(self, data: Dict, source_id: str = "nvd") -> bool:
+    def merge_cve(self, data: Dict, source_id: str = "nvd", *, refresh_raw_data: bool = True) -> bool:
         """
         MERGE a CVE node with source tracking, then create CVSS sub-nodes.
 
@@ -3308,7 +3325,13 @@ class Neo4jClient:
         ``published`` and ``last_modified`` are set by NVD's record (``nvd_record``) and only filled,
         where the node has none, by any other record (2026-10). ``description`` and
         ``description_source`` follow the source ranking NVD > CISA KEV > CISA ICS > any other source
-        (``description_ranking.CVE_DESCRIPTIONS``, 2026-10-16).
+        (``description_ranking.CVE_DESCRIPTIONS``, 2026-10-16). ``cisa_exploit_add``,
+        ``cisa_action_due``, ``cisa_required_action`` and ``cisa_vulnerability_name`` are set by a CISA
+        KEV record and only filled by any other (``_KEV_OWNED_CVE_PROPS``, 2026-10). The
+        ``SOURCED_FROM`` edge's ``raw_data`` is replaced with the record on every write (2026-10), so
+        the edge holds the source's latest record; ``refresh_raw_data=False`` writes it only when the
+        edge is created, for a caller whose record is not the source's (the STIX import of
+        ``run_pipeline``, a reduced record under the MISP event's source id).
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -3327,14 +3350,16 @@ class Neo4jClient:
         # (no GraphQL field, no STIX export, no Cypher query). Same
         # dead-write pattern as round-17's ``original_*_date`` cleanup.
         extra_props: Dict = {}
-        if data.get("cisa_exploit_add"):
-            extra_props["cisa_exploit_add"] = data["cisa_exploit_add"]
-        if data.get("cisa_action_due"):
-            extra_props["cisa_action_due"] = data["cisa_action_due"]
-        if data.get("cisa_required_action"):
-            extra_props["cisa_required_action"] = data["cisa_required_action"]
-        if data.get("cisa_vulnerability_name"):
-            extra_props["cisa_vulnerability_name"] = data["cisa_vulnerability_name"]
+        fill_props: Dict = {}
+        # 2026-10: the KEV record owns its four fields. A CISA KEV record sets them; any other record
+        # (NVD's carries the same four from its own KEV enrichment) only fills them where the node has
+        # none. Before, the record merged last set them, and NVD's copy can hold an older value: NVD did
+        # not move ``lastModified`` when CISA moved the due date of CVE-2022-0995 (2026-10-08), so NVD's
+        # MISP copy kept the old date and a sync that read it after the KEV record wrote it back.
+        kev_owned = extra_props if source_registry.canonical_source_id(source_id) == "cisa_kev" else fill_props
+        for prop in _KEV_OWNED_CVE_PROPS:
+            if data.get(prop):
+                kev_owned[prop] = data[prop]
         # 2026-10: CISA's ``knownRansomwareCampaignUse`` ("Known" / "Unknown"), carried by the KEV
         # collector's records only, so an NVD record never overwrites it.
         if data.get("known_ransomware_use"):
@@ -3364,7 +3389,6 @@ class Neo4jClient:
         # NVD's description depending on the order of the events in the sync. 2026-10-16: the description
         # follows the source ranking (``description_ranking``), so on a CVE without NVD's record the
         # KEV's text wins over CISA ICS's, and CISA ICS's over any other, in any order.
-        fill_props: Dict = {}
         record_dates = extra_props if data.get("nvd_record") else fill_props
         for prop in _CVE_RECORD_DATE_PROPS:
             if data.get(prop):
@@ -3402,6 +3426,9 @@ class Neo4jClient:
             extra_props=extra_props or None,
             fill_props=fill_props or None,
             description=CVE_DESCRIPTIONS.record(data.get("description"), source_id),
+            # 2026-10: the SOURCED_FROM edge holds the source's latest record (an edited MISP copy
+            # re-read by the sync), not the record that created the edge.
+            refresh_raw_data=refresh_raw_data,
         )
         if not ok:
             return False
@@ -3817,6 +3844,8 @@ class Neo4jClient:
         MISP peers storing lowercase ids.
 
         ``description`` and ``description_source``: as in ``merge_malware`` (2026-10-16).
+
+        ``is_subtechnique``: whether the normalised id is dotted (2026-10), whatever the record says.
         """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Technique", data=data)
         if mitre_id is None:
@@ -3828,7 +3857,11 @@ class Neo4jClient:
             "attack_domain": str(data.get("attack_domain") or "enterprise"),
         }
         extra_props["detection"] = data.get("detection", "")
-        extra_props["is_subtechnique"] = data.get("is_subtechnique", False)
+        # 2026-10: from the ATT&CK id, as build_relationships step 1b reads it: ATT&CK identifies a
+        # sub-technique by its parent's id and a dotted suffix (T1059.001 under T1059). The MISP round
+        # trip carries no flag, so reading it from the record wrote the default False onto every
+        # sub-technique on each sync.
+        extra_props["is_subtechnique"] = "." in mitre_id
         if data.get("name"):
             extra_props["name"] = data["name"]
         # 2026-10-16: the source ranking decides the description (any record used to set it).

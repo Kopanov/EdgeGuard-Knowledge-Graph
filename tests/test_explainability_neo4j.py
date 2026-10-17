@@ -528,3 +528,31 @@ def test_campaign_link_provenance_does_not_depend_on_the_order_links_were_create
     assert sources == ["alienvault_otx", "coreideas", "mitre_attck"]
     assert refs == ["alienvault_otx:many-a", "coreideas:many-c", "mitre_attck:many-b"]
     assert forward[("many-c.example", "PART_OF_CAMPAIGN")][0] == [str(e) for e in range(300, 200, -1)] + ["7"]
+
+
+def test_step5_counts_the_active_campaigns_stamped_since_the_run_started(client, raw_driver):
+    """2026-10-16: Step 5 of ``build_campaign_nodes`` counts the active campaigns whose ``last_updated``
+    (Step 1 stamps it with the database's clock) is at or after the run's start, read from that clock.
+    The statement was ``duration.between(c.last_updated, datetime()).minutes < 5``: ``.minutes`` is a
+    component of the duration, so it counted the campaigns stamped days before (0 minutes) and missed
+    one stamped 6 minutes before (here 3, not 2)."""
+    import enrichment_jobs
+
+    with raw_driver.session() as session:
+        run_start_at = session.run("RETURN toString(datetime() - duration('PT10M')) AS t").single()["t"]
+        session.run(
+            f"""
+            CREATE (:Campaign:{LABEL} {{name: 'stamped 6 minutes ago', active: true,
+                    last_updated: datetime() - duration('PT6M')}})
+            CREATE (:Campaign:{LABEL} {{name: 'stamped 1 minute ago', active: true,
+                    last_updated: datetime() - duration('PT1M')}})
+            CREATE (:Campaign:{LABEL} {{name: 'inactive, stamped 1 minute ago', active: false,
+                    last_updated: datetime() - duration('PT1M')}})
+            CREATE (:Campaign:{LABEL} {{name: 'stamped 2 days ago', active: true,
+                    last_updated: datetime() - duration('P2D')}})
+            CREATE (:Campaign:{LABEL} {{name: 'stamped 3 days ago', active: true,
+                    last_updated: datetime() - duration('P3D')}})
+            """
+        )
+        record = session.run(enrichment_jobs._CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, run_start_at=run_start_at).single()
+    assert record["count"] == 2, "the active campaigns stamped 6 minutes and 1 minute ago"
