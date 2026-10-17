@@ -1,16 +1,15 @@
 # Backup & Recovery — EdgeGuard Knowledge Graph
 
-> **Status: ✅ Production-ready.** This procedure is the operator pre-requisite
+> **Status:** production-ready. This procedure is the operator prerequisite
 > for `edgeguard fresh-baseline` (the destructive command). Without an
 > up-to-date `EDGEGUARD_LAST_BACKUP_AT` timestamp, the CLI refuses to run
-> (PR-F2 backup-timestamp gate). **Since 2026-06 the same gate is also
-> enforced by the `baseline_clean` DAG task** for Airflow UI/API triggers
-> with `{"fresh_baseline": true}` — those used to bypass it entirely. The
-> DAG-side gate reads `EDGEGUARD_LAST_BACKUP_AT` from the **airflow
+> (the backup-timestamp gate). **The `baseline_clean` DAG task enforces the
+> same gate** for Airflow UI/API triggers with `{"fresh_baseline": true}`.
+> The DAG-side gate reads `EDGEGUARD_LAST_BACKUP_AT` from the **airflow
 > container environment** (passed through by docker-compose), auto-skips on
 > a clean install (Neo4j and MISP reachable and empty), and accepts an
-> explicit `{"skip_backup_check": true}` conf bypass (loudly logged; mirrors
-> the CLI `--skip-backup-check` flag).
+> explicit `{"skip_backup_check": true}` conf bypass (logged at WARNING; the
+> counterpart of the CLI `--skip-backup-check` flag).
 
 ## Why this exists
 
@@ -52,7 +51,7 @@ docker compose up -d api graphql airflow
 edgeguard fresh-baseline --days 730
 ```
 
-## The backup-timestamp gate (PR-F2)
+## The backup-timestamp gate
 
 `edgeguard fresh-baseline` reads `EDGEGUARD_LAST_BACKUP_AT` from the
 environment. The gate accepts:
@@ -94,7 +93,7 @@ edgeguard fresh-baseline --skip-backup-check    # logs WARNING; not for prod
 The gate logs the bypass at WARNING level so audit-trail readers can see
 when production safety was disabled.
 
-### Auto-skip on clean installs (PR-F3, Issue #58)
+### Auto-skip on clean installs
 
 The gate also auto-skips when **both data stores are empty** (Neo4j
 EdgeGuard nodes = 0 AND MISP EdgeGuard events = 0). This covers the
@@ -117,7 +116,7 @@ is a one-time bootstrap, not an ongoing posture.
 
 Checkpoint state is **intentionally excluded** from the auto-skip
 predicate: a leftover `checkpoints/baseline_checkpoint.json` from a prior
-run on a now-emptied graph is exactly the case we want to allow without
+run on an emptied graph is exactly the case the auto-skip allows without
 ceremony, and per-collector cursor state is not user-meaningful data.
 
 ## Backup procedures by deployment shape
@@ -267,9 +266,9 @@ edgeguard doctor    # verify all services connect
 edgeguard --help    # sanity check
 ```
 
-The graph should reflect the 13:50 state. The 14:05 failure is now
-recoverable; investigate the MISP rate-limit, fix the root cause, then
-take a fresh backup + retry.
+The graph reflects the 13:50 state. Investigate the MISP rate-limit of
+the 14:05 failure, fix the root cause, then take a fresh backup and
+retry.
 
 ## Expected restore times
 
@@ -281,20 +280,21 @@ take a fresh backup + retry.
 
 Times are SSDs on a workstation; spinning disk + cloud storage adds 2-5×.
 
-## What's NOT in this procedure (yet)
+## Audit trail and what this procedure does not cover
 
-These are tracked in [Issue #53 (PR-E backlog)](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/53):
+Destructive operations leave an audit trail: `src/destructive_ops_audit.py`
+appends one JSONL line per Neo4j wipe and CVSS de-duplication to
+`EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH` (default `logs/destructive_ops.jsonl`).
+It does not record who triggered `fresh-baseline` or the DAG run conf.
 
-- ~~Audit-trail JSONL~~ — shipped in PR #147: `src/destructive_ops_audit.py`
-  appends one line per Neo4j wipe and CVSS de-duplication to
-  `EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH` (default `logs/destructive_ops.jsonl`).
-  It does not yet record who triggered `fresh-baseline` or the DAG run conf.
+Not covered:
+
 - **Automated pre-flight backup hook** — option to take the snapshot AS
   part of `fresh-baseline` rather than as a manual prerequisite
 - **Backup-validation script** — verify the dump is restorable without
   actually restoring (parse + size + checksum sanity)
 
-For now, this manual procedure is the supported path. Operators who run
+This manual procedure is the supported path. Operators who run
 `fresh-baseline` regularly should script the backup steps + timestamp
 update into a wrapper.
 
@@ -302,9 +302,19 @@ update into a wrapper.
 
 - [docs/AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — `edgeguard_baseline` task chain (additive vs destructive modes)
 - [docs/DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md) — Neo4j memory + storage sizing (relevant for dump sizing)
-- [Issue #53](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/53) — operational hardening backlog (automated backup hook, backup validation; the audit trail shipped in PR #147)
 - [README.md § Roadmap & Status](../README.md#%EF%B8%8F-roadmap--status) — current production-ready vs in-progress scope
 
 ---
 
-_Last updated: 2026-10-17 — the 350K-node row of the restore times is the April 2026 baseline on which they were measured. Same day: documentation audit: the Neo4j dump runs offline (Community Edition refuses a database in use) and needs a backup mount (`./backups/neo4j:/backups`) on the `neo4j` service, which `docker-compose.yml` does not have; the MISP dump and restore run in MISP's own containers (MySQL in `misp_db_1` in the reference compose), not through EdgeGuard's compose project; the quick reference exports `EDGEGUARD_LAST_BACKUP_AT` to the host shell, because the CLI reads its own environment, not `.env`; Airflow task ids `baseline_clean` / `full_neo4j_sync`; incremental windows per source; the audit-trail JSONL shipped in PR #147; node count of the 2026-10-16 baseline; absolute issue links and the README anchor. Prior: 2026-06-11 — PR #125: the backup-timestamp gate is now ALSO enforced by the baseline_clean DAG task for UI/API triggers (previously CLI-only); quick-reference step 2 corrected to `docker compose up -d` (recreate) — plain `restart` does not re-read .env interpolations. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: verified — no factual drift. All commands (`docker compose exec neo4j neo4j-admin database dump …`) match the live `docker-compose.yml` `neo4j:` service; `EDGEGUARD_BACKUP_MAX_AGE_HOURS` env var exists and is read at `src/edgeguard.py:2341` (default 240h). Footer added as part of the audit trail._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
+- 2026-10-17 — The 350K-node row of the restore times names the April 2026 baseline on which they were measured.
+- 2026-10-17 — The Neo4j dump runs offline, because Community Edition refuses to dump a database in use, and needs a backup mount (`./backups/neo4j:/backups`) on the `neo4j` service, which `docker-compose.yml` does not have.
+- 2026-10-17 — The MISP dump and restore run in MISP's own containers (MySQL in `misp_db_1` in the reference compose), not through EdgeGuard's compose project; the quick reference exports `EDGEGUARD_LAST_BACKUP_AT` to the host shell, because the CLI reads its own environment, not `.env`.
+- 2026-10-17 — Airflow task ids `baseline_clean` / `full_neo4j_sync`, the incremental window of each source, the node count of the 730-day baseline of 2026-10-16 and the destructive-operations audit trail (shipped in PR #147) documented; the open items (automated pre-flight backup hook, backup validation) are tracked in issue #53.
+- 2026-06-11 — The `baseline_clean` DAG task enforces the backup-timestamp gate for UI/API triggers with `{"fresh_baseline": true}`, which had bypassed it (PR #125); the quick reference recreates the containers with `docker compose up -d`, because `restart` does not re-read `.env` interpolations.
+- 2026-04-20 — The gate auto-skips on a clean install where both stores are empty (PR-F3, issue #58).
+- 2026-04-20 — Document created with the backup-timestamp gate of `edgeguard fresh-baseline` (PR-F2).
