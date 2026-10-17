@@ -65,8 +65,9 @@ stix2~=3.0
 #     positional form so the call works unchanged on both versions.
 #   - DAG schedule kwarg renamed `schedule_interval=` → `schedule=` (removed
 #     in Airflow 3.x, no fallback possible — this is a hard break).
-#   - API server config: AIRFLOW__WEBSERVER__* → AIRFLOW__API__*;
-#     FabAuthManager requires AIRFLOW__API_AUTH__JWT_SECRET.
+#   - API server config: AIRFLOW__WEBSERVER__* → AIRFLOW__API__*; the API
+#     server requires AIRFLOW__API_AUTH__JWT_SECRET whatever the auth manager
+#     (this stack uses the Simple auth manager).
 #   - Metadata DB schema migration required: run `airflow db migrate` on
 #     airflow_postgres AFTER deploying the new image. BACK UP THE METADATA
 #     DB FIRST — the migration is not cleanly reversible.

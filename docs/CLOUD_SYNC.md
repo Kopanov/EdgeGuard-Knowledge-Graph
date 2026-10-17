@@ -674,16 +674,21 @@ operations — incremental MERGEs leave no audit trail.
 Pre-flight before every sync:
 
 ```bash
-# CLOUD-side: snapshot before any sync run
-neo4j-admin database dump neo4j --to-path=/backups/cloud-pre-sync-$(date +%F-%H%M).dump
+# CLOUD-side: snapshot before any sync run. The dump runs offline (Community Edition
+# refuses a database in use); --to-path is a directory, which receives neo4j.dump.
+STAMP=$(date +%F-%H%M)
+systemctl stop neo4j
+mkdir -p /backups/cloud-pre-sync-$STAMP
+neo4j-admin database dump neo4j --to-path=/backups/cloud-pre-sync-$STAMP --overwrite-destination=true
+systemctl start neo4j
 ```
 
 To restore:
 
 ```bash
-# CLOUD-side: stop Neo4j, restore, restart
+# CLOUD-side: stop Neo4j, restore, restart (--from-path is the directory that holds neo4j.dump)
 systemctl stop neo4j
-neo4j-admin database load neo4j --from-path=/backups/cloud-pre-sync-2026-04-17-1400.dump --overwrite-destination
+neo4j-admin database load neo4j --from-path=/backups/cloud-pre-sync-2026-04-17-1400 --overwrite-destination=true
 systemctl start neo4j
 ```
 
@@ -790,4 +795,4 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-10-17 — documentation audit: Recipe 1 and the full snapshot merge with the delta as on-match properties too (`{}` left changed nodes and edges stale in the cloud); the delta selects aged indicators (`aging_evaluated_at`) since `$since`, names the primary label (secondary sector labels made `apoc.merge.node` miss and `labels(a)[0]` pick a sector) and gets a reconciliation for deletions; Recipe 3 dumps offline and wipes with `edgeguard clear neo4j --force` (a `Neo4jClient()` that never connected deleted nothing); 19 UNIQUE constraints and 25 range `<label>_uuid` indexes, with a Rollback C that compiles; 17 batch templates; sector steps 7a–7d; CVE nodes created by the MISP → Neo4j sync; the standalone helpers stamp `r.src_uuid` / `r.trg_uuid` (caveat removed); `_NATURAL_KEYS` as the mirror, field canonicalization and the topology/User/Alert labels; Rollback D uses `clear_neo4j.py --force` (`--yes` is not an option). Prior: 2026-10-15 — wording only: the PR #33 review finding is stated without naming the review tool. Prior: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-17 — Rollback A dumps offline and passes directories to `--to-path` / `--from-path`, as Recipe 3 and BACKUP.md do. Same day: documentation audit: Recipe 1 and the full snapshot merge with the delta as on-match properties too (`{}` left changed nodes and edges stale in the cloud); the delta selects aged indicators (`aging_evaluated_at`) since `$since`, names the primary label (secondary sector labels made `apoc.merge.node` miss and `labels(a)[0]` pick a sector) and gets a reconciliation for deletions; Recipe 3 dumps offline and wipes with `edgeguard clear neo4j --force` (a `Neo4jClient()` that never connected deleted nothing); 19 UNIQUE constraints and 25 range `<label>_uuid` indexes, with a Rollback C that compiles; 17 batch templates; sector steps 7a–7d; CVE nodes created by the MISP → Neo4j sync; the standalone helpers stamp `r.src_uuid` / `r.trg_uuid` (caveat removed); `_NATURAL_KEYS` as the mirror, field canonicalization and the topology/User/Alert labels; Rollback D uses `clear_neo4j.py --force` (`--yes` is not an option). Prior: 2026-10-15 — wording only: the PR #33 review finding is stated without naming the review tool. Prior: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._

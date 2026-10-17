@@ -264,7 +264,7 @@ specific = {z for z in all_zones if z != "global"}
 event_zones = sorted(specific) if specific else ["global"]
 ```
 
-Flag any version that uses `if zone_from_name: event_zones = [zone_from_name]` — this silently discards tag-sourced zones. Example failure: event name=`FINANCE` + tag `zone:healthcare` → should produce `['finance','healthcare']`, not `['finance']`. The same applies when `zone_from_name='global'` — the specific tags must win over the generic name.
+Flag any version that uses `if zone_from_name: event_zones = [zone_from_name]` — this silently discards tag-sourced zones. Example failure: event tags `zone:finance` + `zone:healthcare` → should produce `['finance','healthcare']`, and `zone:global` + `zone:healthcare` → `['healthcare']` (a specific sector wins over `global`). Event names carry no zone (`_extract_zone_from_event_name` returns None), so the name never adds one; an attribute's own specific zone tags take precedence over all of these (next rule).
 
 ### `parse_attribute` must use all three zone sources with priority layers
 
@@ -468,7 +468,7 @@ Properties that record when a record was first seen must use `ON CREATE SET`, no
 `SET v.imported_at = timestamp()` overwrites the original value every sync. Flag it.
 
 ### `last_updated` not set on every sync
-Every `MERGE` that modifies an existing node must include `SET node.last_updated = timestamp()` or equivalent.
+Every `MERGE` that modifies an existing node must include `SET node.last_updated = datetime()` (§19).
 Flag MERGE blocks that update properties but do not refresh `last_updated`.
 
 ### Source provenance array overwritten
@@ -1007,7 +1007,7 @@ Every call to `datetime.now()` across `src/`, `dags/`, `tests/`, and `scripts/` 
 
 ### Neo4j timestamps must use Cypher `datetime()`, not Python ISO strings
 
-All Cypher SET clauses for `first_seen`, `last_updated`, `first_imported_at` must use the Neo4j server-side `datetime()` function, not Python-side `$parameter` strings. Storing ISO strings as `last_updated` breaks `duration.between()` in enrichment decay queries. Flag any Cypher that writes `$first_seen` or `$last_updated` as string parameters instead of `datetime()`.
+All Cypher SET clauses for `first_seen`, `last_updated`, `first_imported_at` must use the Neo4j server-side `datetime()` function, not Python-side `$parameter` strings. Storing ISO strings breaks datetime comparison and `duration` arithmetic in Cypher (the indicator aging computes `duration.inDays` from `coalesce(last_reported_at, first_imported_at)`, §15). Flag any Cypher that writes `$first_seen` or `$last_updated` as string parameters instead of `datetime()`.
 
 ### Prometheus metric labels must match between `metrics_server.py` and `dags/edgeguard_pipeline.py`
 

@@ -72,9 +72,11 @@ def test_cmd_doctor_does_not_default_airflow_password_to_airflow():
         "operators who skip setting it would expose the Airflow REST API "
         "(DAG triggering, task-instance reset) to anyone reaching port 8082"
     )
-    # Positive pin: must use the empty-string default + skip-if-empty pattern
+    # Positive pin: empty-string default. The doctor still lists the DAGs without it (through
+    # the generated password file); tests/test_doctor_dag_list.py checks that behaviour.
     assert 'os.getenv("AIRFLOW_API_PASSWORD", "")' in src, (
-        "use the empty-default + skip pattern so unset env → skip API check, not weak auth"
+        "no literal password default; unset AIRFLOW_API_PASSWORD makes the DAG list report "
+        "'skipped' instead of a warning"
     )
 
 

@@ -37,7 +37,7 @@ Output: 37 findings. Driven fixes in PR-F9, PR-G1, PR-I, PR-J, PR-K1, PR-K2, PR-
 | 07 | Per-collector baseline correctness | [`07_collector_baseline.md`](07_collector_baseline.md) | 19 (8 HIGH, 10 MED, 6 LOW) |
 | 08 | Relationship / edge integrity | [`08_relationship_integrity.md`](08_relationship_integrity.md) | 10+ (2 CRITICAL, 4 HIGH) |
 
-### Pass 3 — 7-agent comprehensive audit (2026-04-21)
+### Pass 3 — comprehensive audit, 7 lenses (2026-04-21)
 
 | # | Focus | File |
 |---|-------|------|

@@ -376,8 +376,8 @@ def cmd_doctor(args):
         all_ok = False
 
     # Check Airflow DAG state if webserver is reachable
-    # PR (security S6) — Red Team Tier S: previously used
-    # ``os.getenv("AIRFLOW_API_PASSWORD", "airflow")`` which silently
+    # No password default: the code previously used
+    # ``os.getenv("AIRFLOW_API_PASSWORD", "airflow")``, which silently
     # used the literal default ``"airflow"`` when unset, exposing the
     # Airflow REST API (DAG triggering, task-instance reset) to anyone who
     # could reach port 8082 with ``airflow:airflow``. No password is
@@ -613,7 +613,10 @@ _MEMORY_RECOMMENDATIONS = (
         "compose_service": "neo4j",
         "min_gb": 4.0,
         "rec_gb": 8.0,
-        "rationale": "730-day baseline graph (~550K nodes, ~2.7M rels, 2026-10-16) + build_relationships needs ≥4G, 8G recommended",
+        "rationale": (
+            "build_relationships needs ≥4G heap, 8G recommended; a 730-day baseline (~550K nodes, ~2.7M rels, "
+            "2026-10-16) uses 12G (baseline-capable profile, docs/DOCKER_SETUP_GUIDE.md)"
+        ),
     },
     {
         "key": "neo4j_page_cache",
@@ -625,7 +628,7 @@ _MEMORY_RECOMMENDATIONS = (
         "compose_service": "neo4j",
         "min_gb": 2.0,
         "rec_gb": 4.0,
-        "rationale": "Caches Neo4j store files; 4G recommended for the ~550K-node 730-day baseline graph",
+        "rationale": "Caches Neo4j store files; 4G recommended, 8G for a 730-day baseline (baseline-capable profile)",
     },
     {
         "key": "neo4j_tx_memory",

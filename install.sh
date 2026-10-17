@@ -122,7 +122,6 @@ if [ ! -f ".env" ]; then
         fi
     fi
 
-    # Production-test audit fix (Prod Readiness LOW 1.8, post-PR-C-merge):
     # Airflow 3.x requires AIRFLOW_API_AUTH_JWT_SECRET (the API server signs
     # its POST /auth/token and execution-API tokens with it, whatever the auth
     # manager; this stack uses the Simple auth manager) AND a Fernet key for

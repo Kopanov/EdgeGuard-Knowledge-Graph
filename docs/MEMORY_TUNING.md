@@ -226,7 +226,7 @@ Memory & sizing check
   --------------------------------    ----------  ------  ------  -------
   Neo4j heap                                8.0G    4G      8G    ✓ ok
   Neo4j page cache                          2.0G    2G      4G    ⚠ low
-                                    → Caches Neo4j store files; 4G recommended for the ~550K-node 730-day baseline graph
+                                    → Caches Neo4j store files; 4G recommended, 8G for a 730-day baseline (baseline-capable profile)
                                     → set NEO4J_PAGECACHE in .env (or NEO4J_server_memory_pagecache_size directly on the neo4j service)
   Neo4j tx memory                           8.0G    4G      8G    ✓ ok
 
@@ -269,4 +269,4 @@ referencing this doc.
 
 ---
 
-_Last updated: 2026-10-17 — documentation audit: env-var names in the quick reference (`NEO4J_server_memory_heap_max__size`, `NEO4J_dbms_memory_transaction_total_max`, set through the `.env` wrapper names); the compose defaults (heap 2g, page cache 1g, tx 4g, container 8g) replace the "commented preset" that does not exist; the `.env` recipe sets `NEO4J_CONTAINER_MEMORY_LIMIT` and adds the 730-day profile; `docker compose up -d neo4j` replaces `restart` (which keeps the old environment); host RAM from the compose memory limits (40G, about 48G for a 730-day baseline); MISP `memory_limit` 4096M per MISP_TUNING.md, and the MISP commands run in the MISP deployment, not EdgeGuard's compose project; build_relationships runs 20 steps with `apoc.periodic.iterate`; node count of the 2026-10-16 baseline; doctor hint line as printed; absolute PR/issue links; the env-var note heading no longer names the audit role._
+_Last updated: 2026-10-17 — the sample doctor output gives the doctor's page-cache rationale (4G recommended, 8G for a 730-day baseline). Same day: documentation audit: env-var names in the quick reference (`NEO4J_server_memory_heap_max__size`, `NEO4J_dbms_memory_transaction_total_max`, set through the `.env` wrapper names); the compose defaults (heap 2g, page cache 1g, tx 4g, container 8g) replace the "commented preset" that does not exist; the `.env` recipe sets `NEO4J_CONTAINER_MEMORY_LIMIT` and adds the 730-day profile; `docker compose up -d neo4j` replaces `restart` (which keeps the old environment); host RAM from the compose memory limits (40G, about 48G for a 730-day baseline); MISP `memory_limit` 4096M per MISP_TUNING.md, and the MISP commands run in the MISP deployment, not EdgeGuard's compose project; build_relationships runs 20 steps with `apoc.periodic.iterate`; node count of the 2026-10-16 baseline; doctor hint line as printed; absolute PR/issue links; the env-var note heading no longer names the audit role._

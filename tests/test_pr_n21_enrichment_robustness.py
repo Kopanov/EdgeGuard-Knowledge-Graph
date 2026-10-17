@@ -371,6 +371,13 @@ class TestBravoOpsPrometheusAlerts:
         assert "severity: critical" in silent_death_block, (
             "silent-death alert must be critical severity (OOM = data-loss)"
         )
+        # 2026-10: the remediation advised lowering NEO4J_TX_MEMORY_MAX to 4g, the value at which
+        # build_relationships ran out of transaction memory; it now sets the cap to 8g or more.
+        flat = " ".join(silent_death_block.split())
+        assert "lower ``NEO4J_TX_MEMORY_MAX``" not in flat, "silent-death remediation must not lower the tx cap"
+        assert "``NEO4J_TX_MEMORY_MAX`` to 8g or more" in flat
+        assert "memory posture for the next baseline" in flat, "remediation must cite the RUNBOOK heading"
+        assert "## Bravo-ops: memory posture for the next baseline" in (REPO_ROOT / "docs" / "RUNBOOK.md").read_text()
 
     def test_apoc_partial_alert_defined(self):
         src = self._alerts_src()

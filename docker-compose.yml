@@ -233,15 +233,13 @@ services:
     deploy:
       resources:
         limits:
-          # PR-A audit fix (Prod Readiness HIGH): default bumped 4g→8g. The
-          # 4g default was too small for any baseline run (the transaction total cap alone
-          # is 4g per ${NEO4J_TX_MEMORY_MAX:-4g} above, leaving zero headroom
-          # for heap+pagecache+OS); fresh-clone deployments would OOM on the
-          # first ``docker compose up`` baseline. 8g matches the JVM-default
-          # math (heap_max 2g + pagecache 1g + tx_max 4g + ~1g OS = 8g floor).
-          # Production deployments should still set NEO4J_CONTAINER_MEMORY_LIMIT
-          # explicitly per docs/DOCKER_SETUP_GUIDE.md (recommended 32g for the
-          # 730d baseline workload).
+          # Default raised from 4g to 8g. The container limit must exceed
+          # heap + page cache + off-heap overhead (2g + 1g + ~1-3g with the
+          # defaults); NEO4J_TX_MEMORY_MAX limits transaction memory inside
+          # that budget and is not added to it (docs/DOCKER_SETUP_GUIDE.md
+          # memory-math note). Production deployments set
+          # NEO4J_CONTAINER_MEMORY_LIMIT explicitly (32g for the 730-day
+          # baseline).
           memory: ${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}
     networks:
       - edgeguard_net
@@ -304,7 +302,7 @@ services:
     deploy:
       resources:
         limits:
-          # PR-A audit fix (Prod Readiness MED): default bumped 512m→2g. In
+          # Default raised from 512m to 2g. In
           # Airflow 3.x the supervisor of every running task sends a heartbeat
           # every 5 s ([workers] min_heartbeat_interval) during a baseline
           # running 24h+; a 512m metadata DB is undersized for that
@@ -444,7 +442,8 @@ services:
       AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8082"
       # The Airflow 3.x API server requires an explicit JWT secret (it signs the
       # tokens issued by POST /auth/token and the execution API tokens) — without
-      # it the API server fails to start ("jwt_secret not set"). Generate once with:
+      # it the API server fails to start ("The value api_auth/jwt_secret must be
+      # set!"). Generate once with:
       #   python3 -c "import secrets; print(secrets.token_urlsafe(64))"
       # and put the value in .env as AIRFLOW_API_AUTH_JWT_SECRET. A
       # stable secret is required across restarts so issued tokens
