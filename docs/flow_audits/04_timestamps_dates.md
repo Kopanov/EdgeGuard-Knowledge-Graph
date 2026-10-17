@@ -1,6 +1,6 @@
 # Flow Audit §4 — Timestamps & Date-Handling End-to-End
 
-> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [TIMESTAMPS.md](../TIMESTAMPS.md).
 
 **Date:** 2026-04-20 afternoon
 **Scope:** Every timestamp / date field from collector source → MISP attribute → Neo4j property → STIX export

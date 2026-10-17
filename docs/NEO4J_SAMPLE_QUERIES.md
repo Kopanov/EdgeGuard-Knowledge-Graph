@@ -20,10 +20,14 @@ ORDER BY count DESC
 ```
 
 ### Count by zone
+
+`zone` is a list (for example `['healthcare', 'energy']`), so the query unwinds it and counts each node once per zone, as `get_stats()` does ([DATA_QUALITY.md](DATA_QUALITY.md#zone-counts-in-the-statistics)):
+
 ```cypher
-MATCH (n) 
+MATCH (n)
 WHERE n.zone IS NOT NULL
-RETURN n.zone as zone, count(n) as count
+UNWIND n.zone AS zone
+RETURN zone, count(DISTINCT n) AS count
 ORDER BY count DESC
 ```
 
@@ -353,10 +357,11 @@ WHERE type(r) IN ['INDICATES', 'EXPLOITS', 'TARGETS', 'AFFECTS']
 RETURN type(r) AS edge_type, count(r) AS gap
 ```
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — *Count by zone* unwinds the `zone` list and counts each node once per zone.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and queries for graphs built by earlier versions to the appendix.
 - 2026-10-17 — The `IMPLEMENTS_TECHNIQUE` sample filters on `mitre_explicit`, because OTX-reported and curated links share the type; code references name functions instead of line numbers; the properties `merge_technique` writes are listed.
 - 2026-10-16 — "Measuring CISA ICS and ATT&CK for ICS": CISA's sector statements (`advisory_sector` on `AFFECTS`, `SOURCED_FROM.stated_zones`, the advisories a sector link cites) and ATT&CK for ICS through the links into ICS techniques; a link to a `Sector` names only the feeds that gave the sector.

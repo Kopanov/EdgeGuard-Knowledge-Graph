@@ -592,7 +592,7 @@ query IPaddresses {
 }
 ```
 
-**Vulnerability + CVE query via ISIM GraphQL** (EdgeGuard data is directly queryable here):
+**Vulnerability + CVE query via ISIM GraphQL** (EdgeGuard's `CVE` data is queryable here through the `Vulnerability` nodes ResilMesh writes):
 ```graphql
 query VulnerableHosts {
   vulnerabilities {
@@ -611,14 +611,14 @@ query VulnerableHosts {
 }
 ```
 
-> The ISIM GraphQL schema includes `CVE`, `Vulnerability`, `CVSSv31`, `CVSSv2`, `CVSSv30`, `CVSSv40`, `SoftwareVersion`, `Host`, `IP`, `Subnet` and all topology types. EdgeGuard's `CVE` and `Vulnerability` nodes are written in full compliance with this schema and are queryable via ISIM GraphQL as-is.
+> The ISIM GraphQL schema includes `CVE`, `Vulnerability`, `CVSSv31`, `CVSSv2`, `CVSSv30`, `CVSSv40`, `SoftwareVersion`, `Host`, `IP`, `Subnet` and all topology types. EdgeGuard's `CVE` nodes are written in full compliance with this schema and are queryable via ISIM GraphQL as-is. The scheduled pipeline writes no `Vulnerability` nodes (§3.1): the `vulnerabilities` query above returns the `Vulnerability` nodes ResilMesh writes (the scanner's findings) with the EdgeGuard `CVE` each one refers to.
 
 ### 8.3 ISIM GraphQL Schema Coverage for EdgeGuard Data
 
 | EdgeGuard node type | In ISIM GraphQL schema | Queryable via iSIM? |
 |---|---|---|
 | `CVE` | ✅ Yes — `type CVE` with full CVSS relationships | ✅ Yes |
-| `Vulnerability` | ✅ Yes — `type Vulnerability` with `→CVE`, `→SoftwareVersion` | ✅ Yes |
+| `Vulnerability` | ✅ Yes — `type Vulnerability` with `→CVE`, `→SoftwareVersion` | ✅ Yes, the nodes ResilMesh writes; the scheduled pipeline writes none (§3.1) |
 | `CVSSv31` / `CVSSv30` / `CVSSv2` / `CVSSv40` | ✅ Yes — full property coverage | ✅ Yes (when NVD/MISP→Neo4j supplies metrics) |
 | `Indicator` | ❌ Not in ISIM schema | ❌ Not via ISIM GraphQL |
 | `ThreatActor` | ❌ Not in ISIM schema | ❌ Not via ISIM GraphQL |
@@ -800,10 +800,11 @@ The main text assumes a fresh baseline. On a graph or MISP kept across an upgrad
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — §8.2 and §8.3: EdgeGuard's `CVE` nodes are queryable through ISIM GraphQL; the `Vulnerability` nodes there are ResilMesh's, since the scheduled pipeline writes none (§3.1).
 - 2026-10-17 — Rewritten as a guide to current behaviour, with history and kept-graph procedures at the end, and checked against the code: `Vulnerability` and `MAPS_TO` are not EdgeGuard output, `Technique.is_subtechnique` is true for a dotted id (every sync wrote false before), `--edgeguard-only` keeps EdgeGuard relationships between partner nodes, UNIQUE constraints cover the shared vulnerability labels, and the `misp_attribute_tag` row names the tags the sync reads.
 - 2026-10-16 — Sector links name only the feeds whose `SOURCED_FROM.zones` give the sector (they named every feed of the node: on that day's graph 2,639 of 6,506 `AFFECTS` links named a feed that never gave their sector), and a sector CISA's ICS advisory states is `advisory_sector` at 0.9 on `AFFECTS` only.
 - 2026-10-16 — Every indicator ages by one rule, from the latest report of any source (STIX extension definition 1.7.0), and its STIX `modified` follows its reports and aging instead of the last database write.

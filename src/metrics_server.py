@@ -497,13 +497,13 @@ NEO4J_BATCH_PERMANENT_FAILURES = Counter(
     "Neo4j MERGE batches that failed permanently after retry exhaustion "
     "(retries_exhausted) or non-retryable exception (non_retryable). "
     "Each increment = one batch (up to BATCH_SIZE items) lost. "
-    "See docs/RUNBOOK.md § Neo4j silent-write failures.",
+    'See docs/RUNBOOK.md § "5. Neo4j batch PERMANENT failure (retry exhaustion)".',
     ["label", "source", "reason"],
 )
 
 # PR-N18 (2026-04-22): placeholder-name MERGE reject counter. PR-N11
 # promised this counter but it was deferred. Landing now so the
-# RUNBOOK's failure-mode #5 detection step switches from log-grep
+# RUNBOOK's failure mode 6 (placeholder-name MERGE spike) detection step switches from log-grep
 # to proper Prometheus alerting.
 #
 # Fires when ``merge_malware`` / ``merge_actor`` rejects a MERGE

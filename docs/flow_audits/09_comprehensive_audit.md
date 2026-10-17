@@ -1,6 +1,6 @@
 # Comprehensive Production-Readiness Audit (7-agent night-shift sweep)
 
-> **Historical record** of the 2026-04-21 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-21 flow audit, not maintained; the current behaviour is described in [PRODUCTION_READINESS.md](../PRODUCTION_READINESS.md).
 
 **Date:** 2026-04-21 (overnight session)
 **Scope:** Full codebase across 7 specialized lenses

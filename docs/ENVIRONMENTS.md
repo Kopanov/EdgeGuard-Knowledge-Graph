@@ -181,7 +181,7 @@ _Last updated: 2026-10-17_
 
 ## History
 
-- 2026-10-17 — Main text describes current behaviour only; version and PR history moved here; heading levels start at the title.
+- 2026-10-17 — Main text describes current behaviour only; version history moved here; heading levels start at the title.
 - 2026-10-17 — Corrected against the code: `EDGEGUARD_ENV` is the fail-closed production gate (`config.is_production_env`: unset, empty, `stage`, `edge` and any value outside dev / development / local / staging / test are production, so the APIs require `EDGEGUARD_API_KEY`); the edge recipe sets the key; suggested values `dev` / `staging` / `prod`; MISP push batch default 500; the baseline lock is held by the `edgeguard_baseline` DAG run (or `run_pipeline.py --baseline`) and makes the scheduled collectors and sync writes skip, max age 172800 s (48 h); Airflow 3.3.2.
 - 2026-10 — Airflow image 3.2.0 → 3.3.2 (security update).
 - 2026-04-26 — `from config import …` requires `src/` on `PYTHONPATH` (or an editable install); removed an unverified inter-chunk pause from the `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` description.

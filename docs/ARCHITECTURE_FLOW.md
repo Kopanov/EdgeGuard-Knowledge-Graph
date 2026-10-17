@@ -5,10 +5,14 @@ de-risk the **730-day baseline production-test**.
 
 > **Status:** the eight diagrams below are planned; each section states the
 > scope, the files covered and the failure modes the diagram illuminates.
-> `tests/test_architecture_flow_pins.py` validates every concrete claim
-> referenced in a doc — env vars, CLI subcommands, container names,
-> `src/*.py` file paths — against `src/`, `dags/`, `scripts/`, `tests/`,
-> `.env.example`, and `docker-compose.yml` / `docker-compose.monitoring.yml`.
+> `tests/test_architecture_flow_pins.py` validates four kinds of concrete
+> reference in a doc — `EDGEGUARD_*` env vars, container names in `docker`
+> commands, `src/*.py` file paths, and the removed command forms
+> `python -m edgeguard baseline` / `python -m src.neo4j_client` (removed forms
+> may appear only where a line calls them removed or wrong) — against `src/`,
+> `dags/`, `scripts/`, `tests/`, `.env.example`, and `docker-compose.yml` /
+> `docker-compose.monitoring.yml`. It does not check `edgeguard` subcommands
+> or function and class names.
 > CI fails on broken doc references. A symbol named in a doc that does not
 > exist in code requires either (a) fixing the doc, (b) adding the symbol
 > to code, or (c) explicitly allowlisting it in the test with a clear reason.
@@ -54,7 +58,7 @@ two-hour read.
 
 Diagrams rot. Every diagram in this file:
 
-1. **References real symbols.** Function names, class names, env vars, and file paths appear as plain text labels. File paths, env vars, CLI subcommands and container names are checked by `tests/test_architecture_flow_pins.py` — if a referenced one vanishes, the test fails and forces an update here; function and class names are not pinned.
+1. **References real symbols.** Function names, class names, env vars, and file paths appear as plain text labels. File paths, env vars and container names in `docker` commands are checked by `tests/test_architecture_flow_pins.py` — if a referenced one vanishes, the test fails and forces an update here; the test also fails on the removed `python -m` command forms, and function names, class names and `edgeguard` subcommands are not pinned.
 2. **Lives close to the code.** Modules whose behavior a diagram describes get a link to the corresponding section from their top-of-file docstring; these cross-references are part of each tier's work (see [Work plan](#work-plan)).
 3. **States its scope.** Each diagram section declares which files it covers and which failure modes it illuminates.
 4. **Changes with the flow.** A change to the flow updates its diagram in the same pull request; a change that removes a referenced file path, env var or a container name used in a `docker` command fails the pin-test.
@@ -95,7 +99,7 @@ Target: complete before the next 730-day baseline.
 - [ ] §1 Baseline sequence diagram (Mermaid `sequenceDiagram`)
 - [ ] §2 Checkpoint state machine (Mermaid `stateDiagram-v2`)
 - [ ] §3 Collector → MISP → Neo4j flow (Mermaid `flowchart`)
-- [x] `tests/test_architecture_flow_pins.py` — env vars, CLI subcommands, container names and `src/*.py` paths (function symbols not pinned)
+- [x] `tests/test_architecture_flow_pins.py` — env vars, container names, `src/*.py` paths and the removed `python -m` command forms (function symbols and `edgeguard` subcommands not pinned)
 - [ ] Docstring cross-references in `src/run_misp_to_neo4j.py`, `src/collectors/misp_writer.py`, `src/baseline_checkpoint.py`, `src/collectors/nvd_collector.py`
 
 ### Tier 2 (production-ready-useful)
@@ -291,7 +295,7 @@ Target: complete before the next 730-day baseline.
 
 ## Appendix B — Self-validation
 
-`tests/test_architecture_flow_pins.py` checks env vars, CLI subcommands, container names and file paths. Symbol pinning is planned:
+`tests/test_architecture_flow_pins.py` checks env vars, container names, file paths and the removed `python -m` command forms; it does not check `edgeguard` subcommands. Symbol pinning is planned:
 
 1. Parse this file for backticked tokens matching symbol patterns (`_[a-z_]+`, `[A-Z][a-zA-Z]+`, `[A-Z_]{3,}`).
 2. For each token, grep `src/` for a definition (`def X`, `class X`, `X =`, `X:` env var).
@@ -302,12 +306,13 @@ This keeps the cost of lying in a diagram at exactly "CI fails," which is the on
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The pin-test is described as it runs: env vars, container names in `docker` commands, `src/*.py` paths and the removed `python -m` command forms; `edgeguard` subcommands are not checked.
 - 2026-10-17 — Rewritten as a guide to the current state: change notes and the delivery history of the plan moved to this history.
-- 2026-10-17 — Corrected against the code: 12 collectors (2 flag-guarded); § 3 names `sync_to_neo4j` and the merges it calls (`_sync_bulk` does not exist); § 4 the real DAG schedules and the sync's 1 h window overlap; the pin-test checks env vars, CLI subcommands, container names and file paths, not function names.
+- 2026-10-17 — Corrected against the code: 12 collectors (2 flag-guarded); § 3 names `sync_to_neo4j` and the merges it calls (`_sync_bulk` does not exist); § 4 the real DAG schedules and the sync's 1 h window overlap; the pin-test does not check function names.
 - 2026-10-15 — Deployment topology: the Prometheus scrape path is `metrics:8001` over `edgeguard_net` (`host.docker.internal` did not reach the loopback-only publish on Linux).
-- 2026-04-28 — `tests/test_architecture_flow_pins.py` added (env vars, CLI subcommands, container names, `src/*.py` file paths); its first run found four doc references with no counterpart in code, among them a README baseline command block that was out of date.
+- 2026-04-28 — `tests/test_architecture_flow_pins.py` added (env vars, the removed `python -m` command forms, container names, `src/*.py` file paths); its first run found four doc references with no counterpart in code, among them a README baseline command block that was out of date.
 - 2026-04-20 — Document created: the diagram plan ordered by baseline risk, a skeleton section per diagram, and the README roadmap entry.

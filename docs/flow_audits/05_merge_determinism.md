@@ -1,6 +1,6 @@
 # Flow Audit §5 — Neo4j Merge Determinism
 
-> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [KNOWLEDGE_GRAPH.md § Neo4j Constraints & Indexes](../KNOWLEDGE_GRAPH.md#neo4j-constraints--indexes) and [DATA_QUALITY.md § Merge Strategy](../DATA_QUALITY.md#merge-strategy).
 
 **Date:** 2026-04-20 afternoon
 **Scope:** Every Cypher MERGE + relationship creation helper

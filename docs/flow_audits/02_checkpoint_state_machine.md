@@ -1,6 +1,6 @@
 # Flow Audit §2 — Checkpoint State Machine
 
-> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [AIRFLOW_DAGS.md § `edgeguard_baseline` task chain](../AIRFLOW_DAGS.md#edgeguard_baseline-task-chain--additive-vs-destructive) and [RUNBOOK.md § 7. Baseline chain stopped after a failed step](../RUNBOOK.md#7-baseline-chain-stopped-after-a-failed-step-postcheck) (resume, `edgeguard checkpoint status`).
 
 **Date:** 2026-04-20
 **Commit audited:** `8e39f88`

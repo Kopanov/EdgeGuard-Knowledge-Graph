@@ -1,6 +1,6 @@
 # Flow Audit §3 — Collector → MISP → Neo4j
 
-> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [ARCHITECTURE.md § Data Flow](../ARCHITECTURE.md#data-flow) and [COLLECTORS.md](../COLLECTORS.md).
 
 **Date:** 2026-04-20
 **Commit audited:** `8e39f88`

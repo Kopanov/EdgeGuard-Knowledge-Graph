@@ -740,7 +740,7 @@ groups:
             Remediation:
               1. Check MISP backend RAM / PHP memory_limit
               2. Check MySQL innodb_buffer_pool_size
-              3. See docs/MISP_TUNING.md and docs/RUNBOOK.md § MISP OOM
+              3. See docs/MISP_TUNING.md and docs/RUNBOOK.md § "1. MISP batch permanent failure (5xx exhaustion)"
 
       - alert: EdgeGuardMispSustainedBackoff
         # Use `increase()` (absolute count over window), NOT `rate()`
@@ -804,7 +804,7 @@ groups:
               1. Check Neo4j logs for constraint errors on {{ $labels.label }}
               2. Query ``MATCH (s:Source {source_id: '{{ $labels.source }}'}) RETURN s``
                  to confirm Source node exists
-              3. See docs/RUNBOOK.md § Neo4j silent-write failures
+              3. See docs/RUNBOOK.md § "4. Neo4j ineffective-batch (silent write failure)"
 
       - alert: EdgeGuardNeo4jBatchPermanentFailure
         # PR-N18 (2026-04-22): alert PR-N15 promised but didn't ship.
@@ -838,7 +838,7 @@ groups:
               2. If ``retries_exhausted``: Neo4j is overloaded. Scale or wait.
               3. If ``non_retryable``: schema drift or constraint. Check
                  Neo4j logs: ``docker logs edgeguard-neo4j 2>&1 | grep -i constraint``
-              4. See docs/RUNBOOK.md § Top-5 failure mode #4 (Neo4j ineffective-batch)
+              4. See docs/RUNBOOK.md § "5. Neo4j batch PERMANENT failure (retry exhaustion)"
 
       - alert: EdgeGuardMergeRejectPlaceholderSpike
         # PR-N18 (2026-04-22): alert paired with the new
@@ -872,7 +872,7 @@ groups:
               3. If adversarial: freeze the source, audit the MISP event.
               4. See ``src/node_identity.py:_REJECTED_PLACEHOLDER_NAMES``
                  for the full rejected list.
-              5. See docs/RUNBOOK.md § Top-5 failure mode #5
+              5. See docs/RUNBOOK.md § "6. Placeholder-name MERGE spike (feed regression or attack)"
 
       - alert: EdgeGuardMispEventAttributesTruncated
         # PR-N24 audit fix (H3): wires the
@@ -914,7 +914,8 @@ groups:
                  producing over-sized events (collector regression /
                  missing pagination).
               3. See ``src/collectors/misp_collector.py`` and
-                 ``docs/RUNBOOK.md`` § MISP truncation.
+                 ``docs/PROMETHEUS_SETUP.md`` § "Built-in Alert Rules"
+                 (``EdgeGuardMispEventAttributesTruncated``).
 
       - alert: EdgeGuardBuildRelationshipsSilentDeath
         # PR-N21 Bravo-ops: catches a silent ``build_relationships``
@@ -1064,4 +1065,4 @@ groups:
               3. Re-run build_relationships for this step only, or
                  accept partial data and move to the next step if
                  errors are transient and row count is acceptable.
-              4. See docs/RUNBOOK.md § "APOC partial batch response".
+              4. See docs/RUNBOOK.md § "APOC partial-batch response playbook".

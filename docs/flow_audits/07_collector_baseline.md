@@ -1,6 +1,6 @@
 # Flow Audit §7 — Per-collector Baseline Correctness
 
-> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [COLLECTORS.md § Baseline collection limits](../COLLECTORS.md#baseline-collection-limits--current--planned).
 
 **Date:** 2026-04-20 afternoon
 **Scope:** Each of 12 collectors + 4 sector feeds on baseline=True path

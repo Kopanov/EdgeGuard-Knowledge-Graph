@@ -314,7 +314,7 @@ _Last updated: 2026-10-17_
 - 2026-10-17 — The 350K-node row of the restore times names the April 2026 baseline on which they were measured.
 - 2026-10-17 — The Neo4j dump runs offline, because Community Edition refuses to dump a database in use, and needs a backup mount (`./backups/neo4j:/backups`) on the `neo4j` service, which `docker-compose.yml` does not have.
 - 2026-10-17 — The MISP dump and restore run in MISP's own containers (MySQL in `misp_db_1` in the reference compose), not through EdgeGuard's compose project; the quick reference exports `EDGEGUARD_LAST_BACKUP_AT` to the host shell, because the CLI reads its own environment, not `.env`.
-- 2026-10-17 — Airflow task ids `baseline_clean` / `full_neo4j_sync`, the incremental window of each source, the node count of the 730-day baseline of 2026-10-16 and the destructive-operations audit trail (shipped in PR #147) documented; the open items (automated pre-flight backup hook, backup validation) are tracked in issue #53.
-- 2026-06-11 — The `baseline_clean` DAG task enforces the backup-timestamp gate for UI/API triggers with `{"fresh_baseline": true}`, which had bypassed it (PR #125); the quick reference recreates the containers with `docker compose up -d`, because `restart` does not re-read `.env` interpolations.
-- 2026-04-20 — The gate auto-skips on a clean install where both stores are empty (PR-F3, issue #58).
-- 2026-04-20 — Document created with the backup-timestamp gate of `edgeguard fresh-baseline` (PR-F2).
+- 2026-10-17 — Airflow task ids `baseline_clean` / `full_neo4j_sync`, the incremental window of each source, the node count of the 730-day baseline of 2026-10-16 and the destructive-operations audit trail documented; the open items (automated pre-flight backup hook, backup validation) are listed under *Not covered*.
+- 2026-06-11 — The `baseline_clean` DAG task enforces the backup-timestamp gate for UI/API triggers with `{"fresh_baseline": true}`, which had bypassed it; the quick reference recreates the containers with `docker compose up -d`, because `restart` does not re-read `.env` interpolations.
+- 2026-04-20 — The gate auto-skips on a clean install where both stores are empty.
+- 2026-04-20 — Document created with the backup-timestamp gate of `edgeguard fresh-baseline`.

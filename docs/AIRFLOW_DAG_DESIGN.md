@@ -274,7 +274,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
 | | Baseline | Incremental |
 |--|----------|-------------|
 | Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB and CISA ICS use their own per-run caps, and CISA KEV compares its whole catalogue (edits capped by `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`) |
-| Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | Last 72 hours |
+| Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | From each collector's cursor (NVD, OTX, CISA ICS) or its feed's current window (ThreatFox: 7 days; URLhaus: `csv_recent`; Feodo Tracker: the servers active in the last 30 days); CISA KEV and MITRE ATT&CK read the whole catalogue (see [Incremental Collection Limit](#incremental-collection-limit)) |
 | Trigger | Manual (once before production) | Automatic (cron schedules) |
 | Scope | Full historical load | New / updated data only |
 
@@ -537,10 +537,11 @@ Only edges with `match_type IN ['misp_cooccurrence', 'misp_correlation']` are mo
 > interpolation), and binds the batch column `rid` as a variable in the
 > inner statement.
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Baseline vs Incremental table: the incremental lookback is each collector's cursor or its feed's current window, not 72 hours.
 - 2026-10-17 — Rewritten as a guide to the current system: change history moved to this section, co-occurrence calibration details to the appendix.
 - 2026-10-17 — CISA ICS uses its own per-run cap (`EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`, `cisa_ics` in `OWN_RUN_CAP_SOURCES`); the incremental collectors read from their cursor or feed window (the text said the last 2–3 days without an item cap); the sync's ShortCircuit also skips while a baseline holds the lock and the writing tasks check it again; `source_key_check` has `retries=0`; every baseline collector installs the liveness callback; the confidence formulas are marked illustrative.
 - 2026-10-16 — CISA KEV, Feodo Tracker, SSL Blacklist and AbuseIPDB are in `OWN_RUN_CAP_SOURCES`; every `collect_*` task takes a slot of the collector pool `edgeguard_collectors`, because all 7 tier-2 feeds at once grew the MISP php-fpm workers past the MISP container's memory limit and a daily catch-up run with OTX, VirusTotal and NVD reached the `airflow` container's memory limit; `edgeguard_neo4j_sync` runs every 72 hours with a 24-hour skip guard.
@@ -551,7 +552,7 @@ _Last updated: 2026-10-17_
 - 2026-10-10 — The whole-event Indicator → Malware co-occurrence query was removed: `INDICATES` comes from the same OTX pulse and the family match; actor techniques also come from OTX pulse `attack_ids`; `SUBTECHNIQUE_OF`, `USES_MALWARE` and `USES_TOOL` edges; the actor alias merge (`merge_alias_duplicate_actors`) joins the enrichment jobs.
 - 2026-04-28 — Baseline task chain corrected: task IDs carry no `baseline_` prefix, there is no `tier3_low_freq` group, `tier2_extended` is `tier2_feeds`, and `baseline_postcheck` is in the chain.
 - 2026-04-23 — The four baseline critical-chain tasks have `retries=0`.
-- 2026-04-20 — Tier-1 baseline collectors run sequentially (PR-F4) after the 2026-04-19 baseline lost about 14.7% of NVD attributes; parent-DAG liveness check (PR-F6, Issue #65) after a failed baseline run's `collect_nvd` subprocess stayed alive 12+ hours and pushed 78,313 attributes to MISP after the next run's `baseline_clean` had wiped it (Event 19, 72,479 duplicated CVEs).
+- 2026-04-20 — Tier-1 baseline collectors run sequentially after the 2026-04-19 baseline lost about 14.7% of NVD attributes; parent-DAG liveness check after a failed baseline run's `collect_nvd` subprocess stayed alive 12+ hours and pushed 78,313 attributes to MISP after the next run's `baseline_clean` had wiped it (Event 19, 72,479 duplicated CVEs).
 - 2026-04-18 — Source-truthful provenance: per-source timestamps on `SOURCED_FROM`, `n.first_seen` retired; Airflow 2 to 3 upgrade.
 - 2026-04-17 — The INDICATES co-occurrence query became array-only (`misp_event_ids[]`, the scalar `misp_event_id` dropped).
 - 2026-04-15 — Baseline OTX/NVD, `build_relationships` and `run_enrichment_jobs` timeouts raised from 3 h to 5 h after baseline re-runs hit the 3 h limit; technique edges split from a single `USES` into `EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE`.
