@@ -6,10 +6,14 @@
 > MERGE sites in `src/neo4j_client.py`, `src/build_relationships.py`, and
 > `src/enrichment_jobs.py`.
 >
-> **However**, three operator-only Python scripts under `scripts/` exist for
-> graphs that **cannot** be wiped (cloud Neo4j Aura snapshots, partner
-> deployments, etc.) — see § "Operator scripts in `scripts/`" below. None
-> are auto-run by CI or DAGs.
+> **However**, three operator-only fix-up / audit scripts under `scripts/`
+> exist for graphs that **cannot** be wiped (cloud Neo4j Aura snapshots,
+> partner deployments, etc.), plus the read-only fresh-baseline acceptance
+> check `scripts/verify_fresh_baseline.py` — see § "Operator scripts in
+> `scripts/`" below. None are auto-run by CI or DAGs. (`scripts/` holds
+> other operator tools as well, e.g. `import_curated_package.py`,
+> `build_canonical_threat_actors.py`, `build_attack_revoked_ids.py`,
+> `clear_neo4j.py`, `clear_misp.py`.)
 
 ---
 
@@ -68,6 +72,7 @@ or audit. All read `NEO4J_URI` / `NEO4J_PASSWORD` / `NEO4J_USER` from env.
 | [`scripts/backfill_edge_misp_event_ids.py`](../scripts/backfill_edge_misp_event_ids.py) | `--dry-run` (READ_ACCESS) / commit (WRITE) | PR-N26 backfill — propagates `misp_event_ids[]` from endpoint nodes onto INDICATES/EXPLOITS/TARGETS/AFFECTS edges. Idempotent (skips edges that already have the array). Uses `apoc.periodic.iterate` for batched commits; reports `committedOperations` (real writes) vs `total` (input rows scanned). Pairs with the 2026_05 runbook above. |
 | [`scripts/backfill_cve_dates_from_nvd_meta.py`](../scripts/backfill_cve_dates_from_nvd_meta.py) | `--dry-run` / commit | PR-N22 backfill — historical CVE `published` / `last_modified` dates from NVD JSON feeds. For graphs where the CVE nodes were created before the source-truthful timestamp work landed (PR-S5 / PR-M2). |
 | [`scripts/audit_legacy_unicode_bypass_nodes.py`](../scripts/audit_legacy_unicode_bypass_nodes.py) | **Read-only** (READ_ACCESS at session level) | PR-N32 audit — counts `Malware` / `ThreatActor` / `Tool` nodes whose `name` contains a zero-width / bidi-control / variation-selector char from the canonical `_ZERO_WIDTH_AND_BIDI_CHARS` list. Never writes. Output recommends one of: close as no-op (0 hits), one-shot Cypher (1–10 hits), full migration PR (>10 hits). Run before a 730d baseline launch — see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) item `[6]`. |
+| [`scripts/verify_fresh_baseline.py`](../scripts/verify_fresh_baseline.py) | **Read-only** (HTTP Query API v2) | Fresh-baseline acceptance check: provenance properties, campaign and sector evidence, CVE scores, revoked ATT&CK ids, the ResilMesh-facing schema (see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § Fresh-baseline acceptance). Reads `NEO4J_HTTP_URL` (or `NEO4J_HTTP`), not `NEO4J_URI`; without either it checks the hosted instance `https://neo4j.edgeguard.org`, so point it at your graph. |
 
 The legacy "no Python migration scripts shipped" claim was retracted in
 PR-N33 (2026-04-26) — these three scripts have all shipped under PR-N22
@@ -83,17 +88,22 @@ generic `USES` edges instead of the specialized triple, etc.), the
 canonical fix is:
 
 ```bash
-# 1. Pause ingest DAGs
-# Airflow UI → Pause: edgeguard_pipeline, edgeguard_baseline
+# 1. Pause the scheduled ingest and sync DAGs
+# Airflow UI → Pause: edgeguard_pipeline, edgeguard_medium_freq, edgeguard_low_freq,
+#   edgeguard_daily, edgeguard_neo4j_sync
+# Leave edgeguard_baseline unpaused: a run triggered on a paused DAG stays queued.
+# While the baseline runs, its lock keeps the scheduled DAGs from writing.
 
-# 2. Wipe the graph (dev/test only — never production)
-python scripts/clear_neo4j.py --yes
+# 2. Wipe the graph (dev/test only — never production): deletes the nodes of the
+#    EdgeGuard labels (add --full-wipe for every node) and clears the collector checkpoints
+python scripts/clear_neo4j.py --force
 
 # 3. Rebuild from the collectors
 edgeguard baseline   # or: trigger the edgeguard_baseline DAG
 
-# 4. Verify the post-baseline schema with the queries in the
-#    relevant runbook (see table above).
+# 4. Verify: read-only acceptance check (without NEO4J_HTTP_URL it checks the
+#    hosted instance), plus the queries of the relevant runbook (see table above)
+NEO4J_HTTP_URL=http://localhost:7474 python scripts/verify_fresh_baseline.py
 ```
 
 This works because every MERGE site in the codebase already writes the
@@ -102,7 +112,12 @@ forward-fix run from a clean slate".
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: retracted the "no Python
+_Last updated: 2026-10-17 — documentation audit: the heal path pauses the five scheduled
+DAGs and leaves `edgeguard_baseline` unpaused (its lock holds the scheduled writers off),
+wipes with `scripts/clear_neo4j.py --force` (the script has no `--yes`), and verifies with
+the read-only `scripts/verify_fresh_baseline.py` (listed in the operator-script table;
+`NEO4J_HTTP_URL` must point at the graph, the default is the hosted instance). Prior:
+2026-04-26 — PR-N33 docs audit: retracted the "no Python
 backfill scripts shipped" claim (3 scripts now live in `scripts/`); added
 the 2026_05 PR-N26 edge-misp-event-ids backfill runbook + cross-links to
 all three operator scripts (PR-N22 / PR-N26 / PR-N32). Prior: 2026-04-18

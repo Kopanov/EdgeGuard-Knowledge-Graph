@@ -11,7 +11,7 @@ We use **calendar versioning** for the distributable package:
 
 ## When to bump
 
-- Bump **`[project].version` in `pyproject.toml`** when you cut a **release** you want others to report (tag, Docker image label, paper snapshot).
+- Bump **`[project].version` in `pyproject.toml`** when you cut a **release** you want others to report (tag, paper snapshot).
 - **Do not** bump automatically on every local `git pull` or daily commit — that would create meaningless churn and merge conflicts.
 
 For ad-hoc identification of an arbitrary checkout, use **`edgeguard version`** (prints package version + **git short SHA** when `.git` is present).
@@ -22,6 +22,8 @@ For ad-hoc identification of an arbitrary checkout, use **`edgeguard version`** 
 |----------|------|
 | `pyproject.toml` → `version` | Source of truth for `pip install` / `importlib.metadata` |
 | `edgeguard version` | Human + support: CalVer + optional `git rev-parse --short` |
+| REST / GraphQL OpenAPI `version` | `package_version()` (`src/package_meta.py`) |
+| `edgeguard_version` in enriched alerts | `AlertProcessor.VERSION` (`package_version()`) |
 
 ## Alternatives considered
 
@@ -30,4 +32,4 @@ For ad-hoc identification of an arbitrary checkout, use **`edgeguard version`** 
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: refreshed example version. Prior: 2026-04-24._
+_Last updated: 2026-10-17 — documentation audit: no Docker image carries a version label, so it is no longer named; the version also feeds the REST / GraphQL OpenAPI `version` and `edgeguard_version` of enriched alerts. Prior: 2026-04-26 — PR-N33 docs audit: refreshed example version. Prior: 2026-04-24._

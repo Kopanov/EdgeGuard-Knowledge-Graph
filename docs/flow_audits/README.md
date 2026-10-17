@@ -1,5 +1,14 @@
 # Flow Audits — Consolidated Findings Index
 
+> **Historical record (2026-04-20/21).** This index and reports 01–09 describe the code and the
+> plan as of those dates. Most Tier-A items were later addressed (PR-M1, PR-M2, PR-M3a–d and
+> later work), but the large-event split (MA-H2) is still tracked as
+> [Issue #61](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/61), and no PR-M4 shipped. Issue #57 (baseline lock) shipped in
+> 2026-10: the `edgeguard_baseline` DAG now holds the lock itself. `decay_ioc_confidence` now
+> applies the indicator aging rule (`src/indicator_aging.py`). For the current baseline procedure
+> see [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and
+> [RUNBOOK.md](../RUNBOOK.md). The file:line pointers below are not maintained.
+
 This directory holds multi-agent audit reports that drive the bug-fix
 work on the main pipeline. Organized for **730-day baseline
 production-test readiness** — what bites a 2-year historical run.
@@ -28,13 +37,19 @@ Output: 37 findings. Driven fixes in PR-F9, PR-G1, PR-I, PR-J, PR-K1, PR-K2, PR-
 | 07 | Per-collector baseline correctness | [`07_collector_baseline.md`](07_collector_baseline.md) | 19 (8 HIGH, 10 MED, 6 LOW) |
 | 08 | Relationship / edge integrity | [`08_relationship_integrity.md`](08_relationship_integrity.md) | 10+ (2 CRITICAL, 4 HIGH) |
 
+### Pass 3 — 7-agent comprehensive audit (2026-04-21)
+
+| # | Focus | File |
+|---|-------|------|
+| 09 | Full-codebase production-readiness audit, 7 lenses | [`09_comprehensive_audit.md`](09_comprehensive_audit.md) |
+
 ---
 
 ## Tier A — 730-DAY BASELINE BLOCKERS (FIX BEFORE PRODUCTION RUN)
 
 **~17 findings.** Each either silently loses data, corrupts historical dates, or produces non-deterministic graphs. Every one has a clear production path that triggers it during a real 730d run.
 
-> **Note on Issue #57 (baseline lock, finding §1-1 from Pass-1 audit):** the Airflow-aware baseline-lock architectural gap was identified in Pass 1 (tracked separately as [Issue #57](../../issues/57) — not a patch, needs design spike). Interim mitigation during 730d production-test: use CLI `python src/run_pipeline.py --baseline` (in-process lock acquisition works) OR pre-pause scheduled incremental DAGs in Airflow for the baseline window.
+> **Issue #57 (baseline lock, finding §1-1):** identified here in Pass 1 ([Issue #57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57)) and shipped in 2026-10 as the DAG tasks `baseline_acquire_lock` / `baseline_release_lock`. The interim mitigation recommended here (CLI baseline or pre-pausing the DAGs) is no longer needed.
 
 ### A1. Silent data loss (operator sees "success", graph is empty or wrong)
 
