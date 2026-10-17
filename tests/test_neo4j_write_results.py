@@ -95,6 +95,30 @@ def _relationships():
     ]  # fmt: skip
 
 
+# ``merge_cve``'s sub-writes: a substring of each statement, and a call that runs it alone.
+CVSS_MERGE = "MERGE (n:CVSSv31"
+NVD_DATA_REPLACE = "AS nvd_only"
+CVE_SCORE_SET = "SET c.cvss_score = best[0].base_score"
+CVE_SUB_WRITES = [
+    (CVSS_MERGE, lambda c: c._merge_cvss_node("CVE-2026-1000", "nvd", "CVSSv31", "HAS_CVSS_v31", {"base_score": 9.8})),
+    (NVD_DATA_REPLACE, lambda c: c._replace_nvd_owned_cve_data("CVE-2026-1000", {"cwe": ["CWE-79"]})),
+    (CVE_SCORE_SET, lambda c: c._set_cve_score_from_cvss("CVE-2026-1000")),
+]
+
+
+def _rich_cve() -> dict:
+    """An NVD record as the sync reads it: the CVE, one CVSS sub-node, the NVD-owned data, the score."""
+    return {
+        "type": "vulnerability",
+        "cve_id": "CVE-2026-1000",
+        "tag": "nvd",
+        "zone": ["global"],
+        "nvd_record": True,
+        "cwe": ["CWE-79"],
+        "cvss_v31_data": {"vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "base_score": 9.8},
+    }
+
+
 class TestBatchMerge:
     """``_execute_batch_with_retry``: the Indicator and Vulnerability batches (up to 1000 rows)."""
 
@@ -183,11 +207,69 @@ class TestSingleItemMerge:
         ],
         ids=["merge_cvss_node", "replace_nvd_owned_cve_data", "set_cve_score_from_cvss"],
     )
-    def test_a_failed_cve_sub_write_returns_false(self, bolt, call):
-        """The helper names the CVE in its own WARNING and returns False (``merge_cve`` does not yet
-        act on the value: a separate change)."""
+    def test_a_failed_cve_sub_write_returns_false(self, bolt, call, caplog):
+        """A terminal error: the helper names the CVE in its own ERROR line and returns False, which
+        ``merge_cve`` returns (``TestCveSubWrites``)."""
         server, client = bolt(fail("cve_id: $cve_id", TYPE_ERROR))
-        assert call(client) is False
+        with caplog.at_level(logging.ERROR, logger="neo4j_client"):
+            assert call(client) is False
+        (line,) = [r.getMessage() for r in caplog.records if "(terminal)" in r.getMessage()]
+        assert "CVE-2026-1000 (terminal): CypherTypeError" in line
+        assert count(server.runs, "cve_id: $cve_id") == 1, "a terminal error is not retried"
+
+    @pytest.mark.parametrize("statement, call", CVE_SUB_WRITES, ids=[s for s, _ in CVE_SUB_WRITES])
+    def test_a_deadlock_on_a_cve_sub_write_is_retried(self, bolt, statement, call):
+        """2026-10: the helpers caught every error, retryable ones included, and returned False."""
+        server, client = bolt(fail(statement, DEADLOCK))
+        assert call(client) is True
+        assert count(server.runs, statement) == 2
+        assert count(server.committed, statement) == 1
+
+    @pytest.mark.parametrize("statement, call", CVE_SUB_WRITES, ids=[s for s, _ in CVE_SUB_WRITES])
+    def test_a_deadlock_that_persists_is_raised(self, bolt, statement, call):
+        """Raised once the retries are spent, as from ``merge_node_with_source``: the sync logs it and
+        counts the entity as an error."""
+        server, client = bolt(fail(statement, DEADLOCK, times=4))
+        with pytest.raises(nc.neo4j_exceptions.TransientError):
+            call(client)
+        assert count(server.runs, statement) == 4
+
+
+class TestCveSubWrites:
+    """``merge_cve`` acts on its sub-writes (2026-10): a terminal error in one returns False, so the sync
+    counts the CVE as an error. Until then it returned True whatever they returned."""
+
+    @pytest.mark.parametrize("statement", [CVSS_MERGE, NVD_DATA_REPLACE, CVE_SCORE_SET])
+    def test_a_terminal_error_in_a_sub_write_returns_false(self, bolt, statement):
+        server, client = bolt(fail(statement, TYPE_ERROR))
+        assert client.merge_cve(_rich_cve(), source_id="nvd") is False
+        # The other sub-writes still run, and the score is derived last from the sub-nodes there are.
+        for other in {CVSS_MERGE, NVD_DATA_REPLACE, CVE_SCORE_SET} - {statement}:
+            assert count(server.committed, other) == 1, other
+        assert "SET c.cvss_score" in server.runs[-1]
+
+    def test_without_errors_merge_cve_returns_true(self, bolt):
+        server, client = bolt()
+        assert client.merge_cve(_rich_cve(), source_id="nvd") is True
+        for statement in (CVSS_MERGE, NVD_DATA_REPLACE, CVE_SCORE_SET):
+            assert count(server.committed, statement) == 1, statement
+
+    def test_a_deadlock_in_a_sub_write_is_retried_and_the_cve_written(self, bolt):
+        server, client = bolt(fail(CVSS_MERGE, DEADLOCK))
+        assert client.merge_cve(_rich_cve(), source_id="nvd") is True
+        assert count(server.runs, CVSS_MERGE) == 2
+        assert count(server.committed, CVE_SCORE_SET) == 1
+
+    def test_the_sync_counts_the_cve_as_an_error(self, bolt, caplog):
+        import run_misp_to_neo4j as rm
+
+        server, client = bolt(fail(CVSS_MERGE, TYPE_ERROR))
+        sync = rm.MISPToNeo4jSync(neo4j_client=client)
+        with caplog.at_level(logging.WARNING):
+            assert sync._sync_to_neo4j_chunk([_rich_cve()]) == (0, 1)
+        assert sync.stats["vulnerabilities_synced"] == 0
+        (line,) = [r.getMessage() for r in caplog.records if "[MERGE-RETURNED-FALSE]" in r.getMessage()]
+        assert "rich CVE CVE-2026-1000 source=nvd" in line
 
 
 class TestRelationshipGroups:

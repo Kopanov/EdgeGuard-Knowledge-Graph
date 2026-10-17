@@ -4731,7 +4731,8 @@ class MISPToNeo4jSync:
                             logger.warning(
                                 "[MERGE-RETURNED-FALSE] rich CVE %s source=%s — merge_cve returned False. "
                                 "Likely cause: resolve_vulnerability_cve_id returned falsy (missing/empty "
-                                "cve_id), or the underlying merge_node_with_source hit a terminal error.",
+                                "cve_id), or the underlying merge_node_with_source or a CVE sub-write (CVSS "
+                                "sub-node, NVD data, CVE score) hit a terminal error.",
                                 str(cve_id)[:30],
                                 src,
                             )
@@ -4766,7 +4767,8 @@ class MISPToNeo4jSync:
                             logger.warning(
                                 "[MERGE-RETURNED-FALSE] plain CVE %s source=%s — merge_cve returned False. "
                                 "Likely cause: resolve_vulnerability_cve_id returned falsy, or "
-                                "merge_node_with_source hit a terminal error. See earlier logs.",
+                                "merge_node_with_source or a CVE sub-write (NVD data, CVE score) hit a "
+                                "terminal error. See earlier logs.",
                                 cve_id,
                                 src,
                             )

@@ -1,0 +1,248 @@
+"""NVD's record before any other on a CVE's shared data, on a real Neo4j with APOC (2026-10).
+
+Two rules of ``merge_cve`` decide what a CVE holds when NVD and CISA ICS both describe it, whatever the
+order in which the sync reads their records:
+
+- a CVSS sub-node NVD has asserted (``'nvd'`` in ``sources`` of the CVE's ``HAS_CVSS_*`` edge to it) holds
+  NVD's payload: another feed's payload only fills a property it lacks, and the CVE's score follows. A
+  sub-node only CISA ICS asserted follows CISA ICS's latest record, without the 0.0 impact and
+  exploitability sub-scores the collector used to send for a CSAF score block (CSAF has none);
+- NVD's record sets the list properties (``cwe``, ``ref_tags``, ``cpe_type``, ``result_impacts``,
+  ``reference_urls``, ``affected_products``); any other record only fills a list the node does not have.
+
+The ``EXISTS`` guard and the ``CASE`` per property cannot be shown with a mocked session, so this module
+runs the real writers: the CISA ICS collector's item of a CSAF advisory (``SAMPLE_ADVISORY`` of
+``tests/test_cisa_ics_collector.py``) or a real hosted MISP attribute (``tests/test_cvss_real_payloads.json``)
+→ MISPWriter's attribute → the sync's item → ``merge_cve``. The statements: ``tests/test_cve_nvd_precedence.py``.
+
+Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``, writes
+only nodes labelled ``EdgeGuardIT`` (every node a writer MERGEs exists beforehand with the label), refuses
+any other node.
+"""
+
+from __future__ import annotations
+
+import copy
+import os
+import sys
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from unittest.mock import MagicMock
+
+import pytest
+
+TESTS = Path(__file__).resolve().parent
+for _p in (TESTS.parent / "src", TESTS):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from test_actor_alias_merge_neo4j import LABEL, URI, open_test_database  # noqa: E402  (same guards)
+
+import neo4j_client  # noqa: E402
+from collectors.cisa_ics_collector import CISAICSCollector  # noqa: E402
+from collectors.misp_writer import MISPWriter  # noqa: E402
+from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
+
+pytestmark = pytest.mark.skipif(not URI, reason="EDGEGUARD_IT_NEO4J_URI is not set (no throwaway Neo4j)")
+
+SOURCES = ("nvd", "cisa_ics")
+NVD_EVENT = {"id": 120, "info": "EdgeGuard-nvd-2026-10-13", "date": "2026-10-13", "Tag": []}
+ICS_EVENT = {"id": 140, "info": "EdgeGuard-cisa_ics-2026-10-16", "date": "2026-10-16", "Tag": []}
+CVE = "CVE-2026-32645"  # the first CVE of SAMPLE_ADVISORY (ICSA-26-281-01, CISA: CVSS 3.1 6.0, AV:L)
+LISTS = ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products")
+CVSS_LABELS = ("CVSSv40", "CVSSv31", "CVSSv30", "CVSSv2")
+
+# NVD's CVSS 3.1 for the CVE, other than CISA's (NVD and the CNA can rate one CVE differently).
+NVD_V31 = {
+    "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "attack_vector": "NETWORK",
+    "attack_complexity": "LOW",
+    "privileges_required": "NONE",
+    "user_interaction": "NONE",
+    "scope": "UNCHANGED",
+    "confidentiality_impact": "HIGH",
+    "integrity_impact": "HIGH",
+    "availability_impact": "HIGH",
+    "base_score": 9.8,
+    "base_severity": "CRITICAL",
+    "impact_score": 5.9,
+    "exploitability_score": 3.9,
+}
+
+
+@pytest.fixture(scope="module")
+def raw_driver():
+    yield from open_test_database()
+
+
+@pytest.fixture
+def client(raw_driver):
+    with raw_driver.session() as session:
+        session.run(f"MATCH (n:{LABEL}) DETACH DELETE n")
+        session.run(f"UNWIND $ids AS sid CREATE (:Source:{LABEL} {{source_id: sid}})", ids=list(SOURCES))
+    c = neo4j_client.Neo4jClient(
+        URI, os.getenv("EDGEGUARD_IT_NEO4J_USER", "neo4j"), os.getenv("EDGEGUARD_IT_NEO4J_PASSWORD", "")
+    )
+    assert c.connect()
+    yield c
+    c.close()
+    with raw_driver.session() as session:
+        foreign = session.run(f"MATCH (n) WHERE NOT n:{LABEL} RETURN count(n) AS c").single()["c"]
+    assert foreign == 0, "the test wrote a node without the test label"
+
+
+def _nodes(driver, cve_id: str) -> None:
+    """The CVE node and its CVSS sub-nodes the writers MERGE into, created with the test label (a MERGE
+    would create them without), as EdgeGuard creates them (``edgeguard_managed``)."""
+    with driver.session() as session:
+        session.run(f"CREATE (:CVE:{LABEL} {{cve_id: $cve, uuid: 'u-' + $cve, edgeguard_managed: true}})", cve=cve_id)
+        for label in CVSS_LABELS:
+            session.run(f"CREATE (:{label}:{LABEL} {{cve_id: $cve, edgeguard_managed: true}})", cve=cve_id)
+
+
+def _ics_item(score: Optional[Dict[str, Any]] = None, product: Optional[str] = None) -> Dict[str, Any]:
+    """The CISA ICS collector's item for ``CVE`` from ``SAMPLE_ADVISORY``; ``score`` revises the advisory's
+    ``cvss_v3`` block, ``product`` its product name."""
+    from test_cisa_ics_collector import SAMPLE_ADVISORY
+
+    data = copy.deepcopy(SAMPLE_ADVISORY)
+    if score:
+        data["vulnerabilities"][0]["scores"][0]["cvss_v3"].update(score)
+    if product:
+        data["product_tree"]["branches"][0]["branches"][0]["name"] = product
+    items, _ = CISAICSCollector(misp_writer=MagicMock()).parse_advisory(data, "2026/icsa-26-281-01.json")
+    (item,) = [i for i in items if i["cve_id"] == CVE]
+    return item
+
+
+def _nvd_item() -> Dict[str, Any]:
+    """NVD's record of ``CVE`` as the NVD collector shapes it."""
+    return {
+        "cve_id": CVE,
+        "description": "Red Lion N-Tron 700 Series devices keep their default factory credentials.",
+        "zone": ["global"],
+        "tag": "nvd",
+        "published": "2026-10-08T15:15:41.000000+00:00",
+        "last_modified": "2026-10-14T18:47:12.000000+00:00",
+        "cwe": ["CWE-1392"],
+        "ref_tags": ["Vendor Advisory"],
+        "cpe_type": ["o"],
+        "result_impacts": ["HIGH", "HIGH", "HIGH"],
+        "reference_urls": ["https://www.redlion.net/support/security-advisories"],
+        "affected_products": ["cpe:2.3:o:redlion:n-tron_708m12_firmware:*:*:*:*:*:*:*:*"],
+        "cvss_score": 9.8,
+        "severity": "CRITICAL",
+        "attack_vector": "NETWORK",
+        "cvss_v31_data": dict(NVD_V31),
+    }
+
+
+def _sync(client, item: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    """One item through MISP and the sync, as production writes it: MISPWriter's attribute, the sync's
+    item, ``merge_cve``."""
+    attribute = MISPWriter.__new__(MISPWriter).create_vulnerability_attribute(item)
+    attribute["uuid"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"edgeguard-it:{item['cve_id']}:{item['tag']}"))
+    parsed, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(attribute, event)
+    assert parsed is not None
+    assert client.merge_cve(parsed, source_id=parsed["tag"]) is True
+    return parsed
+
+
+def _merge_real(client, record: Dict[str, Any]) -> None:
+    assert client.merge_cve(record, source_id=record["tag"]) is True
+
+
+def _cve(driver, cve_id: str) -> Dict[str, Any]:
+    with driver.session() as session:
+        (row,) = list(session.run("MATCH (c:CVE {cve_id: $cve}) RETURN properties(c) AS p", cve=cve_id))
+    return row["p"]
+
+
+def _cvss31(driver, cve_id: str) -> Tuple[Dict[str, Any], List[str], List[str]]:
+    """The CVSSv31 sub-node's properties, and ``sources`` / ``misp_event_ids`` of the CVE's edge to it."""
+    with driver.session() as session:
+        (row,) = list(
+            session.run(
+                "MATCH (:CVE {cve_id: $cve})-[r:HAS_CVSS_v31]->(n:CVSSv31) "
+                "RETURN properties(n) AS p, r.sources AS sources, r.misp_event_ids AS events",
+                cve=cve_id,
+            )
+        )
+    return row["p"], sorted(row["sources"]), sorted(row["events"])
+
+
+@pytest.mark.parametrize("order", ["nvd_then_ics", "ics_then_nvd"])
+def test_nvd_payload_holds_the_shared_cvss_sub_node_in_either_order(client, raw_driver, order):
+    _nodes(raw_driver, CVE)
+    steps = [(_nvd_item(), NVD_EVENT), (_ics_item(), ICS_EVENT)]
+    for item, event in steps if order == "nvd_then_ics" else reversed(steps):
+        _sync(client, item, event)
+    props, sources, events = _cvss31(raw_driver, CVE)
+    assert {k: props.get(k) for k in NVD_V31} == NVD_V31, "the sub-node holds NVD's payload"
+    assert (sources, events) == (["cisa_ics", "nvd"], ["120", "140"]), "the edge still names both feeds"
+    node = _cve(raw_driver, CVE)
+    assert (node["cvss_score"], node["severity"], node["cvss_version"], node["attack_vector"]) == (
+        9.8,
+        "CRITICAL",
+        "3.1",
+        "NETWORK",
+    ), "the CVE's score follows the sub-node"
+
+
+def test_a_sub_node_only_cisa_ics_asserted_follows_its_latest_record(client, raw_driver):
+    _nodes(raw_driver, CVE)
+    _sync(client, _ics_item(), ICS_EVENT)
+    props, _, _ = _cvss31(raw_driver, CVE)
+    assert (props["base_score"], props["attack_vector"]) == (6.0, "LOCAL")
+    assert "impact_score" not in props and "exploitability_score" not in props, "CSAF gives no sub-score"
+
+    revised = {
+        "baseScore": 7.2,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+    }
+    _sync(client, _ics_item(score=revised), ICS_EVENT)
+    props, sources, _ = _cvss31(raw_driver, CVE)
+    assert (props["base_score"], props["base_severity"], props["vector_string"], props["attack_vector"]) == (
+        7.2,
+        "HIGH",
+        revised["vectorString"],
+        "NETWORK",
+    )
+    assert "impact_score" not in props and sources == ["cisa_ics"]
+    node = _cve(raw_driver, CVE)
+    assert (node["cvss_score"], node["severity"], node["attack_vector"]) == (7.2, "HIGH", "NETWORK")
+
+
+@pytest.mark.parametrize("cve_id", ["CVE-2025-7223", "CVE-2025-14272"])
+@pytest.mark.parametrize("order", ["nvd_then_ics", "ics_then_nvd"])
+def test_nvd_record_sets_the_lists_and_cisa_ics_fills_the_rest(client, raw_driver, cve_id, order):
+    """Real hosted MISP attributes of NVD and CISA ICS. CVE-2025-7223: NVD gives every list, the node shows
+    NVD's (not the advisory's URL and product names). CVE-2025-14272: NVD gives no product and no CVSS 3.x
+    impacts, so the advisory's product name and impacts fill them."""
+    from test_cve_description_source import synced_key
+
+    nvd, ics = synced_key(f"{cve_id}__source:NVD"), synced_key(f"{cve_id}__source:CISA-ICS")
+    assert nvd["nvd_record"] is True and ics["tag"] == "cisa_ics"
+    _nodes(raw_driver, cve_id)
+    for record in (nvd, ics) if order == "nvd_then_ics" else (ics, nvd):
+        _merge_real(client, record)
+    expected = {prop: (nvd.get(prop) or ics.get(prop) or None) for prop in LISTS}
+    if cve_id == "CVE-2025-7223":
+        assert all(nvd[prop] for prop in LISTS) and expected == {prop: nvd[prop] for prop in LISTS}
+    else:
+        assert expected["affected_products"] == ics["affected_products"] and not nvd["affected_products"]
+        assert expected["reference_urls"] == nvd["reference_urls"] != ics["reference_urls"]
+    node = _cve(raw_driver, cve_id)
+    assert {prop: node.get(prop) for prop in LISTS} == expected
+
+
+def test_a_revised_cisa_ics_record_does_not_change_the_lists_it_filled(client, raw_driver):
+    """The trade-off of the rule: CISA ICS only fills, so a revised advisory leaves the lists of a CVE only
+    CISA ICS names as the first record set them (today MISPWriter keeps the first CISA ICS record of a CVE
+    anyway: a revised advisory reaches neither MISP nor the graph)."""
+    _nodes(raw_driver, CVE)
+    _sync(client, _ics_item(), ICS_EVENT)
+    _sync(client, _ics_item(product="700 Series Gen2"), ICS_EVENT)
+    assert _cve(raw_driver, CVE)["affected_products"] == ["Red Lion Controls 700 Series"]
