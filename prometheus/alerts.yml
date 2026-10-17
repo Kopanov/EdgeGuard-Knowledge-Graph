@@ -1062,7 +1062,7 @@ groups:
                  2>&1 | grep -E '\[PARTIAL\]' | tail -20``
               2. Inspect the reported errorMessages in the log line
                  (first 3 errors are pre-logged).
-              3. Re-run build_relationships for this step only, or
+              3. Re-run the whole build_relationships task (its MERGEs are idempotent; there is no per-step re-run), or
                  accept partial data and move to the next step if
                  errors are transient and row count is acceptable.
               4. See docs/RUNBOOK.md § "APOC partial-batch response playbook".

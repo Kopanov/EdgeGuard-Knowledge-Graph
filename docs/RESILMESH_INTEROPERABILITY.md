@@ -611,7 +611,7 @@ query VulnerableHosts {
 }
 ```
 
-> The ISIM GraphQL schema includes `CVE`, `Vulnerability`, `CVSSv31`, `CVSSv2`, `CVSSv30`, `CVSSv40`, `SoftwareVersion`, `Host`, `IP`, `Subnet` and all topology types. EdgeGuard's `CVE` nodes are written in full compliance with this schema and are queryable via ISIM GraphQL as-is. The scheduled pipeline writes no `Vulnerability` nodes (§3.1): the `vulnerabilities` query above returns the `Vulnerability` nodes ResilMesh writes (the scanner's findings) with the EdgeGuard `CVE` each one refers to.
+> The ISIM GraphQL schema includes `CVE`, `Vulnerability`, `CVSSv31`, `CVSSv2`, `CVSSv30`, `CVSSv40`, `SoftwareVersion`, `Host`, `IP`, `Subnet` and all topology types. EdgeGuard's `CVE` nodes are written in full compliance with this schema and are queryable via ISIM GraphQL as-is. The scheduled pipeline writes no `Vulnerability` nodes (§3.1): the `vulnerabilities` query above returns the `Vulnerability` nodes ResilMesh writes (the scanner's findings) with the `CVE` each one refers to (EdgeGuard's node where EdgeGuard holds that CVE id).
 
 ### 8.3 ISIM GraphQL Schema Coverage for EdgeGuard Data
 

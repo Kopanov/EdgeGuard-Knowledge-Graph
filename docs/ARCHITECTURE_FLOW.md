@@ -58,10 +58,10 @@ two-hour read.
 
 Diagrams rot. Every diagram in this file:
 
-1. **References real symbols.** Function names, class names, env vars, and file paths appear as plain text labels. File paths, env vars and container names in `docker` commands are checked by `tests/test_architecture_flow_pins.py` — if a referenced one vanishes, the test fails and forces an update here; the test also fails on the removed `python -m` command forms, and function names, class names and `edgeguard` subcommands are not pinned.
+1. **References real symbols.** Function names, class names, env vars, and file paths appear as plain text labels. `src/*.py` file paths, env vars and container names in `docker` commands are checked by `tests/test_architecture_flow_pins.py` — if a referenced one vanishes, the test fails and forces an update here; the test also fails on the removed `python -m` command forms, and function names, class names and `edgeguard` subcommands are not pinned.
 2. **Lives close to the code.** Modules whose behavior a diagram describes get a link to the corresponding section from their top-of-file docstring; these cross-references are part of each tier's work (see [Work plan](#work-plan)).
 3. **States its scope.** Each diagram section declares which files it covers and which failure modes it illuminates.
-4. **Changes with the flow.** A change to the flow updates its diagram in the same pull request; a change that removes a referenced file path, env var or a container name used in a `docker` command fails the pin-test.
+4. **Changes with the flow.** A change to the flow updates its diagram in the same pull request; a change that removes a referenced `src/*.py` file, env var or a container name used in a `docker` command fails the pin-test.
 
 ---
 
@@ -295,7 +295,7 @@ Target: complete before the next 730-day baseline.
 
 ## Appendix B — Self-validation
 
-`tests/test_architecture_flow_pins.py` checks env vars, container names, file paths and the removed `python -m` command forms; it does not check `edgeguard` subcommands. Symbol pinning is planned:
+`tests/test_architecture_flow_pins.py` checks env vars, container names, `src/*.py` file paths and the removed `python -m` command forms; it does not check `edgeguard` subcommands. Symbol pinning is planned:
 
 1. Parse this file for backticked tokens matching symbol patterns (`_[a-z_]+`, `[A-Z][a-zA-Z]+`, `[A-Z_]{3,}`).
 2. For each token, grep `src/` for a definition (`def X`, `class X`, `X =`, `X:` env var).
