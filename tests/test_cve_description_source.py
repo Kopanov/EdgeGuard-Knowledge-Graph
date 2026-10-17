@@ -642,12 +642,12 @@ class TestStixImport:
 
 
 # ================================================================ the RUNBOOK repair (docs/RUNBOOK.md)
-CVE_RUNBOOK_SECTION = "## Repairing CVE descriptions and dates (2026-10)"
+CVE_RUNBOOK_SECTION = "### Repairing CVE descriptions and dates"
 
 
 def _cve_runbook_statements() -> list:
     doc = (_SRC.parent / "docs" / "RUNBOOK.md").read_text()
-    section = doc.split(CVE_RUNBOOK_SECTION, 1)[1].split("\n## ", 1)[0]
+    section = re.split(r"\n#{2,3} ", doc.split(CVE_RUNBOOK_SECTION + "\n", 1)[1], maxsplit=1)[0]
     return [block.strip().rstrip(";") for block in re.findall(r"```cypher\n(.*?)```", section, re.S)]
 
 

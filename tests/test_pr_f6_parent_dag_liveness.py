@@ -548,11 +548,13 @@ class TestDocsExist:
         assert "Issue #65" in content or "PR-F6" in content
         assert "Event 19" in content or "orphan" in content.lower()
 
-    def test_design_doc_references_pr_f6(self):
+    def test_design_doc_documents_the_liveness_check(self):
         with open("docs/AIRFLOW_DAG_DESIGN.md") as fh:
             content = fh.read()
-        assert "PR-F6" in content or "Issue #65" in content, (
-            "AIRFLOW_DAG_DESIGN.md must document the PR-F6 / Issue #65 "
-            "parent-DAG liveness check so operators see WHY collectors "
-            "may exit early on a sibling-task failure"
+        assert "### Parent-DAG liveness check" in content, (
+            "AIRFLOW_DAG_DESIGN.md must document the parent-DAG liveness "
+            "check so operators see WHY collectors may exit early on a "
+            "sibling-task failure"
         )
+        section = content.split("### Parent-DAG liveness check", 1)[1].split("\n### ", 1)[0]
+        assert "**Why it is needed:**" in section and "PARENT_DAG_DEAD" in section

@@ -351,9 +351,11 @@ class TestRunbookDocumentsBackfill:
 
     def test_runbook_has_backfill_section(self):
         rb = self._runbook()
-        assert "PR-N22" in rb and "backfill" in rb.lower(), (
-            "RUNBOOK must have a PR-N22 backfill section so operators can find it"
+        assert "### Backfilling CVE `published` / `last_modified`" in rb, (
+            "RUNBOOK must have a CVE date backfill section so operators can find it"
         )
+        section = rb.split("### Backfilling CVE `published` / `last_modified`", 1)[1].split("\n## ", 1)[0]
+        assert "scripts/backfill_cve_dates_from_nvd_meta.py" in section
 
     def test_runbook_shows_dry_run_first(self):
         """The operator protocol must emphasize dry-run first — a 100K-CVE

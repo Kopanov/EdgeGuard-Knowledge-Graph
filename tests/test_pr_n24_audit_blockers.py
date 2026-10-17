@@ -137,11 +137,12 @@ class TestB1RunbookNoPhantomStepFlag:
             "recovery path (the actual operator action)"
         )
 
-    def test_runbook_cross_refs_step_n_issue(self):
+    def test_runbook_states_there_is_no_step_flag(self):
         text = (DOCS / "RUNBOOK.md").read_text()
-        # The fix should reference the tracking issue for adding the flag.
-        assert "Issue #58" in text or "issue #58" in text, (
-            "RUNBOOK should cross-ref Issue #58 (tracking the missing --step N flag)"
+        section = text.split("### APOC partial-batch response playbook", 1)[1].split("\n### ", 1)[0]
+        # The playbook must say that build_relationships has no per-step flag (no --step N).
+        assert "There is no per-step CLI flag" in section, (
+            "RUNBOOK must state that build_relationships has no per-step flag, so the full-task re-run is the path"
         )
 
 

@@ -130,11 +130,11 @@ def _read_all_code_text() -> str:
 # Env vars that are intentionally referenced in docs but don't exist in
 # the codebase. Each entry must have a clear reason.
 _ENV_VAR_DOC_ONLY_ALLOWLIST: dict[str, str] = {
-    # Naming-conflict history: PRODUCTION_READINESS.md L123 documents that
-    # this env var was renamed to EDGEGUARD_ENABLE_METRICS. The reference is
-    # historical narrative, not a current spec.
+    # Naming-conflict history: the History section of PRODUCTION_READINESS.md
+    # records that this env var was standardised to EDGEGUARD_ENABLE_METRICS.
+    # The reference is historical narrative, not a current spec.
     "EDGEGUARD_ENABLE_PROMETHEUS": (
-        "Historical narrative in PRODUCTION_READINESS.md — documented as renamed to EDGEGUARD_ENABLE_METRICS"
+        "History section of PRODUCTION_READINESS.md — standardised to EDGEGUARD_ENABLE_METRICS"
     ),
     # Pedagogical code example in RESILIENCE_CONFIG.md showing how to add
     # env-var-driven circuit breaker tuning IN YOUR FORK. Not a current

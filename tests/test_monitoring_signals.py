@@ -896,7 +896,7 @@ class TestFullSyncRequestPendingAlert:
         # 2026-10: the launch-day monitoring step said 37 rules when the file held 38, and 39 with this one.
         rules = [r for g in _RULES["groups"] for r in g["rules"] if "alert" in r]
         readme = (_ROOT / "README.md").read_text()
-        assert f"({len(rules)} alert rules at HEAD across {len(_RULES['groups'])} groups)" in readme
+        assert f"({len(rules)} alert rules across {len(_RULES['groups'])} groups in `prometheus/alerts.yml`)" in readme
 
     def test_it_says_it_clears_three_days_after_the_last_failure(self):
         # 2026-10: the rule reads a counter over a 3-day window, so it keeps firing after the request was

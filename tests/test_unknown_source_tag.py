@@ -1,10 +1,10 @@
 """Unknown ``source:*`` MISP tags must degrade gracefully in the sync path.
 
 A MISP instance may still hold attributes tagged by a collector that has
-since been removed from the framework (see "Removed sources" in
-``docs/DATA_SOURCES.md``). ``run_misp_to_neo4j`` must keep ingesting such
-attributes: the source falls back to ``misp``, the fallback is logged once
-per distinct tag name and counted in
+since been removed from the framework (see "Appendix: data written by
+earlier versions" in ``docs/DATA_SOURCES.md``). ``run_misp_to_neo4j`` must
+keep ingesting such attributes: the source falls back to ``misp``, the
+fallback is logged once per distinct tag name and counted in
 ``edgeguard_misp_unmapped_source_tags_total``, and nothing raises.
 ``source_truthful_timestamps`` must likewise return ``(None, None)`` for a
 source id it does not know, so no unverified first-seen claim reaches the

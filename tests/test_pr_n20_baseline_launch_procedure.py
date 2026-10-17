@@ -70,12 +70,18 @@ class TestFix1RunbookLaunchPath:
 
     def test_runbook_documents_cli_launch_option(self):
         rb = self._runbook()
-        # CLI path takes the in-process baseline_lock; every scheduled DAG
-        # then self-skips via baseline_skip_reason(). Pin the recommended
-        # command shape.
-        assert "python -m edgeguard baseline" in rb, (
-            "RUNBOOK must document the CLI launch command (recommended path). "
-            "It takes the in-process baseline_lock (src/run_pipeline.py:1093)."
+        section = rb.split("#### What about the CLI commands?", 1)[1].split("\n---", 1)[0]
+        # The CLI wrappers trigger the baseline DAG (which holds the lock);
+        # the legacy in-process path takes the in-process baseline_lock, and
+        # every scheduled DAG then self-skips via baseline_skip_reason().
+        assert "edgeguard baseline --days N" in section and "edgeguard fresh-baseline" in section, (
+            "RUNBOOK must document the CLI launch commands"
+        )
+        assert "trigger" in section and "`edgeguard_baseline` DAG" in section, (
+            "RUNBOOK must say that the CLI wrappers trigger the edgeguard_baseline DAG"
+        )
+        assert "python src/run_pipeline.py --baseline" in section, (
+            "RUNBOOK must name the legacy in-process path that takes the in-process baseline_lock"
         )
 
     def test_runbook_documents_dag_pause_option(self):
@@ -91,11 +97,12 @@ class TestFix1RunbookLaunchPath:
         assert "airflow dags pause" in rb, "RUNBOOK must show the `airflow dags pause` command"
         assert "airflow dags unpause" in rb, "RUNBOOK must show how to restore after baseline completes"
 
-    def test_runbook_cross_references_issue_57(self):
+    def test_runbook_explains_the_root_cause_of_the_launch_path_constraint(self):
         rb = self._runbook()
-        # Cross-reference so ops readers can find the root-cause audit.
-        assert "Issue #57" in rb or "01_baseline_sequence.md" in rb, (
-            "RUNBOOK must cross-reference the root-cause audit for the launch-path constraint"
+        section = rb.split("### ⚠️ Baseline launch path", 1)[1].split("\n#### ", 1)[0]
+        # The root cause, so ops readers understand why the scheduled DAGs must not write during a baseline.
+        assert "concurrent writers exhaust MISP's PHP-FPM workers" in section, (
+            "RUNBOOK must explain the root cause of the launch-path constraint"
         )
 
     def test_runbook_references_preflight_script(self):
@@ -432,14 +439,24 @@ class TestFix5ReadmeLaunchProcedure:
             "README must point to scripts/preflight_baseline.sh as the pre-kickoff check"
         )
 
-    def test_readme_explains_issue_57_rationale(self):
-        """The 'why' matters as much as the 'what' — colleagues need to
-        understand the 2026-04-19 incident shape to make the right
-        launch-path choice."""
+    def test_readme_explains_the_launch_path_rationale(self):
+        """The 'why' matters as much as the 'what': the README explains the
+        baseline lock (the mutex the ``edgeguard_baseline`` DAG holds for the
+        whole run and the scheduled DAGs honour) and why pausing the
+        scheduled DAGs is still recommended before a destructive
+        ``fresh-baseline``, so colleagues can make the right launch-path
+        choice."""
         rd = self._readme()
-        assert "Issue #57" in rd, "README must cross-reference Issue #57 (DB-backed mutex)"
-        assert "2026-04-19" in rd or "14.7%" in rd, (
-            "README must explain the historical incident that motivates the launch-path decision"
+        section = rd.split("### Why the launch path matters", 1)[1].split("\n### ", 1)[0]
+        assert "baseline_acquire_lock" in section and "baseline_release_lock" in section, (
+            "README must explain that the baseline DAG acquires and releases the baseline lock itself"
+        )
+        assert "checkpoints/baseline_in_progress.lock" in section, "README must name the lock sentinel"
+        assert "reason `baseline_in_progress`" in section, (
+            "README must explain that the scheduled DAGs skip while the baseline holds the lock"
+        )
+        assert "completes its current write" in section, (
+            "README must explain why pausing the scheduled DAGs is recommended before a fresh-baseline"
         )
 
     def test_readme_documents_misp_retrieval_paths(self):

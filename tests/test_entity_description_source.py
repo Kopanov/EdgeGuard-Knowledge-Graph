@@ -813,13 +813,13 @@ class TestStixImport:
 
 
 # ================================================================ the RUNBOOK repair (docs/RUNBOOK.md)
-RUNBOOK_SECTION = "## Repairing Malware, ThreatActor and Tool descriptions (2026-10)"
+RUNBOOK_SECTION = "### Repairing Malware, ThreatActor and Tool descriptions"
 
 
 def runbook_statements() -> list:
     """The Cypher of the RUNBOOK repair section, block by block: steps 1, 2, 3, 4 and the check."""
     doc = (TESTS.parent / "docs" / "RUNBOOK.md").read_text()
-    section = doc.split(RUNBOOK_SECTION, 1)[1].split("\n## ", 1)[0]
+    section = re.split(r"\n#{2,3} ", doc.split(RUNBOOK_SECTION + "\n", 1)[1], maxsplit=1)[0]
     return [block.strip().rstrip(";") for block in re.findall(r"```cypher\n(.*?)```", section, re.S)]
 
 
