@@ -307,6 +307,33 @@ class OTXCollector:
                 best = dt
         return best.isoformat() if best else None
 
+    @staticmethod
+    def _pulses_before_oldest(pulses: List[Dict], held_ids: set) -> List[Dict]:
+        """The *pulses* modified before the oldest pulse whose id is in *held_ids*.
+
+        2026-10: the cursor goes no further than these, so the next run reads the held pulses again.
+        All of them when *held_ids* is empty; none when a held pulse is missing or has no readable
+        ``modified`` (the cursor then stays where it is).
+        """
+        if not held_ids:
+            return list(pulses)
+
+        def _modified(p: Dict) -> Optional[datetime]:
+            raw = p.get("modified")
+            if not raw or not isinstance(raw, str):
+                return None
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return None
+            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+        held = {p.get("id"): _modified(p) for p in pulses if p.get("id") in held_ids}
+        if set(held) != set(held_ids) or any(dt is None for dt in held.values()):
+            return []
+        oldest = min(held.values())
+        return [p for p in pulses if (dt := _modified(p)) is not None and dt < oldest]
+
     def health_check(self) -> Dict[str, Any]:
         """
         Check OTX API health.
@@ -868,20 +895,34 @@ class OTXCollector:
                     logger.warning(f"[WARN] OTX: Failed to push {failed} items to MISP")
 
                 # Advance cursor only when there were successful items.
-                # On partial failure, advance to the last successful pulse
-                # so we re-collect only the failed window next time.
+                # On partial failure, advance no further than the pulses
+                # before the oldest pulse with an unstored item, so the
+                # next run collects the failed window again.
                 if success > 0:
                     if failed == 0:
                         _advance_otx_incremental_cursor()
                     else:
-                        # Partial failure: identify pulses that contributed
-                        # the successfully pushed items (first `success` items
-                        # are the ones that went through) and advance only
-                        # up to their latest timestamp.
-                        successful_items = unique[:success]
-                        successful_pulse_ids = {it.get("pulse_id") for it in successful_items if it.get("pulse_id")}
-                        successful_pulses = [p for p in pulses if p.get("id") in successful_pulse_ids]
-                        _advance_otx_incremental_cursor(successful_pulses)
+                        # Partial failure (2026-10): the cursor stops below the oldest pulse with an
+                        # item MISP did not store because its batch failed, so the next run reads that
+                        # pulse again. It took the pulses of ``unique[:success]`` before, the first
+                        # items by position, which named the failed batch's pulses whenever an earlier
+                        # batch failed (or items were already present), and the cursor passed them.
+                        # Failures the writer does not list (items no attribute could be built from,
+                        # values MISP cannot store) do not hold it: a later run cannot store them
+                        # either. A writer that gives no list, or an unstored item of no known pulse,
+                        # leaves the cursor where it is.
+                        unstored = getattr(self.misp_writer, "last_push_unstored_items", None)
+                        held_ids: set = set()
+                        placed = isinstance(unstored, (list, tuple, set))
+                        for pos in unstored if placed else ():
+                            item = unique[pos] if isinstance(pos, int) and 0 <= pos < len(unique) else {}
+                            ids = [pid for pid in [item.get("pulse_id"), *(item.get("report_ids") or [])] if pid]
+                            if not ids:
+                                placed = False  # an unstored item of no known pulse: the cursor stays
+                                break
+                            held_ids.update(ids)
+                        if placed:
+                            _advance_otx_incremental_cursor(self._pulses_before_oldest(to_process, held_ids))
 
                 self.circuit_breaker.record_success()
                 st = status_after_misp_push("otx", len(unique), success, failed)

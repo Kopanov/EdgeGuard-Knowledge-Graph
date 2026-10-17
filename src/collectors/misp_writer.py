@@ -993,6 +993,12 @@ def _strip_non_bmp(text: str) -> str:
     return "".join(ch for ch in text if ord(ch) <= 0xFFFF)
 
 
+def _value_is_storable(attr: Dict) -> bool:
+    """False when the attribute's ``value`` holds 4-byte characters, which MISP cannot store."""
+    value = attr.get("value")
+    return not (isinstance(value, str) and any(ord(ch) > 0xFFFF for ch in value))
+
+
 def _make_attributes_storable(attributes: List[Dict]) -> List[Dict]:
     """Strip 4-byte characters from descriptive fields; drop attributes whose value needs them.
 
@@ -1003,7 +1009,7 @@ def _make_attributes_storable(attributes: List[Dict]) -> List[Dict]:
     storable: List[Dict] = []
     for attr in attributes:
         value = attr.get("value")
-        if isinstance(value, str) and any(ord(ch) > 0xFFFF for ch in value):
+        if not _value_is_storable(attr):
             logger.warning(
                 "[SKIP] attribute value contains 4-byte characters MISP cannot store: type=%s value=%r",
                 attr.get("type"),
@@ -2921,7 +2927,17 @@ class MISPWriter:
 
         See docs/MISP_TUNING.md for the full playbook (php.ini /
         my.cnf settings + when to apply each EdgeGuard env knob).
+
+        2026-10 (unstored items): after the call, ``self.last_push_unstored_items`` lists the
+        positions in *items* of the items MISP did not store because their batch, or their group's
+        event lookup, failed. A cursor that must not pass them (OTX) stops below them. A batch
+        failed when MISP stored none of it: HTTP 4xx, a batch error, HTTP 429 or 5xx after the
+        retries, and under strict accounting an HTTP 200 that confirms none of it; attributes
+        missing from a batch MISP partly stored are not listed. Items no attribute could be built
+        from and values MISP can never store (4-byte characters) are not listed either: a later run
+        cannot store them.
         """
+        self.last_push_unstored_items: List[int] = []
         if not items:
             return 0, 0
 
@@ -2957,7 +2973,16 @@ class MISPWriter:
         not_converted: Dict[str, Dict[str, int]] = {}
         items_per_source: Dict[str, int] = {}
 
-        for item in items:
+        # 2026-10: (type, value) → positions in *items*, to name the items of a failed batch.
+        item_positions_by_key: Dict[Tuple[Any, Any], List[int]] = {}
+        unstored_positions: set = set()
+
+        def _note_unstored(attrs: List[Dict]) -> None:
+            for a in attrs:
+                if _value_is_storable(a):
+                    unstored_positions.update(item_positions_by_key.get((a.get("type"), a.get("value")), ()))
+
+        for item_position, item in enumerate(items):
             source = item.get("tag", "unknown")
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             key = (source, date)
@@ -2994,6 +3019,7 @@ class MISPWriter:
                 continue
 
             grouped.setdefault(key, []).append(attr)
+            item_positions_by_key.setdefault((attr.get("type"), attr.get("value")), []).append(item_position)
             if kind == "indicator":
                 reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
 
@@ -3179,9 +3205,11 @@ class MISPWriter:
                 )
                 self.stats["errors"] += 1
                 total_failed += len(unique_attrs)
+                _note_unstored(unique_attrs)
                 continue
             if not event_id:
                 total_failed += len(unique_attrs)
+                _note_unstored(unique_attrs)
                 continue
 
             per_event_keys = self._get_existing_attribute_keys(event_id)
@@ -3563,6 +3591,8 @@ class MISPWriter:
                 # bad event doesn't destroy a whole NVD push.
                 try:
                     success, failed = self._push_batch(event_id, batch)
+                    if success == 0 and failed:
+                        _note_unstored(batch)  # HTTP 4xx, a batch error, or none confirmed (strict): none stored
                     # PR-N4 round 2 (Cross-Checker #2, Bug Hunter #5):
                     # require N CONSECUTIVE FULL SUCCESSES before
                     # resetting the failure counter. Pre-fix, a single
@@ -3595,6 +3625,7 @@ class MISPWriter:
                         exc,
                     )
                     success, failed = 0, len(batch)
+                    _note_unstored(batch)
                     self.stats["errors"] += 1
                     # PR-N4 round 2 (Cross-Checker #2): instance-scoped
                     # counter persists across push_items calls so a
@@ -3659,6 +3690,7 @@ class MISPWriter:
         else:
             logger.info("[OK] MISP push: no items provided")
 
+        self.last_push_unstored_items = sorted(unstored_positions)
         return total_success, total_failed
 
     def _refresh_stored_copies(
