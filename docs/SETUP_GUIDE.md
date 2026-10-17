@@ -66,7 +66,7 @@ The repo **`install.sh`** defaults to **path A** when Docker Compose v2 is avail
 - **Git** (or a release tarball — see § 7)
 - A running **MISP** instance (URL + auth key your org provides)
 - **Tiny dev / smoke test:** ~**8 GB+ RAM** is enough.
-- **Full 730d baseline (350K+ nodes):** plan for **~32 GB host RAM** — Neo4j alone wants **8 GB heap + 4 GB pagecache** under load, Airflow worker default is **12 GB** (`AIRFLOW_MEMORY_LIMIT=12g`), plus MISP + Postgres + monitoring stack. See [`DOCKER_SETUP_GUIDE.md`](DOCKER_SETUP_GUIDE.md) "Recommended Neo4j memory profiles" + [`MEMORY_TUNING.md`](MEMORY_TUNING.md).
+- **Full 730d baseline** (the baseline loaded on 2026-10-16 has about 550K nodes and 2.7M relationships): Neo4j alone wants **12 GB heap + 8 GB pagecache** under load (8 GB transaction limit, ~25 GB typical RSS, 32 GB container limit — the baseline-capable profile of [`DOCKER_SETUP_GUIDE.md`](DOCKER_SETUP_GUIDE.md)). With the Airflow limit of **12 GB** (`AIRFLOW_MEMORY_LIMIT=12g`), its Postgres' 2 GB and the API and GraphQL services' 512 MB each, the container limits add up to about **47 GB**, so plan **~48 GB host RAM** (more if MISP or the monitoring stack runs on the same host). On a smaller host, use DOCKER_SETUP_GUIDE's smaller option (8 GB heap, ~21 GB typical RSS, 28 GB container limit). See [`DOCKER_SETUP_GUIDE.md`](DOCKER_SETUP_GUIDE.md) "Recommended Neo4j memory profiles" + [`MEMORY_TUNING.md`](MEMORY_TUNING.md).
 
 For a **large Neo4j heap**, clean-slate volume resets, and MISP-on-Docker-desktop patterns, use [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md) alongside this section.
 
@@ -78,7 +78,9 @@ cd EdgeGuard-Knowledge-Graph
 cp .env.example .env
 ```
 
-Edit **`.env`** before or right after the first start. **Inside Docker**, services talk to Neo4j as **`bolt://neo4j:7687`** — that is already set in **`docker-compose.yml`** via `x-common-env`; your **`.env`** should still define **`NEO4J_PASSWORD`** (and any other secrets) — Compose substitutes them into the stack.
+**`./install.sh`** (§ 3.4) generates **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`**, **`AIRFLOW_FERNET_KEY`** and **`GRAFANA_ADMIN_PASSWORD`** (used by `docker-compose.monitoring.yml`) only when **`.env`** does not exist yet; an existing **`.env`**, such as the copy above, is left as it is. After the copy, set these yourself together with the variables of § 3.3.
+
+Edit **`.env`** before the first start: Neo4j takes its password from **`NEO4J_PASSWORD`** on the first start only (while its data volume is empty), and a later change in **`.env`** does not change it. **Inside Docker**, services talk to Neo4j as **`bolt://neo4j:7687`** — that is already set in **`docker-compose.yml`** via `x-common-env`; your **`.env`** should still define **`NEO4J_PASSWORD`** (and any other secrets) — Compose substitutes them into the stack.
 
 ### 3.3 Minimum variables to set (Compose)
 
@@ -88,6 +90,7 @@ Edit **`.env`** before or right after the first start. **Inside Docker**, servic
 | **`MISP_URL`** | Full base URL of your MISP (e.g. `https://misp.company.internal`) |
 | **`MISP_API_KEY`** | MISP auth key (same as in MISP UI → automation) |
 | **`EDGEGUARD_API_KEY`** | Set a **strong random** value for the EdgeGuard REST API (Compose expects it for the `api` / `graphql` services) |
+| **`AIRFLOW_API_AUTH_JWT_SECRET`** | Required. One stable JWT signing secret for the Airflow scheduler and API server (`python3 -c "import secrets; print(secrets.token_urlsafe(64))"`); when it is empty, every Airflow process signs with its own random key |
 
 **Strongly recommended:**
 
@@ -95,7 +98,7 @@ Edit **`.env`** before or right after the first start. **Inside Docker**, servic
 |----------|------|
 | **`AIRFLOW_FERNET_KEY`** | Before relying on Airflow Connections / encrypted fields. Generate: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | **`AIRFLOW_POSTGRES_PASSWORD`** | Non-default password for metadata DB in production (must stay URL-safe for the SQLAlchemy URI — avoid `@`, `#`, `/`, `?` in the password) |
-| **`EDGEGUARD_SSL_VERIFY=false`** | Only if MISP uses a **private CA** / self-signed cert **and** you accept the risk in dev. **`SSL_VERIFY=false`** works only as a **fallback** when **`EDGEGUARD_SSL_VERIFY`** is unset/empty. **`SSL_CERT_VERIFY`** is ignored by EdgeGuard. |
+| **`EDGEGUARD_SSL_VERIFY=false`** | Only if MISP uses a **private CA** / self-signed cert **and** you accept the risk in dev. **`SSL_VERIFY=false`** works only as a **fallback** when **`EDGEGUARD_SSL_VERIFY`** is unset/empty. **`SSL_CERT_VERIFY`** is ignored by EdgeGuard. On the Compose stack **`EDGEGUARD_SSL_VERIFY`** is always set (default `true`), so only **`EDGEGUARD_SSL_VERIFY`** takes effect there. |
 
 **MISP in Docker on another compose network?**  
 Airflow and collectors resolve **`MISP_URL`** from **inside** containers. `localhost` on the host ≠ MISP inside another stack. Use a **shared Docker network** or hostname both stacks know. Details: [MISP_SOURCES.md](MISP_SOURCES.md) § *MISP not reachable*, [ENVIRONMENTS.md](ENVIRONMENTS.md).
@@ -114,9 +117,11 @@ From the repo root:
 
 This will:
 
-1. Create **`.env`** from **`.env.example`** if missing  
+1. Create **`.env`** from **`.env.example`** if it is missing, and only in that case generate **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`**, **`AIRFLOW_FERNET_KEY`** and **`GRAFANA_ADMIN_PASSWORD`** (an existing **`.env`** is left as it is)  
 2. **`docker compose build`** (API image + **Airflow image** from **`Dockerfile.airflow`**)  
 3. **`docker compose up -d`**
+
+When **`install.sh`** creates **`.env`**, it starts the stack in the same run with the template values, so fill in **`.env`** first (§ 3.2, § 3.3).
 
 If you change **`requirements-airflow-docker.txt`** or **`Dockerfile.airflow`**, rebuild Airflow:
 
@@ -140,7 +145,7 @@ docker compose up -d --force-recreate api graphql airflow
 | REST API health | http://localhost:8000/health |
 | GraphQL | http://localhost:4001/graphql |
 
-First Airflow login: check **`docker compose logs airflow`** for the generated admin password (standalone image).
+First Airflow login: user **`admin`**. The password is printed in **`docker compose logs airflow`** on the first start only. Afterwards: **`docker exec edgeguard_airflow cat /opt/airflow/simple_auth_manager_passwords.json.generated`** (the file is in the persistent `airflow_db` volume).
 
 ### 3.6 Verify connectivity
 
@@ -149,17 +154,18 @@ With **`.env` loaded** in your shell (or `export` vars manually):
 ```bash
 cd EdgeGuard-Knowledge-Graph
 set -a && source .env && set +a   # bash/zsh
+export NEO4J_URI=bolt://localhost:7687   # .env names the Compose service, which resolves only inside the Compose network
 python src/health_check.py
 ```
 
-You want **MISP** and **Neo4j** checks to pass. If MISP fails with SSL errors, align **`EDGEGUARD_SSL_VERIFY`** with your cert policy and restart services.
+You want **MISP** and **Neo4j** checks to pass. **`MISP_URL`** must also be reachable from the host for this check (a name that resolves only inside the Docker network fails here). If MISP fails with SSL errors, align **`EDGEGUARD_SSL_VERIFY`** with your cert policy and restart services.
 
 Optional: **`edgeguard doctor`** / **`edgeguard validate`** after `pip install -e ".[api]"` or from a venv that has the project on `PYTHONPATH` (see § 4).
 
 ### 3.7 Run the pipeline in Airflow (first time)
 
 1. In the Airflow UI: **DAGs** → ensure **no import errors** (see also: `docker compose exec airflow airflow dags list-import-errors`).  
-2. Run **`misp_health_check`** path: open DAG **`edgeguard_pipeline`** (or baseline) and confirm the **preflight** task succeeds — proves Airflow can reach **MISP** (**API + DB**; workers optional unless **`EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS=true`**).  
+2. Run **`misp_health_check`** path: open DAG **`edgeguard_pipeline`** (or baseline) and confirm the **`misp_health_check`** task succeeds (the baseline DAG also runs **`source_key_check`**) — proves Airflow can reach **MISP** (**API + DB**; workers optional unless **`EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS=true`**).  
 3. For a **full historical load** (long-running): trigger **`edgeguard_baseline`** once. For a **smaller test**, see [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) (`EDGEGUARD_BASELINE_DAYS`, limits, restart Airflow).  
 4. **MISP → Neo4j:** tasks like **`full_neo4j_sync`** / **`run_neo4j_sync`** need **Neo4j APOC** (enabled in Compose Neo4j service). If sync logs **“No events”** but MISP has `EdgeGuard-…` events, confirm deployed **`src/run_misp_to_neo4j.py`** matches the repo (discovery: **`/events/index`** + client filter; **`Accept: application/json`** on the sync session; **`restSearch`** only as fallback). See [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) and [MISP_SOURCES.md](MISP_SOURCES.md).
 
@@ -169,7 +175,7 @@ Optional: **`edgeguard doctor`** / **`edgeguard validate`** after `pip install -
 
 ## 4. Path B — Python / venv (no Docker)
 
-Requires **Python 3.12+** (same as `pyproject.toml` and GitHub Actions). Apache Airflow 3.2 supports **3.10–3.14** upstream; this repo tests on **3.12** only. Airflow was bumped from 2.11 to 3.2 in April 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) if you are migrating an existing install.
+Requires **Python 3.12+** (same as `pyproject.toml` and GitHub Actions). Apache Airflow 3.3 supports **3.10–3.14** upstream; this repo tests on **3.12** only. Airflow was bumped from 2.11 to 3.2 in April 2026 and to 3.3.2 in October 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) if you are migrating an existing install.
 
 For developers or minimal setups:
 
@@ -185,7 +191,7 @@ python src/health_check.py
 
 **Neo4j:** Use **`bolt://localhost:7687`** (or your server) in **`.env`**. Install **APOC** on that Neo4j — required for sync (see below).
 
-**Airflow (optional):** Install **`apache-airflow~=3.2`** (the repo upgraded from 2.11 → 3.2 on 2026-04-15 to resolve 16 stale 2.11.x CVEs — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md)). Configure **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`**, copy **`dags/`** into **`$AIRFLOW_HOME/dags`**, mount or copy **`src/`** so DAGs can import collectors. After **`airflow db migrate`** and before unpausing the DAGs, create the collector pool once: **`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`** (2026-10: every collector task of every DAG runs in this pool, which bounds how many collectors run at once; without it the collector tasks are never scheduled — see [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10)). Compose creates it on every start of the **`airflow`** service. The Compose stack runs `airflow standalone` (Airflow 3.x) — the legacy `airflow webserver` was split into `airflow api-server` in 3.x and is **not** what EdgeGuard uses. This venv path is more manual; prefer Compose for orchestration.
+**Airflow (optional):** Install the Airflow extra: **`pip install -e '.[airflow]'`** (`apache-airflow[postgres]~=3.3` + `apache-airflow-providers-standard~=1.5`; the Compose image is `apache/airflow:3.3.2-python3.12`). The repo upgraded from 2.11 → 3.2 on 2026-04-15 to resolve 16 stale 2.11.x CVEs, then to 3.3.2 in October 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md). Configure **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`**. Point **`AIRFLOW__CORE__DAGS_FOLDER`** at the repository's **`dags/`** and **`AIRFLOW__CORE__PLUGINS_FOLDER`** at **`plugins/`** (the DAG-run listener `edgeguard_dag_run_state.py`) instead of copying them. The DAG then imports **`src/`** from the repository (`EDGEGUARD_BASE_DIR`, default the parent of the DAG folder), and **`./install.sh --update`** updates what Airflow runs. If you copy instead, re-copy **`dags/`**, **`src/`** and **`plugins/`** after every update. After **`airflow db migrate`** and before unpausing the DAGs, create the collector pool once: **`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`** (2026-10: every collector task of every DAG runs in this pool, which bounds how many collectors run at once; without it the collector tasks are never scheduled — see [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10)). Compose creates it on every start of the **`airflow`** service. The Compose stack runs `airflow standalone` (Airflow 3.x) — the legacy `airflow webserver` was split into `airflow api-server` in 3.x and is **not** what EdgeGuard uses. This venv path is more manual; prefer Compose for orchestration.
 
 **CLI:** `python src/run_pipeline.py --baseline` or `edgeguard` after editable install. For 730d baseline launches see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md).
 
@@ -209,7 +215,7 @@ Sync code uses APOC (`apoc.coll.toSet`, etc.). Without APOC, merges fail.
 **Compose-specific (see `docker-compose.yml` header and service blocks):**
 
 - **`x-common-env`:** includes **`NEO4J_URI=bolt://neo4j:7687`**, **`MISP_URL`** (override in **`.env`** if **`misp.local`** doesn’t resolve in containers), collector keys, sync tuning vars.
-- **`airflow` service:** **`AIRFLOW_MEMORY_LIMIT`** (default **12g** per `docker-compose.yml:284`) — raise if **`full_neo4j_sync`** gets **SIGKILL (-9)**; scheduler tuning **`AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD`**, **`LOCAL_TASK_JOB_HEARTBEAT_SEC`**, **`ZOMBIE_DETECTION_INTERVAL`** (defaults documented in [HEARTBEAT.md](HEARTBEAT.md)).
+- **`airflow` service:** **`AIRFLOW_MEMORY_LIMIT`** (default **12g**, the `airflow` service's `deploy.resources.limits.memory` in `docker-compose.yml`) — raise if **`full_neo4j_sync`** gets **SIGKILL (-9)**. Scheduler tuning: since 2026-10 `docker-compose.yml` sets the Airflow 3 options **`AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT`** (3600 s; Airflow default 300 s) and **`AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT_DETECTION_INTERVAL`** (60 s; Airflow default 10 s), both overridable in `.env`. Until then it set the Airflow 2 names (**`SCHEDULER_ZOMBIE_TASK_THRESHOLD`**, **`LOCAL_TASK_JOB_HEARTBEAT_SEC`**, **`ZOMBIE_DETECTION_INTERVAL`**), which Airflow 3 renamed without an alias and ignores (see [HEARTBEAT.md](HEARTBEAT.md)).
 - **`api` / `graphql` images:** **`Dockerfile`** runs as **`edgeguard`** and **`chown`s `/app/src`** so Uvicorn can read modules (see troubleshooting table §9).
 
 **Optional YAML / wizard:**
@@ -229,6 +235,8 @@ With git:
 ./install.sh --update              # pull + rebuild / refresh (auto Docker vs pip)
 # or: make update
 ```
+
+On the venv path, **`--update`** pulls and re-installs the package; Airflow runs the new code only when its DAG and plugin folders point at the repository (§ 4), otherwise re-copy **`dags/`**, **`src/`** and **`plugins/`**.
 
 **First update to the collector pool code (2026-10):** from that version every collector task runs in the Airflow pool **`edgeguard_collectors`**, and while the pool does not exist the collectors of new DAG runs are never scheduled (no failure alert). Create it before you update: on a Compose stack in the running container, **`docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`**; on the venv path, **`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`**. On a Compose stack, run the update only when no **`edgeguard_baseline`** run is in progress: it recreates the containers, which kills the running tasks, and if the rebuild fails after the pull, the old container keeps running and re-parses the new **`./dags`**. Details: [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10).
 
@@ -256,13 +264,13 @@ docker compose up -d
 |---------|----------------|
 | Compose fails on **`NEO4J_PASSWORD is required`** | Set **`NEO4J_PASSWORD`** in **`.env`** |
 | Airflow tasks: **MISP connection** / DNS errors | **`MISP_URL`** must resolve **inside** the Airflow container (compose default **`misp.local`** often fails); use the MISP service URL on a **shared Docker network** — see **`.env.example`** / **[MISP_SOURCES.md](MISP_SOURCES.md)** |
-| **NVD / long task or sync marked zombie** | **`docker-compose.yml`** sets **`SCHEDULER_ZOMBIE_TASK_THRESHOLD`** (default **3600**), **`LOCAL_TASK_JOB_HEARTBEAT_SEC`** (**30**), **`ZOMBIE_DETECTION_INTERVAL`** (**60**) on **airflow** — recreate container after pull; see **[HEARTBEAT.md](HEARTBEAT.md)** |
+| **Long task or sync failed for missing heartbeats** | The scheduler fails a task whose last heartbeat is older than **`AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT`** (Airflow default **300 s**; **`docker-compose.yml`** sets **3600 s** since 2026-10). Before 2026-10 the compose file set the old names **`SCHEDULER_ZOMBIE_TASK_THRESHOLD`** / **`LOCAL_TASK_JOB_HEARTBEAT_SEC`** / **`ZOMBIE_DETECTION_INTERVAL`**, which Airflow 3 ignores, so a stack created from an older compose file runs with 300 s: recreate it with `docker compose up -d airflow` and check the value with `docker compose exec airflow airflow config get-value scheduler task_instance_heartbeat_timeout`. See **[HEARTBEAT.md](HEARTBEAT.md)** |
 | **SSL certificate verify failed** (MISP) | Corporate CA → trust store; dev self-signed → **`EDGEGUARD_SSL_VERIFY=false`** + restart |
 | Sync **0 events** | MISP has `EdgeGuard-…` event titles? Current **`run_misp_to_neo4j.py`**? **`EDGEGUARD_MISP_EVENT_SEARCH`** |
 | **`Unknown function 'apoc.coll.toSet'`** | Enable APOC on Neo4j |
 | **`ModuleNotFoundError: neo4j` / `pymisp` in Airflow** | Rebuild Airflow image: **`docker compose build airflow`** — deps come from **`Dockerfile.airflow`**, not manual pip in the container |
 | **API / GraphQL crash loop:** **`PermissionError: ... '/app/src/query_api.py'`** (or **`graphql_api.py`**) | Image runs as **`edgeguard` (uid 1001)**; **`COPY src/`** was root-owned with tight modes (**600**). Rebuild **`edgeguard-kg`** from current **`Dockerfile`** (includes **`chown -R edgeguard:edgeguard /app/src`**) — **`docker compose build api graphql --no-cache`** |
-| **`full_neo4j_sync` / MISP→Neo4j exits -9 (SIGKILL)** mid-run | Usually **container memory**, not a Python traceback: host can have free RAM while **Docker's cgroup** limit is hit. Check **`docker inspect edgeguard_airflow --format '{{.State.OOMKilled}}'`** and **`docker stats`**. Compose defaults **`AIRFLOW_MEMORY_LIMIT=12g`** for **airflow** (per `docker-compose.yml:284`); raise in **`.env`** or lower **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. On **Docker Desktop**, raise the **VM memory** cap too. See **[HEARTBEAT.md](HEARTBEAT.md)**. |
+| **`full_neo4j_sync` / MISP→Neo4j exits -9 (SIGKILL)** mid-run | Usually **container memory**, not a Python traceback: host can have free RAM while **Docker's cgroup** limit is hit. Check **`docker inspect edgeguard_airflow --format '{{.State.OOMKilled}}'`** and **`docker stats`**. Compose defaults **`AIRFLOW_MEMORY_LIMIT=12g`** for **airflow** (the `airflow` service's `deploy.resources.limits.memory` in `docker-compose.yml`); raise in **`.env`** or lower **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. On **Docker Desktop**, raise the **VM memory** cap too. See **[HEARTBEAT.md](HEARTBEAT.md)**. |
 
 More: [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting, [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
 
@@ -288,4 +296,4 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-10-16 — venv path: create the Airflow pool `edgeguard_collectors` (`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`) before unpausing the DAGs; Compose creates it on every start. Same day: § 7 Updates: before the first update to the collector pool code, create the pool (in the running container on a Compose stack), and on a Compose stack update only when no baseline run is in progress. Prior: 2026-04-26 — PR-N33 docs audit: fixed venv-path Airflow install (was `~=2.11`, now `~=3.2` after the 2026-04-15 upgrade); corrected `AIRFLOW_MEMORY_LIMIT` default (was 4g, actual default is 12g); split RAM recommendation into "tiny dev" (8 GB) vs "full 730d baseline" (~32 GB); cross-linked `BASELINE_LAUNCH_CHECKLIST.md` and `MEMORY_TUNING.md`. Prior: 2026-04-06 Compose `x-common-env` / scheduler tuning._
+_Last updated: 2026-10-17 — documentation audit: `install.sh` generates the four secrets only when it creates `.env` (after `cp`, set them yourself; set `.env` before the first start); `AIRFLOW_API_AUTH_JWT_SECRET` added to the minimum variables; host RAM for a 730-day baseline from the baseline-capable profile and the container limits (about 47 GB, plan ~48 GB); Airflow 3.3 (`pip install -e '.[airflow]'`); venv path points the DAG and plugin folders at the repository; `docker-compose.yml` sets the Airflow 3 heartbeat-timeout names since 2026-10 (Airflow 3 ignored the Airflow 2 names it set before); host health check sets `NEO4J_URI=bolt://localhost:7687`; first Airflow login and the `misp_health_check` / `source_key_check` task names; `EDGEGUARD_SSL_VERIFY` always set on Compose; symbol pointers instead of compose line numbers. Prior: 2026-10-16 — venv path: create the Airflow pool `edgeguard_collectors` (`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`) before unpausing the DAGs; Compose creates it on every start. Same day: § 7 Updates: before the first update to the collector pool code, create the pool (in the running container on a Compose stack), and on a Compose stack update only when no baseline run is in progress. Prior: 2026-04-26 — PR-N33 docs audit: fixed venv-path Airflow install (was `~=2.11`, now `~=3.2` after the 2026-04-15 upgrade); corrected `AIRFLOW_MEMORY_LIMIT` default (was 4g, actual default is 12g); split RAM recommendation into "tiny dev" (8 GB) vs "full 730d baseline" (~32 GB); cross-linked `BASELINE_LAUNCH_CHECKLIST.md` and `MEMORY_TUNING.md`. Prior: 2026-04-06 Compose `x-common-env` / scheduler tuning._
