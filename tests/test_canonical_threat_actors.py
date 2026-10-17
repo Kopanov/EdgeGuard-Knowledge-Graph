@@ -1146,7 +1146,11 @@ class TestCommittedReference:
         assert gen.resolve(index, "Lazarus").actor == "lazarus group"
         assert gen.resolve(index, "Sandworm").actor == "sandworm team"
         assert gen.resolve(index, "andariel").actor == "andariel"
-        assert gen.resolve(index, "medusa").how == "never_merge"
+        # 2026-10-17: medusa merged into ATT&CK's Medusa Group (was never_merge); three more reviewed merges
+        assert gen.resolve(index, "medusa").actor == "medusa group"
+        assert gen.resolve(index, "blindeagle").actor == "apt-c-36"
+        assert gen.resolve(index, "agenda").actor == "qilin"
+        assert gen.resolve(index, "callisto").actor == "star blizzard"
         assert gen.resolve(index, "famous chollima").how == "never_merge"
         assert gen.resolve(index, "silverfox").actor == "silver fox"
         assert gen.resolve(index, "no such actor").how == "unresolved"
