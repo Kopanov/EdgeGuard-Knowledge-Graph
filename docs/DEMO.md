@@ -1,7 +1,5 @@
 # EdgeGuard Demo
 
-**Last updated:** 2026-10-17 — the key note lists the routes served without the key in a non-production `EDGEGUARD_ENV` (`/docs`, `/redoc`, `/openapi.json`). Prior: 2026-10-16 — the actor summary also lists the malware the actor uses (`malware_used`). Same day: the `--from-graph` selection orders the indicators by their latest report (`coalesce(last_reported_at, first_imported_at)`), not by the last database write. Same day: rewritten for `demo/alert_enrichment_demo.py`, which runs EdgeGuard's alert enrichment read-only against the configured Neo4j and prints the processor's own response; the earlier NATS mock, which printed random values as an enrichment without querying anything, was removed. New section "Workflow demonstration": the end-to-end checks a presenter can run against a deployment. Same day: the alert enrichment reads CVEs as the graph links them, `(Indicator)-[:EXPLOITS]->` a `CVE` or `Vulnerability` node (it read `INDICATES` to a `Vulnerability`, which no code path writes, and found none), with the score and severity of one node. Same day: a failed enrichment query is `enriched: false` and ends the demo with exit code 1, an alert the processor raises on is named and gives exit code 2; the prerequisites set a Bolt URI the host can reach; the comparison with `process_alert` covers confidence and last update; `stats --misp` counts every page of MISP's event index.
-
 Everything shown on this page is what the code returns from the graph it is pointed at. The
 output samples below give the **shape** only; the values in angle brackets are placeholders, not
 results.
@@ -29,7 +27,7 @@ generated from those fields. The demo hands alerts to that code and prints the r
   enrichment's queries and, with `--from-graph`, the selection query below.
 - **No NATS.** The alert is passed to the processor directly. EdgeGuard subscribes to
   `resilmesh.alerts.zone.*` in code but has no deployed consumer, and does not publish the
-  enriched response yet ([TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) § NATS Topics).
+  enriched response ([TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) § NATS Topics).
 - **Graph patterns read** (each one written by the MISP → Neo4j sync or `build_relationships`):
   `(Indicator)-[:INDICATES]->(Malware)`, `(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)`,
   `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`, `(Indicator)-[:EXPLOITS]->(CVE | Vulnerability)`,
@@ -278,3 +276,14 @@ One `key:value` line per active entry (`<indicator>:type=<type> confidence=<scor
 headers `X-EdgeGuard-Entries`, `X-EdgeGuard-Skipped` and `X-EdgeGuard-Truncated` say how many
 lines were written, how many keys were skipped (URL and IPv6 keys contain `:`) and whether the
 50,000-entry cap cut the list. Further filters: `indicator_type`, `min_confidence`.
+
+---
+
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Restated as a guide to the current behaviour, with the change history moved here; the API key note lists the routes served without the key in a non-production `EDGEGUARD_ENV` (`/docs`, `/redoc`, `/openapi.json`).
+- 2026-10-16 — The actor summary lists the malware the actor uses (`malware_used`); the `--from-graph` selection orders the indicators by their latest report (`coalesce(last_reported_at, first_imported_at)`) instead of the last database write.
+- 2026-10-16 — Rewritten for `demo/alert_enrichment_demo.py`, which runs EdgeGuard's alert enrichment read-only against the configured Neo4j and prints the processor's own response; the earlier NATS mock, which printed random values as an enrichment without querying anything, was removed, and the section "Workflow demonstration" was added.
+- 2026-10-16 — The alert enrichment reads CVEs as the graph links them, `(Indicator)-[:EXPLOITS]->` a `CVE` or `Vulnerability` node (it read `INDICATES` to a `Vulnerability`, which no code path writes); a failed enrichment query gives `enriched: false` and exit code 1, and an alert the processor raises on is named and gives exit code 2; the prerequisites set a Bolt URI the host can reach; the comparison with `process_alert` covers confidence and last update; `stats --misp` counts every page of MISP's event index.
