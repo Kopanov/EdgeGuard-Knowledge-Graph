@@ -16,12 +16,17 @@ on the order of the events in the sync:
   names, CISA's CWE). Now NVD's record sets them and any other record only fills a list the node does not
   have, as for the dates.
 
+An NVD record without a CVSS version takes NVD out of ``sources`` of a sub-node CISA ICS also asserted, so
+CISA ICS's next record sets its values again (``TestCvssVersionNvdWithdrew``), and the sync checks NVD_META's
+CVSS payloads when it reads them, so a malformed payload is no CVSS write error (``TestMalformedCvssPayload``).
+
 These tests check the statements; ``tests/test_cve_nvd_precedence_neo4j.py`` runs them on Neo4j.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -167,3 +172,105 @@ class TestCveListProperties:
         record; in production the lists come only with ``NVD_META``, which sets the flag."""
         extra, fill = _merge_cve_props({"cve_id": "CVE-2026-1000", "tag": "nvd", "cwe": ["CWE-79"]}, "nvd")
         assert extra["cwe"] == ["CWE-79"] and "cwe" not in fill
+
+
+class TestCvssVersionNvdWithdrew:
+    """An NVD record without a CVSS version takes NVD out of the sub-node another feed also asserted
+    (2026-10). Until then ``'nvd'`` stayed in ``sources`` of its ``HAS_CVSS_*`` edges, so the sub-node
+    counted as NVD's for good: the other feed's records only filled it, and NVD's withdrawn payload kept
+    scoring the CVE, while a rebuild from the same records gives the other feed's payload."""
+
+    def _statement(self, record: dict):
+        client, session = _recording_client()
+        assert client._replace_nvd_owned_cve_data("CVE-2026-1000", record) is True
+        ((query,), params) = session.run.call_args
+        return query, params
+
+    def test_nvd_leaves_the_sources_and_events_of_a_shared_sub_node(self):
+        query, params = self._statement({"nvd_record": True, "misp_event_id": "120", "cvss_v40_data": {"x": 1}})
+        assert params["absent_rel_types"] == ["HAS_CVSS_v31", "HAS_CVSS_v30", "HAS_CVSS_v2"]
+        assert params["nvd_event_id"] == "120"
+        release = re.search(
+            r"WITH DISTINCT c\s+OPTIONAL MATCH \(c\)-\[r:HAS_CVSS_v40\|HAS_CVSS_v31\|HAS_CVSS_v30\|HAS_CVSS_v2\]-\(s\)\s+"
+            r"WHERE type\(r\) IN \$absent_rel_types AND s\.cve_id = \$cve_id\s+"
+            r"AND 'nvd' IN r\.sources AND any\(feed IN r\.sources WHERE feed <> 'nvd'\)\s+"
+            r"SET r\.sources = \[feed IN r\.sources WHERE feed <> 'nvd'\],\s+"
+            r"r\.misp_event_ids = \[event IN r\.misp_event_ids WHERE event <> \$nvd_event_id\]",
+            query,
+        )
+        assert release, "NVD stays in the sources of a sub-node another feed asserted"
+        # The release runs after the removal of the sub-nodes only NVD asserted, which it never touches.
+        assert query.index("DETACH DELETE s") < query.index("WITH DISTINCT c")
+
+    def test_a_record_without_an_event_keeps_every_event(self):
+        """No MISP event id: ``event <> ''`` keeps every event (``event <> null`` would drop them all)."""
+        _, params = self._statement({"nvd_record": True})
+        assert params["nvd_event_id"] == ""
+
+
+class TestMalformedCvssPayload:
+    """A CVSS payload of ``NVD_META`` is checked when the sync reads the attribute (2026-10): one that is not
+    a JSON object counts as absent, and an entry that is not a property a CVSS sub-node can hold is dropped,
+    each with a WARNING naming the CVE. Without the check, ``_merge_cvss_node`` failed on such a payload, and
+    since ``merge_cve`` counts a failed CVSS sub-write as an error, one attribute failed every sync until its
+    MISP comment was edited (the sync: ``test_neo4j_write_results.py``)."""
+
+    KEY = "CVE-2025-7223__source:NVD"  # real hosted attribute; NVD gives CVSS 3.0 only
+
+    def _real_v30(self) -> dict:
+        from test_cve_description_source import attribute
+
+        return json.loads(attribute(self.KEY)["comment"][len("NVD_META:") :])["cvss_v30_data"]
+
+    def _read(self, caplog, **changes):
+        from test_cve_description_source import _with_comment_meta, attribute, synced
+
+        with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
+            item = synced(_with_comment_meta(attribute(self.KEY), **changes))
+        return item, [r.getMessage() for r in caplog.records if "[META] NVD_META.cvss" in r.getMessage()]
+
+    def test_the_collectors_payload_passes_unchanged(self, caplog):
+        item, warnings = self._read(caplog)
+        assert item["cvss_v30_data"] == self._real_v30() and item["cvss_v31_data"] is None
+        assert warnings == []
+
+    @pytest.mark.parametrize("value", ["CVSS:3.0/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H", ["7.8"], 7.8])
+    def test_a_payload_that_is_not_an_object_counts_as_absent(self, caplog, value):
+        item, warnings = self._read(caplog, cvss_v30_data=value)
+        assert item["cvss_v30_data"] is None
+        assert item["nvd_record"] is True, "still NVD's record: the version counts as absent"
+        assert (item["cvss_score"], item["cvss_version"]) == (None, None)
+        (line,) = warnings
+        assert f"NVD_META.cvss_v30_data of CVE-2025-7223 is a JSON {type(value).__name__}" in line
+
+    def test_entries_that_are_not_properties_are_dropped(self, caplog):
+        payload = {
+            **self._real_v30(),
+            "base_score": {"value": 7.8},  # a map: Neo4j stores no map as a property
+            "bad key": "x",  # not a property name: the writer's injection guard refuses it
+            "refs": ["a"],  # no CVSS property is a list
+            "big": 2**64,  # beyond Neo4j's integer range
+            "uuid": "attacker-chosen",  # the sub-node's identity, which the writer sets
+            "timeout": 1,  # an argument of ``session.run``: the write failed with a TypeError
+        }
+        item, warnings = self._read(caplog, cvss_v30_data=payload)
+        expected = {k: v for k, v in self._real_v30().items() if k != "base_score"}
+        assert item["cvss_v30_data"] == expected
+        (line,) = warnings
+        assert line.endswith(
+            "of CVE-2025-7223: entries that are not CVSS properties dropped: "
+            "bad key, base_score, big, refs, timeout, uuid"
+        )
+
+    def test_a_payload_is_written_as_checked(self):
+        """What remains is what ``_merge_cvss_node`` writes, and it writes it: an entry the check drops failed
+        the write (the injection guard, a ``timeout`` argument given twice) or replaced the sub-node's uuid."""
+        from test_cve_description_source import _with_comment_meta, attribute, synced
+
+        payload = {**self._real_v30(), "bad key": "x", "timeout": 1, "uuid": "attacker-chosen"}
+        item = synced(_with_comment_meta(attribute(self.KEY), cvss_v30_data=payload))
+        client, session = _recording_client()
+        assert client._merge_cvss_node("CVE-2025-7223", "nvd", "CVSSv30", "HAS_CVSS_v30", item["cvss_v30_data"])
+        ((query,), params) = session.run.call_args
+        assert params["cvss_uuid"] == neo4j_client.compute_node_uuid("CVSSv30", {"cve_id": "CVE-2025-7223"})
+        assert "n.uuid = CASE" not in query and "uuid" not in item["cvss_v30_data"]

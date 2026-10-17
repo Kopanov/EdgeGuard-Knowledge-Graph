@@ -271,6 +271,38 @@ class TestCveSubWrites:
         (line,) = [r.getMessage() for r in caplog.records if "[MERGE-RETURNED-FALSE]" in r.getMessage()]
         assert "rich CVE CVE-2026-1000 source=nvd" in line
 
+    def test_a_malformed_cvss_payload_is_not_a_write_error(self, bolt, caplog):
+        """``NVD_META.cvss_v31_data`` holding a vector string, not an object: the sync reads the CVE without
+        that CVSS, logs a WARNING and counts the CVE as synced. Without the check of the payload when the
+        attribute is read (``_meta_cvss_payload``), ``_merge_cvss_node`` failed on it with a terminal error,
+        the CVE counted as an error and every later sync failed on the same attribute."""
+        import json
+
+        import run_misp_to_neo4j as rm
+
+        meta = {
+            "cvss_v31_data": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "cwe": ["CWE-79"],
+            "published": "2026-10-01T00:00:00",
+        }
+        attribute = {
+            "type": "vulnerability",
+            "value": "CVE-2026-1001",
+            "comment": "NVD_META:" + json.dumps(meta),
+            "uuid": "5d7c3b0e-3d6b-4c39-9a51-0f3b2f6b1001",
+            "Tag": [{"name": "source:NVD"}, {"name": "tlp:white"}],
+        }
+        server, client = bolt()
+        sync = rm.MISPToNeo4jSync(neo4j_client=client)
+        with caplog.at_level(logging.WARNING):
+            item, _ = sync.parse_attribute(attribute, {"id": 5, "info": "EdgeGuard-nvd-2026-10-13", "Tag": []})
+            assert (item["tag"], item["nvd_record"], item["cvss_v31_data"]) == ("nvd", True, None)
+            assert sync._sync_to_neo4j_chunk([item]) == (1, 0)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("NVD_META.cvss_v31_data of CVE-2026-1001 is a JSON str" in m for m in messages)
+        assert not any("(terminal)" in m or "[MERGE-RETURNED-FALSE]" in m for m in messages)
+        assert sync.stats["vulnerabilities_synced"] == 1
+
 
 class TestRelationshipGroups:
     """``create_misp_relationships_batch``: the groups share one session; each group's error is its own."""

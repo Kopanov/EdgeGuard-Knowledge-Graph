@@ -60,7 +60,9 @@ from indicator_aging import BASIS_MISP_RECORDED, BASIS_SOURCE_DATE
 from ioc_normalize import MISP_IP_ATTRIBUTE_TYPES, ip_address_type
 from misp_health import MISPHealthCheck
 from neo4j_client import (
+    _PROP_NAME_RE,
     CURATED_MISSING_SAMPLE,
+    CVSS_PAYLOAD_RESERVED_NAMES,
     Neo4jClient,
     clamp_cvss_score,
     normalize_cve_id_for_graph,
@@ -1484,6 +1486,60 @@ def _meta_list(meta: Dict[str, Any], key: str) -> List[str]:
     """
     value = meta.get(key)
     return _scalar_strings(value) if isinstance(value, list) else []
+
+
+_NEO4J_INT_RANGE = (-(2**63), 2**63 - 1)
+
+
+def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[Dict[str, Any]]:
+    """``meta[key]``, a CVSS payload of ``NVD_META`` (``cvss_v31_data`` …), as a CVSS sub-node can hold it;
+    None when it is absent or not a JSON object (2026-10).
+
+    ``Neo4jClient._merge_cvss_node`` writes each entry of the payload as a property of the sub-node, so a
+    payload that is not an object, a name that is not a property name (letters, digits, underscores) or a
+    value that is not a string, a boolean or a number Neo4j can store made that write fail. Since
+    ``merge_cve`` counts a failed CVSS sub-write as an error (2026-10), one such attribute would fail every
+    sync until its MISP comment is edited. The payload is checked here instead, as ``ssvc`` is: a payload
+    that is not an object counts as absent, so the record has no CVSS of that version (an NVD record then
+    removes the sub-node only NVD asserted, as a rebuild from the same record gives), and an entry that is
+    not a property, or has a name the writer keeps for itself (``CVSS_PAYLOAD_RESERVED_NAMES``: the sub-node's
+    ``uuid``, ``timeout`` …), is dropped; both are logged with the CVE. The payloads the collectors write pass
+    unchanged.
+    """
+    value = meta.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        logger.warning(
+            "[META] NVD_META.%s of %s is a JSON %s, not an object — the CVE is read without it",
+            key,
+            cve_id,
+            type(value).__name__,
+        )
+        return None
+    payload: Dict[str, Any] = {}
+    dropped: List[str] = []
+    for name, entry in value.items():
+        valid_name = (
+            isinstance(name, str) and _PROP_NAME_RE.match(name) is not None and name not in CVSS_PAYLOAD_RESERVED_NAMES
+        )
+        valid_value = (
+            entry is None
+            or isinstance(entry, (str, bool, float))
+            or (isinstance(entry, int) and _NEO4J_INT_RANGE[0] <= entry <= _NEO4J_INT_RANGE[1])
+        )
+        if valid_name and valid_value:
+            payload[name] = entry
+        else:
+            dropped.append(str(name)[:40])
+    if dropped:
+        logger.warning(
+            "[META] NVD_META.%s of %s: entries that are not CVSS properties dropped: %s",
+            key,
+            cve_id,
+            ", ".join(sorted(dropped)),
+        )
+    return payload or None
 
 
 def _extract_tlp_tag(tags: List[Dict[str, Any]], ref: str = "") -> str:
@@ -3778,6 +3834,12 @@ class MISPToNeo4jSync:
                     logger.warning(f"Failed to parse NVD_META for {cve_id}; reading the CVE without it")
                 if not isinstance(nvd_meta, dict):
                     nvd_meta = {}
+            # 2026-10: each CVSS payload as a CVSS sub-node can hold it, before anything reads it
+            # (``_meta_cvss_payload``): a malformed one would fail the CVE's CVSS sub-write, which counts
+            # as an error, on every sync.
+            for _cvss in CVSS_VERSIONS:
+                if _cvss.payload_key in nvd_meta:
+                    nvd_meta[_cvss.payload_key] = _meta_cvss_payload(nvd_meta, _cvss.payload_key, cve_id)
 
             # 2026-10: score and severity come only from the CVSS payloads in NVD_META, in the
             # order v3.1 → v3.0 → v2 → v4.0 (``cvss_selection.select_cvss``, which applies the

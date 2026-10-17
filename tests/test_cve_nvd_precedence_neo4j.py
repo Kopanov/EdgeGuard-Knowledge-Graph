@@ -10,6 +10,9 @@ order in which the sync reads their records:
 - NVD's record sets the list properties (``cwe``, ``ref_tags``, ``cpe_type``, ``result_impacts``,
   ``reference_urls``, ``affected_products``); any other record only fills a list the node does not have.
 
+An NVD record without a CVSS version CISA ICS also gives takes NVD out of that sub-node's ``sources``, and
+CISA ICS's next record sets its values and the CVE's score again.
+
 The ``EXISTS`` guard and the ``CASE`` per property cannot be shown with a mocked session, so this module
 runs the real writers: the CISA ICS collector's item of a CSAF advisory (``SAMPLE_ADVISORY`` of
 ``tests/test_cisa_ics_collector.py``) or a real hosted MISP attribute (``tests/test_cvss_real_payloads.json``)
@@ -213,6 +216,56 @@ def test_a_sub_node_only_cisa_ics_asserted_follows_its_latest_record(client, raw
     assert "impact_score" not in props and sources == ["cisa_ics"]
     node = _cve(raw_driver, CVE)
     assert (node["cvss_score"], node["severity"], node["attack_vector"]) == (7.2, "HIGH", "NETWORK")
+    # The trade-off of the list rule: ``result_impacts`` (C/I/A of the same CVSS block) only fills, so after
+    # the revision it keeps the first record's impacts while the sub-node shows the revised A:H.
+    assert props["availability_impact"] == "HIGH" and node["result_impacts"] == ["HIGH", "HIGH", "NONE"]
+
+
+def test_a_cvss_version_nvd_withdrew_goes_back_to_cisa_ics(client, raw_driver):
+    """NVD's record drops the CVSS 3.1 CISA ICS also gives (an NVD re-analysis edits the MISP copy in place):
+    NVD leaves ``sources`` and its event leaves ``misp_event_ids`` of the sub-node's edges, and CISA ICS's
+    next record sets its values and the CVE's score, as a rebuild from the same records gives. Until 2026-10
+    NVD stayed in ``sources``, so CISA ICS only filled the sub-node and NVD's withdrawn 3.1 scored the CVE."""
+    _nodes(raw_driver, CVE)
+    _sync(client, _nvd_item(), NVD_EVENT)
+    _sync(client, _ics_item(), ICS_EVENT)
+    withdrawn = _nvd_item()
+    del withdrawn["cvss_v31_data"]
+    withdrawn["cvss_v40_data"] = {
+        "vector_string": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+        "base_score": 9.3,
+        "base_severity": "CRITICAL",
+    }
+    _sync(client, withdrawn, NVD_EVENT)
+    props, sources, events = _cvss31(raw_driver, CVE)
+    assert (sources, events) == (["cisa_ics"], ["140"]), "NVD no longer asserts the sub-node"
+    with raw_driver.session() as session:
+        both = session.run(
+            "MATCH (:CVE {cve_id: $cve})-[r:HAS_CVSS_v31]-(:CVSSv31) RETURN collect([r.sources, r.misp_event_ids]) AS e",
+            cve=CVE,
+        ).single()["e"]
+    assert both == [[["cisa_ics"], ["140"]]] * 2, "both edges (CVE to sub-node and back)"
+    assert props["base_score"] == 9.8, "the values stay until CISA ICS's next record"
+
+    _sync(client, _ics_item(), ICS_EVENT)
+    props, sources, events = _cvss31(raw_driver, CVE)
+    assert (props["base_score"], props["base_severity"], props["attack_vector"], props["vector_string"]) == (
+        6.0,
+        "MEDIUM",
+        "LOCAL",
+        "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N",
+    )
+    assert (sources, events) == (["cisa_ics"], ["140"])
+    # Known limit: CSAF gives no impact or exploitability sub-score, so NVD's stay on a graph that is kept
+    # (a rebuild has none); the CVE's score does not read them.
+    assert (props["impact_score"], props["exploitability_score"]) == (5.9, 3.9)
+    node = _cve(raw_driver, CVE)
+    assert (node["cvss_score"], node["severity"], node["cvss_version"], node["attack_vector"]) == (
+        6.0,
+        "MEDIUM",
+        "3.1",
+        "LOCAL",
+    ), "the CVE's score follows CISA ICS's 3.1, which outranks NVD's 4.0"
 
 
 @pytest.mark.parametrize("cve_id", ["CVE-2025-7223", "CVE-2025-14272"])

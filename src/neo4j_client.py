@@ -1355,6 +1355,30 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
     return decorator
 
 
+# 2026-10: names a CVSS payload entry cannot have (``run_misp_to_neo4j._meta_cvss_payload`` drops them).
+# ``Neo4jClient._merge_cvss_node`` sets the sub-node's identity and bookkeeping itself, passes its own
+# statement parameters beside the payload's, and gives ``session.run`` its query, parameters and timeout,
+# so such an entry replaced the sub-node's ``uuid`` or made the write fail. No collector writes one.
+CVSS_PAYLOAD_RESERVED_NAMES = frozenset(
+    {
+        "cve_id",
+        "uuid",
+        "tag",
+        "last_updated",
+        "edgeguard_managed",
+        "edgeguard_enriched",
+        "created",
+        "cve_uuid",
+        "cvss_uuid",
+        "feed",
+        "misp_event_id",
+        "query",
+        "parameters",
+        "timeout",
+    }
+)
+
+
 def _cve_sub_write_failed(exc: Exception, what: str) -> bool:
     """The error handling of ``merge_cve``'s sub-writes: the CVSS sub-nodes, the NVD-owned data and
     the CVE score (2026-10). A retryable error (``_is_retryable_neo4j_error``) is raised again, so the
@@ -3502,7 +3526,12 @@ class Neo4jClient:
           nodes with ``cwe`` had NVD as their only source);
         - a CVSS sub-node of a version the record no longer has is removed when EdgeGuard manages it
           and NVD is the only feed that asserted it (``sources`` of its ``HAS_CVSS_*`` edge, or the
-          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too;
+          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too. On
+          a sub-node another feed also asserted, NVD is taken out of ``sources`` and the record's event
+          out of ``misp_event_ids`` of both edges (2026-10), as a rebuild from the same records gives:
+          the sub-node no longer counts as NVD's (``_merge_cvss_node``), so the other feed's next
+          record sets its payload. Until that record the sub-node keeps the values it has, NVD's;
+          before, NVD stayed in ``sources``, and the other feed's records only filled the sub-node;
         - CISA's SSVC decision points (``ssvc_exploitation``, ``ssvc_automatable``,
           ``ssvc_technical_impact``, with ``ssvc_version`` and ``ssvc_timestamp``; 2026-10) are set
           from the record on any node, and removed when the record has none: no other source supplies
@@ -3533,11 +3562,23 @@ class Neo4jClient:
         WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id AND s.edgeguard_managed = true
           AND coalesce(r.sources, [s.tag]) = ['nvd']
         DETACH DELETE s
+        WITH DISTINCT c
+        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]-(s)
+        WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id
+          AND 'nvd' IN r.sources AND any(feed IN r.sources WHERE feed <> 'nvd')
+        SET r.sources = [feed IN r.sources WHERE feed <> 'nvd'],
+            r.misp_event_ids = [event IN r.misp_event_ids WHERE event <> $nvd_event_id]
         """
         try:
             with self.driver.session() as session:
                 session.run(
-                    query, cve_id=cve_id, absent_rel_types=absent, **lists, **ssvc, timeout=NEO4J_READ_TIMEOUT
+                    query,
+                    cve_id=cve_id,
+                    absent_rel_types=absent,
+                    nvd_event_id=str(data.get("misp_event_id") or ""),
+                    **lists,
+                    **ssvc,
+                    timeout=NEO4J_READ_TIMEOUT,
                 ).consume()
             return True
         except Exception as e:
@@ -3597,7 +3638,9 @@ class Neo4jClient:
         fills a property the node lacks (``_set_if_absent_clause``), so the node holds NVD's payload
         whatever the order of the records; NVD's own write and a write to a sub-node only other
         feeds asserted set the payload. ``r.sources`` and ``r.misp_event_ids`` still name every feed
-        and event. Before, every write set its whole payload and the record merged last won.
+        and event. Before, every write set its whole payload and the record merged last won. An NVD
+        record without the version takes NVD out of ``sources`` (``_replace_nvd_owned_cve_data``), so
+        the other feed's next write sets its payload again.
 
         A retryable error is retried and then raised, a terminal one logged and returned as False,
         which ``merge_cve`` returns (``_cve_sub_write_failed``, 2026-10).
