@@ -12,7 +12,7 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
                                                         REST API (port 8000)  +  GraphQL API (port 4001)
 ```
 
-- **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist
+- **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist and, behind their enable flags (2026-10), CISA ICS and MalwareBazaar
 - **MISP** is the only place collector output lands first — no collector writes directly to Neo4j
 - **Neo4j (primary path):** `src/run_misp_to_neo4j.py` syncs from MISP. **Optional CLI path:** `run_pipeline.py` with STIX flow calls `load_stix21_to_neo4j()` — still not collector→Neo4j direct writes
 - **Optional allowlist:** `EDGEGUARD_COLLECT_SOURCES` — canonical names in `src/collector_allowlist.py` (import this from DAGs at parse time, **not** `collectors/__init__.py`, which loads every collector)
@@ -20,11 +20,11 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
 - **GraphQL API** (`src/graphql_api.py`) — Strawberry-based API on port 4001 mirroring ISIM's interface
 - **Airflow DAGs** (`dags/`) orchestrate scheduled collection and sync
 - **Sector zones**: `global`, `healthcare`, `energy`, `finance` — only valid values
-- **Node types**: Indicator, Vulnerability, CVE, Malware, ThreatActor, Technique, Tactic, Campaign, Tool, Sector, Source — `Tool` represents MITRE ATT&CK software tools (distinct from Malware)
+- **Node types**: Indicator, Vulnerability, CVE, CVSSv40 / CVSSv31 / CVSSv30 / CVSSv2 (CVE sub-nodes), Malware, ThreatActor, Technique, Tactic, Campaign, Tool, Sector, Source, Alert — `Tool` represents MITRE ATT&CK software tools (distinct from Malware)
 - **MISP/PyMISP version compatibility**: `src/misp_health.py` performs a version detection check; flag any code that assumes a specific PyMISP API without guarding against version differences
 - **Historical windows**: the same for every sector — `baseline_days` (default 730 days = 24 months) for a baseline, the source's incremental window otherwise; CISA KEV and the NVD KEV sweep take the whole catalogue on purpose. No collector filters by sector (see "Historical window / collection limit exceeded")
 - **Resilience**: circuit breakers and retry logic protect all external calls
-- **Provenance invariant**: every Neo4j node carries `first_imported_at`, `source[]`, `edgeguard_managed=true` and a `SOURCED_FROM` edge to its source node. MISP-originated nodes (Indicator, Vulnerability, CVE, Malware, ThreatActor) additionally carry `misp_event_id`
+- **Provenance invariant**: every node EdgeGuard creates from a source record carries `first_imported_at`, `source[]`, `edgeguard_managed = true` (set on create; a node another system created that EdgeGuard writes to gets `edgeguard_enriched = true` instead) and a `SOURCED_FROM` edge to its `Source` node. Derived nodes (Campaign, Sector, the CVSS sub-nodes) carry `edgeguard_managed = true` and no `SOURCED_FROM` edge. MISP-originated nodes accumulate `misp_event_ids[]` / `misp_attribute_ids[]` (there is no scalar `misp_event_id`)
 - **ResilMesh deployment**: EdgeGuard runs on the same server as ResilMesh — port isolation and `edgeguard_managed` tagging are mandatory
 
 Review every change against these principles. Flag anything that violates them.
@@ -143,11 +143,11 @@ How far back a collector reaches comes from the run, not from the collector: `ba
 
 Flag any collector that uses a hardcoded absolute date instead of a relative offset from `datetime.now()`, or that hardcodes a lookback instead of taking `baseline_days` / its incremental window. Taking a whole catalogue on purpose (every CISA KEV run and the NVD KEV sweep, `docs/DATA_SOURCES.md`) is not a lookback violation.
 Flag any comparison of a timestamp parsed from a source payload with a timezone-aware datetime when the parsed value is not normalised first (`tzinfo is None` → UTC). NVD and OTX send timestamps without a zone; the comparison raises `TypeError`, and inside a broad `except` the check silently never runs (the former NVD/OTX sector time-range filter, removed 2026-10).
-Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`).
+Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`). Sources in `config.OWN_RUN_CAP_SOURCES` (2026-10) apply their own per-run cap instead of `EDGEGUARD_INCREMENTAL_LIMIT` (`EDGEGUARD_<SOURCE>_MAX_PER_RUN`: MalwareBazaar 500, NVD 5,000 MISP writes, ThreatFox 10,000, URLhaus 50,000, Feodo 15,000, SSLBL 20,000, AbuseIPDB 10,000; CISA KEV compares its whole catalogue and caps only its edits, `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`); `EDGEGUARD_MAX_ENTRIES` still overrides them. Flag a source added there without its own cap, or a cap that cuts below one run's window.
 
 ### Incremental cursor moved past work that did not reach MISP
 A collector with an incremental cursor advances it only over work whose MISP writes succeeded: OTX to the last pulse it pushed, CISA ICS and NVD only after a run without a failed write. NVD (2026-10) also requires the lastMod window to have been read completely, counts an addition as written only when MISP's answer or a lookup by value (`MISPWriter.existing_values`) shows it stored, fails the task while the cursor cannot move, and moves the cursor at most to the record where `EDGEGUARD_NVD_MAX_PER_RUN` stopped the run. NVD's lastMod results must be read one answer per time slice (`_iter_lastmod_slices`), not paged across a window that changes while it is read.
-Flag a cursor update that runs before, or regardless of, the result of the push or the edits. Flag an NVD change that brings back a newest-N selection by publication date (37% of new CVEs lost in a 30-day replay, 2026-10-14), or that re-adds a changed CVE as a new attribute instead of editing the stored one (`MISPWriter.update_attribute`). Flag a change to `Neo4jClient._replace_nvd_owned_cve_data` that clears list properties on a CVE node with a source other than NVD, or removes a CVSS sub-node another feed asserted.
+Flag a cursor update that runs before, or regardless of, the result of the push or the edits. Flag an NVD change that brings back a newest-N selection by publication date (37% of new CVEs lost in a 30-day replay, 2026-10-14), or that re-adds a changed CVE as a new attribute instead of editing the stored one (`MISPWriter.update_attribute`). Flag a change to `Neo4jClient._replace_nvd_owned_cve_data` that clears list properties on a CVE node with a source other than NVD, or removes a CVSS sub-node another feed also asserted (an NVD record without that version takes `'nvd'` out of the `sources` of both `HAS_CVSS_*` edges and its event out of their `misp_event_ids` instead). Flag a change (2026-10) that lets a record other than NVD's set, rather than fill, `cwe`, `ref_tags`, `cpe_type`, `result_impacts`, `reference_urls` or `affected_products` on a CVE (`_NVD_OWNED_CVE_LISTS`), or set a property of a CVSS sub-node NVD has asserted (`'nvd'` in the `sources` of the CVE's `HAS_CVSS_*` edge to it, or the node's `tag` where the edge has no `sources`, `_cvss_legacy_sources_cypher`; `_merge_cvss_node` lets other feeds only fill it); that logs a CVE sub-write error without `merge_cve` returning False; or that passes an `NVD_META` CVSS payload to `_merge_cvss_node` without `_meta_cvss_payload` (a payload that is not an object or is left without a base score counts as absent; non-finite numbers, map / list values and `CVSS_PAYLOAD_RESERVED_NAMES` are dropped).
 
 ### Source revisions edited in place (2026-10)
 Every CISA KEV run compares the whole catalogue with EdgeGuard's `source:CISA-KEV` copies and edits the copy of a revised entry in place, only through `src/collectors/vulnerability_update.py` (`plan_source_updates`, `push_additions`, `apply_vulnerability_edits`): one complete listing (a failed listing writes nothing), only copies in EdgeGuard events (`KnownAttribute.own_event`), each edit confirmed against the stored copy's timestamp (`written_after`), the refresh path's stop rules, and `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`. A deferred edit is not a failure; a failed edit counts in the run's status.
@@ -158,22 +158,22 @@ Every `collect()` method must return a status dict using `make_status()` from `s
 Flag collectors that return `None`, `{}`, or ad-hoc dicts that don't match the standard schema.
 
 ### Duplicate source registration
-If a new source is added, verify it has its own entry in `SOURCE_MAPPING` in `src/neo4j_client.py`.
-Flag any source that reuses another source's `source_id` (e.g., a new feed incorrectly mapped to `abuseipdb`).
+A new source needs its own `Source` entry in `_REGISTRY` in `src/source_registry.py` (canonical id, aliases, MISP tag, `reliability`, `source_type`). `neo4j_client.SOURCES`, the sync's `MISPToNeo4jSync.SOURCE_MAPPING` (`src/run_misp_to_neo4j.py`, via `misp_tag_to_canonical_map()`) and `MISPWriter.SOURCE_TAGS` derive from it, and its `reliability` orders it in the description ranking (`src/description_ranking.py`).
+Flag any source that reuses another source's canonical id / `source_id` (e.g., a new feed incorrectly mapped to `abuseipdb`).
 
 ---
 
 ## 3. MISP DATA QUALITY — Blocking
 
-### Missing required event metadata
-Every MISP event created by a collector must include ALL of the following before being pushed:
-- **Source tag**: `source:SourceName` (e.g., `source:AlienVault-OTX`)
-- **Sector/zone tag**: `sector:SectorName` or `sector:Global`
-- **TLP tag**: `tlp:amber` (sector-specific) or `tlp:green` (global)
-- **`collection_date`** attribute: ISO 8601 timestamp of when the data was collected
-- **`last_updated`** attribute: ISO 8601 timestamp, updated on every sync
+### Required MISP metadata
+The day event `EdgeGuard-{source}-{date}` carries the single event tag `EdgeGuard`; sources and zones are not event tags. Every attribute EdgeGuard writes carries:
+- **Source tag**: `MISPWriter.SOURCE_TAGS` (derived from `source_registry`, e.g. `source:AlienVault-OTX`), or `source:<name>` for a source the registry does not know
+- **Zone tags**: `zone:<Zone>` for each of the item's specific zones, `zone:Global` when it has only global or none (`_get_zones_to_tag`)
+- **TLP tag** (2026-10): `tlp:<level>` (`_tlp_tag`: the item's or the OTX pulse's level, else `EDGEGUARD_DEFAULT_TLP`, default `white`)
 
-Flag any collector that pushes events missing any of these fields.
+No attribute carries a `collection_date` or `last_updated` value: MISP's own attribute `timestamp` records the last write, and an in-place edit is confirmed against it (`written_after`).
+
+Flag a writer path that builds an attribute without its source, zone or TLP tag, and an event given source, sector or zone tags.
 
 ### Overwriting with corrupt or empty data
 Before updating an existing MISP event or attribute:
@@ -185,16 +185,13 @@ Before updating an existing MISP event or attribute:
 Flag any merge/update path that does not validate the incoming value before overwriting.
 
 ### Duplicate event creation
-Before creating a new MISP event, the collector must call `misp_writer.find_existing_event()` (or equivalent) to check whether an event for the same source + sector combination already exists.
-Flag any collector that creates events without a deduplication check — this inflates MISP with redundant events and corrupts provenance tracking.
+Events are created only through `MISPWriter._get_or_create_event(source, date)`: one event `EdgeGuard-{source}-{date}` per source and UTC day of the push (zones live on attribute `zone:` tags). It finds the day's event through `_restsearch_events_for_name`: `/events/restSearch` with `eventinfo` (an exact match from MISP 2.4.177 on) and `metadata: true`, paged until a row matches or a page comes back short, at most `EVENT_LOOKUP_MAX_PAGES` pages, then the exact `Event.info` match. It creates an event only inside `_cross_process_event_creation_lock` after a second lookup, never after a failed or capped lookup (`MispLookupError`), and `push_items` looks up an event only for a (source, date) group with at least one attribute left to write (2026-10).
+Flag a collector that creates events directly, a lookup that filters by anything other than `eventinfo` (the earlier `info` key is not a restSearch parameter: MISP answered the first events of the store and a duplicate same-day event was created), asks for full events or reads one page only, and an event created after a lookup error — duplicates inflate MISP with redundant events and corrupt provenance tracking.
+In `fetch_edgeguard_events` (2026-10), flag an event listing not de-duplicated by event id, paging that continues after a page that brings no new event, and a listing reported complete after a failed page, a cut at the page cap or a page-1 payload that is not a listing: the run must fail, so the sync cursor is not stamped past events never listed.
 
 ### `imported_at` / `first_seen` overwritten on re-import
 Original import timestamps (`imported_at`, `first_seen`) must be set with `ON CREATE SET` semantics — written once and never updated.
 Flag any code path that overwrites these timestamps on subsequent imports of the same record.
-
-### `last_updated` not refreshed on sync
-Every time an existing MISP event or attribute is updated, `last_updated` must be set to `datetime.now().isoformat()`.
-Flag update paths that merge data but do not refresh this timestamp.
 
 ### MISP health check insufficient
 `src/misp_health.py` must verify:
@@ -228,8 +225,11 @@ Flag any new MISP→sync code that assumes a flat event dict without normalizati
 
 | Prefix | Writer | Reader |
 |--------|--------|--------|
-| **`NVD_META:`** | `misp_writer` CVE attributes | `run_misp_to_neo4j.parse_attribute` (vulnerability) |
-| **`MITRE_USES_TECHNIQUES:`** | `misp_writer.create_malware_attribute` | `run_misp_to_neo4j.parse_attribute` (malware-type) → **`uses_techniques`** on **`merge_malware` |
+| **`NVD_META:`** | `misp_writer.create_vulnerability_attribute` | `run_misp_to_neo4j.parse_attribute` (vulnerability) |
+| **`MITRE_USES_TECHNIQUES:`** | `misp_writer.create_malware_attribute`, `create_actor_attribute`, `create_tool_attribute` (actors also carry `uses_malware` / `uses_tools` as keys `m` / `s`) | `run_misp_to_neo4j.parse_attribute` → **`uses_techniques`** on **`merge_malware`** / **`merge_actor`** / **`merge_tool`** |
+| **`MITRE_TACTIC_PHASES:`** | `misp_writer.create_technique_attribute` | `run_misp_to_neo4j.parse_attribute` (`tactic_phases`) |
+| **`OTX_META:`** (2026-10) | `misp_writer.create_attribute` (OTX items) | `run_misp_to_neo4j.parse_attribute` (pulse malware families, ATT&CK ids, several-actor marks) |
+| **`TF_META:`** (2026-10) | `misp_writer.create_attribute` (ThreatFox items) | `run_misp_to_neo4j.parse_attribute` |
 
 Flag new embedded JSON sentinels added on one side without the other, or truncation that breaks JSON parsing.
 
@@ -296,7 +296,7 @@ Flag any version that checks only `event_info.get("info")` (event name) as fallb
 In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (prior to 2026-04 this was a generic `USES`; see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) — pre-release framework, no migration script shipped; a fresh baseline rerun writes the specialized edge type directly):
 
 ```cypher
--- CORRECT
+// CORRECT
 MATCH (a:ThreatActor), (t:Technique)
 WHERE t.mitre_id IN coalesce(a.uses_techniques, [])
 MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
@@ -305,7 +305,7 @@ SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit'
 
 Flag any version using `WHERE a.misp_event_id = t.misp_event_id` for this relationship — MITRE ATT&CK actors and techniques always come from separate MISP events, so `misp_event_id` never matches and this query always returns 0. Confirmed bug: the co-occurrence approach produced zero edges in all test runs.
 
-Also flag any new code that emits the legacy `USES` rel type for Actor→Technique. The write path in `create_misp_relationships_batch` still accepts `rel_type="USES"` when `to_type="Technique"` as a backward-compat shim, but new code should emit `EMPLOYS_TECHNIQUE` directly.
+Also flag any new code that emits the legacy `USES` rel type for Actor→Technique. The backward-compat `rel_type="USES"` shim in `create_misp_relationships_batch` was removed (PR-N1); `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` rows must name `from_type` (a row without it is dropped with a warning).
 
 ### `uses_techniques` must be populated in the MITRE collector
 
@@ -342,11 +342,11 @@ The MITRE collector must populate **`uses_techniques`** on each malware dict fro
 
 Flag any **`CAN_USE`** relationship or fuzzy name/description matching between Malware and Technique — that pattern was removed as a hallucination risk.
 
-### Hardcoded zone list must stay in sync with `VALID_ZONES`
+### Zone lists come from `VALID_ZONES`
 
-`_extract_zone_from_event_name()` in `run_misp_to_neo4j.py` uses a hardcoded `valid_zones = ["global", "finance", "energy", "healthcare"]`. This list must always match `VALID_ZONES` in `config.py`.
+Event names carry no zone (`EdgeGuard-{source}-{date}`): `_extract_zone_from_event_name()` in `run_misp_to_neo4j.py` always returns None, and zones come from `zone:` tags (`extract_zones_from_tags`, checked against `config.VALID_ZONES`).
 
-Flag any PR that adds a new zone to `VALID_ZONES` in `config.py` without also updating the hardcoded list in `_extract_zone_from_event_name()`. The preferred fix is to import `VALID_ZONES` directly instead of duplicating it.
+Flag any new hard-coded zone list instead of an import of `VALID_ZONES`.
 
 ### Zone values must be validated before storing in Neo4j or MISP
 
@@ -393,23 +393,15 @@ Assigning a static `confidence_score = 0.8` to every node regardless of source q
 | Co-occurrence inference | 0.30 – 0.50 |
 | Text keyword detection only | 0.10 – 0.30 |
 
+Links to a `Sector` take their confidence from `sector_evidence.LABEL_CONFIDENCE` (`zone_classification` 0.5, `advisory_sector` 0.9; 2026-10), not from this table.
+
 Flag any node or relationship that hardcodes a confidence score above `0.70` for data that has not been explicitly corroborated by source material. Flag any relationship with `confidence_score > 0.80` and `match_type = 'misp_cooccurrence'` — co-occurrence is inherently weak signal.
 
 ### Generic entity names must never become graph nodes
 
 Node keys like `"unknown"`, `"malware"`, `"trojan"`, `"backdoor"`, `"virus"`, `"actor"`, `"ransomware"`, or any single-character / empty string will match against thousands of unrelated records, causing massive false-positive enrichment cascades.
 
-Flag any `MERGE` or `merge_node_with_source()` call where the primary key property could be one of these generic terms. Add a blocklist check before writing:
-
-```python
-GENERIC_NAMES_BLOCKLIST = frozenset({
-    "unknown", "malware", "trojan", "backdoor", "virus", "actor",
-    "ransomware", "threat", "attack", "hacker", "apt", "n/a", "",
-})
-if name.strip().lower() in GENERIC_NAMES_BLOCKLIST:
-    logger.warning("Skipping generic entity name: %s", name)
-    return False
-```
+Flag any `MERGE` or `merge_node_with_source()` call where the primary key property could be one of these generic terms. Check the name with `node_identity.is_placeholder_name()` (`_REJECTED_PLACEHOLDER_NAMES`, which holds every term above) before writing, as `merge_malware` and `merge_actor` do (aliases are filtered the same way). Flag a new merge path for a name-keyed label that does not call it, and a second blocklist.
 
 ### Zone keyword false positives — single generic words must not trigger sector tagging
 
@@ -425,9 +417,11 @@ Flag any new zone keyword added to `SECTOR_KEYWORDS` in `config.py` that is a si
 Incorrect edge direction silently produces wrong graph traversals. The canonical directions are:
 
 ```
-(Indicator)   -[:INDICATES]->          (Malware)            # co-occurrence or malware_family match
+(Indicator)   -[:INDICATES]->          (Malware)            # same OTX pulse (otx_pulse) or malware_family label (credited to FAMILY_LABEL_FEEDS)
 (Indicator)   -[:EXPLOITS]->           (Vulnerability|CVE)
 (Malware)     -[:ATTRIBUTED_TO]->      (ThreatActor)        # malware attributed to actor
+(ThreatActor) -[:USES_MALWARE]->       (Malware)            # MITRE uses / curated claim; campaign evidence with ATTRIBUTED_TO
+(ThreatActor) -[:USES_TOOL]->          (Tool)
 (ThreatActor) -[:EMPLOYS_TECHNIQUE]->  (Technique)          # attribution: actor performs TTP (MITRE STIX uses)
 (Campaign)    -[:EMPLOYS_TECHNIQUE]->  (Technique)          # campaign-level attribution (future)
 (Malware)     -[:IMPLEMENTS_TECHNIQUE]->(Technique)         # capability: malware implements TTP
@@ -435,31 +429,31 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 (Indicator)   -[:USES_TECHNIQUE]->     (Technique)          # observation: IOC tied to TTP (OTX attack_ids)
 (Technique)   -[:IN_TACTIC]->          (Tactic)
 (ThreatActor) -[:RUNS]->               (Campaign)
-(Malware|Indicator)-[:PART_OF]->       (Campaign)
+(Malware|Indicator)-[:PART_OF_CAMPAIGN]-> (Campaign)     # PART_OF until 2026-10; PART_OF is ResilMesh's topology relationship (IP / Subnet / OrganizationUnit)
 (Indicator)   -[:TARGETS]->            (Sector)
 (Vulnerability|CVE)-[:AFFECTS]->       (Sector)             # sector from zone list (build_relationships)
 ```
 
-**Sector links (2026-10-16).** Flag a write of a link to a `Sector` that names in `r.sources` (or copies `source_refs` / `misp_event_ids` from) a feed whose `SOURCED_FROM.zones` do not hold that sector: use `relationship_provenance.zone_prov_with`, never `prov_with(n, node_feeds(n))`, for a sector link. Flag `advisory_sector` anywhere but on `AFFECTS` from a CVE / Vulnerability whose `cisa_ics` record stated the sector (`sector_evidence.STATEMENT_LABELS`; a CISA advisory sector means "deployed in", never TARGETS), a hard-coded confidence on a sector link (it comes from `sector_evidence.LABEL_CONFIDENCE`), and a statement label whose confidence is not above `zone_classification`'s. A new `SOURCED_FROM` write site must set `zones`, `stated_zones` and `stated_refs` (`Neo4jClient._sourced_zone_items`). Flag a sector link that cites every record of a stating feed instead of those recorded for its sector (`sector_evidence.zone_refs`, `stated_refs`), and a light copy of a parsed item (the paged sync's `_REL_KEYS`) that drops `stated_zones` or `stated_refs`.
+**Sector links (2026-10-16).** Flag a write of a link to a `Sector` that names in `r.sources` (or copies `source_refs` / `misp_event_ids` from) a feed whose `SOURCED_FROM.zones` do not hold that sector: use `relationship_provenance.zone_prov_with`, never `prov_with(n, node_feeds(n))`, for a sector link. Flag `advisory_sector` anywhere but on `AFFECTS` from a CVE / Vulnerability whose `cisa_ics` record stated the sector (`sector_evidence.STATEMENT_LABELS`; a CISA advisory sector means "deployed in", never TARGETS), a hard-coded confidence on a sector link (it comes from `sector_evidence.LABEL_CONFIDENCE`), and a statement label whose confidence is not above `zone_classification`'s. A new `SOURCED_FROM` write site must set `zones`, `stated_zones` and `stated_refs` (`neo4j_client._sourced_zone_items`). Flag a sector link that cites every record of a stating feed instead of those recorded for its sector (`sector_evidence.zone_refs`, `stated_refs`), and a light copy of a parsed item (the paged sync's `_REL_KEYS`) that drops `stated_zones` or `stated_refs`.
 
-> **2026-04 rename:** `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` were previously a single generic `USES` edge. The write path in `create_misp_relationships_batch` still accepts `rel_type="USES"` when `to_type="Technique"` as a backward-compat shim — it routes to the correct specialized type based on `from_type`. Flag new code that **emits** the legacy `USES` value; reads against both are fine.
+> **2026-04 rename:** `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` were previously a single generic `USES` edge. The backward-compat `rel_type="USES"` shim in `create_misp_relationships_batch` was removed (PR-N1): `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` rows must name `from_type`, and a row without it is dropped with a warning. Flag any code that **emits** `USES` for a Technique edge; reads against both are fine.
 
 Flag **`(ThreatActor)-[:ATTRIBUTED_TO]->(Malware)`** (reversed). Flag any relationship creation that reverses the rows above. Wrong `ATTRIBUTED_TO` direction makes traversals return empty results silently.
 
 ### Circular enrichment — a node must not be used to enrich itself
 
-If the same source (`source_id`) has already been recorded in `n.sources`, writing back properties derived only from that source does not constitute corroboration and should not increase `confidence_score`.
+If the same source (`source_id`) has already been recorded in `n.source`, writing back properties derived only from that source does not constitute corroboration and should not increase `confidence_score`.
 
 Flag any enrichment path where:
 1. The enrichment query matches a node by its existing properties
-2. The only new data comes from the same `source_id` already in `n.sources`
+2. The only new data comes from the same `source_id` already in `n.source`
 3. The confidence score is raised as a result
 
 This is a form of hallucination: the system convincing itself a piece of data is more reliable because it "confirmed" itself.
 
 ### Stale data re-import must not reset or boost `confidence_score`
 
-Re-importing the same indicator from the same source (common during baseline collection) must use `ON MATCH SET` with `CASE WHEN` logic that only raises confidence, never lowers it due to decay from other jobs. Flag any sync path that unconditionally overwrites `confidence_score` without checking the existing value.
+Re-importing the same record from the same source (common during baseline collection) must neither lower a node's confidence nor undo an Indicator's aging: on labels other than Indicator a write keeps the higher `confidence_score` (max-wins); on an Indicator the higher value is kept in `source_confidence` and `confidence_score` is recomputed by the aging rule, so a re-import of an old report does not restore an aged confidence (only a newer report moves the basis; §14 "Confidence: max-wins per label", 2026-10-16). Flag a sync path that overwrites `source_confidence`, or a non-Indicator `confidence_score`, without comparing it with the stored value.
 
 ---
 
@@ -478,21 +472,26 @@ Every `MERGE` that modifies an existing node must include `SET node.last_updated
 Flag MERGE blocks that update properties but do not refresh `last_updated`.
 
 ### Source provenance array overwritten
-The `sources` property must be appended to, not replaced:
+The node property `source` (a list) must be appended to, not replaced:
 ```cypher
-SET node.sources = COALESCE(node.sources, []) + [new_source]
+SET n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_array)
 ```
-Flag any `SET node.sources = [value]` that discards the accumulated source history.
+Flag any `SET n.source = [value]` that discards the accumulated source history.
 
 ### Sector label never applied
-After a node MERGE, the sector label must be applied:
+After the sync, `Neo4jClient.apply_sector_labels()` (called once by `run_misp_to_neo4j`) adds the sector labels (`:Finance`, `:Healthcare`, `:Energy`) from each node's `zone` list, one statement per label of its `edgeguard_labels` list:
 ```cypher
-CALL apoc.create.addLabels(node, [sector]) YIELD node
+MATCH (n:Indicator)
+WHERE n.zone IS NOT NULL AND size(n.zone) > 0
+WITH n, [z IN n.zone WHERE z <> 'global' | apoc.text.capitalize(z)] AS sectorLabels
+WHERE size(sectorLabels) > 0
+CALL apoc.create.addLabels(n, sectorLabels) YIELD node
+RETURN count(DISTINCT node) AS labeled
 ```
-Flag any node creation path that does not apply the sector label. Without it, all sector-filtered Cypher queries return empty results.
+The yielded variable must differ from the bound one. Flag removal of that call, and a new zoned node label missing from `edgeguard_labels`. Without the labels, sector-filtered Cypher queries return empty results.
 
 ### UNIQUE constraint missing for new node type
-If a new node label is added to the graph schema, flag if there is no corresponding `CREATE CONSTRAINT` call in `src/neo4j_client.py`. Missing constraints allow race-condition duplicates.
+If a new EdgeGuard-owned node label is added, flag a missing `CREATE CONSTRAINT` in `Neo4jClient.create_constraints`. Missing constraints allow race-condition duplicates. Never add a UNIQUE constraint on a partner-owned label (`SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT`: Device, NetworkService, SoftwareVersion, Application, Role, User; 2026-10): such a constraint made the partner's scanner writes fail, and `create_constraints` drops those constraints on every run.
 
 ### Direct string formatting in Cypher
 Never build Cypher queries using `%` formatting, `.format()`, or f-strings with external data.
@@ -510,25 +509,23 @@ Flag any path where the key property could be empty before the `MERGE` is execut
 `MATCH (n)` without a label scans every node in the database. In a large graph this is catastrophically slow.
 Flag any Cypher query that uses `MATCH (n)` without a label constraint.
 
-### `n.active = true` must respect decay retirement
-Merge paths must not blindly set `n.active = true`. If a node has been retired by the decay job (`retired_at IS NOT NULL`), its `active` flag must be preserved. The correct pattern is:
-```cypher
-n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
-```
-Flag any `SET n.active = true` in merge paths (`merge_node_with_source`, `merge_indicators_batch`, `merge_vulnerabilities_batch`, `mark_inactive_nodes`, ResilMesh `merge_indicator`) that does not check `retired_at`. An unconditional `SET n.active = true` silently un-retires indicators that the decay job correctly retired, creating zombie nodes with `confidence_score=0.10, active=true`.
+### `active`: set by the aging rule on Indicators, on create only elsewhere (2026-10-16)
+A node that does not age gets `active = true` on its create path only (`neo4j_client._create_active`, in `merge_node_with_source` and `merge_vulnerabilities_batch`); a node write never changes `active` of a matched node, so a node another system created keeps its own lifecycle. An Indicator's `active`, `retired_at` and `retired_by` come only from `indicator_aging.aging_map` (`aging_set_clause`): a newer report reactivates a decay retirement in the same write; a manual decommission is kept. A Campaign's `active` follows its active indicators (`enrichment_jobs.build_campaign_nodes`: Step 1 sets it true, Step 4 false). Flag any other `active` write on the match path of a non-aging label, and an Indicator write that sets `active` / `retired_at` / `retired_by` other than through `aging_set_clause`.
 
 ### Merge functions must promote queryable properties to `extra_props`
-Every merge function (`merge_cve`, `merge_vulnerability`, `merge_malware`, `merge_actor`, `merge_technique`, `merge_tactic`, `merge_tool`) must promote analyst-relevant fields to `extra_props` so they become queryable Neo4j node properties. Fields NOT in `key_props` or `extra_props` go to `raw_data` on the SOURCED_FROM edge (a JSON blob invisible to Cypher queries).
+Every merge function (`merge_cve`, `merge_vulnerability`, `merge_malware`, `merge_actor`, `merge_technique`, `merge_tactic`, `merge_tool`) must promote analyst-relevant fields to `extra_props` (or `fill_props`, for a field the current record only fills where the node has none) so they become queryable Neo4j node properties. Fields NOT in `key_props`, `extra_props` or `fill_props` go to `raw_data` on the SOURCED_FROM edge (a JSON blob invisible to Cypher queries).
 
 Required promotions by node type:
-- **CVE**: `description`, `known_ransomware_use`. `cvss_score`, `severity`, `cvss_version` and `attack_vector` are NOT promoted from the record: `merge_cve` sets them from the CVSS sub-nodes (`_set_cve_score_from_cvss`, 2026-10). Flag any code that writes a CVE score from the record, from a `cvss:` tag, from a 0.0 placeholder or from another field (CISA KEV ransomware use, a collector default) — that is how 14,451 unscored CVEs showed as 3.0 / LOW. Likewise flag any code that writes a CVE's `attack_vector` from the record or invents one (`NETWORK`, `UNKNOWN`, a vector-string letter): it is NVD's word for the attack vector of the CVSS that gives the score, null without CVSS (`cvss_selection`); mixed values made `attack_vector = 'NETWORK'` match 3,305 of about 100,000 network-exploitable CVEs.
-- **Vulnerability**: `description`, `cvss_score`, `severity`, `attack_vector`
-- **Technique / Tactic**: `name`, `description`
-- **Tool**: `name`, `description`, `aliases`
-- **Malware**: `description`, `malware_types`, `aliases`, `uses_techniques`
-- **ThreatActor**: `description`, `aliases`, `uses_techniques`, `sophistication`, `primary_motivation`, `resource_level`
+- **CVE**: `known_ransomware_use`; `published`, `last_modified`, `cwe`, `ref_tags`, `cpe_type`, `result_impacts`, `reference_urls`, `affected_products` (set by NVD's record, filled by any other); `status`; the four KEV-owned `cisa_*` fields (set by CISA KEV's record, filled by any other). `cvss_score`, `severity`, `cvss_version` and `attack_vector` are NOT promoted from the record: `merge_cve` sets them from the CVSS sub-nodes (`_set_cve_score_from_cvss`, 2026-10). Flag any code that writes a CVE score from the record, from a `cvss:` tag, from a 0.0 placeholder or from another field (CISA KEV ransomware use, a collector default) — that is how 14,451 unscored CVEs showed as 3.0 / LOW. Likewise flag any code that writes a CVE's `attack_vector` from the record or invents one (`NETWORK`, `UNKNOWN`, a vector-string letter): it is NVD's word for the attack vector of the CVSS that gives the score, null without CVSS (`cvss_selection`); mixed values made `attack_vector = 'NETWORK'` match 3,305 of about 100,000 network-exploitable CVEs.
+- **Vulnerability**: `cvss_score`, `severity`, `attack_vector`
+- **Technique / Tactic**: `name`
+- **Tool**: `name`, `aliases`
+- **Malware**: `malware_types`, `aliases`, `uses_techniques`
+- **ThreatActor**: `aliases`, `uses_techniques`, `sophistication`, `primary_motivation`, `resource_level`
 
-Flag any new merge function that leaves `name` or `description` in raw_data only. Flag any change to a merge function that removes a field from `extra_props`.
+`description` and `description_source` (2026-10-16) are never in `extra_props` or `fill_props` of a CVE, Vulnerability, Malware, ThreatActor, Tool, Technique or Tactic merge (`merge_node_with_source` raises `ValueError`): the merge passes `description=CVE_DESCRIPTIONS.record(...)` / `ENTITY_DESCRIPTIONS.record(...)`, so the fixed source ranking of `src/description_ranking.py` decides (CVE / Vulnerability: NVD > CISA KEV > CISA ICS > any other source; the other labels: MITRE ATT&CK > a curated source > any other source). A record replaces the text only when its source ranks at least as high as the stored text's, and `description_source` names that source. Flag a description written outside `DescriptionRanking.set_cypher` / `best_of_cypher` (alias and twin merges), and a new label with a description but no ranking.
+
+Flag any new merge function that leaves `name` in raw_data only. Flag any change to a merge function that removes a field from `extra_props`.
 
 ### CVSS sub-nodes must filter None/empty values before SET
 `_merge_cvss_node()` dynamically builds SET clauses from a dict. If the dict contains `None` or `""` values, they get SET as NULL on the Neo4j node, hiding valid data. The correct pattern is:
@@ -585,7 +582,7 @@ At task start, if **`is_collector_enabled_by_allowlist(collector_name)`** is fal
 
 ### Neo4j sync DAG short-circuit vs real work
 
-**`edgeguard_neo4j_sync`**: when **`check_sync_needed`** (ShortCircuitOperator) returns false, downstream **`run_neo4j_sync`**, **`build_relationships`**, and enrichment are **skipped** — a green run may mean no sync. Document/operator expectations must stay aligned with **`docs/AIRFLOW_DAGS.md`**.
+**`edgeguard_neo4j_sync`**: when **`check_sync_needed`** (ShortCircuitOperator) returns false, downstream **`run_neo4j_sync`**, **`build_relationships`**, and enrichment are **skipped** — a green run may mean no sync. Each writing task also skips on its own while a baseline holds the baseline lock (2026-10-16; §18 "Baseline lock"). Document/operator expectations must stay aligned with **`docs/AIRFLOW_DAGS.md`**.
 
 ### Dynamic start_date
 `start_date = pendulum.now()` or any expression that changes on re-parse breaks Airflow scheduling.
@@ -684,9 +681,9 @@ In `src/graphql_api.py`, resolver functions must never return raw exception mess
 Catch exceptions, log them server-side with `exc_info=True`, and raise a `strawberry.exceptions.GraphQLError` with a generic message.
 Flag any resolver that passes `str(e)` or `repr(e)` into a GraphQL error response.
 
-### GraphQL resolver bypasses `edgeguard_managed` filter
-Every list resolver (indicators, vulnerabilities, CVEs, etc.) must include `n.edgeguard_managed = true` in its WHERE clause.
-Flag any resolver that queries `MATCH (n:Label)` without this filter — it would expose ResilMesh-owned nodes to EdgeGuard clients and vice versa.
+### GraphQL resolver bypasses the ownership filter
+Every list resolver (indicators, vulnerabilities, CVEs, etc.) must restrict to `(n.edgeguard_managed = true OR n.edgeguard_enriched = true)`: nodes EdgeGuard created or enriched (2026-10; `_resolve_list` applies it while `NodeFilter.edgeguard_managed_only` is true, the default).
+Flag any resolver that queries `MATCH (n:Label)` without this filter — it would expose ResilMesh-owned nodes EdgeGuard never wrote to EdgeGuard clients — and one that filters on `edgeguard_managed` alone (it hides partner CVEs EdgeGuard enriched).
 
 ### GraphQL Cypher query not parameterised
 All Cypher in `src/graphql_api.py` must use `$param` placeholders passed to `session.run(query, **params)`.
@@ -738,15 +735,17 @@ EdgeGuard must never bind to these ports (all used by ResilMesh on the shared ed
 
 Flag any new `ports:` entry in docker-compose files or any `os.getenv("..._PORT", "XXXX")` default that clashes with the table above, unless the clash is intentional and documented in `docs/RESILMESH_INTEROPERABILITY.md`.
 
-### `edgeguard_managed` not set on new MERGE
-Every `MERGE (n:Label …)` in `src/neo4j_client.py`, `src/run_misp_to_neo4j.py`, or any enrichment job must include:
+### Ownership markers on new MERGE (shared-database contract, 2026-10)
+Every `MERGE (n:Label …)` in `src/neo4j_client.py`, `src/run_misp_to_neo4j.py`, or any enrichment job must set `n.edgeguard_managed = true` in `ON CREATE SET` only, and mark a node another system created on the match path (`neo4j_client._enriched_on_match_clause`):
 ```cypher
-SET n.edgeguard_managed = true
+MERGE (n:Malware {name: $name})
+ON CREATE SET n.edgeguard_managed = true
+ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
 ```
-This tag is the only way to distinguish EdgeGuard-owned nodes from ResilMesh-owned nodes in the shared graph. Flag any MERGE block that does not set it.
+Every EdgeGuard edge sets `r.edgeguard_managed = true`. These markers are the only way to distinguish EdgeGuard-owned nodes from ResilMesh-owned nodes in the shared graph. Flag a MERGE without the create-path marker, and any unconditional `SET n.edgeguard_managed = true`: it claims a node another system created, and the baseline wipe (`baseline_clean._wipe_neo4j` → `Neo4jClient.clear_edgeguard_managed`) would delete it.
 
 ### New relationship type collides with ResilMesh schema
-Before introducing a new relationship type, verify it does not already exist in the ResilMesh schema with a different direction or semantics. Known ResilMesh relationship types to avoid reusing: `RESOLVES_TO` (reserved for `(IP)-[:RESOLVES_TO]->(DomainName)`), `HAS_CVSS_v31`, `HAS_CVSS_v2`, `IN`.
+Before introducing a new relationship type, verify it does not already exist in the ResilMesh schema with a different direction or semantics. Known ResilMesh relationship types to avoid reusing: `RESOLVES_TO` (reserved for `(IP)-[:RESOLVES_TO]->(DomainName)`), `HAS_CVSS_v31`, `HAS_CVSS_v2`, `IN`, `PART_OF` (ResilMesh topology: IP / Subnet / OrganizationUnit; EdgeGuard's campaign membership is `PART_OF_CAMPAIGN`).
 Flag any new relationship type that is a case-insensitive match for an existing ResilMesh type.
 
 ### `cve_id` written in uppercase
@@ -777,22 +776,22 @@ EdgeGuard types (`Indicator`, `ThreatActor`, `Malware`, `Technique`, `Tactic`, `
 These rules ensure that every node in Neo4j can be traced back to its original source, and that raw data remains accessible via MISP.
 
 ### MERGE block missing SOURCED_FROM edge
-Every `MERGE (n:Label …)` must be followed (in the same transaction or immediately after) by a `MERGE (n)-[:SOURCED_FROM]->(s:Source {source_id: $source_id})` that stores the full collector payload in `r.raw_data`.
-Flag any node creation path that does not create or update the `SOURCED_FROM` relationship. Without it, there is no way to retrieve the raw data that produced the node.
+Every MERGE of a node from a source record must be followed (in the same transaction or immediately after) by a `MERGE (n)-[:SOURCED_FROM]->(s:Source {source_id: $source_id})` that stores the full collector payload in `r.raw_data`. Derived nodes (Campaign, Sector, the CVSS sub-nodes) have no `SOURCED_FROM` edge.
+Flag any node creation path for a source record that does not create or update the `SOURCED_FROM` relationship. Without it, there is no way to retrieve the raw data that produced the node.
 
 ### `first_imported_at` overwritten after initial import
 `first_imported_at` records when a node first entered the graph and must never be updated after creation.
 ```cypher
--- CORRECT
+// CORRECT
 ON CREATE SET n.first_imported_at = datetime()
--- WRONG
+// WRONG
 SET n.first_imported_at = datetime()
 ```
 Flag any `SET n.first_imported_at` that is not inside an `ON CREATE SET` block.
 
-### `misp_event_id` overwritten after initial import (batch path)
-In `merge_indicators_batch` and `merge_vulnerabilities_batch`, `misp_event_id` and `misp_attribute_id` must use `coalesce(n.misp_event_id, item.misp_event_id)` semantics — written once, never replaced.
-Flag any batch MERGE that unconditionally sets `n.misp_event_id = item.misp_event_id` without the coalesce guard.
+### MISP id lists replaced instead of accumulated
+In `merge_node_with_source`, `merge_indicators_batch` and `merge_vulnerabilities_batch`, `misp_event_ids` / `misp_attribute_ids` accumulate (`_dedup_concat_clause` / `_dedup_concat_optional_clause`); the scalar `misp_event_id` / `misp_attribute_id` node properties were dropped (PR #33).
+Flag a write that replaces either list, or brings back the scalar `misp_event_id` / `misp_attribute_id` node properties.
 
 ### `misp_event_url` persisted to Neo4j
 `misp_event_url` is a **computed field** — it is constructed at API query time from `MISP_URL + misp_event_id`.
@@ -805,21 +804,20 @@ SET n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_array)
 ```
 Flag any `SET n.source = $source` that discards the accumulated source history.
 
-### Confidence score lowered without decay job context
-The confidence score must only decrease through the scheduled `ioc_confidence_decay` enrichment job.
-Flag any sync or merge path (outside of `src/enrichment_jobs.py`) that lowers `n.confidence_score`.
-In merge paths, the correct pattern is:
+### Confidence: max-wins per label (2026-10-16)
+On every label but `Indicator` a write keeps the higher confidence:
 ```cypher
 SET n.confidence_score = CASE
     WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score
     THEN $confidence
     ELSE n.confidence_score END
 ```
+On an `Indicator` the max-wins applies to `n.source_confidence` (`indicator_aging.source_confidence_item`, incoming values only), and `n.confidence_score` is the value of the one aging rule (`src/indicator_aging.py`): `max(0.10, round(source_confidence × factor, 2))`, with factors 0.85 / 0.70 / 0.55 from 90 / 180 / 365 days (`EDGEGUARD_AGING_TIER_DAYS`, `EDGEGUARD_AGING_FACTORS`) and retirement from `EDGEGUARD_AGING_RETIRE_DAYS` (default 730). Every Indicator write recomputes it (`merge_indicators_batch`, `merge_node_with_source`, `create_indicator_from_alert`, through `aging_set_clause`), and so does `enrichment_jobs.decay_ioc_confidence`; a node written before 2026-10-16 without `source_confidence` keeps its stored value.
+Flag an Indicator write that sets `confidence_score` other than through `aging_map`, a max-wins on an Indicator's `confidence_score`, `source_confidence` filled from an aged `confidence_score`, and any path that lowers a non-Indicator node's confidence.
 
-### `SOURCED_FROM` edge `raw_data` preserves original provenance
-`r.raw_data` on the `SOURCED_FROM` edge captures the **original** collector payload at first import.
-It is set via `ON CREATE SET r.raw_data = …` and intentionally NOT overwritten on re-import.
-`r.confidence`, `r.source`, and `r.updated_at` are updated on every import; `r.raw_data` and `r.imported_at` are immutable after creation.
+### `SOURCED_FROM` edge provenance
+`r.raw_data` on the `SOURCED_FROM` edge is written when the edge is created (`ON CREATE SET`), except on CVE: `merge_cve` passes `refresh_raw_data=True` (the default, 2026-10), so the edge holds the source's latest record (a MISP copy edited in place and re-read by the sync); the STIX import (`run_pipeline`, a reduced record) passes `refresh_raw_data=False` and never replaces it.
+`r.imported_at` is immutable after creation. `r.confidence`, `r.source`, `r.misp_event_ids`, `r.source_refs`, `r.zones` / `r.stated_zones` / `r.stated_refs` and `r.updated_at` are updated on every write; `r.source_reported_first_at` / `r.source_reported_last_at` move by MIN / MAX, and an Indicator's edge records the source's report forward only (`indicator_aging.edge_report_items`).
 
 ---
 
@@ -829,22 +827,17 @@ It is set via `ON CREATE SET r.raw_data = …` and intentionally NOT overwritten
 All enrichment jobs in `src/enrichment_jobs.py` must use `MERGE` (not `CREATE`) for every node and relationship they produce.
 Running the same job twice must produce identical graph state. Flag any job that uses `CREATE` for nodes or relationships, which would produce duplicates on every pipeline run.
 
-### Confidence decay job using wrong time comparison
-The decay job must compare `datetime()` against `n.last_updated` (when the node was last seen in fresh data), not `n.first_imported_at` (when it was first seen).
-Using `first_imported_at` would decay newly created nodes that haven't had a chance to be updated yet.
-Flag any decay WHERE clause that references `first_imported_at` for age calculation.
+### Indicator aging basis (2026-10-16)
+Only `Indicator` nodes age (`src/indicator_aging.py`); CVE, CVSS, Vulnerability, Malware, ThreatActor, Technique, Tactic, Tool, Sector, Source and Alert never age by time. The age counts from `coalesce(n.last_reported_at, n.first_imported_at)` (`basis_expr`): `last_reported_at` is the latest report of any source, `min(MISP attribute time, source last_seen)` (`run_misp_to_neo4j.misp_report_times`), kept forward only (`node_report_items`); `first_imported_at` dates a node no MISP report dated. The rule runs at the database's time (`DATABASE_TIME`), lifted to the node's `aging_evaluated_at` when that is later (`evaluated_at_expr`).
+Flag an age computed from `n.last_updated` (every write refreshes it), a run- or Python-supplied evaluation time in production (`decay_ioc_confidence(as_of=...)` is for tests only), a report time that moves backwards, an aging statement that reads `edgeguard_managed` / `edgeguard_enriched`, and aging of any label other than Indicator.
 
-### Decay job retires nodes without logging
-When `ioc_confidence_decay` sets `n.active = false`, it must:
-1. Set `n.retired_at = datetime()`
-2. Log the count of retired nodes at INFO level
+### Indicator retirement (2026-10-16)
+The aging rule (`indicator_aging.aging_map`, applied by every Indicator write and by `enrichment_jobs.decay_ioc_confidence`) retires an Indicator `EDGEGUARD_AGING_RETIRE_DAYS` (default 730) after its basis: `active = false`, `retired_by = 'decay'`, `retired_at` = basis + retire days. A newer report that brings the age below that clears a decay retirement; a manual decommission (`retired_at` with `retired_by` other than `'decay'`) is kept. The job logs per-tier, retired and per-basis counts at INFO (`[AGING]`).
+Flag `retired_at = datetime()`, a retirement without `retired_by = 'decay'`, code that clears a manual decommission, and a job that writes a node whose `AGING_FIELDS` did not change (other than the one-time stamp of a node without `aging_evaluated_at`) or writes without `apoc.lock.nodes`.
 
-Flag any decay path that silently marks nodes inactive without recording `retired_at` or logging a count.
-
-### Campaign builder creates campaign with only one indicator
-`build_campaign_nodes` should only create a `Campaign` node when there is meaningful evidence of coordinated activity.
-The query must include `WHERE size(indicators) >= 2` (or a configurable minimum).
-Flag any campaign builder that creates campaigns for a single indicator — this produces noise that misleads analysts.
+### Campaign builder follows its evidence (2026-10-16)
+`build_campaign_nodes` builds a Campaign for a ThreatActor with an `ATTRIBUTED_TO` (Malware→ThreatActor) or `USES_MALWARE` (ThreatActor→Malware) link to a malware that at least one active Indicator `INDICATES`; one indicator is enough. The definitions come only from `src/campaign_evidence.py` (`has_evidence`, `member_malware`, `evidence_links`, `QUALIFYING_ACTORS_QUERY`), shared with the baseline postcheck (INV-1) and `scripts/verify_fresh_baseline.py`. Every campaign link carries `match_type = 'campaign_grouping'`, the confidence of the evidence it rests on, `r.evidence_types` and replace-mode provenance. Step 1b deletes an EdgeGuard-created campaign whose actor has neither link left, Step 2b prunes a malware membership without evidence, and Step 2c removes a RUNS from an actor that is not the campaign's or has no evidence.
+Flag a second definition of campaign evidence, a campaign link without `evidence_types` or with a hard-coded confidence, provenance added to instead of replaced, a campaign kept without evidence, and deletion of a campaign that is not `edgeguard_managed`.
 
 ### `bridge_vulnerability_cve` not bidirectional
 The enrichment job that creates `REFERS_TO` links between `Vulnerability` and `CVE` nodes must create **both directions**:
@@ -854,9 +847,9 @@ MERGE (c)-[:REFERS_TO]->(v)
 ```
 This matches the ResilMesh schema. Flag any version that only creates the `(v)-[:REFERS_TO]->(c)` direction.
 
-### Enrichment job missing error count in return dict
-Every enrichment job function must return a dict with at minimum `{"linked": N, "errors": N}` (or equivalent counts).
-Flag any job that returns `None`, `True`/`False`, or a dict without an error counter.
+### Enrichment job failure not counted or raised
+Every enrichment job returns a dict of counts. A failure either counts in `errors` (the alias and twin merges, per batch) or raises so the task fails (`decay_ioc_confidence`, `build_campaign_nodes`, `bridge_vulnerability_cve`, and `calibrate_cooccurrence_confidence` after all tiers ran); only `enrich_cve_epss` logs and skips a feed outage by design.
+Flag a job that returns `None` / `True` / `False`, or catches an error without counting or raising it.
 
 ---
 
@@ -907,15 +900,15 @@ Flag any `Counter(...)` / `Gauge(...)` / `Histogram(...)` at module level that i
 ### Metrics server binds to `0.0.0.0` by default
 For **bare-metal / host runs**, `EDGEGUARD_METRICS_HOST` must default to `127.0.0.1` so the Prometheus metrics endpoint is not reachable from other hosts on the shared ResilMesh server.
 `0.0.0.0` is only acceptable when Prometheus runs on a separate machine and the override is explicitly documented in `.env.example`.
-**Docker exception (2026-06):** inside a compose service, container-loopback is unreachable by ANY scraper (it is not the host's loopback), so the airflow service defaults `EDGEGUARD_METRICS_HOST` to `0.0.0.0` **in-container** while host exposure stays loopback-only via a `127.0.0.1:8001:8001` port mapping — that pattern (in-container any-addr + host-loopback publish) is correct. Flag instead: (a) a metrics port mapping that binds `0.0.0.0` on the HOST side, or (b) a bare-metal default of `0.0.0.0`. The in-container bind is reachable by peer containers on `edgeguard_net`; the endpoint serves only Prometheus counters/gauges (no secrets) and `EDGEGUARD_ENABLE_METRICS` defaults to `false`.
+**Docker (2026-10):** inside a compose service, container-loopback is unreachable by ANY scraper (it is not the host's loopback), so the `metrics` service (`src.metrics_exporter`, multi-process mode) binds `0.0.0.0` **in-container** and publishes `127.0.0.1:8001:8001`; Prometheus scrapes `metrics:8001` over `edgeguard_net`. That pattern (in-container any-addr + host-loopback publish) is correct. The `airflow` service publishes no metrics port: its task processes write to `PROMETHEUS_MULTIPROC_DIR`, and `EDGEGUARD_ENABLE_METRICS` only governs the in-process server of bare-metal installs. Flag instead: (a) a metrics port mapping that binds `0.0.0.0` on the HOST side, or (b) a bare-metal default of `0.0.0.0`. The in-container bind is reachable by peer containers on `edgeguard_net`; the endpoint serves only Prometheus counters/gauges (no secrets).
 
 ### Health endpoint does not reflect actual dependency status
 The `/health` endpoint in both `src/query_api.py` and `src/graphql_api.py` must verify that Neo4j is reachable before returning `{"status": "ok"}`.
 Flag any `/health` implementation that returns 200 unconditionally without checking the Neo4j connection.
 
 ### New data source not added to source reliability table
-`src/neo4j_client.py` maintains a `SOURCES` dict with `reliability` scores for each source.
-If a new collector is added, flag if there is no corresponding entry in `SOURCES` with an appropriate `reliability` value (0.0–1.0).
+A new source needs its own entry in `src/source_registry.py` (canonical id, aliases, MISP tag, `reliability`, `source_type`); `neo4j_client.SOURCES`, `MISPToNeo4jSync.SOURCE_MAPPING` and `MISPWriter.SOURCE_TAGS` derive from it, and its `reliability` orders it in the description ranking.
+If a new collector is added, flag if there is no corresponding registry entry with an appropriate `reliability` value (0.0–1.0), or if the source reuses another's canonical id.
 Leaving a source out means its nodes get no `SOURCED_FROM` edges and no reliability weighting.
 
 ---
@@ -963,11 +956,11 @@ The `default_args` dict must include `on_success_callback` pointing to `_on_task
 
 ### DAG runs are marked in progress by the listener plugin only (2026-10)
 
-`edgeguard_dag_run_in_progress_start_timestamp` is written only by `plugins/edgeguard_dag_run_state.py`: `on_dag_run_running` sets the run's `start_date`, `on_dag_run_success` and `on_dag_run_failed` set 0. The scheduler calls these hooks in order when it starts and ends a run, and the API server calls the end hooks when a run is marked failed or successful by hand. `docker-compose.yml` must keep `AIRFLOW__CORE__PLUGINS_FOLDER` and the `./plugins` mount on the `airflow` service. Flag any code in `dags/` that writes `DAG_RUN_START` (a DAG-level callback runs late in the DAG processor and can clear the next run's mark, and none runs on a manual state change), a hook that can raise, and a new DAG missing from the `edgeguard:dag_run_max_seconds` recording rule in `prometheus/alerts.yml`. Also flag any call from a listener hook to an Airflow function decorated with `@provide_session` (`DagRun.find()` and the like) without an explicit, separate session (`create_session(scoped=False)`): without one the call uses Airflow's scoped session, which in the scheduler is the scheduling loop's own session under `prohibit_commit`; the commit attempted on exit is refused, the session is rolled back and closed, the `DagRun` the scheduler is finishing is detached, and the scheduler's next read of it raises `DetachedInstanceError` and stops the scheduler at the end of every run.
+`edgeguard_dag_run_in_progress_start_timestamp` is written only by `plugins/edgeguard_dag_run_state.py`: `on_dag_run_running` sets the run's `start_date`, `on_dag_run_success` and `on_dag_run_failed` set 0, or the start time of the earliest other run of the same DAG still running (`_other_running_start`, read in a non-scoped session of its own). The scheduler calls these hooks in order when it starts and ends a run, and the API server calls the end hooks when a run is marked failed or successful by hand. `docker-compose.yml` must keep `AIRFLOW__CORE__PLUGINS_FOLDER` and the `./plugins` mount on the `airflow` service. Flag any code in `dags/` that writes `DAG_RUN_START` (a DAG-level callback runs late in the DAG processor and can clear the next run's mark, and none runs on a manual state change), a hook that can raise, and a new DAG missing from the `edgeguard:dag_run_max_seconds` recording rule in `prometheus/alerts.yml`. Also flag any call from a listener hook to an Airflow function decorated with `@provide_session` (`DagRun.find()` and the like) without an explicit, separate session (`create_session(scoped=False)`): without one the call uses Airflow's scoped session, which in the scheduler is the scheduling loop's own session under `prohibit_commit`; the commit attempted on exit is refused, the session is rolled back and closed, the `DagRun` the scheduler is finishing is detached, and the scheduler's next read of it raises `DetachedInstanceError` and stops the scheduler at the end of every run.
 
 ### Baseline DAG must have `is_paused_upon_creation=False`
 
-`edgeguard_baseline` must set `is_paused_upon_creation=False`. Without this, manual triggers silently queue forever because Airflow starts DAGs paused by default. The `schedule_interval=None` already prevents automatic execution. Flag removal of this setting.
+`edgeguard_baseline` must set `is_paused_upon_creation=False`. Without this, manual triggers silently queue forever because Airflow starts DAGs paused by default. `schedule=None` (Airflow 3; `schedule_interval` was removed) already prevents automatic execution. Flag removal of this setting.
 
 ### Neo4j merge return values must be checked before incrementing stats
 
@@ -981,6 +974,18 @@ The correct pattern is:
 if self.neo4j.merge_vulnerability(item, ...):
     self.stats["vulnerabilities_synced"] += 1
 ```
+
+### Every write result is read inside its retry (2026-10)
+
+The Neo4j driver reports an execution or commit error only when a result is read. Every `session.run` / `tx.run` in `src/` must read its result (`.consume()`, `.single()`, iteration) inside the `try` / `@retry_with_backoff` that classifies its error (`tests/test_neo4j_write_results.py::TestNoWriteResultIsDiscarded`). Batch merges pass that one summary to the counter helper; each relationship group is retried and charged on its own; single-item writes and `merge_cve`'s sub-writes (`_merge_cvss_node`, `_replace_nvd_owned_cve_data`, `_set_cve_score_from_cvss`) retry a retryable error, raise it once the retries are spent, and return False on a terminal one (`_cve_sub_write_failed`), so the sync counts the item as an error; the alias and twin merges run each batch and its follow-ups in one explicit transaction. Flag a discarded or late-read result, a result read outside its retry, and a write error logged without being returned or counted.
+
+### Baseline lock (2026-10-16)
+
+Every writing task of `edgeguard_neo4j_sync` (`run_neo4j_sync` and its retries, `build_relationships`, `run_enrichment_jobs`) calls `_skip_while_baseline_holds_lock` at its start (`baseline_skip_reason(own_holder=_baseline_run_holder(context))`), not only `check_sync_needed`; every collector task calls `baseline_skip_reason`. In `edgeguard_baseline` the collectors refuse while no baseline holds the lock, and `full_neo4j_sync`, the baseline's `build_relationships` and `run_enrichment_jobs` refuse unless the sentinel names their own DAG run (`_require_baseline_lock(own=True)`, `is_own_dag_run_sentinel`). A refusal of `baseline_clean` before the wipe releases the lock (`_release_lock_on_pre_wipe_refusal`), and `baseline_clean` / `baseline_start` take it again (`_retake_baseline_lock`). Flag a new Neo4j- or MISP-writing task without one of these checks, a baseline writer that runs without the lock or under another run's lock, a refusal before the wipe that keeps the lock, and a skip that stamps the sync state file.
+
+### Collector tasks share one pool (2026-10)
+
+Every collector task (scheduled and baseline) sets `pool=COLLECTOR_POOL` (`edgeguard_collectors`, `EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4, created by `docker-compose.yml` at start); sync, relationships, enrichment, health checks and the baseline lock stay outside it. Flag a collector task without it, and a `dagrun_timeout` recalculation that ignores the time a task waits for a slot (it counts against `dagrun_timeout`, not `execution_timeout`).
 
 ### `clear_checkpoint()` must preserve incremental state
 
@@ -1013,7 +1018,8 @@ Both files define the same Prometheus metrics (standalone and production paths).
 - `NEO4J_NODES`: `["label", "zone"]`
 - `SOURCE_HEALTH`: `["source", "zone"]` (metric name: `edgeguard_source_health`)
 - `DAG_LAST_SUCCESS`: `["dag_id"]`
-- `DAG_RUN_START`: `["dag_id"]`
+
+`DAG_RUN_START` (`edgeguard_dag_run_in_progress_start_timestamp`, labels `["dag_id"]`) is defined only in `metrics_server.py` and written only by the listener plugin (2026-10); flag a definition or write of it in `dags/`.
 
 Flag any change to metric labels in one file without updating the other. Also flag any `.labels()` call that does not pass ALL required labels.
 
