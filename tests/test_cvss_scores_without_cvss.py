@@ -145,7 +145,7 @@ class TestSelectCvss:
         assert select_cvss({"cvss_v2_data": {"base_score": 10.0, "base_severity": ""}}) == (10.0, "HIGH", "2.0")
         assert severity_from_score(10.0, "3.1") == "CRITICAL"
 
-    @pytest.mark.parametrize("bad", ["1e309", float("inf"), float("nan"), -0.1, 10.1, "n/a"])
+    @pytest.mark.parametrize("bad", ["1e309", float("inf"), float("nan"), -0.1, 10.1, "n/a", 10**400])
     def test_rejected_scores_are_skipped_not_stored(self, bad):
         payloads = {
             "cvss_v31_data": {"base_score": bad},
@@ -264,7 +264,13 @@ class TestSyncOfHostedAttributes:
         with caplog.at_level("WARNING"):
             item = _parse(syncer, attribute)
         assert (item["cvss_score"], item["cvss_version"]) == (8.3, "4.0")
-        assert any("rejected by clamp" in r.message for r in caplog.records)
+        # Since 2026-10-17 the NVD_META payload check drops a score that is no finite number before the clamp
+        # sees it, and reports it there; the score is still skipped and reported, never stored.
+        assert any(
+            "rejected by clamp" in r.message
+            or ("NVD_META.cvss_v31_data" in r.message and "entries dropped: base_score" in r.message)
+            for r in caplog.records
+        )
 
 
 # ---------------------------------------------------------------- 4. CISA KEV

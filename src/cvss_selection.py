@@ -88,7 +88,8 @@ def clamp_cvss_score(value: Any) -> Optional[float]:
         return None
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError (2026-10-17): an integer beyond the float range, which json.loads keeps as an int.
         return None
     if not math.isfinite(f):
         # inf / -inf / NaN — reject (honest-NULL).

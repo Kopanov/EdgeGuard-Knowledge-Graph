@@ -95,6 +95,30 @@ def _relationships():
     ]  # fmt: skip
 
 
+# ``merge_cve``'s sub-writes: a substring of each statement, and a call that runs it alone.
+CVSS_MERGE = "MERGE (n:CVSSv31"
+NVD_DATA_REPLACE = "AS nvd_only"
+CVE_SCORE_SET = "SET c.cvss_score = best[0].base_score"
+CVE_SUB_WRITES = [
+    (CVSS_MERGE, lambda c: c._merge_cvss_node("CVE-2026-1000", "nvd", "CVSSv31", "HAS_CVSS_v31", {"base_score": 9.8})),
+    (NVD_DATA_REPLACE, lambda c: c._replace_nvd_owned_cve_data("CVE-2026-1000", {"cwe": ["CWE-79"]})),
+    (CVE_SCORE_SET, lambda c: c._set_cve_score_from_cvss("CVE-2026-1000")),
+]
+
+
+def _rich_cve() -> dict:
+    """An NVD record as the sync reads it: the CVE, one CVSS sub-node, the NVD-owned data, the score."""
+    return {
+        "type": "vulnerability",
+        "cve_id": "CVE-2026-1000",
+        "tag": "nvd",
+        "zone": ["global"],
+        "nvd_record": True,
+        "cwe": ["CWE-79"],
+        "cvss_v31_data": {"vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "base_score": 9.8},
+    }
+
+
 class TestBatchMerge:
     """``_execute_batch_with_retry``: the Indicator and Vulnerability batches (up to 1000 rows)."""
 
@@ -183,11 +207,167 @@ class TestSingleItemMerge:
         ],
         ids=["merge_cvss_node", "replace_nvd_owned_cve_data", "set_cve_score_from_cvss"],
     )
-    def test_a_failed_cve_sub_write_returns_false(self, bolt, call):
-        """The helper names the CVE in its own WARNING and returns False (``merge_cve`` does not yet
-        act on the value: a separate change)."""
+    def test_a_failed_cve_sub_write_returns_false(self, bolt, call, caplog):
+        """A terminal error: the helper names the CVE in its own ERROR line and returns False, which
+        ``merge_cve`` returns (``TestCveSubWrites``)."""
         server, client = bolt(fail("cve_id: $cve_id", TYPE_ERROR))
-        assert call(client) is False
+        with caplog.at_level(logging.ERROR, logger="neo4j_client"):
+            assert call(client) is False
+        (line,) = [r.getMessage() for r in caplog.records if "(terminal)" in r.getMessage()]
+        assert "CVE-2026-1000 (terminal): CypherTypeError" in line
+        assert count(server.runs, "cve_id: $cve_id") == 1, "a terminal error is not retried"
+
+    @pytest.mark.parametrize("statement, call", CVE_SUB_WRITES, ids=[s for s, _ in CVE_SUB_WRITES])
+    def test_a_deadlock_on_a_cve_sub_write_is_retried(self, bolt, statement, call):
+        """2026-10: the helpers caught every error, retryable ones included, and returned False."""
+        server, client = bolt(fail(statement, DEADLOCK))
+        assert call(client) is True
+        assert count(server.runs, statement) == 2
+        assert count(server.committed, statement) == 1
+
+    @pytest.mark.parametrize("statement, call", CVE_SUB_WRITES, ids=[s for s, _ in CVE_SUB_WRITES])
+    def test_a_deadlock_that_persists_is_raised(self, bolt, statement, call):
+        """Raised once the retries are spent, as from ``merge_node_with_source``: the sync logs it and
+        counts the entity as an error."""
+        server, client = bolt(fail(statement, DEADLOCK, times=4))
+        with pytest.raises(nc.neo4j_exceptions.TransientError):
+            call(client)
+        assert count(server.runs, statement) == 4
+
+
+class TestCveSubWrites:
+    """``merge_cve`` acts on its sub-writes (2026-10): a terminal error in one returns False, so the sync
+    counts the CVE as an error. Until then it returned True whatever they returned."""
+
+    @pytest.mark.parametrize("statement", [CVSS_MERGE, NVD_DATA_REPLACE, CVE_SCORE_SET])
+    def test_a_terminal_error_in_a_sub_write_returns_false(self, bolt, statement):
+        server, client = bolt(fail(statement, TYPE_ERROR))
+        assert client.merge_cve(_rich_cve(), source_id="nvd") is False
+        # The other sub-writes still run, and the score is derived last from the sub-nodes there are.
+        for other in {CVSS_MERGE, NVD_DATA_REPLACE, CVE_SCORE_SET} - {statement}:
+            assert count(server.committed, other) == 1, other
+        assert "SET c.cvss_score" in server.runs[-1]
+
+    def test_without_errors_merge_cve_returns_true(self, bolt):
+        server, client = bolt()
+        assert client.merge_cve(_rich_cve(), source_id="nvd") is True
+        for statement in (CVSS_MERGE, NVD_DATA_REPLACE, CVE_SCORE_SET):
+            assert count(server.committed, statement) == 1, statement
+
+    def test_a_deadlock_in_a_sub_write_is_retried_and_the_cve_written(self, bolt):
+        server, client = bolt(fail(CVSS_MERGE, DEADLOCK))
+        assert client.merge_cve(_rich_cve(), source_id="nvd") is True
+        assert count(server.runs, CVSS_MERGE) == 2
+        assert count(server.committed, CVE_SCORE_SET) == 1
+
+    def test_the_sync_counts_the_cve_as_an_error(self, bolt, caplog):
+        import run_misp_to_neo4j as rm
+
+        server, client = bolt(fail(CVSS_MERGE, TYPE_ERROR))
+        sync = rm.MISPToNeo4jSync(neo4j_client=client)
+        with caplog.at_level(logging.WARNING):
+            assert sync._sync_to_neo4j_chunk([_rich_cve()]) == (0, 1)
+        assert sync.stats["vulnerabilities_synced"] == 0
+        (line,) = [r.getMessage() for r in caplog.records if "[MERGE-RETURNED-FALSE]" in r.getMessage()]
+        assert "rich CVE CVE-2026-1000 source=nvd" in line
+
+    def test_a_malformed_cvss_payload_is_not_a_write_error(self, bolt, caplog):
+        """``NVD_META.cvss_v31_data`` holding a vector string, not an object: the sync reads the CVE without
+        that CVSS, logs a WARNING and counts the CVE as synced. Without the check of the payload when the
+        attribute is read (``_meta_cvss_payload``), ``_merge_cvss_node`` failed on it with a terminal error,
+        the CVE counted as an error and every later sync failed on the same attribute."""
+        import json
+
+        import run_misp_to_neo4j as rm
+
+        meta = {
+            "cvss_v31_data": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "cwe": ["CWE-79"],
+            "published": "2026-10-01T00:00:00",
+        }
+        attribute = {
+            "type": "vulnerability",
+            "value": "CVE-2026-1001",
+            "comment": "NVD_META:" + json.dumps(meta),
+            "uuid": "5d7c3b0e-3d6b-4c39-9a51-0f3b2f6b1001",
+            "Tag": [{"name": "source:NVD"}, {"name": "tlp:white"}],
+        }
+        server, client = bolt()
+        sync = rm.MISPToNeo4jSync(neo4j_client=client)
+        with caplog.at_level(logging.WARNING):
+            item, _ = sync.parse_attribute(attribute, {"id": 5, "info": "EdgeGuard-nvd-2026-10-13", "Tag": []})
+            assert (item["tag"], item["nvd_record"], item["cvss_v31_data"]) == ("nvd", True, None)
+            assert sync._sync_to_neo4j_chunk([item]) == (1, 0)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("NVD_META.cvss_v31_data of CVE-2026-1001 is a JSON str" in m for m in messages)
+        assert not any("(terminal)" in m or "[MERGE-RETURNED-FALSE]" in m for m in messages)
+        assert sync.stats["vulnerabilities_synced"] == 1
+
+    @pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN", "1e309"])
+    def test_a_non_finite_cvss_number_is_not_written(self, bolt, caplog, literal):
+        """2026-10-17: ``json.loads`` reads these literals of ``NVD_META`` as floats that are not finite, and the
+        payload check let them through as numbers, so the CVSS sub-node held them (the GraphQL API cannot
+        return one). Now the entry is dropped and a payload left without a base score counts as absent: the
+        CVE syncs, no CVSS write fails, and no parameter the driver sends holds a number that is not finite.
+        Here a non-finite base score of CVSS 3.1 and a non-finite impact sub-score of CVSS 3.0."""
+        import json
+        import math
+
+        import run_misp_to_neo4j as rm
+
+        meta = {
+            "cvss_v31_data": {
+                "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "base_score": "__LITERAL__",
+                "base_severity": "CRITICAL",
+            },
+            "cvss_v30_data": {
+                "vector_string": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                "base_score": 7.5,
+                "base_severity": "HIGH",
+                "impact_score": "__LITERAL__",
+                "exploitability_score": 3.9,
+            },
+            "cwe": ["CWE-79"],
+            "published": "2026-10-01T00:00:00",
+        }
+        attribute = {
+            "type": "vulnerability",
+            "value": "CVE-2026-1002",
+            "comment": "NVD_META:" + json.dumps(meta).replace('"__LITERAL__"', literal),
+            "uuid": "5d7c3b0e-3d6b-4c39-9a51-0f3b2f6b1002",
+            "Tag": [{"name": "source:NVD"}, {"name": "tlp:white"}],
+        }
+        read = json.loads(attribute["comment"][len("NVD_META:") :])
+        assert not math.isfinite(read["cvss_v31_data"]["base_score"])
+        assert not math.isfinite(read["cvss_v30_data"]["impact_score"])
+
+        server, client = bolt()
+        sync = rm.MISPToNeo4jSync(neo4j_client=client)
+        with caplog.at_level(logging.WARNING):
+            item, _ = sync.parse_attribute(attribute, {"id": 5, "info": "EdgeGuard-nvd-2026-10-13", "Tag": []})
+            assert item["cvss_v31_data"] is None
+            assert "impact_score" not in item["cvss_v30_data"] and item["cvss_v30_data"]["base_score"] == 7.5
+            assert (item["cvss_score"], item["cvss_version"]) == (7.5, "3.0")
+            assert sync._sync_to_neo4j_chunk([item]) == (1, 0)
+        assert sync.stats["vulnerabilities_synced"] == 1
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("(terminal)" in m or "[MERGE-RETURNED-FALSE]" in m for m in messages)
+        assert any("NVD_META.cvss_v31_data of CVE-2026-1002 has no base score" in m for m in messages)
+        assert any("NVD_META.cvss_v30_data of CVE-2026-1002: entries that are not" in m for m in messages)
+        # The writes the driver sent: CVSS 3.0 without the sub-score, no CVSS 3.1, nothing non-finite.
+        assert count(server.committed, "MERGE (n:CVSSv30") == 1 and count(server.runs, "MERGE (n:CVSSv31") == 0
+        assert not any("n.impact_score" in q for q in server.runs)
+
+        def floats(value):
+            if isinstance(value, dict):
+                return [f for v in value.values() for f in floats(v)]
+            if isinstance(value, (list, tuple)):
+                return [f for v in value for f in floats(v)]
+            return [value] if isinstance(value, float) else []
+
+        sent = [f for params in server.parameters for f in floats(params)]
+        assert 7.5 in sent and all(math.isfinite(f) for f in sent)
 
 
 class TestRelationshipGroups:

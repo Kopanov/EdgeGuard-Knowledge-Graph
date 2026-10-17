@@ -18,6 +18,7 @@ Production-ready features:
 import gc
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -60,7 +61,9 @@ from indicator_aging import BASIS_MISP_RECORDED, BASIS_SOURCE_DATE
 from ioc_normalize import MISP_IP_ATTRIBUTE_TYPES, ip_address_type
 from misp_health import MISPHealthCheck
 from neo4j_client import (
+    _PROP_NAME_RE,
     CURATED_MISSING_SAMPLE,
+    CVSS_PAYLOAD_RESERVED_NAMES,
     Neo4jClient,
     clamp_cvss_score,
     normalize_cve_id_for_graph,
@@ -1484,6 +1487,106 @@ def _meta_list(meta: Dict[str, Any], key: str) -> List[str]:
     """
     value = meta.get(key)
     return _scalar_strings(value) if isinstance(value, list) else []
+
+
+_NEO4J_INT_RANGE = (-(2**63), 2**63 - 1)
+
+
+# The numeric scores of a CVSS payload (2026-10-17): they must be finite numbers, whatever type the JSON gave.
+_CVSS_SCORE_KEYS = frozenset({"base_score", "impact_score", "exploitability_score"})
+
+
+def _finite_cvss_score(entry: Any) -> Optional[float]:
+    """``entry`` as a finite float, or None when it is not a number, or a string that reads as one, or is not finite."""
+    if isinstance(entry, bool):
+        return None
+    try:
+        if isinstance(entry, (int, float)):
+            number = float(entry)
+        elif isinstance(entry, str):
+            number = float(entry.strip())
+        else:
+            return None
+    except (ValueError, OverflowError):
+        # OverflowError: a JSON integer beyond the float range (json.loads keeps it as an int); it is no
+        # usable score, and it must not fail the event's other attributes.
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[Dict[str, Any]]:
+    """``meta[key]``, a CVSS payload of ``NVD_META`` (``cvss_v31_data`` …), as a CVSS sub-node can hold it;
+    None when it is absent or not a JSON object (2026-10).
+
+    ``Neo4jClient._merge_cvss_node`` writes each entry of the payload as a property of the sub-node, so a
+    payload that is not an object, a name that is not a property name (letters, digits, underscores) or a
+    value that is not a string, a boolean or a number Neo4j can store made that write fail. Since
+    ``merge_cve`` counts a failed CVSS sub-write as an error (2026-10), one such attribute would fail every
+    sync until its MISP comment is edited. The payload is checked here instead, as ``ssvc`` is: a payload
+    that is not an object counts as absent, so the record has no CVSS of that version (an NVD record then
+    removes the sub-node only NVD asserted, as a rebuild from the same record gives), and an entry that is
+    not a property, or has a name the writer keeps for itself (``CVSS_PAYLOAD_RESERVED_NAMES``: the sub-node's
+    ``uuid``, ``timeout`` …), is dropped; both are logged with the CVE. The payloads the collectors write pass
+    unchanged.
+
+    A number that is not finite (``Infinity``, ``-Infinity``, ``NaN`` or ``1e309`` in the JSON, which
+    ``json.loads`` reads as such floats) is dropped as well, as a missing value (2026-10-17): the sub-node
+    would hold it, the GraphQL API cannot return it (a GraphQL ``Float`` is finite) and a JSON export would
+    not be valid JSON. A payload left without a base score is malformed and counts as absent, like one that
+    is not an object: a sub-node of it would have no score, and an earlier score of the same version would
+    stay on the node. An empty object (``{}``, which an NVD record without the version carries) counts as
+    absent without a warning, as before.
+    """
+    value = meta.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        logger.warning(
+            "[META] NVD_META.%s of %s is a JSON %s, not an object — the CVE is read without it",
+            key,
+            cve_id,
+            type(value).__name__,
+        )
+        return None
+    payload: Dict[str, Any] = {}
+    dropped: List[str] = []
+    for name, entry in value.items():
+        valid_name = (
+            isinstance(name, str) and _PROP_NAME_RE.match(name) is not None and name not in CVSS_PAYLOAD_RESERVED_NAMES
+        )
+        if name in _CVSS_SCORE_KEYS and entry is not None:
+            # A score is a finite number (2026-10-17): a string that reads as one ("9.8") becomes that
+            # number, and anything else ("1e309", "Infinity", "NaN", "N/A", a boolean) is dropped as a
+            # missing value, as a non-finite number is.
+            entry = _finite_cvss_score(entry)
+            valid_value = entry is not None
+        else:
+            valid_value = (
+                entry is None
+                or isinstance(entry, (str, bool))
+                or (isinstance(entry, float) and math.isfinite(entry))
+                or (isinstance(entry, int) and _NEO4J_INT_RANGE[0] <= entry <= _NEO4J_INT_RANGE[1])
+            )
+        if valid_name and valid_value:
+            payload[name] = entry
+        else:
+            dropped.append(str(name)[:40])
+    if (payload or dropped) and payload.get("base_score") in (None, ""):
+        logger.warning(
+            "[META] NVD_META.%s of %s has no base score%s — the CVE is read without it",
+            key,
+            cve_id,
+            f" (entries dropped: {', '.join(sorted(dropped))})" if dropped else "",
+        )
+        return None
+    if dropped:
+        logger.warning(
+            "[META] NVD_META.%s of %s: entries that are not CVSS properties dropped: %s",
+            key,
+            cve_id,
+            ", ".join(sorted(dropped)),
+        )
+    return payload or None
 
 
 def _extract_tlp_tag(tags: List[Dict[str, Any]], ref: str = "") -> str:
@@ -3778,6 +3881,12 @@ class MISPToNeo4jSync:
                     logger.warning(f"Failed to parse NVD_META for {cve_id}; reading the CVE without it")
                 if not isinstance(nvd_meta, dict):
                     nvd_meta = {}
+            # 2026-10: each CVSS payload as a CVSS sub-node can hold it, before anything reads it
+            # (``_meta_cvss_payload``): a malformed one would fail the CVE's CVSS sub-write, which counts
+            # as an error, on every sync.
+            for _cvss in CVSS_VERSIONS:
+                if _cvss.payload_key in nvd_meta:
+                    nvd_meta[_cvss.payload_key] = _meta_cvss_payload(nvd_meta, _cvss.payload_key, cve_id)
 
             # 2026-10: score and severity come only from the CVSS payloads in NVD_META, in the
             # order v3.1 → v3.0 → v2 → v4.0 (``cvss_selection.select_cvss``, which applies the
@@ -4731,7 +4840,8 @@ class MISPToNeo4jSync:
                             logger.warning(
                                 "[MERGE-RETURNED-FALSE] rich CVE %s source=%s — merge_cve returned False. "
                                 "Likely cause: resolve_vulnerability_cve_id returned falsy (missing/empty "
-                                "cve_id), or the underlying merge_node_with_source hit a terminal error.",
+                                "cve_id), or the underlying merge_node_with_source or a CVE sub-write (CVSS "
+                                "sub-node, NVD data, CVE score) hit a terminal error.",
                                 str(cve_id)[:30],
                                 src,
                             )
@@ -4766,7 +4876,8 @@ class MISPToNeo4jSync:
                             logger.warning(
                                 "[MERGE-RETURNED-FALSE] plain CVE %s source=%s — merge_cve returned False. "
                                 "Likely cause: resolve_vulnerability_cve_id returned falsy, or "
-                                "merge_node_with_source hit a terminal error. See earlier logs.",
+                                "merge_node_with_source or a CVE sub-write (NVD data, CVE score) hit a "
+                                "terminal error. See earlier logs.",
                                 cve_id,
                                 src,
                             )
