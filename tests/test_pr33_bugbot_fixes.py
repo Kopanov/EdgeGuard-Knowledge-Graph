@@ -2840,6 +2840,11 @@ def test_merge_resilmesh_user_normalizes_domain_none_and_empty():
                 def __iter__(self):
                     return iter([])
 
+                def consume(self):
+                    # 2026-10-16: every write reads its result inside its ``try`` (the server
+                    # reports an execution error with it); nothing fails here.
+                    return None
+
             return _R()
 
     class _CapDriver:
