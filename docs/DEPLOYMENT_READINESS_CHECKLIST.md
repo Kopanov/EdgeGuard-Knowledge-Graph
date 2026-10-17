@@ -131,8 +131,8 @@ concern a deployment or graph kept across an upgrade:
   [§ Airflow 3.2 to 3.3.2 upgrade](AIRFLOW_DAGS.md#airflow-32-to-332-upgrade) before deploying.
 - **Graph built before 2026-04.** There are no Cypher migration scripts: rebaseline against
   the current code (backup, then `edgeguard fresh-baseline`). For graphs that cannot be
-  wiped, use the operator scripts in [MIGRATIONS.md](MIGRATIONS.md) § "Operator scripts in
-  `scripts/`".
+  wiped, use the fix-up and audit scripts in
+  [MIGRATIONS.md § Appendix: data written by earlier versions](MIGRATIONS.md#appendix-data-written-by-earlier-versions).
 
 ---
 

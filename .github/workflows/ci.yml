@@ -241,8 +241,8 @@ jobs:
           # new requirements.txt reports "No known vulnerabilities found"
           # with zero ignores.
           #
-          # Flask CVE-2026-27205 (see docs/AIRFLOW_DAGS.md § "Flask on
-          # Airflow 3.x — reality check"): the apache/airflow:3.2.0 base
+          # Flask CVE-2026-27205 (see docs/AIRFLOW_DAGS.md § "Airflow version
+          # and image"): the apache/airflow:3.2.0 base
           # image bundled Flask 2.2.5 via the apache-airflow-providers-fab
           # auth manager, which this pip-install path never pulls, so
           # pip-audit could not see it; it was accepted operationally on the

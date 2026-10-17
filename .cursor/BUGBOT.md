@@ -667,7 +667,7 @@ If a PR changes **`build_relationships.py`**, **`mitre_collector.py`**, **`misp_
 - `docs/KNOWLEDGE_GRAPH.md`
 - `docs/ARCHITECTURE.md` (relationship table)
 - `docs/RESILMESH_INTEROPERABILITY.md` (integration contract)
-- `docs/DOCUMENTATION_AUDIT.md` (index row / refresh date if needed)
+- the `_Last updated_` line and a dated `## History` entry of each changed document (`CONTRIBUTING.md` § Documentation)
 
 ### `.env.example` and `docs/AIRFLOW_DAGS.md` for new operator env vars
 If a PR adds environment variables operators must set (e.g. **`EDGEGUARD_COLLECT_SOURCES`**), flag missing entries in **`.env.example`** and **`docs/AIRFLOW_DAGS.md`** (or the doc that owns that feature).

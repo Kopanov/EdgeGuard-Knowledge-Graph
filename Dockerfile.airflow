@@ -11,7 +11,7 @@
 #   - airflow.models.Variable → airflow.sdk.Variable
 #   - airflow.utils.task_group.TaskGroup → airflow.sdk.TaskGroup
 # Metadata DB migration required on first boot — see docs/AIRFLOW_DAGS.md
-# "Airflow 3 upgrade" section.
+# § "Airflow 2 to 3 upgrade".
 #
 # Bumped 3.2.0 → 3.3.2 (October 2026) to clear six Trivy CRITICALs the 3.2.0
 # base carried and that cannot all be patched from this layer:
@@ -28,7 +28,7 @@
 # providers.standard are unchanged); the base is still Debian 12 (bookworm),
 # so the apt package names below remain valid. Rebuild + `airflow standalone`
 # applies the 3.3 metadata migrations on first boot — back up airflow_postgres
-# first (docs/AIRFLOW_DAGS.md § "3.2 → 3.3.2").
+# first (docs/AIRFLOW_DAGS.md § "Airflow 3.2 to 3.3.2 upgrade").
 #
 # tini as PID 1: improves signal forwarding and zombie reaping (helpful on Docker Desktop / constrained VMs).
 # docker-compose.yml must NOT use `command: standalone` alone — that would run `tini -- standalone` (invalid).

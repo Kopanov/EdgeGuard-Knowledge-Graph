@@ -821,7 +821,7 @@ This README stays the **short** entry (quick start, ports, env vars). Deep onboa
 | [docs/HEARTBEAT.md](docs/HEARTBEAT.md) | Airflow zombie tasks, OOM/SIGKILL, heartbeat timeout |
 | [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md) | Prometheus + Grafana monitoring stack |
 | [docs/MISP_SOURCES.md](docs/MISP_SOURCES.md) | MISP as single source of truth, event discovery, metadata prefixes |
-| [docs/MIGRATIONS.md](docs/MIGRATIONS.md) | Neo4j schema migrations — pre-flight, backup, execute, rollback runbook for hand-applied Cypher rewrites |
+| [docs/MIGRATIONS.md](docs/MIGRATIONS.md) | Neo4j schema changes — the heal path (back up, then rebaseline against the current code), the fresh-baseline acceptance script, and the fix-up and audit scripts for graphs written by earlier versions that cannot be wiped |
 | [docs/RESILIENCE_CONFIG.md](docs/RESILIENCE_CONFIG.md) | Circuit breakers, retry logic, timeout tuning |
 | [docs/SECRETS_MANAGEMENT.md](docs/SECRETS_MANAGEMENT.md) | Credential handling, env vars, key rotation |
 
