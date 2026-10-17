@@ -52,7 +52,7 @@ stix2~=3.0
 # binds the Airflow API server to 127.0.0.1 only. The pip-install path from
 # this file never pulled FAB, so pip-audit was clean either way. The 3.3.2
 # base ships providers-fab 3.9.0 → Flask 3.1.3, which retires that
-# exception (docs/AIRFLOW_DAGS.md § "Flask on Airflow 3.x"). Keep the
+# exception (docs/AIRFLOW_DAGS.md § "Airflow version and image"). Keep the
 # loopback-only binding regardless.
 #
 # Breaking changes we handled in this repo when bumping from 2.11:

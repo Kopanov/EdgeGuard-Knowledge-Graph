@@ -302,9 +302,10 @@ class TestMemoryTuningDocExists:
         assert "MISP PHP" in content
         # The 2026-04-18 incident motivation must be discoverable
         assert "MemoryLimitExceededException" in content
-        # The PR-F4 cross-link (the incident that established the
-        # MISP PHP memory recommendation) must be present
-        assert "PR-F4" in content or "#60" in content
+        # The measurement that establishes the MISP PHP memory
+        # recommendation (the 730-day baseline of 2026-04-19 at 512M) must
+        # be present
+        assert "13,620 of 92,620" in content
 
     def test_doctor_command_help_references_memory_tuning_doc(self):
         """The argparse help string for --memory must point to the doc

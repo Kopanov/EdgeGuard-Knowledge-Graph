@@ -126,14 +126,16 @@ session.run("""
 ```
 
 `coalesce(n.uuid, $node_uuid)` is defensive — the same uuid is computed
-on every call, but the coalesce ensures we never overwrite an existing
-value (also lets the backfill be idempotent for nodes that were already
-stamped).
+on every call, but the coalesce ensures an existing value is never
+overwritten (it also keeps a re-stamp of nodes that are already stamped
+idempotent).
 
 ### Frozen things — never change without a graph-wide migration
 
 - `EDGEGUARD_NODE_UUID_NAMESPACE` — changing it invalidates every uuid in
-  every running Neo4j AND every STIX bundle ever shipped.
+  every running Neo4j AND every STIX bundle ever shipped. `src/stix_exporter.py`
+  checks at import that its `EDGEGUARD_STIX_NAMESPACE` equals this namespace
+  and raises `RuntimeError` when they differ.
 - `_NATURAL_KEYS` (and its lowercase view `_LABEL_NATURAL_KEY_FIELDS`) —
   changing the field order or set for a label changes the canonical string
   for every existing node of that label.
@@ -145,7 +147,7 @@ stamped).
 
 ## The logic — how each relationship receives src_uuid / trg_uuid
 
-There are **three mechanisms**, all converging on the same property shape
+There are **two mechanisms**, both converging on the same property shape
 (`r.src_uuid` and `r.trg_uuid` strings holding the connected nodes' uuids).
 Different code paths use different mechanisms because they have different
 information available at the time of the MERGE.
@@ -173,21 +175,17 @@ SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
     r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
 ```
 
-If `i.uuid` is null (e.g. ingested before this PR, backfill hasn't run yet),
-the coalesce keeps `r.src_uuid` null too — a fresh baseline stamps both (no
-backfill ships). No silent drift.
+The coalesce never replaces an endpoint uuid already on the edge, and it
+never invents one: if an endpoint has no `n.uuid`, the edge property stays
+null too (no silent drift). On a fresh baseline every endpoint carries
+`n.uuid`, so both properties are set.
 
-PR #33 used to have a separate "Mechanism A" (Python-side precomputation
-of endpoint uuids, threaded into UNWIND row dicts) for
-`create_misp_relationships_batch`. A review of PR #33 found a class of
-mismatches — a producer's incomplete from_key (e.g. an Indicator
-relationship with no `indicator_type`) would yield a precomputed uuid
-that didn't match the actual node's `n.uuid` because the node MERGE
-used the real key. The refactor switched all 11 batch templates to
-Mechanism B (deleted in commit `8465e71`); the precomputation Python is
-gone. Same applies to what used to be a "Mechanism C" dual-label
-routing helper — the bound-var form removes the per-label uuid swap
-entirely.
+The batch templates of `create_misp_relationships_batch` do not precompute
+endpoint uuids in Python, because a producer's incomplete from_key (e.g. an
+Indicator relationship with no `indicator_type`) would yield a precomputed
+uuid that does not match the actual node's `n.uuid`, which the node MERGE
+computes from the real key. Reading the bound variable also removes any
+per-label uuid swap for dual-label routing.
 
 ### Mechanism A (limited) — Python precomputation for AUTO-CREATEd nodes
 
@@ -223,9 +221,9 @@ with a deterministic uuid. The SET reads `n.uuid` and `s.uuid` directly.
 
 ### Cross-mechanism guarantee
 
-All three mechanisms produce the **same uuid** for the same logical
-endpoint, because they all delegate to `node_identity.compute_node_uuid`
-(directly in A and C, transitively via the upstream node MERGE in B).
+Both mechanisms produce the **same uuid** for the same logical
+endpoint, because both delegate to `node_identity.compute_node_uuid`
+(directly in A, transitively via the upstream node MERGE in B).
 So an edge's `src_uuid` and `trg_uuid` always equal the connected nodes'
 `n.uuid`, regardless of which path created the edge.
 
@@ -240,7 +238,7 @@ natural key**. Practical implications:
 
 - Two analysts running the same ingest pipeline against the same MISP
   produce graphs with **identical uuids** — without ever coordinating.
-- If you nuke your local Neo4j and re-run the pipeline from MISP, every
+- If you wipe your local Neo4j and re-run the pipeline from MISP, every
   node gets the same uuid it had before. Reports referencing
   `Indicator(uuid=6ca3af4a-...)` keep resolving.
 - A uuid in a published paper, a Slack thread, a notebook, or a
@@ -261,9 +259,9 @@ possible for downstream AI consumers.
 
 **GraphRAG / retrieval over live Neo4j.** The standard pattern is
 "retrieve a seed entity, expand 1-2 hops, serialize to LLM context".
-Pre-uuid, expanded edges had no canonical identity for their endpoints
-beyond the node's natural-key fields — fine when the LLM saw both
-endpoints, brittle when context budget forced edge-only chunks. With
+Without endpoint uuids, an expanded edge identifies its endpoints only by
+the nodes' natural-key fields — fine when the LLM sees both endpoints,
+brittle when the context budget forces edge-only chunks. With
 `r.src_uuid` / `r.trg_uuid`, every edge in the retrieved subgraph is
 self-addressing.
 
@@ -319,7 +317,7 @@ Several scenarios beyond the production cloud-sync:
 | Backup → restore (cold) | `neo4j-admin database dump`/`load` | Topology preserved; uuids preserved as ordinary properties. No semantic change. |
 | Subgraph export → re-import | Hand-written Cypher producing JSON | Edges in the export are self-describing — the re-import doesn't need every node, just the ones referenced by `src_uuid`/`trg_uuid` it sees. |
 | Multi-tenant fan-out | Same producer pipeline → N consumer instances | Every consumer gets identical uuids for shared entities. Consumers can reconcile/dedup locally. |
-| Re-derive after pipeline change | Nuke, re-ingest from MISP | Uuids are reproducible — published references still resolve. |
+| Re-derive after pipeline change | Wipe, re-ingest from MISP | Uuids are reproducible — published references still resolve. |
 
 The common thread: uuid is the **portable identifier** that survives the
 choice of transfer mechanism. Pick the mechanism for cost/cadence
@@ -331,7 +329,7 @@ reasons; the identifier is the same either way.
 
 ### Recipe 1 — push deltas keyed by uuid
 
-This is the production path the 2026-04 PR is designed for. Producer side
+This is the production path from the local graph to the cloud. Producer side
 (local). `$since` is the time of the previous successful push, and
 `$primary_labels` is the list of labels that carry a uuid
 (`node_identity.supported_labels()`, the keys of `_NATURAL_KEYS`). A node can
@@ -430,7 +428,7 @@ The uuid index (`CREATE INDEX <label>_uuid` in
 
 **The delta carries no deletions.** Campaigns and campaign links without
 evidence (`enrichment_jobs.build_campaign_nodes`), CVSS sub-nodes that NVD
-no longer supplies (`Neo4jClient._replace_nvd_owned_cve_data`) and merged
+stops supplying (`Neo4jClient._replace_nvd_owned_cve_data`) and merged
 duplicate actors and malware disappear locally but stay in the cloud.
 Reconcile periodically: run the query below on both sides, compare the
 `(label, uuid)` pairs and delete the cloud-only ones, label-scoped:
@@ -557,15 +555,11 @@ see Recipe 1's "CVE/Vulnerability twin-node design" callout.
 
 ## Operator runbook
 
-EdgeGuard is pre-release — no production graph carries pre-uuid nodes, so no
-backfill script is shipped. Every node MERGE in `src/neo4j_client.py` and
-every edge MERGE in `src/build_relationships.py` already stamps `n.uuid`,
-`r.src_uuid`, and `r.trg_uuid` at write time. A fresh baseline rerun against
-the current code populates uuids on every node and edge in the graph.
-
-If a dev / test graph somehow drifts (e.g. created against a much older
-build), the heal path is the same as for any other schema drift in this
-project: pause ingest, wipe, rebaseline. See `docs/MIGRATIONS.md`.
+No backfill script ships. Every node MERGE in `src/neo4j_client.py` and
+every edge MERGE in `src/build_relationships.py` stamps `n.uuid`,
+`r.src_uuid`, and `r.trg_uuid` at write time, so a fresh baseline populates
+uuids on every node and edge in the graph. The heal path for any schema
+drift is: pause ingest, wipe, rebaseline (see `docs/MIGRATIONS.md`).
 
 Post-baseline verification:
 
@@ -614,9 +608,9 @@ snapshot. Steps:
    current code** (so every node carries a non-NULL `n.uuid`). This is
    critical: if any local node has `n.uuid IS NULL`, the delta query in
    Recipe 1 EXCLUDES it from the export → it never reaches cloud → silent
-   data loss. Pre-release framework: a fresh baseline rerun is the
-   canonical way to populate uuids; no separate backfill script ships
-   (see [MIGRATIONS.md](MIGRATIONS.md)). Verify:
+   data loss. A fresh baseline is the canonical way to populate uuids; no
+   separate backfill script ships (see [MIGRATIONS.md](MIGRATIONS.md)).
+   Verify:
    ```cypher
    // On LOCAL Neo4j
    MATCH (n) WHERE n.uuid IS NULL RETURN labels(n)[0] AS label, count(n) AS missing;
@@ -692,24 +686,14 @@ neo4j-admin database load neo4j --from-path=/backups/cloud-pre-sync-2026-04-17-1
 systemctl start neo4j
 ```
 
-### Rollback B — revert the n.uuid / edge-endpoint deploy
-
-If the n.uuid feature itself is the problem (rare — code is backward-compatible):
-
-- Old code DOESN'T read `n.uuid` / `r.src_uuid` / `r.trg_uuid`, so reverting
-  the deploy leaves the new fields in place but unused. Graph stays
-  queryable. **Safe to revert.**
-- Old code STILL writes the new fields (defensive `coalesce` on every MERGE),
-  so even mid-revert the fields persist. No data loss either direction.
-
-### Rollback C — drop all uuid fields (urgent cleanup)
+### Rollback B — drop all uuid fields (urgent cleanup)
 
 Not normally needed (the fields are inert when unused), but documented for
 emergencies:
 
 ```cypher
 // One-shot cleanup — removes every uuid field from every node and edge.
-// IRREVERSIBLE without a re-run of the backfill.
+// IRREVERSIBLE without a fresh baseline (no backfill script ships).
 MATCH (n) SET n.uuid = null;
 MATCH ()-[r]->() SET r.src_uuid = null, r.trg_uuid = null;
 
@@ -720,11 +704,11 @@ SHOW INDEXES YIELD name WHERE name ENDS WITH '_uuid' RETURN name;
 DROP INDEX <name> IF EXISTS;
 ```
 
-### Rollback D — re-stamp uuids after a canonicalization change
+### Rollback C — re-stamp uuids after a canonicalization change
 
-Pre-release framework — no backfill script ships. If you've changed
+No backfill script ships. If you've changed
 `node_identity.canonicalize_field_value` (e.g. added a new normalization
-rule), the existing nodes' uuids are now stale. The heal path is the
+rule), the existing nodes' uuids are stale. The heal path is the
 same as for any schema drift in this project: pause ingest, wipe,
 rebaseline.
 
@@ -740,7 +724,7 @@ one-shot refresh through `merge_indicator` / `merge_indicators_batch`
 from a small driver script — both code paths re-compute the uuid via
 `node_identity.compute_node_uuid` on every call.
 
-## ⚠️ CVE / Vulnerability twin-node design — read this before writing recipes
+## CVE / Vulnerability twin-node design — read this before writing recipes
 
 EdgeGuard maintains TWO Neo4j labels for the same logical CVE:
 
@@ -787,12 +771,43 @@ vs EdgeGuard-derived state) and pinned by
 
 - **Topology / ResilMesh-owned nodes** (`Component`, `Mission`,
   `OrganizationUnit`, `MissionDependency`, `Node`) are not in
-  `_NATURAL_KEYS` yet — they don't get uuids. Documented as a deferred
-  follow-up. Use full dump/restore for those if needed.
+  `_NATURAL_KEYS` — they don't get uuids (a deferred follow-up). Use full
+  dump/restore for those if needed.
 - **Tool**'s natural key in Neo4j is `mitre_id`, but the STIX exporter uses
   `name`. Tool SDO IDs do NOT have UUID parity with Neo4j `n.uuid`. Worth
   reconciling in a follow-up if Tool round-trips become important.
 
 ---
 
-_Last updated: 2026-10-17 — Rollback A dumps offline and passes directories to `--to-path` / `--from-path`, as Recipe 3 and BACKUP.md do. Same day: documentation audit: Recipe 1 and the full snapshot merge with the delta as on-match properties too (`{}` left changed nodes and edges stale in the cloud); the delta selects aged indicators (`aging_evaluated_at`) since `$since`, names the primary label (secondary sector labels made `apoc.merge.node` miss and `labels(a)[0]` pick a sector) and gets a reconciliation for deletions; Recipe 3 dumps offline and wipes with `edgeguard clear neo4j --force` (a `Neo4jClient()` that never connected deleted nothing); 19 UNIQUE constraints and 25 range `<label>_uuid` indexes, with a Rollback C that compiles; 17 batch templates; sector steps 7a–7d; CVE nodes created by the MISP → Neo4j sync; the standalone helpers stamp `r.src_uuid` / `r.trg_uuid` (caveat removed); `_NATURAL_KEYS` as the mirror, field canonicalization and the topology/User/Alert labels; Rollback D uses `clear_neo4j.py --force` (`--yes` is not an option). Prior: 2026-10-15 — wording only: the PR #33 review finding is stated without naming the review tool. Prior: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._
+## Appendix: data written by earlier versions
+
+A graph populated by a fresh baseline needs nothing from this section.
+
+- **Nodes or edges without uuids.** A graph written by a build that did
+  not stamp uuids has nodes with `n.uuid IS NULL`. Edges to such nodes keep
+  `r.src_uuid` / `r.trg_uuid` null (the `coalesce` invents no value), and
+  the delta and snapshot queries of Recipe 1 and the first-run procedure
+  leave the nodes out, so they never reach the cloud. No backfill script
+  ships: pause ingest, wipe and rebaseline (see
+  [MIGRATIONS.md](MIGRATIONS.md)), then run the post-baseline verification
+  of the operator runbook.
+- **Reverting to a build without uuid support.** Such a build does not
+  read `n.uuid`, `r.src_uuid` or `r.trg_uuid`; the properties stay on the
+  graph unused, the graph stays queryable, and no data is lost in either
+  direction.
+
+---
+
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the notes for graphs written by earlier builds to the appendix (the revert of the uuid deploy is no longer a rollback recipe, so the uuid cleanup and re-stamp recipes are Rollback B and C).
+- 2026-10-17 — Rollback A dumps offline and passes directories to `--to-path` / `--from-path`, as Recipe 3 and BACKUP.md do.
+- 2026-10-17 — Recipe 1 and the full snapshot merge the delta as on-match properties too, because `{}` left changed nodes and edges stale in the cloud; the delta selects nodes aged since `$since` (`aging_evaluated_at`), names the primary label, because secondary sector labels made `apoc.merge.node` miss and `labels(a)[0]` pick a sector, and gains a reconciliation for deletions.
+- 2026-10-17 — Recipe 3 dumps offline and wipes with `edgeguard clear neo4j --force`, because a `Neo4jClient()` that never connected deleted nothing; the re-stamp recipe uses `clear_neo4j.py --force` (`--yes` is not an option).
+- 2026-10-17 — Counts follow the code (19 UNIQUE constraints, 25 range `<label>_uuid` indexes with a cleanup recipe that compiles, 17 batch templates, sector steps 7a–7d); CVE nodes are created by the MISP → Neo4j sync, the standalone helpers stamp `r.src_uuid` / `r.trg_uuid`, and `_NATURAL_KEYS` is named as the mirror of the natural keys, with field canonicalization and the topology, User and Alert labels.
+- 2026-04-18 — Migration and backfill scripts removed: a fresh baseline populates the uuids.
+- 2026-04-17 — The first-run procedure for a fresh cloud Neo4j, the rollback recipes and the CVE / Vulnerability twin-node design section added.
+- 2026-04-16 — The 11 batch templates of `create_misp_relationships_batch` read the bound nodes' uuids (Mechanism B) instead of precomputing them in Python (the former Mechanism A), which mismatched for incomplete from_keys; the dual-label routing helper (Mechanism C) was removed.
+- 2026-04-16 — Document created: deterministic node uuids and edge endpoint uuids, reproducibility, AI-workflow use and transfer recipes.

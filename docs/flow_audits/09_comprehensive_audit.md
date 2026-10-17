@@ -1,5 +1,7 @@
 # Comprehensive Production-Readiness Audit (7-agent night-shift sweep)
 
+> **Historical record** of the 2026-04-21 flow audit, not maintained; the current behaviour is described in [PRODUCTION_READINESS.md](../PRODUCTION_READINESS.md).
+
 **Date:** 2026-04-21 (overnight session)
 **Scope:** Full codebase across 7 specialized lenses
 **Method:** 7 independent research agents (Red Team, Devil's Advocate,

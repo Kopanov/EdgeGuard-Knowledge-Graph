@@ -1,5 +1,7 @@
 # Flow Audit §8 — Post-sync Relationship Construction
 
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [KNOWLEDGE_GRAPH.md § Relationship Types](../KNOWLEDGE_GRAPH.md#relationship-types) and [RESILMESH_INTEROPERABILITY.md § 3.2](../RESILMESH_INTEROPERABILITY.md#32-relationships-produced-by-edgeguard).
+
 **Date:** 2026-04-20 afternoon
 **Scope:** `src/build_relationships.py` (12 link queries), `src/enrichment_jobs.py`, `src/neo4j_client.py` relationship helpers
 **Goal:** Graph-integrity bugs — wrong direction, duplicate edges, missing provenance, non-idempotent enrichment

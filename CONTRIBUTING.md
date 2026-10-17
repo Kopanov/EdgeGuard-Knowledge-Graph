@@ -11,10 +11,22 @@ Use **Python 3.12+** (see `pyproject.toml` `requires-python`; CI uses 3.12).
 
 CI runs **Ruff**, **Mypy** (`src/` and `scripts/`), **pytest** (with coverage floor 30%), a **Neo4j integration** test, **Docker builds** of both images with **Trivy** image scans, and **pip-audit** — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-## New CLI / version behavior
+## CLI and version behavior
 
 - **`edgeguard version`** / **`edgeguard update`** — covered by `tests/test_edgeguard_cli_light.py` (update path mocks `subprocess.call` so `install.sh` is not executed in CI).
 - **CalVer** — bump `[project].version` in `pyproject.toml` only when cutting a release; see [`docs/VERSIONING.md`](docs/VERSIONING.md).
+
+## Documentation
+
+Every document in the repository follows one convention:
+
+- **Main text: current behavior, present tense.** The body of a document is a guide to how the system works today: settings, defaults, limits, commands, procedures, known limits, and the rationale for them ("because …"). It carries no pull request or issue numbers, no change dates, and no before/after narration.
+- **Dates that are data stay.** A measurement stated with the dataset it came from, an external version (for example Airflow 3.3.2 or MISP 2.4.177), and a reference-data version are part of the main text.
+- **Changes go to History.** Each change is recorded as a dated entry, newest first, one line each (`- YYYY-MM-DD — <what changed and why>`), in the document's `## History` section at the end, directly below a single `_Last updated: YYYY-MM-DD_` line. An entry whose day is not known carries `YYYY-MM` and follows the dated entries of that month.
+- **Data written by earlier versions goes to the appendix.** Steps that matter only for a Neo4j graph or MISP instance kept across an upgrade (repairs of data written by earlier versions, one-off migrations) go, condensed, to `## Appendix: data written by earlier versions`, placed before `## History`. The main text assumes a fresh baseline.
+- **Historical records keep their text.** `docs/flow_audits/`, `migrations/*.md`, `docs/DOCUMENTATION_AUDIT.md` and `docs/STIX21_EXPORTER_PROPOSAL.md` record a past state; each opens with a one-line note that points to the current document.
+
+When a heading changes, its anchor changes too: update every link to the old anchor in the same pull request.
 
 ## Commits
 
@@ -26,4 +38,11 @@ If you run Airflow on the host (not only via repo `docker-compose.yml`), **do no
 
 ---
 
-_Last updated: 2026-10-17 — documentation audit: the CI and versioning links resolve from the repository root; the CI list names the Neo4j integration job and the Trivy scans of both images, and Mypy's scope (`src/` and `scripts/` in CI, `src/` in `make type-check`). Prior: 2026-03-20_
+_Last updated: 2026-10-18_
+
+## History
+
+- 2026-10-18 — A History entry whose day is not known carries `YYYY-MM`.
+- 2026-10-17 — Added the documentation convention (current behavior in the present tense, dated History entries, an appendix for data written by earlier versions, historical records marked as such) and renamed the section "New CLI / version behavior" to "CLI and version behavior".
+- 2026-10-17 — The CI and versioning links resolve from the repository root; the CI list names the Neo4j integration job, the Trivy scans of both images, and Mypy's scope (`src/` and `scripts/` in CI, `src/` in `make type-check`).
+- 2026-03-20 — Earlier revision of the guide; no change details recorded.

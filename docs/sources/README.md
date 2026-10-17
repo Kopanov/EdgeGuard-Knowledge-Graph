@@ -10,4 +10,9 @@ This folder holds **supplementary** notes for external systems EdgeGuard integra
 
 ---
 
-_Last updated: 2026-03-17_
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — History section added.
+- 2026-03-17 — Index of the source-specific notes, pointing to the canonical collector reference.

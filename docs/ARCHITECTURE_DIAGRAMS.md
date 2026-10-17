@@ -32,7 +32,7 @@ graph TB
     subgraph EdgeGuard Pipeline
         COLL[Collectors<br/>10 sources + 2 flag-guarded]
         MISP[(MISP 2.4 / 2.5<br/>Single Source of Truth<br/>port 8443)]
-        SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
+        SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ _MispFallbackHardError sentinel<br/>+ MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
         BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ provenance on every edge: sources, source_refs, misp_event_ids"]
         ENRICH[Enrichment Jobs<br/>Bridge / Actor alias merge /<br/>Malware twin merge / Indicator aging /<br/>Campaigns / Calibration / EPSS]
@@ -41,7 +41,7 @@ graph TB
     subgraph APIs
         REST[FastAPI REST<br/>port 8000]
         GQL[Strawberry GraphQL<br/>port 4001]
-        METRICS[Prometheus Metrics<br/>port 8001<br/>+ 2 PR-N31 fallback alerts:<br/>EdgeGuardMispFetchFallbackActive warning<br/>EdgeGuardMispFetchFallbackHardError critical]
+        METRICS[Prometheus Metrics<br/>port 8001<br/>+ 2 fallback alerts:<br/>EdgeGuardMispFetchFallbackActive warning<br/>EdgeGuardMispFetchFallbackHardError critical]
     end
 
     subgraph Orchestration
@@ -88,7 +88,7 @@ flowchart LR
     end
 
     subgraph Step 3: Sync
-        MISP_DB -->|paginated<br/>index fetch| FETCH[Fetch Events<br/>primary index: 500/page × 100 pages<br/>fallback PyMISP/restSearch: 500/page × 200 pages<br/>+ _MispFallbackHardError on cap-hit PR-N29]
+        MISP_DB -->|paginated<br/>index fetch| FETCH[Fetch Events<br/>primary index: 500/page × 100 pages<br/>fallback PyMISP/restSearch: 500/page × 200 pages<br/>+ _MispFallbackHardError on cap-hit]
         FETCH --> PARSE[Parse Attributes<br/>per event]
         PARSE -->|< 5000 attrs| NORMAL[Normal Path]
         PARSE -->|> 5000 attrs| PAGED[Paged Streaming<br/>5000/page + gc.collect]
@@ -105,7 +105,7 @@ flowchart LR
         ALIAS --> TWIN[Malware twin merge]
         TWIN --> AGING[Indicator aging]
         AGING --> CAMP[Campaign Builder]
-        CAMP --> CALIB["Legacy co-occurrence calibration (no-op since 2026-10)"]
+        CAMP --> CALIB["Co-occurrence calibration (no-op on a fresh baseline)"]
         CALIB --> EPSS[FIRST EPSS]
     end
 
@@ -149,7 +149,6 @@ graph TB
     %%   EMPLOYS_TECHNIQUE    = attribution  (who is doing the TTP)
     %%   IMPLEMENTS_TECHNIQUE = capability   (what the code/tool can do)
     %%   USES_TECHNIQUE       = observation  (indicator observed tied to a TTP)
-    %% Split from a generic USES edge in the 2026-04 refactor.
     %%
     %% HAS_CVSS_v* expands to four concrete edge types written by
     %% _merge_cvss_node inside merge_cve(): HAS_CVSS_v2, HAS_CVSS_v30,
@@ -157,17 +156,14 @@ graph TB
     %% underscore + lowercase v + version), each in both directions
     %% (CVE to CVSS and CVSS to CVE), as in the ResilMesh model.
     %%
-    %% Provenance (2026-10): every relationship built from the sources
-    %% carries r.sources[] (who asserts it), r.source_refs[] (their record
-    %% ids) and r.misp_event_ids[] (the MISP events); see KNOWLEDGE_GRAPH.md
-    %% "Relationship provenance". PR-N26 (2026-04-23) had added
-    %% r.misp_event_ids[] to INDICATES, EXPLOITS, TARGETS and AFFECTS only;
-    %% scripts/backfill_edge_misp_event_ids.py backfills those four types on
-    %% graphs that pre-date PR-N26.
+    %% Provenance: every relationship built from the sources carries
+    %% r.sources[] (who asserts it), r.source_refs[] (their record ids) and
+    %% r.misp_event_ids[] (the MISP events); see KNOWLEDGE_GRAPH.md
+    %% "Relationship provenance".
     %%
     %% ThreatActor / Malware -[:EXPLOITS]-> CVE comes only from curated
-    %% packages (2026-10); ThreatActor / Malware -[:TARGETS]-> Sector from
-    %% build_relationships Q7c / Q7d (2026-10).
+    %% packages; ThreatActor / Malware -[:TARGETS]-> Sector from
+    %% build_relationships Q7c / Q7d.
 
     classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff
     classDef vuln fill:#dc2626,stroke:#b91c1c,color:#fff
@@ -230,7 +226,7 @@ flowchart LR
 ```
 
 `run_neo4j_sync` (and its retries), `build_relationships` and `run_enrichment_jobs` each skip
-(`AirflowSkipException`) when a baseline has taken the lock before they start (2026-10-16); the
+(`AirflowSkipException`) when a baseline has taken the lock before they start; the
 tasks downstream of a skipped task skip with it.
 
 ---
@@ -250,7 +246,7 @@ flowchart TD
     CALLER -->|run_pipeline| RECONNECT[Reconnect loop<br/>3 attempts]
     CALLER -->|run_misp_to_neo4j| CIRCUIT[Circuit breaker<br/>record_failure]
     CALLER -->|Airflow DAG<br/>incremental tasks: retries=2| AIRFLOW[AirflowException<br/>task marked FAILED]
-    CALLER -->|Airflow DAG<br/>baseline critical chain<br/>PR-N29 H1: retries=0| BASELINE_FAIL[AirflowException<br/>FAILS IMMEDIATELY<br/>no retry — operator pages<br/>via EdgeGuardMispFetchFallbackHardError]
+    CALLER -->|Airflow DAG<br/>baseline critical chain<br/>retries=0| BASELINE_FAIL[AirflowException<br/>FAILS IMMEDIATELY<br/>no retry — operator pages<br/>via EdgeGuardMispFetchFallbackHardError]
 
     style DEC fill:#7c3aed,stroke:#6d28d9,color:#fff
     style RAISE fill:#dc2626,stroke:#b91c1c,color:#fff
@@ -259,7 +255,7 @@ flowchart TD
     style BASELINE_FAIL fill:#dc2626,stroke:#b91c1c,color:#fff
 ```
 
-**PR-N29 H1 carve-out (operator-relevant):** the four baseline critical-chain
+**Baseline critical chain without retries (operator-relevant):** the four baseline critical-chain
 tasks — `baseline_clean`, `full_neo4j_sync`, `build_relationships`,
 `run_enrichment_jobs` (top-level task ids of `edgeguard_baseline`; only
 `baseline_clean` carries the `baseline_` prefix) — override `retries=0` (see
@@ -268,7 +264,7 @@ also runs once. A single failure on any of these tasks immediately marks
 the DAG run FAILED rather than auto-retrying. This is intentional: a 5–6h
 critical-chain task that retries once would burn 12h of the 32h `dagrun_timeout`
 cap and could leave the graph mid-mutated. Combined with the
-`EdgeGuardMispFetchFallbackHardError` Prometheus alert (PR-N31), the operator
+`EdgeGuardMispFetchFallbackHardError` Prometheus alert, the operator
 gets paged immediately when the `_MispFallbackHardError` sentinel raises.
 
 ---
@@ -312,7 +308,7 @@ flowchart LR
         CB3 --> CB4["Link: RUNS + PART_OF_CAMPAIGN (r.evidence_types)<br/>No evidence left: delete campaign + links<br/>Evidence but no active indicator: inactive"]
     end
 
-    subgraph "Job 6/7: Calibration (legacy, no-op on a fresh baseline)"
+    subgraph "Job 6/7: Calibration (no-op on a fresh baseline)"
         CAL0[Pre-compute: one COUNT<br/>per MISP event] --> CAL1[Group events by tier]
         CAL1 --> CAL2{Event size tier}
         CAL2 -->|1-10| CAL3[conf = 0.50]
@@ -322,7 +318,7 @@ flowchart LR
         CAL2 -->|> 500| CAL6[conf = 0.30]
     end
 
-    subgraph "Job 4/7: Indicator aging (before the campaigns, 2026-10-16)"
+    subgraph "Job 4/7: Indicator aging (before the campaigns)"
         D1[Every Indicator,<br/>whoever supplied it] --> D2{Days since the<br/>latest report}
         D2 -->|from 90d| D3[source_confidence x 0.85]
         D2 -->|from 180d| D4[source_confidence x 0.70]
@@ -354,15 +350,29 @@ campaign builder, 6/7 the calibration and 7/7 FIRST EPSS. Jobs 2/7, 3/7 and 7/7 
 
 ---
 
-*Last updated: 2026-10-17 — § 2: the sync's Neo4j MERGE writes indicators, CVEs, techniques, tactics, actors, malware and tools (it said indicators and vulnerabilities). Same day: corrections against the code: § 1 NATS has no deployed consumer and the APIs do not publish to it; MISP 2.4 / 2.5; § 2 eight further collectors and the seven enrichment jobs; § 3 `HAS_CVSS_v*` in both directions; § 4 MITRE + 7 daily collectors; § 5 task `neo4j_health_check`, the baseline-lock skips and `force_sync`; § 6 the baseline task ids (`full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`); § 7 report-scoped linking with per-pulse caps, `query_pause` and the 600 s relationship timeout (no cross-product sampling); § 8 jobs numbered of seven and the campaign evidence (`ATTRIBUTED_TO` or `USES_MALWARE`); technology stack versions (Airflow 3.3, CalVer 2026.10.x). Prior: 2026-10-16 — § 4 and § 5: the sync DAG runs every 72 hours and skips its chain when the last sync started less than 24 hours ago. Same day: enrichment: the indicator aging (one rule for every Indicator from its latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730; no Vulnerability tiers) runs before the campaign builder. Prior: 2026-10-15 — §5: `run_neo4j_sync` timeout 8h (was 4h). Same day: enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
+## Appendix: data written by earlier versions
 
-*Prior: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
+The diagrams assume a graph built by a fresh baseline. On a graph kept across an upgrade:
 
-- *§6 (HIGH): `neo4j: 5 retries, 2s base` → `3 retries, 2s base` (matches `_run_with_retries` and `_retry_db_op` in `src/neo4j_client.py`).*
-- *§6 (MED): added new branch + explanatory note for the PR-N29 H1 `retries=0` carve-out on the 4 baseline critical-chain tasks (`baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`, `baseline_run_enrichment_jobs`); operator now sees the immediate-fail path that pages via `EdgeGuardMispFetchFallbackHardError`.*
-- *§1 (MED): aligned BREL block with §5's wording — "11 relationship types" → "12 link queries → many edge types incl. INDICATES, EXPLOITS, TARGETS, AFFECTS + PR-N26 r.misp_event_ids array on edges". Reordered ENRICH job list to match actual execution order in `run_all_enrichment_jobs` (Bridge → Campaigns → Calibration → Decay).*
-- *§1 (LOW): added PR-N31 observability annotations on the SYNC node (`MISP_FETCH_FALLBACK_ACTIVE` Counter + `_MispFallbackHardError` sentinel) and METRICS node (the 2 fallback alerts).*
-- *§3 (LOW): added comment block at the bottom of the schema explaining (a) `HAS_CVSS_v*` expands to four concrete edge types and (b) PR-N26 wired `r.misp_event_ids[]` onto the 4 build_relationships edges.*
-- *§3 (LOW): edge label `HAS_CVSS` → `HAS_CVSS_v*` (matches `neo4j_client.py:_merge_cvss_node` which writes `HAS_CVSS_v2 / v30 / v31 / v40` with underscore + lowercase v + version).*
+- **`r.misp_event_ids[]` on older edges.** `scripts/backfill_edge_misp_event_ids.py` backfills the array on `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS` edges written before those types carried it; a fresh baseline writes the provenance lists on every relationship.
+- **Co-occurrence calibration (job 6/7).** `calibrate_cooccurrence_confidence` changes only `INDICATES` and `EXPLOITS` edges at the `misp_cooccurrence` / `misp_correlation` level, which earlier versions wrote and no current code path writes; on a fresh baseline it changes nothing.
 
-*Prior: 2026-04-26 PR-N33 docs audit; 2026-04-06.*
+---
+
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, data from earlier versions to the appendix.
+- 2026-10-17 — Corrected against the code: § 1 NATS has no deployed consumer and the APIs do not publish to it, MISP 2.4 / 2.5; § 2 the further collectors, the seven enrichment jobs and the labels the sync MERGE writes (it said indicators and vulnerabilities); § 3 `HAS_CVSS_v*` in both directions; § 4 MITRE + 7 daily collectors; § 5 task `neo4j_health_check`, the baseline-lock skips and `force_sync`; § 6 the baseline task ids; § 7 report-scoped linking with per-pulse caps, `query_pause` and the 600 s relationship timeout (no cross-product sampling); § 8 jobs numbered of seven and the campaign evidence; technology stack versions.
+- 2026-10-16 — The sync DAG runs every 72 hours, skips its chain when the last sync started less than 24 hours ago, and its writing tasks skip while a baseline holds the lock.
+- 2026-10-16 — One indicator aging rule for every Indicator from its latest report (×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730; no Vulnerability tiers), run before the campaign builder; campaigns rest on `ATTRIBUTED_TO` or `USES_MALWARE`.
+- 2026-10-15 — `run_neo4j_sync` timeout 8 h (was 4 h); seven post-sync jobs including the Malware ATT&CK-id twin merge (the count said five); § 3 `USES_MALWARE` / `USES_TOOL` drawn from `ThreatActor`, `EXPLOITS` and `TARGETS` from actors and malware, `AFFECTS` from `CVE`; the provenance note covers every relationship.
+- 2026-10-14 — Campaign membership renamed `PART_OF_CAMPAIGN`; every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]`.
+- 2026-10-10 — Whole-event co-occurrence `INDICATES` edges are no longer written, so the calibration job has nothing to change on a fresh baseline.
+- 2026-04-28 — Corrected against the code: Neo4j retries 3 (it said 5) with a 2 s base; the `retries=0` branch of the baseline critical chain; the `build_relationships` label aligned with § 5 and the enrichment order; the fallback counter and alerts annotated; edge label `HAS_CVSS_v*` with the comment block on its four concrete types.
+- 2026-04-25 — The MISP fetch fallback counter `MISP_FETCH_FALLBACK_ACTIVE` and the alerts `EdgeGuardMispFetchFallbackActive` / `EdgeGuardMispFetchFallbackHardError`.
+- 2026-04-24 — Baseline critical-chain tasks run with `retries=0`; `_MispFallbackHardError` is raised when the fallback reaches its page cap.
+- 2026-04-23 — `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS` carry `r.misp_event_ids[]`.
+- 2026-04-15 — The generic `USES` technique edge split into `EMPLOYS_TECHNIQUE` (attribution) and `IMPLEMENTS_TECHNIQUE` (capability); `USES_TECHNIQUE` (Indicator) unchanged.
+- 2026-03-30 — Mermaid architecture diagrams added.

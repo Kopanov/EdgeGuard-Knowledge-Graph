@@ -40,7 +40,7 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │  • Fetches EdgeGuard events (``/events/index`` + filter; restSearch fallback) │
 │  • Loads full event JSON → parse_attribute() per flat row   │
 │  • MERGE nodes + relationships (not a STIX bundle load)     │
-│  • MISP ``Object`` / nested attrs: not ingested yet (flat   │
+│  • MISP ``Object`` / nested attrs: not ingested (flat       │
 │    ``Attribute`` list only) — see run_misp_to_neo4j logs    │
 └─────────────────────────┬───────────────────────────────────┘
                           │
@@ -78,7 +78,7 @@ Collectors → MISP → [per MISP event] parse_attribute() → dedupe → cross-
               → sync_to_neo4j() (Python chunks) → create_misp_relationships_batch() (UNWIND batches) → Neo4j
 ```
 
-No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Report-scoped** relationships produced during sync (2026-10) are built from **one event’s item list only**, and inside it only between items that share the same OTX `pulse_id`: `Indicator → INDICATES → Malware` and `Malware → ATTRIBUTED_TO → ThreatActor` (the latter only when the pulse's actors are one actor, 2026-10-15; the aliases of one actor count as one, and the OTX collector marks a pulse naming several actors on every item of it, `several_actor_pulses`, or `several_actor_pulses_by_name` when it judged without the canonical reference: only the former is stored on `Indicator` nodes, 2026-10-16), `match_type='otx_pulse'`, confidence 0.6, `r.sources = ['alienvault_otx']`, the pulse in `r.source_refs[]` (`alienvault_otx:<pulse id>`). Items without a pulse id are never paired, and nothing is paired across the whole per-source, per-day event any more (see the `_build_cross_item_relationships` docstring in `run_misp_to_neo4j.py`). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
+No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Report-scoped** relationships produced during sync are built from **one event’s item list only**, and inside it only between items that share the same OTX `pulse_id`: `Indicator → INDICATES → Malware` and `Malware → ATTRIBUTED_TO → ThreatActor` (the latter only when the pulse's actors are one actor; the aliases of one actor count as one, and the OTX collector marks a pulse naming several actors on every item of it, `several_actor_pulses`, or `several_actor_pulses_by_name` when it judged without the canonical reference: only the former is stored on `Indicator` nodes), `match_type='otx_pulse'`, confidence 0.6, `r.sources = ['alienvault_otx']`, the pulse in `r.source_refs[]` (`alienvault_otx:<pulse id>`). Items without a pulse id are never paired, and nothing is paired across the whole per-source, per-day event (see the `_build_cross_item_relationships` docstring in `run_misp_to_neo4j.py`). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
 
 **CLI / `run_pipeline.py` (optional)** — with `use_stix_flow=True` (default for **`python src/run_pipeline.py`** step 3 when STIX is available):
 
@@ -88,7 +88,7 @@ MISP → convert_to_stix21() / PyMISP to_stix2 → load_stix21_to_neo4j() → Ne
 
 STIX is also used for **export** (`--stix`, `export_to_stix21`) and lives in **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** for tooling — those helpers are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow.
 
-**After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging — one rule for every Indicator, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later, so a re-run of an older run never moves a node's aging back ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*), 2026-10-16 —, campaigns, calibration, FIRST EPSS). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
+**After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging — one rule for every Indicator, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later, so a re-run of an older run never moves a node's aging back ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*) —, campaigns, calibration, FIRST EPSS). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
 
 ---
 
@@ -102,7 +102,7 @@ Sector keywords live in **`config.py`** as **`SECTOR_KEYWORDS`**. Matching is **
 
 Collectors pass contextual text into these helpers; items carry **`zone`** as a **list** (e.g. `['finance', 'healthcare']` or `['global']`).
 
-**Do not** copy simplified pseudo-code from older docs — **`src/config.py`** is the source of truth.
+**`src/config.py`** is the source of truth for the keywords, weights and thresholds; simplified pseudo-code does not reproduce the scoring.
 
 ### MISP → Neo4j Zone Resolution (Priority Layers)
 
@@ -126,23 +126,23 @@ specific  = {z for z in all_zones if z != "global"}
 result    = sorted(specific) if specific else ["global"]
 ```
 
-This prevents two confirmed bugs from the 2026-03 debug audit:
-- **H1** (zone combination): event tags `zone:finance` + `zone:healthcare` → `['finance', 'healthcare']`, and `zone:global` + `zone:healthcare` → `['healthcare']` (event names carry no zone; `_extract_zone_from_event_name` returns None)
-- **H3** (fallback override): no attribute zone, event has `zone:healthcare` tag, event name `GLOBAL` → `['healthcare']`
+Examples of the rule:
+- **Zone combination:** event tags `zone:finance` + `zone:healthcare` → `['finance', 'healthcare']`, and `zone:global` + `zone:healthcare` → `['healthcare']` (event names carry no zone; `_extract_zone_from_event_name` returns None)
+- **No fallback override:** no attribute zone, event has `zone:healthcare` tag, event name `GLOBAL` → `['healthcare']`
 
 All zone values are validated against `VALID_ZONES` in `config.py` before any write.
 
 ### MISP → Neo4j sync chunking (worker memory)
 
-`sync_to_neo4j()` merges parsed items in **Python-side chunks** to limit RAM on huge attribute counts. Env **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**: default **`500`**; **`0`** or **`all`** (case-insensitive) forces a **single pass** (legacy memory profile, **OOM risk** on tens of thousands of items — expert/debug only). `Neo4jClient.merge_*_batch` still UNWINDs in sub-batches. Relationship creation uses **`EDGEGUARD_REL_BATCH_SIZE`** and **`Neo4jClient.create_misp_relationships_batch`** (per-query error handling; partial success possible — see module docstring). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [HEARTBEAT.md](HEARTBEAT.md) for worker OOM vs Airflow “task failed” symptoms.
+`sync_to_neo4j()` merges parsed items in **Python-side chunks** to limit RAM on huge attribute counts. Env **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**: default **`500`**; **`0`** or **`all`** (case-insensitive) forces a **single pass** (all parsed items merged at once, **OOM risk** on tens of thousands of items — expert/debug only). `Neo4jClient.merge_*_batch` still UNWINDs in sub-batches. Relationship creation uses **`EDGEGUARD_REL_BATCH_SIZE`** and **`Neo4jClient.create_misp_relationships_batch`** (per-query error handling; partial success possible — see module docstring). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [HEARTBEAT.md](HEARTBEAT.md) for worker OOM vs Airflow “task failed” symptoms.
 
 ### ThreatActor / Malware / Tool → Technique Relationship Sources
 
 **`(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`**, **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`**, and **`(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** are built from the **explicit STIX `uses` relationship objects** in the MITRE ATT&CK bundle — **not** from substring / `CONTAINS` matching and **not** from cross-event co-occurrence (which yields 0 for actor/technique pairs).
 
-> **History:** Prior to 2026-04 all three were a single generic `USES` edge. The split was made to distinguish **attribution** (actor employs a TTP) from **capability** (malware/tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.* The property name **`uses_techniques`** on nodes is a STIX-side serialization field and was intentionally left unchanged.
+The edge types distinguish **attribution** (an actor employs a TTP) from **capability** (malware or a tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. The node property **`uses_techniques`** keeps its name because it is a STIX-side serialization field.
 
-The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor**, **Malware**, and **Tool** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). **2026-10:** the OTX collector puts a pulse's `attack_ids` on its malware/actor items as **`reported_techniques`** (JSON key `rt`, with the pulse id as `pid`) — never as `uses_techniques` — so pulse-level associations become `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` edges with `match_type='otx_pulse'` (0.6) instead of being mislabelled `mitre_explicit`. `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label, writing the appropriate specialized edge type. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
+The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor**, **Malware**, and **Tool** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). The OTX collector puts a pulse's `attack_ids` on its malware/actor items as **`reported_techniques`** (JSON key `rt`, with the pulse id as `pid`) — never as `uses_techniques` — so pulse-level associations become `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` edges with `match_type='otx_pulse'` (0.6) and are never labelled `mitre_explicit`. `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label, writing the appropriate specialized edge type. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
 
 ---
 
@@ -207,9 +207,9 @@ When data is pushed to MISP, it gets tagged with:
 | Zone | `zone:Finance` | All detected zones (equal importance) |
 | Source | `source:AlienVault-OTX` | Original data source |
 | Confidence | `confidence:high` | Indicator attributes only: `high` ≥ 0.8, `medium` ≥ 0.5, `low` < 0.5 of the collector's confidence_score; the sync stores 0.8 / 0.5 / 0.3 |
-| TLP | `tlp:white` | 2026-10: on every attribute — the source's own level (OTX `pulse_tlp`) or `EDGEGUARD_DEFAULT_TLP` |
+| TLP | `tlp:white` | On every attribute — the source's own level (OTX `pulse_tlp`) or `EDGEGUARD_DEFAULT_TLP` |
 | Severity | `severity:high` | For vulnerabilities; `severity:unknown` when the CVE has no CVSS |
-| CVSS | `cvss:critical` | Rating of the CVE's CVSS score (`none`, `low`, `medium`, `high`, `critical`), from its first CVSS in the order v3.1 → v3.0 → v2 → v4.0. No tag when the CVE has no CVSS (2026-10: unscored CVEs used to be tagged `cvss:low`). The sync takes the score itself from NVD_META, never from this tag |
+| CVSS | `cvss:critical` | Rating of the CVE's CVSS score (`none`, `low`, `medium`, `high`, `critical`), from its first CVSS in the order v3.1 → v3.0 → v2 → v4.0. No tag when the CVE has no CVSS. The sync takes the score itself from NVD_META, never from this tag |
 | Malware Family | `malware-family:emotet` | For malware indicators |
 
 ---
@@ -245,31 +245,30 @@ When data is pushed to MISP, it gets tagged with:
 
 | Relationship | From → To | How it is created |
 |---|---|---|
-| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`, and (2026-10) that source's `misp_event_ids[]` and `source_refs[]`, which the links derived after the sync copy; (2026-10-16) the zones this source's records gave the node (`zones`), the part of them the source stated itself (`stated_zones`, CISA ICS) and which record stated which zone (`stated_refs`); on an Indicator's edge, that source's latest report (`last_recorded_at`, `last_reported_at`, `last_reported_source`, `last_reported_ref`, forward only). A CVE's edge replaces `raw_data` with the source's latest record on every write from MISP; other labels keep the record that created the edge. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
-| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor (`match_type='mitre_explicit'`, 0.95); OTX pulse `attack_ids` → `reported_techniques` (`match_type='otx_pulse'`, 0.6, 2026-10) → `build_relationships.py`; a curated package's claim, written by the sync (2026-10): the package's curated label and 0.85 on a link it creates, only its provenance on an existing link. *(Split from a generic `USES` in 2026-04.)* |
-| `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` (`mitre_explicit`, 0.95); OTX pulse ids → `reported_techniques` (`otx_pulse`, 0.6, 2026-10); a malware's curated-package claim as for `EMPLOYS_TECHNIQUE` (2026-10). MISP round-trip via **`MITRE_USES_TECHNIQUES:`** (`t` / `rt` / `pid`) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
+| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`, that source's `misp_event_ids[]` and `source_refs[]`, which the links derived after the sync copy; the zones this source's records gave the node (`zones`), the part of them the source stated itself (`stated_zones`, CISA ICS) and which record stated which zone (`stated_refs`); on an Indicator's edge, that source's latest report (`last_recorded_at`, `last_reported_at`, `last_reported_source`, `last_reported_ref`, forward only). A CVE's edge replaces `raw_data` with the source's latest record on every write from MISP; other labels keep the record that created the edge. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor (`match_type='mitre_explicit'`, 0.95); OTX pulse `attack_ids` → `reported_techniques` (`match_type='otx_pulse'`, 0.6) → `build_relationships.py`; a curated package's claim, written by the sync: the package's curated label and 0.85 on a link it creates, only its provenance on an existing link. |
+| `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` (`mitre_explicit`, 0.95); OTX pulse ids → `reported_techniques` (`otx_pulse`, 0.6); a malware's curated-package claim as for `EMPLOYS_TECHNIQUE`. MISP round-trip via **`MITRE_USES_TECHNIQUES:`** (`t` / `rt` / `pid`) → `build_relationships.py`. |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
-| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` exact match on the malware's own `attributed_to` claim against the actor's `name` OR the actor's `aliases` (`match_type='exact'`, 1.0; the "Cozy Bear → APT29" path), plus — 2026-10 — same-OTX-pulse links from the sync and `build_relationships.py` step 2d (`match_type='otx_pulse'`, 0.6), only from a pulse whose actors are one actor (2026-10-15; step 2d removes the older attributions from pulses naming several actors). Whole-event co-occurrence attribution removed 2026-10. Actor/malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06). |
-| `INDICATES` | Indicator → Malware | Same-OTX-pulse link from the sync (`match_type='otx_pulse'`, 0.6, 2026-10) and source-asserted `malware_family` match (`build_relationships.py` Q9, 0.8). The whole-event `misp_event_ids[]` co-occurrence query was removed in 2026-10. |
-| `EXPLOITS` | Indicator → CVE/Vulnerability; ThreatActor / Malware → CVE | Indicator tagged with matching `cve_id` (`match_type='cve_tag'`, 1.0). Not derived from event co-membership since 2026-10. Actor and malware links (2026-10) come only from curated packages (the package's curated label, 0.85, on the link a claim creates; MATCH on existing nodes; `r.tlp` = the package's TLP level). |
+| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` exact match on the malware's own `attributed_to` claim against the actor's `name` OR the actor's `aliases` (`match_type='exact'`, 1.0; the "Cozy Bear → APT29" path), plus same-OTX-pulse links from the sync and `build_relationships.py` step 2d (`match_type='otx_pulse'`, 0.6), only from a pulse whose actors are one actor (step 2d removes the same-pulse attributions that rest only on pulses naming several actors). No attribution is derived from whole-event co-occurrence. Actor/malware `aliases` survive the MISP round-trip via `alias:` tags. |
+| `INDICATES` | Indicator → Malware | Same-OTX-pulse link from the sync (`match_type='otx_pulse'`, 0.6) and source-asserted `malware_family` match (`build_relationships.py` Q9, 0.8). No query links by whole-event `misp_event_ids[]` co-occurrence. |
+| `EXPLOITS` | Indicator → CVE/Vulnerability; ThreatActor / Malware → CVE | Indicator tagged with matching `cve_id` (`match_type='cve_tag'`, 1.0); never derived from event co-membership. Actor and malware links come only from curated packages (the package's curated label, 0.85, on the link a claim creates; MATCH on existing nodes; `r.tlp` = the package's TLP level). |
 | `IN_TACTIC` | Technique → Tactic | MITRE ATT&CK tactic phases |
-| `SUBTECHNIQUE_OF` | Technique → Technique | Sub-technique → parent technique (MITRE dotted id; 2026-10) |
-| `USES_MALWARE` | ThreatActor → Malware | MITRE explicit group → malware `uses` (2026-10, R6); also a curated package's claim (curated label and 0.85 on a link it creates) |
-| `USES_TOOL` | ThreatActor → Tool | MITRE explicit group → tool `uses` (2026-10, R6); also a curated package's claim (curated label and 0.85 on a link it creates) |
-| `TARGETS` | Indicator / ThreatActor / Malware → Sector | Node `zone` list → the sync (indicators) and `build_relationships.py` (`zone_classification`, 0.5; actor and malware edges since 2026-10; never to `global`); since 2026-10-16 each link names only the feeds whose `SOURCED_FROM.zones` give its sector |
-| `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → the sync and `build_relationships.py`: `advisory_sector`, 0.9, where CISA's ICS advisory states the sector (the product is deployed in it, 2026-10-16), else `zone_classification`, 0.5; each link names only the feeds that gave its sector (`src/sector_evidence.py`) |
-| `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` for an actor with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware with an active indicator (`r.evidence_types`, `src/campaign_evidence.py`); a campaign whose actor has neither link is deleted with its links (2026-10-16) |
-| `PART_OF_CAMPAIGN` | Malware / Indicator → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` (named `PART_OF` until 2026-10; `PART_OF` is ResilMesh's asset hierarchy) |
+| `SUBTECHNIQUE_OF` | Technique → Technique | Sub-technique → parent technique (MITRE dotted id) |
+| `USES_MALWARE` | ThreatActor → Malware | MITRE explicit group → malware `uses`; also a curated package's claim (curated label and 0.85 on a link it creates) |
+| `USES_TOOL` | ThreatActor → Tool | MITRE explicit group → tool `uses`; also a curated package's claim (curated label and 0.85 on a link it creates) |
+| `TARGETS` | Indicator / ThreatActor / Malware → Sector | Node `zone` list → the sync (indicators) and `build_relationships.py` (indicators, actors and malware; `zone_classification`, 0.5; never to `global`); each link names only the feeds whose `SOURCED_FROM.zones` give its sector |
+| `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → the sync and `build_relationships.py`: `advisory_sector`, 0.9, where CISA's ICS advisory states the sector (the product is deployed in it), else `zone_classification`, 0.5; each link names only the feeds that gave its sector (`src/sector_evidence.py`) |
+| `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` for an actor with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware with an active indicator (`r.evidence_types`, `src/campaign_evidence.py`); a campaign whose actor has neither link is deleted with its links |
+| `PART_OF_CAMPAIGN` | Malware / Indicator → Campaign | Built by `enrichment_jobs.build_campaign_nodes()`; a type of its own because `PART_OF` is ResilMesh's asset hierarchy |
 
 All relationship `sources` arrays are accumulated as sets — no duplicates on re-sync.
 `imported_at` is set once on first creation (`ON CREATE SET`) and never overwritten.
 
-**Source-truthful timestamps on `SOURCED_FROM` edges (PR S5, 2026-04;
-PR-M2 hardening, 2026-04):**
-The two new edge properties `r.source_reported_first_at` /
+**Source-truthful timestamps on `SOURCED_FROM` edges:**
+The edge properties `r.source_reported_first_at` /
 `r.source_reported_last_at` carry the per-source first/last claim
 ("NVD says it published 2013-01-15", "AbuseIPDB says it first reported
-2024-01-15"). Updated via MIN/MAX CASE with NULL short-circuit so
+2024-01-15"). They are updated via MIN/MAX CASE with NULL short-circuit so
 stale imports cannot regress earlier claims. Node-level
 `n.first_imported_at` (ON CREATE SET only) and `n.last_updated`
 (refreshed every MERGE) carry only DB-local truths — they cannot be
@@ -277,36 +276,27 @@ misread as real-world claims. STIX export aggregates MIN across all
 edges for `valid_from`; when no source claim exists, `valid_from`
 falls back to `first_imported_at` and the SDO is stamped with
 `x_edgeguard_first_seen_inferred=true` so consumers can filter for
-source-truthful evidence (PR-M2 design choice). The complete
+source-truthful evidence. The complete
 **timestamp semantic model** is documented in
 [`docs/TIMESTAMPS.md`](TIMESTAMPS.md) — invariants (honest-NULL +
-tz-aware UTC), per-collector source-field mapping, STIX 2.1 export
-contract for Indicator vs. Vulnerability vs. Report SDOs, and the
-backwards-compatibility plan for pre-PR-M2 data.
+tz-aware UTC), per-collector source-field mapping, and the STIX 2.1 export
+contract for Indicator vs. Vulnerability vs. Report SDOs.
 
-**MISP traceability on edges (PR-N26, 2026-04-23):** the four edge types
-MERGEd by `build_relationships.py` from the MISP path —
-`INDICATES` (Indicator → Malware, both report-scoped + family-match
-patterns), `EXPLOITS` (Indicator → CVE / Vulnerability), `TARGETS`
-(Indicator → Sector), and `AFFECTS` (Vulnerability → Sector) — accumulate
-`r.misp_event_ids[]` via `apoc.coll.toSet`, same shape as the node-level
-array. The `apoc.coll.toSet(coalesce + CASE)` write pattern is idempotent
-on re-sync. The `_misp_event_id` scalar field was deleted in PR-N17 —
-all readers now use list-membership predicates (`eid IN
-n.misp_event_ids`).
-
-Edges built BEFORE PR-N26 have no array set; backfill via
-[`scripts/backfill_edge_misp_event_ids.py`](../scripts/backfill_edge_misp_event_ids.py)
-+ the [`migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`](../migrations/2026_05_edge_misp_event_ids_backfill_runbook.md)
-runbook (those four types only). **Since 2026-10 every relationship built
-from the sources carries `r.misp_event_ids[]`**, together with `r.sources[]`
+**MISP traceability on edges:** every relationship built from the sources
+carries `r.misp_event_ids[]` (the MISP events), together with `r.sources[]`
 (who asserts it) and `r.source_refs[]` (the sources' own record ids): the
 sync writes the three lists from the MISP attribute, and the links derived
 afterwards (`build_relationships.py`, the campaign and Vulnerability↔CVE
 links of `enrichment_jobs.py`) copy them from the subject node's
 per-source `SOURCED_FROM` edge or inherit them from the links they are
 built on (`src/relationship_provenance.py`; [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md),
-"Relationship provenance").
+"Relationship provenance"). This includes the `INDICATES` (both the
+report-scoped and the family-match pattern), `EXPLOITS`, `TARGETS` and
+`AFFECTS` links. `r.misp_event_ids[]` accumulates via the
+`apoc.coll.toSet(coalesce + CASE)` pattern, the same shape as the node-level
+array, so a re-sync is idempotent. Readers use
+list-membership predicates (`eid IN n.misp_event_ids`); no scalar
+`_misp_event_id` field exists.
 
 Per-attribute IDs are deliberately **not** stored on edges (cardinality
 blowup for marginal benefit) — attribute UUIDs live on the Indicator
@@ -314,20 +304,19 @@ node only as `i.misp_attribute_ids[]`.
 
 **MISP traceability on Indicator nodes:** `i.misp_attribute_ids[]` holds the
 originating MISP attribute UUIDs — the stable cross-instance identifiers
-from `attr.uuid`. The forward fix is in
+from `attr.uuid`, set in
 [run_misp_to_neo4j.py `parse_attribute`](../src/run_misp_to_neo4j.py).
 
-**Array-only provenance (PR #33 round 10):** every MISP-derived consumer
+**Array-only provenance:** every MISP-derived consumer
 (`calibrate_cooccurrence_confidence`, STIX export) reads only
-`misp_event_ids[]` / `misp_attribute_ids[]` (the event co-occurrence
-INDICATES query in `build_relationships.py` and `run_pipeline.py` was
-removed in 2026-10). The
-legacy first-seen scalars `misp_event_id` / `misp_attribute_id` were
-removed pre-release — multi-event nodes are tracked via the array's full
-list of contributing events with `any(eid IN n.misp_event_ids WHERE eid IN
-$active_ids)` semantics.
+`misp_event_ids[]` / `misp_attribute_ids[]`; nodes carry no first-seen
+scalars `misp_event_id` / `misp_attribute_id`. A node from several events
+is tracked via the array's full list of contributing events with
+`any(eid IN n.misp_event_ids WHERE eid IN $active_ids)` semantics. No query
+in `build_relationships.py` or `run_pipeline.py` links by event
+co-occurrence.
 
-**Cross-environment traceability (2026-04, PR #33):** every node carries a
+**Cross-environment traceability:** every node carries a
 deterministic `n.uuid` = `uuid5(namespace, canonical(label, natural_key))`
 and every MISP-derived edge carries `r.src_uuid` / `r.trg_uuid`. Same input
 → same uuid on every Neo4j instance, so:
@@ -345,22 +334,20 @@ and every MISP-derived edge carries `r.src_uuid` / `r.trg_uuid`. Same input
 
 The implementation lives in [src/node_identity.py](../src/node_identity.py)
 and is wired into every node MERGE in `Neo4jClient` plus the 20 link
-steps in `build_relationships.py`. *Pre-release framework — no backfill
-script ships; a fresh baseline rerun stamps every uuid at write time. See
-[MIGRATIONS.md](MIGRATIONS.md) for the heal-by-rebaseline contract.*
+steps in `build_relationships.py`; every uuid is stamped at write time.
 
 ---
 
 ## Data Sources (12 collector sources + 2 placeholders)
 
 > **Single source of truth — `src/source_registry.py`.** Adding a new
-> data source is a one-line `Source(...)` entry there. Five legacy
-> registries (`neo4j_client.SOURCES`, `edgeguard.DEFAULT_SOURCES`,
+> data source is a one-line `Source(...)` entry there. Five registries
+> (`neo4j_client.SOURCES`, `edgeguard.DEFAULT_SOURCES`,
 > `config.SOURCE_TAGS`, `source_truthful_timestamps._RELIABLE_FIRST_SEEN_SOURCES`,
-> `MISPWriter.SOURCE_TAGS`) all derive from it; before the chip-5a
-> refactor each was hand-maintained and forgetting any one produced
-> a different silent-failure mode (see the module docstring for the
-> full failure-mode catalog).
+> `MISPWriter.SOURCE_TAGS`) all derive from it, because a registry
+> maintained by hand that misses a source fails silently, each in a
+> different way (see the module docstring for the full failure-mode
+> catalog).
 
 | Code | Full Name | Type | Collector Module |
 |------|-----------|------|------------------|
@@ -379,7 +366,7 @@ script ships; a fresh baseline rerun stamps every uuid at write time. See
 | healthcare | Healthcare Feeds | Threat Intel | healthcare_feed_collector.py (placeholder) |
 | energy | Energy Feeds | Threat Intel | energy_feed_collector.py (placeholder) |
 
-The registry also holds the MISP hub (`misp`, the fallback for an attribute without a known source tag) and, since 2026-10, two curated sources with no collector: `coreideas` (Core Ideas) and `misp_galaxy`. Their packages are imported once into MISP with `scripts/import_curated_package.py`, and the sync writes their claims as relationships of existing types without creating nodes ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Curated packages").
+The registry also holds the MISP hub (`misp`, the fallback for an attribute without a known source tag) and two curated sources with no collector: `coreideas` (Core Ideas) and `misp_galaxy`. Their packages are imported once into MISP with `scripts/import_curated_package.py`, and the sync writes their claims as relationships of existing types without creating nodes ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Curated packages").
 
 ---
 
@@ -411,8 +398,8 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/misp_collector.py` | Fetch/normalize events from MISP API (ingest) — **not** used in default baseline collector tier |
 | `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j**: `fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`, optional STIX helpers for CLI/export |
 | `src/run_pipeline.py` | CLI orchestration; optional **STIX flow** to Neo4j; collector steps to MISP |
-| `src/enrichment_jobs.py` | Post-sync enrichment: Vulnerability↔CVE `REFERS_TO` bridge, actor alias merge, Malware ATT&CK-id twin merge (`cobalt strike - s0154` into `cobalt strike`, 2026-10), indicator aging (2026-10-16, the rule in `src/indicator_aging.py`), campaigns, co-occurrence calibration, FIRST EPSS |
-| `src/cve_feed_enrichment.py` | FIRST EPSS on existing `CVE` nodes (2026-10): bounded download, parse, batched `SET`, removal for CVEs that left the feed; the one source written to Neo4j without MISP |
+| `src/enrichment_jobs.py` | Post-sync enrichment: Vulnerability↔CVE `REFERS_TO` bridge, actor alias merge, Malware ATT&CK-id twin merge (`cobalt strike - s0154` into `cobalt strike`), indicator aging (the rule in `src/indicator_aging.py`), campaigns, co-occurrence calibration, FIRST EPSS |
+| `src/cve_feed_enrichment.py` | FIRST EPSS on existing `CVE` nodes: bounded download, parse, batched `SET`, removal for CVEs that left the feed; the one source written to Neo4j without MISP |
 | `src/build_relationships.py` | Graph relationship builder (exact / MITRE-ID / scoped co-occurrence — **no `CONTAINS`**) |
 | `src/indicator_aging.py` | The one Indicator aging rule (basis, tiers, retirement, `aging_evaluated_at`) |
 | `src/campaign_evidence.py` | What a campaign rests on (`ATTRIBUTED_TO` / `USES_MALWARE`) |
@@ -490,7 +477,7 @@ query {
 | `Technique`, `Tactic` | ❌ EdgeGuard extension | Planned ISIM schema extension |
 | `Campaign` | ❌ EdgeGuard extension | Planned ISIM schema extension |
 
-Every type that maps an EdgeGuard node carries `tlp`, the node's TLP level (null when it has none; 2026-10). `vulnerabilities` returns the `Vulnerability` type built from the `CVE` nodes the sync writes (2026-10: it read the `Vulnerability` label, which the sync does not write, and returned an empty list); `cvssScore` is null for a CVE without CVSS, named by `cvssVersion` otherwise. An `indicators` filter on `md5` / `sha1` / `sha256` / `sha512` selects the stored `hash` indicators of that digest length.
+Every type that maps an EdgeGuard node carries `tlp`, the node's TLP level (null when it has none). `vulnerabilities` returns the `Vulnerability` type built from the `CVE` nodes the sync writes; `cvssScore` is null for a CVE without CVSS, named by `cvssVersion` otherwise. An `indicators` filter on `md5` / `sha1` / `sha256` / `sha512` selects the stored `hash` indicators of that digest length.
 
 See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for the proposed ISIM schema extension that would make Indicator/ThreatActor/Malware/Technique/Campaign queryable from ResilMesh directly.
 
@@ -505,9 +492,42 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 - [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — Airflow CLI, env vars, troubleshooting
 - [HEARTBEAT.md](HEARTBEAT.md) — Heartbeats, zombies, SIGKILL/OOM vs successful graph writes
 - [DATA_SOURCES_RATE_LIMITS.md](DATA_SOURCES_RATE_LIMITS.md) — API rate limits and cost reference
-- [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) — Doc ↔ code traceability (dated verification index); reading order: [README.md](../README.md#-recommended-reading-order-new-operators)
-
+- [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) — Historical record of doc ↔ code verification passes; reading order: [README.md](../README.md#-recommended-reading-order-new-operators)
 
 ---
 
-_Last updated: 2026-10-17 — zone combination example H1: two event tags (event names carry no zone). Same day: corrections against the code: 12 collector sources (2 flag-guarded) and 2 placeholders; the seven enrichment jobs; the node list (`CVE` from the sync, CVSS sub-nodes, Tactic, Tool, Campaign, Sector, Alert); `tag` is not part of the Indicator key; the `SOURCED_FROM` properties (`zones`, `stated_zones`, `stated_refs`, the indicator report values) and when `raw_data` is replaced; what `RUNS` rests on; the `confidence:*` tag is set on indicator attributes only; 20 link steps; the removed co-occurrence query; `VirusTotalCollector` has no DAG task; key files for the aging, campaign, sector, description, provenance, baseline-lock and KEV-update modules; the reading order is in README.md, not DOCUMENTATION_AUDIT.md. Prior: 2026-10-16 — relationship table: a link to a `Sector` names only the feeds whose `SOURCED_FROM.zones` give its sector, and a sector CISA's ICS advisory states is `advisory_sector` at 0.9 on `AFFECTS`. Same day: the indicator aging is evaluated at the database's current time, or at a node's later `aging_evaluated_at`; no task passes a time of the run. Same day: the enrichment order: the indicator aging (one rule for every Indicator, `src/indicator_aging.py`) runs before the campaign builder; `mark_inactive_nodes` (removed) no longer listed among the array-only consumers. Same day: the OTX collector's several-actor mark judged without the canonical reference (`several_actor_pulses_by_name`) serves the sync's run and is not stored. Prior: 2026-10-15 — same-pulse `ATTRIBUTED_TO` only from a pulse whose actors are one actor. Same day: post-sync enrichment adds the Malware ATT&CK-id twin merge (`merge_malware_attack_twins`). Same day: GraphQL: `vulnerabilities` reads the `CVE` nodes, every node type carries `tlp`, digest-type indicator filters; the REST `/health` note says 503 while degraded. Same day: post-sync enrichment adds FIRST EPSS (`src/cve_feed_enrichment.py`). Same day: relationship table: per-source `misp_event_ids[]` / `source_refs[]` on `SOURCED_FROM`, curated-package claims on the technique, `USES_MALWARE` / `USES_TOOL` and `EXPLOITS` rows, `TARGETS` from actors and malware; the edge-traceability paragraph no longer says the technique and attribution edges lack `r.misp_event_ids[]`; the curated sources and the `misp` hub named under the source inventory; after #193: a curated claim sets its label and confidence only on a link it creates, and actor / malware `EXPLOITS` carry the package's TLP. Prior: 2026-10-14 — MISP tag table: `cvss:` only for a CVE with a CVSS score (`cvss:none` for 0.0), `severity:unknown` without; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-06-11 — PR #126: ATTRIBUTED_TO row now documents the alias round-trip (actor/malware aliases survive the MISP round-trip via `alias:` tags) and the removal of the alias attribution-forgery branch (Q2 Branch 3). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._
+## Appendix: data written by earlier versions
+
+The main text assumes a graph built by a fresh baseline. A graph kept across an upgrade can hold data that earlier versions wrote differently:
+
+- **Generic `USES` technique edges.** Earlier versions wrote one generic `USES` edge from `ThreatActor`, `Malware` and `Tool` to `Technique` where the graph now has `EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE`. No migration script ships; a fresh baseline writes the specialized edge types directly.
+- **Edges without `r.misp_event_ids[]`.** [`scripts/backfill_edge_misp_event_ids.py`](../scripts/backfill_edge_misp_event_ids.py) with the [`migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`](../migrations/2026_05_edge_misp_event_ids_backfill_runbook.md) runbook backfills the array on `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS` only; a fresh baseline writes `sources[]`, `source_refs[]` and `misp_event_ids[]` on every relationship built from the sources.
+- **Nodes without `uuid`, edges without `src_uuid` / `trg_uuid`.** No backfill script ships; a fresh baseline stamps every uuid at write time. See [MIGRATIONS.md](MIGRATIONS.md) for the heal-by-rebaseline contract.
+- **Timestamps.** [TIMESTAMPS.md](TIMESTAMPS.md) describes the backwards-compatibility handling of data written before the source-truthful timestamp properties existed.
+
+---
+
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, the handling of graphs from earlier versions to the appendix.
+- 2026-10-17 — Corrected against the code: 12 collector sources (2 flag-guarded) and 2 placeholders, the seven enrichment jobs, the node list, `tag` outside the Indicator key, the `SOURCED_FROM` properties and when `raw_data` is replaced, what `RUNS` rests on, `confidence:*` tags on indicator attributes only, 20 link steps, no DAG task for `VirusTotalCollector`, further key files, and the zone example with two event tags.
+- 2026-10-16 — Links to a `Sector` name only the feeds whose `SOURCED_FROM.zones` give the sector; `AFFECTS` is `advisory_sector` (0.9) where CISA's ICS advisory states the sector.
+- 2026-10-16 — One indicator aging rule for every Indicator (`src/indicator_aging.py`), evaluated at the database's current time or a node's later `aging_evaluated_at` and run before the campaign builder; `mark_inactive_nodes` removed.
+- 2026-10-16 — Campaigns rest on `ATTRIBUTED_TO` or `USES_MALWARE` (`src/campaign_evidence.py`); a campaign whose actor has neither link is deleted.
+- 2026-10-16 — The OTX collector's several-actor mark is stored on `Indicator` nodes (`several_actor_pulses`); the mark judged without the canonical reference serves only the sync.
+- 2026-10-15 — Same-pulse `ATTRIBUTED_TO` only from a pulse whose actors are one actor; the Malware ATT&CK-id twin merge and FIRST EPSS join the post-sync jobs.
+- 2026-10-15 — GraphQL `vulnerabilities` reads the `CVE` nodes (it read the `Vulnerability` label, which the sync does not write, and returned an empty list); every node type carries `tlp`; digest-length indicator filters; REST `/health` answers 503 while degraded.
+- 2026-10-15 — Curated packages (`coreideas`, `misp_galaxy`, introduced 2026-10-14) add claims to the technique, `USES_MALWARE` / `USES_TOOL` and `EXPLOITS` links; a claim sets its label and confidence only on a link it creates, and actor / malware `EXPLOITS` carry the package's TLP.
+- 2026-10-14 — Every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]`; the relationship properties `source_id`, `source_ids` and `report_ids` dropped.
+- 2026-10-14 — Campaign membership renamed from `PART_OF` to `PART_OF_CAMPAIGN`, since `PART_OF` is ResilMesh's asset hierarchy.
+- 2026-10-14 — `cvss:` MISP tag only for a CVE with a CVSS score (unscored CVEs had been tagged `cvss:low`), `severity:unknown` without one.
+- 2026-10-10 — Report-scoped linking replaced whole-event co-occurrence: `INDICATES` and `ATTRIBUTED_TO` only between items of one OTX pulse, `EXPLOITS` only from CVE tags, OTX `attack_ids` as `reported_techniques` (`otx_pulse`, 0.6) instead of `mitre_explicit`; TLP tag on every attribute; `SUBTECHNIQUE_OF`, `USES_MALWARE` / `USES_TOOL` and `TARGETS` from actors and malware added.
+- 2026-06-11 — Actor and malware aliases survive the MISP round-trip via `alias:` tags; the alias attribution-forgery branch removed.
+- 2026-04-23 — `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS` carry `r.misp_event_ids[]` (backfill script for older graphs); the scalar `_misp_event_id` removed.
+- 2026-04-18 — `src/source_registry.py` became the single source registry from which five registries derive; source-truthful timestamps on `SOURCED_FROM` edges with `x_edgeguard_first_seen_inferred` on STIX export.
+- 2026-04-17 — The scalars `misp_event_id` / `misp_attribute_id` replaced by the arrays (array-only provenance).
+- 2026-04-16 — Deterministic node `uuid` and edge `src_uuid` / `trg_uuid` (`src/node_identity.py`); `misp_attribute_ids[]` from `attr.uuid`.
+- 2026-04-15 — The generic `USES` technique edge split into `EMPLOYS_TECHNIQUE` (attribution) and `IMPLEMENTS_TECHNIQUE` (capability).
+- 2026-03 — Zone resolution merges attribute, event and event-name zones and prefers specific zones over `global` (fixes for zone combination and fallback override).

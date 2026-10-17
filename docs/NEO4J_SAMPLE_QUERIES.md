@@ -20,10 +20,14 @@ ORDER BY count DESC
 ```
 
 ### Count by zone
+
+`zone` is a list (for example `['healthcare', 'energy']`), so the query unwinds it and counts each node once per zone, as `get_stats()` does ([DATA_QUALITY.md](DATA_QUALITY.md#zone-counts-in-the-statistics)):
+
 ```cypher
-MATCH (n) 
+MATCH (n)
 WHERE n.zone IS NOT NULL
-RETURN n.zone as zone, count(n) as count
+UNWIND n.zone AS zone
+RETURN zone, count(DISTINCT n) AS count
 ORDER BY count DESC
 ```
 
@@ -31,11 +35,11 @@ ORDER BY count DESC
 
 ## Vulnerabilities
 
-> **Label note (verified 2026-05-25 against the live graph):** the MISP→Neo4j sync routes every CVE through `merge_cve()` → the **`:CVE`** label (`MISPToNeo4jSync._sync_to_neo4j_chunk` in `src/run_misp_to_neo4j.py`: CVEs with and without CVSS sub-nodes alike). The older **`:Vulnerability`** label is legacy and is **empty** on current baselines (the production snapshot held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may still hold legacy nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
+> **Label note:** the MISP→Neo4j sync routes every CVE through `merge_cve()` → the **`:CVE`** label (`MISPToNeo4jSync._sync_to_neo4j_chunk` in `src/run_misp_to_neo4j.py`: CVEs with and without CVSS sub-nodes alike). The **`:Vulnerability`** label is **empty** on current baselines (the production snapshot of 2026-05-25 held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may hold `:Vulnerability` nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
 
-> **Scores (2026-10):** `c.cvss_score` / `c.severity` are the base score and rating of the CVE's first CVSS in the order v3.1 → v3.0 → v2 → v4.0, and `c.cvss_version` names the version. A CVE without any CVSS (rejected, or awaiting NVD analysis without a CNA score) has a null score and severity `UNKNOWN`. Graphs built before 2026-10 show such CVEs as 3.0 / LOW.
+> **Scores:** `c.cvss_score` / `c.severity` are the base score and rating of the CVE's first CVSS in the order v3.1 → v3.0 → v2 → v4.0, and `c.cvss_version` names the version. A CVE without any CVSS (rejected, or awaiting NVD analysis without a CNA score) has a null score and severity `UNKNOWN`.
 >
-> **Attack vector (2026-10):** `c.attack_vector` is the attack vector of the same CVSS, in NVD's words — `NETWORK`, `ADJACENT_NETWORK`, `LOCAL`, `PHYSICAL` — and null without CVSS. Graphs built before 2026-10 mix the vector-string letters (`N`, `L`, `A`, `P`) with the words and `UNKNOWN`, so `c.attack_vector = 'NETWORK'` there misses most network-exploitable CVEs (3,305 matches on the hosted graph of 2026-10-15; 100,779 after a re-merge).
+> **Attack vector:** `c.attack_vector` is the attack vector of the same CVSS, in NVD's words — `NETWORK`, `ADJACENT_NETWORK`, `LOCAL`, `PHYSICAL` — and null without CVSS.
 
 ### Network-exploitable CVEs
 ```cypher
@@ -75,8 +79,7 @@ LIMIT 20
 
 ### Find actively exploited CVEs (CISA KEV)
 `cisa_exploit_add` (date added to the CISA Known Exploited Vulnerabilities
-list) is range-indexed (PR #126). On pre-June-2026 baselines only
-NVD-enriched CVEs carry it; after a fresh baseline CISA-only CVEs do too.
+list) is range-indexed. Both NVD-enriched and CISA-only CVEs carry it.
 
 ```cypher
 MATCH (c:CVE)
@@ -117,10 +120,8 @@ LIMIT 20
 ```
 
 ### Resolve an actor by name OR alias ("Cozy Bear" → APT29)
-`aliases` is populated by the PR #126 alias round-trip — on baselines from
-before June 2026 the property is empty (0/917 actors), so this query only
-resolves canonical names there. `a.name` is stored lowercase; aliases keep
-display case.
+`aliases` is populated by the alias round trip (MISP `alias:` tags). `a.name`
+is stored lowercase; aliases keep display case.
 
 ```cypher
 WITH 'Cozy Bear' AS name
@@ -137,12 +138,10 @@ LIMIT 5
 
 ### Find techniques by tactic phase
 ```cypher
-// PR-N33 docs audit (2026-04-26): the previous `WHERE 'Windows' IN t.platforms`
-// query was broken — `merge_technique` in src/neo4j_client.py never sets
-// `t.platforms` (it writes `tactic_phases`, `detection`, `is_subtechnique`
-// (from the dotted id), `attack_domain`, `deprecated`, `name`, `description`
-// and `description_source`), so the query silently returned zero rows.
-// Use `tactic_phases` instead, which IS populated:
+// `merge_technique` in src/neo4j_client.py writes `tactic_phases`, `detection`,
+// `is_subtechnique` (from the dotted id), `attack_domain`, `deprecated`, `name`,
+// `description` and `description_source`; it sets no `t.platforms`, so a filter
+// on platforms returns zero rows. Filter on `tactic_phases`, which is populated:
 MATCH (t:Technique)
 WHERE 'lateral-movement' IN t.tactic_phases
 RETURN t.mitre_id, t.name
@@ -163,16 +162,16 @@ RETURN m.name, t.mitre_id, t.name, r.match_type, r.confidence_score
 LIMIT 25
 ```
 
-Drop the `WHERE` to also see the OTX-reported links (`otx_pulse`, 0.6, step 6b, 2026-10) and the curated ones (0.85).
+Drop the `WHERE` to also see the OTX-reported links (`otx_pulse`, 0.6, step 6b) and the curated ones (0.85).
 
-> **History:** Prior to 2026-04 this edge was a generic `USES`. It was renamed to `IMPLEMENTS_TECHNIQUE` to distinguish malware/tool capability from actor attribution (`EMPLOYS_TECHNIQUE`). Both collapse back to STIX 2.1 `relationship_type: "uses"` on export. To query all three specialized types at once:
->
-> ```cypher
-> MATCH (n)-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]->(t:Technique)
-> RETURN labels(n)[0] AS source_label, n.name AS source_name,
->        type(r) AS rel_type, t.mitre_id, t.name, r.confidence_score
-> LIMIT 50
-> ```
+`IMPLEMENTS_TECHNIQUE` (malware/tool capability) is distinct from `EMPLOYS_TECHNIQUE` (actor attribution); both become STIX 2.1 `relationship_type: "uses"` on export. To query all three specialized technique types at once:
+
+```cypher
+MATCH (n)-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]->(t:Technique)
+RETURN labels(n)[0] AS source_label, n.name AS source_name,
+       type(r) AS rel_type, t.mitre_id, t.name, r.confidence_score
+LIMIT 50
+```
 
 ---
 
@@ -190,10 +189,9 @@ LIMIT 10
 
 ## Edge provenance (`r.misp_event_ids[]`, `r.sources[]`, `r.source_refs[]`)
 
-PR-N26 wired `r.misp_event_ids[]` onto edges from `build_relationships.py`
-for 4 edge types: `INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`. Since
-2026-10 every relationship built from the sources carries it, together with
-`r.sources[]` and `r.source_refs[]` (see "Who asserts a link" below).
+Every relationship built from the sources carries `r.misp_event_ids[]`,
+together with `r.sources[]` and `r.source_refs[]` (see "Who asserts a link"
+below).
 
 ### Indicators with their MISP-event provenance edges
 
@@ -222,7 +220,7 @@ LIMIT 50
 ```
 
 ```cypher
-// Report-level pivot (2026-10): other IoCs whose INDICATES link cites the same source
+// Report-level pivot: other IoCs whose INDICATES link cites the same source
 // record, e.g. the same OTX pulse ("alienvault_otx:<pulse id>" in r.source_refs).
 MATCH (a:Indicator {value: $known_value})-[ra:INDICATES]->(:Malware)
 UNWIND coalesce(ra.source_refs, []) AS ref
@@ -232,11 +230,11 @@ RETURN ref, b.value, m.name
 LIMIT 50
 ```
 
-### Who asserts a link, and where is the record (2026-10)
+### Who asserts a link, and where is the record
 
 Every relationship built from the sources carries `r.sources[]` (who asserts it), `r.source_refs[]`
 (the sources' own record ids, `"<source>:<id>"`) and `r.misp_event_ids[]`
-(`docs/KNOWLEDGE_GRAPH.md`, "Relationship provenance"). On a link to a `Sector` (2026-10-16) they name only
+(`docs/KNOWLEDGE_GRAPH.md`, "Relationship provenance"). On a link to a `Sector` they name only
 the feeds that gave that sector.
 
 ```cypher
@@ -257,7 +255,7 @@ ORDER BY links DESC
 LIMIT 25
 ```
 
-### Measuring CISA ICS and ATT&CK for ICS (2026-10-16)
+### Measuring CISA ICS and ATT&CK for ICS
 
 **CISA ICS.** A sector CISA's ICS advisory states is a statement of where the affected product is
 **deployed**: the CVE's `AFFECTS` link to the sector carries `match_type = 'advisory_sector'` (0.9), and
@@ -266,9 +264,7 @@ only the advisories whose sector note names that sector (the edge's `stated_refs
 not every advisory that names the CVE. It is never a `TARGETS`
 link, so it never answers "who targets energy". A sector EdgeGuard infers from text (NVD, KEV, OTX) is
 `zone_classification` (0.5): **a query that filters sector links on `match_type = 'zone_classification'`
-alone misses CISA's statements**; filter on `type(r)` instead, or on both labels. On a graph built before
-2026-10-16 `r.sources` of a sector link names every feed of the node, so count CISA there through MISP (the
-`source:CISA-ICS` attributes and their `zone:*` tags) or through `SOURCED_FROM.raw_data`, not `r.sources`.
+alone misses CISA's statements**; filter on `type(r)` instead, or on both labels.
 
 ```cypher
 // What CISA ICS states, per sector: by CISA alone, or also inferred by another feed
@@ -339,21 +335,41 @@ ORDER BY size(ics_techniques) DESC
 LIMIT 25
 ```
 
-### Backfill candidates — edges WITHOUT misp_event_ids
+---
 
-Only for a graph built before PR-N26 (2026-04). The script copies every MISP event of the node onto an edge with an empty list, not the per-source / per-sector events the pipeline writes since 2026-10, so it is not needed on a graph built since then.
+*Save queries to test the prototype*
+
+## Appendix: data written by earlier versions
+
+The queries above assume a graph built from a fresh baseline. On a graph kept across an upgrade:
+
+- **CVE scores.** Graphs built before 2026-10-15 show a CVE without any CVSS as 3.0 / LOW.
+- **Attack vector.** Graphs built before 2026-10-15 mix the vector-string letters (`N`, `L`, `A`, `P`) with the words and `UNKNOWN`, so `c.attack_vector = 'NETWORK'` there misses most network-exploitable CVEs (3,305 matches on the hosted graph of 2026-10-15; 100,779 after a re-merge).
+- **`cisa_exploit_add` and `aliases`.** On baselines built before June 2026 only NVD-enriched CVEs carry `cisa_exploit_add`, and the `aliases` of `ThreatActor` nodes are empty (0/917 actors), so the alias-aware actor query resolves only canonical names there.
+- **CISA ICS on sector links.** On a graph built before 2026-10-16 `r.sources` of a sector link names every feed of the node, so count CISA there through MISP (the `source:CISA-ICS` attributes and their `zone:*` tags) or through `SOURCED_FROM.raw_data`, not `r.sources`.
+- **Edges without `misp_event_ids`.** A graph built before 2026-04-23 has relationships without the list. `scripts/backfill_edge_misp_event_ids.py` copies every MISP event of the node onto such an edge of the types `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS`, not the per-source / per-sector events the pipeline writes, so it is not needed on a graph built since then. To estimate its scope before running it:
 
 ```cypher
-// Run before scripts/backfill_edge_misp_event_ids.py to estimate scope.
-// Pre-PR-N26 edges have no array; post-PR-N26 edges always do.
+// Edges written before 2026-04-23 have no array; later edges always do.
 MATCH ()-[r]->()
 WHERE type(r) IN ['INDICATES', 'EXPLOITS', 'TARGETS', 'AFFECTS']
   AND (r.misp_event_ids IS NULL OR size(r.misp_event_ids) = 0)
 RETURN type(r) AS edge_type, count(r) AS gap
 ```
 
----
+_Last updated: 2026-10-18_
 
-_Last updated: 2026-10-17 — the `IMPLEMENTS_TECHNIQUE` sample filters on `mitre_explicit` (OTX-reported and curated links share the type since 2026-10); the code references name `MISPToNeo4jSync._sync_to_neo4j_chunk` and `Neo4jClient.apply_sector_labels` instead of stale line numbers; the properties `merge_technique` writes; the backfill-candidates query is for graphs built before PR-N26 only. Prior: 2026-10-16 — "Measuring CISA ICS and ATT&CK for ICS": CISA's sector statements by label (`advisory_sector` on `AFFECTS`) and through `SOURCED_FROM.stated_zones`, the advisories a sector link cites (only those that name the sector, `stated_refs`), `IN_TACTIC` from an ICS technique to an ICS tactic, the warning that a filter on `zone_classification` alone misses them, and ATT&CK for ICS through the links into ICS techniques; a link to a `Sector` names only the feeds that gave the sector. Prior: 2026-10-15 — attack-vector note (`c.attack_vector` from the CVSS that gives the score, NVD's words, null without CVSS) and the network-exploitable CVE sample; edge-provenance section: `r.misp_event_ids[]` is on every relationship built from the sources (no longer only the four PR-N26 types); the MISP-event pivot states that events are per-source, per-day buckets, and a report-level pivot on `r.source_refs[]` was added. Prior: 2026-10-14 — score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW) and the sample for CVEs without a CVSS 3.x / 2 score; added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
+## History
 
-*Save queries to test the prototype*
+- 2026-10-18 — *Count by zone* unwinds the `zone` list and counts each node once per zone.
+- 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and queries for graphs built by earlier versions to the appendix.
+- 2026-10-17 — The `IMPLEMENTS_TECHNIQUE` sample filters on `mitre_explicit`, because OTX-reported and curated links share the type; code references name functions instead of line numbers; the properties `merge_technique` writes are listed.
+- 2026-10-16 — "Measuring CISA ICS and ATT&CK for ICS": CISA's sector statements (`advisory_sector` on `AFFECTS`, `SOURCED_FROM.stated_zones`, the advisories a sector link cites) and ATT&CK for ICS through the links into ICS techniques; a link to a `Sector` names only the feeds that gave the sector.
+- 2026-10-15 — Attack-vector note and the network-exploitable CVE sample; `r.misp_event_ids[]` on every relationship built from the sources; the MISP-event pivot states that events are per-source, per-day buckets, and a report-level pivot on `r.source_refs[]` was added.
+- 2026-10-14 — Score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW), the sample for CVEs without a CVSS 3.x / 2 score, and the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`).
+- 2026-06-12 — CISA-KEV sample (`cisa_exploit_add`, range-indexed), the alias-aware actor-resolve sample, and the pointer to the test-pinned `_TI_GRAPHRAG` catalog.
+- 2026-05-25 — The Vulnerabilities samples query the `:CVE` label the sync writes instead of the empty `:Vulnerability` label, verified against the live graph.
+- 2026-04-28 — Sectors are stored both on the `zone` property and as secondary labels after `apply_sector_labels()`; the `zone` property is recommended for portable queries.
+- 2026-04-26 — The technique sample filters on `t.tactic_phases` instead of the never-written `t.platforms`; the edge-provenance section was added.
+- 2026-04-15 — The generic `USES` edge to a technique became `IMPLEMENTS_TECHNIQUE` for malware and tools, distinct from `EMPLOYS_TECHNIQUE` for actors.
+- 2026-03-28 — First version of the sample queries.

@@ -4,7 +4,6 @@ Interactive browser-based visualization for the EdgeGuard knowledge graph. Built
 
 **File:** [`docs/visualization.html`](visualization.html)
 **API endpoint:** `GET /graph/explore`
-**Last updated:** 2026-10-17 — the CVE view's `description` (first 200 characters) and `description_source` (of a CVE's twins, the text the source ranking keeps); the Cypher pattern comments use `//` (`--` is not a Cypher comment). Prior: 2026-10-15 — Quick Start: when the monitoring stack's Grafana holds port 3000, serve `docs/` on port 3001 and append `http://localhost:3001` to `EDGEGUARD_CORS_ORIGINS`; `limit` caps the rows each view reads, not the nodes; the CVE view's Cypher comment says which label carries the score and KEV fields (`:CVE`). Same day: the default view (`attacks`) matches `(Indicator)-[:INDICATES]->(Malware)`, the direction every writer creates (it matched the reverse direction and a `DROPS` type that nothing writes, and was always empty); edges point the way the graph relationship does and are listed once; Quick Start serves the page from an origin the default CORS allowlist accepts (opening the file directly is refused) and says how to add a presenter's origin with `EDGEGUARD_CORS_ORIGINS`; edge style table matches the page. Prior: 2026-04-26 — PR-N33 docs audit: clarified that the "Malware (default)" view's API enum value is `attacks` (was confusing — heading said "Malware" but the API parameter says `attacks`). Prior: 2026-03-27.
 
 ---
 
@@ -92,10 +91,8 @@ the malware families and sector triangles the row below.
 ```cypher
 MATCH (i:Indicator)-[:INDICATES]->(m:Malware)
 // Both ends EdgeGuard-created or enriched; zone filter on the indicator.
-// 2026-10: every writer (build_relationships, the MISP → Neo4j sync, the
-// alert path) creates (Indicator)-[:INDICATES]->(Malware). The view
-// matched (Malware)-[INDICATES|DROPS]->(Indicator) before — a direction
-// and a DROPS type that nothing writes — and was always empty.
+// Every writer (build_relationships, the MISP → Neo4j sync, the alert path)
+// creates (Indicator)-[:INDICATES]->(Malware), the direction matched here.
 ```
 
 ### Actors
@@ -110,9 +107,8 @@ MATCH (i:Indicator)-[:INDICATES]->(m:Malware)
 ```cypher
 MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
 OPTIONAL MATCH (t)-[:IN_TACTIC]->(tac:Tactic)
-// EMPLOYS_TECHNIQUE is the actor→technique edge since the 2026-04 split
-// of the generic USES relationship. For malware/tool capability instead,
-// use IMPLEMENTS_TECHNIQUE.
+// EMPLOYS_TECHNIQUE is the actor→technique edge. For malware/tool
+// capability instead, use IMPLEMENTS_TECHNIQUE.
 ```
 
 ### Indicators
@@ -131,7 +127,7 @@ ORDER BY n.confidence_score DESC
 
 ### CVEs (Vulnerability Landscape)
 
-**What it shows:** Vulnerabilities sized by CVSS score. CISA KEV entries are highlighted with a red glow and border. Each CVE node carries `description` (first 200 characters) and `description_source` (2026-10-16): of a CVE's `:CVE` and `:Vulnerability` twins, the text the source ranking keeps (NVD > CISA KEV > CISA ICS > other; at an equal rank, the twin that names a source).
+**What it shows:** Vulnerabilities sized by CVSS score. CISA KEV entries are highlighted with a red glow and border. Each CVE node carries `description` (first 200 characters) and `description_source`: of a CVE's `:CVE` and `:Vulnerability` twins, the text the source ranking keeps (NVD > CISA KEV > CISA ICS > other; at an equal rank, the twin that names a source).
 
 **Layout:** Force-directed — critical/KEV CVEs appear largest.
 
@@ -197,7 +193,7 @@ GET /graph/explore?view={view}&zone={zone}&limit={limit}
 Edges named after a graph relationship (`INDICATES`, `EMPLOYS_TECHNIQUE`, `IN_TACTIC`) point the
 way the relationship does. `BELONGS_TO` (indicator → sector) and `IN_ZONE` (CVE → sector) are not
 graph relationships: they draw the node's `zone` property as a link to a sector node. Each
-(source, target, type) edge is listed once (2026-10).
+(source, target, type) edge is listed once.
 
 **Authentication:** requires `X-API-Key` header (same key as all other API endpoints).
 
@@ -249,3 +245,17 @@ No build step, no npm, no bundler — a single self-contained HTML file.
 ### Custom styling
 
 All Cytoscape.js styles are defined inline in the `cy` initialization. Node colors, sizes, and shapes can be modified there. CSS variables at the top of `<style>` control the overall theme.
+
+---
+
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
+- 2026-10-17 — The CVE view states `description` (first 200 characters) and `description_source` (of a CVE's twins, the text the source ranking keeps); the Cypher pattern comments use `//`, because `--` is not a Cypher comment.
+- 2026-10-15 — Quick Start serves the page from an origin the default CORS allowlist accepts (a page opened from disk is refused), says how to add a presenter's origin, and gives port 3001 when Grafana holds port 3000; `limit` caps the rows each view reads, not the nodes; the CVE view names `:CVE` as the label that carries the score and KEV fields.
+- 2026-10-15 — The default view (`attacks`) matches `(Indicator)-[:INDICATES]->(Malware)`, the direction every writer creates; it had matched the reverse direction and a `DROPS` type that nothing writes, and was always empty. Edges point the way the graph relationship does and are listed once.
+- 2026-04-26 — The "Malware" view heading names its API enum value, `attacks`.
+- 2026-04-15 — The Actors view follows `EMPLOYS_TECHNIQUE`, which replaced the generic `USES` relationship from an actor to a technique.
+- 2026-03-27 — First version of the Graph Explorer guide.

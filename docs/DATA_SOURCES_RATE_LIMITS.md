@@ -1,6 +1,5 @@
 # EdgeGuard Data Sources - API Documentation & Rate Limits
 
-**Last Updated:** 2026-10-17  
 **Purpose:** Complete reference for setting up a new EdgeGuard instance. For integration behaviour (e.g. NVD published-date windows), see [`DATA_SOURCES.md`](DATA_SOURCES.md).
 
 ---
@@ -27,7 +26,7 @@
 
 ## Detailed Source Documentation
 
-### 1. AlienVault OTX (Now LevelBlue OTX)
+### 1. AlienVault OTX (LevelBlue OTX)
 
 **Website:** https://otx.alienvault.com  
 **Documentation:** https://otx.alienvault.com/api
@@ -80,7 +79,7 @@
 ### 3. CISA KEV (Known Exploited Vulnerabilities)
 
 **Website:** https://www.cisa.gov/known-exploited-vulnerabilities-catalog  
-**Data Feed:** `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` (this is what `src/collectors/cisa_collector.py:81` actually fetches; the `/json` URL the website used to redirect to no longer resolves).
+**Data Feed:** `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` (the file `src/collectors/cisa_collector.py:81` fetches; the `/json` address under the catalogue page does not resolve).
 
 | Aspect | Details |
 |--------|---------|
@@ -111,8 +110,8 @@
 | **Update Frequency** | Quarterly releases |
 
 **Data Download (ground truth — `MITRECollector.attack_url` in `src/collectors/mitre_collector.py`; with `EDGEGUARD_ENABLE_MITRE_ICS=true` (default off) also the ATT&CK for ICS bundle `https://raw.githubusercontent.com/mitre/cti/master/ics-attack/ics-attack.json`, `MITRE_ICS_ATTACK_URL` in `src/config.py`, overridable):**
-- **Currently used (legacy):** `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` — the STIX 2.0/2.1 enterprise bundle from MITRE's `mitre/cti` repo.
-- **Recommended for future migration:** https://github.com/mitre-attack/attack-stix-data is MITRE's newer canonical STIX 2.1 dataset; planned for a follow-up PR but **not yet wired** into the collector. Don't update the docs to claim it's the "canonical dataset EdgeGuard ingests" until the collector actually points there.
+- **Used:** `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` — the STIX 2.0/2.1 enterprise bundle from MITRE's `mitre/cti` repo.
+- **Not used:** https://github.com/mitre-attack/attack-stix-data, MITRE's newer canonical STIX 2.1 dataset. A migration to it is planned; the collector does not read it.
 
 **Pricing:** Free
 
@@ -173,7 +172,7 @@
 - **Professional:** $150/month, 100,000 lookups/day
 - **Enterprise:** Custom, 300,000+ lookups/day
 
-**EdgeGuard usage (free tier):** `collect_abuseipdb` (daily DAG and baseline) downloads the blacklist with `GET /blacklist`; the source key check uses `GET /check` and spends no blacklist request. A blacklist answer of HTTP 429 means the day's 5 blacklist requests are spent: the request returns at once, without the rate-limit backoff, and the task fails (2026-10; it used to stay green with a count of 0). A fetched, non-empty answer is kept in `<EDGEGUARD_STATE_DIR or ./state>/abuseipdb_blacklist_cache.json`, and a run that asks for the same parameters reuses it without a request while it was fetched on the current UTC day and is at most `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS` (default 20) old; `0` turns the cache off. See docs/COLLECTORS.md § 5 and docs/RUNBOOK.md, "AbuseIPDB daily blacklist quota".
+**EdgeGuard usage (free tier):** `collect_abuseipdb` (daily DAG and baseline) downloads the blacklist with `GET /blacklist`; the source key check uses `GET /check` and spends no blacklist request. A blacklist answer of HTTP 429 means the day's 5 blacklist requests are spent: the request returns at once, without the rate-limit backoff, and the task fails. A fetched, non-empty answer is kept in `<EDGEGUARD_STATE_DIR or ./state>/abuseipdb_blacklist_cache.json`, and a run that asks for the same parameters reuses it without a request while it was fetched on the current UTC day and is at most `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS` (default 20) old; `0` turns the cache off. See docs/COLLECTORS.md § 5 and docs/RUNBOOK.md, "AbuseIPDB daily blacklist quota".
 
 ---
 
@@ -212,7 +211,7 @@
 | **Rate Limit** | None (CSV download) |
 | **Data Provided** | Banking trojan C&C IPs, malware family |
 | **Format** | CSV |
-| **Update Frequency** | Daily by design; abuse.ch has not updated the feed since 2026-03-04 |
+| **Update Frequency** | Daily by design; abuse.ch last updated the feed on 2026-03-04 |
 
 **Download URLs:**
 - IP blocklist (last 30 days, regular runs): https://feodotracker.abuse.ch/downloads/ipblocklist.csv
@@ -356,4 +355,12 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-10-17 — quick reference table and § 2 NVD: the NVD key is optional (5 requests per 30 s without it; it said required); quick reference table: the KEV feed is a JSON download; § 4 MITRE: the download is `MITRECollector.attack_url` (it cited line 58), plus the ATT&CK for ICS bundle with `EDGEGUARD_ENABLE_MITRE_ICS=true`; the "Getting an API key" labels are in English; setup checklist: `THREATFOX_API_KEY` added, every source key is optional (the collector is skipped without it, NVD runs slower), and the column names the environment variable (the AbuseIPDB and ThreatFox keys are read in the collectors, not in `config.py`). Prior: 2026-10-16 — § 3 CISA KEV: the line of the collector that names the feed URL (`cisa_collector.py:81`). Same day: § 6 AbuseIPDB, the quick reference table and the rate-limit recommendations: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests, and how EdgeGuard uses them (a blacklist 429 fails `collect_abuseipdb` at once; a fetched, non-empty answer is reused by a run with the same parameters on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`). Prior: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — The NVD key is optional (5 requests per 30 s without it; the page said required); the KEV feed listed as a JSON download; the MITRE download named as `MITRECollector.attack_url`, plus the ATT&CK for ICS bundle with `EDGEGUARD_ENABLE_MITRE_ICS=true`; the setup checklist adds `THREATFOX_API_KEY`, names the environment variables and marks every source key optional; main text limited to current behaviour, with the change history in this section.
+- 2026-10-16 — AbuseIPDB: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests; a blacklist 429 fails `collect_abuseipdb` at once (the task had stayed green with a count of 0); a fetched, non-empty answer is reused on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`; the collector line that names the KEV feed URL cited.
+- 2026-10-15 — One entry removed from the alternative and premium sources.
+- 2026-04-26 — The CISA KEV feed URL corrected (the page named the non-existent `/known-exploited-vulnerabilities-catalog/json` address); the MITRE ATT&CK labels corrected to the `mitre/cti` bundle the collector reads, with `attack-stix-data` as a planned migration.
+- 2026-03-27 — Reference of source APIs, rate limits and the setup checklist.

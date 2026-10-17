@@ -51,12 +51,12 @@ Each source uses different attribute types. We normalize to a standard set:
 | Our Standard | MISP | OTX | Notes |
 |--------------|------|-----|-------|
 | `ipv4` | ip-src, ip-dst (IPv4 address) | IPv4 | IPv4 addresses |
-| `ipv6` | ip-src, ip-dst (IPv6 address) | IPv6 | IPv6 addresses: MISP has one type for both families, so the address decides (2026-10) |
+| `ipv6` | ip-src, ip-dst (IPv6 address) | IPv6 | IPv6 addresses: MISP has one type for both families, so the address decides |
 | `domain` | domain, hostname | domain | DNS names |
 | `url` | url | URL | Web addresses |
-| `hash` | md5, sha1, sha256, sha512 — chosen by the length of the hex digest (2026-10) | MD5, SHA1, SHA256 (`FileHash-MD5` / `-SHA1` / `-SHA256`) | File hashes. Import hashes, PE hashes and JA3 fingerprints from OTX are not collected (2026-10) |
-| `x509-fingerprint-sha1` | x509-fingerprint-sha1 | — (SSLCertFingerprint is not collected) | SHA-1 fingerprints of TLS certificates (SSL Blacklist, 2026-10) |
-| `email` | email-src, email-dst | EMAIL, email | Email addresses (OTX e-mail indicators are no longer typed as domains, 2026-10) |
+| `hash` | md5, sha1, sha256, sha512 — chosen by the length of the hex digest | MD5, SHA1, SHA256 (`FileHash-MD5` / `-SHA1` / `-SHA256`) | File hashes. Import hashes, PE hashes and JA3 fingerprints from OTX are not collected |
+| `x509-fingerprint-sha1` | x509-fingerprint-sha1 | — (SSLCertFingerprint is not collected) | SHA-1 fingerprints of TLS certificates (SSL Blacklist) |
+| `email` | email-src, email-dst | EMAIL, email | Email addresses (OTX e-mail indicators are typed as e-mail, not as domains) |
 | `cve` | vulnerability | CVE | CVE IDs |
 
 ### 2.2 Normalization Logic
@@ -121,9 +121,9 @@ Examples from `SECTOR_KEYWORDS` (the full lists, including negative keywords, ar
 | Energy | scada, power grid, electric grid, energy sector, ICS vendors and products (siemens, simatic …, § 3.6b) |
 | Finance | banking, banking trojan, payment gateway, trading platform, swift payment |
 
-### 3.4 Current Data Distribution
+### 3.4 Measured Data Distribution
 
-**As of 2026-03-02:**
+**Measured on the graph of 2026-03-02:**
 
 | Sector | Nodes | % | Primary Source |
 |--------|-------|---|-----------------|
@@ -152,7 +152,7 @@ We tested a hybrid approach (keyword + token overlap fallback) vs. keyword-only:
 | Keyword | ✅ Sufficient - no improvement from hybrid |
 | Hybrid | Same accuracy as keyword-only |
 
-**Conclusion:** Keep keyword as default. Hybrid provides no benefit on current data.
+**Conclusion:** Keyword classification is the default. Hybrid provides no benefit on the tested data.
 
 ### 3.6 Malware Families (Not Used for Sectors)
 
@@ -164,13 +164,13 @@ keywords in the record's text or from a sector the source states itself (OTX pul
 MalwareBazaar IOCs are therefore `global` unless their text names a sector:
 `detect_zones_from_text("QakBot C&C server")` returns `['global']`.
 
-### 3.6b CPE Vendor and Product Vocabulary (2026-10)
+### 3.6b CPE Vendor and Product Vocabulary
 
-**Problem:** the NVD collector already scores CPE vendor / product tokens (`configurations_to_zone_text` → the `comment` field of the item), but `SECTOR_KEYWORDS['energy']` contained no vendor names. Measured on the hosted graph (25k-CVE NVD sample, 2026-10-10): Siemens 238 CVEs with 4 tagged energy, Rockwell Automation 49 / 0, Fuji Electric 29 / 0, Growatt 30 / 0, ABB 28 / 0, Advantech 26 / 0, Delta Electronics 25 / 0, Phoenix Contact 14 / 0, Schneider Electric 10 / 0, Hitachi Energy 7 / 0.
+**Why:** the NVD collector scores CPE vendor / product tokens (`configurations_to_zone_text` → the `comment` field of the item), and these tokens match a sector only when the vocabulary names the vendor. Measured on the hosted graph (25k-CVE NVD sample, 2026-10-10) with a vocabulary without vendor names: Siemens 238 CVEs with 4 tagged energy, Rockwell Automation 49 / 0, Fuji Electric 29 / 0, Growatt 30 / 0, ABB 28 / 0, Advantech 26 / 0, Delta Electronics 25 / 0, Phoenix Contact 14 / 0, Schneider Electric 10 / 0, Hitachi Energy 7 / 0.
 
-**Implementation:** ICS / energy vendors and product families as they appear in CPE strings (`siemens`, `simatic`, `wincc`, `rockwellautomation`, `factorytalk`, `modicon`, `ecostruxure`, `experion`, `deltav`, `codesys`, `iec 61850`, `dnp3`, solar inverter vendors, EV charging / OCPP, smart meters …) were added to `SECTOR_KEYWORDS['energy']`, and payment / ATM / banking-software vendors (`diebold nixdorf`, `vynamic`, `ingenico`, `verifone`, `temenos`, `finastra`, `flexcube`, `iso 8583`, `iso 20022`, `metatrader`, crypto wallets …) to `SECTOR_KEYWORDS['finance']`. Generic or shared names (`ge`, `sel`, `oracle`, `sap`, `cisco`, `huawei`, Honeywell's consumer lines) stay out. A vendor can own non-OT product lines, so `healthineers` / `siemens healthineers` are **negative** energy keywords: a Siemens Healthineers CVE stays healthcare only.
+**Vocabulary:** `SECTOR_KEYWORDS['energy']` contains ICS / energy vendors and product families as they appear in CPE strings (`siemens`, `simatic`, `wincc`, `rockwellautomation`, `factorytalk`, `modicon`, `ecostruxure`, `experion`, `deltav`, `codesys`, `iec 61850`, `dnp3`, solar inverter vendors, EV charging / OCPP, smart meters …), and `SECTOR_KEYWORDS['finance']` contains payment / ATM / banking-software vendors (`diebold nixdorf`, `vynamic`, `ingenico`, `verifone`, `temenos`, `finastra`, `flexcube`, `iso 8583`, `iso 20022`, `metatrader`, crypto wallets …). Generic or shared names (`ge`, `sel`, `oracle`, `sap`, `cisco`, `huawei`, Honeywell's consumer lines) stay out. A vendor can own non-OT product lines, so `healthineers` / `siemens healthineers` are **negative** energy keywords: a Siemens Healthineers CVE stays healthcare only.
 
-**Result (same 25k sample, recomputed with the new vocabulary):** energy-tagged CVEs 26 → 513, finance +24. On the full NVD set that is roughly +2,800 energy CVEs against the 234 the keyword-only vocabulary produced. Tags are assigned at collection, so the gain appears with the next baseline / daily runs.
+**Effect (same 25k sample):** with the vendor vocabulary, 513 CVEs are tagged energy instead of 26, and 24 more are tagged finance. On the full NVD set that is roughly +2,800 energy CVEs against the 234 that the vocabulary without vendor names produces. Tags are assigned at collection.
 
 ### 3.7 Future: LLM-Based Classification (Roadmap)
 
@@ -201,7 +201,7 @@ def classify_llm(text: str) -> str:
 
 **Recommended approach for EdgeGuard:**
 1. Start with keyword classification (malware families link to `Malware` nodes, not to sectors; § 3.6)
-2. Add local LLM classification in Sprint 2
+2. Add local LLM classification
 3. Use Ollama with Granite-4 or Qwen-4 for inference
 
 ---
@@ -210,7 +210,7 @@ def classify_llm(text: str) -> str:
 
 ### 4.1 Deduplication Strategy
 
-We use UNIQUE constraints as deduplication keys — `tag` removed from all entity keys so the same entity merges across sources:
+We use UNIQUE constraints as deduplication keys. No key includes `tag`, so the same entity merges across sources:
 
 | Node Type | UNIQUE Constraint Key |
 |-----------|----------------------|
@@ -225,14 +225,13 @@ We use UNIQUE constraints as deduplication keys — `tag` removed from all entit
 | Campaign | `(name)` |
 | Sector | `(name)` |
 
-**Note (PR-N33 docs audit, 2026-04-26):** `tag` was REMOVED from every
-EdgeGuard threat-intel constraint in earlier passes (the keys above are
-the current truth — single-key `(name)` / `(cve_id)` / `(mitre_id)` /
-`(indicator_type, value)`). The same entity now MERGEs across sources
-into one node, with per-source provenance carried on
+**Note:** no EdgeGuard threat-intel constraint includes `tag`; the keys
+are single-key `(name)` / `(cve_id)` / `(mitre_id)` or
+`(indicator_type, value)`. The same entity MERGEs across sources into one
+node, with per-source provenance carried on
 `(Node)-[:SOURCED_FROM]->(Source)` edges (see `merge_node_with_source`
-in `src/neo4j_client.py`). Do not re-introduce `tag` into a constraint
-without re-architecting the SOURCED_FROM model.
+in `src/neo4j_client.py`). Do not add `tag` to a constraint without
+re-architecting the SOURCED_FROM model.
 
 ### 4.2 Merge Logic
 
@@ -282,14 +281,11 @@ The values each collector sets on its items (layer 1 below says which of them re
 | SSL Blacklist | 0.6 | `finance_feed_collector.py` |
 | CISA ICS advisories | 0.9 | Government advisory (`cisa_ics_collector.py`); flag-guarded |
 
-**Confidence Calculation (as actually implemented):**
+**Confidence Calculation:**
 
-> **Docs correction (2026-06):** earlier versions described a
-> `final_confidence = source_confidence * data_quality_factor` formula.
-> No `data_quality_factor` exists anywhere in the code — that formula was
-> aspirational and is removed so downstream consumers (including the
-> Stage-2 fine-tuning dataset) don't learn semantics the system doesn't
-> have. The real model is three independent layers:
+There is no data-quality factor or other multiplier on the source
+confidence: downstream consumers (including the Stage-2 fine-tuning
+dataset) must not assume one. The model is three independent layers:
 
 1. **Source prior** — each collector sets a confidence (table above). It
    reaches Neo4j through MISP only as a band: `MISPWriter` tags each
@@ -304,10 +300,11 @@ The values each collector sets on its items (layer 1 below says which of them re
    **and** `EXPLOITS` edges from large bulk-feed MISP events are
    down-weighted by event size into the 0.30–0.50 band (≤10 → 0.50,
    ≤20 → 0.45, ≤100 → 0.40, ≤500 → 0.35, >500 → 0.30); only edges marked
-   `misp_cooccurrence` / `misp_correlation` are touched. **2026-10:** no such
-   edges are written any more — links are report-scoped (same OTX pulse,
-   `match_type='otx_pulse'`, 0.6) — so this step is a no-op on a fresh baseline.
-3. **Indicator aging** (2026-10-16, `src/indicator_aging.py`; applied by
+   `misp_cooccurrence` / `misp_correlation` are touched. The pipeline writes
+   no such edges — links are report-scoped (same OTX pulse,
+   `match_type='otx_pulse'`, 0.6) — so this step changes nothing on a fresh
+   baseline.
+3. **Indicator aging** (`src/indicator_aging.py`; applied by
    every Indicator write and by the post-sync job `decay_ioc_confidence`):
    one rule for every `Indicator`, whoever supplied it — the age counts
    from the latest report of any source (the source's own `last_seen`
@@ -316,8 +313,8 @@ The values each collector sets on its items (layer 1 below says which of them re
    2))` with ×0.85 from 90 days, ×0.70 from 180 and ×0.55 from 365; from
    730 days the indicator is retired (`active=false`, `retired_by =
    'decay'`). `source_confidence` is the highest confidence a source gave,
-   so the factor never applies twice. No other label ages (the
-   `Vulnerability` tiers were removed). Each node carries `aging_basis`,
+   so the factor never applies twice. No other label ages (`Vulnerability`
+   included). Each node carries `aging_basis`,
    `aging_tier`, `aging_factor`, `aging_since` and `aging_evaluated_at`
    (the time at which its aging values were last written: by a write, or
    by a job run that changed them; a job run that changes nothing leaves
@@ -330,7 +327,7 @@ When explaining a score, cite the layer that produced it (source prior,
 with its basis) — multi-source
 corroboration is visible through per-source `SOURCED_FROM` edges and, for a
 relationship, through `r.sources[]` (`size(r.sources) >= 2` = two or more
-sources assert it; 2026-10), not folded into a single multiplier.
+sources assert it), not folded into a single multiplier.
 
 ---
 
@@ -340,13 +337,13 @@ sources assert it; 2026-10), not folded into a single multiplier.
 
 | Relationship | Source | Logic |
 |-------------|--------|-------|
-| `EMPLOYS_TECHNIQUE` | MITRE | ThreatActor employs Technique (attribution — from STIX `uses`). *Split from generic `USES` in 2026-04.* |
-| `IMPLEMENTS_TECHNIQUE` | MITRE | Malware / Tool implements Technique (capability — from STIX `uses`). *Split from generic `USES` in 2026-04.* |
+| `EMPLOYS_TECHNIQUE` | MITRE | ThreatActor employs Technique (attribution — from STIX `uses`) |
+| `IMPLEMENTS_TECHNIQUE` | MITRE | Malware / Tool implements Technique (capability — from STIX `uses`) |
 | `USES_TECHNIQUE` | OTX | Indicator observed tied to Technique (from `attack_ids`) |
 | `ATTRIBUTED_TO` | Malware's own claim / OTX | Malware attributed to ThreatActor: exact `attributed_to` name or alias match (1.0), or named in the same OTX pulse when the pulse's actors are one actor (`otx_pulse`, 0.6) |
-| `INDICATOR_RESOLVES_TO` (planned) | DNS | Indicator → IP; not written today |
+| `INDICATOR_RESOLVES_TO` (planned) | DNS | Indicator → IP; not written |
 | `EXPLOITS` | CVEs | Indicator exploits Vulnerability (exact CVE ID match) |
-| `INDICATES` | Malware | Indicator indicates Malware (same OTX pulse `otx_pulse` 0.6, or malware_family match 0.8; whole-event co-occurrence removed 2026-10) |
+| `INDICATES` | Malware | Indicator indicates Malware (same OTX pulse `otx_pulse` 0.6, or malware_family match 0.8; never from whole-event co-occurrence) |
 
 Also written: `USES_MALWARE` / `USES_TOOL` (MITRE explicit, 0.95), `SUBTECHNIQUE_OF`, `IN_TACTIC`,
 `TARGETS` / `AFFECTS` (`zone_classification` 0.5, `advisory_sector` 0.9), `RUNS` /
@@ -354,11 +351,11 @@ Also written: `USES_MALWARE` / `USES_TOOL` (MITRE explicit, 0.95), `SUBTECHNIQUE
 
 ### 5.2 Relationship Quality
 
-- **EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE**: High quality - direct from MITRE STIX `uses` relationships. The split into attribution (actor→technique) and capability (malware/tool→technique) was made in 2026-04 to disambiguate the two semantics for Cypher queries and LLM/GraphRAG retrieval; both collapse back to STIX `uses` on export.
-- **ATTRIBUTED_TO**: Exact (1.0) when the malware's own `attributed_to` names the actor; medium (0.6, `otx_pulse`) when malware and actor are named in the same OTX pulse and the pulse's actors are one actor (2026-10-15: a pulse naming several actors does not say which malware is whose and attributes nothing; aliases of one actor count as one). Whole-event co-occurrence attribution (one malware → up to 152 actors) was removed 2026-10
+- **EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE**: High quality - direct from MITRE STIX `uses` relationships. Two types separate attribution (actor→technique) from capability (malware/tool→technique), so that Cypher queries and LLM/GraphRAG retrieval can tell the two semantics apart; both collapse back to STIX `uses` on export.
+- **ATTRIBUTED_TO**: Exact (1.0) when the malware's own `attributed_to` names the actor; medium (0.6, `otx_pulse`) when malware and actor are named in the same OTX pulse and the pulse's actors are one actor. A pulse naming several actors does not say which malware is whose and attributes nothing; aliases of one actor count as one. EdgeGuard does not attribute by whole-event co-occurrence, because a large MISP event can link one malware to up to 152 actors.
 - **EXPLOITS**: High quality - deterministic CVE ID match (confidence 1.0)
-- **INDICATES**: Medium quality - same OTX pulse (0.6, `otx_pulse`) or malware_family name match (0.8). The 0.5 whole-event co-occurrence level no longer exists (2026-10)
-- **INDICATOR_RESOLVES_TO** (planned): requires external DNS data; not written today
+- **INDICATES**: Medium quality - same OTX pulse (0.6, `otx_pulse`) or malware_family name match (0.8). No `INDICATES` edge comes from whole-event co-occurrence.
+- **INDICATOR_RESOLVES_TO** (planned): requires external DNS data; not written
 
 ---
 
@@ -495,7 +492,7 @@ CREATE INDEX actor_name IF NOT EXISTS FOR (a:ThreatActor) ON (a.name)
 
 EdgeGuard uses a **keyword-based sector classification** with word boundary matching to prevent false positives. Data is normalized to a standard schema, deduplicated by composite keys, and assigned confidence scores based on source reliability.
 
-The architecture supports multiple data sources, with MITRE providing the highest quality TTP relationships (`EMPLOYS_TECHNIQUE` for actors, `IMPLEMENTS_TECHNIQUE` for malware/tools — previously a single `USES` edge, split in 2026-04), and community sources (OTX, MISP) providing broad IOC coverage.
+The architecture supports multiple data sources, with MITRE providing the highest quality TTP relationships (`EMPLOYS_TECHNIQUE` for actors, `IMPLEMENTS_TECHNIQUE` for malware/tools), and community sources (OTX, MISP) providing broad IOC coverage.
 
 Future enhancements include embedding-based classification for better context understanding and GraphRAG integration for natural language threat queries.
 
@@ -505,4 +502,27 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-10-17 — corrections against the code: the confidence table gives each collector's value (MITRE by object type; rows for ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker, SSL Blacklist and CISA ICS; the "MISP (push side)" row removed) and layer 1 says that only an indicator's band (0.8 / 0.5 / 0.3) reaches Neo4j, CVE, Malware and ThreatActor nodes being stored at 0.5; the collection flow runs through MISP; § 3.2 / § 3.3 describe the production zone matching and real keywords; § 3.6 says malware families are not sector keywords; CISA ICS, MalwareBazaar and FIRST EPSS in the source table; `ATTRIBUTED_TO` is Malware → ThreatActor and the planned DNS bridge is `INDICATOR_RESOLVES_TO`; the merge pseudo-code sets `last_updated` to the write time and ages Indicators; a MISP `uri` attribute is not read as a URL. Prior: 2026-10-16 — an indicator carries `aging_evaluated_at`, the time at which its aging values were last written (a job run that changes nothing leaves it unchanged); the rule runs at the database's current time, lifted to it when it is later. Same day: § time decay replaced by the indicator aging: one rule for every Indicator from the latest report of any source (the source's date capped at the MISP time), ×0.85 / ×0.70 / ×0.55 of `source_confidence` from 90 / 180 / 365 days, retirement from 730 days; no Vulnerability tiers; `aging_*` properties instead of `last_decayed_tier`. Prior: 2026-10-15 — § 2.1 type mapping: `ipv6` from MISP `ip-src` / `ip-dst` by the address; `x509-fingerprint-sha1` for SSL Blacklist certificate fingerprints; a generic hash is typed by digest length (md5 / sha1 / sha256 / sha512); OTX non-file hashes are not collected; OTX `email` typed as e-mail; relationship corroboration visible through `r.sources[]`. Prior: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._
+## Appendix: data written by earlier versions
+
+The main text assumes a fresh baseline. A graph kept across an upgrade can still hold:
+
+- **Co-occurrence edges.** Versions before report-scoped linking wrote `INDICATES` and `EXPLOITS` edges from whole-event co-occurrence (`match_type` `misp_cooccurrence` / `misp_correlation`). The calibration job `calibrate_cooccurrence_confidence` (§ 4.3, layer 2) down-weights them by event size; a fresh baseline writes none.
+- **Attributions from multi-actor pulses.** `build_relationships` step 2d removes an `ATTRIBUTED_TO` edge that rests only on OTX pulses naming several actors (a graph built before that rule holds them), unless another feed asserts the link too, and drops such pulses from the provenance of the attributions that remain; see [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md).
+- **Sector tags without the CPE vendor vocabulary.** Tags are assigned at collection, so CVEs collected before the vocabulary of § 3.6b keep their earlier zones until a baseline or a daily run collects them again.
+
+---
+
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Main text describes current behaviour only; history and repairs of data from earlier versions moved to the end.
+- 2026-10-17 — Corrected against the code: each collector's confidence value (MITRE by object type; ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker, SSL Blacklist and CISA ICS rows), only an indicator's band (0.8 / 0.5 / 0.3) reaches Neo4j, collection flow through MISP, production zone matching and keywords, malware families not sector keywords, CISA ICS / MalwareBazaar / FIRST EPSS sources, `ATTRIBUTED_TO` as Malware → ThreatActor, `INDICATOR_RESOLVES_TO` as the planned DNS bridge, merge pseudo-code with write-time `last_updated` and Indicator aging, MISP `uri` not read as a URL.
+- 2026-10-16 — Time decay replaced by indicator aging: one rule for every Indicator from the latest report of any source, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retirement from 730 days, `aging_*` properties (incl. `aging_evaluated_at`) instead of `last_decayed_tier`; Vulnerability decay tiers removed.
+- 2026-10-15 — Type mapping: `ipv6` by address, `x509-fingerprint-sha1` for SSL Blacklist, hash type by digest length, OTX non-file hashes not collected, OTX e-mail typed as e-mail; corroboration through `r.sources[]`; `ATTRIBUTED_TO` only from a pulse whose actors are one actor.
+- 2026-10 — Links made report-scoped (same OTX pulse, 0.6): whole-event co-occurrence `INDICATES` (0.5) and attribution (up to 152 actors for one malware) removed, so the co-occurrence calibration changes nothing on a fresh baseline.
+- 2026-10 — CPE vendor and product vocabulary added to the energy and finance keywords (energy-tagged CVEs 26 → 513 on a 25k-CVE sample).
+- 2026-06-11 — Removed the `data_quality_factor` confidence formula, which no code implements; documented the three-layer model.
+- 2026-04-28 — Per-source confidence table corrected against `src/collectors/` (NVD 0.6 / 0.9 on CISA KEV, OTX flat 0.5; AbuseIPDB, ThreatFox and global feeds added).
+- 2026-04-26 — Removed the statement that `tag` scopes the dedup key; fixed the `vulnerability_key` Cypher.
+- 2026-04 — Generic `USES` split into `EMPLOYS_TECHNIQUE` (actor) and `IMPLEMENTS_TECHNIQUE` (malware / tool).

@@ -1,10 +1,10 @@
 # EdgeGuard Security Roadmap
 
-This document tracks EdgeGuard's **trust-boundary** defenses — the
+This document describes EdgeGuard's **trust-boundary** defenses — the
 controls that protect the knowledge graph against hostile or
-misconfigured upstream feeds. It is a staged roadmap, not a finished
-design: each tier raises the bar one step without breaking existing
-operators.
+misconfigured upstream feeds. It is a staged roadmap: each tier raises
+the bar one step without breaking existing operators. Tiers 1 and 2 are
+in place; Tier 3 is planned.
 
 ## Threat model in one paragraph
 
@@ -15,10 +15,10 @@ anyone with write access to the MISP instance (a federated peer, a
 compromised user, a misconfigured community feed) can create events
 and attach tags such as `original_source:nvd` or
 `edgeguard:source:vt`. Without an additional check, the source-truthful
-timestamp pipeline (PR #41) would treat those forged tags as
-authoritative — corrupting `MIN(r.source_reported_first_at)` exports to
-ResilMesh. The **MISP tag-impersonation defense** (PR #44, Chip 5e) is
-the trust-boundary control that fixes this.
+timestamp pipeline would treat those forged tags as authoritative —
+corrupting `MIN(r.source_reported_first_at)` exports to ResilMesh. The
+**MISP tag-impersonation defense** is the trust-boundary control
+against this.
 
 ## The defense
 
@@ -37,41 +37,39 @@ allowlist. Non-matching events' claims are dropped and counted via
 `edgeguard_source_truthful_creator_rejected_total`.
 
 When **both** env vars are empty, the defense is **DISABLED** — all
-claims are accepted. This is the "backward-compat" path for
-operators who have not yet configured the allowlist.
+claims are accepted. This keeps a deployment that has not configured
+the allowlist working; Tier 2 makes that state visible.
 
 ## Roadmap tiers
 
-### ✅ Tier 1 — Defense machinery (shipped, PR #44 + PR-N29 L1 + PR-N31)
+### ✅ Tier 1 — Defense machinery (in place)
 
 - `source_trust.py` implements the creator-org allowlist check
 - Unicode-aware name normalization (NFKC + casefold) defeats
   homoglyph attacks
 - **Zero-width / bidi-control / variation-selector characters** (37,
-  `node_identity._ZERO_WIDTH_AND_BIDI_CHARS`; shipped PR-N29 L1 with 17,
-  extended PR-N31 with CGJ U+034F + Variation Selectors VS1–VS16 + ALM
-  U+061C) are stripped before the placeholder-name check
-  (`is_placeholder_name`) and in the read-side IOC normalization
-  (`ioc_normalize.refang`). This defeats invisible-character placeholder
-  bypass (e.g. `"unknown​"` passing the placeholder filter). Natural keys
-  themselves keep these characters (canonicalization applies NFC + trim
-  only), so a name with a trailing U+200B and the same name without it
-  remain two nodes. The PR-N32 read-only audit
-  script `scripts/audit_legacy_unicode_bypass_nodes.py` checks for
-  legacy nodes that may have escaped this filter pre-PR-N29 L1.
+  `node_identity._ZERO_WIDTH_AND_BIDI_CHARS`, including the combining
+  grapheme joiner U+034F, the variation selectors VS1–VS16 and the
+  Arabic letter mark U+061C) are stripped before the placeholder-name
+  check (`is_placeholder_name`) and in the read-side IOC normalization
+  (`ioc_normalize.refang`). This defeats invisible-character
+  placeholder bypass (e.g. `"unknown​"` passing the placeholder
+  filter). Natural keys themselves keep these characters
+  (canonicalization applies NFC + trim only), so a name with a
+  trailing U+200B and the same name without it remain two nodes.
   Cross-script confusables (Cyrillic 'о' U+043E vs Latin 'o' U+006F)
-  are documented as residual — fixing requires a confusables library,
-  tracked in Tier 2.
+  are a known residual — fixing them requires a confusables library,
+  which no tier of this roadmap covers yet.
 - Strict UUID validation defeats free-text spoofing
 - Log-injection-safe rejection logging (truncated, newline-stripped
   `Orgc.name`)
 - `edgeguard_source_truthful_creator_rejected_total` Prometheus
   counter fires on every rejection
 
-### 🚧 Tier 2 — Observability for the disabled state (this PR, PR-I)
+### ✅ Tier 2 — Observability for the disabled state (in place)
 
 When the defense is configured OFF (both allowlists empty), the
-state is now **always visible** — not silent.
+state is **always visible** — not silent.
 
 - **Startup log signal (all envs):**
   - `INFO` line when the defense is ACTIVE: `MISP tag-impersonation
@@ -94,17 +92,13 @@ state is now **always visible** — not silent.
     value (multi-process mode, the most recent write is served by the
     `metrics` service)
 
-**Why widen from the prior prod/staging-only warning:**
-At the time of PR-I, `EDGEGUARD_ENV` defaulted to `dev` in `src/config.py:17`
-(today `config.EDGEGUARD_ENV` defaults to `dev` at `src/config.py:26`, a
-label only; the API security gate `config.is_production_env()` treats
-unset as production). Under the
-original gating (PR #44's `_warn_if_disabled_in_prod`), a brand-new
-deployment would silently inherit "defense off + no warning" until an
-operator remembered to flip the env var. Every new installation
-shipped with a silent gap. PR-I closes that by emitting the warning
-in **every** env and exposing the state via a gauge that any alert
-rule can catch.
+**Why the warning fires in every environment:** `config.EDGEGUARD_ENV`
+defaults to `dev` (`src/config.py:26`, a label only; the API security
+gate `config.is_production_env()` treats unset as production). A
+warning limited to prod/staging would leave a brand-new deployment
+with the defense off and no warning until an operator set the
+variable. The warning therefore fires in **every** environment, and
+the gauge exposes the state to any alert rule.
 
 **Suggested alert rule** (see `docs/PROMETHEUS_SETUP.md`):
 
@@ -131,9 +125,9 @@ rule can catch.
 ### 📋 Tier 3 — Fail-closed boot refusal (planned, post-Tier 2)
 
 After operators have had a deployment cycle to configure the
-allowlists (signalled by the Tier 2 log + gauge), the
-`EDGEGUARD_ENV ∈ {prod, staging, production, stage}` default will
-flip to **fail-closed**: the process refuses to boot unless EITHER
+allowlists (signalled by the Tier 2 log + gauge), the default for
+`EDGEGUARD_ENV ∈ {prod, staging, production, stage}` will become
+**fail-closed**: the process refuses to boot unless EITHER
 an allowlist is configured OR
 `EDGEGUARD_ALLOW_UNTRUSTED_MISP=1` is set explicitly as an opt-out.
 
@@ -142,14 +136,14 @@ Rationale:
   deploy without making a conscious trust decision
 - Log warnings can be missed; Prometheus alerts can be unwired;
   boot refusal cannot be missed
-- Dev loop keeps the current warn-on-empty ergonomics (no friction
+- Dev loop keeps the warn-on-empty ergonomics (no friction
   for local stacks where MISP runs inside the same compose network)
 - Opt-out flag preserves escape hatch for operators with legitimate
   untrusted-MISP use cases (e.g. a known-curated community MISP
   they've explicitly decided to trust as a whole)
 
-Tier 3 will land as its own PR after Tier 2 has had enough operator
-exposure to surface any unexpected interaction.
+Tier 3 is planned as a separate change, after Tier 2 has had enough
+operator exposure to surface any unexpected interaction.
 
 ## Operator checklist
 
@@ -188,24 +182,38 @@ exposure to surface any unexpected interaction.
 - `src/source_trust.py` — defense implementation
 - `src/metrics_server.py` — Prometheus gauge wiring
 - `tests/test_source_trust.py` — 47 tests covering both the decision
-  logic and the new PR-I observability
+  logic and the disabled-state observability
 - `docs/PROMETHEUS_SETUP.md` — full metrics reference + alert rules
 - `.env.example` — env var templates
-- `docs/RUNBOOK.md` § 8 — operator triage tree for `_MispFallbackHardError` (PR-N31)
-- `docs/BASELINE_LAUNCH_CHECKLIST.md` step `[6]` — pre-launch unicode-bypass audit (PR-N32)
+- `docs/RUNBOOK.md` § 8 — operator triage tree for `_MispFallbackHardError`
+- `docs/BASELINE_LAUNCH_CHECKLIST.md` step `[6]` — pre-launch unicode-bypass audit
 - `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only audit
   pairing with the `_ZERO_WIDTH_AND_BIDI_CHARS` Tier-1 defense above
+  (see the appendix)
+
+## Appendix: data written by earlier versions
+
+A graph kept from a version whose placeholder-name check did not strip
+the zero-width / bidi-control / variation-selector characters can hold
+`Malware` / `ThreatActor` / `Tool` nodes whose name is a placeholder
+padded with invisible characters (e.g. `"unknown​"`). The read-only
+script `scripts/audit_legacy_unicode_bypass_nodes.py` (session in
+`READ_ACCESS`) counts the nodes of these labels whose `name` contains a
+character of `_ZERO_WIDTH_AND_BIDI_CHARS` and recommends one of: close
+as no-op (0 hits), one-shot Cypher (1–10 hits), a migration (>10 hits).
+It is step `[6]` of [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md);
+[MIGRATIONS.md](MIGRATIONS.md) lists it with the other operator
+scripts. A fresh baseline has no such nodes.
 
 ---
 
-_Last updated: 2026-10-17 — documentation audit: the zero-width / bidi table (37 characters,
-not 35) is applied before the placeholder-name check and in the read-side IOC refang, not in
-natural-key canonicalization (keys keep these characters); the disabled-defense WARNING logs
-`EDGEGUARD_ENV=unset` when the variable is unset, and the API security gate treats unset as
-production; the gauge is written by every Airflow task process that loads `metrics_server` and
-served by the `metrics` service, so an allowlist change needs `docker compose up -d airflow`.
-Prior: 2026-04-26 — PR-N33 docs audit: added explicit Tier-1
-sub-bullet for the PR-N29 L1 + PR-N31 zero-width / bidi-control /
-variation-selector character stripping in natural-key canonicalization
-(35 chars total at HEAD; pairs with `scripts/audit_legacy_unicode_bypass_nodes.py`
-for legacy-graph audits). Cross-linked RUNBOOK § 8 + BASELINE_LAUNCH_CHECKLIST `[6]`._
+_Last updated: 2026-10-17_
+
+## History
+
+- 2026-10-17 — Corrected the character table (37 characters, stripped before the placeholder-name check and in the read-side IOC refang, not in natural-key canonicalization), the `EDGEGUARD_ENV=unset` warning and the gauge writers (every Airflow task process that loads `metrics_server`, served by the `metrics` service, so an allowlist change needs `docker compose up -d airflow`); the main text describes current behavior only, the legacy-node audit moved to the appendix, and Tier 2 is marked as in place.
+- 2026-04-26 — Added the Tier 1 bullet on zero-width / bidi-control / variation-selector stripping and the read-only legacy-node audit, and cross-linked RUNBOOK § 8 and BASELINE_LAUNCH_CHECKLIST step `[6]`.
+- 2026-04-25 — The stripped character table was extended with the combining grapheme joiner U+034F, the variation selectors VS1–VS16 and the Arabic letter mark U+061C, and the read-only audit `scripts/audit_legacy_unicode_bypass_nodes.py` was added for nodes written before the strip.
+- 2026-04-24 — The placeholder-name check moved from NFC to NFKC normalization and began stripping 19 zero-width and bidi-control characters before it.
+- 2026-04-20 — Tier 2: the disabled-defense warning, previously limited to prod/staging, fires in every environment, and the gauge `edgeguard_misp_tag_impersonation_defense_disabled` was added.
+- 2026-04-18 — Tier 1: the creator-org allowlist defense against MISP tag impersonation (`src/source_trust.py`) was added for the source-truthful timestamp pipeline.

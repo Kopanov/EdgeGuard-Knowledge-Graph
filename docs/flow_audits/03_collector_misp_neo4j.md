@@ -1,5 +1,7 @@
 # Flow Audit §3 — Collector → MISP → Neo4j
 
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [ARCHITECTURE.md § Data Flow](../ARCHITECTURE.md#data-flow) and [COLLECTORS.md](../COLLECTORS.md).
+
 **Date:** 2026-04-20
 **Commit audited:** `8e39f88`
 **Scope:** A single IOC's journey from collector through MISPWriter, through MISP-read, through trust check, through sync, to Neo4j node + SOURCED_FROM edge

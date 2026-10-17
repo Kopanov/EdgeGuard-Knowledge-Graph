@@ -4,8 +4,8 @@ PR-N32 — Read-only audit: legacy unicode-bypass nodes in Neo4j.
 
 ## Why this script exists
 
-PR-N29 L1 + PR-N31 closed 35 zero-width / bidi-control / variation-
-selector chars in ``is_placeholder_name`` so an attacker (or buggy
+``is_placeholder_name`` strips 37 zero-width / bidi-control / variation-
+selector chars (``node_identity._ZERO_WIDTH_AND_BIDI_CHARS``) so an attacker (or buggy
 upstream feed) can no longer create ``Malware``/``ThreatActor``/``Tool``
 nodes whose ``name`` is a placeholder ("unknown", "n/a", …) padded with
 invisible chars. **However**: nodes that were MERGEd BEFORE PR-N29 L1

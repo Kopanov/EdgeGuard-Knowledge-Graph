@@ -1,8 +1,8 @@
 """
 PR-N32 — read-only unicode-bypass audit + launch-day checklist.
 
-PR-N29 L1 + PR-N31 closed 35 zero-width / bidi-control / variation-
-selector chars in `is_placeholder_name` so an attacker (or buggy feed)
+`is_placeholder_name` strips 37 zero-width / bidi-control / variation-
+selector chars (`node_identity._ZERO_WIDTH_AND_BIDI_CHARS`) so an attacker (or buggy feed)
 can no longer create Malware/ThreatActor/Tool nodes whose names are
 placeholders padded with invisible chars. PR-N32 ships:
 

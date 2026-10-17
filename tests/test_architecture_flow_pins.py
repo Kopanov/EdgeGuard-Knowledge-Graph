@@ -37,9 +37,10 @@ Four pin classes:
 1. **Env vars** — every `EDGEGUARD_*` env var referenced in docs must
    exist somewhere in `src/`, `dags/`, `scripts/`, `tests/`, or
    `.env.example`. Allowlist for planned-future + historical-narrative.
-2. **CLI subcommands** — every `python -m edgeguard X` /
-   `edgeguard X` reference must match a real subcommand in
-   `src/edgeguard.py` `subparsers.add_parser(...)`.
+2. **Removed command forms** — no doc may give `python -m edgeguard
+   baseline|fresh-baseline` or `python -m src.neo4j_client` as current
+   (lines that describe them as removed or wrong are skipped). Other
+   `edgeguard X` subcommand references are not checked.
 3. **Container names** — every `edgeguard_X` / `edgeguard-X`
    reference in a `docker logs|exec|stats|inspect` context must match
    a `container_name:` in `docker-compose.yml`. Catches the
@@ -130,23 +131,29 @@ def _read_all_code_text() -> str:
 # Env vars that are intentionally referenced in docs but don't exist in
 # the codebase. Each entry must have a clear reason.
 _ENV_VAR_DOC_ONLY_ALLOWLIST: dict[str, str] = {
-    # Naming-conflict history: PRODUCTION_READINESS.md L123 documents that
-    # this env var was renamed to EDGEGUARD_ENABLE_METRICS. The reference is
-    # historical narrative, not a current spec.
+    # Naming-conflict history: the History section of PRODUCTION_READINESS.md
+    # records that this env var was standardised to EDGEGUARD_ENABLE_METRICS.
+    # The reference is historical narrative, not a current spec.
     "EDGEGUARD_ENABLE_PROMETHEUS": (
-        "Historical narrative in PRODUCTION_READINESS.md — documented as renamed to EDGEGUARD_ENABLE_METRICS"
+        "History section of PRODUCTION_READINESS.md — standardised to EDGEGUARD_ENABLE_METRICS"
     ),
     # Pedagogical code example in RESILIENCE_CONFIG.md showing how to add
     # env-var-driven circuit breaker tuning IN YOUR FORK. Not a current
     # EdgeGuard env var.
     "EDGEGUARD_MISP_FAILURE_THRESHOLD": (
-        "Fork-only example in RESILIENCE_CONFIG.md § How to override (not a "
+        "Fork-only example in RESILIENCE_CONFIG.md § 4. Overriding circuit breaker settings (not a "
         "current EdgeGuard env var; the example shows operators how to add "
         "tunable circuit breakers in their own deployment)"
     ),
-    "EDGEGUARD_MISP_RECOVERY_TIMEOUT": ("Fork-only example in RESILIENCE_CONFIG.md § How to override"),
-    "EDGEGUARD_NEO4J_FAILURE_THRESHOLD": ("Fork-only example in RESILIENCE_CONFIG.md § How to override"),
-    "EDGEGUARD_NEO4J_RECOVERY_TIMEOUT": ("Fork-only example in RESILIENCE_CONFIG.md § How to override"),
+    "EDGEGUARD_MISP_RECOVERY_TIMEOUT": (
+        "Fork-only example in RESILIENCE_CONFIG.md § 4. Overriding circuit breaker settings"
+    ),
+    "EDGEGUARD_NEO4J_FAILURE_THRESHOLD": (
+        "Fork-only example in RESILIENCE_CONFIG.md § 4. Overriding circuit breaker settings"
+    ),
+    "EDGEGUARD_NEO4J_RECOVERY_TIMEOUT": (
+        "Fork-only example in RESILIENCE_CONFIG.md § 4. Overriding circuit breaker settings"
+    ),
     # Planned future knob — documented as "future knob" / "planned" in
     # COLLECTORS.md. Adding a real env var would be a code change; the doc
     # is honest that it's not implemented yet.
@@ -277,10 +284,9 @@ _CLI_SUBCOMMAND_DOC_ONLY_ALLOWLIST: dict[str, str] = {
 
 
 class TestCLISubcommandsReferencedInDocsExist:
-    """Every `python -m edgeguard X` or `edgeguard X` reference in docs
-    must match a real subcommand in `src/edgeguard.py`. Catches the class
-    of drift PR-N35 fixed manually for `edgeguard baseline` /
-    `edgeguard fresh-baseline` (neither exists)."""
+    """No doc may give the removed forms `python -m edgeguard
+    baseline|fresh-baseline` or `python -m src.neo4j_client` as current.
+    Other `edgeguard X` subcommand references are not checked."""
 
     def test_no_doc_references_python_dash_m_edgeguard_baseline(self):
         """Specific regression pin for the PR-N35 finding. Multiple docs

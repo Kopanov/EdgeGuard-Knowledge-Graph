@@ -1,5 +1,7 @@
 # Flow Audit §4 — Timestamps & Date-Handling End-to-End
 
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [TIMESTAMPS.md](../TIMESTAMPS.md).
+
 **Date:** 2026-04-20 afternoon
 **Scope:** Every timestamp / date field from collector source → MISP attribute → Neo4j property → STIX export
 **Goal:** Find every date-handling bug that would corrupt historical data during a 730-day baseline run

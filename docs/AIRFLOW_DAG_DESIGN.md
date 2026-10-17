@@ -15,7 +15,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │  │  edgeguard_baseline  (MANUAL TRIGGER ONLY — run once)               │    │
 │  │  misp_health → source_key_check → baseline_acquire_lock              │    │
 │  │    → baseline_clean (wipe only for fresh_baseline) → baseline_start  │    │
-│  │    → tier1 cisa → mitre → otx → nvd  (SEQUENTIAL, PR-F4)             │    │
+│  │    → tier1 cisa → mitre → otx → nvd  (SEQUENTIAL)                    │    │
 │  │    → tier2 [abuseipdb, threatfox, urlhaus, feodo, sslbl,             │    │
 │  │             cisa_ics*, malwarebazaar*]                               │    │
 │  │             (collector pool: at most EDGEGUARD_COLLECTOR_POOL_SLOTS  │    │
@@ -61,7 +61,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │                                                                              │
 │  Every collect_* task of every DAG takes a slot of the Airflow pool          │
 │  edgeguard_collectors: at most EDGEGUARD_COLLECTOR_POOL_SLOTS (default 4)    │
-│  collectors run at once (2026-10)                                            │
+│  collectors run at once                                                      │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -72,12 +72,12 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 
 | DAG | Schedule | Tasks |
 |-----|----------|-------|
-| `edgeguard_baseline` | **None (manual only)** | `misp_health_check` → `source_key_check` → `baseline_acquire_lock` → `baseline_clean` (gated on `dag_run.conf={"fresh_baseline": true}` — PR-C) → `baseline_start` → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_postcheck` → `baseline_complete` → `baseline_release_lock`. **Top-level task IDs do NOT carry a `baseline_` prefix** at HEAD (verified against `dags/edgeguard_pipeline.py`). **PR-N29 H1: the four critical-chain tasks (`baseline_clean`, `full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`) override `retries=0`**, as does `source_key_check` — see [`AIRFLOW_DAGS.md § Built-in Features`](AIRFLOW_DAGS.md). The baseline DAG has only 2 TaskGroups (`tier1_core`, `tier2_feeds`); there is no `tier3_low_freq` here — the daily-tier collectors live in the *incremental* `edgeguard_daily` DAG. |
+| `edgeguard_baseline` | **None (manual only)** | `misp_health_check` → `source_key_check` → `baseline_acquire_lock` → `baseline_clean` (gated on `dag_run.conf={"fresh_baseline": true}`) → `baseline_start` → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_postcheck` → `baseline_complete` → `baseline_release_lock`. **Top-level task IDs do NOT carry a `baseline_` prefix.** **The four critical-chain tasks (`baseline_clean`, `full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`) override `retries=0`**, as does `source_key_check` — see [`AIRFLOW_DAGS.md § Built-in Features`](AIRFLOW_DAGS.md). The baseline DAG has only 2 TaskGroups (`tier1_core`, `tier2_feeds`); there is no `tier3_low_freq` here — the daily-tier collectors live in the *incremental* `edgeguard_daily` DAG. |
 | `edgeguard_pipeline` | Every 30 min | `check_containers` → `misp_health_check` → `high_frequency_collectors.collect_otx` → `log_summary` |
 | `edgeguard_medium_freq` | Every 4 hours | `misp_health_check` → `collect_cisa`, `collect_virustotal` → `log_summary` |
 | `edgeguard_low_freq` | Every 8 hours | `misp_health_check` → `collect_nvd` → `log_summary` |
 | `edgeguard_daily` | Daily 2 AM | `misp_health_check` → 8 collectors on the shared collector pool (no order among them; at most `EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4, run at once; `collect_cisa_ics` and `collect_malwarebazaar` skip while their flags are off) → `log_summary` |
-| `edgeguard_neo4j_sync` | Every 72 hours (`timedelta(days=3)`, 2026-10) | `check_sync_needed` → `neo4j_health_check` → `run_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `check_neo4j_quality` |
+| `edgeguard_neo4j_sync` | Every 72 hours (`timedelta(days=3)`) | `check_sync_needed` → `neo4j_health_check` → `run_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `check_neo4j_quality` |
 
 ### Execution Timeouts
 
@@ -89,8 +89,8 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Slow collectors (MITRE, AbuseIPDB, ThreatFox, etc.) | 2 hours |
 | Baseline collectors OTX / NVD (unlimited)            | 5 hours each |
 | Baseline collectors CISA / MITRE / Tier 2 feeds      | 2 hours each |
-| Baseline wipe (`baseline_clean`, 2026-10; was 20 minutes) | 60 minutes |
-| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours (2026-10, was 4: a full sync of a 730-day MISP takes about 6 hours, the baseline full sync's limit, plus a third, since a requested full sync stands until it succeeds) |
+| Baseline wipe (`baseline_clean`) | 60 minutes |
+| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours (a full sync of a 730-day MISP takes about 6 hours, the baseline full sync's limit; plus a third, because a requested full sync stands until it succeeds) |
 | Neo4j full sync (baseline) | 6 hours |
 | build_relationships | 5 hours |
 | run_enrichment_jobs | 5 hours |
@@ -100,89 +100,80 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Log/summary tasks | 2–5 minutes |
 | Metrics server task | 24 hours (long-lived) |
 
-_Baseline OTX/NVD, `build_relationships`, and `run_enrichment_jobs` were
-bumped from 3h → 5h in 2026-04 after baseline re-runs on the merged
-#20/#22/#24 scope repeatedly hit the 3h ceiling._
-
-### Tier 1 collectors — sequential (PR-F4, 2026-04-20)
+### Tier 1 collectors — sequential
 
 The four tier-1 baseline collectors run **sequentially** inside the
-`tier1_core` TaskGroup, in the order **`cisa → mitre → otx → nvd`**. They
-were originally parallel; the change was made after the 2026-04-19
-overnight 730-day baseline run lost ~14.7% of NVD attributes (13,620 of
-92,620) to MISP HTTP 500 errors caused by PHP-FPM worker exhaustion when
-all four collectors hammered MISP simultaneously (`AppModel.php`
-"Cannot use a scalar value as an array" warnings cascading into 5xx
-responses on edit-event calls).
+`tier1_core` TaskGroup, in the order **`cisa → mitre → otx → nvd`**,
+because all four writing to MISP at once exhaust MISP's PHP-FPM workers:
+`AppModel.php` "Cannot use a scalar value as an array" warnings cascade
+into 5xx responses on edit-event calls, and the attributes of those calls
+are lost. On the overnight 730-day baseline run of 2026-04-19, with the
+four collectors in parallel, MISP HTTP 500 errors lost 13,620 of 92,620
+NVD attributes (about 14.7%).
 
 **Order rationale:** the order is mostly aesthetic — small-first
 (CISA ~14s, MITRE ~28s) reads more naturally in the Airflow grid view.
-It does **not** give automatic fast-fail: the TaskGroup keeps its
-`trigger_rule = ALL_DONE` (preserved from the parallel design) so a
+It does **not** give automatic fast-fail: the TaskGroup keeps
+`trigger_rule = ALL_DONE` so a
 single-source API flake doesn't cascade-skip the rest of tier-1 — losing
 1/4 of a baseline is much better than losing all of it. The real value
-of PR-F4 is **halved MISP write concurrency**, which is independent of
+of the sequential order is **halved MISP write concurrency**, which is independent of
 the collector ordering.
 
-**Trade-off:** total tier-1 wall time grows from `max(otx, nvd) ≈ 5h` to
-`cisa + mitre + otx + nvd ≈ 8h`. The ~3h cost buys halved MISP write
+**Trade-off:** total tier-1 wall time is
+`cisa + mitre + otx + nvd ≈ 8h` instead of `max(otx, nvd) ≈ 5h` for
+parallel collectors. The ~3h cost buys halved MISP write
 concurrency without any MISP server changes.
 
-**What this DOES NOT fix:** the per-event-grows-with-size cost on a
+**What this does not address:** the per-event-grows-with-size cost on a
 single oversized event (MISP `edit-event` loads the entire event for
-dedup; cost grows linearly with existing attribute count). That's an
-architectural fix tracked separately — see [Issue #61](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/61)
-for event partitioning by date range so no single event exceeds
-~20K attributes.
+dedup; cost grows linearly with existing attribute count). Partitioning
+events by date range, so that no single event exceeds ~20K attributes,
+is not implemented.
 
-**Tier 2 has no order, and the collector pool bounds it (2026-10)** —
+**Tier 2 has no order, and the collector pool bounds it** —
 the tier-2 feeds are individually small and don't trigger the
 oversized-event failure mode, so `tier2_feeds` puts no edges between
-them. Their load is not negligible, though: all 7 at once grew the MISP
+them. Their load is not negligible, though: all 7 at once grow the MISP
 php-fpm workers past the MISP container's memory limit (HTTP 502), and a
-daily catch-up run together with OTX, VirusTotal and NVD reached the
-`airflow` container's memory limit (tasks killed). Since 2026-10 every
-collector, here and in the other DAGs, takes a slot of the Airflow pool
+daily catch-up run together with OTX, VirusTotal and NVD reaches the
+`airflow` container's memory limit (tasks killed). Every
+collector, here and in the other DAGs, therefore takes a slot of the Airflow pool
 `edgeguard_collectors`, so at most `EDGEGUARD_COLLECTOR_POOL_SLOTS`
 (default 4) collectors run at once across all DAGs; tier 1 runs one
-collector at a time, so it holds one slot. The pool, the upgrade order
-and resizing are described in
-[AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10).
+collector at a time, so it holds one slot. The pool and resizing are described in
+[AIRFLOW_DAGS.md § Collector pool: setup and resizing](AIRFLOW_DAGS.md#collector-pool-setup-and-resizing).
 
-### Parent-DAG liveness check (PR-F6, Issue #65, 2026-04-20)
+### Parent-DAG liveness check
 
 Every baseline collector (tier 1 and tier 2, through
 `run_baseline_collector`) installs a **parent-DAG liveness
 callback** that polls the Airflow REST API between MISP push batches
 and exits cleanly if the parent `dag_run` is no longer in `running`
-or `queued` state. This closes the **orphan-collector-process gap**
-that produced Event 19 + 72,479-CVE duplication on 2026-04-19:
+or `queued` state. This closes the **orphan-collector-process gap**.
 
-> A failed `edgeguard_baseline` DAG run kept its `collect_nvd` Python
-> subprocess alive for 12+ hours after Airflow marked the run failed.
-> The orphan eventually pushed 78,313 attributes to MISP **after** the
-> next manual run's `baseline_clean` had already wiped MISP.
-
-**Root cause**: when a DAG run is marked `failed` (because *another*
+**Why it is needed:** when a DAG run is marked `failed` (because *another*
 task in the same run failed), Airflow does NOT auto-kill in-flight
 tasks of that run. The collector keeps running in its worker
-subprocess until it finishes naturally or hits its 5h timeout.
+subprocess until it finishes naturally or hits its 5h timeout, and can
+push attributes to MISP after the next run's `baseline_clean` has wiped
+it.
 
-**The fix**: between MISP push batches (already throttled 5s by
+**How it works:** between MISP push batches (already throttled 5s by
 `EDGEGUARD_MISP_BATCH_THROTTLE_SEC`), the collector calls a callback
 that probes the Airflow REST API (rate-limited to one probe per
 60s). If the parent `dag_run` is in any terminal state, the callback
 raises `AbortedByDagFailureException` — the **current batch finishes**
 its write to MISP cleanly, the **next batch never starts**.
 
-**Trade-offs**:
-- ✅ Clean exit between batches → no half-written MISP events
-- ✅ Fail-OPEN → transient Airflow API blip doesn't false-kill the collector
-- ✅ Per-collector opt-in via `EDGEGUARD_PARENT_DAG_LIVENESS_CHECK` (default `true` for baseline)
-- ✅ Low overhead (~1 small HTTP call per minute)
-- ⚠️ Up to 60s lag between DAG-marked-failed and collector-noticing (configurable via `EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC`)
+**Trade-offs:**
+- Clean exit between batches → no half-written MISP events
+- Fail-OPEN → transient Airflow API blip doesn't false-kill the collector
+- Per-collector opt-in via `EDGEGUARD_PARENT_DAG_LIVENESS_CHECK` (default `true` for baseline)
+- Low overhead (~1 small HTTP call per minute)
+- Limitation: up to 60s lag between DAG-marked-failed and collector-noticing (configurable via `EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC`)
 
-**Operator visibility**: when the safeguard fires, you'll see this in the collector log:
+**Operator visibility:** when the safeguard fires, you'll see this in the collector log:
 
 ```
 WARNING [PARENT_DAG_DEAD] dag_run=edgeguard_baseline/manual__2026-04-19T22:46:59
@@ -194,10 +185,10 @@ Grep `PARENT_DAG_DEAD` in your DAG logs to find every aborted-by-parent-failure
 event. If you see it firing on healthy runs, your Airflow API is unreachable
 from the collector worker (check `AIRFLOW_WEBSERVER_URL` env).
 
-**What this DOES NOT do**: the safeguard runs collector-side, so it
+**What this does not do:** the safeguard runs collector-side, so it
 can't help if the collector itself is wedged (e.g., blocked in a
-syscall, in a non-MISP loop). For those cases, the existing
-`execution_timeout` per task remains the backstop. Combine the two
+syscall, in a non-MISP loop). For those cases, the per-task
+`execution_timeout` is the backstop. Combine the two
 for defense-in-depth.
 
 See [`src/parent_dag_liveness.py`](../src/parent_dag_liveness.py) for
@@ -230,7 +221,7 @@ Unpause the scheduled DAGs (`edgeguard_pipeline`, `edgeguard_medium_freq`, etc.)
 
 | Source | Baseline mode | Note |
 |--------|--------------|------|
-| NVD | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back; then the records of every KEV CVE and of `EDGEGUARD_NVD_EXTRA_CVE_IDS`, whatever their age (2026-10) | Resumes from checkpoint on restart |
+| NVD | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back; then the records of every KEV CVE and of `EDGEGUARD_NVD_EXTRA_CVE_IDS`, whatever their age | Resumes from checkpoint on restart |
 | OTX | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back | Resumes from checkpoint on restart |
 | CISA / MITRE | Full catalog fetch | Already returns complete list |
 | ThreatFox / URLhaus / Feodo / etc. | Full current feed (ThreatFox: last 7 days, at most `EDGEGUARD_THREATFOX_MAX_PER_RUN`; URLhaus: `csv_recent`, at most `EDGEGUARD_URLHAUS_MAX_PER_RUN`; Feodo Tracker: the complete C2 history, at most `EDGEGUARD_FEODO_MAX_PER_RUN`; SSL Blacklist: the whole blacklist, at most `EDGEGUARD_SSLBL_MAX_PER_RUN`; AbuseIPDB: one blacklist request of at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` addresses) | Flat feeds, no history API |
@@ -243,7 +234,7 @@ Regular cron DAGs (every 30 min / 4 h / 8 h / daily) read what changed since eac
 
 ### Configuration
 
-Set `EDGEGUARD_INCREMENTAL_LIMIT` in the environment of the Airflow worker. `src/config.py` reads the process environment, not `.env`, and `docker-compose.yml` does not forward `EDGEGUARD_INCREMENTAL_LIMIT` or `EDGEGUARD_MAX_ENTRIES` (2026-10), so on the Compose deployment a value in `.env` does not reach the container: add the variable to the `airflow` service's `environment` (or to `x-common-env`) to change it there. The per-source caps below (`EDGEGUARD_NVD_MAX_PER_RUN`, `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN`, `EDGEGUARD_THREATFOX_MAX_PER_RUN`, `EDGEGUARD_URLHAUS_MAX_PER_RUN`, `EDGEGUARD_FEODO_MAX_PER_RUN`, `EDGEGUARD_SSLBL_MAX_PER_RUN`, `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN`) are forwarded, so `.env` sets them.
+Set `EDGEGUARD_INCREMENTAL_LIMIT` in the environment of the Airflow worker. `src/config.py` reads the process environment, not `.env`, and `docker-compose.yml` does not forward `EDGEGUARD_INCREMENTAL_LIMIT` or `EDGEGUARD_MAX_ENTRIES`, so on the Compose deployment a value in `.env` does not reach the container: add the variable to the `airflow` service's `environment` (or to `x-common-env`) to change it there. The per-source caps below (`EDGEGUARD_NVD_MAX_PER_RUN`, `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN`, `EDGEGUARD_THREATFOX_MAX_PER_RUN`, `EDGEGUARD_URLHAUS_MAX_PER_RUN`, `EDGEGUARD_FEODO_MAX_PER_RUN`, `EDGEGUARD_SSLBL_MAX_PER_RUN`, `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN`) are forwarded, so `.env` sets them.
 
 ```bash
 # Default — 200 items per source per cron run
@@ -256,7 +247,7 @@ EDGEGUARD_INCREMENTAL_LIMIT=500
 EDGEGUARD_INCREMENTAL_LIMIT=0
 ```
 
-This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV and CISA ICS do not use it: each applies its own per-run cap (2026-10; CISA KEV compares its whole catalogue with MISP in every run and caps only its edits, `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500; CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, since a cut at 200 (advisory, CVE) items stopped inside the window and an advisory naming 200 or more CVEs held its cursor for good, every run green; ThreatFox and URLhaus read a 7-day and a 30-day window of about 1,100 new entries per day each, of which a cut at 200 lost about 80%; Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 left the stored copies of the others unreported, so they aged while still listed. AbuseIPDB stays at one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan). The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
+This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV and CISA ICS do not use it: each applies its own per-run cap. CISA KEV compares its whole catalogue with MISP in every run and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500). CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, because a cut at 200 (advisory, CVE) items would stop inside the window, and an advisory naming 200 or more CVEs would hold its cursor for good, every run green. ThreatFox and URLhaus read a 7-day and a 30-day window of about 1,100 new entries per day each, of which a cut at 200 would lose about 80%. Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 would leave the stored copies of the others unreported, so they would age while still listed. AbuseIPDB makes one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan. The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
 
 ### Priority order in `get_effective_limit()`
 
@@ -265,7 +256,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
 2. EDGEGUARD_MAX_ENTRIES ≠ 0 (hard global override)    → that value
 3. OWN_RUN_CAP_SOURCES (nvd, malwarebazaar,            → None here; the collector applies
    threatfox, urlhaus, feodo, sslbl,                     its own cap (EDGEGUARD_NVD_MAX_PER_RUN,
-   abuseipdb, cisa / cisa_kev, cisa_ics; 2026-10)        EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN,
+   abuseipdb, cisa / cisa_kev, cisa_ics)                 EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN,
                                                          EDGEGUARD_THREATFOX_MAX_PER_RUN 10000,
                                                          EDGEGUARD_URLHAUS_MAX_PER_RUN 50000,
                                                          EDGEGUARD_FEODO_MAX_PER_RUN 15000,
@@ -283,7 +274,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
 | | Baseline | Incremental |
 |--|----------|-------------|
 | Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB and CISA ICS use their own per-run caps, and CISA KEV compares its whole catalogue (edits capped by `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`) |
-| Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | Last 72 hours |
+| Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | From each collector's cursor (NVD, OTX, CISA ICS) or its feed's current window (ThreatFox: 7 days; URLhaus: `csv_recent`; Feodo Tracker: the servers active in the last 30 days); CISA KEV and MITRE ATT&CK read the whole catalogue (see [Incremental Collection Limit](#incremental-collection-limit)) |
 | Trigger | Manual (once before production) | Automatic (cron schedules) |
 | Scope | Full historical load | New / updated data only |
 
@@ -301,44 +292,41 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 | Relationship | Method | Confidence / properties |
 |-------------|--------|-------------------------|
-| `(Indicator)-[:INDICATES]->(Malware)` | 2026-10: same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (`match_type='otx_pulse'`, the pulse in `r.source_refs[]`), or `malware_family` name match in `build_relationships.py` Q9. The whole-event `misp_event_ids[]` co-occurrence query was removed | **0.6** (`otx_pulse`) / **0.8** (`malware_family`) |
+| `(Indicator)-[:INDICATES]->(Malware)` | Same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (`match_type='otx_pulse'`, the pulse in `r.source_refs[]`), or `malware_family` name match in `build_relationships.py` Q9; there is no whole-event `misp_event_ids[]` co-occurrence query | **0.6** (`otx_pulse`) / **0.8** (`malware_family`) |
 | `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'` (not bulk-calibrated like co-occurrence) |
-| `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** (Q5); 2026-10: also `a.reported_techniques` from OTX pulse `attack_ids` (Q5b) | **0.95** (`match_type='mitre_explicit'`) / **0.6** (`match_type='otx_pulse'`) |
+| `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** (Q5); also `a.reported_techniques` from OTX pulse `attack_ids` (Q5b) | **0.95** (`match_type='mitre_explicit'`) / **0.6** (`match_type='otx_pulse'`) |
 | `(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN m.uses_techniques` — **same STIX `uses` rows** (malware → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
 | `(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN tool.uses_techniques` — **same STIX `uses` rows** (tool → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
 | `(Technique)-[:IN_TACTIC]->(Tactic)` | MITRE ATT&CK taxonomy | **1.0** |
-| `(Technique)-[:SUBTECHNIQUE_OF]->(Technique)` | MITRE dotted id `T1021.006` → `T1021` (Q1b, 2026-10) | **1.0** (`match_type='mitre_explicit'`) |
-| `(ThreatActor)-[:USES_MALWARE]->(Malware)` | `m.name IN a.uses_malware` (MITRE STIX `uses` group → malware; Q2b, 2026-10) | **0.95** (`mitre_explicit`) |
-| `(ThreatActor)-[:USES_TOOL]->(Tool)` | `t.mitre_id IN a.uses_tools` (MITRE STIX `uses` group → tool; Q2c, 2026-10) | **0.95** (`mitre_explicit`) |
+| `(Technique)-[:SUBTECHNIQUE_OF]->(Technique)` | MITRE dotted id `T1021.006` → `T1021` (Q1b) | **1.0** (`match_type='mitre_explicit'`) |
+| `(ThreatActor)-[:USES_MALWARE]->(Malware)` | `m.name IN a.uses_malware` (MITRE STIX `uses` group → malware; Q2b) | **0.95** (`mitre_explicit`) |
+| `(ThreatActor)-[:USES_TOOL]->(Tool)` | `t.mitre_id IN a.uses_tools` (MITRE STIX `uses` group → tool; Q2c) | **0.95** (`mitre_explicit`) |
 
 **Note on Actor/Malware/Tool → Technique:** All three are sourced from **explicit** STIX **`relationship_type: uses`** objects in the MITRE ATT&CK bundle — **not** from fuzzy text matching and **not** from actor/technique MISP co-occurrence (which is always empty). The MITRE collector populates **`uses_techniques`** on actors directly from the bundle; for **malware** and **tool**, the same list is embedded in MISP as **`MITRE_USES_TECHNIQUES:{...}`** on the attribute comment so `run_misp_to_neo4j` can restore **`uses_techniques`** on **`Malware`** / **`Tool`** nodes. `build_relationships.py` uses `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label and emits the specialized edge type matching the source label.
 
-> **2026-04 refactor note:** Prior to April 2026 all three edges were a single generic `USES`. They were split into `EMPLOYS_TECHNIQUE` (attribution — actor/campaign) and `IMPLEMENTS_TECHNIQUE` (capability — malware/tool) to improve Cypher clarity and LLM/GraphRAG retrieval. Both edges collapse back to STIX 2.1 `relationship_type: "uses"` on export. *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.* See [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) for the semantic rationale.
-
-> **2026-10 (fresh-baseline PR):** the Indicator → Malware co-occurrence query described in the next note was **removed**; `INDICATES` is now written only by the sync for items of the same OTX pulse and by the family match. The note is kept for history.
->
-> **PR #33 round 10 — array-only INDICATES co-occurrence:** the legacy
-> first-seen scalar `misp_event_id` was dropped pre-release. The Indicator
-> → Malware co-occurrence query is now array-only on both ends — outer
-> filter selects Indicators with a non-empty `misp_event_ids[]`; inner
-> Malware match uses `eid IN m.misp_event_ids` for IN-membership. Mirrored
-> in `src/run_pipeline.py` for the optional CLI path.
+> **Technique edge types:** attribution (actor/campaign → technique) is
+> `EMPLOYS_TECHNIQUE` and capability (malware/tool → technique) is
+> `IMPLEMENTS_TECHNIQUE`, rather than one generic `USES`, for Cypher
+> clarity and LLM/GraphRAG retrieval. Both edges collapse back to STIX 2.1
+> `relationship_type: "uses"` on export. See
+> [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation)
+> for the semantic rationale.
 
 ### 2. run_enrichment_jobs
 
 Runs `src/enrichment_jobs.py` — **seven** jobs in sequence (`run_all_enrichment_jobs`):
 
 1. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
-1b. **Actor alias merge** (`merge_alias_duplicate_actors`, 2026-10 — folds non-MITRE actors named by an alias of exactly one MITRE actor, or resolved by the canonical threat-actor reference to another actor on the graph, into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`, `EDGEGUARD_CANONICAL_THREAT_ACTORS`)
-1c. **Malware ATT&CK-id twin merge** (`merge_malware_attack_twins`, 2026-10 — folds a non-MITRE `Malware` node named after an ATT&CK software id, `cobalt strike - s0154` from OTX's MISP-galaxy naming, into the MITRE `Malware` node of that id or, when its id cannot be read, of that base name, or, for software without one (an ATT&CK tool), into the `Malware` node of its base name; a twin with neither is left and counted; same merge as 1b; `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`; see [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Malware named after an ATT&CK software id")
-2. **Indicator aging** (`decay_ioc_confidence`, 2026-10-16: the one aging rule for every `Indicator`, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later (the time at which its aging values were last written; no task passes a time of the run, so a re-run of an older run, or a baseline overlapping a scheduled sync, evaluates at the time it runs and moves no node backwards; [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*); writes only the nodes whose values change, so a run right after it writes nothing unless a node reached a tier day; runs before the campaign builder, which links active indicators only)
+1b. **Actor alias merge** (`merge_alias_duplicate_actors` — folds non-MITRE actors named by an alias of exactly one MITRE actor, or resolved by the canonical threat-actor reference to another actor on the graph, into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`, `EDGEGUARD_CANONICAL_THREAT_ACTORS`)
+1c. **Malware ATT&CK-id twin merge** (`merge_malware_attack_twins` — folds a non-MITRE `Malware` node named after an ATT&CK software id, `cobalt strike - s0154` from OTX's MISP-galaxy naming, into the MITRE `Malware` node of that id or, when its id cannot be read, of that base name, or, for software without one (an ATT&CK tool), into the `Malware` node of its base name; a twin with neither is left and counted; same merge as 1b; `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`; see [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Malware named after an ATT&CK software id")
+2. **Indicator aging** (`decay_ioc_confidence`: the one aging rule for every `Indicator`, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later (the time at which its aging values were last written; no task passes a time of the run, so a re-run of an older run, or a baseline overlapping a scheduled sync, evaluates at the time it runs and moves no node backwards; [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*); writes only the nodes whose values change, so a run right after it writes nothing unless a node reached a tier day; runs before the campaign builder, which links active indicators only)
 3. **Campaign nodes** (`build_campaign_nodes`)
-4. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`; legacy — no-op since 2026-10, no `misp_cooccurrence` edges are written)
-5. **FIRST EPSS** (`enrich_cve_epss` in `src/cve_feed_enrichment.py`, 2026-10 — the day's EPSS score and percentile on the `CVE` nodes that exist, removed from those that left the feed; `EDGEGUARD_ENABLE_EPSS`, default on; a feed outage is logged and skipped, never fails the task; the one source written to Neo4j without MISP, see [DATA_SOURCES.md § 8b](DATA_SOURCES.md)). CISA's SSVC decision points need no job: they come with the NVD records through the sync.
+4. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`; a no-op on a fresh baseline, since no `misp_cooccurrence` edges are written)
+5. **FIRST EPSS** (`enrich_cve_epss` in `src/cve_feed_enrichment.py` — the day's EPSS score and percentile on the `CVE` nodes that exist, removed from those that left the feed; `EDGEGUARD_ENABLE_EPSS`, default on; a feed outage is logged and skipped, never fails the task; the one source written to Neo4j without MISP, see [DATA_SOURCES.md § 8b](DATA_SOURCES.md)). CISA's SSVC decision points need no job: they come with the NVD records through the sync.
 
-#### Indicator aging (2026-10-16)
+#### Indicator aging
 
-Threat intelligence has a shelf life. Every `Indicator`, whoever supplied it, ages from its latest report (`last_reported_at`: the source's own `last_seen` capped at the MISP timestamp; `first_imported_at` when no report dated it), never from `last_updated` ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#indicator-aging-2026-10-16)). No other label ages.
+Threat intelligence has a shelf life. Every `Indicator`, whoever supplied it, ages from its latest report (`last_reported_at`: the source's own `last_seen` capped at the MISP timestamp; `first_imported_at` when no report dated it), never from `last_updated` ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#indicator-aging)). No other label ages.
 
 | Days since the latest report | Effect on the Indicator |
 |--------------------------|---------------------|
@@ -349,51 +337,26 @@ Threat intelligence has a shelf life. Every `Indicator`, whoever supplied it, ag
 | from 730 | `active = false`, `retired_by = 'decay'`, `retired_at` = basis + 730 days (retired, not deleted) |
 | Any | Minimum floor: 0.10 |
 
-The value is recomputed from `source_confidence` each time, so a missed or repeated run gives the same graph; a newer report reactivates a node in the sync's write, and a manual decommission is kept. Retired nodes remain in the graph for historical queries — they are never deleted. Settings: `EDGEGUARD_AGING_TIER_DAYS`, `EDGEGUARD_AGING_FACTORS`, `EDGEGUARD_AGING_RETIRE_DAYS`.
+The value is recomputed from `source_confidence` each time, so a missed or repeated run gives the same graph; a newer report reactivates a node in the sync's write, and a manual decommission is kept. `active` comes from this rule only. Retired nodes remain in the graph for historical queries — they are never deleted. Settings: `EDGEGUARD_AGING_TIER_DAYS`, `EDGEGUARD_AGING_FACTORS`, `EDGEGUARD_AGING_RETIRE_DAYS`.
 
 #### Campaign Node Builder
 
-Materialises `Campaign` nodes from the existing graph structure. A Campaign is created for each `ThreatActor` that has at least one malware attributed to it (`ATTRIBUTED_TO`) or, since 2026-10-16, used by it (`USES_MALWARE`: MITRE's explicit `uses`, curated-package claims), and an active indicator of such a malware (`src/campaign_evidence.py`; the baseline postcheck's INV-1 counts the qualifying actors by the same definition).
+Materialises `Campaign` nodes from the existing graph structure. A Campaign is created for each `ThreatActor` that has at least one malware attributed to it (`ATTRIBUTED_TO`) or used by it (`USES_MALWARE`: MITRE's explicit `uses`, curated-package claims), and an active indicator of such a malware (`src/campaign_evidence.py`; the baseline postcheck's INV-1 counts the qualifying actors by the same definition).
 
 ```
 ThreatActor <-[:ATTRIBUTED_TO]- Malware <-[:INDICATES]- Indicator
-ThreatActor  -[:USES_MALWARE]-> Malware <-[:INDICATES]- Indicator   (2026-10-16)
+ThreatActor  -[:USES_MALWARE]-> Malware <-[:INDICATES]- Indicator
     ↓                              ↓                       ↓
  [:RUNS]→ Campaign ←── [:PART_OF_CAMPAIGN] ←── [:PART_OF_CAMPAIGN]
 ```
 
-Every campaign link carries `match_type = 'campaign_grouping'`, the confidence of the links it rests on and their relationship types (`evidence_types`, 2026-10-16). A campaign whose actor has neither link left (or whose actor name no longer exists after the actor alias merge) is deleted with its links in the same run (2026-10-16; it was kept, inactive, before); one with evidence whose indicators all expired stays, `active = false`. Its `uuid` comes from the actor's name, so a campaign built again keeps it.
+Every campaign link carries `match_type = 'campaign_grouping'`, the confidence of the links it rests on and their relationship types (`evidence_types`). A campaign whose actor has neither link left (or whose actor name no longer exists after the actor alias merge) is deleted with its links in the same run; one with evidence whose indicators all expired stays, `active = false`. Its `uuid` comes from the actor's name, so a campaign built again keeps it.
 
 Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `indicator_count`, `malware_count`.
 
 #### Co-occurrence Confidence Calibration
 
-Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.match_type IN ('misp_cooccurrence', 'misp_correlation')`, using the number of indicators in the same MISP event. No producer writes such edges since 2026-10, so the pass is a no-op on a fresh baseline. (CVE-tag `EXPLOITS` edges carry `match_type='cve_tag'` and are not tuned by this pass.)
-
-| Event size (indicators in same event) | Confidence set to |
-|--------------------------------------|-------------------|
-| ≤ 10 (tight incident report) | 0.50 |
-| 11–20 (small report) | 0.45 |
-| 21–100 (medium feed) | 0.40 |
-| 101–500 (large feed) | 0.35 |
-| > 500 (bulk dump, e.g. Feodo) | 0.30 |
-
-Only edges with `match_type IN ['misp_cooccurrence', 'misp_correlation']` are modified (2026-10: the filter moved from the dropped `r.source_id` / `r.source_ids` to `r.match_type`). Other edges, curated-package claims included, are untouched. **2026-10:** this version writes no such edges (report-scoped linking, `match_type='otx_pulse'`), so the job finds nothing on a fresh baseline; it is kept for graphs built before the change. Its large-event path (`apoc.periodic.iterate`) binds the batch column `rid` as a variable in the inner statement (2026-10; the former `$rid` parameter failed every batch).
-
-> **Multi-event event sizing (array-only):** the event-size pre-compute
-> UNWINDs `misp_event_ids[]` and counts distinct Indicators per event id,
-> so multi-event Indicators contribute to the size of every event they
-> appear in. The matcher and the large-event `apoc.periodic.iterate`
-> path use the same array IN-membership semantics; the large-event path
-> uses APOC's `params:` config so the event id is bound (no f-string
-> interpolation).
-
-> **`mark_inactive_nodes` removed (2026-10-16):** the helper (no caller)
-> set `active` from whether a node's MISP events were still listed, on
-> Indicators and Vulnerabilities alike. It was a rule beside the one
-> indicator aging rule and a lifecycle write on a label that does not
-> age; `active` now comes from the aging rule only (manual decommissions
-> are kept).
+Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.match_type IN ('misp_cooccurrence', 'misp_correlation')`, using the number of indicators in the same MISP event. No producer writes such edges (the sync links report-scoped, `match_type='otx_pulse'`), so the pass is a no-op on a fresh baseline; what it does on a graph that holds such edges is described in the [appendix](#co-occurrence-edges-and-their-calibration). Other edges, curated-package claims included, are untouched. (CVE-tag `EXPLOITS` edges carry `match_type='cve_tag'` and are not tuned by this pass.)
 
 ## Data Quality Targets
 
@@ -447,15 +410,15 @@ SET
 
 ### Confidence Score Logic
 
-The Cypher above and the multi-source example below illustrate the MERGE pattern; their confidence values are illustrative, not implemented. EdgeGuard adds no bonus per corroborating source and none for freshness. In the code, a node other than an `Indicator` keeps the highest `confidence_score` any source reported for it, and an `Indicator`'s `confidence_score` is its `source_confidence` (the highest confidence a source gave) × the aging factor, at least 0.10 (see [Indicator aging](#indicator-aging-2026-10-16)).
+The Cypher above and the multi-source example below illustrate the MERGE pattern; their confidence values are illustrative, not implemented. EdgeGuard adds no bonus per corroborating source and none for freshness. In the code, a node other than an `Indicator` keeps the highest `confidence_score` any source reported for it, and an `Indicator`'s `confidence_score` is its `source_confidence` (the highest confidence a source gave) × the aging factor, at least 0.10 (see [Indicator aging](#indicator-aging)).
 
 ### Provenance Tracking Properties
 
-Per the **PR #41 source-truthful architecture** (see
+Under the **source-truthful architecture** (see
 [`migrations/2026_04_first_seen_at_source.md`](../migrations/2026_04_first_seen_at_source.md)),
 **node-level timestamps are DB-local only** — per-source observation
 claims live on the `SOURCED_FROM` edge so multi-source IOCs preserve
-full provenance. The legacy `n.first_seen` field has been retired.
+full provenance. Nodes carry no `n.first_seen` field.
 
 | Property | Where | Type | Description |
 |----------|-------|------|-------------|
@@ -529,19 +492,67 @@ EdgeGuard-Knowledge-Graph/
 ```
 
 ### Key DAG Design Points
-- Each source group runs at its own cadence to respect API rate limits — no more one-DAG-for-all.
-- **`edgeguard_neo4j_sync`** runs every 72 hours (a timedelta schedule since 2026-10) and uses a `ShortCircuitOperator`
+- Each source group runs at its own cadence to respect API rate limits, rather than one DAG for all sources.
+- **`edgeguard_neo4j_sync`** runs every 72 hours (a timedelta schedule) and uses a `ShortCircuitOperator`
   (`check_sync_needed` / `should_run_neo4j_sync`) that skips the chain when the last sync started less than 24 hours ago
   (after a baseline's or a forced sync) and while a baseline holds the baseline lock; a regular run is never skipped by the
-  24 h guard. Since 2026-10-16 `run_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` check the lock again at
+  24 h guard. `run_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` check the lock again at
   their start and skip while a baseline holds it ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#neo4j-sync)).
 - All `python_callable` values are direct function references (no lambdas) — lambda functions
-  cannot be serialized by Airflow's DAG serialization (the constraint persisted across the 2.x → 3.x upgrade) and cause `PicklingError` on workers.
+  cannot be serialized by Airflow's DAG serialization (on 2.x and 3.x alike) and cause `PicklingError` on workers.
 - Every task has an `execution_timeout` — see table above.
-- Every `collect_*` task of every DAG runs in the Airflow pool `edgeguard_collectors` (2026-10), which bounds how many collectors run at once (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4); see [AIRFLOW_DAGS.md § Collector pool: upgrade and resizing](AIRFLOW_DAGS.md#collector-pool-upgrade-and-resizing-2026-10).
+- Every `collect_*` task of every DAG runs in the Airflow pool `edgeguard_collectors`, which bounds how many collectors run at once (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4); see [AIRFLOW_DAGS.md § Collector pool: setup and resizing](AIRFLOW_DAGS.md#collector-pool-setup-and-resizing).
 - The Prometheus metrics server runs in `edgeguard_metrics_server.py`, not at DAG module level.
-
 
 ---
 
-_Last updated: 2026-10-17 — Incremental Collection Limit: CISA ICS uses its own per-run cap (`EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`, 1,200 advisory files), not `EDGEGUARD_INCREMENTAL_LIMIT` (`cisa_ics` in `OWN_RUN_CAP_SOURCES`). Same day: Incremental Collection Limit: each collector reads from its cursor or its feed's current window (it said the last 2-3 days, and a 72-hour window without an item cap). Same day: documentation audit: `check_sync_needed` also skips while a baseline holds the baseline lock, and the sync DAG's writing tasks check the lock again at their start (diagram, Key DAG Design Points); `source_key_check` also has `retries=0`; every baseline collector, tier 1 and tier 2, installs the parent-DAG liveness callback; *Step 2* names the additive and the destructive trigger, *Step 3* the unpause and the lock; CISA KEV in the incremental item-cap cell; timeouts of `baseline_postcheck` and of the health, key and lock checks; the confidence formulas were illustrative: a node keeps the highest confidence a source reported, an Indicator's is `source_confidence` × the aging factor; issue link. Prior: 2026-10-16 — `get_effective_limit`: CISA KEV (`cisa`, `cisa_kev`) is in `OWN_RUN_CAP_SOURCES`: every KEV run compares the whole catalogue with MISP and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN`). Same day: collector pool: every `collect_*` task of every DAG takes a slot of the Airflow pool `edgeguard_collectors` (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4); the diagram, the `edgeguard_daily` row and the tier-2 paragraph no longer describe the collectors as running in parallel (all 7 tier-2 feeds at once grew the MISP php-fpm workers past the MISP container's memory limit, and a daily catch-up run with OTX, VirusTotal and NVD reached the `airflow` container's memory limit). Same day: the indicator aging is evaluated at the database's current time, or at a node's later `aging_evaluated_at`; no task passes a time of the run. Same day: Feodo Tracker, SSL Blacklist and AbuseIPDB are in `OWN_RUN_CAP_SOURCES` with their own per-run caps (baseline behaviour, incremental limit, `get_effective_limit` priority); `edgeguard_neo4j_sync` runs every 72 hours (a timedelta schedule) and skips a run within 24 hours of the last sync start. Same day: `run_enrichment_jobs`: the indicator aging (one rule for every Indicator, from the latest report, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retired from 730) runs before the campaign builder; `mark_inactive_nodes` removed. Same day: Campaign Node Builder: a campaign rests on `ATTRIBUTED_TO` or `USES_MALWARE`, its links name the relationship types they rest on, and a campaign without evidence is deleted; the baseline postcheck's INV-1 counts the qualifying actors by the builder's definition. Prior: 2026-10-15 — ThreatFox and URLhaus are in `OWN_RUN_CAP_SOURCES` with their own per-run caps; a value of `EDGEGUARD_INCREMENTAL_LIMIT` in `.env` does not reach the Compose deployment (not forwarded); `run_neo4j_sync` timeout 8 hours (was 4), the baseline full sync's 6 hours plus a third. Same day: post-sync enrichment: seven jobs, the Malware ATT&CK-id twin merge (`merge_malware_attack_twins`, into the ATT&CK node or the node of the base name) after the actor alias merge and before the Campaign builder. Same day: post-sync enrichment: six jobs, the sixth FIRST EPSS (`enrich_cve_epss`). Same day: co-occurrence calibration: the filter is `r.match_type` (the text still named the dropped `r.source_id`); the large-event batch statement binds `rid` as a variable (#182); `baseline_clean` timeout (60 minutes) in the timeout table; `get_effective_limit` priority includes `OWN_RUN_CAP_SOURCES` (NVD, MalwareBazaar); the NVD baseline row names the KEV sweep and the named CVE ids. Prior: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._
+## Appendix: data written by earlier versions
+
+The main text assumes a fresh baseline. The notes below matter only for a graph kept across an upgrade.
+
+### Generic `USES` technique edges
+
+A graph built before the technique edges were split holds a single generic `USES` edge from actors, malware and tools to techniques. No migration script is shipped; a fresh baseline writes `EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE` directly.
+
+### Co-occurrence edges and their calibration
+
+Earlier versions wrote `INDICATES` and `EXPLOITS` edges from MISP co-occurrence (`match_type` `misp_cooccurrence` or `misp_correlation`). On a graph that still holds them, `calibrate_cooccurrence_confidence` sets their confidence from the number of indicators in the same MISP event:
+
+| Event size (indicators in same event) | Confidence set to |
+|--------------------------------------|-------------------|
+| ≤ 10 (tight incident report) | 0.50 |
+| 11–20 (small report) | 0.45 |
+| 21–100 (medium feed) | 0.40 |
+| 101–500 (large feed) | 0.35 |
+| > 500 (bulk dump, e.g. Feodo) | 0.30 |
+
+Only edges with `match_type IN ['misp_cooccurrence', 'misp_correlation']` are modified; other edges, curated-package claims included, are untouched.
+
+> **Multi-event event sizing (array-only):** the event-size pre-compute
+> UNWINDs `misp_event_ids[]` and counts distinct Indicators per event id,
+> so multi-event Indicators contribute to the size of every event they
+> appear in. The matcher and the large-event `apoc.periodic.iterate`
+> path use the same array IN-membership semantics; the large-event path
+> uses APOC's `params:` config so the event id is bound (no f-string
+> interpolation), and binds the batch column `rid` as a variable in the
+> inner statement.
+
+_Last updated: 2026-10-18_
+
+## History
+
+- 2026-10-18 — Baseline vs Incremental table: the incremental lookback is each collector's cursor or its feed's current window, not 72 hours.
+- 2026-10-17 — Rewritten as a guide to the current system: change history moved to this section, co-occurrence calibration details to the appendix.
+- 2026-10-17 — CISA ICS uses its own per-run cap (`EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`, `cisa_ics` in `OWN_RUN_CAP_SOURCES`); the incremental collectors read from their cursor or feed window (the text said the last 2–3 days without an item cap); the sync's ShortCircuit also skips while a baseline holds the lock and the writing tasks check it again; `source_key_check` has `retries=0`; every baseline collector installs the liveness callback; the confidence formulas are marked illustrative.
+- 2026-10-16 — CISA KEV, Feodo Tracker, SSL Blacklist and AbuseIPDB are in `OWN_RUN_CAP_SOURCES`; every `collect_*` task takes a slot of the collector pool `edgeguard_collectors`, because all 7 tier-2 feeds at once grew the MISP php-fpm workers past the MISP container's memory limit and a daily catch-up run with OTX, VirusTotal and NVD reached the `airflow` container's memory limit; `edgeguard_neo4j_sync` runs every 72 hours with a 24-hour skip guard.
+- 2026-10-16 — Indicator aging: one rule for every Indicator from its latest report, evaluated at the database's current time and run before the campaign builder; `mark_inactive_nodes` (no caller) removed, because it set `active` on Indicators and Vulnerabilities from MISP event listing, a second lifecycle rule beside the aging rule on a label that does not age.
+- 2026-10-16 — Campaign builder: a campaign rests on `ATTRIBUTED_TO` or `USES_MALWARE`, its links name their evidence types, and a campaign without evidence is deleted (it was kept, inactive).
+- 2026-10-15 — ThreatFox and URLhaus use their own per-run caps; a value of `EDGEGUARD_INCREMENTAL_LIMIT` in `.env` does not reach the Compose deployment; `run_neo4j_sync` timeout 8 hours (was 4); `baseline_clean` timeout 60 minutes (was 20); the enrichment gained the Malware ATT&CK-id twin merge and FIRST EPSS; the calibration filter is `r.match_type` (it named the dropped `r.source_id` / `r.source_ids`) and its large-event batch binds `rid` as a variable (the `$rid` parameter failed every batch); the NVD baseline names the KEV sweep and the named CVE ids.
+- 2026-10-14 — Every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]`; `source_id`, `source_ids` and `report_ids` dropped from relationships.
+- 2026-10-10 — The whole-event Indicator → Malware co-occurrence query was removed: `INDICATES` comes from the same OTX pulse and the family match; actor techniques also come from OTX pulse `attack_ids`; `SUBTECHNIQUE_OF`, `USES_MALWARE` and `USES_TOOL` edges; the actor alias merge (`merge_alias_duplicate_actors`) joins the enrichment jobs.
+- 2026-04-28 — Baseline task chain corrected: task IDs carry no `baseline_` prefix, there is no `tier3_low_freq` group, `tier2_extended` is `tier2_feeds`, and `baseline_postcheck` is in the chain.
+- 2026-04-23 — The four baseline critical-chain tasks have `retries=0`.
+- 2026-04-20 — Tier-1 baseline collectors run sequentially after the 2026-04-19 baseline lost about 14.7% of NVD attributes; parent-DAG liveness check after a failed baseline run's `collect_nvd` subprocess stayed alive 12+ hours and pushed 78,313 attributes to MISP after the next run's `baseline_clean` had wiped it (Event 19, 72,479 duplicated CVEs).
+- 2026-04-18 — Source-truthful provenance: per-source timestamps on `SOURCED_FROM`, `n.first_seen` retired; Airflow 2 to 3 upgrade.
+- 2026-04-17 — The INDICATES co-occurrence query became array-only (`misp_event_ids[]`, the scalar `misp_event_id` dropped).
+- 2026-04-15 — Baseline OTX/NVD, `build_relationships` and `run_enrichment_jobs` timeouts raised from 3 h to 5 h after baseline re-runs hit the 3 h limit; technique edges split from a single `USES` into `EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE`.
