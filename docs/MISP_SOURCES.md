@@ -164,7 +164,7 @@ _Last updated: 2026-10-19_
 
 ## History
 
-- 2026-10-19 — The `OTX_META` row lists the block on a CVE an OTX pulse names (`pulse_id`, `report_ids`, `pulse_name`), from which the sync groups the CVE into its pulse.
+- 2026-10-19 — MISPWriter writes an `OTX_META` block (`pulse_id`, `report_ids`, `pulse_name`) on a CVE an OTX pulse names (it wrote a plain comment), from which the sync groups the CVE into its pulse; the `OTX_META` row lists it.
 - 2026-10-18 — The events' MISP distribution stated as it is: 1 ("This community only", every organisation on the instance), unpublished, so neither server synchronisation nor feeds forward them; MISP is the single store the collectors write to and the graph is built from (the writer's code comment had said "This organization only"); the `EdgeGuard` tag marks the events EdgeGuard wrote.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; the change history moved to this section, the historical note on early prototypes that skipped MISP folded into the architecture section as the product path, and data written by earlier versions moved to the appendix.

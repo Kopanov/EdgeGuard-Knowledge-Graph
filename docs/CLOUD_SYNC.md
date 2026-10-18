@@ -449,10 +449,11 @@ DETACH DELETE n
 ### Recipe 2 — extract a self-describing subgraph for an LLM / RAG store
 
 ```cypher
-// Seed: a CVE, both twin nodes (see the twin-node design above). Pull 1 hop on
-// each side. Output is fully self-describing — every edge document carries
-// src_uuid + trg_uuid, every node carries uuid.
-MATCH (v) WHERE (v:CVE OR v:Vulnerability) AND v.cve_id = $cve_id
+// Seed: the CVE node (EdgeGuard's label; the Vulnerability twin shares its uuid,
+// see the twin-node design above). Pull 1 hop on each side. Output is fully
+// self-describing — every edge document carries src_uuid + trg_uuid, every node
+// carries uuid.
+MATCH (v:CVE {cve_id: $cve_id})
 OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS|INDICATES]->(v)
 OPTIONAL MATCH (v)-[r2:AFFECTS]->(s:Sector)
 WITH collect(DISTINCT v) + collect(DISTINCT i) + collect(DISTINCT s) AS nodes,
@@ -788,7 +789,7 @@ _Last updated: 2026-10-19_
 
 ## History
 
-- 2026-10-19 — Recipe 2 seeds on both twin nodes of the CVE and takes both links from an indicator, `INDICATES` (named in the same OTX report) and `EXPLOITS` (the indicator's own CVE tag), kept apart by the edge type; it took `EXPLOITS` to the `Vulnerability` only.
+- 2026-10-19 — Recipe 2 seeds on the `CVE` node and takes both links from an indicator, `INDICATES` (named in the same OTX report) and `EXPLOITS` (the indicator's own CVE tag), kept apart by the edge type; it seeded on the `Vulnerability` twin and took `EXPLOITS` only.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the notes for graphs written by earlier builds to the appendix (the revert of the uuid deploy is no longer a rollback recipe, so the uuid cleanup and re-stamp recipes are Rollback B and C).
 - 2026-10-17 — Rollback A dumps offline and passes directories to `--to-path` / `--from-path`, as Recipe 3 and BACKUP.md do.

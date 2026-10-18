@@ -1292,7 +1292,7 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-18_
 
 ## History
 
