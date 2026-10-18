@@ -54,6 +54,60 @@ class TestPreflightAndStats:
         assert "success_rate_percent" in summary and "average_duration_seconds" in summary
 
 
+class TestStatsLastSync:
+    """``stats`` printed a green "Last sync: Never (Noneh ago)" when no sync state file was found on
+    the host (every host but the pipeline's); it warns instead and never formats a missing age
+    (2026-10-18)."""
+
+    NEVER = {"last_sync": "Never", "age_hours": None}
+
+    def test_no_state_file_is_a_warning(self, capsys):
+        edgeguard._print_last_sync(self.NEVER)
+        out = capsys.readouterr().out
+        assert "⚠" in out and "✓" not in out
+        assert "Last sync: no sync recorded on this host (no sync state file found)" in out
+        assert "None" not in out and "Never" not in out
+
+    def test_a_recorded_sync_is_a_success_with_a_rounded_age(self, capsys):
+        edgeguard._print_last_sync({"last_sync": "2026-10-18 10:00", "age_hours": 2.4567})
+        out = capsys.readouterr().out
+        assert "✓" in out and "Last sync: 2026-10-18 10:00 (2.5h ago)" in out
+
+    def test_a_missing_age_never_reaches_the_format(self, capsys):
+        edgeguard._print_last_sync({"last_sync": "2026-10-18 10:00", "age_hours": None})
+        out = capsys.readouterr().out
+        assert "⚠" in out and "None" not in out
+
+    def test_stats_misp_off_the_pipeline_host(self, monkeypatch, capsys):
+        """The scorecard's case: ``stats --misp`` where no sync state file exists."""
+        edgeguard._ensure_runtime_imports()
+        unreachable = SimpleNamespace(Neo4jClient=lambda: SimpleNamespace(connect=lambda: False))
+        monkeypatch.setitem(sys.modules, "neo4j_client", unreachable)
+        monkeypatch.setattr(
+            edgeguard,
+            "_fetch_misp_event_summary",
+            lambda: {"total_events": 2, "total_attributes": 10, "by_source": [], "truncated": False},
+        )
+        monkeypatch.setattr(edgeguard, "get_sync_status", lambda: dict(self.NEVER))
+        args = SimpleNamespace(json=False, full=False, by_zone=False, by_source=False, misp=True)
+        assert edgeguard.cmd_stats(args) == 0
+        out = capsys.readouterr().out
+        assert "MISP Events: 2 events" in out
+        assert "Last sync: no sync recorded on this host" in out
+        assert "Noneh" not in out and "Last sync: Never" not in out
+
+    def test_json_output_keeps_the_raw_status(self, monkeypatch, capsys):
+        edgeguard._ensure_runtime_imports()
+        unreachable = SimpleNamespace(Neo4jClient=lambda: SimpleNamespace(connect=lambda: False))
+        monkeypatch.setitem(sys.modules, "neo4j_client", unreachable)
+        monkeypatch.setattr(edgeguard, "get_sync_status", lambda: dict(self.NEVER))
+        args = SimpleNamespace(json=True, full=False, by_zone=False, by_source=False, misp=False)
+        assert edgeguard.cmd_stats(args) == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out[out.index("{") : out.rindex("}") + 1])
+        assert payload["last_sync"] == self.NEVER
+
+
 class TestMonitor:
     @pytest.fixture(autouse=True)
     def _runtime_names(self):

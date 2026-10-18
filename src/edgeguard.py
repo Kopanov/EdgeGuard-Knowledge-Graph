@@ -2178,10 +2178,7 @@ def cmd_stats(args) -> int:
         sync = get_sync_status()
         result["last_sync"] = sync
         if not use_json:
-            if sync.get("last_sync"):
-                ok(f"\nLast sync: {sync['last_sync'][:19]} ({sync.get('age_hours', '?')}h ago)")
-            else:
-                warn("\nNo sync recorded yet")
+            _print_last_sync(sync)
     except Exception:
         pass
 
@@ -2224,6 +2221,21 @@ def cmd_stats(args) -> int:
 
     print()
     return 0
+
+
+def _print_last_sync(sync: dict) -> None:
+    """The "Last sync" line of ``stats``: a success line only when a sync state file was read.
+
+    ``get_sync_status`` answers ``{"last_sync": "Never", "age_hours": None}`` when no state file is
+    found on this host, which is the case wherever the CLI runs off the pipeline host; that is a
+    warning, not a green "Last sync: Never (Noneh ago)" (2026-10-18).
+    """
+    last = sync.get("last_sync")
+    age = sync.get("age_hours")
+    if last and last != "Never" and isinstance(age, (int, float)):
+        ok(f"\nLast sync: {str(last)[:19]} ({age:.1f}h ago)")
+    else:
+        warn("\nLast sync: no sync recorded on this host (no sync state file found)")
 
 
 # 2026-10: ``stats --misp`` pages through ``/events/index`` (it read one page of 500 events, so on a

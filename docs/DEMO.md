@@ -215,7 +215,10 @@ Next to the graph's node counts, prints the number of EdgeGuard events and attri
 a table of events and attributes per source, parsed from the event names
 (`EdgeGuard-<source>-<date>`). The summary reads every page of MISP's `/events/index`
 (`searchall=EdgeGuard`, 500 events a page, at most 200 pages; it warns when it stops at that cap,
-and `--json` then carries `"truncated": true`). `--json` prints the same as JSON.
+and `--json` then carries `"truncated": true`). `--json` prints the same as JSON. The closing
+"Last sync" line reads the sync state file of the host it runs on
+(`state/edgeguard_last_neo4j_sync.json`, which the Airflow sync writes); on any other host it is a
+warning, `Last sync: no sync recorded on this host`.
 
 ### 2. Graph Explorer
 
@@ -308,6 +311,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Step 1 says that `stats` warns when the host holds no sync state file.
 - 2026-10-18 — The alert enrichment shows no CVE from the graph (an indicator links to a CVE only through its own CVE tag, which the collectors do not write), so the output shape shows `cves: []` and the workflow takes `<CVE id>` from the GraphQL step instead of the alert output; the demo commands discard the configuration warning on stderr (`2>/dev/null`); the STIX example URL-encodes the indicator and adds a CVE bundle.
 
 - 2026-10-17 — Restated as a guide to the current behaviour, with the change history moved here; the API key note lists the routes served without the key in a non-production `EDGEGUARD_ENV` (`/docs`, `/redoc`, `/openapi.json`).
