@@ -1100,6 +1100,19 @@ class TestBuildRelationshipsSource:
         assert '"malware_implements_technique_reported"' in text
         assert re.search(r"\[LINK\] 6b/\d+", text)
 
+    def test_8_indicator_attack_ids_has_the_confidence_of_the_other_pulse_level_links(self):
+        """The ATT&CK ids an OTX pulse lists are one report's association, whichever node they reach:
+        ``USES_TECHNIQUE`` from the pulse's indicators (step 8) is created at 0.6, as are 5b / 6b from
+        the same ids on the pulse's actors and families, and keeps its own evidence label."""
+        from build_rel_queries import assigned_query
+
+        q8 = assigned_query("_q8_inner")
+        assert "MERGE (i)-[r:USES_TECHNIQUE]->(t)" in q8
+        assert 'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_attack_ids"' in q8
+        assert "0.85" not in q8
+        reported = [body for _, _, body in _inner_queries() if "reported_techniques AS tid" in body]
+        assert len(reported) == 2 and all("r.confidence_score = 0.6" in body for body in reported)
+
     def test_reported_queries_run_after_their_mitre_explicit_sibling(self):
         """ON CREATE semantics: a pair MITRE also asserts must keep the
         ``mitre_explicit`` / 0.95 stamp, so Q5 must run before 5b and Q6 before 6b."""

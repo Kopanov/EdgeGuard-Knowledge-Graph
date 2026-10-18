@@ -91,6 +91,17 @@ def test_build_relationships_records_the_cited_id_on_a_translated_link(client, r
         # T1086 (revoked into T1059.001) and T1059.001 itself make one link, which names T1086;
         # the link to T1566 was cited as itself and carries no property.
         assert _cited(raw_driver, query) == {"T1059.001": ["T1086"], "T1566": None}
+    # The pulse's ATT&CK ids are one report's association: 0.6, as every other link from them, with
+    # the step's own evidence label.
+    with raw_driver.session() as session:
+        evidence = {
+            (r["label"], r["confidence"])
+            for r in session.run(
+                "MATCH (:Indicator {value: 'it.example'})-[r:USES_TECHNIQUE]->(:Technique) "
+                "RETURN r.match_type AS label, r.confidence_score AS confidence"
+            )
+        }
+    assert evidence == {("otx_attack_ids", 0.6)}
 
 
 def test_the_sync_writer_records_cited_ids_on_technique_rows_only(client, raw_driver):
