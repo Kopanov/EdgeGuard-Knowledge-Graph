@@ -54,29 +54,10 @@ _PLACEHOLDER_NAMES_CYPHER_LIST = (
 )
 
 
-# PR-N30 Cross-Checker H-2 (2026-04-24): canonical cap on per-edge
-# ``r.misp_event_ids[]`` fan-out.
-#
-# Pre-N30 Q4 (INDICATES cooccurrence) capped per-malware fan-out at
-# ``[0..200]`` (line 654) but the 5 other PR-N26 SET clauses (Q3a, Q3b,
-# Q7a, Q7b, Q9) and the 5 backfill queries in
-# ``scripts/backfill_edge_misp_event_ids.py`` had NO cap. Result: a
-# Malware with 250 event_ids that co-occur with an Indicator carrying all
-# 250 landed on the EXPLOITS edge as a 200-element array under Q4 but a
-# 250-element array under backfill. Same logical entity, different
-# ``r.misp_event_ids[]`` content depending on the write path.
-#
-# PR-N30 aligns: apply this cap symmetrically to all 5 forward-write SET
-# clauses AND the 5 backfill queries. The constant is referenced via
-# f-string substitution rather than hardcoded so a future bump to e.g.
-# 500 needs to change ONE line.
-#
-# Sibling constant in ``scripts/backfill_edge_misp_event_ids.py`` MUST
-# match this value. The backfill script can't cleanly import from
-# ``src/build_relationships.py`` without triggering its module-level
-# side effects (APOC + Sector UUID precomputation), so the constant is
-# duplicated with a cross-reference comment. Grep
-# ``CRITICAL_MAX_EVENT_IDS_PER_EDGE`` to find both sites.
+# Canonical cap on the per-edge ``r.misp_event_ids[]`` fan-out, applied symmetrically to every
+# forward-write site (through ``relationship_provenance.MAX_EVENT_IDS_PER_EDGE`` and the step 2d
+# intersection), so the same logical edge carries the same event list whichever step writes it.
+# Referenced via f-string substitution rather than hardcoded, so a change needs one line.
 CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
 
 # Relationship provenance (2026-10): every link built here names the feed(s) whose data it
@@ -1122,7 +1103,7 @@ def build_relationships():
             # empty strings (matches Path A's require_nonempty_string guard
             # in neo4j_client.create_misp_relationships_batch) AND cap
             # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
-            # semantics between forward-write and the backfill script.
+            # semantics across the forward-write sites.
              + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)"
         )
         # PR #34 round 20: count Indicator orphans (cve_id set but no
@@ -1164,7 +1145,7 @@ def build_relationships():
             # empty strings (matches Path A's require_nonempty_string guard
             # in neo4j_client.create_misp_relationships_batch) AND cap
             # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
-            # semantics between forward-write and the backfill script.
+            # semantics across the forward-write sites.
              + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)"
         )
         _q3b_skip = (
@@ -1581,7 +1562,7 @@ def build_relationships():
             # empty strings (matches Path A's require_nonempty_string guard
             # in neo4j_client.create_misp_relationships_batch) AND cap
             # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
-            # semantics between forward-write and the backfill script.
+            # semantics across the forward-write sites.
              + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )

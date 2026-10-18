@@ -3,27 +3,19 @@ PR-N30 — post-PR-#109 audit follow-ups that touch files PR #109 created
 or modified. Couldn't split into PR-N29 (which branched off main before
 PR #109 merged), so these stack on PR #109's merge.
 
-Four fixes:
-
-1. **Red Team H1** — ``scripts/backfill_edge_misp_event_ids.py`` opens
-   the dry-run session in ``READ_ACCESS`` mode. Pre-N30 there was zero
-   driver-side constraint preventing a future ``count_query`` drift
-   from silently mutating during what the operator thought was a safe
-   dry-run. Neo4j rejects writes on READ-mode sessions with
-   ``ClientError`` — loud failure instead of silent corruption.
+Three fixes (each numbered as in the original follow-up list):
 
 2. **Cross-Checker H-2** — ``CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200`` cap
-   applied symmetrically to all 5 forward-write SET clauses (Q3a, Q3b,
-   Q7a, Q7b, Q9) AND all 5 backfill queries. Pre-N30 Q4 had the cap
-   but the others didn't — same (i, m) edge could carry a 200-element
-   array under Q4 but a 250-element array under the other paths.
+   applied symmetrically to every forward-write SET clause. Pre-N30 Q4 had
+   the cap but the others didn't — same (i, m) edge could carry a
+   200-element array under Q4 but a 250-element array under the other paths.
 
-3. **Cross-Checker M-1** — empty-string filter on all 5 forward-write
-   SET clauses AND 5 backfill queries (Path A parity). Pre-N30 Path A
-   filtered via ``_dedup_concat_optional_clause(..., require_nonempty_string=True)``
-   but Path B (build_relationships + backfill) didn't. An Indicator
-   whose ``misp_event_ids[]`` contained an empty string would propagate
-   the empty string onto downstream edges.
+3. **Cross-Checker M-1** — empty-string filter on every forward-write SET
+   clause (Path A parity). Pre-N30 Path A filtered via
+   ``_dedup_concat_optional_clause(..., require_nonempty_string=True)``
+   but Path B (build_relationships) didn't. An Indicator whose
+   ``misp_event_ids[]`` contained an empty string would propagate the
+   empty string onto downstream edges.
 
 4. **Test Coverage REC-B1** — proper behavioural test for the PR-N27
    sentinel via mocked Airflow context. Pre-N30 all sentinel tests were
@@ -45,7 +37,6 @@ from unittest.mock import MagicMock, patch
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
 DAGS = REPO_ROOT / "dags"
-SCRIPTS = REPO_ROOT / "scripts"
 
 for _p in (str(SRC), str(DAGS)):
     if _p not in sys.path:
@@ -104,60 +95,20 @@ def _import_dag_module_or_skip():
 
 
 # ===========================================================================
-# Fix 1 — Red Team H1: backfill --dry-run opens session in READ_ACCESS mode
-# ===========================================================================
-
-
-class TestPRN30RedTeamH1DryRunReadMode:
-    """Backfill script must open sessions with ``READ_ACCESS`` when
-    ``--dry-run`` is set so a future maintainer adding a stray MERGE
-    to a count_query gets a loud ``ClientError`` instead of silent
-    mutation."""
-
-    BACKFILL = SCRIPTS / "backfill_edge_misp_event_ids.py"
-
-    def test_imports_read_access_and_write_access(self):
-        text = self.BACKFILL.read_text()
-        assert "from neo4j import READ_ACCESS, WRITE_ACCESS" in text or (
-            "READ_ACCESS" in text and "WRITE_ACCESS" in text and "from neo4j import" in text
-        ), "PR-N30 Red Team H1: backfill must import READ_ACCESS + WRITE_ACCESS from neo4j"
-
-    def test_session_default_access_mode_gated_on_dry_run(self):
-        text = self.BACKFILL.read_text()
-        assert "access_mode = READ_ACCESS if dry_run else WRITE_ACCESS" in text, (
-            "PR-N30 Red Team H1: access_mode must be selected from dry_run flag"
-        )
-        assert "driver.session(default_access_mode=access_mode)" in text, (
-            "PR-N30 Red Team H1: session must be opened with default_access_mode=access_mode"
-        )
-
-
-# ===========================================================================
 # Fix 2 — Cross-Checker H-2: CRITICAL_MAX_EVENT_IDS_PER_EDGE cap alignment
 # ===========================================================================
 
 
 class TestPRN30CrossCheckerH2EventIdCap:
     """CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200 applied symmetrically to
-    both the forward-write Cypher in build_relationships.py AND the
-    backfill queries in scripts/backfill_edge_misp_event_ids.py."""
+    every forward-write Cypher site in build_relationships.py."""
 
     BUILD_RELS = SRC / "build_relationships.py"
-    BACKFILL = SCRIPTS / "backfill_edge_misp_event_ids.py"
 
     def test_constant_defined_in_build_relationships(self):
         text = self.BUILD_RELS.read_text()
         assert "CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200" in text, (
             "PR-N30 H-2: src/build_relationships.py must define the canonical cap"
-        )
-
-    def test_constant_defined_in_backfill_script(self):
-        """Sibling constant — the backfill script can't cleanly import
-        from build_relationships, so the constant is duplicated with a
-        cross-reference comment."""
-        text = self.BACKFILL.read_text()
-        assert "CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200" in text, (
-            "PR-N30 H-2: backfill script must define the sibling constant"
         )
 
     def test_forward_write_cap_applied_to_all_five_sites(self):
@@ -210,12 +161,6 @@ class TestPRN30CrossCheckerH2EventIdCap:
             "symmetric cap maintenance"
         )
 
-    def test_backfill_cap_applied_to_all_5_queries(self):
-        text = self.BACKFILL.read_text()
-        cap_pattern = "[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-        occurrences = text.count(cap_pattern)
-        assert occurrences >= 5, f"PR-N30 H-2: f-string cap must appear in all 5 backfill queries; found {occurrences}"
-
 
 # ===========================================================================
 # Fix 3 — Cross-Checker M-1: empty-string filter on Path B
@@ -225,10 +170,9 @@ class TestPRN30CrossCheckerH2EventIdCap:
 class TestPRN30CrossCheckerM1EmptyStringFilter:
     """Path A (neo4j_client.create_misp_relationships_batch) filters
     empty strings via require_nonempty_string=True. Path B (forward-write
-    in build_relationships + backfill) must match that contract."""
+    in build_relationships) must match that contract."""
 
     BUILD_RELS = SRC / "build_relationships.py"
-    BACKFILL = SCRIPTS / "backfill_edge_misp_event_ids.py"
 
     def test_forward_write_filters_empty_strings(self):
         """Forward-write filter uses ``size(x) > 0`` (not ``x <> ''``).
@@ -251,18 +195,6 @@ class TestPRN30CrossCheckerM1EmptyStringFilter:
         assert "x IS NOT NULL AND x <> ''" not in text, (
             "PR-N30 M-1: do NOT use ``<> ''`` — conflicts with apoc.periodic.iterate's "
             "single-quoted inner-query wrapper. Use ``size(x) > 0`` (PR-N7 guard)."
-        )
-
-    def test_backfill_filters_empty_strings(self):
-        text = self.BACKFILL.read_text()
-        # Backfill uses ``size(x) > 0`` for the same PR-N7 reason — keeps
-        # the Cypher safe inside apoc.periodic.iterate's inner-query wrapper.
-        count_x = text.count("x IS NOT NULL AND size(x) > 0")
-        count_eid = text.count("eid IS NOT NULL AND size(eid) > 0")
-        total = count_x + count_eid
-        assert total >= 5, (
-            f"PR-N30 M-1: empty-string filter (size(x) > 0) must appear in "
-            f"all 5 backfill queries; found {total} (x={count_x}, eid={count_eid})"
         )
 
 
