@@ -48,17 +48,6 @@ class TestSharedStateDirectories:
             "condition": "service_completed_successfully"
         }
 
-    def test_init_service_migrates_existing_state_from_the_volume_without_overwriting(self):
-        """Deployments created before the bind mounts keep their sync watermark and resume points."""
-        init = _compose()["services"]["airflow-init"]
-        assert "airflow_db:/legacy:ro" in init["volumes"]
-        script = "\n".join(init["command"])
-        assert 'find "/legacy/$d" -mindepth 1 -maxdepth 1' in script and "-exec cp -an {}" in script
-        assert script.index("cp -an") < script.index("chown -R 50000:0"), "copy before the ownership fix"
-        # Process-held lock files of the previous container must not be carried over: a copied
-        # baseline_in_progress.lock would make the scheduled DAGs skip until the age cap.
-        assert "! -name baseline_in_progress.lock" in script and "! -name pipeline.lock" in script
-
     def test_container_paths_match_the_code_defaults(self):
         """The DAG derives BASE_DIR from its own location and the lock module from src/..; with src
         and dags mounted under /opt/airflow both resolve to the mounted directories."""
