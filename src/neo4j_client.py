@@ -5143,8 +5143,11 @@ class Neo4jClient:
 
         Mirrors the semantics of ``create_actor_technique_relationship``,
         ``create_malware_actor_relationship``, ``create_indicator_malware_relationship``,
-        ``create_indicator_sector_relationship``, ``create_vulnerability_sector_relationship``,
-        and ``create_indicator_vulnerability_relationship`` (null/blank endpoints skipped).
+        ``create_indicator_sector_relationship`` and ``create_vulnerability_sector_relationship``
+        (null/blank endpoints skipped). Indicator -> INDICATES -> CVE (2026-10-18, the sync's
+        same-report rows) MATCHes the ``CVE`` node by ``cve_id`` and writes the row's label,
+        confidence and provenance like every other row; ``create_indicator_vulnerability_relationship``
+        (no caller) writes neither.
 
         Unknown ``rel_type`` / shape combinations are skipped during row collection.
         Each UNWIND query runs in its own try/except so earlier groups still commit if a
@@ -5174,6 +5177,8 @@ class Neo4jClient:
         implements_rows: List[Dict[str, Any]] = []
         attr_rows: List[Dict[str, Any]] = []
         ind_mal_rows: List[Dict[str, Any]] = []
+        # 2026-10-18: Indicator -> CVE named in the same OTX report (``match_type`` ``otx_pulse``)
+        ind_cve_rows: List[Dict[str, Any]] = []
         tgt_ind_rows: List[Dict[str, Any]] = []
         tgt_vuln_rows: List[Dict[str, Any]] = []
         expl_rows: List[Dict[str, Any]] = []
@@ -5380,6 +5385,25 @@ class Neo4jClient:
                             "confidence": conf,
                             "misp_event_id": mev,
                             # 2026-10: report-scoped edges say what asserted them.
+                            "match_type": rel.get("match_type"),
+                        }
+                    )
+                else:
+                    _dropped_rels += 1
+            elif rt == "INDICATES" and rel.get("to_type") == "CVE":
+                # 2026-10-18: the indicator and the CVE are named in the same report (the sync's
+                # report-scoped build). The CVE node is MATCHed by its key, never created here.
+                iv = nonempty_graph_string(fk.get("value"))
+                cid = normalize_cve_id_for_graph(tk.get("cve_id"))
+                if iv and cid:
+                    ind_cve_rows.append(
+                        {
+                            "value": iv,
+                            "cve_id": cid,
+                            "source": row_source,
+                            "source_refs": row_refs,
+                            "confidence": conf,
+                            "misp_event_id": mev,
                             "match_type": rel.get("match_type"),
                         }
                     )
@@ -5652,6 +5676,15 @@ class Neo4jClient:
         MERGE (i)-[r:INDICATES]->(m)
         {_set_clause("i", "m")}
         """
+        # 2026-10-18: Indicator -> CVE named in the same report. Both ends are MATCHed (the CVE by
+        # ``cve_id``, its key); only the link is MERGEd, so the link never creates a CVE node.
+        q_ind_cve = f"""
+        UNWIND $rows AS row
+        MATCH (i:Indicator {{value: row.value}})
+        MATCH (c:CVE {{cve_id: row.cve_id}})
+        MERGE (i)-[r:INDICATES]->(c)
+        {_set_clause("i", "c")}
+        """
         q_tgt_ind = f"""
         UNWIND $rows AS row
         MERGE (s:Sector {{name: row.sector}})
@@ -5912,6 +5945,9 @@ class Neo4jClient:
                 query_pause()
             _run_rows(session, "INDICATES_malware", q_ind_mal, ind_mal_rows)
             if ind_mal_rows:
+                query_pause()
+            _run_rows(session, "INDICATES_cve", q_ind_cve, ind_cve_rows)
+            if ind_cve_rows:
                 query_pause()
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
