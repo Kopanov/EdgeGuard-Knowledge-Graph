@@ -2226,16 +2226,17 @@ def cmd_stats(args) -> int:
 def _print_last_sync(sync: dict) -> None:
     """The "Last sync" line of ``stats``: a success line only when a sync state file was read.
 
-    ``get_sync_status`` answers ``{"last_sync": "Never", "age_hours": None}`` when no state file is
-    found on this host, which is the case wherever the CLI runs off the pipeline host; that is a
-    warning, not a green "Last sync: Never (Noneh ago)" (2026-10-18).
+    ``get_sync_status`` answers ``{"last_sync": "Never", "age_hours": None}`` when it reads no sync
+    state on this host: no state file exists (wherever the CLI runs off the pipeline host), or a
+    state file cannot be opened or parsed. Either is a warning, not a green "Last sync: Never (Noneh
+    ago)" (2026-10-18).
     """
     last = sync.get("last_sync")
     age = sync.get("age_hours")
     if last and last != "Never" and isinstance(age, (int, float)):
         ok(f"\nLast sync: {str(last)[:19]} ({age:.1f}h ago)")
     else:
-        warn("\nLast sync: no sync recorded on this host (no sync state file found)")
+        warn("\nLast sync: no readable sync state file on this host (none found, or unreadable)")
 
 
 # 2026-10: ``stats --misp`` pages through ``/events/index`` (it read one page of 500 events, so on a

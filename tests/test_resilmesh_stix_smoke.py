@@ -6,6 +6,11 @@ bundle then holds only the producer identity and the extension definition. It no
 types with a while-read loop, fails a bundle that holds no graph object, and exports identifiers a
 baseline graph holds (APT28, T1059, CVE-2021-44228, and the newest indicator).
 
+The script exits ``1`` on every failure, as its header and the quickstart state: a failed
+``GET /stix/types`` (unreachable API, HTTP error, a body that is not the discovery JSON) ends the run
+with ``1`` instead of curl's or jq's own code, and an export that answers HTTP 200 with a body that is
+not JSON fails that type only, so the remaining types are still checked.
+
 The run tests start the script against a local stub of the REST API, with every bash on the host
 (``/bin/bash`` is 3.2 on macOS); they are skipped without curl or jq.
 """
@@ -16,11 +21,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import pytest
 
@@ -59,11 +65,20 @@ def _sdo(kind: str) -> dict:
 
 
 class _Api:
-    """A stub of the REST API routes the script calls; records every raw request path."""
+    """A stub of the REST API routes the script calls; records every raw request path.
 
-    def __init__(self, bundles: Dict[str, dict], indicator: Optional[str] = "203.0.113.7"):
+    A ``bytes`` value in ``bundles`` (or ``types``) is sent as is, with HTTP 200 and ``text/html``.
+    """
+
+    def __init__(
+        self,
+        bundles: Dict[str, Union[dict, bytes]],
+        indicator: Optional[str] = "203.0.113.7",
+        types: Optional[Union[dict, bytes]] = None,
+    ):
         self.bundles = bundles
         self.indicator = indicator
+        self.types = types
         self.paths: List[str] = []
         api = self
 
@@ -77,6 +92,8 @@ class _Api:
                     return self._send(401, {"detail": "unauthorized"})
                 route = self.path.split("?", 1)[0]
                 if route == "/stix/types":
+                    if api.types is not None:
+                        return self._send(200, api.types)
                     types = [{"name": n, "example": "1.2.3.4"} for n in ("indicator", "actor", "technique", "cve")]
                     return self._send(200, {"object_types": types})
                 if route == "/indicators":
@@ -88,7 +105,10 @@ class _Api:
                 return self._send(404, {"detail": "not found"})
 
             def _send(self, status, body, ctype="application/json"):
-                data = json.dumps(body).encode()
+                if isinstance(body, bytes):
+                    data, ctype = body, "text/html"
+                else:
+                    data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
@@ -113,15 +133,18 @@ def _good_bundles() -> Dict[str, dict]:
     }
 
 
-def _run(bash: str, api: _Api, *args: str) -> subprocess.CompletedProcess:
+def _run(
+    bash: str, api: _Api, *args: str, base: Optional[str] = None, key: str = "test-key", pretty: bool = False
+) -> subprocess.CompletedProcess:
+    """Runs the script against the stub; ``pretty`` keeps the default mode, which pipes the discovery
+    response and each bundle through jq."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "EDGEGUARD_API_BASE": api.base,
-        "EDGEGUARD_API_KEY": "test-key",
+        "EDGEGUARD_API_BASE": base or api.base,
+        "EDGEGUARD_API_KEY": key,
     }
-    return subprocess.run(
-        [bash, str(SCRIPT), "--no-pretty", *args], env=env, capture_output=True, text=True, timeout=60
-    )
+    argv = [bash, str(SCRIPT), *([] if pretty else ["--no-pretty"]), *args]
+    return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
 
 
 class TestScriptText:
@@ -209,3 +232,70 @@ class TestScriptRuns:
         assert "/stix/export/actor/Lazarus%20Group?depth=1" in exported
         assert "/stix/export/indicator/http%3A%2F%2Fevil.example%2Fa%20b?depth=1" in exported
         assert not any(p.startswith("/indicators") for p in api.paths), "--indicator skips the lookup"
+
+    def test_unreachable_api_exits_1_not_curls_code(self, bash):
+        with socket.socket() as sock:  # a port nothing listens on once the socket is closed
+            sock.bind(("127.0.0.1", 0))
+            closed = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        api = _Api(_good_bundles())
+        try:
+            done = _run(bash, api, base=closed)
+        finally:
+            api.close()
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "FAIL: GET /stix/types failed" in done.stderr
+
+    @pytest.mark.parametrize("pretty", [True, False], ids=["pretty", "no-pretty"])
+    def test_discovery_http_error_exits_1(self, bash, pretty):
+        api = _Api(_good_bundles())
+        try:
+            done = _run(bash, api, key="wrong-key", pretty=pretty)
+        finally:
+            api.close()
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "FAIL: GET /stix/types failed" in done.stderr
+        assert not any(p.startswith("/stix/export/") for p in api.paths)
+
+    @pytest.mark.parametrize("body", [b"<html>proxy error</html>", b'{"detail": "ok"}'], ids=["html", "no-types"])
+    @pytest.mark.parametrize("pretty", [True, False], ids=["pretty", "no-pretty"])
+    def test_discovery_body_that_is_not_the_discovery_json_exits_1(self, bash, body, pretty):
+        api = _Api(_good_bundles(), types=body)
+        try:
+            done = _run(bash, api, pretty=pretty)
+        finally:
+            api.close()
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "FAIL: /stix/types returned no object_types" in done.stderr
+
+    @pytest.mark.parametrize("pretty", [True, False], ids=["pretty", "no-pretty"])
+    def test_a_non_json_export_fails_that_type_and_the_run_goes_on(self, bash, pretty):
+        bundles: Dict[str, Union[dict, bytes]] = dict(_good_bundles())
+        bundles["indicator"] = b"<html>gateway error</html>"  # the first type the stub lists
+        api = _Api(bundles)
+        try:
+            done = _run(bash, api, pretty=pretty)
+        finally:
+            api.close()
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "✗ response is not a valid STIX bundle" in done.stdout
+        assert "<html>gateway error</html>" in done.stdout
+        assert "▶ 1 check(s) failed" in done.stdout
+        exported = {p.split("?", 1)[0].rsplit("/", 1)[0] for p in api.paths if p.startswith("/stix/export/")}
+        assert exported == {
+            "/stix/export/indicator",
+            "/stix/export/actor",
+            "/stix/export/technique",
+            "/stix/export/cve",
+        }
+
+    def test_a_bundle_whose_objects_are_not_objects_fails_that_type(self, bash):
+        bundles: Dict[str, Union[dict, bytes]] = dict(_good_bundles())
+        bundles["actor"] = {"type": "bundle", "id": "bundle--00000000-0000-4000-8000-0000000000ff", "objects": ["x"]}
+        api = _Api(bundles)
+        try:
+            done = _run(bash, api, pretty=True)
+        finally:
+            api.close()
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "✗ response is not a valid STIX bundle" in done.stdout
+        assert "▶ 1 check(s) failed" in done.stdout

@@ -55,9 +55,9 @@ class TestPreflightAndStats:
 
 
 class TestStatsLastSync:
-    """``stats`` printed a green "Last sync: Never (Noneh ago)" when no sync state file was found on
-    the host (every host but the pipeline's); it warns instead and never formats a missing age
-    (2026-10-18)."""
+    """``stats`` printed a green "Last sync: Never (Noneh ago)" when it read no sync state on the host
+    (every host but the pipeline's, or a state file it cannot open or parse); it warns instead, in
+    words true for both cases, and never formats a missing age (2026-10-18)."""
 
     NEVER = {"last_sync": "Never", "age_hours": None}
 
@@ -65,7 +65,7 @@ class TestStatsLastSync:
         edgeguard._print_last_sync(self.NEVER)
         out = capsys.readouterr().out
         assert "⚠" in out and "✓" not in out
-        assert "Last sync: no sync recorded on this host (no sync state file found)" in out
+        assert "Last sync: no readable sync state file on this host (none found, or unreadable)" in out
         assert "None" not in out and "Never" not in out
 
     def test_a_recorded_sync_is_a_success_with_a_rounded_age(self, capsys):
@@ -93,8 +93,25 @@ class TestStatsLastSync:
         assert edgeguard.cmd_stats(args) == 0
         out = capsys.readouterr().out
         assert "MISP Events: 2 events" in out
-        assert "Last sync: no sync recorded on this host" in out
+        assert "Last sync: no readable sync state file on this host" in out
         assert "Noneh" not in out and "Last sync: Never" not in out
+
+    @pytest.mark.parametrize("content", ["{not json", '{"last_sync": "yesterday"}'], ids=["corrupt", "bad-time"])
+    def test_an_unreadable_state_file_gets_the_same_true_warning(self, monkeypatch, tmp_path, capsys, content):
+        """A state file exists but cannot be parsed: ``get_sync_status`` answers "Never", and the
+        warning must not claim that no file was found."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "state").mkdir()
+        (tmp_path / "state" / "edgeguard_last_neo4j_sync.json").write_text(content)
+        (tmp_path / "tmp").mkdir()
+        monkeypatch.setattr(edgeguard, "SCRIPT_DIR", str(tmp_path / "src"))
+        monkeypatch.setattr(edgeguard.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
+        sync = edgeguard.get_sync_status()
+        assert sync == self.NEVER
+        edgeguard._print_last_sync(sync)
+        out = capsys.readouterr().out
+        assert "⚠" in out and "no readable sync state file on this host" in out
+        assert "not found" not in out and "no sync state file found" not in out
 
     def test_json_output_keeps_the_raw_status(self, monkeypatch, capsys):
         edgeguard._ensure_runtime_imports()

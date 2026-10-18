@@ -10,7 +10,7 @@
 #
 # Usage:
 #   cp .env.example .env && nano .env        # fill in real secrets
-#   export EDGEGUARD_GIT_SHA=$(git rev-parse --short HEAD)   # the deployed commit, reported by /health
+#   scripts/record_deployed_commit.sh        # the deployed commit into .env as EDGEGUARD_GIT_SHA (reported by /health)
 #   docker compose build                     # every image: airflow (Python deps) and edgeguard-kg (api + graphql copy src/ in)
 #   docker compose up -d --force-recreate    # start, or recreate every service on the new images
 #   docker compose logs -f graphql           # tail a specific service
@@ -196,9 +196,11 @@ x-common-env: &common-env
   EDGEGUARD_CORS_ORIGINS: ${EDGEGUARD_CORS_ORIGINS:-http://localhost,http://localhost:3000}
   # REST and GraphQL request body cap in bytes (code default 1048576; the parsers tolerate empty).
   EDGEGUARD_MAX_BODY_BYTES: ${EDGEGUARD_MAX_BODY_BYTES:-}
-  # Commit the containers were deployed from (set at deploy time:
-  # export EDGEGUARD_GIT_SHA=$(git rev-parse --short HEAD)). Reported as git_sha by the REST and
-  # GraphQL /health and as the X-EdgeGuard-Git-Sha header of STIX exports; empty = not reported.
+  # Commit the containers were deployed from, written into .env by scripts/record_deployed_commit.sh
+  # (./install.sh runs it). Kept in .env, never exported in a shell: a docker compose command from a
+  # shell with a different value recreates airflow (which kills a running baseline), api and graphql.
+  # Reported as git_sha by the REST and GraphQL /health and as the X-EdgeGuard-Git-Sha header of
+  # STIX exports; empty = not reported.
   EDGEGUARD_GIT_SHA: ${EDGEGUARD_GIT_SHA:-}
 
 services:

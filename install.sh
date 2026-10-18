@@ -217,6 +217,17 @@ if [ "$USE_DOCKER" = true ]; then
     fi
     info "Docker Compose $(docker compose version --short)"
 
+    # The deployed commit goes into .env (not a shell export), so every later docker compose
+    # command, from any shell, sees the same value; /health reports it as git_sha. Recorded after
+    # the pull above. The shell value is dropped because Compose prefers it to .env.
+    section "Recording the deployed commit"
+    if [ -e .git ] && command -v git &>/dev/null; then
+        bash scripts/record_deployed_commit.sh
+        unset EDGEGUARD_GIT_SHA
+    else
+        warn "No .git — EDGEGUARD_GIT_SHA in .env not updated: run scripts/record_deployed_commit.sh <commit>, or delete that line so /health reports null"
+    fi
+
     section "Building EdgeGuard image"
     # NOTE: --dev flag is not used here; dev/test dependencies (ruff, mypy, pytest)
     # are installed inside the container via the Dockerfile's own extras configuration.

@@ -36,7 +36,7 @@
 #
 # Exit codes:
 #   0 — all checks passed
-#   1 — a dependency is missing or a check failed
+#   1 — a dependency is missing, GET /stix/types failed, or a check failed
 #
 # The script does NOT validate the bundle against the STIX 2.1
 # specification — use the stix2-validator Python package for that.
@@ -100,9 +100,18 @@ echo
 # 1. Discovery — /stix/types
 # ---------------------------------------------------------------------------
 echo "▶ GET /stix/types"
-TYPES_JSON=$(curl --silent --show-error --fail \
+# Guarded, so an unreachable API or an HTTP error ends the run with exit code 1, not curl's.
+if ! TYPES_JSON=$(curl --silent --show-error --fail \
     -H "X-API-Key: $API_KEY" \
-    "$API_BASE/stix/types")
+    "$API_BASE/stix/types"); then
+    echo "FAIL: GET /stix/types failed (curl error above)" >&2
+    exit 1
+fi
+# Every later read of the discovery response relies on this shape.
+if ! echo "$TYPES_JSON" | jq -e '.object_types | type == "array" and length > 0 and all(.[]; type == "object" and (.name | type == "string"))' >/dev/null 2>&1; then
+    echo "FAIL: /stix/types returned no object_types (response is not the discovery JSON)" >&2
+    exit 1
+fi
 if [[ $PRETTY -eq 1 ]]; then
     echo "$TYPES_JSON" | jq .
 else
@@ -186,10 +195,17 @@ for ot in "${OBJECT_TYPES[@]}"; do
     fi
 
     # Shape sanity checks — every response must be a STIX 2.1 bundle
-    # with type=bundle, id prefixed bundle--, and an objects array.
-    if ! jq -e '.type == "bundle" and (.id | startswith("bundle--")) and (.objects | type == "array")' "$response" >/dev/null; then
+    # with type=bundle, id prefixed bundle--, and an objects array of
+    # objects that each carry a string type (the reads below rely on it).
+    if ! jq -e '.type == "bundle" and (.id | startswith("bundle--")) and (.objects | type == "array" and all(.[]; type == "object" and (.type | type == "string")))' "$response" >/dev/null 2>&1; then
         echo "  ✗ response is not a valid STIX bundle"
-        jq . "$response" | head -20
+        # The start of the body; never fatal, so the remaining types are still checked.
+        if jq empty "$response" >/dev/null 2>&1; then
+            jq . "$response" | head -20 || true
+        else
+            head -c 2000 "$response" || true
+            echo
+        fi
         FAILED=$((FAILED + 1))
         rm -f "$response" "$headers"
         echo

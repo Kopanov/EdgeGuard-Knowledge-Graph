@@ -23,8 +23,8 @@ def package_version() -> str:
 def deployed_git_sha() -> str | None:
     """Commit the running containers were deployed from: ``EDGEGUARD_GIT_SHA``, stripped.
 
-    Set at deploy time (``export EDGEGUARD_GIT_SHA=$(git rev-parse --short HEAD)``) and forwarded
-    by docker-compose.yml; ``None`` when unset or blank. Read on every call, so the REST and GraphQL
+    Written into ``.env`` at deploy time by ``scripts/record_deployed_commit.sh`` (``./install.sh``
+    runs it) and forwarded by docker-compose.yml; ``None`` when unset or blank. Read on every call, so the REST and GraphQL
     ``/health`` responses and the STIX ``X-EdgeGuard-Git-Sha`` header report the same value.
     """
     value = os.environ.get("EDGEGUARD_GIT_SHA", "").strip()

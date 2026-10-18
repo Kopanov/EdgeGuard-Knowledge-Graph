@@ -238,9 +238,9 @@ With git:
 
 On the venv path, **`--update`** pulls and re-installs the package; Airflow runs the new code only when its DAG and plugin folders point at the repository (§ 4), otherwise re-copy **`dags/`**, **`src/`** and **`plugins/`**.
 
-On a Compose stack, run the update only when no **`edgeguard_baseline`** run is in progress: it recreates the containers, which kills the running tasks, and if the rebuild fails after the pull, the old container keeps running and re-parses the new **`./dags`**.
+On a Compose stack, **`--update`** writes the pulled commit into **`.env`** as **`EDGEGUARD_GIT_SHA`** (**`scripts/record_deployed_commit.sh`**) before it rebuilds; both `/health` responses report it as `git_sha`. Run the update only when no **`edgeguard_baseline`** run is in progress: it recreates the containers, which kills the running tasks, and if the rebuild fails after the pull, the old container keeps running and re-parses the new **`./dags`**.
 
-Without git (tarball): replace files manually, then **`docker compose build && docker compose up -d --force-recreate`**, which rebuilds every image (the `api` and `graphql` images contain `src/`) and recreates every container (or **`./install.sh --python`**). Set **`EDGEGUARD_GIT_SHA`** to the release's commit first when you know it: both `/health` responses report it as `git_sha`.
+Without git (tarball): replace files manually, record the release's commit with **`scripts/record_deployed_commit.sh <commit>`** (when it is unknown, delete the `EDGEGUARD_GIT_SHA=` line of `.env`, so `/health` reports `null` instead of an earlier commit), then **`docker compose build && docker compose up -d --force-recreate`**, which rebuilds every image (the `api` and `graphql` images contain `src/`) and recreates every container (or **`./install.sh --python`**).
 
 ---
 
@@ -300,7 +300,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — The tarball update recreates every container (`docker compose up -d --force-recreate`) after rebuilding every image, and names `EDGEGUARD_GIT_SHA`.
+- 2026-10-18 — The tarball update recreates every container (`docker compose up -d --force-recreate`) after rebuilding every image; the deployed commit is recorded in `.env` as `EDGEGUARD_GIT_SHA` (`./install.sh --update` runs `scripts/record_deployed_commit.sh`; a tarball deploy passes the commit to it).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; upgrade steps for kept installs moved to the appendix.
 - 2026-10-17 — An empty `AIRFLOW_API_AUTH_JWT_SECRET` stops the API server from starting; the reading-order table names `docker compose up -d airflow` after a `.env` change.
