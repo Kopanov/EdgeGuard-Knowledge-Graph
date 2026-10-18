@@ -37,7 +37,12 @@ but on an AFFECTS link to a sector CISA's ICS advisory stated, when a sector CIS
 ``advisory_sector``, when a sector link cites a record of a feed that recorded its references per sector
 (``stated_refs``: the CISA ICS advisories) other than those of its sector, and when a sector link's
 confidence is not the one its label gives (``src/sector_evidence.py``); it reports the links by evidence
-label, what CISA ICS adds per sector and the node sectors no feed gave. Since the same day it also fails
+label, what CISA ICS adds per sector and the node sectors no feed gave. Since the OTX industries change of
+2026-10-18 it fails when ``otx_industries`` sits anywhere but on a TARGETS link from an Indicator,
+ThreatActor or Malware to a sector an OTX record stated (``stated_zones`` of the alienvault_otx
+``SOURCED_FROM`` edge), when such a link cites none of the pulses that stated its sector, and when a sector
+an OTX record stated is not linked as ``otx_industries``; the per-sector reference check judges only the
+feeds whose records state every zone they give (CISA ICS). Since 2026-10-16 it also fails
 when a ranked description names no source (``description_source``) or an Indicator has no
 ``aging_basis`` / ``source_confidence``.
 
@@ -109,7 +114,14 @@ from canonical_threat_actors import (  # noqa: E402
 from description_ranking import ranking_for_label  # noqa: E402
 from relationship_provenance import as_list as _as_list  # noqa: E402
 from relationship_provenance import zone_prov_with  # noqa: E402
-from sector_evidence import ADVISORY_SECTOR, LABEL_CONFIDENCE, STATED_REF_SEPARATOR  # noqa: E402
+from sector_evidence import (  # noqa: E402
+    ADVISORY_SECTOR,
+    LABEL_CONFIDENCE,
+    OTX_INDUSTRIES,
+    STATED_REF_SEPARATOR,
+    STATEMENT_LABELS,
+    STATING_FEEDS,
+)
 from source_registry import SOURCE_REF_SEPARATOR  # noqa: E402
 
 # NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
@@ -359,21 +371,28 @@ _SECTOR_LINKED_LABELS = ("Indicator", "CVE", "Vulnerability", "ThreatActor", "Ma
 _SECTOR_LINKED_WHERE = "(" + " OR ".join(f"n:{label}" for label in _SECTOR_LINKED_LABELS) + ")"
 # A zone stored as a single string reads as a one-entry list (APOC ``combine`` stores equal values so).
 _N_ZONES = _as_list("n.zone")
+# 2026-10-18: the feeds whose TARGETS statement is ``otx_industries`` (the table: ``alienvault_otx``).
+_OTX_INDUSTRIES_FEEDS = sorted(f for f, label in STATEMENT_LABELS["TARGETS"].items() if label == OTX_INDUSTRIES)
+_TARGETS_START = "(n:Indicator OR n:ThreatActor OR n:Malware)"
 
 
 def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
-    """Checks 10d-10k (2026-10-16): each link to a Sector names only the feeds that gave its sector and
+    """Checks 10d-10m (2026-10-16): each link to a Sector names only the feeds that gave its sector and
     cites only the records that gave it, its label and confidence follow the table (``sector_evidence``),
-    and CISA's ICS statements are linked as ``advisory_sector`` on AFFECTS only. The per-source zones are
-    on the ``SOURCED_FROM`` edges (``zones``, ``stated_zones``, ``stated_refs``); a graph written before
-    them has none, so the judged checks report instead of passing vacuously."""
+    CISA's ICS statements are linked as ``advisory_sector`` on AFFECTS only and (2026-10-18) an OTX
+    report's industries as ``otx_industries`` on TARGETS only. The per-source zones are on the
+    ``SOURCED_FROM`` edges (``zones``, ``stated_zones``, ``stated_refs``); a graph written before them has
+    none, so the judged checks report instead of passing vacuously."""
     # 10d. A link to a Sector names only the feeds whose SOURCED_FROM zones give the sector. An edge
     #      without ``zones`` (written before 2026-10-16, or by a path that records none) is not judged.
     zoned = _one(
-        "MATCH ()-[sf:SOURCED_FROM]->() RETURN count(sf) AS edges, "
+        "MATCH ()-[sf:SOURCED_FROM]->(src) RETURN count(sf) AS edges, "
         "sum(CASE WHEN sf.zones IS NOT NULL THEN 1 ELSE 0 END) AS with_zones, "
         "sum(CASE WHEN sf.stated_zones IS NOT NULL THEN 1 ELSE 0 END) AS with_stated_zones, "
-        "sum(CASE WHEN sf.stated_refs IS NOT NULL THEN 1 ELSE 0 END) AS with_stated_refs"
+        "sum(CASE WHEN sf.stated_refs IS NOT NULL THEN 1 ELSE 0 END) AS with_stated_refs, "
+        "sum(CASE WHEN sf.stated_refs IS NOT NULL AND src.source_id IN $stating_feeds THEN 1 ELSE 0 END) "
+        "AS stating_feed_edges_with_stated_refs",
+        {"stating_feeds": sorted(STATING_FEEDS)},
     )
     wrong = _post(
         "MATCH (n)-[r:AFFECTS|TARGETS]->(s:Sector) WHERE r.edgeguard_managed = true "
@@ -438,13 +457,17 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         "cisa_stated_sectors_linked_as_advisory_sector", stated_ok, {**r, "cisa_records_with_zones": cisa_with_zones}
     )
 
-    # 10k. A sector link cites, of a feed that records which of its records stated which sector (the
-    #      SOURCED_FROM ``stated_refs``, ``"<zone>|<ref>"``: the CISA ICS advisories), only the records
-    #      of its sector: a CISA ICS link to healthcare cites no advisory whose note does not name
-    #      Healthcare. A feed whose edge records nothing for the sector is not judged.
+    # 10k. A sector link cites, of a feed whose records state every zone they give and record which of
+    #      them stated which sector (the SOURCED_FROM ``stated_refs``, ``"<zone>|<ref>"``: the CISA ICS
+    #      advisories, ``sector_evidence.STATING_FEEDS``), only the records of its sector: a CISA ICS link to
+    #      healthcare cites no advisory whose note does not name Healthcare. A feed whose edge records
+    #      nothing for the sector is not judged, and neither is OTX (2026-10-18): an OTX record also gives
+    #      zones by keyword, for which it records no reference, so a link may rightly cite a pulse its
+    #      ``stated_refs`` record for another sector only (10l judges OTX's statements).
     other_refs = _post(
         "MATCH (n)-[r:AFFECTS|TARGETS]->(s:Sector) WHERE r.edgeguard_managed = true "
         "MATCH (n)-[sf:SOURCED_FROM]->(src:Source) WHERE sf.stated_refs IS NOT NULL "
+        "AND src.source_id IN $stating_feeds "
         "WITH r, s, src, [_x IN " + _as_list("sf.stated_refs") + " WHERE _x STARTS WITH s.name + $sep "
         "| substring(_x, size(s.name) + size($sep))] AS cited "
         "WHERE size(cited) > 0 "
@@ -452,15 +475,67 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         "AND NOT _x IN cited] AS other "
         "RETURN type(r) AS type, src.source_id AS source, count(*) AS c, "
         "collect(s.name + ' ' + other)[..10] AS examples ORDER BY c DESC",
-        {"sep": STATED_REF_SEPARATOR, "ref_sep": SOURCE_REF_SEPARATOR},
+        {"sep": STATED_REF_SEPARATOR, "ref_sep": SOURCE_REF_SEPARATOR, "stating_feeds": sorted(STATING_FEEDS)},
     )
     rep.add(
         "sector_links_cite_only_records_that_gave_the_sector",
-        None if not zoned.get("with_stated_refs") else not other_refs,
+        None if not zoned.get("stating_feed_edges_with_stated_refs") else not other_refs,
         {
             "citing_a_record_of_another_sector": other_refs,
             "sourced_from_with_stated_refs": zoned.get("with_stated_refs"),
+            "judged_sourced_from_with_stated_refs": zoned.get("stating_feed_edges_with_stated_refs"),
+            "judged_feeds": sorted(STATING_FEEDS),
         },
+    )
+
+    # 10l. ``otx_industries`` (2026-10-18) only on TARGETS from an Indicator, ThreatActor or Malware to a
+    #      Sector that an OTX record stated (the alienvault_otx SOURCED_FROM ``stated_zones``): never on
+    #      AFFECTS, never on a sector the report's industries did not name. Where that edge records which
+    #      pulse stated the sector (``stated_refs``), the link cites one of them. Informational while no
+    #      link carries the label.
+    otx = _one(
+        "MATCH (n)-[r]->(s) WHERE r.match_type = $label "
+        "WITH n, r, s, type(r) = 'TARGETS' AND s:Sector AND " + _TARGETS_START + " AS on_targets, "
+        "[(n)-[sf:SOURCED_FROM]->(src:Source) WHERE src.source_id IN $feeds "
+        "AND s.name IN " + _as_list("sf.stated_zones") + " | sf] AS stating "
+        "WITH n, r, s, on_targets AND size(stating) > 0 AS stated, "
+        "reduce(_a = [], _sf IN stating | _a + [_x IN " + _as_list("_sf.stated_refs") + " "
+        "WHERE _x STARTS WITH s.name + $sep | substring(_x, size(s.name) + size($sep))]) AS stating_refs "
+        "RETURN count(r) AS otx_links, sum(CASE WHEN type(r) = 'AFFECTS' THEN 1 ELSE 0 END) AS on_affects, "
+        "sum(CASE WHEN stated THEN 0 ELSE 1 END) AS misplaced, "
+        "sum(CASE WHEN stated AND size(stating_refs) > 0 AND NONE(_x IN stating_refs WHERE _x IN "
+        + _as_list("r.source_refs")
+        + ") THEN 1 ELSE 0 END) AS citing_no_stating_report, "
+        "collect(CASE WHEN NOT stated THEN type(r) + ' ' + labels(n)[0] + ' -> ' + coalesce(s.name, '?') END)[..10] "
+        "AS examples",
+        {"label": OTX_INDUSTRIES, "feeds": _OTX_INDUSTRIES_FEEDS, "sep": STATED_REF_SEPARATOR},
+    )
+    rep.add(
+        "otx_industries_only_where_otx_stated",
+        None
+        if not otx.get("otx_links")
+        else otx.get("misplaced") == 0 and otx.get("on_affects") == 0 and otx.get("citing_no_stating_report") == 0,
+        otx,
+    )
+
+    # 10m. Every sector an OTX record stated is linked as ``otx_industries`` from the node (TARGETS, steps
+    #      7a / 7c / 7d and the sync's indicator rows). A link whose label is outside the table (a curated or
+    #      partner label, which the writers keep) is not judged. Informational while no OTX record states a
+    #      sector (a graph synced before 2026-10-18).
+    r = _one(
+        "MATCH (n)-[sf:SOURCED_FROM]->(src:Source) WHERE " + _TARGETS_START + " AND src.source_id IN $feeds "
+        "UNWIND " + _as_list("sf.stated_zones") + " AS z "
+        "OPTIONAL MATCH (n)-[r:TARGETS]->(:Sector {name: z}) "
+        "WITH n, z, r, r IS NULL OR (r.match_type IN $labels AND r.match_type <> $label) AS missing "
+        "RETURN count(*) AS stated, sum(CASE WHEN missing THEN 1 ELSE 0 END) AS otx_not_labelled, "
+        "collect(CASE WHEN missing THEN labels(n)[0] + ' ' + coalesce(n.name, n.value, '?') + ' ' + z END)[..10] "
+        "AS examples",
+        {"label": OTX_INDUSTRIES, "feeds": _OTX_INDUSTRIES_FEEDS, "labels": sorted(LABEL_CONFIDENCE)},
+    )
+    rep.add(
+        "otx_stated_sectors_linked_as_otx_industries",
+        None if not r.get("stated") else r.get("otx_not_labelled") == 0,
+        r,
     )
 
     # 10g. The confidence of a sector link is the table's value of its label (the sync and step 7 write
@@ -478,7 +553,13 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         {"by_label": rows, "table": dict(LABEL_CONFIDENCE)},
     )
 
-    # 10h. Breakdown by relationship type, start label, sector and evidence label (informational).
+    # 10h. Links by relationship type and evidence label (informational), then broken down by start label
+    #      and sector.
+    by_label = _post(
+        "MATCH ()-[r:AFFECTS|TARGETS]->(:Sector) "
+        "RETURN type(r) AS type, r.match_type AS match_type, count(*) AS links ORDER BY type, match_type"
+    )
+    rep.add("sector_links_by_evidence_label", None, by_label)
     breakdown = _post(
         "MATCH (n)-[r:AFFECTS|TARGETS]->(s:Sector) "
         "RETURN type(r) AS type, labels(n)[0] AS label, s.name AS sector, r.match_type AS match_type, count(*) AS c "

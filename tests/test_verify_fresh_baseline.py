@@ -238,6 +238,11 @@ _SECTOR_BREAKDOWN_ROWS = [
     {"type": "AFFECTS", "label": "CVE", "sector": "energy", "match_type": "zone_classification", "c": 1400},
     {"type": "TARGETS", "label": "Indicator", "sector": "finance", "match_type": "zone_classification", "c": 64000},
 ]
+_OTX_LINKS_ROW = {"otx_links": 0, "on_affects": 0, "misplaced": 0, "citing_no_stating_report": 0, "examples": []}
+_SECTOR_LABEL_COUNT_ROWS = [
+    {"type": "AFFECTS", "match_type": "zone_classification", "links": 8500},
+    {"type": "TARGETS", "match_type": "zone_classification", "links": 64000},
+]
 _DESCRIPTION_ROW = {"described": 150000, "without_source": 0, "example_labels": []}
 _AGING_ROW = {"indicators": 217000, "without_aging_basis": 0, "without_source_confidence": 0}
 
@@ -252,6 +257,13 @@ def _sector_evidence_rows(s: str) -> Optional[List[Dict[str, Any]]]:
         return []
     if "AS advisory_links" in s:
         return [{"advisory_links": 0, "misplaced": 0, "examples": []}]
+    # 2026-10-18 (checks 10l / 10m): no OTX report stated a sector on the default graph's fixture
+    if "AS otx_links" in s:
+        return [dict(_OTX_LINKS_ROW)]
+    if "AS otx_not_labelled" in s:
+        return [{"stated": 0, "otx_not_labelled": 0, "examples": []}]
+    if "count(*) AS links ORDER BY type, match_type" in s:
+        return [dict(x) for x in _SECTOR_LABEL_COUNT_ROWS]
     if "] AS other RETURN" in s:
         return []
     if "AS not_labelled" in s:
@@ -1782,7 +1794,15 @@ class TestSectorEvidence:
     @staticmethod
     def _cisa_graph(st, rows):
         if "AS with_stated_zones" in st:
-            return [{"edges": 380000, "with_zones": 380000, "with_stated_zones": 2186, "with_stated_refs": 2186}]
+            return [
+                {
+                    "edges": 380000,
+                    "with_zones": 380000,
+                    "with_stated_zones": 2186,
+                    "with_stated_refs": 2186,
+                    "stating_feed_edges_with_stated_refs": 2186,
+                }
+            ]
         if "AS cisa_global" in st:
             return [{"cisa_records": 4164, "cisa_global": 1978, "without_zones": 0}]
         if "AS advisory_links" in st:
@@ -1957,8 +1977,8 @@ class TestSectorEvidence:
         monkeypatch.setattr(vfb, "_post", fake_post)
         vfb.run_checks(False, False, False)
         assert seen["params"] == {
-            "labels": ["advisory_sector", "zone_classification"],
-            "conf": {"zone_classification": 0.5, "advisory_sector": 0.9},
+            "labels": ["advisory_sector", "otx_industries", "zone_classification"],
+            "conf": {"zone_classification": 0.5, "otx_industries": 0.6, "advisory_sector": 0.9},
         }
         assert "MATCH (n)-[sf:SOURCED_FROM]->(:Source {source_id: f})" in seen["NOT s.name IN"]
         assert "WHERE sf.zones IS NOT NULL" in seen["NOT s.name IN"]
@@ -1968,8 +1988,119 @@ class TestSectorEvidence:
         assert "sf.stated_zones" in seen["AS advisory_links"]
         # the records of a sector are read with the writer's format, "<zone>|<source>:<id>"
         other, params = seen["other"]
-        assert params == {"sep": "|", "ref_sep": ":"}
+        # judged only for the feeds whose records state every zone they give (2026-10-18)
+        assert params == {"sep": "|", "ref_sep": ":", "stating_feeds": ["cisa_ics"]}
         assert "STARTS WITH s.name + $sep" in other and "STARTS WITH src.source_id + $ref_sep" in other
+        assert "src.source_id IN $stating_feeds" in other
+
+
+# --------------------------------------------------------------------------- 10k-10m. OTX industries
+class TestOtxIndustriesLabel:
+    """2026-10-18: an OTX report's own industries are the statement ``otx_industries`` (0.6) on TARGETS
+    links from an Indicator, ThreatActor or Malware to the sectors they map to. The label sits only on
+    such a link to a sector an OTX record stated (the alienvault_otx ``SOURCED_FROM`` ``stated_zones``),
+    never on AFFECTS; the link cites a report that stated it; every stated sector is linked so. Check 10k
+    judges only the feeds whose records state every zone they give: an OTX record also gives zones by
+    keyword, which its per-sector references do not record."""
+
+    # A graph after a baseline with the 2026-10-18 code: 41,200 OTX statements (figures illustrative).
+    @staticmethod
+    def _otx_graph(st, rows):
+        if "AS otx_links" in st:
+            return [
+                {"otx_links": 41200, "on_affects": 0, "misplaced": 0, "citing_no_stating_report": 0, "examples": []}
+            ]
+        if "AS otx_not_labelled" in st:
+            return [{"stated": 41200, "otx_not_labelled": 0, "examples": []}]
+        if "AS other_confidence" in st:
+            return [
+                {"label": "otx_industries", "links": 41200, "other_confidence": 0},
+                {"label": "zone_classification", "links": 31300, "other_confidence": 0},
+            ]
+        if "AS with_stated_zones" in st:
+            # stated_refs on OTX edges only: none of a feed that states every zone
+            return [
+                {
+                    "edges": 380000,
+                    "with_zones": 380000,
+                    "with_stated_zones": 40100,
+                    "with_stated_refs": 40100,
+                    "stating_feed_edges_with_stated_refs": 0,
+                }
+            ]
+        return rows
+
+    def test_a_default_graph_without_statements_is_not_judged(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        assert _check(rep, "otx_industries_only_where_otx_stated")["ok"] is None
+        assert _check(rep, "otx_stated_sectors_linked_as_otx_industries")["ok"] is None
+        assert _check(rep, "sector_links_by_evidence_label")["detail"] == _SECTOR_LABEL_COUNT_ROWS
+
+    def test_a_graph_with_otx_statements_passes(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, override=self._otx_graph)
+        assert rep.failed == [], [c["check"] for c in rep.failed]
+        for name in (
+            "otx_industries_only_where_otx_stated",
+            "otx_stated_sectors_linked_as_otx_industries",
+            "sector_confidence_follows_label",
+        ):
+            assert _check(rep, name)["ok"] is True, name
+        # OTX's per-sector references are no judgement of 10k: reported, not a vacuous pass
+        assert _check(rep, "sector_links_cite_only_records_that_gave_the_sector")["ok"] is None
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            # on a sector no OTX record stated
+            {"otx_links": 41201, "on_affects": 0, "misplaced": 1, "citing_no_stating_report": 0},
+            # on AFFECTS: a targeted industry is no deployment statement
+            {"otx_links": 41201, "on_affects": 1, "misplaced": 1, "citing_no_stating_report": 0},
+            # a stated link that cites none of the reports that stated its sector
+            {"otx_links": 41200, "on_affects": 0, "misplaced": 0, "citing_no_stating_report": 2},
+        ],
+    )
+    def test_a_misplaced_label_fails(self, vfb, monkeypatch, row):
+        def override(st, rows):
+            if "AS otx_links" in st:
+                return [dict(row, examples=["AFFECTS CVE -> energy"])]
+            return self._otx_graph(st, rows)
+
+        rep = _run(vfb, monkeypatch, override=override)
+        assert [c["check"] for c in rep.failed] == ["otx_industries_only_where_otx_stated"]
+
+    def test_a_stated_sector_not_labelled_otx_industries_fails(self, vfb, monkeypatch):
+        def override(st, rows):
+            if "AS otx_not_labelled" in st:
+                return [{"stated": 41200, "otx_not_labelled": 7, "examples": ["Malware examplelocker energy"]}]
+            return self._otx_graph(st, rows)
+
+        rep = _run(vfb, monkeypatch, override=override)
+        assert [c["check"] for c in rep.failed] == ["otx_stated_sectors_linked_as_otx_industries"]
+
+    def test_queries_read_the_table(self, vfb, monkeypatch):
+        seen: Dict[str, Any] = {}
+
+        def fake_post(statement, params=None, timeout=180):
+            for key in ("AS otx_links", "AS otx_not_labelled", "AS with_stated_zones"):
+                if key in statement:
+                    seen[key] = (statement, params)
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        vfb.run_checks(False, False, False)
+        links, params = seen["AS otx_links"]
+        assert params == {"label": "otx_industries", "feeds": ["alienvault_otx"], "sep": "|"}
+        assert "type(r) = 'TARGETS' AND s:Sector AND (n:Indicator OR n:ThreatActor OR n:Malware)" in links
+        assert "sf.stated_zones" in links and "sf.stated_refs" in links and "r.source_refs" in links
+        stated, params = seen["AS otx_not_labelled"]
+        assert params == {
+            "label": "otx_industries",
+            "feeds": ["alienvault_otx"],
+            "labels": ["advisory_sector", "otx_industries", "zone_classification"],
+        }
+        assert "(n:Indicator OR n:ThreatActor OR n:Malware)" in stated and "OPTIONAL MATCH (n)-[r:TARGETS]->" in stated
+        zoned, params = seen["AS with_stated_zones"]
+        assert params == {"stating_feeds": ["cisa_ics"]}
 
 
 # --------------------------------------------------------------------------- 16. descriptions and aging
