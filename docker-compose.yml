@@ -720,6 +720,8 @@ services:
       EDGEGUARD_GRAPHQL_PLAYGROUND: ${EDGEGUARD_GRAPHQL_PLAYGROUND:-false}
       # Query depth cap of the GraphQL validation rules (code default when empty).
       EDGEGUARD_GRAPHQL_MAX_DEPTH: ${EDGEGUARD_GRAPHQL_MAX_DEPTH:-}
+      # Per-client-address limit of every GraphQL route (slowapi syntax; empty = code default 120/minute).
+      EDGEGUARD_RATE_LIMIT_GRAPHQL: ${EDGEGUARD_RATE_LIMIT_GRAPHQL:-}
       # Root fields one operation executes (aliases and fragment spreads expanded) and the expanded
       # selection budget checked before validation (forwarded since 2026-10; empty = the code
       # defaults 15 and 2000, graphql_api._env_positive_int).

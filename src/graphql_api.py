@@ -158,7 +158,31 @@ def _verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) 
         raise HTTPException(status_code=401, detail="Invalid or missing X-Api-Key header")
 
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+_GRAPHQL_RATE_LIMIT_DEFAULT = "120/minute"
+
+
+def _graphql_rate_limit() -> str:
+    """Per-client-address limit of every GraphQL route (``EDGEGUARD_RATE_LIMIT_GRAPHQL``, slowapi
+    syntax such as ``600/minute``); unset, blank or not a valid limit string gives the default, so a
+    typo cannot stop the service from starting. Behind a reverse proxy every client shares the
+    proxy's address and so one limit."""
+    raw = (os.getenv("EDGEGUARD_RATE_LIMIT_GRAPHQL") or "").strip()
+    if not raw:
+        return _GRAPHQL_RATE_LIMIT_DEFAULT
+    try:
+        from limits import parse_many
+
+        parse_many(raw)
+    except ValueError:
+        logger.warning(
+            "EDGEGUARD_RATE_LIMIT_GRAPHQL=%r is not a valid rate limit; using %s", raw, _GRAPHQL_RATE_LIMIT_DEFAULT
+        )
+        return _GRAPHQL_RATE_LIMIT_DEFAULT
+    return raw
+
+
+_GRAPHQL_RATE_LIMIT = _graphql_rate_limit()
+limiter = Limiter(key_func=get_remote_address, default_limits=[_GRAPHQL_RATE_LIMIT])
 
 
 # ---------------------------------------------------------------------------
@@ -1071,7 +1095,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 if _IS_PROD:
 
     @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(_verify_api_key)])
-    @limiter.limit("120/minute")
+    @limiter.limit(_GRAPHQL_RATE_LIMIT)
     async def openapi_document(request: Request) -> dict:
         """OpenAPI document for key holders (prod); rate-limited like every other route."""
         return app.openapi()

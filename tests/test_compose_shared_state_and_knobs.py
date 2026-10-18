@@ -118,6 +118,11 @@ class TestKnobForwarding:
         env = _compose()["services"]["graphql"]["environment"]
         assert _default_of(env["EDGEGUARD_GRAPHQL_MAX_DEPTH"], "EDGEGUARD_GRAPHQL_MAX_DEPTH") == ""
 
+    def test_graphql_rate_limit_is_forwarded_with_an_empty_default(self):
+        # Empty is the code default (graphql_api._graphql_rate_limit), so .env alone sets it.
+        env = _compose()["services"]["graphql"]["environment"]
+        assert _default_of(env["EDGEGUARD_RATE_LIMIT_GRAPHQL"], "EDGEGUARD_RATE_LIMIT_GRAPHQL") == ""
+
     def test_int_and_float_parsed_knobs_carry_the_code_default(self):
         """A set-but-empty value would raise at import for these; compose must pass the code default."""
         src = (_ROOT / "src" / "run_misp_to_neo4j.py").read_text()

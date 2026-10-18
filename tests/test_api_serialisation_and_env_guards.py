@@ -116,6 +116,31 @@ class TestEmptyEnvironmentGuards:
         assert query_api._env_rate_limit("EDGEGUARD_RATE_LIMIT_READ", "60/minute") == expected
 
     @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (None, "120/minute"),
+            ("", "120/minute"),
+            ("  ", "120/minute"),
+            (" 600/minute ", "600/minute"),
+            ("10/second;600/minute", "10/second;600/minute"),
+            ("abc", "120/minute"),
+            ("600 a minute", "120/minute"),
+        ],
+    )
+    def test_graphql_rate_limit_string(self, monkeypatch, raw, expected):
+        if raw is None:
+            monkeypatch.delenv("EDGEGUARD_RATE_LIMIT_GRAPHQL", raising=False)
+        else:
+            monkeypatch.setenv("EDGEGUARD_RATE_LIMIT_GRAPHQL", raw)
+        assert graphql_api._graphql_rate_limit() == expected
+
+    def test_the_graphql_limiter_and_routes_use_the_setting(self):
+        src = inspect.getsource(graphql_api)
+        assert 'default_limits=["120/minute"]' not in src
+        assert '@limiter.limit("120/minute")' not in src
+        assert "default_limits=[_GRAPHQL_RATE_LIMIT]" in src
+
+    @pytest.mark.parametrize(
         "raw, expected", [(None, 8), ("", 8), (" ", 8), ("abc", 8), ("0", 8), ("-3", 8), ("12", 12), (" 6 ", 6)]
     )
     def test_graphql_max_depth(self, monkeypatch, raw, expected):

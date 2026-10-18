@@ -1012,6 +1012,7 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_ADMIN_TOKEN` | Token `POST /admin/query` expects in `X-Admin-Token`; with the endpoint enabled and no token set, it answers 503 | *(unset)* |
 | `EDGEGUARD_RATE_LIMIT_READ` | Per-client-IP limit (slowapi) of the REST endpoints other than `/health` and `POST /admin/query`; empty = default; forwarded to the `api` service | `60/minute` |
 | `EDGEGUARD_RATE_LIMIT_ADMIN` | Per-client-IP limit of `POST /admin/query`; empty = default; forwarded to the `api` service | `10/minute` |
+| `EDGEGUARD_RATE_LIMIT_GRAPHQL` | Per-client-IP limit (slowapi) of every GraphQL route; empty or not a valid limit string = default (logged); forwarded to the `graphql` service. Behind a reverse proxy every client shares the proxy's address, so raise it for integrations (for example `600/minute`) | `120/minute` |
 
 #### Neo4j memory tuning
 
@@ -1325,6 +1326,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — `EDGEGUARD_RATE_LIMIT_GRAPHQL` sets the GraphQL rate limit (it was fixed at 120/minute in code).
 - 2026-10-18 — Deploy instructions rebuild every image (`docker compose build && docker compose up -d --force-recreate`; they rebuilt only the Airflow image, which left REST, GraphQL and STIX on the old code); `EDGEGUARD_GIT_SHA` forwarded by Compose, written into `.env` by `scripts/record_deployed_commit.sh` (run by `./install.sh`) and reported as `git_sha` by both `/health` responses.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1 (an empty sync window is a failed run).
 - 2026-10-18 — MITRE ATT&CK uses its own per-run cap (the whole changed bundle) on scheduled runs instead of `EDGEGUARD_INCREMENTAL_LIMIT`.
