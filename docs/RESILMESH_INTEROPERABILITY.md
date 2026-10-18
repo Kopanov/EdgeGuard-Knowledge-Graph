@@ -226,7 +226,7 @@ The full timestamp model is documented in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md).
 | `x_edgeguard_first_seen_at_source` | Verbatim source claim (concept 1). Absent if no source provided one |
 | `x_edgeguard_last_seen_at_source` | Verbatim source claim (concept 2). Absent if no source provided one |
 | `x_edgeguard_first_imported_at` | EdgeGuard's import wall-clock (concept 3) |
-| `x_edgeguard_last_updated` | EdgeGuard's last-touch wall-clock (concept 4) |
+| `x_edgeguard_last_updated` | EdgeGuard's last-touch wall-clock (concept 4); not on an indicator, whose `modified` does not follow it |
 | `x_edgeguard_first_seen_inferred` | `true` iff `valid_from` came from the fallback chain. Use this to filter for source-truthful indicators only when building correlation pipelines |
 | `x_edgeguard_description_source` | The source whose text the SDO's `description` is (`nvd`, `cisa_kev`, `mitre_attck`, …; extension definition 1.6.0). Absent when the SDO has no description |
 | `x_edgeguard_last_reported_at`, `x_edgeguard_last_reported_source`, `x_edgeguard_last_reported_ref` | Indicators (extension definition 1.7.0): the latest report of any source — its time (`min(T, coalesce(L, T))`, the source's `last_seen` capped at the MISP timestamp), the source, and the MISP attribute uuid that holds it ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#indicator-aging)) |
@@ -245,7 +245,6 @@ The `x_edgeguard_*` properties are top-level extension properties: each object t
   "x_edgeguard_first_seen_at_source": "2025-11-03T00:00:00+00:00",
   "x_edgeguard_last_seen_at_source":  "2026-10-01T18:42:00+00:00",
   "x_edgeguard_first_imported_at":    "2026-04-21T08:00:00+00:00",
-  "x_edgeguard_last_updated":         "2026-10-16T22:05:00+00:00",   // last database write (a full sync moves it)
   "x_edgeguard_last_reported_at":     "2026-10-01T18:42:00+00:00",
   "x_edgeguard_last_reported_source": "threatfox",
   "x_edgeguard_aging_tier": 0,
@@ -786,7 +785,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — STIX bundle coverage: times from the graph (byte-identical re-exports). § 7: IOB STIX does not ingest bundles from outside producers; EdgeGuard's outward STIX surface is `GET /stix/export` (the table had pointed to the `run_pipeline.py` file export, since removed).
+- 2026-10-18 — STIX bundle coverage: times from the graph (byte-identical re-exports); an indicator no longer carries `x_edgeguard_last_updated`. § 7: IOB STIX does not ingest bundles from outside producers; EdgeGuard's outward STIX surface is `GET /stix/export` (the table had pointed to the `run_pipeline.py` file export, since removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — §8.2 and §8.3: EdgeGuard's `CVE` nodes are queryable through ISIM GraphQL; the `Vulnerability` nodes there are ResilMesh's, since the scheduled pipeline writes none (§3.1).
 - 2026-10-17 — Rewritten as a guide to current behaviour, with history and kept-graph procedures at the end, and checked against the code: `Vulnerability` and `MAPS_TO` are not EdgeGuard output, `Technique.is_subtechnique` is true for a dotted id (every sync wrote false before), `--edgeguard-only` keeps EdgeGuard relationships between partner nodes, UNIQUE constraints cover the shared vulnerability labels, and the `misp_attribute_tag` row names the tags the sync reads.

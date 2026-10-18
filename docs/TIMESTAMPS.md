@@ -262,7 +262,7 @@ gives byte-identical objects:
 | `x_edgeguard_first_seen_at_source` | custom | Concept 1 (verbatim, MIN across edges) | Explicit preservation; absent if no source claim |
 | `x_edgeguard_last_seen_at_source`  | custom | Concept 2 (verbatim, MAX across edges) | Explicit preservation; absent if no source claim |
 | `x_edgeguard_first_imported_at`    | custom | Concept 3 | Explicit preservation |
-| `x_edgeguard_last_updated`         | custom | Concept 4 | Explicit preservation |
+| `x_edgeguard_last_updated`         | custom | Not emitted | The indicator's `modified` does not follow concept 4, so the property is left out: a full sync that writes the same data again does not change the exported indicator |
 | `x_edgeguard_first_seen_inferred`  | custom | `true` if `valid_from` came from the fallback chain (concept 3 or the SDO's `created`); absent / `false` otherwise | Lets consumers filter for source-truthful evidence only |
 
 #### Vulnerability SDO (STIX 2.1 §3.4)
@@ -453,7 +453,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — STIX export times only from the graph: SDO `created` falls back to `created_at` (Campaign, Sector) and `modified` is never before `created`; relationships take `created_at` / `imported_at` / `updated_at` (they had the export time); the primary `valid_from` chain ends at the SDO's `created` instead of `now()`; the Indicator's `confidence` and `valid_until` (the retirement time of the aging rule).
+- 2026-10-18 — STIX export times only from the graph: SDO `created` falls back to `created_at` (Campaign, Sector) and `modified` is never before `created`; relationships take `created_at` / `imported_at` / `updated_at` (they had the export time); the primary `valid_from` chain ends at the SDO's `created` instead of `now()`; the Indicator's `confidence` and `valid_until` (the retirement time of the aging rule); the Indicator no longer carries `x_edgeguard_last_updated`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; the change notes of the timestamp model and its backwards-compatibility guide moved to History and the appendix.
 - 2026-10-17 — Corrected against the code: a Vulnerability SDO's `created` / `modified` are `first_imported_at` / `last_updated` (NVD's dates are `x_edgeguard_published` / `x_edgeguard_last_modified`; only Indicator SDOs carry the inferred flag); OTX claims dropped by the reliable first-seen allowlist; CISA ICS row; `coerce_iso` keeps an aware input's offset and has no year floor for strings; an Indicator's `SOURCED_FROM` edge keeps the report values, not the basis kind; collectors that set `last_updated`; reliable sources marked by `reliable_first_seen=True` in `src/source_registry.py`.

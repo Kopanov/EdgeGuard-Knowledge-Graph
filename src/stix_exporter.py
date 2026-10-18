@@ -15,10 +15,10 @@ Key design decisions:
 - STIX IDs are **deterministic** (UUIDv5 over the node's natural key) and
   every timestamp comes from the graph, never from the clock, so
   re-exports of the same graph state produce byte-identical bundles, so
-  consumers can diff bundles safely (``modified`` follows the documented
-  sources, so an indicator's ``x_edgeguard_last_updated``, ``confidence`` or
-  ``valid_until``, or an SRO's endpoint-derived marking, can change while
-  ``modified`` stays the same).
+  consumers can diff bundles safely. ``modified`` follows the documented
+  sources; an indicator does not carry ``x_edgeguard_last_updated``, which
+  every full sync moves (docs/RESILMESH_QUICKSTART_STIX.md § 4 lists the few
+  changes that leave ``modified`` as it is).
 - All Cypher queries filter on ``x.edgeguard_managed = true OR x.edgeguard_enriched = true`` — nodes EdgeGuard created or enriched — (strict
   equality — null fails) so we never leak ResilMesh-owned
   asset/vulnerability nodes into an outbound bundle. Originally written
@@ -1882,6 +1882,8 @@ class StixExporter:
           wall-clock (analogous to OpenCTI `updated_at`). Cross-Checker
           F8: symmetric with `first_imported_at`; consumers polling for
           "has this SDO been touched since my last read" need the pair.
+          ``_indicator_sdo`` removes it again: an indicator's ``modified``
+          does not follow ``last_updated``.
         """
         if props.get("first_seen_at_source"):
             sdo_dict["x_edgeguard_first_seen_at_source"] = _iso_str(props["first_seen_at_source"])
@@ -1959,6 +1961,10 @@ class StixExporter:
         # SDO type emits the same envelope (Logic Tracker HIGH —
         # previously only Indicator got the custom props).
         sdo_dict = self._apply_source_truthful_custom_props(_to_dict(obj), props)
+        # An indicator's ``modified`` does not follow ``last_updated`` (every full sync moves it), so
+        # the property is not emitted: a full sync that writes the same data again does not change
+        # the exported indicator under the same ``modified``.
+        sdo_dict.pop("x_edgeguard_last_updated", None)
         # PR-M2: mark indicators whose valid_from came from the fallback
         # chain so consumers can filter for source-truthful evidence
         # only. Conscientious consumers (analyst UIs) check the flag;

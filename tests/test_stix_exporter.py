@@ -1940,6 +1940,18 @@ def test_indicator_valid_from_falls_back_to_the_created_value_not_the_clock(monk
     assert _at(sdo["valid_from"]) == _at(stix_exporter._PROVENANCE_OBJECTS_CREATED) == _at(sdo["created"])
 
 
+def test_a_full_sync_write_does_not_change_the_exported_indicator():
+    """An indicator's ``modified`` does not follow ``last_updated``, so the property is not
+    emitted: a write that only moves ``last_updated`` gives the same object, while every other
+    SDO keeps ``x_edgeguard_last_updated`` (its ``modified`` follows it)."""
+    before = _indicator(last_recorded_at="2026-10-14T00:00:00+00:00", last_updated="2026-10-15T00:00:00+00:00")
+    after = _indicator(last_recorded_at="2026-10-14T00:00:00+00:00", last_updated="2026-10-17T00:00:00+00:00")
+    assert "x_edgeguard_last_updated" not in before
+    assert _json.dumps(before, sort_keys=True) == _json.dumps(after, sort_keys=True)
+    malware = StixExporter(object())._malware_sdo(dict(_MALWARE, last_updated="2026-10-17T00:00:00+00:00"))
+    assert malware["x_edgeguard_last_updated"].startswith("2026-10-17T00:00:00")
+
+
 def test_a_retired_indicator_is_valid_until_its_retirement():
     sdo = _indicator(
         aging_basis="source_date",

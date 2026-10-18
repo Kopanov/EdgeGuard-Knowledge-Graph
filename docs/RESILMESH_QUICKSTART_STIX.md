@@ -115,13 +115,17 @@ Every bundle carries:
   Every `created`, `modified` and `valid_from` comes from the graph,
   never from the clock (§ 8), so re-exporting the same graph state gives
   a **byte-identical** bundle. `modified` follows the node's or
-  relationship's own times (§ 8), so some content can change while
-  `modified` stays the same: an indicator's `x_edgeguard_last_updated`,
-  `confidence` and projected `valid_until` (its `modified` moves only when
-  a source reports it again or its aging state changes), and a
-  relationship's `object_marking_refs`, which it takes from its
-  endpoints as well as its own TLP. A consumer therefore compares
-  objects rather than keying on (`id`, `modified`) alone
+  relationship's own times (§ 8). An indicator's `modified` moves when a
+  source reports it with a later time or its aging state changes, which
+  covers the usual changes of its `confidence` and `valid_until`; it
+  does not carry `x_edgeguard_last_updated`, which every full sync
+  moves. A few changes leave `modified` as it is: a report with an
+  earlier time than the indicator's latest report (it can add
+  provenance or raise `confidence`), a change of
+  `EDGEGUARD_AGING_RETIRE_DAYS` (the projected `valid_until`), and a
+  change of an endpoint's TLP (a relationship's `object_marking_refs`).
+  A consumer that must see those compares objects rather than keying on
+  (`id`, `modified`) alone
 - `objects: [...]` — SDOs + SROs for the seed and its neighborhood,
   plus three kinds of supporting objects in every bundle:
   the EdgeGuard producer `identity` (referenced by `created_by_ref`
@@ -529,7 +533,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).
+- 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until` and no longer `x_edgeguard_last_updated`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: no bundle carries `malware targets identity` or `campaign uses malware`, so `x_edgeguard_evidence_types` appears on `campaign attributed-to intrusion-set` and `indicator indicates campaign` only; `x_edgeguard_misp_attribute_ids` is on every SDO a MISP attribute wrote; a node in a sector never also carries `global` in `x_edgeguard_zones`; § 9 gives EdgeGuard the CVE + CVSS nodes and ResilMesh the asset layer and scanner findings.
 - 2026-10-16 — `advisory_sector` (confidence 90) on a vulnerability's sector link where CISA's ICS advisory states the sector, with the advisory's cisa.gov page in `external_references`.
