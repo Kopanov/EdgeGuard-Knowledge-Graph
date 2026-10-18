@@ -1037,7 +1037,7 @@ The version defaults to the build date. The same inputs and version give a byte-
 
 Add or change decisions only in the overrides file, with a reason, a date and `"status": "proposed"` until reviewed. A rebuild keeps them. `tests/test_canonical_threat_actors.py` fails when the overrides file changed after the last build.
 
-**At each ATT&CK release.** After the MITRE collector has loaded the new release, export the graph again and rebuild. In the report's canonical-key check, every ATT&CK node must be either a canonical key or a revoked group that resolves to its successor. Then look at:
+**At each ATT&CK release.** A scheduled MITRE run adds the release's new techniques, groups and software, and a renamed object as a new MISP attribute under its new name; an object MISP already holds keeps its stored description, relationships and deprecation (MISPWriter skips it), which reach the graph with the next fresh baseline. After the release is loaded, export the graph again and rebuild. In the report's canonical-key check, every ATT&CK node must be either a canonical key or a revoked group that resolves to its successor. Then look at:
 
 - groups the new release renamed, which take the loaded name;
 - new groups, anchored by name;
@@ -1255,6 +1255,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — "At each ATT&CK release": a scheduled run adds the release's new and renamed objects; changes to objects already in MISP arrive with the next fresh baseline.
 - 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed. The kill switch `EDGEGUARD_RESPECT_CALIBRATOR`, the relationship-write guard it controlled and the post-run query for calibrated edges were removed with the co-occurrence calibration job, which was the only writer of `r.calibrated_at`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restructured as a guide to current behaviour: the change history moved to this section and the repairs of data written by earlier versions to the appendix.

@@ -833,8 +833,24 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   naming 200 or more CVEs (350-378 on three advisories of the 2026-10-16 baseline) held the cursor
 #   at itself for good while every run succeeded. EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN (default
 #   1200 advisory files; at most 46 changed on one day in two years) is the per-run limit here.
+#   mitre (2026-10): a run downloads the ATT&CK bundle only when it changed (ETag) and pushes every
+#   technique, group, software and tactic in it. Cut at 200, a run kept about 140 of them and stored
+#   the new ETag, so every later run was answered "not modified" and the rest never arrived. The
+#   bundle is the run's limit.
 OWN_RUN_CAP_SOURCES = frozenset(
-    {"malwarebazaar", "nvd", "threatfox", "urlhaus", "feodo", "sslbl", "abuseipdb", "cisa", "cisa_kev", "cisa_ics"}
+    {
+        "malwarebazaar",
+        "nvd",
+        "threatfox",
+        "urlhaus",
+        "feodo",
+        "sslbl",
+        "abuseipdb",
+        "cisa",
+        "cisa_kev",
+        "cisa_ics",
+        "mitre",
+    }
 )
 
 
