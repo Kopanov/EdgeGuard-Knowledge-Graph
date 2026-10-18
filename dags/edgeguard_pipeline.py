@@ -2216,7 +2216,7 @@ check_neo4j_quality_task = BashOperator(
 #    1. build_relationships  — link IOCs to malware/CVEs (needs fresh data)
 #    2. run_enrichment_jobs  — merges, the indicator aging (one rule at the database's current
 #                              time, or a node's later aging_evaluated_at; 2026-10-16), campaigns
-#                              (active indicators), calibration, EPSS
+#                              (active indicators), EPSS
 #                              (enrichment_jobs.run_all_enrichment_jobs)
 # ================================================================================
 
@@ -2277,7 +2277,7 @@ def run_build_relationships(**context):
 
 
 def run_enrichment_jobs(**context):
-    """Run the post-sync enrichment jobs (merges, indicator aging, campaigns, calibration, EPSS)."""
+    """Run the post-sync enrichment jobs (merges, indicator aging, campaigns, EPSS)."""
     _skip_while_baseline_holds_lock("run_enrichment_jobs", context)
     from enrichment_jobs import run_all_enrichment_jobs
     from neo4j_client import Neo4jClient

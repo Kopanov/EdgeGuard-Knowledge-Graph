@@ -29,9 +29,12 @@ in build_relationships.py honored `r.calibrated_at IS NOT NULL`, but
 unconditionally SET `r.confidence_score = <constant>`. Next sync
 undoes calibrator's demotion.
 
-Fix: new `_confidence_respect_calibrator(value)` helper generating
+Fix: a `_confidence_respect_calibrator(value)` helper generating
 `CASE WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score ELSE
-{value} END`. Applied at all 7 sites:
+{value} END`, with the kill switch `EDGEGUARD_RESPECT_CALIBRATOR`.
+Removed on 2026-10-18 with the co-occurrence calibration job, the only
+writer of `r.calibrated_at`: the sites write their confidence directly.
+The 7 sites:
   - create_actor_technique_relationship (0.7)
   - create_malware_actor_relationship (0.7)
   - create_indicator_vulnerability_relationship (0.5 x 2 branches)
@@ -218,115 +221,30 @@ class TestFix1PlaceholderNameReject:
 
 
 # ===========================================================================
-# Fix #2 — calibrator-respect completion
+# Fix #2 — calibrator guard (removed 2026-10-18)
 # ===========================================================================
 
 
-class TestFix2CalibratorRespectComplete:
-    """``_confidence_respect_calibrator`` helper applied at all 7 sites:
-    6 create_*_relationship helpers + _set_clause in batched path."""
+class TestFix2CalibratorGuardRemoved:
+    """The guard and its kill switch went with the co-occurrence calibration job; the 6
+    create_*_relationship helpers and the batched ``_set_clause`` write their confidence directly."""
 
     def _src(self) -> str:
         return (SRC / "neo4j_client.py").read_text()
 
-    def test_helper_defined(self):
+    def test_helper_and_kill_switch_are_gone(self):
+        import neo4j_client
+
+        assert not hasattr(neo4j_client, "_confidence_respect_calibrator")
         src = self._src()
-        assert "def _confidence_respect_calibrator(" in src
+        assert "calibrated_at" not in src and "EDGEGUARD_RESPECT_CALIBRATOR" not in src
 
-    def test_helper_correct_shape(self):
-        from neo4j_client import _confidence_respect_calibrator
-
-        result = _confidence_respect_calibrator(0.7)
-        assert result == "CASE WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score ELSE 0.7 END"
-
-    def test_helper_accepts_cypher_param_expression(self):
-        """Must work with `$param` expressions for the batched path."""
-        from neo4j_client import _confidence_respect_calibrator
-
-        result = _confidence_respect_calibrator("row.confidence")
-        assert "ELSE row.confidence END" in result
-
-    def test_all_7_sites_use_helper(self):
-        """Count the usages — must be 7 executable sites + 1 _set_clause
-        call. The docstring example is in a comment/docstring so it's
-        inside a string literal."""
+    def test_helper_sites_write_their_confidence(self):
         src = self._src()
-        # Count executable invocations (exclude docstring example)
-        # Docstring example is on line 192 area: `f"SET r.confidence_score = {_confidence_respect_calibrator(0.7)}"`
-        # Real sites are in the 6 helpers + _set_clause body
-        count = src.count("_confidence_respect_calibrator(")
-        # Helper definition (1) + docstring example (1) + 7 helper sites + 1 _set_clause = 10
-        assert count >= 9, f"expected >=9 usages (def + docstring + 7 helpers + _set_clause); got {count}"
-
-    def test_kill_switch_reverts_to_unconditional_overwrite(self):
-        """``EDGEGUARD_RESPECT_CALIBRATOR=0`` restores pre-PR-N10 behaviour.
-        Ops escape hatch — must produce a bare literal, no CASE expr."""
-        import os
-
-        from neo4j_client import _confidence_respect_calibrator
-
-        for disable_val in ("0", "false", "no", "off", "FALSE", "Off", " 0 "):
-            os.environ["EDGEGUARD_RESPECT_CALIBRATOR"] = disable_val
-            try:
-                result = _confidence_respect_calibrator(0.7)
-                assert result == "0.7", f"kill-switch value {disable_val!r} should produce bare literal; got {result!r}"
-                assert "CASE" not in result
-                assert "calibrated_at" not in result
-            finally:
-                os.environ.pop("EDGEGUARD_RESPECT_CALIBRATOR", None)
-
-    def test_kill_switch_unset_or_true_keeps_guard(self):
-        """Default (unset) or any non-disable value keeps the CASE guard."""
-        import os
-
-        from neo4j_client import _confidence_respect_calibrator
-
-        # Unset
-        os.environ.pop("EDGEGUARD_RESPECT_CALIBRATOR", None)
-        result = _confidence_respect_calibrator(0.7)
-        assert "CASE WHEN r.calibrated_at IS NOT NULL" in result
-
-        # Explicit enable values
-        for enable_val in ("1", "true", "yes", "on", ""):
-            os.environ["EDGEGUARD_RESPECT_CALIBRATOR"] = enable_val
-            try:
-                result = _confidence_respect_calibrator(0.7)
-                assert "CASE WHEN r.calibrated_at IS NOT NULL" in result, (
-                    f"value {enable_val!r} should keep guard; got {result!r}"
-                )
-            finally:
-                os.environ.pop("EDGEGUARD_RESPECT_CALIBRATOR", None)
-
-    def test_no_unconditional_confidence_writes_remaining(self):
-        """Regression pin: no `r.confidence_score = <literal>` should
-        appear in executable code (only in docstring examples). AST walk."""
-        import ast
-
-        src = self._src()
-        tree = ast.parse(src)
-        # Walk JoinedStr (f-strings) and plain Str constants, search for
-        # `r.confidence_score = <numeric-literal>` pattern.
-        for node in ast.walk(tree):
-            # Look for string literals containing "r.confidence_score = 0."
-            # except inside the docstring helper definition.
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                s = node.value
-                if (
-                    "r.confidence_score = 0.5" in s
-                    or "r.confidence_score = 0.6" in s
-                    or "r.confidence_score = 0.7" in s
-                ):
-                    # Must be in a context that ALSO has ELSE (calibrator-wrapped)
-                    # or be explicit documentation
-                    if "CASE WHEN r.calibrated_at" not in s and "ELSE " not in s:
-                        # The only legitimate occurrence is the docstring
-                        # example at line ~181 which has "SET r.confidence_score = 0.7"
-                        # as the PRE-fix shape being explained
-                        if "SET r.confidence_score = 0.7\n" not in s:
-                            raise AssertionError(
-                                f"Fix #2 regression: unconditional confidence write "
-                                f"found in string literal: {s[:200]!r}"
-                            )
+        assert src.count("r.confidence_score = 0.7,") == 2
+        assert src.count("r.confidence_score = 0.5,") == 4
+        assert src.count("r.confidence_score = 0.6,") == 1
+        assert 'confidence_expr = "row.confidence"' in src
 
 
 # ===========================================================================

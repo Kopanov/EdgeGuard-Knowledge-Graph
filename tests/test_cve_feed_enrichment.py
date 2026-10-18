@@ -317,7 +317,6 @@ def _patch_other_jobs(monkeypatch):
         "merge_alias_duplicate_actors",
         "merge_malware_attack_twins",
         "build_campaign_nodes",
-        "calibrate_cooccurrence_confidence",
     ):
         monkeypatch.setattr(enrichment_jobs, name, lambda c: {"n": 1})
     # 2026-10-16: the aging job takes the run's as_of and reports the Indicators it changed.
@@ -325,7 +324,7 @@ def _patch_other_jobs(monkeypatch):
 
 
 class TestRunner:
-    def test_seven_jobs_and_the_summary_line(self, monkeypatch, caplog):
+    def test_six_jobs_and_the_summary_line(self, monkeypatch, caplog):
         _patch_other_jobs(monkeypatch)
         monkeypatch.setattr(config, "ENABLE_EPSS", True)
         result = {"rows_in_feed": 390_000, "cves_updated": 5, "cves_cleared": 2, "rows_skipped": 0}
@@ -337,14 +336,13 @@ class TestRunner:
             "actor_alias_merge",
             "malware_twin_merge",
             "campaigns",
-            "calibration",
             "decay",
             "epss",
         }
         text = "\n".join(r.getMessage() for r in caplog.records)
-        assert "[1/7]" in text and "[7/7] EPSS" in text and "/6]" not in text and "/8]" not in text
+        assert "[1/6]" in text and "[6/6] EPSS" in text and "/7]" not in text and "/5]" not in text
         # The CVE nodes EPSS updated, not the sum of its counts.
-        assert "calibration=1 decay=1 epss=5" in text
+        assert "campaigns=1 decay=1 epss=5" in text and "calibration=" not in text
 
     def test_the_flag_off_makes_no_network_call(self, monkeypatch):
         _patch_other_jobs(monkeypatch)

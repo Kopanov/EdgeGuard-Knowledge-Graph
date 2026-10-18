@@ -403,7 +403,6 @@ def _run(vfb, monkeypatch, override=None, **kw):
         kw.get("require_ics", False),
         kw.get("require_cisa_ics", False),
         kw.get("require_malwarebazaar", False),
-        legacy_graph=kw.get("legacy_graph", False),
     )
 
 
@@ -1862,12 +1861,11 @@ class TestSectorEvidence:
         rep = _run(vfb, monkeypatch, override=override)
         assert [c["check"] for c in rep.failed] == ["cisa_stated_sectors_linked_as_advisory_sector"]
 
-    @pytest.mark.parametrize("legacy_graph", [False, True])
-    def test_cisa_ics_records_without_zones_are_not_judged(self, vfb, monkeypatch, legacy_graph):
+    def test_cisa_ics_records_without_zones_are_not_judged(self, vfb, monkeypatch):
         """The hosted graph of 2026-10-14/16: 4,164 CISA ICS records, none with ``zones`` or
         ``stated_zones`` (written before 2026-10-16; on a kept graph unchanged attributes are not re-read).
         No record can state a sector, so ``--require-cisa-ics`` does not fail the stated-sector check by
-        construction, with or without ``--legacy-graph``."""
+        construction."""
 
         def override(st, rows):
             if "AS with_stated_zones" in st:
@@ -1880,16 +1878,15 @@ class TestSectorEvidence:
                 return [{"present": True, "edges": 4164}]
             return rows
 
-        rep = _run(vfb, monkeypatch, override=override, require_cisa_ics=True, legacy_graph=legacy_graph)
+        rep = _run(vfb, monkeypatch, override=override, require_cisa_ics=True)
         assert _check(rep, "cisa_ics_source_present")["ok"] is True
         check = _check(rep, "cisa_stated_sectors_linked_as_advisory_sector")
         assert check["ok"] is None and check["detail"]["cisa_records_with_zones"] == 0
         assert "cisa_stated_sectors_linked_as_advisory_sector" not in {c["check"] for c in rep.failed}
 
-    @pytest.mark.parametrize("legacy_graph, expected", [(False, False), (True, None)])
-    def test_cisa_ics_records_with_zones_but_no_statement(self, vfb, monkeypatch, legacy_graph, expected):
-        """CISA ICS records written by the new code (``zones`` set) and still no stated sector: with
-        ``--require-cisa-ics`` that fails, unless ``--legacy-graph`` says the graph is a kept older one."""
+    def test_cisa_ics_records_with_zones_but_no_statement(self, vfb, monkeypatch):
+        """CISA ICS records written by the current code (``zones`` set) and still no stated sector: with
+        ``--require-cisa-ics`` that fails."""
 
         def override(st, rows):
             if "AS cisa_global" in st:
@@ -1898,8 +1895,8 @@ class TestSectorEvidence:
                 return [{"stated": 0, "not_labelled": 0, "examples": []}]
             return rows
 
-        rep = _run(vfb, monkeypatch, override=override, require_cisa_ics=True, legacy_graph=legacy_graph)
-        assert _check(rep, "cisa_stated_sectors_linked_as_advisory_sector")["ok"] is expected
+        rep = _run(vfb, monkeypatch, override=override, require_cisa_ics=True)
+        assert _check(rep, "cisa_stated_sectors_linked_as_advisory_sector")["ok"] is False
 
     def test_a_sector_link_citing_an_advisory_of_another_sector_fails(self, vfb, monkeypatch):
         """CVE-2026-32645: ICSA-26-281-01 names Energy, ICSMA-26-283-01 names Healthcare; a healthcare link
@@ -1978,7 +1975,7 @@ class TestSectorEvidence:
 # --------------------------------------------------------------------------- 16. descriptions and aging
 class TestRankedDescriptionsAndAging:
     """2026-10-16: every ranked description names its source and every Indicator has an aging basis and a
-    source confidence; on a graph built before (``--legacy-graph``) both are reported, not judged."""
+    source confidence; both are judged whenever the graph holds such nodes."""
 
     def test_a_correct_graph_passes(self, vfb, monkeypatch):
         rep = _run(vfb, monkeypatch)
@@ -1993,8 +1990,6 @@ class TestRankedDescriptionsAndAging:
 
         rep = _run(vfb, monkeypatch, override=override)
         assert [c["check"] for c in rep.failed] == ["descriptions_name_their_source"]
-        rep = _run(vfb, monkeypatch, override=override, legacy_graph=True)
-        assert _check(rep, "descriptions_name_their_source")["ok"] is None and rep.failed == []
         assert _check(rep, "descriptions_name_their_source")["detail"]["without_source"] == 859
 
     @pytest.mark.parametrize("missing", ["without_aging_basis", "without_source_confidence"])
@@ -2006,8 +2001,6 @@ class TestRankedDescriptionsAndAging:
 
         rep = _run(vfb, monkeypatch, override=override)
         assert [c["check"] for c in rep.failed] == ["indicators_have_aging_basis"]
-        rep = _run(vfb, monkeypatch, override=override, legacy_graph=True)
-        assert _check(rep, "indicators_have_aging_basis")["ok"] is None and rep.failed == []
 
     def test_an_empty_graph_is_not_judged(self, vfb, monkeypatch):
         def override(st, rows):
@@ -2035,16 +2028,23 @@ class TestRankedDescriptionsAndAging:
         }
         assert all(ranking_for_label(label) for label in vfb._RANKED_DESCRIPTION_LABELS)
 
-    def test_legacy_graph_flag_reaches_the_checks(self, vfb, monkeypatch, capsys):
+    def test_the_cli_judges_every_graph_alike(self, vfb, monkeypatch, capsys):
+        """The CLI passes only the three ``--require-*`` flags; there is no option that reports instead of
+        judging the description-source, aging or stated-sector checks."""
         seen = {}
 
         def fake_run_checks(*args, **kwargs):
             seen["args"] = args
+            seen["kwargs"] = kwargs
             rep = vfb.Report()
             rep.add("x", True, {})
             return rep
 
         monkeypatch.setattr(vfb, "run_checks", fake_run_checks)
-        monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py", "--legacy-graph"])
+        monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py"])
         assert vfb.main() == 0
-        assert seen["args"] == (False, False, False, True)
+        assert seen["args"] == (False, False, False) and seen["kwargs"] == {}
+        monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py", "--legacy-graph"])
+        with pytest.raises(SystemExit) as exc:
+            vfb.main()
+        assert exc.value.code == 2

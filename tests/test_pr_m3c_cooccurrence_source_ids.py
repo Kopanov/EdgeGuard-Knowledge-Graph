@@ -4,7 +4,9 @@ PR-M3c — §8-RI-S3-Q9: Co-occurrence ``r.source_ids`` accumulation.
 Superseded 2026-10 (relationship provenance): ``r.source_id`` / ``r.source_ids`` were dropped
 in favour of the accumulating ``r.sources`` / ``r.source_refs`` / ``r.misp_event_ids`` lists
 (``src/relationship_provenance.py``), with the kind of evidence in ``r.match_type``. The
-tests below pin the successor contract for the same sites; the history is kept for context.
+tests below pin the successor contract for the same build_relationships sites; the history is
+kept for context. The co-occurrence calibration job the history names was removed on 2026-10-18,
+because no current code writes co-occurrence edges.
 
 ## The bug
 
@@ -33,10 +35,8 @@ on a 730-day baseline are affected.
 
 ## Test strategy
 
-Source-pin the fix sites (Q3a/Q3b/Q4/Q9 + calibrator small-event path +
-calibrator apoc.periodic.iterate large-event path) so any future
-regression that reintroduces the scalar-only filter or drops the
-``r.source_ids`` accumulation fails loudly.
+Source-pin the fix sites (Q3a/Q3b/Q4/Q9) so any future regression that
+reintroduces the scalar ``r.source_id`` writes or the removed Q4 fails loudly.
 """
 
 from __future__ import annotations
@@ -119,86 +119,3 @@ class TestBuildRelationshipsAccumulatesProvenance:
         assert '_prov_with("i", _family_feeds("i"))' in block and "_prov_set()" in block
         assert 'r.match_type = "malware_family"' in block
         assert "source_id" not in block and "source_ids" not in block
-
-
-# ===========================================================================
-# enrichment_jobs.py — calibrator filter matches on source_ids with fallback
-# ===========================================================================
-
-
-class TestCalibratorFiltersOnTheEvidenceLabel:
-    """The calibrator (``calibrate_cooccurrence_confidence``) filters on the
-    evidence label ``r.match_type`` (2026-10; it used ``r.source_ids`` / ``r.source_id``)."""
-
-    @pytest.fixture(scope="class")
-    def source(self) -> str:
-        return (SRC / "enrichment_jobs.py").read_text()
-
-    def _body(self, source: str) -> str:
-        start = source.find("def calibrate_cooccurrence_confidence")
-        return source[start : source.find("\ndef ", start + 1)]
-
-    def test_small_event_path_filters_on_match_type(self, source: str) -> None:
-        """2026-10 (relationship provenance): ``r.source_id`` / ``r.source_ids`` were dropped
-        (they mixed feed names with evidence names); the kind of evidence is ``r.match_type``."""
-        body = self._body(source)
-        block = body[body.find("update_cypher = ") :][:1500]
-        assert 'WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"]' in block
-        assert "r.source_ids" not in block and "r.source_id IN" not in block
-
-    def test_large_event_path_filters_on_match_type(self, source: str) -> None:
-        body = self._body(source)
-        assert "large_batch_query = " in body, "large-event apoc.periodic.iterate query must exist"
-        block = body[body.find("large_batch_query = ") :][:1500]
-        assert 'WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"]' in block
-        assert "r.source_ids" not in block and "r.source_id IN" not in block
-
-
-# ===========================================================================
-# Negative pin — the pre-fix form (scalar-only filter) must not reappear
-# ===========================================================================
-
-
-class TestCalibratorScalarOnlyFilterIsGone:
-    """Regression pin: a calibrator filter of ``WHERE r.source_id IN [...]``
-    ALONE (no array branch, no OR) is the pre-fix form that silently
-    exempts Q9-overwritten edges from calibration.  This test catches a
-    future refactor that accidentally drops the array check."""
-
-    def test_no_active_scalar_only_filter_line(self) -> None:
-        """Scan the calibrator's source for any active (non-comment)
-        line that matches ``WHERE r.source_id IN [...]`` WITHOUT an
-        accompanying ``r.source_ids`` array match on the same line or
-        the surrounding boolean expression.  If found, the pre-fix
-        scalar-only filter has regressed."""
-        source = (SRC / "enrichment_jobs.py").read_text()
-        start = source.find("def calibrate_cooccurrence_confidence")
-        end = source.find("\ndef ", start + 1)
-        body = source[start:end]
-        # Heuristic: look for ``WHERE r.source_id IN`` (capital WHERE,
-        # active Cypher) that does NOT appear next to ``source_ids``
-        # in a small window.  Active cypher lines are NOT inside Python
-        # ``#`` comments.
-        for i, line in enumerate(body.splitlines()):
-            stripped = line.lstrip()
-            # Skip Python comment lines
-            if stripped.startswith("#"):
-                continue
-            # The pre-fix scalar-only form would be a standalone
-            # ``WHERE r.source_id IN [...]`` with NO array branch.
-            # After PR-M3c, every such line is preceded/followed by a
-            # ``r.source_ids`` match in the same boolean expression.
-            if "WHERE r.source_id IN" in line and "source_ids" not in line:
-                # Check the preceding line for an OR-continuation that
-                # contains ``source_ids`` (spans two lines in the
-                # update_cypher block).
-                prev = body.splitlines()[i - 1] if i > 0 else ""
-                if "source_ids" not in prev:
-                    raise AssertionError(
-                        f"Regression: scalar-only ``WHERE r.source_id IN [...]`` filter at "
-                        f"line {i + 1}: {line.strip()!r}. "
-                        f"This is the pre-fix form — it silently exempts Q9-overwritten "
-                        f"edges from calibration. The array branch "
-                        f"(``r.source_ids IS NOT NULL AND any(s IN r.source_ids ...)``) "
-                        f"must accompany it."
-                    )

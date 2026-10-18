@@ -1,15 +1,13 @@
 """Enrichment jobs fail on every ``apoc.periodic.iterate`` failure signal.
 
-Three enrichment steps run ``apoc.periodic.iterate``: the campaign ``link_indicators``
-step, the large-event confidence calibration and the Vulnerability-CVE bridge. The
-first used to read only ``errorMessages``; the other two yielded only ``total``. A heap
-OOM inside a batch reports an empty ``errorMessages`` with ``failedBatches=1`` and
-``batch.errors`` set (local 800-day baseline, 2026-09-16), so all three logged success
-over a partially written graph. The calibration job also swallowed a failed tier and
-ended "complete".
+Two enrichment steps run ``apoc.periodic.iterate``: the campaign ``link_indicators``
+step and the Vulnerability-CVE bridge. The first used to read only ``errorMessages``;
+the other yielded only ``total``. A heap OOM inside a batch reports an empty
+``errorMessages`` with ``failedBatches=1`` and ``batch.errors`` set (local 800-day
+baseline, 2026-09-16), so both logged success over a partially written graph.
 
 Each step now reads every failure column through ``neo4j_client.apoc_iterate_failures``
-and raises ``RuntimeError``; calibration attempts every tier, then raises if any failed.
+and raises ``RuntimeError``.
 """
 
 import os
@@ -67,11 +65,9 @@ class _Session:
         iterate_row: Dict[str, Any],
         *,
         records: List[Dict[str, Any]] = None,
-        fail_small_path: bool = False,
     ):
         self.iterate_row = iterate_row
         self.records = records or []
-        self.fail_small_path = fail_small_path
         self.queries: List[str] = []
 
     def __enter__(self):
@@ -82,14 +78,10 @@ class _Session:
 
     def run(self, cypher: str, *args, **params):
         self.queries.append(cypher)
-        if self.fail_small_path and "UNWIND $eids AS eid" in cypher:
-            raise RuntimeError("small path boom")
         result = MagicMock()
         if "apoc.periodic.iterate" in cypher:
             row = dict(self.iterate_row)
             result.single = lambda: row
-        elif "count(DISTINCT i) AS sz" in cypher:
-            result.__iter__ = lambda _self: iter(self.records)
         elif "ThreatActor" in cypher and "RETURN DISTINCT" in cypher:
             result.__iter__ = lambda _self: iter(self.records)
         else:
@@ -169,41 +161,3 @@ class TestCampaignLinkIndicators:
         with pytest.raises(RuntimeError, match=r"\[CAMPAIGNS\] link_indicators") as exc:
             self._run(overrides)
         assert expected in str(exc.value)
-
-
-class TestCalibration:
-    """Event sizes drive the tier: 5 indicators → tier 0-10 (small path, one UNWIND
-    query); 5,000 → tier 501-inf (apoc path). Tiers run in ascending order."""
-
-    def _run(self, iterate_row, records):
-        session = _Session(iterate_row, records=records)
-        with patch.object(enrichment_jobs.time, "sleep", lambda *_: None):
-            return enrichment_jobs.calibrate_cooccurrence_confidence(_client(session)), session
-
-    def test_clean_large_event_calibrates(self):
-        results, session = self._run(_apoc_row(updated=7), [{"eid": "9001", "sz": 5000}])
-        assert results["size 501–∞ → conf=0.3"] == 7
-        query = next(q for q in session.queries if "apoc.periodic.iterate" in q)
-        for column in ("failedBatches", "failedOperations", "wasTerminated", "batch", "operations"):
-            assert column in query
-
-    @pytest.mark.parametrize("overrides, expected", FAILURE_CASES)
-    def test_failed_large_event_fails_the_job_after_all_tiers(self, overrides, expected, caplog):
-        # Event 9001 (5,000 indicators) fails in tier 501-inf; event 7 (5 indicators)
-        # sits in tier 0-10 and must still be calibrated through the small path.
-        records = [{"eid": "9001", "sz": 5000}, {"eid": "7", "sz": 5}]
-        with pytest.raises(RuntimeError, match=r"\[CALIBRATE\] 1 tier\(s\) failed") as exc:
-            self._run(_apoc_row(updated=7, **overrides), records)
-        assert expected in str(exc.value)
-        assert "event 9001" in str(exc.value)
-
-    def test_remaining_tiers_still_run_after_a_failed_tier(self):
-        # Tier 0-10 (small path) fails first; tier 501-inf (apoc path) must still run,
-        # then the job raises naming the failed tier.
-        records = [{"eid": "7", "sz": 5}, {"eid": "9001", "sz": 5000}]
-        session = _Session(_apoc_row(updated=7), records=records, fail_small_path=True)
-        with patch.object(enrichment_jobs.time, "sleep", lambda *_: None):
-            with pytest.raises(RuntimeError, match=r"1 tier\(s\) failed") as exc:
-                enrichment_jobs.calibrate_cooccurrence_confidence(_client(session))
-        assert "size 0\u201310" in str(exc.value) and "small path boom" in str(exc.value)
-        assert any("apoc.periodic.iterate" in q for q in session.queries), "tier 501-inf must still run"

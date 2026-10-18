@@ -848,7 +848,7 @@ MERGE (c)-[:REFERS_TO]->(v)
 This matches the ResilMesh schema. Flag any version that only creates the `(v)-[:REFERS_TO]->(c)` direction.
 
 ### Enrichment job failure not counted or raised
-Every enrichment job returns a dict of counts. A failure either counts in `errors` (the alias and twin merges, per batch) or raises so the task fails (`decay_ioc_confidence`, `build_campaign_nodes`, `bridge_vulnerability_cve`, and `calibrate_cooccurrence_confidence` after all tiers ran); only `enrich_cve_epss` logs and skips a feed outage by design.
+Every enrichment job returns a dict of counts. A failure either counts in `errors` (the alias and twin merges, per batch) or raises so the task fails (`decay_ioc_confidence`, `build_campaign_nodes` and `bridge_vulnerability_cve`); only `enrich_cve_epss` logs and skips a feed outage by design.
 Flag a job that returns `None` / `True` / `False`, or catches an error without counting or raising it.
 
 ---
@@ -1049,6 +1049,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The rule on enrichment job failures no longer names the removed co-occurrence calibration job.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as the current rules; data written by earlier versions moved to the appendix.
 - 2026-10-17 — Rules added for the CISA KEV whole-catalogue comparison with in-place edits, the CISA ICS per-run cap, the OTX cursor after a partial MISP push and the baseline-lock check in every writing task; review rules corrected against the code and extended to the changes of 2026-10-16.

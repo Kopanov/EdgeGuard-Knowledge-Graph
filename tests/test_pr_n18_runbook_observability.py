@@ -171,12 +171,10 @@ class TestPartBRunbookDriftFixed:
             "RUNBOOK must explicitly note that MISP is NOT a compose service"
         )
 
-    def test_kill_switch_table_has_three_entries(self):
-        """Pre-PR-N18 only 2 kill-switches were documented. PR-N14
-        added a third (EDGEGUARD_EARLIEST_IOC_DATE) that was missing
-        from the table."""
+    def test_kill_switch_table_has_both_entries(self):
+        """PR-N14 added EDGEGUARD_EARLIEST_IOC_DATE, which was missing from the table. The calibrator
+        kill switch was removed on 2026-10-18 with the co-occurrence calibration job."""
         runbook = self._runbook()
-        assert "EDGEGUARD_RESPECT_CALIBRATOR" in runbook
         assert "EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION" in runbook
         assert "EDGEGUARD_EARLIEST_IOC_DATE" in runbook, "PR-N14 earliest-date env var must be in kill-switch table"
 

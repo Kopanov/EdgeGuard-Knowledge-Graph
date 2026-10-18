@@ -5,13 +5,11 @@ Four findings from the 5-agent audit of `build_relationships` + merge
 logic (run 2026-04-21 after PR-N7 merged). All four are Tier-B or above
 with cross-agent corroboration:
 
-  #1 [BLOCK-MERGE] Q9 in ``build_relationships.py`` re-inflates
-     calibrator-demoted INDICATES edges every run. The calibrator
-     demotes 0.8 → 0.30 for bulk-dump events; Q9's unconditional
-     ``SET r.confidence_score = CASE WHEN 0.8 > r.confidence_score
-     THEN 0.8 …`` reverses that on the very next build_relationships
-     run. The flap has been happening nightly since the calibrator
-     shipped.
+  #1 [BLOCK-MERGE] Q9 in ``build_relationships.py`` re-inflated
+     calibrator-demoted INDICATES edges every run. The guard on
+     ``r.calibrated_at`` that fixed it was removed on 2026-10-18 with
+     the co-occurrence calibration job, the only writer of that stamp;
+     Q9's confidence keeps the maximum of 0.8 and the stored value.
 
   #2 [HIGH] REFERS_TO / RUNS / PART_OF(malware) edges have no
      ``created_at`` / ``updated_at``. Cloud delta-sync + STIX
@@ -49,7 +47,7 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n8")
 
 
 # ===========================================================================
-# Fix #1 — Q9 calibrator-respect guard (BLOCK-MERGE)
+# Fix #1 — Q9 confidence (the calibrator guard was removed on 2026-10-18)
 # ===========================================================================
 
 
@@ -63,56 +61,28 @@ def _link(src: str, step: str, after: int = 0) -> int:
     return after + m.start() if m else -1
 
 
-class TestFix1Q9CalibratorRespect:
-    """Pre-fix Q9 re-inflated calibrator-demoted confidence on every
-    run. Post-fix the CASE gates on ``r.calibrated_at IS NOT NULL``
-    to respect the calibrator's stamp."""
+class TestFix1Q9Confidence:
+    """Q9's confidence keeps the maximum of 0.8 and the stored value. The guard that kept a
+    calibrated confidence (``r.calibrated_at``) went with the co-occurrence calibration job."""
 
-    def _src(self) -> str:
-        return (SRC / "build_relationships.py").read_text()
-
-    def test_q9_has_calibrated_at_guard(self):
-        """The Q9 inner CASE must include ``WHEN r.calibrated_at IS
-        NOT NULL THEN r.confidence_score`` as its FIRST branch so it
-        short-circuits before the 0.8 floor."""
-        src = self._src()
-        # Find the Q9 inner block and verify the guard is present
+    def _case_body(self) -> str:
+        src = (SRC / "build_relationships.py").read_text()
         q9_idx = src.find("_q9_inner")
         assert q9_idx != -1, "Q9 inner query must exist"
         next_assignment = src.find("_q9_skip", q9_idx)
         block = src[q9_idx : next_assignment if next_assignment != -1 else q9_idx + 3000]
-        assert "r.calibrated_at IS NOT NULL" in block, (
-            "Fix #1 regression: Q9 must guard on r.calibrated_at IS NOT NULL to respect the calibrator's demotion"
-        )
-        # Must appear BEFORE the 0.8 floor — extract the CASE body
         case_start = block.find("SET r.confidence_score = CASE")
         case_end = block.find("END", case_start)
         assert case_start != -1 and case_end > case_start
-        case_body = block[case_start:case_end]
-        # calibrated_at guard must come before the 0.8 floor
-        cal_idx = case_body.find("calibrated_at IS NOT NULL")
-        floor_idx = case_body.find("0.8 > r.confidence_score")
-        assert cal_idx != -1 and floor_idx != -1 and cal_idx < floor_idx, (
-            "Fix #1 regression: calibrated_at guard must come BEFORE the "
-            "0.8 floor clause (CASE evaluates top-down, first-match-wins)"
-        )
+        return block[case_start:case_end]
 
     def test_q9_case_branches_semantics(self):
-        """Walk the CASE semantics:
-        - calibrated_at NOT NULL → keep existing (calibrator wins)
-        - confidence_score NULL or 0.8 > it → set 0.8 (fresh-edge floor)
-        - else → keep existing (no regression from higher existing)
-        """
-        src = self._src()
-        q9_idx = src.find("_q9_inner")
-        next_assignment = src.find("_q9_skip", q9_idx)
-        block = src[q9_idx : next_assignment if next_assignment != -1 else q9_idx + 3000]
-        # Extract the CASE body
-        case_body = block[block.find("SET r.confidence_score = CASE") : block.find("END", block.find("CASE"))]
-        # All three branches must be present
-        assert "r.calibrated_at IS NOT NULL THEN r.confidence_score" in case_body
+        """- confidence_score NULL or 0.8 > it → set 0.8 (fresh-edge floor)
+        - else → keep existing (no regression from a higher existing value)"""
+        case_body = self._case_body()
         assert "r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8" in case_body
         assert "ELSE r.confidence_score" in case_body
+        assert "calibrated_at" not in case_body
 
 
 # ===========================================================================

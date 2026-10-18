@@ -1923,42 +1923,6 @@ def test_bridge_vulnerability_cve_logs_orphan_count_runtime(caplog):
     )
 
 
-# ---------------------------------------------------------------------------
-# Round 19 — bugbot findings on commit 39ec502
-# ---------------------------------------------------------------------------
-
-
-def test_calibrate_large_event_uses_id_based_rebinding():
-    """Bugbot (round 19, MED): the round-13 large-event apoc.periodic.iterate
-    in calibrate_cooccurrence_confidence used ``WITH $r AS r`` to alias the
-    relationship returned from the outer query — the SAME unsafe cross-
-    transaction pattern that round 11 fixed in the backfill script.
-
-    apoc.periodic.iterate runs each batch in a NEW transaction; raw entity
-    references from the outer can't be safely accessed in the inner.
-    Round 19 applies the id()-based pattern: outer RETURNs id(r), inner
-    re-MATCHes by id."""
-    import importlib
-    import inspect
-
-    if "enrichment_jobs" in sys.modules:
-        del sys.modules["enrichment_jobs"]
-    enrichment_jobs = importlib.import_module("enrichment_jobs")
-
-    src = inspect.getsource(enrichment_jobs.calibrate_cooccurrence_confidence)
-    # Outer must return id(r) AS rid (primitive, transaction-safe).
-    assert "RETURN id(r) AS rid" in src, "outer must RETURN id(r) AS rid — raw entity refs not safe across apoc batches"
-    # Inner must re-MATCH by id.
-    assert "id(r) = rid" in src and "id(r) = $rid" not in src, (
-        "inner must re-MATCH the relationship by the batch variable rid, not the parameter $rid "
-        "(apoc.periodic.iterate exposes outer columns as variables; 2026-10-12)"
-    )
-    # Negative: the round-13 unsafe `WITH $r AS r` alias must be gone.
-    assert "WITH $r AS r" not in src, (
-        "round-19 dropped the unsafe `WITH $r AS r` cross-tx rebind in calibrate_cooccurrence_confidence"
-    )
-
-
 # (Removed) test_backfill_lists_both_has_cvss_directions
 # (Removed) test_backfill_omits_cvss_sourced_from_intentionally
 # (Removed) test_backfill_rejects_conflicting_nodes_only_and_edges_only

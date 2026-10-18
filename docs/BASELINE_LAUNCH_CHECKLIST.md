@@ -14,7 +14,7 @@ the launch. There is no soft-warn tier here — soft warns belong in
 `scripts/preflight_baseline.sh` (they fire there, and the operator decides
 whether to override). When this file says "block", it means stop and escalate.
 
-The checklist assumes a fresh baseline built by the deployed code: § [7]
+The checklist assumes a fresh baseline built by the deployed code: § [6]
 clears the EdgeGuard data in MISP and Neo4j before the baseline runs.
 
 ---
@@ -63,8 +63,8 @@ fails under STRICT=1) and skips check [5]. Specifically:
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
 * `[7b] alertmanager.yml has no placeholder / un-rendered ${...} pager key`
 * `[8] no stale baseline_lock sentinel`
-* `[9] kill-switch env vars` — `EDGEGUARD_RESPECT_CALIBRATOR` and
-  `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` unset (a set one is a warning)
+* `[9] kill-switch env vars` — `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION`
+  unset (a warning when it is set)
 * `[10] test suite syntax check` — `pytest --collect-only` collects the
   suite cleanly (a warning when `.venv/bin/pytest` is missing)
 * `[11] baseline hardening invariants` — sentinel class, retries=0, 48h lock
@@ -250,26 +250,7 @@ OOM. Either:
 
 ---
 
-### [6] Unicode-bypass audit of entity names
-
-**What:** EdgeGuard creates no `Malware`, `ThreatActor` or `Tool` node whose
-name is a placeholder ("unknown", "n/a", …), also when the name is padded
-with zero-width, bidi-control or variation-selector characters
-(`is_placeholder_name` in `src/node_identity.py`). A graph built by the
-current code therefore holds no such node.
-
-**Pass criteria:** passes without a run, because § [7] step 4 wipes the
-graph before the baseline. The read-only audit
-`scripts/audit_legacy_unicode_bypass_nodes.py` counts such nodes in a graph
-and changes nothing.
-
-**If it fails:** the audit counts such nodes only in a graph that was not
-wiped; wipe it as § [7] step 4 describes, since the baseline does not
-remove them.
-
----
-
-### [7] Fresh baseline: deploy, MISP import rule, flags, re-feed
+### [6] Fresh baseline: deploy, MISP import rule, flags, re-feed
 
 **What:** the graph is built by whatever code is deployed, and part of its
 contract (evidence labels, report-scoped linking, CVE properties, TLP,
@@ -420,7 +401,7 @@ See RUNBOOK § "Baseline launch path" for the full procedure:
    `edgeguard_pipeline`, `edgeguard_low_freq`, `edgeguard_neo4j_sync`)
    so they don't race the baseline.
 2. `edgeguard fresh-baseline --days 730 --wipe-all` (destructive, see
-   § [7] step 4) or `edgeguard baseline --days 730` (additive)
+   § [6] step 4) or `edgeguard baseline --days 730` (additive)
 3. Watch `baseline_complete` and `baseline_release_lock`; unpause the 5
    scheduled DAGs after the lock is released. After a failed run the lock
    stays until the run is resumed and succeeds or 48 h have passed, and
@@ -510,8 +491,8 @@ It exits non-zero when any of these fail. A warning (`[WARN]`; in the JSON `ok: 
 | No campaign without evidence (`campaigns_have_evidence`) | every `Campaign` EdgeGuard built has an actor of its `actor_name` with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware (`build_campaign_nodes` step 1b deletes the others with their links) and that actor's `RUNS`; no `RUNS` comes from an actor that is not the campaign's or has neither link (step 2c removes it). The detail counts `without_evidence`, `without_runs` and `runs_without_evidence`. A campaign with evidence whose indicators all expired is legitimate (`active = false`). Informational while there is no campaign EdgeGuard built and no `RUNS` without evidence; a `RUNS` without evidence into any campaign, a partner's included, fails |
 | CVE scores (`cve_score_from_cvss`) | an EdgeGuard `CVE` with a CVSS sub-node whose `base_score` is in [0, 10] has the `cvss_score` / `cvss_version` of the sub-node selected in the order 3.1, 3.0, 2.0, 4.0 and a CVSS rating as `severity`; a `CVE` without one has a null score and version and `severity = 'UNKNOWN'`. Informational while there is no CVE |
 | FIRST EPSS and CISA's SSVC (`cve_epss_and_ssvc`, **warning**) | warns when `CVE` nodes exist and none carries `epss_score`: EPSS is off (`EDGEGUARD_ENABLE_EPSS=false`) or the feed was unavailable (the enrichment task log has an `[EPSS]` line). Reports the CVEs with EPSS, the number of EPSS score dates (one expected; more mean a run stopped before clearing, or matched too few nodes to clear) and the latest, and the CVEs with a CISA SSVC decision and with `ssvc_exploitation = 'active'`. Informational while there is no CVE. On the hosted graph of 2026-10-15 (written by a test run of the job): 137,753 of 141,932 CVEs with EPSS, 2 score dates |
-| Sector evidence (`sector_links_name_only_feeds_that_gave_the_sector`, `advisory_sector_only_where_cisa_stated`, `cisa_stated_sectors_linked_as_advisory_sector`, `sector_links_cite_only_records_that_gave_the_sector`, `sector_confidence_follows_label`) | every link to a `Sector` names only the feeds whose `SOURCED_FROM.zones` hold that sector (not judged when no edge has `zones`); `advisory_sector` only on `AFFECTS` from a CVE to a sector the `cisa_ics` edge lists in `stated_zones`, and every such stated sector linked with it (with `--require-cisa-ics`, at least one once the `cisa_ics` edges carry `zones`; not required with `--legacy-graph`); a sector link cites, of the CISA ICS advisories, only those whose sector note names its sector (the edge's `stated_refs`; not judged when no edge has them); the confidence of a sector link is its label's value in `src/sector_evidence.py` (`zone_classification` 0.5, `advisory_sector` 0.9). Reported: `sector_evidence_breakdown`, `cisa_ics_contribution` (per sector: stated, by CISA alone, also inferred; CISA records with no tracked sector) and `node_sectors_without_a_feed` (and nodes with `global` next to a sector) |
-| Ranked descriptions and indicator aging (`descriptions_name_their_source`, `indicators_have_aging_basis`) | every EdgeGuard node with a ranked description (labels from `src/description_ranking.py`) names its source in `description_source`; every EdgeGuard `Indicator` has `aging_basis` and `source_confidence`. With `--legacy-graph` both are reported instead of judged |
+| Sector evidence (`sector_links_name_only_feeds_that_gave_the_sector`, `advisory_sector_only_where_cisa_stated`, `cisa_stated_sectors_linked_as_advisory_sector`, `sector_links_cite_only_records_that_gave_the_sector`, `sector_confidence_follows_label`) | every link to a `Sector` names only the feeds whose `SOURCED_FROM.zones` hold that sector (not judged when no edge has `zones`); `advisory_sector` only on `AFFECTS` from a CVE to a sector the `cisa_ics` edge lists in `stated_zones`, and every such stated sector linked with it (with `--require-cisa-ics`, at least one once the `cisa_ics` edges carry `zones`); a sector link cites, of the CISA ICS advisories, only those whose sector note names its sector (the edge's `stated_refs`; not judged when no edge has them); the confidence of a sector link is its label's value in `src/sector_evidence.py` (`zone_classification` 0.5, `advisory_sector` 0.9). Reported: `sector_evidence_breakdown`, `cisa_ics_contribution` (per sector: stated, by CISA alone, also inferred; CISA records with no tracked sector) and `node_sectors_without_a_feed` (and nodes with `global` next to a sector) |
+| Ranked descriptions and indicator aging (`descriptions_name_their_source`, `indicators_have_aging_basis`) | every EdgeGuard node with a ranked description (labels from `src/description_ranking.py`) names its source in `description_source`; every EdgeGuard `Indicator` has `aging_basis` and `source_confidence`. Informational while the graph holds no such node |
 | Per-source presence (`default_sources_delivered`, **warning**) | the `SOURCED_FROM` count of every `Source` node is listed; a source collected by default (`cisa_kev`, `mitre_attck`, `nvd`, `urlhaus`, `feodo_tracker`, `ssl_blacklist`) with none is a warning — look at that collector's task in the baseline run (an upstream outage skips it without failing the run). Keyed sources without data (`alienvault_otx`, `virustotal`, `threatfox`, `abuseipdb`: skipped by design without a key) and the flag-guarded ones (`cisa_ics`, `malwarebazaar`) are only listed |
 
 ### GraphRAG readiness verification
@@ -554,7 +535,6 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 * [`docs/BACKUP.md`](BACKUP.md) — backup + restore procedure
 * [`docs/BASELINE_SMOKE_TEST.md`](BASELINE_SMOKE_TEST.md) — 7-day smoke
 * [`scripts/preflight_baseline.sh`](../scripts/preflight_baseline.sh) — automated readiness check
-* [`scripts/audit_legacy_unicode_bypass_nodes.py`](../scripts/audit_legacy_unicode_bypass_nodes.py) — unicode-bypass audit of entity names (item [6])
 * [`prometheus/alerts.yml`](../prometheus/alerts.yml) — alert rule definitions
 
 ---
@@ -563,6 +543,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The unicode-bypass audit item was removed, so the fresh-baseline item is [6]. The acceptance script has no `--legacy-graph` option: the description-source and aging checks are judged whenever the graph holds such nodes, and `--require-cisa-ics` requires a stated sector once the `cisa_ics` edges carry `zones`. Preflight check [9] covers `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` only (`EDGEGUARD_RESPECT_CALIBRATOR` was removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restated as a guide to the current behaviour: change history moved here, the steps for kept deployments and graphs moved to the appendix.
 - 2026-10-17 — Preflight with `--launch-path=dag` and checks [2], [7b], [9], [10] described; the DAG holds the baseline lock; smoke run applied with `docker compose up -d airflow`; the 50,000-event index cap; expected end state and memory thresholds of a 730-day baseline; minimum code checked by commit; acceptance rows for `no_global_sector_edges`, `pulse_indicates_complete`, `in_tactic_same_domain` and ResilMesh conformance.

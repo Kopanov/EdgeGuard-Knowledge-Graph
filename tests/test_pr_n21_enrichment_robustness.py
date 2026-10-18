@@ -4,9 +4,9 @@ PR-N21 — enrichment_jobs robustness for the next 730-day baseline.
 Root-caused via 4-agent audit on 2026-04-22 of the Campaign = 0 outcome
 in cloud Neo4j after a "successful" baseline. Three problems found:
 
-1. **Silent-failure swallowers** in all 4 enrichment jobs
+1. **Silent-failure swallowers** in the enrichment jobs
    (``decay_ioc_confidence``, ``build_campaign_nodes``,
-   ``calibrate_cooccurrence_confidence``, ``bridge_vulnerability_cve``).
+   ``bridge_vulnerability_cve``).
    The pre-N21 ``except Exception: logger.error(...)`` (no raise) ate
    real Cypher errors (timeouts, schema drift, OOM) and let each job
    return zero results. Airflow saw a clean dict and marked the task
@@ -53,7 +53,7 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n21")
 
 
 # ===========================================================================
-# Fix #1-#4 — the four swallowers must re-raise
+# Fix #1-#4 — the enrichment-job swallowers must re-raise
 # ===========================================================================
 
 
@@ -67,7 +67,8 @@ def _function_body(src: str, fn_name: str) -> str:
 
 
 class TestFix1234SwallowersReraise:
-    """Each of the 4 enrichment jobs must re-raise on outer except instead of
+    """Each of these enrichment jobs (decay_ioc_confidence, build_campaign_nodes,
+    bridge_vulnerability_cve) must re-raise on outer except instead of
     silently returning zero results. Pin via AST-walk of each function."""
 
     def _src(self) -> str:
@@ -109,13 +110,6 @@ class TestFix1234SwallowersReraise:
             "except Exception handler. The pre-N21 swallower returned "
             "{campaigns_created: 0, links_created: 0} on any error, "
             "producing the silent Campaign = 0 outcome in the cloud baseline."
-        )
-
-    def test_calibrate_cooccurrence_confidence_reraises(self):
-        assert self._outer_except_reraises("calibrate_cooccurrence_confidence"), (
-            "calibrate_cooccurrence_confidence must ``raise`` after logging "
-            "in its outer except. Per-tier inner exceptions still log+continue "
-            "(by design) — only the WHOLE-SESSION outer except re-raises."
         )
 
     def test_bridge_vulnerability_cve_reraises(self):

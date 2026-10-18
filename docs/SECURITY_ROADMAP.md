@@ -186,9 +186,6 @@ operator exposure to surface any unexpected interaction.
 - `docs/PROMETHEUS_SETUP.md` — full metrics reference + alert rules
 - `.env.example` — env var templates
 - `docs/RUNBOOK.md` § 8 — operator triage tree for `_MispFallbackHardError`
-- `docs/BASELINE_LAUNCH_CHECKLIST.md` step `[6]` — pre-launch unicode-bypass audit
-- `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only audit
-  pairing with the `_ZERO_WIDTH_AND_BIDI_CHARS` Tier-1 defense above
 
 ---
 
@@ -196,6 +193,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The cross-references no longer list the read-only audit `scripts/audit_legacy_unicode_bypass_nodes.py` and its launch-checklist item, both removed: a fresh baseline holds no node the character strip would have rejected.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Corrected the character table (37 characters, stripped before the placeholder-name check and in the read-side IOC refang, not in natural-key canonicalization), the `EDGEGUARD_ENV=unset` warning and the gauge writers (every Airflow task process that loads `metrics_server`, served by the `metrics` service, so an allowlist change needs `docker compose up -d airflow`); the main text describes current behavior only, the legacy-node audit moved to the appendix, and Tier 2 is marked as in place.
 - 2026-04-26 — Added the Tier 1 bullet on zero-width / bidi-control / variation-selector stripping and the read-only legacy-node audit, and cross-linked RUNBOOK § 8 and BASELINE_LAUNCH_CHECKLIST step `[6]`.
