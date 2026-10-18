@@ -14,9 +14,16 @@ results.
 
 A ResilMesh alert carries an indicator (IP, domain, hash, URL). EdgeGuard enriches it from the
 knowledge graph with `src/alert_processor.py`: the malware families the indicator indicates, the
-threat actors those families are attributed to and the ATT&CK techniques the actors employ, the
-CVEs the indicator exploits, its confidence, first / last seen and zones, and recommendations
-generated from those fields. The demo hands alerts to that code and prints the response as JSON.
+threat actors those families are attributed to and the ATT&CK techniques the actors employ, its
+confidence, first / last seen and zones, and recommendations generated from those fields. The demo
+hands alerts to that code and prints the response as JSON.
+
+**No CVEs from the graph.** The enrichment also lists the CVEs the indicator exploits, but the graph
+links an indicator to a CVE (`EXPLOITS`) only when the indicator's own MISP record tags that CVE,
+and EdgeGuard's collectors write no such tag. On a graph they built, every alert built with
+`--from-graph` therefore shows `cves: []` and `cves_found: 0`; `cves` lists a CVE only when the
+alert itself names one (`"source": "alert"`). Show CVEs with the GraphQL step of the workflow below
+instead.
 
 - **Real enrichment, read-only.** The demo calls `AlertProcessor.enrich_alert_read_only`: the same
   validation, indicator canonicalization (refang, case-fold, type inference) and enrichment
@@ -34,7 +41,8 @@ generated from those fields. The demo hands alerts to that code and prints the r
   the indicator's `SOURCED_FROM` edges (first / last seen as the sources report them) and its
   `zone` list. Techniques are those of the attributed actors; the indicator's own
   `USES_TECHNIQUE` links and the malware's `IMPLEMENTS_TECHNIQUE` links are not part of the
-  enrichment.
+  enrichment. The `EXPLOITS` pattern finds nothing on a graph the collectors built (see "No CVEs
+  from the graph" above).
 
 How the read-only answer differs from a `process_alert` answer, because nothing is recorded:
 
@@ -72,17 +80,23 @@ export NEO4J_URI=bolt://localhost:7687   # host of a Compose deployment; .env na
 python demo/alert_enrichment_demo.py --help
 
 # Build 3 alerts from real indicators in the graph and enrich them
-python demo/alert_enrichment_demo.py --from-graph 3
+python demo/alert_enrichment_demo.py --from-graph 3 2>/dev/null
 
 # The same, restricted to indicators whose zone list holds "energy"
-python demo/alert_enrichment_demo.py --from-graph 3 --zone energy
+python demo/alert_enrichment_demo.py --from-graph 3 --zone energy 2>/dev/null
 
 # Enrich alerts from a file: one alert object or a list of them
-python demo/alert_enrichment_demo.py --alerts alerts.json
+python demo/alert_enrichment_demo.py --alerts alerts.json 2>/dev/null
 
 # Only the enrichment of the first response (stdout carries JSON only)
-python demo/alert_enrichment_demo.py --from-graph 1 | jq '.[0].enrichment'
+python demo/alert_enrichment_demo.py --from-graph 1 2>/dev/null | jq '.[0].enrichment'
 ```
+
+The demo imports the pipeline's configuration, which prints a warning on stderr at every start
+while no trusted MISP organisation is configured (the MISP tag-impersonation notice of
+`src/source_trust.py`); `2>/dev/null` keeps it off the screen. It also hides the error lines the
+demo writes on stderr, so read the exit code before showing a response (below), or run the command
+once without `2>/dev/null` when it fails.
 
 `--from-graph N` selects N indicators with this read-only query (also printed by `--help`):
 
@@ -100,7 +114,7 @@ Each alert built from a selected indicator holds only what the graph says about 
 indicator's value and type, its first stored zone other than `global` (or the `--zone` given),
 the time the alert was built, the alert id `demo-graph-<n>` and the source `edgeguard-demo`. It
 names no malware, CVE or host, so everything in `known_malware`, `threat_actors`, `techniques` and
-`cves` comes from the graph.
+`cves` comes from the graph, and `cves` is empty (see "No CVEs from the graph" above).
 
 An alert file uses the ResilMesh alert schema ([TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) § Alert
 Format, `ResilMeshAlert` in `src/alert_processor.py`). Only `alert_id` (a non-empty string) is
@@ -140,7 +154,7 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       "malware_found": "<true | false>",
       "actor_found": "<true | false>",
       "techniques_found": "<count>",
-      "cves_found": "<count>",
+      "cves_found": 0,
       "assets_found": 0,
       "users_found": 0
     },
@@ -152,7 +166,7 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       ],
       "threat_actors": [{"name": "<actor>", "aliases": ["<alias>"], "description": "<text or null>"}],
       "techniques": [{"mitre_id": "<T####>", "name": "<technique>", "description": "<text or null>"}],
-      "cves": [{"cve_id": "<CVE id>", "cvss_score": "<score or null>", "severity": "<severity or null>"}],
+      "cves": [],
       "assets": [],
       "users": [],
       "confidence": "<the indicator's confidence_score>",
@@ -169,9 +183,11 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
 
 A failed enrichment query gives `enriched: false` with `query_metadata.error` and the defaults in
 `enrichment`; a rejected alert is `enriched: false` with `query_metadata.error` and an empty
-`enrichment`. `cves` takes each CVE's score and severity from one node: the `CVE` node's (a null
-score with severity `UNKNOWN` when the CVE has no CVSS), or the `Vulnerability` node's when no
-`CVE` node of that id states them.
+`enrichment`. `cves` is empty for an alert built with `--from-graph` (see "No CVEs from the graph"
+above). A CVE the alert names is listed as `{"cve_id": "<CVE id>", "source": "alert"}`. A CVE the
+graph links to the indicator would be listed as `{"cve_id", "cvss_score", "severity"}`, with the
+score and severity of one node: the `CVE` node's (a null score with severity `UNKNOWN` when the CVE
+has no CVSS), or the `Vulnerability` node's when no `CVE` node of that id states them.
 
 ---
 
@@ -183,8 +199,11 @@ those of [README.md](../README.md), [GRAPH_EXPLORER.md](GRAPH_EXPLORER.md),
 checked against `src/query_api.py`, `src/graphql_api.py` and `src/edgeguard.py`. They assume the
 REST API on `http://localhost:8000`, the GraphQL API on `http://localhost:4001` and the API key in
 `EDGEGUARD_API_KEY` (every route except `/health` (and, when `EDGEGUARD_ENV` is non-production, `/docs`,
-`/redoc` and `/openapi.json`) requires the `X-API-Key` header when the key is set). Take the identifiers (`<indicator>`, `<actor>`, `<CVE id>`) from the alert enrichment demo's
-output, so each check shows data the graph holds.
+`/redoc` and `/openapi.json`) requires the `X-API-Key` header when the key is set). Take
+`<indicator>` and `<actor>` from the alert enrichment demo's output (`enrichment.indicator` and a
+name in `enrichment.threat_actors`), and `<CVE id>` from a `cveId` that step 5 (GraphQL
+vulnerabilities) returns, so each check shows data the graph holds. The alert output holds no CVE
+from the graph (see "No CVEs from the graph" above).
 
 ### 1. MISP events by source
 
@@ -253,14 +272,20 @@ The `CVE` nodes EdgeGuard created or enriched, highest score first; the filter a
 ```bash
 export EDGEGUARD_API_BASE="http://127.0.0.1:8000"
 curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" "$EDGEGUARD_API_BASE/stix/types" | jq .
+IND=$(jq -rn --arg v '<indicator>' '$v | @uri')   # URL-encode: a URL indicator holds "/" and ":"
 curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" \
     -H "Accept: application/stix+json;version=2.1" \
-    "$EDGEGUARD_API_BASE/stix/export/indicator/<indicator>" | jq .
+    "$EDGEGUARD_API_BASE/stix/export/indicator/$IND" | jq .
+curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" \
+    "$EDGEGUARD_API_BASE/stix/export/cve/<CVE id>" | jq '[.objects[].type] | group_by(.) | map({(.[0]): length}) | add'
 ```
 
 `object_type` is `indicator`, `actor`, `technique` or `cve`; `depth` (1 or 2) and `limit` (1–500)
-are query parameters. `scripts/resilmesh_stix_smoke.sh` runs every listed type
-([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
+are query parameters. A CVE bundle holds the `vulnerability`, at depth 2 the sectors it affects
+and the threat actors and malware a curated package says exploit it, and no indicator (see "No
+CVEs from the graph" above): at `depth=1` it holds the `vulnerability` alone next to the producer
+`identity`, the `extension-definition` and the TLP markings. `scripts/resilmesh_stix_smoke.sh`
+runs every listed type ([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
 
 ### 7. Wazuh CDB export
 
@@ -279,9 +304,11 @@ lines were written, how many keys were skipped (URL and IPv6 keys contain `:`) a
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
+
+- 2026-10-18 — The alert enrichment shows no CVE from the graph (an indicator links to a CVE only through its own CVE tag, which the collectors do not write), so the output shape shows `cves: []` and the workflow takes `<CVE id>` from the GraphQL step instead of the alert output; the demo commands discard the configuration warning on stderr (`2>/dev/null`); the STIX example URL-encodes the indicator and adds a CVE bundle.
 
 - 2026-10-17 — Restated as a guide to the current behaviour, with the change history moved here; the API key note lists the routes served without the key in a non-production `EDGEGUARD_ENV` (`/docs`, `/redoc`, `/openapi.json`).
 - 2026-10-16 — The actor summary lists the malware the actor uses (`malware_used`); the `--from-graph` selection orders the indicators by their latest report (`coalesce(last_reported_at, first_imported_at)`) instead of the last database write.

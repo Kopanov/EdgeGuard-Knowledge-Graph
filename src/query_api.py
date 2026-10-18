@@ -1568,7 +1568,8 @@ async def stix_types(request: Request):
                 "identifier": "indicator value (IP, domain, hash, URL)",
                 "example": "1.2.3.4",
                 "returns": (
-                    "indicator + 1 hop: INDICATES malware, EXPLOITS CVEs, USES_TECHNIQUE techniques, "
+                    "indicator + 1 hop: INDICATES malware, EXPLOITS CVEs (only a CVE the indicator's own "
+                    "MISP record tags; EdgeGuard's collectors write no such tag), USES_TECHNIQUE techniques, "
                     "TARGETS sectors, PART_OF_CAMPAIGN campaigns"
                 ),
                 "primary_relation": "indicates→malware",
@@ -1599,7 +1600,9 @@ async def stix_types(request: Request):
                 "identifier": "CVE identifier",
                 "example": "CVE-2021-44228",
                 "returns": (
-                    "CVE + exploiting indicators, threat actors and malware (EXPLOITS) + affected sectors (AFFECTS)"
+                    "CVE + exploiting indicators (EXPLOITS; only an indicator whose own MISP record tags the "
+                    "CVE, which EdgeGuard's collectors do not write, so a graph they built has none), threat "
+                    "actors and malware (EXPLOITS) + affected sectors (AFFECTS)"
                 ),
                 "primary_relation": "indicators related-to CVE",
             },
@@ -1638,8 +1641,9 @@ async def stix_export(
 
     - ``indicator`` — ``identifier`` is the indicator value (IP, domain,
       hash, URL, …). Returns the indicator + 1 hop: INDICATES malware,
-      EXPLOITS CVEs, USES_TECHNIQUE techniques, TARGETS sectors,
-      PART_OF_CAMPAIGN campaigns.
+      EXPLOITS CVEs (only a CVE the indicator's own MISP record tags;
+      EdgeGuard's collectors write no such tag), USES_TECHNIQUE techniques,
+      TARGETS sectors, PART_OF_CAMPAIGN campaigns.
     - ``actor`` — ``identifier`` is a ThreatActor name or alias. Returns
       the actor + attributed malware (ATTRIBUTED_TO), EMPLOYS_TECHNIQUE
       techniques, the IMPLEMENTS_TECHNIQUE techniques of the attributed
@@ -1650,8 +1654,11 @@ async def stix_export(
       (IMPLEMENTS_TECHNIQUE), indicators (USES_TECHNIQUE), parent technique
       and sub-techniques (SUBTECHNIQUE_OF).
     - ``cve`` — ``identifier`` is a CVE ID (e.g. ``CVE-2021-44228``).
-      Returns the CVE + exploiting indicators, threat actors and malware
-      (EXPLOITS) + affected sectors (AFFECTS).
+      Returns the CVE + exploiting indicators (EXPLOITS; only an indicator
+      whose own MISP record tags the CVE, which EdgeGuard's collectors do
+      not write, so on a graph they built ``depth=1`` returns the CVE
+      alone), threat actors and malware (EXPLOITS) + affected sectors
+      (AFFECTS).
 
     The same neighbourhoods are listed by ``GET /stix/types`` (``returns``),
     with the STIX relationship each graph relationship becomes

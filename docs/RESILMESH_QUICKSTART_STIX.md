@@ -341,6 +341,11 @@ for enrichment and analyst UIs.
 | `technique` | seed + ThreatActors that employ it             | Malware, Tools, Indicators, parent and sub-techniques |
 | `cve`       | seed + exploiting Indicators                   | exploiting ThreatActors and Malware, affected Sectors |
 
+An Indicator exploits a CVE only when its own MISP record tags that CVE, and EdgeGuard's collectors
+write no such tag: on a graph they built, an `indicator` bundle holds no CVE and a `cve` bundle no
+indicator, so a `cve` bundle at `depth=1` holds the `vulnerability` alone. The ThreatActors and
+Malware that exploit a CVE come from curated packages.
+
 Today `depth` is a Python-side filter — the Cypher always fetches the
 full neighborhood and the exporter drops the non-primary groups when
 `depth<2`. Bundle size shrinks; query time does not. A future
@@ -533,6 +538,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — § 5 states that the collectors link no indicator to a CVE, so a `cve` bundle at `depth=1` holds the `vulnerability` alone.
 - 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until` and no longer `x_edgeguard_last_updated`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: no bundle carries `malware targets identity` or `campaign uses malware`, so `x_edgeguard_evidence_types` appears on `campaign attributed-to intrusion-set` and `indicator indicates campaign` only; `x_edgeguard_misp_attribute_ids` is on every SDO a MISP attribute wrote; a node in a sector never also carries `global` in `x_edgeguard_zones`; § 9 gives EdgeGuard the CVE + CVSS nodes and ResilMesh the asset layer and scanner findings.
