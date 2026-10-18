@@ -573,7 +573,7 @@ Auth:    Configured via environment variables
 | `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. No code path writes the `misp_cooccurrence` level (0.5) |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` |
 | `EXPLOITS` | ThreatActor / Malware | `CVE` | Curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 (both written when the claim creates the link), `tlp` = the package's TLP level |
-| `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`confidence_score` 0.85) |
+| `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`match_type='otx_attack_ids'`, `confidence_score` 0.6, written when the link is created) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |
 | `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()`; `match_type='campaign_grouping'`; rests on the actor's `ATTRIBUTED_TO` and `USES_MALWARE` links to malware (`evidence_types`); a campaign whose actor has neither link left is deleted with its links |
 | `PART_OF_CAMPAIGN` | Malware, Indicator | Campaign | `build_campaign_nodes()`; a malware with either link to the campaign's actor is a member, an indicator joins through `INDICATES` to a member (`evidence_types`) |
@@ -1012,6 +1012,7 @@ _Last updated: 2026-10-18_
 ## History
 
 - 2026-10-18 — `GET /health` reports the deployed commit as `git_sha` (`EDGEGUARD_GIT_SHA`).
+- 2026-10-18 — `USES_TECHNIQUE` from an OTX pulse's ATT&CK ids (`otx_attack_ids`, step 8) is created at 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-18 — STIX export row: times from the graph (byte-identical re-exports), indicator `confidence` and `valid_until`, the `X-EdgeGuard-Git-Sha` header.
 - 2026-10-18 — The `INDICATES` row no longer names the removed co-occurrence calibration job.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

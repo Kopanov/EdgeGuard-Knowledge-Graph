@@ -11,7 +11,8 @@ produced three kinds of junk ``ThreatActor`` nodes:
    ``"lockbit, cl0p, refined kitten, wicked panda, fancy bear"``).
 2. **Generic descriptions** that are not names at all
    (``"multiple russian state-backed groups"``, ``"russian cybercrime groups"``,
-   ``"russia-nexus apt"``).
+   ``"russia-nexus apt"``), and country or state names standing beside the
+   actor (``"apt37, north korea"``).
 3. Alias-duplicates of a canonical MITRE actor (``"reddelta"`` next to
    ``"mustang panda"``) — handled downstream by
    ``enrichment_jobs.merge_alias_duplicate_actors``, not here.
@@ -32,6 +33,7 @@ Public API
 ``split_composite_actor_name(name) -> list[str]``
 ``is_generic_actor_name(name) -> bool``
 ``clean_actor_names(name) -> list[str]``
+``strip_trailing_parenthetical(name) -> str``
 """
 
 from __future__ import annotations
@@ -205,13 +207,13 @@ GENERIC_SIGNAL_PATTERNS: tuple = (
 # words is a description (``"ransomware group"``, ``"chinese apt"``,
 # ``"iranian threat actor"``, ``"russian cyber group"``). One non-descriptor
 # word anywhere (``"lazarus"``, ``"gorgon"``, ``"sandworm"``, ``"gentlemen"``,
-# ``"nasir"``, ``"8200"``) keeps the name. Bare country NOUNS (``"russia"``,
-# ``"china"``) are intentionally NOT descriptors so ``"north korea"`` /
-# ``"cyber army of russia reborn"`` are kept — only nationality ADJECTIVES
-# are. Words are split on whitespace AND hyphen, so ``"state-backed"`` is
-# the two descriptors ``state`` + ``backed``, ``"pro-russian"`` is
-# ``pro`` + ``russian``, while ``"apt-c-13"`` contains the non-descriptors
-# ``c`` + ``13``.
+# ``"nasir"``, ``"8200"``) keeps the name. Country NOUNS (``"russia"``,
+# ``"china"``) are intentionally NOT descriptors, so a name that contains one
+# (``"cyber army of russia reborn"``) is kept; a name that IS a country or
+# state is generic through rule (c). Words are split on whitespace AND
+# hyphen, so ``"state-backed"`` is the two descriptors ``state`` + ``backed``,
+# ``"pro-russian"`` is ``pro`` + ``russian``, while ``"apt-c-13"`` contains the
+# non-descriptors ``c`` + ``13``.
 GENERIC_DESCRIPTOR_WORDS: frozenset = frozenset(
     # quantity / unknown-ness / hedges
     "multiple various several numerous many unknown unnamed unidentified unspecified "
@@ -242,8 +244,143 @@ GENERIC_DESCRIPTOR_WORDS: frozenset = frozenset(
     "and or of the a an with by from in to for &".split()
 )
 
+
+def _names(text: str) -> frozenset:
+    """The names of a ``|``-separated list (a name may contain spaces)."""
+    return frozenset(n.strip() for n in text.split("|") if n.strip())
+
+
+# (c) Country and state names, and nationality adjectives, as the WHOLE name (2026-10-18). They
+# say where an actor is said to be from, never which actor it is: OTX adversary fields list
+# ``"apt37, north korea"``, ``"lazarus group; dprk"``. A name that merely CONTAINS one stays a name
+# (``"cyber army of russia reborn"``, ``"anonymous sudan"``, ``"syrian electronic army"``). Compared
+# lower-cased, whitespace-collapsed, edge punctuation stripped, without apostrophes (``"people's"`` =
+# ``"peoples"``), with dots and hyphens read as spaces and a run of single letters joined (``"u.s."`` =
+# ``"us"``, ``"n. korea"`` = ``"n korea"``, ``"north-korea"`` = ``"north korea"``), ``&`` as ``and`` and a
+# leading ``"the "`` ignored (``"the netherlands"``). No entry of either list is a name the canonical
+# threat-actor reference resolves (tests/test_actor_name_hygiene.py checks it). Rule (c) does not
+# consult the reference: an actor whose whole name is a country or state (a group named ``"cuba"``) is
+# kept by taking that name out of these lists, not by adding it to the reference.
+#
+# COUNTRY_AND_STATE_NAMES: the ISO 3166-1 short names (natural word order; accented names also
+# without accents), the long and short forms of states, constituent countries, disputed and occupied
+# territories, former states, and the state forms that ISO's inverted names ("korea, republic of")
+# leave after the comma split.
+COUNTRY_AND_STATE_NAMES: frozenset = _names(
+    # ISO 3166-1 short names
+    "afghanistan|åland islands|aland islands|albania|algeria|american samoa|andorra|angola|anguilla|antarctica|"
+    "antigua and barbuda|argentina|armenia|aruba|australia|austria|azerbaijan|bahamas|bahrain|bangladesh|barbados|"
+    "belarus|belgium|belize|benin|bermuda|bhutan|bolivia|plurinational state of bolivia|bonaire|sint eustatius|saba|"
+    "bosnia and herzegovina|botswana|bouvet island|brazil|british indian ocean territory|brunei darussalam|brunei|"
+    "bulgaria|burkina faso|burundi|cabo verde|cape verde|cambodia|cameroon|canada|cayman islands|"
+    "central african republic|chad|chile|china|christmas island|cocos (keeling) islands|cocos islands|colombia|"
+    "comoros|congo|republic of the congo|democratic republic of the congo|cook islands|costa rica|côte d'ivoire|"
+    "cote d'ivoire|ivory coast|croatia|cuba|curaçao|curacao|cyprus|czechia|czech republic|denmark|djibouti|dominica|"
+    "dominican republic|ecuador|egypt|el salvador|equatorial guinea|eritrea|estonia|eswatini|swaziland|ethiopia|"
+    "falkland islands|falkland islands (malvinas)|faroe islands|fiji|finland|france|french guiana|french polynesia|"
+    "french southern territories|gabon|gambia|georgia|germany|ghana|gibraltar|greece|greenland|grenada|guadeloupe|"
+    "guam|guatemala|guernsey|guinea|guinea-bissau|guyana|haiti|heard island and mcdonald islands|holy see|vatican|"
+    "vatican city|honduras|hong kong|hungary|iceland|india|indonesia|iran|islamic republic of iran|persia|iraq|"
+    "ireland|republic of ireland|"
+    "isle of man|israel|state of israel|italy|jamaica|japan|jersey|jordan|kazakhstan|kenya|kiribati|korea|"
+    "north korea|south korea|n korea|s korea|democratic people's republic of korea|republic of korea|dpr korea|"
+    "kuwait|kyrgyzstan|lao people's democratic republic|lao pdr|laos|latvia|lebanon|lesotho|liberia|libya|"
+    "liechtenstein|lithuania|luxembourg|"
+    "macao|macau|north macedonia|macedonia|former yugoslav republic of macedonia|madagascar|malawi|malaysia|maldives|"
+    "mali|malta|marshall islands|"
+    "martinique|mauritania|mauritius|mayotte|mexico|micronesia|federated states of micronesia|moldova|"
+    "republic of moldova|monaco|mongolia|montenegro|montserrat|morocco|mozambique|myanmar|burma|namibia|nauru|nepal|"
+    "netherlands|kingdom of the netherlands|holland|new caledonia|new zealand|nicaragua|niger|nigeria|niue|"
+    "norfolk island|northern mariana islands|norway|oman|pakistan|palau|palestine|state of palestine|panama|"
+    "papua new guinea|paraguay|peru|philippines|pitcairn|poland|portugal|puerto rico|qatar|réunion|reunion|romania|"
+    "russia|russian federation|rwanda|saint barthélemy|saint barthelemy|saint helena|ascension|tristan da cunha|"
+    "saint kitts and nevis|saint lucia|st lucia|saint martin|saint pierre and miquelon|"
+    "saint vincent and the grenadines|samoa|san marino|sao tome and principe|são tomé and príncipe|saudi arabia|"
+    "kingdom of saudi arabia|"
+    "senegal|serbia|seychelles|sierra leone|singapore|sint maarten|slovakia|slovenia|solomon islands|somalia|"
+    "south africa|south georgia and the south sandwich islands|south sudan|spain|sri lanka|sudan|suriname|"
+    "svalbard and jan mayen|sweden|switzerland|syria|syrian arab republic|taiwan|tajikistan|tanzania|"
+    "united republic of tanzania|thailand|timor-leste|east timor|togo|tokelau|tonga|trinidad and tobago|tunisia|"
+    "türkiye|turkiye|turkey|republic of türkiye|republic of turkiye|republic of turkey|turkmenistan|"
+    "turks and caicos islands|tuvalu|uganda|ukraine|united arab emirates|"
+    "united kingdom|united kingdom of great britain and northern ireland|united kingdom of great britain|"
+    "great britain|britain|england|scotland|wales|northern ireland|united states|united states of america|america|"
+    "united states minor outlying islands|uruguay|uzbekistan|vanuatu|venezuela|bolivarian republic of venezuela|"
+    "viet nam|vietnam|socialist republic of viet nam|socialist republic of vietnam|virgin islands|"
+    "british virgin islands|us virgin islands|wallis and futuna|western sahara|yemen|"
+    "zambia|zimbabwe|"
+    # short state forms
+    "dprk|prc|roc|rok|drc|ksa|usa|us|uk|uae|ussr|people's republic of china|republic of china|"
+    # disputed and occupied territories, former states
+    "gaza|gaza strip|west bank|crimea|kosovo|abkhazia|south ossetia|transnistria|northern cyprus|donbas|donbass|"
+    "tibet|xinjiang|soviet union|yugoslavia|czechoslovakia|"
+    # what ISO's inverted names leave after the comma split ("iran, islamic republic of")
+    "republic of|islamic republic of|democratic people's republic of|united republic of|democratic republic of the|"
+    "state of|federated states of|plurinational state of|bolivarian republic of|province of china|kingdom of the|"
+    "former yugoslav republic of|"
+)
+
+# Nationality adjectives on their own (``"russian"``, ``"north korean"``). As a
+# word inside a longer name they are rule (b4)'s descriptors, which needs two
+# or more words; on their own they are generic through rule (c).
+NATIONALITY_ADJECTIVES: frozenset = _names(
+    "afghan|albanian|algerian|american|angolan|argentine|argentinian|armenian|australian|austrian|azerbaijani|"
+    "azeri|bahraini|bangladeshi|belarusian|belarussian|belgian|bolivian|bosnian|brazilian|british|bulgarian|burmese|"
+    "cambodian|"
+    "cameroonian|canadian|chilean|chinese|colombian|congolese|croatian|cuban|cypriot|czech|danish|dutch|ecuadorian|"
+    "egyptian|emirati|english|eritrean|estonian|ethiopian|filipino|finnish|french|georgian|german|ghanaian|greek|"
+    "guatemalan|haitian|honduran|hungarian|icelandic|indian|indonesian|iranian|iraqi|irish|israeli|italian|jamaican|"
+    "japanese|jordanian|kazakh|kazakhstani|kenyan|korean|north korean|south korean|kosovar|kurdish|kuwaiti|kyrgyz|"
+    "lao|"
+    "laotian|latvian|lebanese|libyan|lithuanian|macedonian|malaysian|maltese|mexican|moldovan|mongolian|montenegrin|"
+    "moroccan|nepalese|nepali|nicaraguan|nigerian|norwegian|omani|pakistani|palestinian|panamanian|paraguayan|"
+    "persian|peruvian|philippine|polish|portuguese|qatari|romanian|russian|rwandan|saudi|scottish|senegalese|serbian|"
+    "singaporean|slovak|slovenian|somali|south african|spanish|sri lankan|sudanese|swedish|swiss|syrian|taiwanese|"
+    "tajik|tanzanian|thai|tunisian|turkish|turkmen|ugandan|ukrainian|uruguayan|uzbek|venezuelan|vietnamese|welsh|"
+    "yemeni|zambian|zimbabwean|soviet|"
+)
+
+
+_APOSTROPHES = "'\u2018\u2019\u02bc"
+
+
+def _geo_key(name: str) -> str:
+    """The form rule (c) compares: lower-case, no apostrophes, dots and hyphens as spaces, ``&`` as
+    ``and``, whitespace collapsed, a run of single letters joined (``"u s a"`` = ``"usa"``), a
+    leading ``"the "`` dropped."""
+    text = name.lower()
+    for mark in _APOSTROPHES:
+        text = text.replace(mark, "")
+    words: List[str] = []
+    letters = ""
+    for word in text.replace(".", " ").replace("-", " ").replace("&", " and ").split():
+        if len(word) == 1 and word.isalpha():
+            letters += word
+            continue
+        if letters:
+            words.append(letters)
+            letters = ""
+        words.append(word)
+    if letters:
+        words.append(letters)
+    key = " ".join(words)
+    return key[4:] if key.startswith("the ") else key
+
+
+_GEOPOLITICAL_KEYS: frozenset = frozenset(_geo_key(n) for n in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES)
+
+
+def _is_geopolitical_name(name: str) -> bool:
+    return _geo_key(name) in _GEOPOLITICAL_KEYS
+
+
 _WORD_SPLIT_RE = re.compile(r"[\s\-]+")
 _EDGE_PUNCT = " .!?\"'`()[]{}"
+
+# The inverted "Korea, North" / "Korea, South" (rule (c)), followed by a list separator or the end.
+_KOREA_INVERTED_RE = re.compile(
+    r"\b(?P<korea>korea)\s*[,，]\s*(?P<side>north|south)\b(?=\s*(?:[,;，；、]|$))", re.IGNORECASE
+)
 
 
 # ---------------------------------------------------------------------------
@@ -263,12 +400,41 @@ def _normalise(name: str) -> str:
 _TRAILING_PAREN_RE = re.compile(r"^(?P<head>.+?)\s+\((?P<inner>[^()]*[A-Za-z][^()]*)\)$")
 
 
-def _strip_trailing_parenthetical(fragment: str) -> str:
+def strip_trailing_parenthetical(fragment: str) -> str:
+    """``"Name (Alias)"`` -> ``"Name"``; anything else unchanged. When the head is a country or state
+    and the parenthetical is not (rule (c)), the parenthetical is the name (2026-10-18):
+    ``"North Korea (APT37)"`` -> ``"APT37"``."""
     m = _TRAILING_PAREN_RE.match(fragment)
     if not m:
         return fragment
+    # A country name with a parenthetical of its own ("falkland islands (malvinas)") stays whole, so
+    # rule (c) drops it instead of keeping the parenthetical as a name.
+    if _is_geopolitical_name(fragment.strip(" .")):
+        return fragment
     head = m.group("head").strip()
+    inner = m.group("inner").strip()
+    if (
+        len(inner) > 1
+        and _is_geopolitical_name(head.strip(_EDGE_PUNCT))
+        and not _is_geopolitical_name(inner.strip(_EDGE_PUNCT))
+    ):
+        return inner
     return head if len(head) > 1 else fragment
+
+
+def _rejoin_country_names(sides: List[str]) -> List[str]:
+    """Join adjacent ``and``-split sides back into a country or state name that contains "and"
+    (``["apt28", "bosnia", "herzegovina"]`` -> ``["apt28", "bosnia and herzegovina"]``)."""
+    out: List[str] = []
+    i = 0
+    while i < len(sides):
+        if i + 1 < len(sides) and _is_geopolitical_name(f"{sides[i]} and {sides[i + 1]}".strip(_EDGE_PUNCT)):
+            out.append(f"{sides[i]} and {sides[i + 1]}")
+            i += 2
+        else:
+            out.append(sides[i])
+            i += 1
+    return out
 
 
 def _try_and_split(fragment: str) -> List[str]:
@@ -278,6 +444,7 @@ def _try_and_split(fragment: str) -> List[str]:
     Guards (all must hold for the split to happen):
       * at least one separator present;
       * the name does not start with an ``AND_SPLIT_PROTECTED_PREFIXES`` entry;
+      * the name is not a country or state (``"trinidad and tobago"``, rule (c));
       * every resulting side is >= ``AND_SPLIT_MIN_SIDE_LEN`` chars;
       * no side (lower-cased) is in ``AND_SPLIT_PROTECTED_SIDES``.
     """
@@ -285,6 +452,13 @@ def _try_and_split(fragment: str) -> List[str]:
     if len(sides) < 2:
         return [fragment]
     if fragment.lower().startswith(AND_SPLIT_PROTECTED_PREFIXES):
+        return [fragment]
+    # 2026-10-18: a country name with "and" ("bosnia and herzegovina") is one name, which rule (c)
+    # then drops, not two names; so is one inside a longer list ("apt28 and bosnia and herzegovina").
+    if _is_geopolitical_name(fragment.strip(_EDGE_PUNCT)):
+        return [fragment]
+    sides = _rejoin_country_names(sides)
+    if len(sides) < 2:
         return [fragment]
     for side in sides:
         if len(side) < AND_SPLIT_MIN_SIDE_LEN or side.lower() in AND_SPLIT_PROTECTED_SIDES:
@@ -333,6 +507,8 @@ def split_composite_actor_name(name: str) -> List[str]:
     normalised = _normalise(name)
     if not normalised:
         return []
+    # 2026-10-18: the inverted "Korea, North" is one country name, not "Korea" and "North".
+    normalised = _KOREA_INVERTED_RE.sub(lambda m: f"{m.group('side')} {m.group('korea')}", normalised)
 
     fragments: List[str] = []
     for raw in _LIST_SEPARATOR_RE.split(normalised):
@@ -343,8 +519,8 @@ def split_composite_actor_name(name: str) -> List[str]:
         # Strip BEFORE the and-split (so "mois (ministry of intelligence and security)" is never
         # split inside the parenthesis) and AGAIN on every side after it (Bugbot on PR #144:
         # "apt28 (fancy bear) and apt29 (cozy bear)" kept both parentheticals).
-        frag = _strip_trailing_parenthetical(frag)
-        fragments.extend(_strip_trailing_parenthetical(side) for side in _try_and_split(frag))
+        frag = strip_trailing_parenthetical(frag)
+        fragments.extend(strip_trailing_parenthetical(side) for side in _try_and_split(frag))
 
     fragments = [f for f in (f.strip() for f in fragments) if len(f) > 1]
 
@@ -385,10 +561,15 @@ def is_generic_actor_name(name: str) -> bool:
            ``<x>-based``, ``state-sponsored``, ``affiliated``, ``aligned`` …);
       (b4) the name has >= 2 words and EVERY word (split on whitespace and
            hyphen) is in ``GENERIC_DESCRIPTOR_WORDS`` (``"ransomware group"``,
-           ``"chinese apt"``, ``"apt groups"``) — one unknown word keeps it.
+           ``"chinese apt"``, ``"apt groups"``) — one unknown word keeps it;
+      (c)  the whole name is a country or state (``COUNTRY_AND_STATE_NAMES``:
+           ``"north korea"``, ``"dprk"``, ``"u.s."``, ``"russian federation"``)
+           or a nationality adjective (``NATIONALITY_ADJECTIVES``: ``"russian"``,
+           ``"north korean"``) — a name that contains one stays a name
+           (``"cyber army of russia reborn"``).
 
-    Single-word names are only generic through rule (a): ``"apt28"``,
-    ``"sandworm"``, ``"russia"`` are names (or at least not provably not).
+    Single-word names are only generic through rules (a) and (c): ``"apt28"``,
+    ``"sandworm"``, ``"play"`` are names (or at least not provably not).
     Non-string input → True (not a name).
     """
     if not isinstance(name, str):
@@ -404,6 +585,9 @@ def is_generic_actor_name(name: str) -> bool:
     if not core:
         return True
     if core in GENERIC_ACTOR_PHRASES or is_placeholder_name(core):
+        return True
+    # (c) a country or state, or a nationality adjective, as the whole name.
+    if _is_geopolitical_name(canonical) or _is_geopolitical_name(core):
         return True
     space_words = core.split(" ")
 
@@ -440,12 +624,15 @@ __all__ = [
     "AND_SPLIT_MIN_SIDE_LEN",
     "AND_SPLIT_PROTECTED_PREFIXES",
     "AND_SPLIT_PROTECTED_SIDES",
+    "COUNTRY_AND_STATE_NAMES",
     "GENERIC_ACTOR_PHRASES",
     "GENERIC_DESCRIPTOR_WORDS",
     "GENERIC_LAST_WORDS",
     "GENERIC_LEADING_WORDS",
     "GENERIC_SIGNAL_PATTERNS",
+    "NATIONALITY_ADJECTIVES",
     "clean_actor_names",
     "is_generic_actor_name",
     "split_composite_actor_name",
+    "strip_trailing_parenthetical",
 ]

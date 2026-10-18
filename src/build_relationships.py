@@ -1390,6 +1390,9 @@ def build_relationships():
         query_pause()
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
+        # The ids are the pulse's, inherited by each of its indicators: a report-level association,
+        # created at 0.6 as every other link from them (5b / 6b, ``otx_pulse``), with its own
+        # evidence label ``otx_attack_ids``. ON CREATE only, like the other report-scoped links.
         # PR #34 round 20: skip_query counts orphan (indicator, attack_id)
         # pairs whose Technique node does NOT exist — direct skip count.
         logger.info("[LINK] 8/20 Indicator → Technique (OTX attack_ids)...")
@@ -1399,7 +1402,7 @@ def build_relationships():
             + _prov_with("i", _OTX_FEEDS)
             + "UNWIND i.attack_ids AS tech_id WITH i, tech_id AS _cited, coalesce($revoked[toString(tech_id)], tech_id) AS tech_id, "
             + _PROV_VARS
-            + ' MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + ' MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
             + _cited_set("tech_id")
             + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"

@@ -403,6 +403,8 @@ Node keys like `"unknown"`, `"malware"`, `"trojan"`, `"backdoor"`, `"virus"`, `"
 
 Flag any `MERGE` or `merge_node_with_source()` call where the primary key property could be one of these generic terms. Check the name with `node_identity.is_placeholder_name()` (`_REJECTED_PLACEHOLDER_NAMES`, which holds every term above) before writing, as `merge_malware` and `merge_actor` do (aliases are filtered the same way). Flag a new merge path for a name-keyed label that does not call it, and a second blocklist.
 
+`ThreatActor` names also pass `actor_name_hygiene.clean_actor_names` (composites split; descriptions, country and state names and nationality adjectives dropped) in the OTX collector, the MISP→Neo4j sync and the reference builder. In the OTX collector the actor items, the `family::adversary::pulse` pairs and the several-actor decision use one list per pulse (`pulse_all_actor_names`), from which an adversary the same pulse lists as a malware family is removed unless the canonical reference resolves it. Flag an actor path that skips the hygiene, a second country list, and an OTX actor path that recomputes the names instead of using that list.
+
 ### Zone keyword false positives — single generic words must not trigger sector tagging
 
 Using single common words as zone keywords (e.g., `"bank"`, `"power"`, `"care"`, `"medical"`) will match in unrelated contexts ("power off", "take care", "bank of results"). Zone keywords must be:
@@ -1049,6 +1051,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Rule added: `ThreatActor` names pass `actor_name_hygiene` (country and state names included), and the OTX actor items, pairs and several-actor decision use one list of names per pulse.
 - 2026-10-18 — The rule on enrichment job failures no longer names the removed co-occurrence calibration job.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as the current rules; data written by earlier versions moved to the appendix.
