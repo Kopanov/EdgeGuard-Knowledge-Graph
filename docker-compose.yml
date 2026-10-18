@@ -477,8 +477,8 @@ services:
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       AIRFLOW__SLACK__WEBHOOK_URL: ${AIRFLOW__SLACK__WEBHOOK_URL:-}
       # Minimum number of MISP events the Neo4j sync must find in its window
-      # (src/run_misp_to_neo4j.py). Unset / 0 disables the guard: a zero-event
-      # window is logged as a WARNING and still counts as a successful run.
+      # (src/run_misp_to_neo4j.py). Unset selects the code default 1: a window
+      # with no EdgeGuard event fails run_neo4j_sync. 0 disables the guard.
       EDGEGUARD_SYNC_MIN_EVENTS: ${EDGEGUARD_SYNC_MIN_EVENTS:-}
       # MISP push accounting: attributes absent from the returned event are reported; with this
       # flag they also count as failed pushes (feeds EDGEGUARD_MISP_MIN_SUCCESS_RATE).

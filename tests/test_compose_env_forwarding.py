@@ -113,8 +113,8 @@ def test_sync_min_events_is_forwarded_on_the_airflow_service():
     """``EDGEGUARD_SYNC_MIN_EVENTS`` is read by ``run_misp_to_neo4j.py`` inside the Airflow task.
 
     It lives next to the other Neo4j-sync knobs on the ``airflow`` service (not in
-    ``x-common-env``) and must keep an empty compose default: the code treats empty as the
-    default 0 (guard disabled), so ``int("")`` can never be reached.
+    ``x-common-env``) and must keep an empty compose default: the code treats empty as its
+    default 1, so ``int("")`` can never be reached.
     """
     data = yaml.safe_load(COMPOSE.read_text())
     airflow_env = data["services"]["airflow"]["environment"]
@@ -125,7 +125,7 @@ def test_sync_min_events_is_forwarded_on_the_airflow_service():
     value = str(airflow_env[name])
     m = re.fullmatch(r"\$\{" + re.escape(name) + r":-(.*)\}", value)
     assert m, f"{name} must be forwarded as ${{{name}:-<default>}} so .env can override it; got {value!r}"
-    assert m.group(1) == "", f"{name}: compose default must stay empty (code applies its own default 0)"
+    assert m.group(1) == "", f"{name}: compose default must stay empty (code applies its own default 1)"
 
 
 def test_int_parsed_variables_never_default_to_empty():

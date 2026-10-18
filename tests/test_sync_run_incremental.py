@@ -15,6 +15,8 @@ import run_misp_to_neo4j as rm  # noqa: E402
 
 
 def _sync(monkeypatch, events=None, available=(True, "ok")):
+    # These tests read the fetch window of an empty run; the empty-window guard has its own tests.
+    monkeypatch.setenv("EDGEGUARD_SYNC_MIN_EVENTS", "0")
     sync = rm.MISPToNeo4jSync(neo4j_client=MagicMock())
     seen = {}
     monkeypatch.setattr(sync, "check_services_available", lambda: available)

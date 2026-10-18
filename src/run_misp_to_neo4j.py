@@ -1180,28 +1180,36 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
 _RELATIONSHIP_BATCH_DEFAULT = 500
 
 
-def _sync_min_events() -> int:
-    """Parse ``EDGEGUARD_SYNC_MIN_EVENTS`` (non-negative integer, default 0 = guard disabled).
+# Default of ``EDGEGUARD_SYNC_MIN_EVENTS``: a sync window must hold at least one EdgeGuard event.
+# Scheduled syncs are at least NEO4J_SYNC_MIN_GAP (24 h) apart and the collectors write to MISP
+# every day (OTX every 30 minutes), so an empty window means nothing was collected; as a success
+# it would also move the sync cursor past the gap.
+_SYNC_MIN_EVENTS_DEFAULT = 1
 
-    When set to N >= 1, ``MISPToNeo4jSync.run`` treats a fetch window that returns fewer than
-    N events as a failed run instead of an empty success. Unset or empty selects the default;
-    a value that is not a non-negative integer is rejected with a WARNING and treated as the
-    default. Read per call so Airflow tasks pick up the environment at fork time.
+
+def _sync_min_events() -> int:
+    """Parse ``EDGEGUARD_SYNC_MIN_EVENTS`` (non-negative integer, default 1; 0 disables the guard).
+
+    ``MISPToNeo4jSync.run`` treats a fetch window that returns fewer than N events as a failed
+    run instead of an empty success. Unset or empty selects the default; a value that is not a
+    non-negative integer is rejected with a WARNING and treated as the default. Read per call so
+    Airflow tasks pick up the environment at fork time.
     """
     raw = (os.environ.get("EDGEGUARD_SYNC_MIN_EVENTS") or "").strip()
     if not raw:
-        return 0
+        return _SYNC_MIN_EVENTS_DEFAULT
     try:
         value = int(raw)
     except ValueError:
         logger.warning(
-            "Invalid EDGEGUARD_SYNC_MIN_EVENTS=%r — expected a non-negative integer; using default 0 (disabled)",
+            "Invalid EDGEGUARD_SYNC_MIN_EVENTS=%r — expected a non-negative integer; using default %d",
             raw,
+            _SYNC_MIN_EVENTS_DEFAULT,
         )
-        return 0
+        return _SYNC_MIN_EVENTS_DEFAULT
     if value < 0:
-        logger.warning("EDGEGUARD_SYNC_MIN_EVENTS=%s is negative; using default 0 (disabled)", value)
-        return 0
+        logger.warning("EDGEGUARD_SYNC_MIN_EVENTS=%s is negative; using default %d", value, _SYNC_MIN_EVENTS_DEFAULT)
+        return _SYNC_MIN_EVENTS_DEFAULT
     return value
 
 
@@ -5750,9 +5758,22 @@ class MISPToNeo4jSync:
             events_index_total = len(events)
             self.stats["events_index_total"] = events_index_total
 
-            # EDGEGUARD_SYNC_MIN_EVENTS: a window returning fewer events than the operator
-            # declared plausible is a failed run (ERROR, no success recorded), not an empty
-            # success. Default 0 keeps the historical behaviour but makes it loud.
+            if not events and self.stats.get("events_index_truncated"):
+                # 2026-10: no EdgeGuard event among the rows the cap allowed says nothing about the
+                # rows beyond it, so an empty window is not a success here.
+                msg = (
+                    "MISP event index stopped at the page cap (EDGEGUARD_MISP_MAX_PAGES="
+                    f"{MISP_EVENTS_INDEX_MAX_PAGES} x EDGEGUARD_MISP_PAGE_SIZE={MISP_EVENTS_INDEX_PAGE_SIZE}) "
+                    "with no EdgeGuard event listed: the listing is incomplete"
+                )
+                logger.error(msg)
+                self._last_sync_failure_reason = msg
+                self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
+                record_collection_failure("misp_to_neo4j", msg)
+                return False
+
+            # EDGEGUARD_SYNC_MIN_EVENTS (default 1): a window returning fewer events is a failed run
+            # (ERROR, no success recorded, the state file is not stamped), not an empty success.
             min_events = _sync_min_events()
             if min_events > 0 and events_index_total < min_events:
                 msg = (
@@ -5771,20 +5792,6 @@ class MISPToNeo4jSync:
                 # and ``EdgeGuardSyncCoverageGap`` does not fire on this deliberate abort. The
                 # number of events found stays in ``stats["events_index_total"]`` for the summary.
                 events_index_total = 0
-                return False
-
-            if not events and self.stats.get("events_index_truncated"):
-                # 2026-10: no EdgeGuard event among the rows the cap allowed says nothing about the
-                # rows beyond it, so an empty window is not a success here.
-                msg = (
-                    "MISP event index stopped at the page cap (EDGEGUARD_MISP_MAX_PAGES="
-                    f"{MISP_EVENTS_INDEX_MAX_PAGES} x EDGEGUARD_MISP_PAGE_SIZE={MISP_EVENTS_INDEX_PAGE_SIZE}) "
-                    "with no EdgeGuard event listed: the listing is incomplete"
-                )
-                logger.error(msg)
-                self._last_sync_failure_reason = msg
-                self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
-                record_collection_failure("misp_to_neo4j", msg)
                 return False
 
             if not events:

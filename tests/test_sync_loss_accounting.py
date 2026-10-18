@@ -326,8 +326,8 @@ def test_relationship_failures_fail_the_run_even_without_merge_errors(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_zero_events_by_default_is_a_warning_and_a_successful_run(monkeypatch, caplog):
-    monkeypatch.delenv("EDGEGUARD_SYNC_MIN_EVENTS", raising=False)
+def test_zero_events_with_the_guard_disabled_is_a_warning_and_a_successful_run(monkeypatch, caplog):
+    monkeypatch.setenv("EDGEGUARD_SYNC_MIN_EVENTS", "0")
     sync, fetched, outcomes = _run_sync(monkeypatch, [])
     with caplog.at_level(logging.WARNING, logger=SYNC_LOGGER):
         assert sync.run(incremental=True) is True
@@ -344,8 +344,12 @@ def test_zero_events_by_default_is_a_warning_and_a_successful_run(monkeypatch, c
     )
 
 
-def test_zero_events_with_min_events_one_is_an_error_and_a_failed_run(monkeypatch, caplog):
-    monkeypatch.setenv("EDGEGUARD_SYNC_MIN_EVENTS", "1")
+@pytest.mark.parametrize("configured", [None, "1"])
+def test_zero_events_by_default_or_with_min_events_one_is_an_error_and_a_failed_run(monkeypatch, caplog, configured):
+    if configured is None:
+        monkeypatch.delenv("EDGEGUARD_SYNC_MIN_EVENTS", raising=False)
+    else:
+        monkeypatch.setenv("EDGEGUARD_SYNC_MIN_EVENTS", configured)
     sync, _fetched, outcomes = _run_sync(monkeypatch, [])
     with caplog.at_level(logging.ERROR, logger=SYNC_LOGGER):
         assert sync.run(incremental=True) is False
@@ -387,16 +391,16 @@ def test_min_events_satisfied_processes_the_window(monkeypatch):
 
 @pytest.mark.parametrize(
     "raw, expected",
-    [("", 0), ("  ", 0), ("0", 0), ("1", 1), (" 3 ", 3), ("abc", 0), ("-2", 0), ("1.5", 0)],
+    [("", 1), ("  ", 1), ("0", 0), ("1", 1), (" 3 ", 3), ("abc", 1), ("-2", 1), ("1.5", 1)],
 )
 def test_sync_min_events_parsing(monkeypatch, raw, expected):
     monkeypatch.setenv("EDGEGUARD_SYNC_MIN_EVENTS", raw)
     assert rm._sync_min_events() == expected
 
 
-def test_sync_min_events_unset_is_disabled(monkeypatch):
+def test_sync_min_events_unset_requires_one_event(monkeypatch):
     monkeypatch.delenv("EDGEGUARD_SYNC_MIN_EVENTS", raising=False)
-    assert rm._sync_min_events() == 0
+    assert rm._sync_min_events() == 1
 
 
 def test_compose_forwards_sync_min_events_to_the_airflow_service():
@@ -407,7 +411,7 @@ def test_compose_forwards_sync_min_events_to_the_airflow_service():
 
 def test_env_example_and_airflow_docs_describe_sync_min_events():
     env_example = (REPO_ROOT / ".env.example").read_text()
-    assert "# EDGEGUARD_SYNC_MIN_EVENTS=0" in env_example, ".env.example must document the knob with its default"
+    assert "# EDGEGUARD_SYNC_MIN_EVENTS=1" in env_example, ".env.example must document the knob with its default"
     docs = (REPO_ROOT / "docs" / "AIRFLOW_DAGS.md").read_text()
     assert "EDGEGUARD_SYNC_MIN_EVENTS" in docs
     assert "relationships_failed" in docs
@@ -517,3 +521,29 @@ def test_writer_stats_reset_keeps_the_verification_counters():
     writer.reset_stats()
     assert writer.stats["batches_unverified"] == 0
     assert writer.stats["attributes_unconfirmed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. Event names reach the sync's discovery filter
+# ---------------------------------------------------------------------------
+
+
+def test_every_event_name_the_writer_builds_passes_the_sync_discovery_filter(monkeypatch):
+    """With the minimum of one event, a name the discovery filter missed would fail every sync;
+    the name ``MISPWriter`` builds for each registered source must be found by
+    ``_is_edgeguard_index_event`` and start with the writer's own-event prefix."""
+    from source_registry import all_sources
+
+    writer = mw.MISPWriter(url="http://127.0.0.1:9", api_key="dummy", verify_ssl=False)
+    names: list = []
+
+    def lookup(name):
+        names.append(name)
+        return [{"Event": {"id": "7", "info": name}}]
+
+    monkeypatch.setattr(writer, "_restsearch_events_for_name", lookup)
+    for source in all_sources():
+        assert writer._get_or_create_event(source.canonical_id, date="2026-10-18") == "7"
+        name = names[-1]
+        assert name.startswith(mw._OWN_EVENT_PREFIX), name
+        assert rm._is_edgeguard_index_event({"info": name, "org": {"name": "ADMIN"}}), name
