@@ -41,7 +41,11 @@ class TestSectorEdgesNeverTargetGlobalAndAreInferences:
         assert "r.confidence_score = coalesce($sector_confidence[_kept], r.confidence_score)" in body
         assert "r.confidence_score = 0.5" not in body, "no unconditional reset: it erased a stated sector's 0.9"
         assert "r.confidence_score = 1.0" not in body
-        assert getattr(br, name).params["sector_confidence"] == {"zone_classification": 0.5, "advisory_sector": 0.9}
+        assert getattr(br, name).params["sector_confidence"] == {
+            "zone_classification": 0.5,
+            "otx_industries": 0.6,
+            "advisory_sector": 0.9,
+        }
 
     def test_acceptance_script_polices_global_edges(self):
         script = (_REPO / "scripts" / "verify_fresh_baseline.py").read_text()
@@ -210,11 +214,22 @@ class TestEveryEdgeRowCarriesAnEvidenceLabel:
         src = (_SRC / "run_misp_to_neo4j.py").read_text()
         assert src.count("# 2026-10 audit: every edge carries an evidence label") == 5
         for rel, label in (
-            ("AFFECTS", "zone_classification"),
             ("EXPLOITS", "cve_tag"),
             ("INDICATES", "misp_attribute_tag"),
         ):
             assert re.search(rf'"rel_type": "{rel}".*?"match_type": "{label}"', src, re.S), (rel, label)
+        # 2026-10-18: the three rows of a ``sector:`` / ``target-sector:`` tag take the label table's
+        # inference (``zone_classification`` at 0.5), not the attribute's confidence
+        from run_misp_to_neo4j import _tag_sector_evidence
+
+        for rel in ("AFFECTS", "TARGETS"):
+            assert re.search(
+                rf'_tag_sector_evidence\(source_id, target_sector, "{rel}"\).*?"rel_type": "{rel}".*?"match_type": _label',
+                src,
+                re.S,
+            ), rel
+            assert _tag_sector_evidence("misp", "energy", rel) == ("zone_classification", 0.5)
+        assert src.count("_tag_sector_evidence(source_id, target_sector,") == 3
 
     def test_alert_created_indicators_carry_tlp_and_marker_on_both_queries(self):
         from neo4j_client import _alert_default_tlp

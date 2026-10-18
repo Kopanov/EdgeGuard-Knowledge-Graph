@@ -107,12 +107,16 @@ _EVENT = {"id": 161, "info": "EdgeGuard-cisa_ics-2026-10-16", "date": "2026-10-1
 # --------------------------------------------------------------------------- the table
 class TestTable:
     def test_labels_and_confidences(self):
-        assert se.LABEL_CONFIDENCE == {"zone_classification": 0.5, "advisory_sector": 0.9}
+        # 2026-10-18: OTX's industries statement on TARGETS (``tests/test_otx_industries_sector_label.py``)
+        assert se.LABEL_CONFIDENCE == {"zone_classification": 0.5, "otx_industries": 0.6, "advisory_sector": 0.9}
         assert se.LABEL_CONFIDENCE["advisory_sector"] > se.LABEL_CONFIDENCE["zone_classification"], (
             "the sync keeps the label of the higher-confidence row: an equal value would let an inferred "
             "row take a stated link's label"
         )
-        assert se.STATEMENT_LABELS == {"AFFECTS": {"cisa_ics": "advisory_sector"}, "TARGETS": {}}
+        assert se.STATEMENT_LABELS == {
+            "AFFECTS": {"cisa_ics": "advisory_sector"},
+            "TARGETS": {"alienvault_otx": "otx_industries"},
+        }
 
     @pytest.mark.parametrize(
         "source, zones, expected",
@@ -180,9 +184,9 @@ class TestTable:
     def test_cypher_params_per_relationship_type(self):
         assert se.cypher_params("AFFECTS") == {
             "sector_statements": {"cisa_ics": "advisory_sector"},
-            "sector_confidence": {"zone_classification": 0.5, "advisory_sector": 0.9},
+            "sector_confidence": {"zone_classification": 0.5, "otx_industries": 0.6, "advisory_sector": 0.9},
         }
-        assert se.cypher_params("TARGETS")["sector_statements"] == {}
+        assert se.cypher_params("TARGETS")["sector_statements"] == {"alienvault_otx": "otx_industries"}
 
     @pytest.mark.parametrize(
         "patch, message",
@@ -460,7 +464,7 @@ class TestSyncStatesTheSectors:
         assert not [r for r in syncer._build_cross_item_relationships([parsed]) if r["to_type"] == "Sector"]
 
     def test_indicator_targets_never_take_the_advisory_label(self, syncer):
-        # A CISA ICS source tag on an indicator (not a record the collector writes): TARGETS has no statement label.
+        # A CISA ICS source tag on an indicator (not a record the collector writes): TARGETS has no CISA ICS label.
         item = {"type": "indicator", "indicator_type": "ipv4", "value": "203.0.113.7", "zone": ["energy"]}
         item["tag"] = "cisa_ics"
         item["stated_zones"] = ["energy"]

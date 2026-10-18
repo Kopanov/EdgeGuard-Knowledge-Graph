@@ -12,6 +12,11 @@ writers (MISPWriter attribute → sync item → ``merge_cve`` and the sync's rel
 statements of steps 7b / 7c through ``_safe_run_batched`` and ``apoc.periodic.iterate``, as production runs
 them, and reads the links afterwards.
 
+Since 2026-10-18 an OTX report's own industries are a statement too (``otx_industries``, 0.6, TARGETS only):
+the OTX indicator, family and adversary go through the same writers and steps 7a / 7c / 7d, a statement and
+an inference of one link keep the statement whichever is written last, a full sync relabels a link written
+before, AFFECTS from an OTX record stays an inference, and the alias merge keeps the statement.
+
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``, writes
 only nodes labelled ``EdgeGuardIT`` (every node a writer MERGEs exists beforehand with the label), refuses
 any other node.
@@ -36,6 +41,8 @@ for _p in (TESTS.parent / "src", TESTS):
 
 from test_actor_alias_merge_neo4j import LABEL, URI, open_test_database  # noqa: E402  (same guards)
 from test_cisa_ics_collector import SAMPLE_ADVISORY  # noqa: E402  (the real CSAF 2.0 shape)
+from test_otx_industries_sector_label import PULSE_REF, WRITER, _attribute, _kind, _pulse  # noqa: E402
+from test_otx_industries_sector_label import otx_items as _otx_items  # noqa: E402
 
 import build_relationships  # noqa: E402
 import collectors.cisa_ics_collector as ics  # noqa: E402
@@ -46,7 +53,7 @@ from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not URI, reason="EDGEGUARD_IT_NEO4J_URI is not set (no throwaway Neo4j)")
 
-SOURCES = ("cisa_ics", "nvd", "cisa_kev", "alienvault_otx", "mitre_attck", "misp")
+SOURCES = ("cisa_ics", "nvd", "cisa_kev", "alienvault_otx", "mitre_attck", "misp", "threatfox")
 SECTORS = ("energy", "finance", "healthcare")
 CISA_EVENT = {"id": 161, "info": "EdgeGuard-cisa_ics-2026-10-16", "date": "2026-10-16", "Tag": []}
 NVD_EVENT = {"id": 120, "info": "EdgeGuard-nvd-2026-10-16", "date": "2026-10-16", "Tag": []}
@@ -473,3 +480,224 @@ class TestActorTargetsAndTheAliasMerge:
         links = self._actor_links(raw_driver)
         for zone in expected:
             assert "alienvault_otx" in links[zone][1]
+
+
+# ================================================================ OTX industries (2026-10-18)
+OTX_EVENT = {"id": 134, "info": "EdgeGuard-alienvault_otx-2026-10-18", "date": "2026-10-18", "Tag": []}
+TF_EVENT = {"id": 135, "info": "EdgeGuard-threatfox-2026-10-18", "date": "2026-10-18", "Tag": []}
+IOC = "198.51.100.23"
+
+
+def _otx_nodes(driver) -> None:
+    """The nodes the OTX writers MERGE into, created with the test label (a MERGE would create them without)."""
+    with driver.session() as session:
+        session.run(
+            f"CREATE (:Indicator:{LABEL} {{indicator_type: 'ipv4', value: $ioc, uuid: 'u-ioc'}}) "
+            f"CREATE (:Malware:{LABEL} {{name: 'examplelocker', uuid: 'u-examplelocker'}}) "
+            f"CREATE (:ThreatActor:{LABEL} {{name: 'dragonfly', uuid: 'u-dragonfly'}})",
+            ioc=IOC,
+        )
+
+
+def _sync_otx(client, pulse: Dict[str, Any], kinds=("indicator",)) -> None:
+    """The collector's items of ``pulse`` of the given kinds through MISPWriter and the sync, as production
+    writes them: the node with its SOURCED_FROM edge and the sync's sector rows."""
+    syncer = MISPToNeo4jSync(neo4j_client=client)
+    for item in _otx_items(pulse):
+        kind = _kind(item)
+        if kind not in kinds:
+            continue
+        parsed, _ = syncer.parse_attribute(_attribute(item), OTX_EVENT)
+        assert parsed is not None
+        if kind == "indicator":
+            assert client.merge_indicators_batch([parsed], source_id="alienvault_otx") == (1, 0)
+        elif kind == "malware":
+            assert client.merge_malware(parsed, source_id="alienvault_otx")
+        elif kind == "actor":
+            assert client.merge_actor(parsed, source_id="alienvault_otx")
+        rows = [r for r in syncer._build_cross_item_relationships([parsed]) if r["to_type"] == "Sector"]
+        if rows:
+            client.create_misp_relationships_batch(rows, source_id="alienvault_otx")
+
+
+def _sync_threatfox(client) -> None:
+    """A ThreatFox record of the same IOC whose energy zone is inferred (a feed's malware family)."""
+    attribute = WRITER.create_attribute(
+        {
+            "indicator_type": "ipv4",
+            "value": IOC,
+            "zone": ["energy"],
+            "tag": "threatfox",
+            "source": ["threatfox"],
+            "confidence_score": 0.5,
+            "ioc_id": "1650000",
+            "reference": "https://threatfox.abuse.ch/ioc/1650000/",
+        }
+    )
+    attribute["uuid"] = "6a1f0000-0000-4000-8000-000000001650"
+    syncer = MISPToNeo4jSync(neo4j_client=client)
+    parsed, _ = syncer.parse_attribute(attribute, TF_EVENT)
+    assert parsed is not None and parsed["tag"] == "threatfox"
+    assert client.merge_indicators_batch([parsed], source_id="threatfox") == (1, 0)
+    rows = [r for r in syncer._build_cross_item_relationships([parsed]) if r["to_type"] == "Sector"]
+    client.create_misp_relationships_batch(rows, source_id="threatfox")
+
+
+def _targets(driver, node: str) -> Dict[str, Dict[str, Any]]:
+    rows = _rows(
+        driver,
+        f"MATCH {node}-[r:TARGETS]->(s:Sector) "
+        "RETURN s.name AS sector, r.match_type AS label, r.confidence_score AS confidence, "
+        "apoc.coll.sort(r.sources) AS sources, apoc.coll.sort(coalesce(r.source_refs, [])) AS refs",
+    )
+    return {r.pop("sector"): r for r in rows}
+
+
+def _otx_edge(driver, node: str) -> Dict[str, Any]:
+    (row,) = _rows(
+        driver,
+        f"MATCH {node}-[sf:SOURCED_FROM]->(:Source {{source_id: 'alienvault_otx'}}) "
+        "RETURN sf.zones AS zones, sf.stated_zones AS stated, sf.stated_refs AS stated_refs",
+    )
+    return row
+
+
+_IOC_NODE = f"(:Indicator {{value: '{IOC}'}})"
+_STATED = {"label": "otx_industries", "confidence": 0.6, "sources": ["alienvault_otx"], "refs": [PULSE_REF]}
+_INFERRED = {"label": "zone_classification", "confidence": 0.5, "sources": ["alienvault_otx"], "refs": [PULSE_REF]}
+
+
+class TestOtxIndustriesStatements:
+    def test_an_indicator_link_is_the_pulses_statement_where_its_industries_name_the_sector(self, client, raw_driver):
+        """The pulse's industries name Energy, its text names hospitals: the sync writes TARGETS energy as
+        ``otx_industries`` and healthcare as ``zone_classification``, and step 7a computes the same."""
+        _otx_nodes(raw_driver)
+        _sync_otx(client, _pulse())
+        assert _otx_edge(raw_driver, _IOC_NODE) == {
+            "zones": ["energy", "healthcare"],
+            "stated": ["energy"],
+            "stated_refs": [f"energy|{PULSE_REF}"],
+        }
+        synced = _targets(raw_driver, _IOC_NODE)
+        assert synced == {"energy": _STATED, "healthcare": _INFERRED}
+        _step(client, build_relationships._Q7A_STATEMENTS, "indicator_targets_sector")
+        assert _targets(raw_driver, _IOC_NODE) == synced
+
+    @pytest.mark.parametrize("industries", [[], ["Government"]])
+    def test_a_pulse_that_states_no_tracked_sector_stays_an_inference(self, client, raw_driver, industries):
+        _otx_nodes(raw_driver)
+        _sync_otx(client, _pulse(industries=industries))
+        _step(client, build_relationships._Q7A_STATEMENTS, "indicator_targets_sector")
+        assert _otx_edge(raw_driver, _IOC_NODE)["stated"] is None
+        assert _targets(raw_driver, _IOC_NODE) == {"healthcare": _INFERRED}
+
+    @pytest.mark.parametrize("otx_first", [True, False])
+    def test_a_statement_and_an_inference_of_one_link_keep_the_statement(self, client, raw_driver, otx_first):
+        _otx_nodes(raw_driver)
+        writes = [lambda: _sync_otx(client, _pulse()), lambda: _sync_threatfox(client)]
+        for write in writes if otx_first else reversed(writes):
+            write()
+        _step(client, build_relationships._Q7A_STATEMENTS, "indicator_targets_sector")
+        energy = _targets(raw_driver, _IOC_NODE)["energy"]
+        assert (energy["label"], energy["confidence"]) == ("otx_industries", 0.6)
+        assert energy["sources"] == ["alienvault_otx", "threatfox"]
+        assert PULSE_REF in energy["refs"] and "threatfox:1650000" in energy["refs"]
+
+    def test_a_full_sync_relabels_a_link_written_before(self, client, raw_driver):
+        """A graph synced before 2026-10-18: the OTX edge records no statement and the link is an inference.
+        Step 7a alone keeps it (nothing stated yet); reading the attribute again (a full sync) records the
+        statement, and the batched writer takes the row's label (0.6 reaches the stored 0.5)."""
+        _graph(
+            raw_driver,
+            f"""
+            MATCH (otx:Source {{source_id: 'alienvault_otx'}}), (s:Sector {{name: 'energy'}})
+            CREATE (i:Indicator:{LABEL} {{indicator_type: 'ipv4', value: '{IOC}', uuid: 'u-ioc',
+                    source: ['alienvault_otx'], zone: ['energy', 'healthcare']}})
+            CREATE (i)-[:SOURCED_FROM {{source: 'alienvault_otx', zones: ['energy', 'healthcare'],
+                    source_refs: ['{PULSE_REF}'], misp_event_ids: ['134']}}]->(otx)
+            CREATE (i)-[:TARGETS {{match_type: 'zone_classification', confidence_score: 0.5,
+                    sources: ['alienvault_otx'], source_refs: ['{PULSE_REF}'], misp_event_ids: ['134'],
+                    edgeguard_managed: true}}]->(s)
+            """,
+        )
+        _step(client, build_relationships._Q7A_STATEMENTS, "indicator_targets_sector")
+        assert _targets(raw_driver, _IOC_NODE)["energy"]["label"] == "zone_classification"
+        _sync_otx(client, _pulse())
+        assert _targets(raw_driver, _IOC_NODE)["energy"] == _STATED
+        _step(client, build_relationships._Q7A_STATEMENTS, "indicator_targets_sector")
+        assert _targets(raw_driver, _IOC_NODE) == {"energy": _STATED, "healthcare": _INFERRED}
+
+    def test_family_and_adversary_links_follow_the_statement(self, client, raw_driver):
+        """Malware and ThreatActor link to a Sector in steps 7c / 7d only: from the OTX edge the writers
+        recorded with the industries that travelled in ``MITRE_USES_TECHNIQUES.ind``."""
+        _otx_nodes(raw_driver)
+        _sync_otx(client, _pulse(), kinds=("malware", "actor"))
+        _step(client, build_relationships._Q7C_STATEMENTS, "actor_targets_sector")
+        _step(client, build_relationships._Q7D_STATEMENTS, "malware_targets_sector")
+        for node in ("(:Malware {name: 'examplelocker'})", "(:ThreatActor {name: 'dragonfly'})"):
+            assert _otx_edge(raw_driver, node)["stated_refs"] == [f"energy|{PULSE_REF}"]
+            assert _targets(raw_driver, node) == {"energy": _STATED, "healthcare": _INFERRED}, node
+
+    def test_affects_from_an_otx_record_stays_an_inference(self, client, raw_driver):
+        """Even an OTX edge that records the statement on a CVE gives AFFECTS no OTX label: a targeted industry
+        is no statement about where the product is deployed."""
+        _graph(
+            raw_driver,
+            f"""
+            MATCH (otx:Source {{source_id: 'alienvault_otx'}})
+            CREATE (c:CVE:{LABEL} {{cve_id: 'CVE-2026-11111', uuid: 'u-11111', source: ['alienvault_otx'],
+                    zone: ['energy']}})
+            CREATE (c)-[:SOURCED_FROM {{source: 'alienvault_otx', zones: ['energy'], stated_zones: ['energy'],
+                    stated_refs: ['energy|{PULSE_REF}'], source_refs: ['{PULSE_REF}']}}]->(otx)
+            """,
+        )
+        _q7b(client)
+        link = _links(raw_driver, "CVE-2026-11111")["energy"]
+        assert (link["label"], link["confidence"], link["refs"]) == ("zone_classification", 0.5, [PULSE_REF])
+
+    def test_the_alias_merge_keeps_the_statement(self, client, raw_driver):
+        """An OTX duplicate whose energy link is the pulse's statement folds into the canonical actor, whose
+        energy link is an ATT&CK inference: the collapsed link keeps ``otx_industries`` and the folded OTX edge
+        keeps the statement, so step 7c computes the same afterwards."""
+        _graph(
+            raw_driver,
+            f"""
+            MATCH (otx:Source {{source_id: 'alienvault_otx'}}), (mitre:Source {{source_id: 'mitre_attck'}}),
+                  (s:Sector {{name: 'energy'}})
+            CREATE (c:ThreatActor:{LABEL} {{name: 'dragonfly', uuid: 'u-c', source: ['mitre_attck'], zone: ['energy'],
+                    aliases: ['Energetic Bear']}})
+            CREATE (d:ThreatActor:{LABEL} {{name: 'energetic bear', uuid: 'u-d', source: ['alienvault_otx'],
+                    zone: ['energy']}})
+            CREATE (c)-[:SOURCED_FROM {{source: 'mitre_attck', zones: ['energy'], source_refs: ['mitre_attck:G0035']}}]->(mitre)
+            CREATE (d)-[:SOURCED_FROM {{source: 'alienvault_otx', zones: ['energy'], stated_zones: ['energy'],
+                    stated_refs: ['energy|{PULSE_REF}'], source_refs: ['{PULSE_REF}']}}]->(otx)
+            CREATE (c)-[:TARGETS {{match_type: 'zone_classification', confidence_score: 0.5, sources: ['mitre_attck'],
+                    source_refs: ['mitre_attck:G0035'], edgeguard_managed: true}}]->(s)
+            CREATE (d)-[:TARGETS {{match_type: 'otx_industries', confidence_score: 0.6, sources: ['alienvault_otx'],
+                    source_refs: ['{PULSE_REF}'], edgeguard_managed: true}}]->(s)
+            """,
+        )
+        with raw_driver.session() as session:
+            results = {"merged": 0, "restamped_edges": 0, "errors": 0, "apoc_missing": 0}
+            assert enrichment_jobs._run_alias_merge_batches(
+                session,
+                [("dragonfly", "energetic bear")],
+                statements=enrichment_jobs._ACTOR_ALIAS_MERGE_STATEMENTS,
+                batch_size=200,
+                apply_params={
+                    "strategy": enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY,
+                    "mitre_source": "mitre_attck",
+                    "reference_canonicals": [],
+                },
+                results=results,
+                log_tag="IT",
+                canonical_noun="actor(s)",
+            )
+        assert results["merged"] == 1 and results["errors"] == 0
+        node = "(:ThreatActor {name: 'dragonfly'})"
+        merged = _targets(raw_driver, node)["energy"]
+        assert (merged["label"], merged["confidence"]) == ("otx_industries", 0.6)
+        assert merged["sources"] == ["alienvault_otx", "mitre_attck"]
+        assert _otx_edge(raw_driver, node)["stated"] == ["energy"]
+        _step(client, build_relationships._Q7C_STATEMENTS, "actor_targets_sector")
+        assert _targets(raw_driver, node)["energy"] == merged

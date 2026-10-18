@@ -868,11 +868,21 @@ def _item_source_refs(item: Dict, source: str) -> List[str]:
 def _item_zone_refs(item: Dict, source: str) -> Dict[str, List[str]]:
     """Zone → the feed's record references behind ``item`` that gave that zone (2026-10-16).
 
-    Only for a feed whose records each state their own zones and are merged into one item: CISA ICS,
-    whose CVE item unites the advisories that name the CVE (``advisory_zones`` from ``NVD_META``, advisory
-    id → its zones). Each sector then cites only the advisories that name it
-    (``sector_evidence.stated_refs``). ``{}`` for every other feed: a sector cites all of its references.
+    Only for a feed whose records state zones themselves (``sector_evidence.stated_refs`` keeps the stated
+    ones). CISA ICS: the CVE item unites the advisories that name the CVE (``advisory_zones`` from
+    ``NVD_META``, advisory id → its zones), and each sector cites only the advisories that name it. OTX
+    (2026-10-18): the item's zones and industries are its own pulse's (``pulse_id``; the other pulses of
+    the run that listed the item, ``report_ids``, gave it neither), so each zone is that pulse's. ``{}``
+    for every other feed, and for an OTX item without its pulse id: a sector cites all of its references.
     """
+    if source == "alienvault_otx":
+        ref = format_source_ref(source, item.get("pulse_id"))
+        if not ref:
+            return {}
+        zones = item.get("zone") or []
+        if isinstance(zones, str):
+            zones = [zones]
+        return {str(z).lower(): [ref] for z in zones if z and str(z).lower() != "global"}
     if source != "cisa_ics":
         return {}
     advisory_zones = item.get("advisory_zones")
@@ -886,6 +896,19 @@ def _item_zone_refs(item: Dict, source: str) -> Dict[str, List[str]]:
         for zone in advisory_zones[advisory]:
             out.setdefault(zone, []).append(ref)
     return out
+
+
+def _tag_sector_evidence(source: Optional[str], sector: str, rel_type: str) -> Tuple[str, float]:
+    """``(label, confidence)`` of the row a ``sector:`` / ``target-sector:`` tag gives (2026-10-18).
+
+    EdgeGuard's writers never set such a tag; a partner's attribute may. The tag is no statement EdgeGuard
+    tracks, so the row is ``zone_classification`` at the table's confidence (``sector_evidence``), whatever
+    the attribute's ``confidence:`` tag says: at that tag's 0.8 a row outweighed a stated link (the batched
+    writer keeps the label of the row whose confidence reaches the stored one) and left the link at a
+    confidence its label does not give. A ``sector:`` tag of a tracked zone is also one of the item's zones
+    (``extract_zones_from_tags``), whose row follows the rule of the item's feed.
+    """
+    return sector_link_evidence(source, sector, None, rel_type)
 
 
 def _meta_advisory_zones(meta: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -3681,9 +3704,11 @@ class MISPToNeo4jSync:
             _item_refs = list(item.get("source_refs") or [])
             # 2026-10-16 (sector evidence): the label and confidence follow from what the feed did,
             # through one table (``sector_evidence``): a sector CISA's ICS advisory states is
-            # ``advisory_sector`` at 0.9 on AFFECTS; every other sector is ``zone_classification`` at
-            # 0.5. A sector cites only the records that gave it (``stated_refs``: of a CISA item, the
-            # advisories that name the sector). ``build_relationships`` steps 7a-7d compute the same.
+            # ``advisory_sector`` at 0.9 on AFFECTS; a sector an OTX pulse's own industries state is
+            # ``otx_industries`` at 0.6 on TARGETS (2026-10-18); every other sector is
+            # ``zone_classification`` at 0.5. A sector cites only the records that gave it (``stated_refs``:
+            # of a CISA item, the advisories that name the sector; of an OTX item, its pulse).
+            # ``build_relationships`` steps 7a-7d compute the same.
             _item_stated = item.get("stated_zones")
             _item_stated_refs = item.get("stated_refs")
 
@@ -3743,7 +3768,8 @@ class MISPToNeo4jSync:
 
         ``source`` is the attribute's feed (canonical registry id, from its ``source:*`` tag);
         ``source_refs`` are that feed's own record ids (``_item_source_refs``); ``stated_zones``
-        (2026-10-16) the zones the feed states itself (``sector_evidence.stated_zones``), and
+        (2026-10-16) the zones the feed states itself (``sector_evidence.stated_zones``, from the item's
+        zones and, for OTX, its pulse's ``otx_industries``), and
         ``stated_refs`` which of its records stated which of them (``_item_zone_refs``). The writer
         accumulates both on the edge as ``r.sources`` / ``r.source_refs`` and on the
         node's ``SOURCED_FROM`` edge, so every link traces back to the feed record and,
@@ -3754,13 +3780,14 @@ class MISPToNeo4jSync:
         if refs:
             item["source_refs"] = refs
         # 2026-10-16 (sector evidence): the zones the feed states itself (CISA ICS: every specific zone
-        # of the attribute; an inferring feed: none). The writer keeps them on the node's SOURCED_FROM
-        # edge of this feed, and the zone rows of ``_build_cross_item_relationships`` read them.
-        stated = sector_stated_zones(source, item.get("zone"))
+        # of the attribute; OTX, 2026-10-18: those its pulse's own industries map to; an inferring feed:
+        # none). The writer keeps them on the node's SOURCED_FROM edge of this feed, and the zone rows of
+        # ``_build_cross_item_relationships`` read them.
+        stated = sector_stated_zones(source, item.get("zone"), item.get("otx_industries"))
         if stated:
             item["stated_zones"] = stated
-            # Which record stated which sector (CISA ICS: the advisories that name it), so a sector link
-            # cites only those, not every advisory that names the CVE.
+            # Which record stated which sector (CISA ICS: the advisories that name it; OTX: the pulse), so
+            # a sector link cites only those, not every advisory that names the CVE.
             stated_refs = sector_stated_refs(stated, _item_zone_refs(item, source))
             if stated_refs:
                 item["stated_refs"] = stated_refs
@@ -3948,6 +3975,9 @@ class MISPToNeo4jSync:
             # Vulnerability → Sector — canonical AFFECTS (PR #33 round 12).
             canon_cve = normalize_cve_id_for_graph(cve_id)
             if target_sector and canon_cve:
+                # 2026-10-18: a foreign ``sector:`` / ``target-sector:`` tag is no statement EdgeGuard
+                # tracks: ``zone_classification`` at the table's confidence (``_tag_sector_evidence``).
+                _label, _conf = _tag_sector_evidence(source_id, target_sector, "AFFECTS")
                 relationships.append(
                     {
                         "rel_type": "AFFECTS",
@@ -3955,8 +3985,8 @@ class MISPToNeo4jSync:
                         "from_key": {"cve_id": canon_cve},
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
-                        "confidence": confidence,
-                        "match_type": "zone_classification",  # 2026-10 audit: every edge carries an evidence label
+                        "confidence": _conf,
+                        "match_type": _label,  # 2026-10 audit: every edge carries an evidence label
                         "misp_event_id": _evt_id,
                     }
                 )
@@ -4081,6 +4111,7 @@ class MISPToNeo4jSync:
             actor_several_by_name: List[str] = []
             actor_uses_malware: List[str] = []
             actor_uses_tools: List[str] = []
+            actor_otx_industries: List[str] = []
             # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
             # (``_entity_comment_description``); the comment used to become the description when the
             # block did not parse.
@@ -4104,6 +4135,9 @@ class MISPToNeo4jSync:
                         actor_several_by_name = [str(x).strip() for x in _meta_list(parsed, "sapn") if str(x).strip()]
                         actor_uses_malware = [str(x).strip() for x in _meta_list(parsed, "m") if str(x).strip()]
                         actor_uses_tools = [str(x).strip() for x in _meta_list(parsed, "s") if str(x).strip()]
+                        # 2026-10-18: the OTX pulse's own industries ("ind"), its sector statement
+                        # (``sector_evidence.stated_zones``, in ``_with_provenance``).
+                        actor_otx_industries = [str(x).strip() for x in _meta_list(parsed, "ind") if str(x).strip()]
                     elif isinstance(parsed, list):
                         uses_techniques = _scalar_strings(parsed)
                 except (ValueError, IndexError):
@@ -4193,6 +4227,8 @@ class MISPToNeo4jSync:
                 "tlp": "" if curated_claims is not None else _extract_tlp_tag(tags, attr_misp_uuid),
                 "relationships": relationships,
             }
+            if actor_otx_industries:
+                item["otx_industries"] = actor_otx_industries
             return self._with_provenance(item, relationships)
 
         # Handle malware
@@ -4216,6 +4252,7 @@ class MISPToNeo4jSync:
             malware_report_ids: List[str] = []
             malware_several_actor_pulses: List[str] = []
             malware_several_by_name: List[str] = []
+            malware_otx_industries: List[str] = []
             # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
             # (``_entity_comment_description``). The comment used to become the description when it was
             # only the block (``tail or description``: an OTX family from a pulse without a description
@@ -4236,6 +4273,8 @@ class MISPToNeo4jSync:
                     malware_report_ids = [str(x).strip() for x in _meta_list(meta, "rids") if str(x).strip()]
                     malware_several_actor_pulses = [str(x).strip() for x in _meta_list(meta, "sap") if str(x).strip()]
                     malware_several_by_name = [str(x).strip() for x in _meta_list(meta, "sapn") if str(x).strip()]
+                    # 2026-10-18: the OTX pulse's own industries ("ind"), its sector statement.
+                    malware_otx_industries = [str(x).strip() for x in _meta_list(meta, "ind") if str(x).strip()]
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
                         "Failed to parse MITRE_USES_TECHNIQUES for malware %r; no techniques taken", malware_name
@@ -4319,6 +4358,8 @@ class MISPToNeo4jSync:
                 "several_actor_pulses_by_name": malware_several_by_name,
                 "relationships": relationships,
             }
+            if malware_otx_industries:
+                item["otx_industries"] = malware_otx_industries
             return self._with_provenance(item, relationships)
 
         # Handle MITRE technique (text format "T1234: Name") — exclude "TA" (tactics, handled below)
@@ -4470,6 +4511,7 @@ class MISPToNeo4jSync:
 
             # Build sector-targeting relationship from tag-extracted sector
             if target_sector:
+                _label, _conf = _tag_sector_evidence(source_id, target_sector, "TARGETS")
                 relationships.append(
                     {
                         "rel_type": "TARGETS",
@@ -4477,8 +4519,8 @@ class MISPToNeo4jSync:
                         "from_key": {"mitre_id": mitre_id},
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
-                        "confidence": confidence,
-                        "match_type": "zone_classification",  # 2026-10 audit: every edge carries an evidence label
+                        "confidence": _conf,
+                        "match_type": _label,  # 2026-10 audit: every edge carries an evidence label
                         "misp_event_id": _evt_id,
                     }
                 )
@@ -4534,6 +4576,7 @@ class MISPToNeo4jSync:
 
             # Build TARGETS relationship to sector
             if target_sector:
+                _label, _conf = _tag_sector_evidence(source_id, target_sector, "TARGETS")
                 relationships.append(
                     {
                         "rel_type": "TARGETS",
@@ -4541,8 +4584,8 @@ class MISPToNeo4jSync:
                         "from_key": {"value": value, "indicator_type": indicator_type},
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
-                        "confidence": confidence,
-                        "match_type": "zone_classification",  # 2026-10 audit: every edge carries an evidence label
+                        "confidence": _conf,
+                        "match_type": _label,  # 2026-10 audit: every edge carries an evidence label
                         "misp_event_id": _evt_id,
                     }
                 )

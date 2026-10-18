@@ -218,7 +218,9 @@ class EdgeGuardPipeline:
         """``zone`` of a STIX object and, as the attribute flow sets them (``MISPToNeo4jSync._with_provenance``),
         the zones its source states itself (``stated_zones``, 2026-10-16): a CVE of a CISA ICS event gets the
         same ``advisory_sector`` link from ``build_relationships`` step 7b whichever flow loaded it. The STIX
-        objects carry no ``NVD_META``, so no advisory ids: the link cites no advisory."""
+        objects carry no ``NVD_META``, so no advisory ids: the link cites no advisory. Nor do they carry an
+        OTX pulse's ``industries`` (2026-10-18): an OTX object states no sector, and its links stay
+        ``zone_classification``."""
         zones = self._extract_zones_from_stix_labels(obj)
         fields: dict = {"zone": zones}
         stated = sector_stated_zones(_stix_object_source(obj), zones)

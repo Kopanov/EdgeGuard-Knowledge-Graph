@@ -62,10 +62,10 @@ from config import (
     OTX_INCREMENTAL_LOOKBACK_DAYS,
     OTX_INCREMENTAL_MAX_PAGES,
     OTX_INCREMENTAL_OVERLAP_SEC,
-    OTX_INDUSTRY_ZONE_ALIASES,
     SOURCE_TAGS,
     SSL_VERIFY,
     detect_zones_from_text,
+    otx_industry_zones,
     resolve_collection_limit,
 )
 
@@ -653,22 +653,20 @@ class OTXCollector:
                 pulse_text = json.dumps(pulse).lower()
                 sectors = self.detect_sectors(pulse_text)
 
-                # OTX-native industry_sectors override: if OTX itself classified
-                # the pulse into industries, use that as authoritative sector data.
+                # OTX's own classification: the pulse's ``industries`` are the report author's
+                # statement of the sectors its campaign targets. Their zones join the keyword hits
+                # in the item's zones, and the raw list travels with every item (``otx_industries``):
+                # the sync takes the zones it maps to as the pulse's statement (``otx_industries`` on
+                # TARGETS, ``sector_evidence``, 2026-10-18), the keyword hits as inferred.
                 #
-                # PR-N6 hotfix #4 (audit 09, Maintainer #1): the inline
-                # industry map moved to ``config.OTX_INDUSTRY_ZONE_ALIASES``
-                # so it lives side-by-side with ``VALID_ZONES`` /
-                # ``SECTOR_KEYWORDS``. Previously this was a hidden
-                # second source of truth containing vocabulary absent
-                # from ``SECTOR_KEYWORDS`` ("pharmaceutical", "utilities",
-                # "oil", "gas", "insurance") — so vocabulary refinements
-                # in ``config.py`` silently diverged from OTX ingestion.
+                # PR-N6 hotfix #4 (audit 09, Maintainer #1): the industry map lives in
+                # ``config.OTX_INDUSTRY_ZONE_ALIASES`` beside ``VALID_ZONES`` / ``SECTOR_KEYWORDS``,
+                # read through ``config.otx_industry_zones`` (the collector and the sync read it alike).
                 otx_industries = pulse.get("industries", [])
-                if otx_industries:
-                    for ind_name in otx_industries:
-                        mapped = OTX_INDUSTRY_ZONE_ALIASES.get(str(ind_name).lower().strip())
-                        if mapped and mapped not in sectors:
+                industry_zones = otx_industry_zones(otx_industries)
+                if industry_zones:
+                    for mapped in industry_zones:
+                        if mapped not in sectors:
                             sectors.append(mapped)
                     # Remove "global" if we now have specific sectors
                     if len(sectors) > 1 and "global" in sectors:

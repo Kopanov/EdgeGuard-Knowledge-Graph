@@ -1282,6 +1282,23 @@ assert set(OTX_INDUSTRY_ZONE_ALIASES.values()) <= VALID_ZONES, (
     f"invalid targets: {set(OTX_INDUSTRY_ZONE_ALIASES.values()) - VALID_ZONES}"
 )
 
+
+def otx_industry_zones(industries: object) -> List[str]:
+    """The zones an OTX pulse's ``industries`` map to through ``OTX_INDUSTRY_ZONE_ALIASES``, each once, in the
+    order the pulse lists them (2026-10-18). An industry the table does not map gives none, and so does a value
+    that is not a list (the sync reads ``OTX_META`` lists only). The one reading of the table: the OTX collector
+    adds these zones to the pulse's zones, and ``sector_evidence.stated_zones`` takes them as the pulse's own
+    statement of the sectors its campaign targets."""
+    if not isinstance(industries, (list, tuple)):
+        return []
+    zones: List[str] = []
+    for industry in industries:
+        zone = OTX_INDUSTRY_ZONE_ALIASES.get(str(industry).lower().strip())
+        if zone and zone not in zones:
+            zones.append(zone)
+    return zones
+
+
 # PR-N6 hotfix #1 (audit 09 / Maintainer #1): module-load assertion
 # making the previously-implicit invariant ``SECTOR_KEYWORDS.keys()
 # ⊆ VALID_ZONES`` load-bearing. Pre-fix the two constants were

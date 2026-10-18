@@ -252,6 +252,9 @@ def _deprecated_tags(item: Dict[str, Any]) -> List[str]:
 # all N ids in `rids`; the earlier 32 cut every link beyond the 33rd pulse (Mirai, Cobalt Strike,
 # AgentTesla appear in hundreds). MISP `comment` is TEXT (64 KB); 500 × ~27 chars ≈ 13 KB.
 _MAX_REPORT_IDS = 500
+# 2026-10-18: ``MITRE_USES_TECHNIQUES.ind``, the OTX pulse's own industries (a pulse lists a handful).
+_MAX_INDUSTRIES = 20
+_MAX_INDUSTRY_CHARS = 64
 # 2026-10: an OTX_META ``pa`` entry, "family::adversary::pulse" (family and adversary up to 128
 # characters each, the pulse id up to 64).
 _MAX_PAIR_CHARS = 128 + 2 + 128 + 2 + 64
@@ -438,6 +441,10 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
       ``sapn`` — ``several_actor_pulses_by_name`` (2026-10): the same judgement made by name
                 because the collector could not load the canonical threat-actor reference (the
                 aliases of one actor count as several); the sync attributes no malware from them.
+      ``ind`` — ``otx_industries`` (2026-10-18): the industries the OTX pulse classified itself into
+                (as OTX names them), so the sync can tell the sectors the pulse states from those
+                EdgeGuard inferred from its text (``sector_evidence.stated_zones``); an indicator
+                carries them in ``OTX_META.otx_industries``.
     Lists are capped so the comment stays within MISP field limits.
     """
     meta: Dict[str, Any] = {}
@@ -457,6 +464,11 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
         marks = [str(x)[:64] for x in (item.get(field_name) or []) if x]
         if marks:
             meta[mark_key] = marks[:_MAX_REPORT_IDS]
+    industries = item.get("otx_industries")
+    if isinstance(industries, (list, tuple)):
+        named = [str(x).strip()[:_MAX_INDUSTRY_CHARS] for x in industries if x is not None and str(x).strip()]
+        if named:
+            meta["ind"] = named[:_MAX_INDUSTRIES]
     # 2026-10 (R6): MITRE group → software ``uses`` (actors only)
     uses_malware = [str(x)[:128] for x in (item.get("uses_malware") or []) if x]
     if uses_malware:
