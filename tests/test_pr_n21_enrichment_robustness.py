@@ -53,7 +53,7 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n21")
 
 
 # ===========================================================================
-# Fix #1-#4 — the four swallowers must re-raise
+# Fix #1-#4 — the enrichment-job swallowers must re-raise
 # ===========================================================================
 
 
@@ -67,7 +67,8 @@ def _function_body(src: str, fn_name: str) -> str:
 
 
 class TestFix1234SwallowersReraise:
-    """Each of the 4 enrichment jobs must re-raise on outer except instead of
+    """Each of these enrichment jobs (decay_ioc_confidence, build_campaign_nodes,
+    bridge_vulnerability_cve) must re-raise on outer except instead of
     silently returning zero results. Pin via AST-walk of each function."""
 
     def _src(self) -> str:
