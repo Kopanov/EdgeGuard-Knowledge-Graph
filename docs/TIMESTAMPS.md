@@ -235,19 +235,35 @@ The export layer (`src/stix_exporter.py`) is the contract that ResilMesh
 and other downstream consumers read. Each STIX SDO type has a canonical
 mapping.
 
+STIX 2.1 (sections 3.2 and 3.6) identifies a version of an object by its
+`id` and `modified`; `created` never changes between versions and
+`modified` is never before `created`. Every exported time therefore comes
+from the graph, never from the clock, and re-exporting the same graph
+gives byte-identical objects:
+
+| Object | `created` | `modified` |
+|--------|-----------|------------|
+| Every SDO (`_producer_created_modified`) | Concept 3 (`n.first_imported_at`); on a Campaign or a Sector, which have none, `n.created_at` | The later of `created` and concept 4 (`n.last_updated`) |
+| Indicator SDO (`_indicator_created_modified`) | As every SDO | The latest of `created`, `n.last_recorded_at` and `n.aging_since` |
+| Relationship SRO (`_relationship_created_modified`) | `r.created_at`, else `r.imported_at` | The later of `created` and `r.updated_at` |
+| SRO behind several graph relationships (edges to twin CVE / Vulnerability nodes; `ATTRIBUTED_TO` and `USES_MALWARE`) | The earliest `created` of the edges | The latest `modified` of the edges |
+| Any object without one of these times | `2026-10-11T00:00:00.000Z` (`_PROVENANCE_OBJECTS_CREATED`) | The later of `created` and the `modified` source above |
+| Producer identity, extension definition | Fixed constants in the code | Fixed constants, moved forward when the object's content changes |
+
 #### Indicator SDO (STIX 2.1 §3.2)
 
 | STIX field | Required | Maps to | Notes |
 |------------|----------|---------|-------|
 | `created`              | ✅ | Concept 3 (`n.first_imported_at`) via `_producer_created_modified` | When the SDO was created in our system |
 | `modified`             | ✅ | The latest of `created`, `n.last_recorded_at` and `n.aging_since` (`_indicator_created_modified`); concept 4 (`n.last_updated`) is not read | When a source last reported it or its aging state last changed; never before `created` |
-| `valid_from`           | ✅ | Concept 1 (`r.source_reported_first_at`, MIN across edges) `??` Concept 3 (`n.first_imported_at`) `??` `now()` | See "valid_from fallback chain" below |
-| `valid_until`          | ⏵ | (omit unless we have a real expiry) | Don't synthesize |
+| `valid_from`           | ✅ | Concept 1 (`r.source_reported_first_at`, MIN across edges) `??` Concept 3 (`n.first_imported_at`) `??` the SDO's `created` | See "valid_from fallback chain" below |
+| `valid_until`          | ⏵ | `n.retired_at` `??` the basis of the age (`coalesce(n.last_reported_at, n.first_imported_at)`) plus `EDGEGUARD_AGING_RETIRE_DAYS` (`indicator_aging.retirement_time`) | The real expiry the aging rule sets: the retirement, or when the rule will retire the indicator without a newer report. Only on a node the rule evaluated (`aging_basis` or `retired_at`), only when later than `valid_from`; omitted when the aging setting is wrong |
+| `confidence`           | ⏵ | `n.confidence_score` (the aged value) × 100 `??` `n.source_confidence` × 100 | Omitted when neither is a number in [0, 1] |
 | `x_edgeguard_first_seen_at_source` | custom | Concept 1 (verbatim, MIN across edges) | Explicit preservation; absent if no source claim |
 | `x_edgeguard_last_seen_at_source`  | custom | Concept 2 (verbatim, MAX across edges) | Explicit preservation; absent if no source claim |
 | `x_edgeguard_first_imported_at`    | custom | Concept 3 | Explicit preservation |
 | `x_edgeguard_last_updated`         | custom | Concept 4 | Explicit preservation |
-| `x_edgeguard_first_seen_inferred`  | custom | `true` if `valid_from` came from the fallback chain (concept 3 or `now()`); absent / `false` otherwise | Lets consumers filter for source-truthful evidence only |
+| `x_edgeguard_first_seen_inferred`  | custom | `true` if `valid_from` came from the fallback chain (concept 3 or the SDO's `created`); absent / `false` otherwise | Lets consumers filter for source-truthful evidence only |
 
 #### Vulnerability SDO (STIX 2.1 §3.4)
 
@@ -258,7 +274,7 @@ timeline is carried in extension properties:
 | STIX field | Maps to | Notes |
 |------------|---------|-------|
 | `created`  | Concept 3 (`n.first_imported_at`) via `_producer_created_modified` | When EdgeGuard first stored the CVE |
-| `modified` | Concept 4 (`n.last_updated`) | When EdgeGuard last wrote it |
+| `modified` | The later of `created` and concept 4 (`n.last_updated`) | When EdgeGuard last wrote it |
 | `x_edgeguard_published`, `x_edgeguard_last_modified` | Node `published` / `last_modified` (NVD's record) | The CVE's own timeline (`_VULNERABILITY_PROMOTED_FIELDS`) |
 | `x_edgeguard_first_imported_at`    | Concept 3 | When EdgeGuard ingested it (separate from NVD timeline) |
 | `x_edgeguard_last_updated`         | Concept 4 | When EdgeGuard last refreshed |
@@ -294,14 +310,16 @@ In the manual fallback:
 ```
 valid_from = source_reported_first_at IF available
           ELSE first_imported_at + set x_edgeguard_first_seen_inferred=true
-          ELSE now() + set x_edgeguard_first_seen_inferred=true
+          ELSE the SDO's created + set x_edgeguard_first_seen_inferred=true   (primary path)
+          ELSE now() + set x_edgeguard_first_seen_inferred=true               (manual-fallback path)
 ```
 
 | Branch | When | `x_edgeguard_first_seen_inferred` |
 |--------|------|-----------------------------------|
 | (1) Source-truthful | `r.source_reported_first_at IS NOT NULL` from any edge (primary path) — OR MISP-native `Attribute.first_seen` (manual-fallback path) | absent (or `false`) |
 | (2) Inferred from import time | source claim absent BUT `n.first_imported_at` present (primary path) — OR MISP `Attribute.timestamp` present (manual-fallback path: when MISP first ingested the datum, analogous to `first_imported_at`) | `true` |
-| (3) Inferred from now() | both absent (orphan SDO with no node context — defensive) | `true` |
+| (3) Inferred from the SDO's `created` (primary path) | both absent: the SDO's `created` (`n.created_at`, else the fixed `2026-10-11T00:00:00.000Z`), so a re-export gives the same value | `true` |
+| (3) Inferred from now() (manual-fallback path) | both absent in a MISP attribute converted without a node | `true` |
 
 **Manual-fallback path note.** The
 ``run_misp_to_neo4j._attribute_to_stix21`` path re-emits STIX directly
@@ -369,11 +387,12 @@ The same rules apply where a time window or a resume cursor is computed:
    Indicator semantics) or a real-world entity (use Vulnerability
    semantics)
 2. Always use `_producer_created_modified` for `created` / `modified`
-   (or document why deviating)
+   (or document why deviating); never let `stix2` stamp a default
+   timestamp, which is the wall clock
 3. Always call `_apply_source_truthful_custom_props` to attach the
    `x_edgeguard_*` extensions
 4. If the SDO has its own validity timestamp (analogous to
-   `valid_from`), use the source-truthful → import-time → now()
+   `valid_from`), use the source-truthful → import-time → `created`
    fallback chain and set `x_edgeguard_first_seen_inferred` on the
    fallback branches
 5. Add a row to the Layer 4 table above
@@ -402,12 +421,17 @@ Any change to `coerce_iso`, `_stix_ts`, or `_clamp_future_to_now` must:
   inputs
 - **End-to-end CVE-2013 fixture** — feed `published="2013-05-29T00:00:00Z"`
   through the full pipeline; assert STIX Indicator's `valid_from == "2013-..."`,
-  `created == today`, `x_edgeguard_first_seen_at_source == "2013-..."`,
+  `created == first_imported_at`, `x_edgeguard_first_seen_at_source == "2013-..."`,
   `x_edgeguard_first_seen_inferred` absent
 - **Inferred fallback fixture** — feed an indicator with no source
   `first_seen`; assert `x_edgeguard_first_seen_inferred == true`,
   `valid_from == first_imported_at`
 - **Boundary tests** — epoch 0/1/9999, year 1900/9999, leap second
+
+`tests/test_stix_exporter.py` exports every seed type twice under two
+different patched clocks and asserts byte-identical JSON, `modified >=
+created` on every object and `valid_until > valid_from`;
+`tests/test_export_paths_neo4j.py` asserts the same on a real Neo4j.
 
 ---
 
@@ -427,6 +451,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — STIX export times only from the graph: SDO `created` falls back to `created_at` (Campaign, Sector) and `modified` is never before `created`; relationships take `created_at` / `imported_at` / `updated_at` (they had the export time); the primary `valid_from` chain ends at the SDO's `created` instead of `now()`; the Indicator's `confidence` and `valid_until` (the retirement time of the aging rule).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; the change notes of the timestamp model and its backwards-compatibility guide moved to History and the appendix.
 - 2026-10-17 — Corrected against the code: a Vulnerability SDO's `created` / `modified` are `first_imported_at` / `last_updated` (NVD's dates are `x_edgeguard_published` / `x_edgeguard_last_modified`; only Indicator SDOs carry the inferred flag); OTX claims dropped by the reliable first-seen allowlist; CISA ICS row; `coerce_iso` keeps an aware input's offset and has no year floor for strings; an Indicator's `SOURCED_FROM` edge keeps the report values, not the basis kind; collectors that set `last_updated`; reliable sources marked by `reliable_first_seen=True` in `src/source_registry.py`.
