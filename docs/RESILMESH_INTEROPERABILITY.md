@@ -777,7 +777,7 @@ one).
 | [`COLLECTORS.md`](COLLECTORS.md) | Per-collector documentation with MISP output format |
 | [`docs/DATA_SOURCES.md`](DATA_SOURCES.md) | All threat intelligence sources and what they provide |
 | [`docs/DATA_SOURCES_RATE_LIMITS.md`](DATA_SOURCES_RATE_LIMITS.md) | API rate limits and quotas |
-| [`docs/BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md) | The seven-item pre-launch operator pass that must be walked through before triggering a 730d baseline (preflight, smoke, Alertmanager wiring, MISP scale, RAM/disk, unicode-bypass audit, fresh-baseline deploy and re-feed) |
+| [`docs/BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md) | The six-item pre-launch operator pass that must be walked through before triggering a 730d baseline (preflight, smoke, Alertmanager wiring, MISP scale, RAM/disk, fresh-baseline deploy and re-feed) |
 | [`docs/RUNBOOK.md`](RUNBOOK.md) § 8 | Operator triage tree for `_MispFallbackHardError` (the fallback's 4 hard-failure modes: errors-payload, unexpected-shape, non-200 and cap-hit; and a failed or incomplete primary event listing) |
 
 ---
@@ -786,6 +786,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The launch checklist row counts six items: its unicode-bypass audit item was removed.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — §8.2 and §8.3: EdgeGuard's `CVE` nodes are queryable through ISIM GraphQL; the `Vulnerability` nodes there are ResilMesh's, since the scheduled pipeline writes none (§3.1).
 - 2026-10-17 — Rewritten as a guide to current behaviour, with history and kept-graph procedures at the end, and checked against the code: `Vulnerability` and `MAPS_TO` are not EdgeGuard output, `Technique.is_subtechnique` is true for a dotted id (every sync wrote false before), `--edgeguard-only` keeps EdgeGuard relationships between partner nodes, UNIQUE constraints cover the shared vulnerability labels, and the `misp_attribute_tag` row names the tags the sync reads.
