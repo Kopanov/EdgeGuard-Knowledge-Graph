@@ -391,12 +391,22 @@ links today, so no bundle carries them. Not exported as SROs: `IN_TACTIC`
 scripts/resilmesh_stix_smoke.sh               # depth=2, pretty
 scripts/resilmesh_stix_smoke.sh --depth 1     # depth=1, minimal
 scripts/resilmesh_stix_smoke.sh --no-pretty   # raw JSON on stdout
+scripts/resilmesh_stix_smoke.sh --actor "Lazarus Group" --cve CVE-2017-0144
 ```
 
-The script reads `/stix/types` first, then curls every listed object
-type at its example identifier. It asserts HTTP 200 and bundle shape,
-and prints the producer identity and the build (`X-EdgeGuard-Git-Sha`).
-Exit code `0` on success.
+The script reads `/stix/types` first, then exports one object of every
+listed type: the actor `APT28`, the technique `T1059`, the CVE
+`CVE-2021-44228` (all three are in a baseline graph) and the newest
+indicator `GET /indicators?limit=1` returns; `--actor`, `--technique`,
+`--cve` and `--indicator` name others. A type without one of these
+identifiers is exported at its `/stix/types` example. Each export must
+answer HTTP 200 with a STIX bundle that holds at least one object besides
+the producer identity, the extension definition and the TLP marking
+definitions: a bundle holding only those means the identifier is not in
+the graph, and the check fails. The script prints the producer identity
+and the build (`X-EdgeGuard-Git-Sha`) and exits `0` when every check
+passes, `1` otherwise. It runs on bash 3.2 (the macOS system bash) and
+later, and needs curl and jq.
 
 ## 7. Validation
 
@@ -538,6 +548,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — § 6: the smoke script runs on bash 3.2, exports identifiers a baseline graph holds (`APT28`, `T1059`, `CVE-2021-44228`, the newest indicator; flags name others) and fails a bundle without a graph object (it passed on the empty bundle of the `/stix/types` indicator example).
 - 2026-10-18 — § 5 states that the collectors link no indicator to a CVE, so a `cve` bundle at `depth=1` holds the `vulnerability` alone.
 - 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until` and no longer `x_edgeguard_last_updated`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
