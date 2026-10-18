@@ -75,10 +75,13 @@ class _Api:
         bundles: Dict[str, Union[dict, bytes]],
         indicator: Optional[str] = "203.0.113.7",
         types: Optional[Union[dict, bytes]] = None,
+        indicators_answer: Optional[Union[int, bytes]] = None,
     ):
         self.bundles = bundles
         self.indicator = indicator
         self.types = types
+        # An HTTP status (int) or a raw body (bytes) that replaces the /indicators answer.
+        self.indicators_answer = indicators_answer
         self.paths: List[str] = []
         api = self
 
@@ -97,6 +100,10 @@ class _Api:
                     types = [{"name": n, "example": "1.2.3.4"} for n in ("indicator", "actor", "technique", "cve")]
                     return self._send(200, {"object_types": types})
                 if route == "/indicators":
+                    if isinstance(api.indicators_answer, int):
+                        return self._send(api.indicators_answer, {"detail": "error"})
+                    if isinstance(api.indicators_answer, bytes):
+                        return self._send(200, api.indicators_answer)
                     rows = [{"value": api.indicator}] if api.indicator else []
                     return self._send(200, {"indicators": rows, "total": len(rows)})
                 m = re.fullmatch(r"/stix/export/([a-z]+)/(.+)", route)
@@ -220,6 +227,18 @@ class TestScriptRuns:
             api.close()
         assert done.returncode == 1
         assert "no indicator to export" in done.stdout
+        assert "returned none" in done.stdout
+
+    @pytest.mark.parametrize("answer", [500, b"<html>maintenance</html>"])
+    def test_a_failed_indicator_lookup_is_reported_as_failed_not_as_an_empty_graph(self, bash, answer):
+        api = _Api(_good_bundles(), indicators_answer=answer)
+        try:
+            done = _run(bash, api)
+        finally:
+            api.close()
+        assert done.returncode == 1
+        assert "GET /indicators?limit=1 failed" in done.stdout
+        assert "returned none" not in done.stdout
 
     def test_flags_override_and_identifiers_are_url_encoded(self, bash):
         api = _Api(_good_bundles())

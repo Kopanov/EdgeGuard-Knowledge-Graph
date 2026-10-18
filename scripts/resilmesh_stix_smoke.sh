@@ -155,12 +155,16 @@ for ot in "${OBJECT_TYPES[@]}"; do
         cve)       identifier="$CVE" ;;
         indicator)
             identifier="$INDICATOR"
-            if [[ -z "$identifier" ]]; then
-                identifier=$(lookup_indicator || true)
+            reason="GET /indicators?limit=1 returned none"
+            if [[ -z "$identifier" ]] && ! identifier=$(lookup_indicator); then
+                # An unreachable API, an HTTP error or a body that is not JSON is a failed lookup,
+                # not an empty graph.
+                identifier=""
+                reason="GET /indicators?limit=1 failed (unreachable, HTTP error or not JSON)"
             fi
             if [[ -z "$identifier" ]]; then
                 echo "▶ GET /stix/export/indicator/..."
-                echo "  ✗ no indicator to export: GET /indicators?limit=1 returned none (pass --indicator VALUE)"
+                echo "  ✗ no indicator to export: $reason (pass --indicator VALUE)"
                 FAILED=$((FAILED + 1))
                 echo
                 continue
