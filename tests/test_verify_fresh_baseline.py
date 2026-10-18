@@ -238,7 +238,17 @@ _SECTOR_BREAKDOWN_ROWS = [
     {"type": "AFFECTS", "label": "CVE", "sector": "energy", "match_type": "zone_classification", "c": 1400},
     {"type": "TARGETS", "label": "Indicator", "sector": "finance", "match_type": "zone_classification", "c": 64000},
 ]
-_OTX_LINKS_ROW = {"otx_links": 0, "on_affects": 0, "misplaced": 0, "citing_no_stating_report": 0, "examples": []}
+_OTX_LINKS_ROW = {
+    "otx_links": 0,
+    "on_affects": 0,
+    "misplaced": 0,
+    "citing_no_stating_report": 0,
+    "examples": [],
+    "citing_examples": [],
+}
+# The OTX records of Indicator / ThreatActor / Malware nodes: many give a sector, none states one (the
+# default fixture's graph predates the statement; ``--require-otx-industries`` fails on it).
+_OTX_RECORDS_ROW = {"otx_records": 148000, "otx_records_with_a_sector": 54250, "otx_records_stating": 0}
 _SECTOR_LABEL_COUNT_ROWS = [
     {"type": "AFFECTS", "match_type": "zone_classification", "links": 8500},
     {"type": "TARGETS", "match_type": "zone_classification", "links": 64000},
@@ -262,6 +272,8 @@ def _sector_evidence_rows(s: str) -> Optional[List[Dict[str, Any]]]:
         return [dict(_OTX_LINKS_ROW)]
     if "AS otx_not_labelled" in s:
         return [{"stated": 0, "otx_not_labelled": 0, "examples": []}]
+    if "AS otx_records_with_a_sector" in s:
+        return [dict(_OTX_RECORDS_ROW)]
     if "count(*) AS links ORDER BY type, match_type" in s:
         return [dict(x) for x in _SECTOR_LABEL_COUNT_ROWS]
     if "] AS other RETURN" in s:
@@ -415,6 +427,7 @@ def _run(vfb, monkeypatch, override=None, **kw):
         kw.get("require_ics", False),
         kw.get("require_cisa_ics", False),
         kw.get("require_malwarebazaar", False),
+        kw.get("require_otx_industries", False),
     )
 
 
@@ -2077,11 +2090,86 @@ class TestOtxIndustriesLabel:
         rep = _run(vfb, monkeypatch, override=override)
         assert [c["check"] for c in rep.failed] == ["otx_stated_sectors_linked_as_otx_industries"]
 
+    def test_a_link_citing_none_of_its_stating_reports_is_named(self, vfb, monkeypatch):
+        """A stated link that cites none of the pulses its sector's ``stated_refs`` record fails with the
+        node and sector to trace (``citing_examples``), not with an empty example list."""
+
+        def override(st, rows):
+            if "AS otx_links" in st:
+                assert "AS citing_examples" in st
+                return [
+                    {
+                        "otx_links": 41200,
+                        "on_affects": 0,
+                        "misplaced": 0,
+                        "citing_no_stating_report": 1,
+                        "examples": [],
+                        "citing_examples": ["Indicator 198.51.100.23 -> energy"],
+                    }
+                ]
+            return self._otx_graph(st, rows)
+
+        rep = _run(vfb, monkeypatch, override=override)
+        check = _check(rep, "otx_industries_only_where_otx_stated")
+        assert check["ok"] is False and check["detail"]["citing_examples"] == ["Indicator 198.51.100.23 -> energy"]
+
+    def test_the_citing_examples_name_the_links_the_count_counts(self, vfb, monkeypatch):
+        seen: Dict[str, str] = {}
+
+        def fake_post(statement, params=None, timeout=180):
+            if "AS otx_links" in statement:
+                seen["links"] = statement
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        vfb.run_checks(False, False, False)
+        counted, examples = seen["links"].split("AS citing_no_stating_report", 1)
+        condition = "stated AND size(stating_refs) > 0 AND NONE(_x IN stating_refs WHERE _x IN "
+        assert condition in counted and condition in examples.split("AS citing_examples", 1)[0]
+
+    def test_require_otx_industries_fails_when_otx_records_give_sectors_but_state_none(self, vfb, monkeypatch):
+        """A run that lost the pulses' industries before the sync (a regression in MISPWriter or the parser)
+        leaves a graph without statements, which the two OTX checks do not judge. With
+        ``--require-otx-industries`` the stated-sector check fails once OTX records give a sector."""
+        rep = _run(vfb, monkeypatch)
+        assert _check(rep, "otx_stated_sectors_linked_as_otx_industries")["ok"] is None
+        rep = _run(vfb, monkeypatch, require_otx_industries=True)
+        assert [c["check"] for c in rep.failed] == ["otx_stated_sectors_linked_as_otx_industries"]
+        detail = _check(rep, "otx_stated_sectors_linked_as_otx_industries")["detail"]
+        assert detail["otx_records_with_a_sector"] == 54250 and detail["otx_records_stating"] == 0
+
+    @pytest.mark.parametrize(
+        "records",
+        [
+            # no OTX record gives a sector (OTX off, or a graph written before the per-source zones)
+            {"otx_records": 0, "otx_records_with_a_sector": 0, "otx_records_stating": 0},
+            {"otx_records": 148000, "otx_records_with_a_sector": 0, "otx_records_stating": 0},
+        ],
+    )
+    def test_require_otx_industries_does_not_judge_without_an_otx_sector(self, vfb, monkeypatch, records):
+        def override(st, rows):
+            if "AS otx_records_with_a_sector" in st:
+                return [dict(records)]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=override, require_otx_industries=True)
+        assert _check(rep, "otx_stated_sectors_linked_as_otx_industries")["ok"] is None
+        assert rep.failed == []
+
+    def test_require_otx_industries_passes_a_graph_with_statements(self, vfb, monkeypatch):
+        def override(st, rows):
+            if "AS otx_records_with_a_sector" in st:
+                return [{"otx_records": 148000, "otx_records_with_a_sector": 54250, "otx_records_stating": 40100}]
+            return self._otx_graph(st, rows)
+
+        rep = _run(vfb, monkeypatch, override=override, require_otx_industries=True)
+        assert rep.failed == [] and _check(rep, "otx_stated_sectors_linked_as_otx_industries")["ok"] is True
+
     def test_queries_read_the_table(self, vfb, monkeypatch):
         seen: Dict[str, Any] = {}
 
         def fake_post(statement, params=None, timeout=180):
-            for key in ("AS otx_links", "AS otx_not_labelled", "AS with_stated_zones"):
+            for key in ("AS otx_links", "AS otx_not_labelled", "AS with_stated_zones", "AS otx_records_with_a_sector"):
                 if key in statement:
                     seen[key] = (statement, params)
             return _healthy_rows(statement, params or {})
@@ -2101,6 +2189,9 @@ class TestOtxIndustriesLabel:
         assert "(n:Indicator OR n:ThreatActor OR n:Malware)" in stated and "OPTIONAL MATCH (n)-[r:TARGETS]->" in stated
         zoned, params = seen["AS with_stated_zones"]
         assert params == {"stating_feeds": ["cisa_ics"]}
+        records, params = seen["AS otx_records_with_a_sector"]
+        assert params == {"feeds": ["alienvault_otx"]}
+        assert "(n:Indicator OR n:ThreatActor OR n:Malware)" in records and "_z <> 'global'" in records
 
 
 # --------------------------------------------------------------------------- 16. descriptions and aging
@@ -2160,7 +2251,7 @@ class TestRankedDescriptionsAndAging:
         assert all(ranking_for_label(label) for label in vfb._RANKED_DESCRIPTION_LABELS)
 
     def test_the_cli_judges_every_graph_alike(self, vfb, monkeypatch, capsys):
-        """The CLI passes only the three ``--require-*`` flags; there is no option that reports instead of
+        """The CLI passes only the four ``--require-*`` flags; there is no option that reports instead of
         judging the description-source, aging or stated-sector checks."""
         seen = {}
 
@@ -2174,7 +2265,10 @@ class TestRankedDescriptionsAndAging:
         monkeypatch.setattr(vfb, "run_checks", fake_run_checks)
         monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py"])
         assert vfb.main() == 0
-        assert seen["args"] == (False, False, False) and seen["kwargs"] == {}
+        assert seen["args"] == (False, False, False, False) and seen["kwargs"] == {}
+        monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py", "--require-otx-industries"])
+        assert vfb.main() == 0
+        assert seen["args"] == (False, False, False, True)
         monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py", "--legacy-graph"])
         with pytest.raises(SystemExit) as exc:
             vfb.main()

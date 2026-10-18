@@ -27,22 +27,26 @@ and ``build_relationships`` (Q7a-Q7d, from the node's zones) therefore agree.
 
 Which zones a record states is ``stated_zones``: every specific zone of a CISA ICS record
 (``STATING_FEEDS``), the zones an OTX record's own industries map to (``INDUSTRY_STATING_FEEDS``), none
-for every other feed.
+for every other feed. One OTX record can unite several pulses: the collector folds the pulses of a run that
+list the same item into the first one's item, and the zones each later pulse's industries state travel with
+it as ``"<zone>|<pulse id>"`` entries (``report_stated_zones``, read by ``report_zone_pairs``), so a
+pulse's statement counts whichever pulse of the run listed the item first.
 
 One link per (node, relationship type, sector) carries the strongest label among the records that gave
 the sector, as for every other link type; ``r.sources`` names every feed that gave the sector, by
 statement or by inference, and only those feeds. Which feed stated a sector is recorded on that feed's
 ``SOURCED_FROM`` edge of the node (``stated_zones``), next to the zones its records gave (``zones``).
 
-``r.source_refs`` of a sector link cites only the records that gave the sector. A stating feed's records
-can each state other sectors (a CVE named by an ICS advisory for Energy and a medical advisory for
-Healthcare), so the feed's ``SOURCED_FROM`` edge also records which of its records stated which sector
+``r.source_refs`` of a sector link cites the records that gave the sector, as far as the feed records them
+per sector. A stating feed's records can each state other sectors (a CVE named by an ICS advisory for
+Energy and a medical advisory for Healthcare), so the feed's ``SOURCED_FROM`` edge also records which of its records stated which sector
 (the edge property ``stated_refs``, entries ``"<zone>|<source ref>"`` built by ``stated_refs``: the CISA ICS
-advisories, the OTX pulse whose industries the record carries), and a sector link takes the feed's
+advisories, the OTX pulses whose industries state the sector), and a sector link takes the feed's
 references for its sector from there (``zone_refs``). A sector the feed records none for (an inferred one,
-an inferring feed, or an edge written before 2026-10-16) gives all of its references. Only for a feed of
-``STATING_FEEDS`` are the references recorded for a sector all the records that gave it: an OTX record
-also gives zones by keyword, for which it records none.
+an inferring feed, or an edge written before 2026-10-16) gives all of its references: a sector an OTX record
+inferred from its text cites every pulse of the record, since EdgeGuard records no per-pulse reference for a
+keyword hit. Only for a feed of ``STATING_FEEDS`` are the references recorded for a sector all the records
+that gave it: an OTX record also gives zones by keyword, for which it records none.
 
 The confidence of a statement label must stay above ``zone_classification``'s: the sync keeps the label
 of the row with the higher confidence, so an equal value would let an inferred row take the label of a
@@ -148,21 +152,46 @@ def industry_zones(industries: Any) -> List[str]:
     return otx_industry_zones(industries)
 
 
-def stated_zones(source_id: Optional[str], zones: Any, industries: Any = None) -> List[str]:
+def report_zone_entry(zone: str, report_id: str) -> str:
+    """The ``"<zone>|<report id>"`` entry of a zone a folded report stated (``report_zone_pairs`` reads it)."""
+    return f"{zone}{STATED_REF_SEPARATOR}{report_id}"
+
+
+def report_zone_pairs(entries: Any) -> List[Tuple[str, str]]:
+    """``(zone, report id)`` of each ``"<zone>|<report id>"`` entry of ``entries`` (2026-10-18): the zones the
+    other reports folded into a record stated, each with the report that stated it (OTX:
+    ``report_stated_zones``, the later pulses of the run that listed the item). The zone is lower-cased;
+    an entry that is not a string, has no separator, an empty part or the zone ``global`` is skipped, and
+    so is ``entries`` when it is not a list."""
+    if not isinstance(entries, (list, tuple)):
+        return []
+    pairs: List[Tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        zone, sep, report = entry.partition(STATED_REF_SEPARATOR)
+        zone, report = zone.strip().lower(), report.strip()
+        if sep and zone and report and zone != GLOBAL_ZONE and (zone, report) not in pairs:
+            pairs.append((zone, report))
+    return pairs
+
+
+def stated_zones(source_id: Optional[str], zones: Any, industries: Any = None, report_zones: Any = None) -> List[str]:
     """The zones of a record that its feed states itself, sorted; ``[]`` for a feed that does not.
 
     ``zones`` are the record's zones, ``industries`` its own classification into industries (an OTX
-    record's ``otx_industries``). For a feed of ``STATING_FEEDS`` every specific zone of the record
-    (``global`` is no sector); for a feed of ``INDUSTRY_STATING_FEEDS`` the specific zones of the record
-    that its industries map to (``industry_zones``), its keyword hits being inferred; for every other feed
-    none, since EdgeGuard inferred them. A record without industries (an OTX attribute written without
-    them, a STIX object) states nothing.
+    record's ``otx_industries``) and ``report_zones`` the zones the other reports folded into the record
+    stated (``"<zone>|<report id>"``, ``report_zone_pairs``). For a feed of ``STATING_FEEDS`` every specific
+    zone of the record (``global`` is no sector); for a feed of ``INDUSTRY_STATING_FEEDS`` the specific
+    zones of the record that its industries, or a folded report's, map to, its keyword hits being
+    inferred; for every other feed none, since EdgeGuard inferred them. A record without industries (an
+    OTX attribute written without them, a STIX object) states nothing.
     """
     specific = sorted({z.lower() for z in _zone_list(zones) if z.lower() != GLOBAL_ZONE})
     if source_id in STATING_FEEDS:
         return specific
     if source_id in INDUSTRY_STATING_FEEDS:
-        declared = set(industry_zones(industries))
+        declared = set(industry_zones(industries)) | {zone for zone, _report in report_zone_pairs(report_zones)}
         return [z for z in specific if z in declared]
     return []
 
@@ -183,8 +212,8 @@ def stated_refs(stated: Optional[Iterable[str]], refs_by_zone: Mapping[str, Iter
     """Which of a record's references stated which of its stated zones, as sorted ``"<zone>|<ref>"`` strings.
 
     ``refs_by_zone`` maps a zone to the references of the records that gave it (CISA ICS: the advisories
-    whose sector note names it, ``cisa_ics:<advisory id>``; OTX: the pulse whose industries the record
-    carries, ``alienvault_otx:<pulse id>``); only the zones in ``stated`` are kept. The writer accumulates
+    whose sector note names it, ``cisa_ics:<advisory id>``; OTX: the pulses whose industries state it,
+    ``alienvault_otx:<pulse id>``); only the zones in ``stated`` are kept. The writer accumulates
     the result on the feed's ``SOURCED_FROM`` edge (``stated_refs``), and ``zone_refs`` reads it back for
     one sector.
     """

@@ -39,6 +39,7 @@ from config import (
     misp_refresh_max_seconds,
 )
 from cvss_selection import cvss_rating_tag, normalize_attack_vector
+from sector_evidence import report_zone_entry, report_zone_pairs
 
 # PR-N4: Prometheus metrics for permanent-failure counter + adaptive-
 # backoff trigger. Optional import so MISPWriter can run in environments
@@ -270,8 +271,12 @@ _META_COMMENT_BUDGET = 4000
 # by many pulses carried one pair per pulse and the halving cut ``report_ids`` first: 120 pulses naming
 # several actors and 10 naming one kept 1 of 129 report ids and 1 of 8 families. ``pa`` holds the first
 # pair of each family and adversary before the later pulses' (``_otx_meta_pairs``), so shrinking it drops
-# those first; ``sap`` / ``sapn`` follow ``report_ids`` (``_fit_meta_comment``).
+# those first; ``sap`` / ``sapn`` follow ``report_ids`` (``_fit_meta_comment``). 2026-10-18:
+# ``report_stated_zones`` (the zones the later pulses' industries state) is shrunk first: it holds the
+# first pulse of each zone before the others (``_report_stated_zones``), so the statement of every zone
+# stays while it fits, and it follows ``report_ids`` as the marks do.
 _META_SHRINK_LISTS = (
+    "report_stated_zones",
     "pa",
     "report_ids",
     "mf",
@@ -322,11 +327,27 @@ def _sap_within_reports(meta: Dict[str, Any], key: str, marks: Any) -> None:
         meta.pop(key, None)
 
 
+def _stated_zones_within_reports(meta: Dict[str, Any]) -> None:
+    """Keep the ``report_stated_zones`` entries of ``meta`` whose pulse is still in ``pulse_id`` +
+    ``report_ids`` (2026-10-18), so a zone never cites a pulse the shrunk block no longer names. Used only
+    when the comment is over its budget; the list may become empty while ``report_ids`` is shrunk, so that
+    it takes its entries back when ``report_ids`` does, and ``_fit_meta_comment`` drops it if it stays
+    empty."""
+    entries = meta.get("report_stated_zones")
+    if not isinstance(entries, list):
+        return
+    reports = {str(meta.get("pulse_id") or "")} | {str(x) for x in (meta.get("report_ids") or [])}
+    meta["report_stated_zones"] = [
+        e for e in entries if any(report in reports for _zone, report in report_zone_pairs([e]))
+    ]
+
+
 def _fit_meta_comment(prefix: str, meta: Dict[str, Any], budget: int = _META_COMMENT_BUDGET) -> str:
     """``prefix + json.dumps(meta)``, shrunk until it fits *budget* without ever breaking the JSON.
 
     2026-10: ``sap`` and ``sapn`` keep the marks of the pulses still in ``pulse_id`` + ``report_ids`` after
-    each step (``_sap_within_reports``), so they shrink with ``report_ids``. Halving stops at the first length
+    each step (``_sap_within_reports``), so they shrink with ``report_ids``; so does ``report_stated_zones``
+    (2026-10-18, ``_stated_zones_within_reports``). Halving stops at the first length
     that fits and could leave a quarter of the budget unused, so at the end each shrunk list takes back,
     from the last shrunk to the first, the longest part of what it held that still fits.
     """
@@ -340,6 +361,7 @@ def _fit_meta_comment(prefix: str, meta: Dict[str, Any], budget: int = _META_COM
     def _render() -> str:
         for mark_key in _MARK_KEYS:
             _sap_within_reports(meta, mark_key, original.get(mark_key))
+        _stated_zones_within_reports(meta)
         return prefix + json.dumps(meta, default=str)
 
     comment = _render()
@@ -372,6 +394,9 @@ def _fit_meta_comment(prefix: str, meta: Dict[str, Any], budget: int = _META_COM
                     too_long = mid
             meta[key] = full[:fits]
             comment = _render()
+    if meta.get("report_stated_zones") == []:
+        meta.pop("report_stated_zones")
+        comment = prefix + json.dumps(meta, default=str)
     logger.warning(
         "%s comment shrunk to fit MISP: %d -> %d chars (lists shortened / optional keys dropped, JSON intact)",
         prefix.rstrip(":"),
@@ -417,6 +442,30 @@ def _otx_meta_pairs(pairs: Any) -> List[str]:
     return (firsts + later)[:_MAX_OTX_META_PAIRS]
 
 
+def _report_stated_zones(item: Dict[str, Any]) -> List[str]:
+    """``OTX_META.report_stated_zones`` / ``MITRE_USES_TECHNIQUES.rsz`` (2026-10-18): the zones the later
+    pulses of the run that listed the item state through their industries, as ``"<zone>|<pulse id>"``
+    (``sector_evidence.report_zone_entry``), only for the pulses the block names in ``report_ids`` (the
+    first ``_MAX_REPORT_IDS``), the first pulse of each zone before the other pulses of that zone, at most
+    ``_MAX_REPORT_IDS`` entries. A malformed entry is left out."""
+    reports = set([str(x)[:64] for x in (item.get("report_ids") or []) if x][:_MAX_REPORT_IDS])
+    if not reports:
+        return []
+    firsts: List[str] = []
+    later: List[str] = []
+    zones_seen: set = set()
+    for zone, report in report_zone_pairs(item.get("report_stated_zones")):
+        if report[:64] not in reports:
+            continue
+        entry = report_zone_entry(zone, report[:64])
+        if zone in zones_seen:
+            later.append(entry)
+        else:
+            zones_seen.add(zone)
+            firsts.append(entry)
+    return (firsts + later)[:_MAX_REPORT_IDS]
+
+
 def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     """Build the ``MITRE_USES_TECHNIQUES:`` JSON block for malware / actor / tool items.
 
@@ -445,6 +494,9 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
                 (as OTX names them), so the sync can tell the sectors the pulse states from those
                 EdgeGuard inferred from its text (``sector_evidence.stated_zones``); an indicator
                 carries them in ``OTX_META.otx_industries``.
+      ``rsz`` — ``report_stated_zones`` (2026-10-18): the zones the industries of the pulses in ``rids``
+                state, ``"<zone>|<pulse id>"`` (``_report_stated_zones``); an indicator carries them in
+                ``OTX_META.report_stated_zones``.
     Lists are capped so the comment stays within MISP field limits.
     """
     meta: Dict[str, Any] = {}
@@ -469,6 +521,9 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
         named = [str(x).strip()[:_MAX_INDUSTRY_CHARS] for x in industries if x is not None and str(x).strip()]
         if named:
             meta["ind"] = named[:_MAX_INDUSTRIES]
+    stated_by_reports = _report_stated_zones(item)
+    if stated_by_reports:
+        meta["rsz"] = stated_by_reports
     # 2026-10 (R6): MITRE group → software ``uses`` (actors only)
     uses_malware = [str(x)[:128] for x in (item.get("uses_malware") or []) if x]
     if uses_malware:
@@ -2143,6 +2198,9 @@ class MISPWriter:
                 # 2026-10: other pulses of the same run that listed this IOC (collector
                 # dedup) — the sync pairs the IOC with the malware/actors of all of them.
                 "report_ids": [str(x)[:64] for x in (indicator.get("report_ids") or []) if x][:_MAX_REPORT_IDS],
+                # 2026-10-18: the zones the industries of those other pulses state, "<zone>|<pulse id>"
+                # (``_report_stated_zones``); pruned below when empty.
+                "report_stated_zones": _report_stated_zones(indicator),
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
                 # 2026-10 (regular-update linking): families named by the pulse(s) that listed this IOC and
@@ -2163,7 +2221,7 @@ class MISPWriter:
                     :_MAX_REPORT_IDS
                 ],
             }
-            for _k in ("mf", "pa", "sap", "sapn"):
+            for _k in ("mf", "pa", "sap", "sapn", "report_stated_zones"):
                 if not otx_meta.get(_k):
                     otx_meta.pop(_k, None)
             comment = _fit_meta_comment("OTX_META:", otx_meta)

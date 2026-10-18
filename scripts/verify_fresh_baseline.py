@@ -41,8 +41,9 @@ label, what CISA ICS adds per sector and the node sectors no feed gave. Since th
 2026-10-18 it fails when ``otx_industries`` sits anywhere but on a TARGETS link from an Indicator,
 ThreatActor or Malware to a sector an OTX record stated (``stated_zones`` of the alienvault_otx
 ``SOURCED_FROM`` edge), when such a link cites none of the pulses that stated its sector, and when a sector
-an OTX record stated is not linked as ``otx_industries``; the per-sector reference check judges only the
-feeds whose records state every zone they give (CISA ICS). Since 2026-10-16 it also fails
+an OTX record stated is not linked as ``otx_industries`` (with ``--require-otx-industries`` also when the
+OTX records give sectors and none states one); the per-sector reference check judges only the feeds whose
+records state every zone they give (CISA ICS). Since 2026-10-16 it also fails
 when a ranked description names no source (``description_source``) or an Indicator has no
 ``aging_basis`` / ``source_confidence``.
 
@@ -57,6 +58,7 @@ Usage:
   python scripts/verify_fresh_baseline.py                 # human-readable
   python scripts/verify_fresh_baseline.py --json          # machine-readable
   python scripts/verify_fresh_baseline.py --require-ics --require-cisa-ics
+  python scripts/verify_fresh_baseline.py --require-otx-industries   # after a baseline with OTX
   python scripts/verify_fresh_baseline.py --require-malwarebazaar   # after enabling that source
 
 Exit code 0 = every mandatory check passed; 1 = at least one failed; 2 = could
@@ -376,7 +378,7 @@ _OTX_INDUSTRIES_FEEDS = sorted(f for f, label in STATEMENT_LABELS["TARGETS"].ite
 _TARGETS_START = "(n:Indicator OR n:ThreatActor OR n:Malware)"
 
 
-def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
+def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, require_otx_industries: bool = False) -> None:
     """Checks 10d-10m (2026-10-16): each link to a Sector names only the feeds that gave its sector and
     cites only the records that gave it, its label and confidence follow the table (``sector_evidence``),
     CISA's ICS statements are linked as ``advisory_sector`` on AFFECTS only and (2026-10-18) an OTX
@@ -507,7 +509,11 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         + _as_list("r.source_refs")
         + ") THEN 1 ELSE 0 END) AS citing_no_stating_report, "
         "collect(CASE WHEN NOT stated THEN type(r) + ' ' + labels(n)[0] + ' -> ' + coalesce(s.name, '?') END)[..10] "
-        "AS examples",
+        "AS examples, "
+        "collect(CASE WHEN stated AND size(stating_refs) > 0 AND NONE(_x IN stating_refs WHERE _x IN "
+        + _as_list("r.source_refs")
+        + ") THEN labels(n)[0] + ' ' + coalesce(n.name, n.value, '?') + ' -> ' + s.name END)[..10] "
+        "AS citing_examples",
         {"label": OTX_INDUSTRIES, "feeds": _OTX_INDUSTRIES_FEEDS, "sep": STATED_REF_SEPARATOR},
     )
     rep.add(
@@ -518,10 +524,25 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         otx,
     )
 
+    # The OTX records of the nodes that link to a Sector by TARGETS: how many give a sector and how many
+    # state one. Read by 10m under ``--require-otx-industries``.
+    otx_records = _one(
+        "MATCH (n)-[sf:SOURCED_FROM]->(src:Source) WHERE " + _TARGETS_START + " AND src.source_id IN $feeds "
+        "RETURN count(sf) AS otx_records, "
+        "sum(CASE WHEN any(_z IN " + _as_list("sf.zones") + " WHERE _z <> 'global') THEN 1 ELSE 0 END) "
+        "AS otx_records_with_a_sector, "
+        "sum(CASE WHEN size(" + _as_list("sf.stated_zones") + ") > 0 THEN 1 ELSE 0 END) AS otx_records_stating",
+        {"feeds": _OTX_INDUSTRIES_FEEDS},
+    )
+    otx_with_a_sector = otx_records.get("otx_records_with_a_sector") or 0
+
     # 10m. Every sector an OTX record stated is linked as ``otx_industries`` from the node (TARGETS, steps
     #      7a / 7c / 7d and the sync's indicator rows). A link whose label is outside the table (a curated or
-    #      partner label, which the writers keep) is not judged. Informational while no OTX record states a
-    #      sector (a graph synced before 2026-10-18).
+    #      partner label, which the writers keep) is not judged. With ``--require-otx-industries`` at least
+    #      one sector must be stated once the OTX records give a sector (a run that lost the pulses'
+    #      industries on the way to the sync looks like a graph without statements); without the flag, or
+    #      while no OTX record gives a sector, no stated sector is informational (a graph synced before
+    #      2026-10-18).
     r = _one(
         "MATCH (n)-[sf:SOURCED_FROM]->(src:Source) WHERE " + _TARGETS_START + " AND src.source_id IN $feeds "
         "UNWIND " + _as_list("sf.stated_zones") + " AS z "
@@ -532,11 +553,14 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
         "AS examples",
         {"label": OTX_INDUSTRIES, "feeds": _OTX_INDUSTRIES_FEEDS, "labels": sorted(LABEL_CONFIDENCE)},
     )
-    rep.add(
-        "otx_stated_sectors_linked_as_otx_industries",
-        None if not r.get("stated") else r.get("otx_not_labelled") == 0,
-        r,
-    )
+    otx_stated_ok: Optional[bool]
+    if r.get("stated"):
+        otx_stated_ok = r.get("otx_not_labelled") == 0
+    elif require_otx_industries and otx_with_a_sector > 0:
+        otx_stated_ok = False
+    else:
+        otx_stated_ok = None
+    rep.add("otx_stated_sectors_linked_as_otx_industries", otx_stated_ok, {**r, **otx_records})
 
     # 10g. The confidence of a sector link is the table's value of its label (the sync and step 7 write
     #      the same); a label outside the table (a curated or partner label) is not judged.
@@ -625,7 +649,9 @@ def _ranked_description_and_aging_checks(rep: Report) -> None:
     rep.add("indicators_have_aging_basis", ok if judged else None, r)
 
 
-def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar: bool = False) -> Report:
+def run_checks(
+    require_ics: bool, require_cisa_ics: bool, require_malwarebazaar: bool = False, require_otx_industries: bool = False
+) -> Report:
     rep = Report()
 
     # 0. Inventory for the record.
@@ -984,7 +1010,7 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
         "RETURN s.name AS sector, labels(n)[0] AS label, count(DISTINCT n) AS nodes ORDER BY sector, label"
     )
     rep.add("sector_coverage", None, cov)
-    _sector_evidence_checks(rep, require_cisa_ics)
+    _sector_evidence_checks(rep, require_cisa_ics, require_otx_industries)
 
     # 11. ResilMesh-facing schema unchanged.
     types = [x["t"] for x in _post("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t")]
@@ -1227,10 +1253,17 @@ def main() -> int:
         action="store_true",
         help="fail if the malwarebazaar source has no sha256 indicator",
     )
+    ap.add_argument(
+        "--require-otx-industries",
+        action="store_true",
+        help="fail if OTX records give sectors but none states one (the pulses' industries did not reach the sync)",
+    )
     args = ap.parse_args()
 
     try:
-        rep = run_checks(args.require_ics, args.require_cisa_ics, args.require_malwarebazaar)
+        rep = run_checks(
+            args.require_ics, args.require_cisa_ics, args.require_malwarebazaar, args.require_otx_industries
+        )
     except (urllib.error.URLError, OSError, RuntimeError) as exc:
         print(f"ERROR: cannot query {URL}: {exc}", file=sys.stderr)
         return 2

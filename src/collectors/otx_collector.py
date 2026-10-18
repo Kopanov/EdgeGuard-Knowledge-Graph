@@ -76,6 +76,7 @@ from resilience import (
     record_collection_failure,
     record_collection_success,
 )
+from sector_evidence import report_zone_entry
 
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
@@ -241,6 +242,13 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     ``OTX_META.report_ids`` on the MISP attribute; the sync groups on
     ``[pulse_id] + report_ids``) and its ATT&CK ids to ``reported_techniques``.
     The kept item takes the most restrictive ``pulse_tlp`` of the pulses (2026-10).
+
+    2026-10-18: a later pulse's industries are its statement of the sectors its campaign targets
+    (``sector_evidence``). The zones they map to (``config.otx_industry_zones``) join the kept item's
+    ``zone`` (``global`` dropped once a sector is present) and are recorded with the pulse as
+    ``"<zone>|<pulse id>"`` entries in ``report_stated_zones``, so the sync labels and cites the statement
+    whichever pulse listed the item first. The zones keyword detection found in a later pulse's text are
+    not added: the kept item's inferred zones stay the first pulse's.
     """
     # Copy-on-write (Bugbot on PR #134, round 2): ``reported_techniques`` is the pulse's
     # ``pulse_attack_ids`` list object, shared by reference with ``attack_ids`` in
@@ -253,6 +261,17 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
         if dup_pid not in rids:
             rids.append(dup_pid)
         kept["report_ids"] = rids
+    # The later pulse's sector statement (copy-on-write: ``zone`` is the pulse's ``sectors`` list, shared by
+    # every item of the kept pulse).
+    if dup_pid and dup_pid != kept.get("pulse_id"):
+        stated_by_dup = otx_industry_zones(dup.get("otx_industries"))
+        if stated_by_dup:
+            zones = [z for z in (kept.get("zone") or []) if z]
+            zones += [z for z in stated_by_dup if z not in zones]
+            kept["zone"] = [z for z in zones if z != "global"] if len(zones) > 1 else zones
+            entries = list(kept.get("report_stated_zones") or [])
+            entries += [e for e in (report_zone_entry(z, str(dup_pid)) for z in stated_by_dup) if e not in entries]
+            kept["report_stated_zones"] = entries
     extra_tids = [t for t in (dup.get("reported_techniques") or []) if t not in (kept.get("reported_techniques") or [])]
     if extra_tids:
         kept["reported_techniques"] = list(kept.get("reported_techniques") or []) + extra_tids

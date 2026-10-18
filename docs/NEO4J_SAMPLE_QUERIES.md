@@ -305,8 +305,8 @@ RETURN count(c) AS cisa_cves_without_a_tracked_sector
 **OTX's industries.** An OTX pulse that classifies itself into industries states, through its author, which
 sectors its campaign targets: an indicator's, actor's or malware's `TARGETS` link to such a sector carries
 `match_type = 'otx_industries'` (0.6), the `SOURCED_FROM` edge to `alienvault_otx` lists the sector in
-`stated_zones` and the pulse in `stated_refs` (`"<zone>|alienvault_otx:<pulse id>"`), and the link cites that
-pulse. A sector only the pulse's text gave stays `zone_classification`, and a CVE the pulse names keeps
+`stated_zones` and each pulse that stated it in `stated_refs` (`"<zone>|alienvault_otx:<pulse id>"`), and the
+link cites those pulses. A sector only the pulse's text gave stays `zone_classification`, and a CVE the pulse names keeps
 `zone_classification` on `AFFECTS`.
 
 ```cypher

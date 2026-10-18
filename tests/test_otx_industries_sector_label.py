@@ -54,6 +54,8 @@ from run_misp_to_neo4j import MISPToNeo4jSync, _item_zone_refs  # noqa: E402
 
 PULSE_ID = "6ac84a155bb626a3710179b9"
 PULSE_REF = f"alienvault_otx:{PULSE_ID}"
+SECOND_ID = "6ac84a155bb626a3710179ba"
+SECOND_REF = f"alienvault_otx:{SECOND_ID}"
 
 # A pulse whose text names hospitals and patient records (keyword detection: healthcare) and whose author
 # classified it into the Energy industry (the pulse's statement: energy). The shape is the OTX API's.
@@ -87,6 +89,21 @@ _EVENT = {"id": 34, "info": "EdgeGuard-alienvault_otx-2026-10-18", "date": "2026
 
 def _pulse(**changes: Any) -> Dict[str, Any]:
     return dict(copy.deepcopy(PULSE), **changes)
+
+
+def _second_pulse(**changes: Any) -> Dict[str, Any]:
+    """Another pulse of the same run listing the same IP and family: its text names a power grid utility
+    (keyword detection: energy), it names no adversary or CVE, and by default no industries."""
+    fields: Dict[str, Any] = {
+        "id": SECOND_ID,
+        "name": "Intrusions at a power grid utility",
+        "description": "The operators reached the substation SCADA network of an electric utility.",
+        "adversary": "",
+        "industries": [],
+        "cve_references": [],
+    }
+    fields.update(changes)
+    return _pulse(**fields)
 
 
 def _kind(item: Dict[str, Any]) -> str:
@@ -159,6 +176,18 @@ class TestTable:
     def test_stated_zones(self, source, zones, industries, expected):
         assert se.stated_zones(source, zones, industries) == expected
 
+    def test_a_folded_pulses_statement_is_the_records_too(self):
+        """``report_zones``: the zones the later pulses of the run that listed the item state
+        (``"<zone>|<pulse id>"``); a zone of the record only, and only for a feed that states by industries."""
+        folded = ["finance|p2", "Energy|p2", "healthcare", "|p3", "global|p3", 7]
+        assert se.stated_zones("alienvault_otx", ["healthcare", "finance"], [], folded) == ["finance"]
+        assert se.stated_zones("alienvault_otx", ["energy", "finance"], ["Banking"], folded) == ["energy", "finance"]
+        assert se.stated_zones("alienvault_otx", ["healthcare"], None, "finance|p2") == []
+        assert se.stated_zones("threatfox", ["finance"], None, folded) == []
+        assert se.stated_zones("cisa_ics", ["healthcare"], None, folded) == ["healthcare"]
+        assert se.report_zone_pairs(folded) == [("finance", "p2"), ("energy", "p2")]
+        assert se.report_zone_entry("energy", "p2") == "energy|p2"
+
     @pytest.mark.parametrize(
         "source, zone, stated, rel_type, expected",
         [
@@ -185,6 +214,19 @@ class TestTable:
         assert se.stated_zones("alienvault_otx", ["energy"], ["Maritime"]) == ["energy"]
         (item,) = [i for i in otx_items(_pulse(industries=["Maritime"])) if "indicator_type" in i]
         assert "energy" in item["zone"]
+
+    def test_the_industry_names_otx_uses_for_the_tracked_sectors(self):
+        """Names OTX pulses use (measured on the OTX attributes MISP held) that the table lacked: their
+        pulses' statements stayed inferences, or the items got no link to the sector at all."""
+        assert config.otx_industry_zones(["Financial Services", "financial services"]) == ["finance"]
+        assert config.otx_industry_zones(["Investment"]) == config.otx_industry_zones(["Investments"]) == ["finance"]
+        assert config.otx_industry_zones(["Pharmaceuticals", "Pharmacy"]) == ["healthcare"]
+        assert config.otx_industry_zones(["Petroleum"]) == ["energy"]
+        # a pulse whose text names no sector: the statement gives the item its only sector
+        quiet = _pulse(industries=["Pharmaceuticals"], name="Loader campaign", description="A loader drops a RAT.")
+        (item,) = [i for i in otx_items(quiet) if _kind(i) == "indicator"]
+        assert "healthcare" in item["zone"]
+        assert _sector_rows(_synced(quiet)["indicator"])[("TARGETS", "healthcare")][:2] == ("otx_industries", 0.6)
 
     def test_cypher_params_per_relationship_type(self):
         assert se.cypher_params("TARGETS")["sector_statements"] == {"alienvault_otx": "otx_industries"}
@@ -261,6 +303,79 @@ class TestTheIndustriesTravelThroughMisp:
         (item,) = [i for i in otx_items(_pulse(industries=[])) if _kind(i) == "malware"]
         assert "ind" not in json.loads(_attribute(item)["comment"][len("MITRE_USES_TECHNIQUES:") :].split("\n", 1)[0])
 
+    def test_a_later_pulses_statement_travels_with_the_item(self):
+        second = _second_pulse(industries=["Banking"])
+        items = otx_items(_pulse(), second)
+        (indicator,) = [i for i in items if _kind(i) == "indicator"]
+        meta = json.loads(_attribute(indicator)["comment"][len("OTX_META:") :])
+        assert meta["report_ids"] == [SECOND_ID] and meta["report_stated_zones"] == [f"finance|{SECOND_ID}"]
+        assert meta["otx_industries"] == ["Energy"]
+        (malware,) = [i for i in items if _kind(i) == "malware"]
+        block = json.loads(_attribute(malware)["comment"][len("MITRE_USES_TECHNIQUES:") :].split("\n", 1)[0])
+        assert block["rids"] == [SECOND_ID] and block["rsz"] == [f"finance|{SECOND_ID}"]
+        # a pulse without industries records nothing
+        (alone,) = [i for i in otx_items(_pulse(), _second_pulse()) if _kind(i) == "indicator"]
+        assert "report_stated_zones" not in json.loads(_attribute(alone)["comment"][len("OTX_META:") :])
+
+    def test_the_folded_statements_list_the_first_pulse_of_each_zone_first(self):
+        from collectors.misp_writer import _report_stated_zones
+
+        reports = [f"{n:024x}" for n in range(1, 5)]
+        item = {
+            "report_ids": reports,
+            "report_stated_zones": [f"energy|{reports[0]}", f"energy|{reports[1]}", f"Healthcare|{reports[2]}"]
+            + ["energy|ffffffffffffffffffffffff", "energy", 7, f"global|{reports[3]}"],
+        }
+        assert _report_stated_zones(item) == [
+            f"energy|{reports[0]}",
+            f"healthcare|{reports[2]}",
+            f"energy|{reports[1]}",
+        ]
+        assert _report_stated_zones({"report_stated_zones": [f"energy|{reports[0]}"]}) == []
+
+    def test_an_over_budget_comment_keeps_the_statements_of_the_pulses_it_names(self):
+        """The ``OTX_META`` comment is shrunk to its budget: ``report_stated_zones`` is shrunk first and keeps
+        only the entries of pulses still in ``report_ids``, so no zone cites a pulse the block dropped."""
+        from collectors.misp_writer import _fit_meta_comment
+
+        reports = [f"{n:024x}" for n in range(1, 121)]
+        meta = {
+            "pulse_id": PULSE_ID,
+            "report_ids": reports,
+            "report_stated_zones": [f"energy|{reports[0]}", f"healthcare|{reports[-1]}"]
+            + [f"energy|{r}" for r in reports[1:-1]],
+            "description": "",
+        }
+        comment = _fit_meta_comment("OTX_META:", meta, budget=1500)
+        assert len(comment) <= 1500
+        fitted = json.loads(comment[len("OTX_META:") :])
+        kept = {PULSE_ID, *fitted["report_ids"]}
+        assert fitted["report_stated_zones"] and fitted["report_stated_zones"][0] == f"energy|{reports[0]}"
+        assert all(entry.split("|", 1)[1] in kept for entry in fitted["report_stated_zones"])
+        assert f"healthcare|{reports[-1]}" not in fitted["report_stated_zones"]
+
+    def test_the_statements_come_back_with_their_pulses(self):
+        """A description longer than the budget: every list is halved to one entry first (``report_ids`` to
+        its first pulse, which empties the statements of the later pulses), then the description; taking
+        back, ``report_ids`` returns whole and the statements return with their pulses. A list left empty is
+        not written."""
+        from collectors.misp_writer import _fit_meta_comment
+
+        reports = [f"{n:024x}" for n in range(1, 11)]
+        meta = {
+            "pulse_id": PULSE_ID,
+            "report_ids": reports,
+            "report_stated_zones": [f"energy|{reports[5]}", f"finance|{reports[6]}"],
+            "description": "x" * 8000,
+        }
+        fitted = json.loads(_fit_meta_comment("OTX_META:", meta)[len("OTX_META:") :])
+        assert len(fitted["description"]) < 8000 and fitted["report_ids"] == reports
+        assert fitted["report_stated_zones"] == [f"energy|{reports[5]}", f"finance|{reports[6]}"]
+        many = [f"{n:024x}" for n in range(1, 121)]
+        meta = dict(meta, report_ids=many, report_stated_zones=[f"energy|{many[70]}"], description="")
+        fitted = json.loads(_fit_meta_comment("OTX_META:", meta, budget=1200)[len("OTX_META:") :])
+        assert many[70] not in fitted["report_ids"] and "report_stated_zones" not in fitted
+
     def test_the_list_is_bounded(self):
         item = {
             "type": "malware",
@@ -325,24 +440,118 @@ class TestSyncStatesTheIndustries:
         item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(attr, event)
         assert "otx_industries" not in item and "stated_zones" not in item
 
-    def test_the_statement_cites_the_pulse_whose_industries_the_item_carries(self):
-        """An IOC two pulses of one run list keeps the first pulse's zones and industries; the second pulse
-        joins ``report_ids`` without either. The stated sector cites the first pulse only: the second one's
-        industries never reached the item."""
-        second = _pulse(id="6ac84a155bb626a3710179ba", industries=[], malware_families=[], cve_references=[])
-        second["adversary"] = ""
+    def test_the_statement_cites_the_pulse_whose_industries_state_it(self):
+        """An IOC two pulses of one run list: the second pulse joins ``report_ids`` and, with no industries,
+        states nothing. The stated sector cites the first pulse only; a sector the item's feed inferred
+        cites every pulse of the item, since no per-pulse reference is recorded for a keyword hit."""
+        second = _second_pulse(malware_families=[])
         indicator = _synced(_pulse(), second)["indicator"]
-        assert indicator["source_refs"] == [PULSE_REF, "alienvault_otx:6ac84a155bb626a3710179ba"]
+        assert indicator["source_refs"] == [PULSE_REF, SECOND_REF]
         assert indicator["stated_refs"] == [f"energy|{PULSE_REF}"]
+        assert "report_stated_zones" not in indicator
         rows = _sector_rows(indicator)
         assert rows[("TARGETS", "energy")] == ("otx_industries", 0.6, "alienvault_otx", [PULSE_REF])
         assert rows[("TARGETS", "healthcare")][3] == indicator["source_refs"]
 
-    def test_item_zone_refs_name_the_items_pulse(self):
-        item = {"pulse_id": PULSE_ID, "report_ids": ["other"], "zone": ["energy", "healthcare", "global"]}
-        assert _item_zone_refs(item, "alienvault_otx") == {"energy": [PULSE_REF], "healthcare": [PULSE_REF]}
-        assert _item_zone_refs({"zone": ["energy"]}, "alienvault_otx") == {}
+    @pytest.mark.parametrize("stating_first", [True, False])
+    def test_a_pulses_statement_counts_whichever_pulse_listed_the_item_first(self, stating_first):
+        """The stating pulse (industries Energy) and a pulse whose text names a power grid utility list the
+        same IP and family in one run. The collector keeps the first pulse's item and folds the other into
+        it; the stating pulse's statement travels with the item whichever came first, so the indicator's
+        and the family's energy link is ``otx_industries`` citing the stating pulse either way."""
+        pulses = (_pulse(), _second_pulse()) if stating_first else (_second_pulse(), _pulse())
+        synced = _synced(*pulses)
+        indicator = synced["indicator"]
+        assert sorted(indicator["source_refs"]) == sorted([PULSE_REF, SECOND_REF])
+        assert indicator["stated_zones"] == ["energy"]
+        assert indicator["stated_refs"] == [f"energy|{PULSE_REF}"]
+        assert _sector_rows(indicator)[("TARGETS", "energy")] == ("otx_industries", 0.6, "alienvault_otx", [PULSE_REF])
+        malware = synced["malware"]
+        assert malware["stated_zones"] == ["energy"] and malware["stated_refs"] == [f"energy|{PULSE_REF}"]
+        # the zones keyword detection found in a later pulse's text are not added: the item keeps the
+        # first pulse's inferred zones (the hospitals of the stating pulse, when it came first)
+        assert sorted(indicator["zone"]) == (["energy", "healthcare"] if stating_first else ["energy"])
+
+    def test_a_later_pulse_adds_the_sector_its_industries_state(self):
+        """The first pulse states nothing (its text names hospitals); the second classifies itself as
+        Banking. The item gains finance, stated by the second pulse alone; healthcare stays an inference,
+        citing every pulse of the item. The first pulse's other items keep their zones (the pulse's zone
+        list is shared by its items)."""
+        second = _second_pulse(description="Phishing pages imitate a webmail login.", name="Phishing wave")
+        second["industries"] = ["Banking"]
+        items = otx_items(_pulse(industries=[]), second)
+        (collected,) = [i for i in items if _kind(i) == "indicator"]
+        assert collected["zone"] == ["healthcare", "finance"]
+        assert collected["report_stated_zones"] == [f"finance|{SECOND_ID}"]
+        assert all(i["zone"] == ["healthcare"] for i in items if _kind(i) in ("vulnerability", "actor"))
+        indicator = _synced(_pulse(industries=[]), second)["indicator"]
+        assert indicator["report_stated_zones"] == [f"finance|{SECOND_ID}"]
+        assert indicator["stated_zones"] == ["finance"] and indicator["stated_refs"] == [f"finance|{SECOND_REF}"]
+        assert _sector_rows(indicator) == {
+            ("TARGETS", "finance"): ("otx_industries", 0.6, "alienvault_otx", [SECOND_REF]),
+            ("TARGETS", "healthcare"): ("zone_classification", 0.5, "alienvault_otx", [PULSE_REF, SECOND_REF]),
+        }
+
+    def test_a_pulse_stating_the_same_sector_twice_is_cited_with_the_first(self):
+        indicator = _synced(_pulse(), _second_pulse(industries=["Utilities"]))["indicator"]
+        assert indicator["stated_refs"] == [f"energy|{PULSE_REF}", f"energy|{SECOND_REF}"]
+        assert _sector_rows(indicator)[("TARGETS", "energy")][3] == [PULSE_REF, SECOND_REF]
+
+    def test_a_statement_of_a_pulse_the_item_does_not_name_is_ignored(self):
+        """A ``rsz`` entry whose pulse is not among the item's pulses (``pid`` + ``rids``) states nothing."""
+        item = {
+            "type": "malware",
+            "name": "ExampleLocker",
+            "tag": "alienvault_otx",
+            "zone": ["energy", "finance"],
+            "pulse_id": PULSE_ID,
+            "report_ids": [SECOND_ID],
+        }
+        attr = _attribute(item)
+        block = json.loads(attr["comment"][len("MITRE_USES_TECHNIQUES:") :])
+        block["rsz"] = ["finance|ffffffffffffffffffffffff", f"Energy|{SECOND_ID}", "energy", 7]
+        attr["comment"] = "MITRE_USES_TECHNIQUES:" + json.dumps(block)
+        parsed, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(attr, _EVENT)
+        assert parsed["report_stated_zones"] == [f"energy|{SECOND_ID}"]
+        assert parsed["stated_zones"] == ["energy"] and parsed["stated_refs"] == [f"energy|{SECOND_REF}"]
+
+    def test_item_zone_refs_name_the_pulses_that_stated_each_zone(self):
+        item = {
+            "pulse_id": PULSE_ID,
+            "report_ids": [SECOND_ID],
+            "zone": ["energy", "healthcare", "finance", "global"],
+            "otx_industries": ["Energy"],
+            "report_stated_zones": [
+                f"finance|{SECOND_ID}",
+                f"energy|{SECOND_ID}",
+                "healthcare|not-a-pulse-of-the-item",
+            ],
+        }
+        assert _item_zone_refs(item, "alienvault_otx") == {"energy": [PULSE_REF, SECOND_REF], "finance": [SECOND_REF]}
+        # a zone no pulse stated is not in the map: its link cites every pulse of the item
+        assert _item_zone_refs({"pulse_id": PULSE_ID, "zone": ["energy"]}, "alienvault_otx") == {}
         assert _item_zone_refs(item, "threatfox") == {}
+
+    @pytest.mark.parametrize("path", ["_process_event_attributes", "_process_large_event_paged"])
+    def test_an_unchanged_attribute_of_the_same_pulse_writes_no_sector_link(self, monkeypatch, path):
+        """Incremental run: the family's attribute changed, the indicator's did not. The indicator joins the
+        report-scoped build (``_same_report_context``) but writes no link to a Sector: its links were written
+        with its node, whose OTX ``SOURCED_FROM`` edge records the statement (on a graph kept across the
+        change, the edge of an unchanged attribute does not yet)."""
+        items = otx_items(_pulse())
+        (malware,) = [_attribute(i) for i in items if _kind(i) == "malware"]
+        (indicator,) = [_attribute(i) for i in items if _kind(i) == "indicator"]
+        syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
+        rows: List[Dict[str, Any]] = []
+        written: List[Dict[str, Any]] = []
+        monkeypatch.setattr(syncer, "sync_to_neo4j", lambda batch: written.extend(batch) or (len(batch), 0, 0))
+        monkeypatch.setattr(syncer, "_create_relationships", lambda rels, source: 0)
+        monkeypatch.setattr(syncer, "_write_cross_item_relationships", lambda rels: rows.extend(rels) or len(rels))
+        monkeypatch.setattr(syncer, "_ATTR_PAGE_SIZE", 1)
+        getattr(syncer, path)("34", _EVENT, [malware], [indicator])
+        assert [i.get("type") for i in written] == ["malware"]
+        assert [r for r in rows if r["to_type"] == "Sector"] == []
+        assert any(r["from_type"] == "Indicator" and r["to_type"] == "Malware" for r in rows)
 
     def test_a_paged_event_gives_the_rows_a_small_event_gives(self, monkeypatch):
         attributes = [_attribute(i) for i in otx_items(_pulse())]

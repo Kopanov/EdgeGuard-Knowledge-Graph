@@ -41,7 +41,15 @@ for _p in (TESTS.parent / "src", TESTS):
 
 from test_actor_alias_merge_neo4j import LABEL, URI, open_test_database  # noqa: E402  (same guards)
 from test_cisa_ics_collector import SAMPLE_ADVISORY  # noqa: E402  (the real CSAF 2.0 shape)
-from test_otx_industries_sector_label import PULSE_REF, WRITER, _attribute, _kind, _pulse  # noqa: E402
+from test_otx_industries_sector_label import (  # noqa: E402
+    PULSE_REF,
+    SECOND_REF,
+    WRITER,
+    _attribute,
+    _kind,
+    _pulse,
+    _second_pulse,
+)
 from test_otx_industries_sector_label import otx_items as _otx_items  # noqa: E402
 
 import build_relationships  # noqa: E402
@@ -499,11 +507,12 @@ def _otx_nodes(driver) -> None:
         )
 
 
-def _sync_otx(client, pulse: Dict[str, Any], kinds=("indicator",)) -> None:
-    """The collector's items of ``pulse`` of the given kinds through MISPWriter and the sync, as production
-    writes them: the node with its SOURCED_FROM edge and the sync's sector rows."""
+def _sync_otx(client, pulse: Dict[str, Any], kinds=("indicator",), *more_pulses: Dict[str, Any]) -> None:
+    """The collector's items of ``pulse`` (and ``more_pulses``, the same run) of the given kinds through
+    MISPWriter and the sync, as production writes them: the node with its SOURCED_FROM edge and the sync's
+    sector rows."""
     syncer = MISPToNeo4jSync(neo4j_client=client)
-    for item in _otx_items(pulse):
+    for item in _otx_items(pulse, *more_pulses):
         kind = _kind(item)
         if kind not in kinds:
             continue
@@ -637,6 +646,23 @@ class TestOtxIndustriesStatements:
         for node in ("(:Malware {name: 'examplelocker'})", "(:ThreatActor {name: 'dragonfly'})"):
             assert _otx_edge(raw_driver, node)["stated_refs"] == [f"energy|{PULSE_REF}"]
             assert _targets(raw_driver, node) == {"energy": _STATED, "healthcare": _INFERRED}, node
+
+    def test_a_folded_pulses_statement_is_linked_whichever_pulse_came_first(self, client, raw_driver):
+        """A pulse whose text names a power grid utility lists the IOC and the family first; the stating pulse
+        (industries Energy) lists them later in the same run. The statement travels with the folded item, so
+        the OTX edges record it with the stating pulse and the sync's indicator row, step 7a and step 7d link
+        energy as ``otx_industries`` citing that pulse; the keyword pulse is cited only by an inferred sector."""
+        _otx_nodes(raw_driver)
+        _sync_otx(client, _second_pulse(), ("indicator", "malware"), _pulse())
+        for node in (_IOC_NODE, "(:Malware {name: 'examplelocker'})"):
+            edge = _otx_edge(raw_driver, node)
+            assert edge["stated"] == ["energy"] and edge["stated_refs"] == [f"energy|{PULSE_REF}"], node
+        assert _targets(raw_driver, _IOC_NODE)["energy"] == _STATED
+        _step(client, build_relationships._Q7A_STATEMENTS, "indicator_targets_sector")
+        _step(client, build_relationships._Q7D_STATEMENTS, "malware_targets_sector")
+        for node in (_IOC_NODE, "(:Malware {name: 'examplelocker'})"):
+            assert _targets(raw_driver, node) == {"energy": _STATED}, node
+        assert SECOND_REF not in _targets(raw_driver, _IOC_NODE)["energy"]["refs"]
 
     def test_affects_from_an_otx_record_stays_an_inference(self, client, raw_driver):
         """Even an OTX edge that records the statement on a CVE gives AFFECTS no OTX label: a targeted industry

@@ -1255,22 +1255,33 @@ VALID_ZONES: frozenset = frozenset({"global", "healthcare", "energy", "finance"}
 # here means (a) the two lists are visible side-by-side for
 # maintainers, and (b) the OTX mapping is assert-testable against
 # ``VALID_ZONES`` at module load (below).
+#
+# 2026-10-18: the industry names OTX pulses use for these sectors, measured on the OTX attributes MISP
+# held (106 distinct names): "Financial Services" (the name the CISA ICS table maps to finance),
+# "Investment(s)", "Pharmaceuticals", "Pharmacy" and "Petroleum" were missing, so their pulses' statements
+# stayed inferences or gave no sector at all. An industry name outside this table states no sector.
 OTX_INDUSTRY_ZONE_ALIASES: Dict[str, str] = {
     # Healthcare aliases
     "healthcare": "healthcare",
     "health": "healthcare",
     "medical": "healthcare",
     "pharmaceutical": "healthcare",
+    "pharmaceuticals": "healthcare",
+    "pharmacy": "healthcare",
     # Energy aliases
     "energy": "energy",
     "utilities": "energy",
     "oil": "energy",
     "gas": "energy",
+    "petroleum": "energy",
     # Finance aliases
     "finance": "finance",
     "banking": "finance",
     "financial": "finance",
+    "financial services": "finance",
     "insurance": "finance",
+    "investment": "finance",
+    "investments": "finance",
 }
 
 # Module-load invariant: every OTX mapping target must be a canonical
