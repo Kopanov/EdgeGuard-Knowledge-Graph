@@ -8,6 +8,9 @@ This script tests the new --stix-flow option that enables:
 
 import os
 import sys
+from unittest.mock import MagicMock
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
@@ -17,23 +20,40 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def test_stix_flow_flag():
-    """Test that --stix-flow flag is properly registered."""
+def test_stix_flow_flag(monkeypatch):
+    """The real ``run_pipeline`` parser accepts ``--stix-flow`` and passes it to ``run()``."""
     logger.info("Testing --stix-flow CLI flag...")
 
-    import argparse
+    import run_pipeline
 
-    # Simulate parsing with --stix-flow
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--stix-flow", action="store_true")
-    parser.add_argument("--stix", action="store_true")
-    parser.add_argument("--stix-output", type=str, default="test.json")
-    parser.add_argument("--stix-event", type=str, default=None)
+    pipeline_class = MagicMock()
+    pipeline_class.return_value.run.return_value = True
+    monkeypatch.setattr(run_pipeline, "EdgeGuardPipeline", pipeline_class)
+    monkeypatch.setattr(sys, "argv", ["run_pipeline.py", "--stix-flow"])
 
-    args = parser.parse_args(["--stix-flow"])
-
-    assert args.stix_flow is True, "stix_flow flag not parsed correctly"
+    assert run_pipeline.main() == 0
+    kwargs = pipeline_class.return_value.run.call_args.kwargs
+    assert kwargs["use_stix_flow"] is True, "stix_flow flag not parsed correctly"
+    assert not {"stix_export", "stix_output", "stix_event_id"} & set(kwargs)
     logger.info("✅ --stix-flow flag is properly registered")
+
+
+@pytest.mark.parametrize("argv", [["--stix"], ["--stix-event", "42"], ["--stix-output", "bundle.json"]])
+def test_the_misp_event_stix_file_export_is_gone(monkeypatch, argv):
+    """The MISP-event STIX file export (``--stix``, ``--stix-event``, ``--stix-output``) is removed: the
+    outward STIX surface is ``GET /stix/export``. argparse refuses the options before a pipeline is built
+    (no abbreviations: ``--stix`` is not read as ``--stix-flow``)."""
+    import run_pipeline
+
+    for method in ("export_to_stix21", "export_single_event_to_stix21"):
+        assert not hasattr(run_pipeline.EdgeGuardPipeline, method)
+    pipeline_class = MagicMock()
+    monkeypatch.setattr(run_pipeline, "EdgeGuardPipeline", pipeline_class)
+    monkeypatch.setattr(sys, "argv", ["run_pipeline.py", *argv])
+    with pytest.raises(SystemExit) as exc:
+        run_pipeline.main()
+    assert exc.value.code == 2
+    pipeline_class.assert_not_called()
 
 
 def test_stix_flow_methods():
@@ -91,6 +111,7 @@ def test_run_method_signature():
     params = list(sig.parameters.keys())
 
     assert "use_stix_flow" in params, "use_stix_flow parameter missing from run()"
+    assert not {"stix_export", "stix_output", "stix_event_id"} & set(params), "the STIX file export is removed"
     logger.info(f"✅ run() parameters: {params}")
 
     # Check default value
@@ -154,49 +175,11 @@ def test_stix_bundle_loading_logic():
 
 
 def main():
-    """Run all STIX flow integration tests."""
+    """Run the STIX flow tests via pytest (CLI compatibility)."""
     logger.info("=" * 60)
     logger.info("🔬 EdgeGuard STIX 2.1 Pipeline Flow Tests")
     logger.info("=" * 60)
-
-    tests = [
-        ("CLI Flag Registration", test_stix_flow_flag),
-        ("STIX Flow Methods", test_stix_flow_methods),
-        ("Pattern Parsing", test_pattern_parsing),
-        ("Run Method Signature", test_run_method_signature),
-        ("STIX Bundle Loading Logic", test_stix_bundle_loading_logic),
-    ]
-
-    results = []
-    for name, test_func in tests:
-        try:
-            test_func()
-            results.append((name, True, None))
-        except Exception as e:
-            results.append((name, False, str(e)))
-
-    # Summary
-    logger.info("\n" + "=" * 60)
-    logger.info("📊 Test Results Summary")
-    logger.info("=" * 60)
-
-    passed = sum(1 for _, result, _ in results if result)
-    total = len(results)
-
-    for name, result, error in results:
-        status = "✅ PASS" if result else "❌ FAIL"
-        logger.info(f"   {status}: {name}")
-        if error:
-            logger.error(f"      Error: {error}")
-
-    logger.info(f"\n📈 Passed: {passed}/{total}")
-
-    if passed == total:
-        logger.info("\n🎉 All tests passed! STIX 2.1 pipeline flow is ready.")
-        return 0
-    else:
-        logger.error(f"\n⚠️ {total - passed} test(s) failed.")
-        return 1
+    return pytest.main([__file__, "-v", "--tb=short"])
 
 
 if __name__ == "__main__":
