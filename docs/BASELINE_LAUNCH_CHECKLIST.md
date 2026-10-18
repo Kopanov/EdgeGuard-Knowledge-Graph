@@ -276,10 +276,11 @@ clearing:
    time), so rebuilding only the Airflow image (built on `apache/airflow:3.3.2-python3.12`)
    would leave REST, GraphQL and STIX serving the old code. `EDGEGUARD_GIT_SHA` stays in
    `.env`, so every later `docker compose` command, from any shell, sees the same value
-   and recreates no container because of it. Do not export it in the shell: Compose
-   prefers a shell value to `.env`, and a `docker compose up -d` from a shell with a
-   different value recreates `airflow`, which kills a running baseline, and restarts
-   `api` and `graphql`. After the recreate,
+   and recreates no container because of it. Compose forwards it to `api` and `graphql`
+   only; `airflow` does not read it, so a changed value never recreates `airflow`. Do not
+   export it in the shell: Compose prefers a shell value to `.env`, and a
+   `docker compose up -d` from a shell with a different value restarts `api` and
+   `graphql`. After the recreate,
    `curl -s http://127.0.0.1:8000/health | jq -r .git_sha` and
    `curl -s http://127.0.0.1:4001/health | jq -r .git_sha` must both print the pulled commit.
    Every collector task runs in the Airflow pool

@@ -196,12 +196,6 @@ x-common-env: &common-env
   EDGEGUARD_CORS_ORIGINS: ${EDGEGUARD_CORS_ORIGINS:-http://localhost,http://localhost:3000}
   # REST and GraphQL request body cap in bytes (code default 1048576; the parsers tolerate empty).
   EDGEGUARD_MAX_BODY_BYTES: ${EDGEGUARD_MAX_BODY_BYTES:-}
-  # Commit the containers were deployed from, written into .env by scripts/record_deployed_commit.sh
-  # (./install.sh runs it). Kept in .env, never exported in a shell: a docker compose command from a
-  # shell with a different value recreates airflow (which kills a running baseline), api and graphql.
-  # Reported as git_sha by the REST and GraphQL /health and as the X-EdgeGuard-Git-Sha header of
-  # STIX exports; empty = not reported.
-  EDGEGUARD_GIT_SHA: ${EDGEGUARD_GIT_SHA:-}
 
 services:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -643,6 +637,11 @@ services:
       - "127.0.0.1:8000:8000"   # REST API — host loopback only; use a reverse proxy for external access
     environment:
       <<: *common-env
+      # Commit the containers were deployed from, written into .env by scripts/record_deployed_commit.sh
+      # (./install.sh runs it); reported as git_sha by /health and as the X-EdgeGuard-Git-Sha header of
+      # STIX exports (empty = not reported). Forwarded to api and graphql only: airflow does not read it,
+      # so a changed value never recreates airflow (a recreate kills a running baseline).
+      EDGEGUARD_GIT_SHA: ${EDGEGUARD_GIT_SHA:-}
       EDGEGUARD_API_HOST: ${EDGEGUARD_API_HOST:-0.0.0.0}
       EDGEGUARD_API_PORT: "8000"
       # PR-A audit fix (Bugbot MED on commit 8dde4de): the symmetric
@@ -712,6 +711,8 @@ services:
       - "127.0.0.1:4001:4001"   # GraphQL API — loopback only
     environment:
       <<: *common-env
+      # Deployed commit, as on the api service (not forwarded to airflow).
+      EDGEGUARD_GIT_SHA: ${EDGEGUARD_GIT_SHA:-}
       EDGEGUARD_GRAPHQL_PORT: "4001"
       EDGEGUARD_GRAPHQL_HOST: ${EDGEGUARD_GRAPHQL_HOST:-0.0.0.0}
       EDGEGUARD_GRAPHQL_WORKERS: "2"

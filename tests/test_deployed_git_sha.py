@@ -11,9 +11,9 @@ STIX kept serving the old code after a deploy that followed them.
 
 The deployed commit lives in ``.env``, written by ``scripts/record_deployed_commit.sh``, which
 ``./install.sh`` (and so ``--update``, ``make update`` and ``edgeguard update``) runs after its pull.
-A value exported only in the deploying shell made every later ``docker compose up -d`` from another
-shell see a different value and recreate ``airflow`` (killing a running baseline), ``api`` and
-``graphql``; and ``./install.sh --update`` never set it, so a commit written into ``.env`` by hand
+Compose forwards it to ``api`` and ``graphql`` only: ``airflow`` does not read it, and a changed value
+on ``airflow`` would recreate it (killing a running baseline). A value exported only in the deploying
+shell made every later ``docker compose up -d`` from another shell see a different value; and ``./install.sh --update`` never set it, so a commit written into ``.env`` by hand
 was reported after the next update as the deployed one.
 """
 
@@ -151,7 +151,7 @@ class TestDeployInstructionsRebuildEveryImage:
         ],
     )
     def test_no_instruction_exports_the_commit_in_a_shell(self, rel):
-        """A shell-only value differs in every other shell, and Compose then recreates airflow."""
+        """A shell-only value differs in every other shell, and Compose then recreates api and graphql."""
         text = (_ROOT / rel).read_text()
         assert not re.search(r"export EDGEGUARD_GIT_SHA=", text), rel
 

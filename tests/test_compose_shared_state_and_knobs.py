@@ -88,8 +88,6 @@ COMMON = [
     ("NEO4J_DATABASE", None),
     ("EDGEGUARD_CORS_ORIGINS", "http://localhost,http://localhost:3000"),
     ("EDGEGUARD_MAX_BODY_BYTES", None),
-    # 2026-10-18: the deployed commit, reported by both /health responses and the STIX header.
-    ("EDGEGUARD_GIT_SHA", None),
 ]
 
 
@@ -106,6 +104,15 @@ class TestKnobForwarding:
         assert _default_of(compose["x-common-env"][name], name) == (default or "")
         for svc in ("airflow", "api", "graphql"):
             assert name in compose["services"][svc]["environment"], f"{name} missing on {svc}"
+
+    def test_deployed_commit_reaches_api_and_graphql_but_not_airflow(self):
+        # The deployed commit is read by both /health responses and the STIX header. Airflow does not
+        # read it, and a changed value on its service would recreate it, killing a running baseline.
+        services = _compose()["services"]
+        for name in ("api", "graphql"):
+            assert services[name]["environment"].get("EDGEGUARD_GIT_SHA") == "${EDGEGUARD_GIT_SHA:-}", name
+        assert "EDGEGUARD_GIT_SHA" not in services["airflow"]["environment"]
+        assert "EDGEGUARD_GIT_SHA" not in _compose()["x-common-env"]
 
     def test_graphql_depth_cap_is_forwarded(self):
         env = _compose()["services"]["graphql"]["environment"]

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Writes the deployed commit into .env as EDGEGUARD_GIT_SHA. docker-compose.yml forwards it to
-# airflow, api and graphql; the REST and GraphQL /health responses report it as git_sha and STIX
-# exports as the X-EdgeGuard-Git-Sha header.
+# Writes the deployed commit into .env as EDGEGUARD_GIT_SHA. docker-compose.yml forwards it to the
+# api and graphql services (not airflow); the REST and GraphQL /health responses report it as git_sha
+# and STIX exports as the X-EdgeGuard-Git-Sha header.
 #
 # The value lives in .env, not in a shell export, so every later docker compose command, from any
 # shell, sees the same value and recreates no container because of it. Run it at every deploy,
