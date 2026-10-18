@@ -88,6 +88,8 @@ COMMON = [
     ("NEO4J_DATABASE", None),
     ("EDGEGUARD_CORS_ORIGINS", "http://localhost,http://localhost:3000"),
     ("EDGEGUARD_MAX_BODY_BYTES", None),
+    # 2026-10-18: the deployed commit, reported by both /health responses and the STIX header.
+    ("EDGEGUARD_GIT_SHA", None),
 ]
 
 

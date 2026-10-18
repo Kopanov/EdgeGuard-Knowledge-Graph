@@ -57,7 +57,7 @@ from graphql_schema import (
 )
 from ioc_normalize import indicator_type_filter, normalize_cve_id
 from neo4j_client import NEO4J_READ_TIMEOUT, Neo4jClient
-from package_meta import package_version
+from package_meta import deployed_git_sha, package_version
 
 logger = logging.getLogger(__name__)
 
@@ -1106,19 +1106,24 @@ app.include_router(
 
 @app.get("/health")
 async def health():
-    """Liveness probe — uses Neo4j ping + APOC check (same semantics as REST ``query_api`` /health)."""
+    """Liveness probe — uses Neo4j ping + APOC check (same semantics as REST ``query_api`` /health).
+
+    ``git_sha`` is the commit the container was deployed from (``EDGEGUARD_GIT_SHA``; null when
+    unset), in every state.
+    """
+    git_sha = deployed_git_sha()
     if _client is None or not _client.is_connected():
         return JSONResponse(
             status_code=503,
-            content={"status": "degraded", "neo4j_connected": False},
+            content={"status": "degraded", "neo4j_connected": False, "git_sha": git_sha},
         )
     neo4j_ok = bool(_client.health_check().get("healthy"))
     if not neo4j_ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "degraded", "neo4j_connected": False},
+            content={"status": "degraded", "neo4j_connected": False, "git_sha": git_sha},
         )
-    return {"status": "ok", "neo4j_connected": True}
+    return {"status": "ok", "neo4j_connected": True, "git_sha": git_sha}
 
 
 if __name__ == "__main__":

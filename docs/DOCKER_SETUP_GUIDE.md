@@ -157,13 +157,14 @@ docker volume ls | grep -E 'neo4j|airflow'
 ## 4. Start the stack
 
 ```bash
-docker compose build airflow   # after clone or Python dep changes
-docker compose up -d
+export EDGEGUARD_GIT_SHA=$(git rev-parse --short HEAD)   # the deployed commit, reported by /health
+docker compose build                    # every image: Airflow and edgeguard-kg (api, graphql)
+docker compose up -d --force-recreate
 ```
 
-The `airflow` service creates the Airflow pool `edgeguard_collectors` on every start (every collector task runs in it); `docker compose logs airflow | grep 'collector pool'` shows `[edgeguard] collector pool edgeguard_collectors set to <n> slots` once it is set.
+`docker compose build` builds the Airflow image and the `edgeguard-kg` image, into which `api` and `graphql` copy `src/` at build time; rebuilding only the Airflow image leaves REST, GraphQL and STIX on the old code. The `airflow` service creates the Airflow pool `edgeguard_collectors` on every start (every collector task runs in it); `docker compose logs airflow | grep 'collector pool'` shows `[edgeguard] collector pool edgeguard_collectors set to <n> slots` once it is set.
 
-**Updating a running stack:** `./dags` is re-parsed live, but the pool is only created when the `airflow` container is recreated. (1) Pull; (2) only when no baseline is running (a recreate kills running tasks), `docker compose build && docker compose up -d` (rebuilds the Airflow image and the `edgeguard-kg` image that `api` and `graphql` bake `src/` into, and recreates every service whose image or configuration changed; the `metrics` service reads `./src` from a bind mount, so run `docker compose restart metrics` when it was not recreated); (3) check the pool with `docker exec edgeguard_airflow airflow pools list`.
+**Updating a running stack:** `./dags` is re-parsed live, but the pool is only created when the `airflow` container is recreated. (1) Pull; (2) only when no baseline is running (a recreate kills running tasks), run the three commands above: they rebuild every image and recreate every container, `metrics` included; (3) check the pool with `docker exec edgeguard_airflow airflow pools list`; (4) check the running commit: `curl -s http://127.0.0.1:8000/health | jq -r .git_sha` and `curl -s http://127.0.0.1:4001/health | jq -r .git_sha` print the value of `EDGEGUARD_GIT_SHA`. Compose takes it from the shell before `.env`, so a later `docker compose up` from a shell without it recreates the containers with an empty value: export it again, or write it into `.env`.
 
 Wait for healthchecks (often **~60s** for Neo4j/Airflow), then:
 
@@ -287,6 +288,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — § 4 builds every image and recreates every container (`docker compose build`, then `docker compose up -d --force-recreate`; the start command built only the Airflow image) and sets `EDGEGUARD_GIT_SHA`, which both `/health` responses report as `git_sha`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; the collector pool upgrade for a running stack moved to the appendix; § 6 renamed to "Checklist of common setup ideas".
 - 2026-10-17 — Corrected against the code: `NEO4J_TX_MEMORY_MAX` sets `dbms.memory.transaction.total.max` (all running transactions together); Tiny dev TX max 4g; the baseline-capable values are commented out in `.env.example` and must be set in `.env`; host RAM from the container limits (about 47g, plan 48g); `docker compose down -v` keeps `./state` and `./checkpoints`; the update rebuilds every image; the MISP check uses the container's `MISP_URL`; the batch throttle also paces KEV revisions and indicator refreshes; the MISP circuit breaker opens after 3 recorded failures; node count of the 2026-10-16 baseline.

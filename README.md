@@ -328,7 +328,7 @@ Prometheus           →  http://localhost:9090
 Grafana              →  http://localhost:3000   (set GRAFANA_ADMIN_PASSWORD in .env)
 AlertManager         →  http://localhost:9093
 ```
-Airflow’s scheduler/UI state uses **`airflow_postgres`**; override credentials with **`AIRFLOW_POSTGRES_*`** in `.env` if needed. The **`airflow`** service image is **built** from **`Dockerfile.airflow`** (EdgeGuard Python deps such as **neo4j** / **pymisp**); run **`docker compose build airflow`** after dependency or **`src/`** logic changes. **`docker-compose.yml`** `x-common-env` forwards MISP→Neo4j tuning from `.env` (**`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, **`EDGEGUARD_REL_BATCH_SIZE`**, **`EDGEGUARD_DEBUG_GC`**, **`EDGEGUARD_MISP_EVENT_SEARCH`**, etc.) into **airflow** / **api** / **graphql**. Ops and troubleshooting: [`docs/AIRFLOW_DAGS.md`](docs/AIRFLOW_DAGS.md).
+Airflow’s scheduler/UI state uses **`airflow_postgres`**; override credentials with **`AIRFLOW_POSTGRES_*`** in `.env` if needed. The **`airflow`** service image is **built** from **`Dockerfile.airflow`** (EdgeGuard Python deps such as **neo4j** / **pymisp**) and reads **`src/`** from a bind mount; the **`api`** and **`graphql`** image (**`Dockerfile`**) copies **`src/`** in at build time. After a pull or a dependency change, rebuild every image and recreate every container: **`export EDGEGUARD_GIT_SHA=$(git rev-parse --short HEAD)`**, then **`docker compose build && docker compose up -d --force-recreate`** (rebuilding only the Airflow image leaves REST, GraphQL and STIX on the old code; both `/health` responses report the commit as `git_sha`). **`docker-compose.yml`** `x-common-env` forwards MISP→Neo4j tuning from `.env` (**`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, **`EDGEGUARD_REL_BATCH_SIZE`**, **`EDGEGUARD_DEBUG_GC`**, **`EDGEGUARD_MISP_EVENT_SEARCH`**, etc.) into **airflow** / **api** / **graphql**. Ops and troubleshooting: [`docs/AIRFLOW_DAGS.md`](docs/AIRFLOW_DAGS.md).
 
 ### Option B — Python / pip (no Docker)
 
@@ -1043,6 +1043,7 @@ These settings also appear in the "Recommended Memory Settings" table below; the
 | `EDGEGUARD_STATE_DIR` | Override default state directory (host-side CLI; the Airflow container uses `/opt/airflow/state`, bind-mounted from `./state`) | `<project_root>/state/` |
 | `EDGEGUARD_BASE_DIR` | Override project root directory (used by DAGs for path resolution) | `<directory containing dags/>` |
 | `EDGEGUARD_VERSION` | Sets only the `version` label on the Prometheus `APP_INFO` metric. Everywhere else (APIs, logs) the version comes from `package_meta.package_version()` (pyproject CalVer) and ignores this var. | `1.0.0` (metrics label fallback) |
+| `EDGEGUARD_GIT_SHA` | Commit the containers were deployed from. Set it at deploy time (`export EDGEGUARD_GIT_SHA=$(git rev-parse --short HEAD)` before `docker compose build && docker compose up -d --force-recreate`; Compose forwards it to `airflow`, `api` and `graphql`). The REST and GraphQL `/health` responses report it as `git_sha` (`null` when unset) and STIX exports as the `X-EdgeGuard-Git-Sha` header (absent when unset). | *(unset)* |
 | `EDGEGUARD_ENABLE_SLACK_ALERTS` | Enable Slack notifications on collector failure | *(unset)* |
 | `SLACK_WEBHOOK_URL` / `AIRFLOW__SLACK__WEBHOOK_URL` | Slack incoming webhook URL for collector-failure alerts | *(unset)* |
 | `NATS_URL` | NATS server URL — used only by the `edgeguard doctor` reachability check. Actual NATS publishing (`src/nats_client.py`) is configured via `NATSClient(servers=...)` and does not read this var. | *(unset)* |
@@ -1207,8 +1208,8 @@ print(format_health_status(status))
 
 | Service | URL | Behavior |
 |---------|-----|----------|
-| **REST** (`query_api`) | `GET /health` | **HTTP 200** when Neo4j is healthy, **HTTP 503** while degraded (no client, a reconnect in progress, or a failed `Neo4jClient.health_check()`: ping + APOC). Body in both cases: `status` (`ok` / `degraded`), `neo4j_connected`, `version`. |
-| **GraphQL** (`graphql_api`) | `GET /health` | **HTTP 200** only when Neo4j is healthy (same check). **HTTP 503** if the driver is missing or `health_check()` fails (suitable for strict load-balancer / k8s probes). |
+| **REST** (`query_api`) | `GET /health` | **HTTP 200** when Neo4j is healthy, **HTTP 503** while degraded (no client, a reconnect in progress, or a failed `Neo4jClient.health_check()`: ping + APOC). Body in both cases: `status` (`ok` / `degraded`), `neo4j_connected`, `version`, `git_sha` (the deployed commit from `EDGEGUARD_GIT_SHA`; `null` when unset). |
+| **GraphQL** (`graphql_api`) | `GET /health` | **HTTP 200** only when Neo4j is healthy (same check). **HTTP 503** if the driver is missing or `health_check()` fails (suitable for strict load-balancer / k8s probes). Body: `status`, `neo4j_connected`, `git_sha` (as on the REST API). |
 
 Other routes on the REST API use a fast **`Neo4jClient.is_connected()`** (driver present) guard before running queries.
 
@@ -1324,6 +1325,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Deploy instructions rebuild every image (`docker compose build && docker compose up -d --force-recreate`; they rebuilt only the Airflow image, which left REST, GraphQL and STIX on the old code); `EDGEGUARD_GIT_SHA` forwarded by Compose and reported as `git_sha` by both `/health` responses.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1 (an empty sync window is a failed run).
 - 2026-10-18 — MITRE ATT&CK uses its own per-run cap (the whole changed bundle) on scheduled runs instead of `EDGEGUARD_INCREMENTAL_LIMIT`.
 - 2026-10-18 — STIX export: times only from the graph (byte-identical re-exports), indicator `confidence` and `valid_until`, malware as families, tools with their ATT&CK reference, the build as the `X-EdgeGuard-Git-Sha` header instead of producer identity properties; the design proposal folded into docs/RESILMESH_QUICKSTART_STIX.md and deleted; the MISP-event STIX file export of `run_pipeline.py` (`--stix`, `--stix-event`, `--stix-output`) removed, `GET /stix/export` being the STIX surface.

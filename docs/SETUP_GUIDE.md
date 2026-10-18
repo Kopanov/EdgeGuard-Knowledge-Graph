@@ -240,7 +240,7 @@ On the venv path, **`--update`** pulls and re-installs the package; Airflow runs
 
 On a Compose stack, run the update only when no **`edgeguard_baseline`** run is in progress: it recreates the containers, which kills the running tasks, and if the rebuild fails after the pull, the old container keeps running and re-parses the new **`./dags`**.
 
-Without git (tarball): replace files manually, then **`docker compose build && docker compose up -d`** (or **`./install.sh --python`**).
+Without git (tarball): replace files manually, then **`docker compose build && docker compose up -d --force-recreate`**, which rebuilds every image (the `api` and `graphql` images contain `src/`) and recreates every container (or **`./install.sh --python`**). Set **`EDGEGUARD_GIT_SHA`** to the release's commit first when you know it: both `/health` responses report it as `git_sha`.
 
 ---
 
@@ -300,6 +300,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The tarball update recreates every container (`docker compose up -d --force-recreate`) after rebuilding every image, and names `EDGEGUARD_GIT_SHA`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; upgrade steps for kept installs moved to the appendix.
 - 2026-10-17 — An empty `AIRFLOW_API_AUTH_JWT_SECRET` stops the API server from starting; the reading-order table names `docker compose up -d airflow` after a `.env` change.
