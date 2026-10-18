@@ -63,3 +63,14 @@ def test_stix_types_discovery_endpoint():
         assert entry["example"]
         assert entry["primary_relation"]
         assert entry["returns"]
+
+
+def test_stix_types_states_that_collectors_link_no_indicator_to_a_cve():
+    """``(Indicator)-[:EXPLOITS]->(CVE)`` rests on the indicator's own CVE tag, which no collector
+    writes (2026-10-18): the indicator and cve entries must not promise those links unqualified."""
+    types = {t["name"]: t for t in client.get("/stix/types").json()["object_types"]}
+    assert "collectors write no such tag" in types["indicator"]["returns"]
+    assert "collectors do not write" in types["cve"]["returns"]
+    assert "threat actors and malware (EXPLOITS)" in types["cve"]["returns"]
+    doc = " ".join((query_api.stix_export.__doc__ or "").split())
+    assert "on a graph they built ``depth=1`` returns the CVE alone" in doc

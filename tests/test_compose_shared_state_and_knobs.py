@@ -105,6 +105,15 @@ class TestKnobForwarding:
         for svc in ("airflow", "api", "graphql"):
             assert name in compose["services"][svc]["environment"], f"{name} missing on {svc}"
 
+    def test_deployed_commit_reaches_api_and_graphql_but_not_airflow(self):
+        # The deployed commit is read by both /health responses and the STIX header. Airflow does not
+        # read it, and a changed value on its service would recreate it, killing a running baseline.
+        services = _compose()["services"]
+        for name in ("api", "graphql"):
+            assert services[name]["environment"].get("EDGEGUARD_GIT_SHA") == "${EDGEGUARD_GIT_SHA:-}", name
+        assert "EDGEGUARD_GIT_SHA" not in services["airflow"]["environment"]
+        assert "EDGEGUARD_GIT_SHA" not in _compose()["x-common-env"]
+
     def test_graphql_depth_cap_is_forwarded(self):
         env = _compose()["services"]["graphql"]["environment"]
         assert _default_of(env["EDGEGUARD_GRAPHQL_MAX_DEPTH"], "EDGEGUARD_GRAPHQL_MAX_DEPTH") == ""

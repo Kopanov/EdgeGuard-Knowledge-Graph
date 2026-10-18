@@ -1020,8 +1020,10 @@ class StixExporter:
     def export_indicator(self, value: str, depth: int = _DEFAULT_DEPTH, limit: int = _DEFAULT_LIMIT) -> Dict[str, Any]:
         """Bundle one indicator + its 1-hop neighbourhood.
 
-        Neighbourhood: INDICATES→Malware, EXPLOITS→CVE/Vulnerability,
-        USES_TECHNIQUE→Technique, TARGETS→Sector, PART_OF_CAMPAIGN→Campaign.
+        Neighbourhood: INDICATES→Malware, EXPLOITS→CVE/Vulnerability (only a
+        CVE the indicator's own MISP record tags; EdgeGuard's collectors write
+        no such tag), USES_TECHNIQUE→Technique, TARGETS→Sector,
+        PART_OF_CAMPAIGN→Campaign.
         Every SRO carries the provenance of its graph relationship
         (``_edge_to_sro``, 2026-10).
 
@@ -1500,8 +1502,15 @@ class StixExporter:
 
         ``depth=1`` returns the CVE plus only the exploiting Indicators
         (primary relation). ``depth=2`` (default) also includes affected
-        sectors and (2026-10) the ThreatActors and Malware that exploit it. See ``export_indicator`` for the general semantics;
-        ``limit`` bounds the indicator and sector collections.
+        sectors and the ThreatActors and Malware that exploit it. See
+        ``export_indicator`` for the general semantics; ``limit`` bounds the
+        indicator and sector collections.
+
+        An Indicator exploits a CVE only when its own MISP record tags that
+        CVE (``build_relationships`` steps 3a / 3b, ``match_type = cve_tag``).
+        EdgeGuard's collectors write no such tag, so on a graph they built
+        the bundle holds no indicator and ``depth=1`` returns the CVE alone;
+        actor and malware links come from curated packages.
 
         A CVE may exist as two twin nodes (``CVE`` — NVD canonical — and
         ``Vulnerability`` — MISP derived) that share one cve_id and one

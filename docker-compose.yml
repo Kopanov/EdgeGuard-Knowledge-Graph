@@ -10,9 +10,12 @@
 #
 # Usage:
 #   cp .env.example .env && nano .env        # fill in real secrets
-#   docker compose build airflow             # bake Python deps (neo4j, pymisp, …) — required after clone or requirements change
-#   docker compose up -d                     # start all services
+#   scripts/record_deployed_commit.sh        # the deployed commit into .env as EDGEGUARD_GIT_SHA (reported by /health)
+#   docker compose build                     # every image: airflow (Python deps) and edgeguard-kg (api + graphql copy src/ in)
+#   docker compose up -d --force-recreate    # start, or recreate every service on the new images
 #   docker compose logs -f graphql           # tail a specific service
+# After a pull, run all three deploy lines: the api and graphql images contain src/, so rebuilding
+# only airflow leaves REST, GraphQL and STIX on the old code.
 #
 # For Prometheus + Grafana monitoring (both files in one command: Prometheus joins edgeguard_net
 # below and scrapes the `metrics` service by name; the monitoring file alone is rejected):
@@ -321,7 +324,8 @@ services:
   #
   # Python packages for DAGs (neo4j, pymisp, collectors, …) are NOT installed at runtime — they are in
   # requirements-airflow-docker.txt and baked by Dockerfile.airflow. Do not pip install inside the container;
-  # recreate would drop them. After pulling code or changing that file: docker compose build airflow && docker compose up -d airflow
+  # recreate would drop them. After changing that file: docker compose build airflow && docker compose up -d airflow.
+  # After pulling code, rebuild every image instead (see Usage at the top of this file).
   # ─────────────────────────────────────────────────────────────────────────────
   # One-shot permission fix for the bind-mounted state directories (same pattern as the official
   # Airflow Compose file): Docker creates missing host directories as root, and the Airflow
@@ -633,6 +637,11 @@ services:
       - "127.0.0.1:8000:8000"   # REST API — host loopback only; use a reverse proxy for external access
     environment:
       <<: *common-env
+      # Commit the containers were deployed from, written into .env by scripts/record_deployed_commit.sh
+      # (./install.sh runs it); reported as git_sha by /health and as the X-EdgeGuard-Git-Sha header of
+      # STIX exports (empty = not reported). Forwarded to api and graphql only: airflow does not read it,
+      # so a changed value never recreates airflow (a recreate kills a running baseline).
+      EDGEGUARD_GIT_SHA: ${EDGEGUARD_GIT_SHA:-}
       EDGEGUARD_API_HOST: ${EDGEGUARD_API_HOST:-0.0.0.0}
       EDGEGUARD_API_PORT: "8000"
       # PR-A audit fix (Bugbot MED on commit 8dde4de): the symmetric
@@ -702,6 +711,8 @@ services:
       - "127.0.0.1:4001:4001"   # GraphQL API — loopback only
     environment:
       <<: *common-env
+      # Deployed commit, as on the api service (not forwarded to airflow).
+      EDGEGUARD_GIT_SHA: ${EDGEGUARD_GIT_SHA:-}
       EDGEGUARD_GRAPHQL_PORT: "4001"
       EDGEGUARD_GRAPHQL_HOST: ${EDGEGUARD_GRAPHQL_HOST:-0.0.0.0}
       EDGEGUARD_GRAPHQL_WORKERS: "2"

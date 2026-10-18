@@ -266,9 +266,23 @@ clearing:
    written for a `main` at or after eef87be that also holds the CVE NVD-precedence
    change: that code holds the relationship, CVE, indicator-type, description and
    curated-package behaviour the re-feed must run with (step 5).
-   The Airflow image is built on `apache/airflow:3.3.2-python3.12`: rebuild and
-   recreate it after the pull —
-   `docker compose build airflow && docker compose up -d --force-recreate airflow`.
+   After the pull, record the deployed commit, rebuild every image and recreate every
+   container:
+   ```bash
+   scripts/record_deployed_commit.sh      # writes EDGEGUARD_GIT_SHA=<commit> into .env
+   docker compose build && docker compose up -d --force-recreate
+   ```
+   The `api` and `graphql` images contain `src/` (the `Dockerfile` copies it at build
+   time), so rebuilding only the Airflow image (built on `apache/airflow:3.3.2-python3.12`)
+   would leave REST, GraphQL and STIX serving the old code. `EDGEGUARD_GIT_SHA` stays in
+   `.env`, so every later `docker compose` command, from any shell, sees the same value
+   and recreates no container because of it. Compose forwards it to `api` and `graphql`
+   only; `airflow` does not read it, so a changed value never recreates `airflow`. Do not
+   export it in the shell: Compose prefers a shell value to `.env`, and a
+   `docker compose up -d` from a shell with a different value restarts `api` and
+   `graphql`. After the recreate,
+   `curl -s http://127.0.0.1:8000/health | jq -r .git_sha` and
+   `curl -s http://127.0.0.1:4001/health | jq -r .git_sha` must both print the pulled commit.
    Every collector task runs in the Airflow pool
    `edgeguard_collectors`, and while the pool does not exist the collectors of new runs
    are never scheduled, without an alert. The `airflow` service sets the pool on every
@@ -543,6 +557,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The deploy step of § [6] rebuilds every image and recreates every container (it rebuilt only the Airflow image, which left REST, GraphQL and STIX on the old code) and records the deployed commit in `.env` (`scripts/record_deployed_commit.sh` writes `EDGEGUARD_GIT_SHA`, which both `/health` responses report as `git_sha`).
 - 2026-10-18 — The unicode-bypass audit item was removed, so the fresh-baseline item is [6]. The acceptance script has no `--legacy-graph` option: the description-source and aging checks are judged whenever the graph holds such nodes, and `--require-cisa-ics` requires a stated sector once the `cisa_ics` edges carry `zones`. Preflight check [9] covers `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` only (`EDGEGUARD_RESPECT_CALIBRATOR` was removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restated as a guide to the current behaviour: change history moved here, the steps for kept deployments and graphs moved to the appendix.

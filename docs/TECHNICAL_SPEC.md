@@ -736,7 +736,7 @@ Topics* below).
 
 | Method | Path | Description | Parameters |
 |--------|------|-------------|------------|
-| GET | `/health` | Health check — **HTTP 200** when Neo4j is healthy, **HTTP 503** while degraded (no client, a reconnect in progress, or a failed `Neo4jClient.health_check()`: ping + APOC); the JSON body in both cases holds `status` (`ok`/`degraded`), `neo4j_connected` and `version`. | - |
+| GET | `/health` | Health check — **HTTP 200** when Neo4j is healthy, **HTTP 503** while degraded (no client, a reconnect in progress, or a failed `Neo4jClient.health_check()`: ping + APOC); the JSON body in both cases holds `status` (`ok`/`degraded`), `neo4j_connected`, `version` and `git_sha` (the deployed commit from `EDGEGUARD_GIT_SHA`, `null` when unset). | - |
 | POST | `/query` | Natural-language threat query | `query`, `zone`, `limit`, `return_cypher` (body) |
 | POST | `/search/indicator` | Search a single indicator. Input is canonicalized via `ioc_normalize.canonicalize_lookup` (refang, NFC, case-fold, type resolution) before querying — see *Type Mapping* below. `related` lists the related nodes' properties in a stable order — Malware, ThreatActor and CVE / Vulnerability before Technique, Campaign, Sector and other labels, at most 10 per kind — and `relationships` (same order) the relationship type, direction (`outgoing` = indicator → node) and labels of each. When one value is stored under several types, the indicator of the resolved type answers (the `indicator_type` given, mapped to the graph type — `md5` → `hash` — or the type inferred from the value), otherwise the lowest type; `related` and `relationships` are that indicator's alone. | `value`, `indicator_type`, `zone` (body) |
 | GET | `/zone/{zone}` | Threats for a zone/sector, newest first by one clock for every label: `coalesce(last_reported_at, first_imported_at, created_at)`, an indicator's latest report, otherwise when the node entered the graph (a campaign's `created_at`); nodes without a time last, ties by `uuid`. `last_updated`, which every sync and campaign rebuild moves, is not read | `zone` (path), `limit`, `severity` |
@@ -1011,6 +1011,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — `GET /health` reports the deployed commit as `git_sha` (`EDGEGUARD_GIT_SHA`).
 - 2026-10-18 — `USES_TECHNIQUE` from an OTX pulse's ATT&CK ids (`otx_attack_ids`, step 8) is created at 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-18 — STIX export row: times from the graph (byte-identical re-exports), indicator `confidence` and `valid_until`, the `X-EdgeGuard-Git-Sha` header.
 - 2026-10-18 — The `INDICATES` row no longer names the removed co-occurrence calibration job.

@@ -40,7 +40,7 @@ from ioc_normalize import (
     normalize_mitre_technique_id,
 )
 from neo4j_client import Neo4jClient
-from package_meta import package_version
+from package_meta import deployed_git_sha, package_version
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -476,6 +476,8 @@ class HealthResponse(BaseModel):
     status: str
     neo4j_connected: bool
     version: str = _PKG_VERSION
+    # Commit the container was deployed from (``EDGEGUARD_GIT_SHA``); null when unset.
+    git_sha: Optional[str] = None
 
 
 class GraphQueryRequest(BaseModel):
@@ -607,7 +609,8 @@ async def health():
     """
     Health check endpoint.
 
-    Returns API status and Neo4j connectivity.
+    Returns API status, Neo4j connectivity, the package version and the deployed commit
+    (``git_sha`` from ``EDGEGUARD_GIT_SHA``, null when unset).
     """
     global neo4j_client
 
@@ -622,6 +625,7 @@ async def health():
         status="ok" if neo4j_ok else "degraded",
         neo4j_connected=neo4j_ok,
         version=_PKG_VERSION,
+        git_sha=deployed_git_sha(),
     )
     if not neo4j_ok:
         # 503 while degraded: the compose healthcheck and partner probes see the outage
@@ -1564,7 +1568,8 @@ async def stix_types(request: Request):
                 "identifier": "indicator value (IP, domain, hash, URL)",
                 "example": "1.2.3.4",
                 "returns": (
-                    "indicator + 1 hop: INDICATES malware, EXPLOITS CVEs, USES_TECHNIQUE techniques, "
+                    "indicator + 1 hop: INDICATES malware, EXPLOITS CVEs (only a CVE the indicator's own "
+                    "MISP record tags; EdgeGuard's collectors write no such tag), USES_TECHNIQUE techniques, "
                     "TARGETS sectors, PART_OF_CAMPAIGN campaigns"
                 ),
                 "primary_relation": "indicates→malware",
@@ -1595,7 +1600,9 @@ async def stix_types(request: Request):
                 "identifier": "CVE identifier",
                 "example": "CVE-2021-44228",
                 "returns": (
-                    "CVE + exploiting indicators, threat actors and malware (EXPLOITS) + affected sectors (AFFECTS)"
+                    "CVE + exploiting indicators (EXPLOITS; only an indicator whose own MISP record tags the "
+                    "CVE, which EdgeGuard's collectors do not write, so a graph they built has none), threat "
+                    "actors and malware (EXPLOITS) + affected sectors (AFFECTS)"
                 ),
                 "primary_relation": "indicators related-to CVE",
             },
@@ -1634,8 +1641,9 @@ async def stix_export(
 
     - ``indicator`` — ``identifier`` is the indicator value (IP, domain,
       hash, URL, …). Returns the indicator + 1 hop: INDICATES malware,
-      EXPLOITS CVEs, USES_TECHNIQUE techniques, TARGETS sectors,
-      PART_OF_CAMPAIGN campaigns.
+      EXPLOITS CVEs (only a CVE the indicator's own MISP record tags;
+      EdgeGuard's collectors write no such tag), USES_TECHNIQUE techniques,
+      TARGETS sectors, PART_OF_CAMPAIGN campaigns.
     - ``actor`` — ``identifier`` is a ThreatActor name or alias. Returns
       the actor + attributed malware (ATTRIBUTED_TO), EMPLOYS_TECHNIQUE
       techniques, the IMPLEMENTS_TECHNIQUE techniques of the attributed
@@ -1646,8 +1654,11 @@ async def stix_export(
       (IMPLEMENTS_TECHNIQUE), indicators (USES_TECHNIQUE), parent technique
       and sub-techniques (SUBTECHNIQUE_OF).
     - ``cve`` — ``identifier`` is a CVE ID (e.g. ``CVE-2021-44228``).
-      Returns the CVE + exploiting indicators, threat actors and malware
-      (EXPLOITS) + affected sectors (AFFECTS).
+      Returns the CVE + exploiting indicators (EXPLOITS; only an indicator
+      whose own MISP record tags the CVE, which EdgeGuard's collectors do
+      not write, so on a graph they built ``depth=1`` returns the CVE
+      alone), threat actors and malware (EXPLOITS) + affected sectors
+      (AFFECTS).
 
     The same neighbourhoods are listed by ``GET /stix/types`` (``returns``),
     with the STIX relationship each graph relationship becomes
@@ -1738,7 +1749,7 @@ async def stix_export(
 
     # The build that served the bundle travels as a header, not in the bundle: an object in it
     # changes only when the graph changes.
-    git_sha = os.environ.get("EDGEGUARD_GIT_SHA", "").strip()
+    git_sha = deployed_git_sha()
     return _JSON(
         content=bundle,
         media_type=StixExporter.MEDIA_TYPE,

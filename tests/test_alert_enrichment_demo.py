@@ -721,3 +721,38 @@ class TestDemoMaterial:
         assert '"malware": ["Cobalt Strike"]' not in page and '"confidence": 0.85' not in page
         assert "&lt;150ms</span>" not in page and "<150ms typical" not in page
         assert "docs/DEMO.md" in page
+
+    def test_demo_md_promises_no_graph_cve_in_the_alert_output(self):
+        """No collector writes the CVE tag on an indicator that ``(Indicator)-[:EXPLOITS]->`` rests on,
+        so every ``--from-graph`` alert shows ``cves: []`` (2026-10-18). The guide says so, shows that
+        shape, and takes ``<CVE id>`` from the GraphQL step instead of the alert output."""
+        guide = " ".join((_ROOT / "docs" / "DEMO.md").read_text().split())
+        assert "**No CVEs from the graph.**" in guide
+        assert "`cves: []` and `cves_found: 0`" in guide
+        assert '"cves": [],' in guide and '"cves_found": 0,' in guide
+        assert "Take the identifiers (`<indicator>`, `<actor>`, `<CVE id>`) from the alert enrichment" not in guide
+        assert "`<CVE id>` from a `cveId` that step 5 (GraphQL vulnerabilities) returns" in guide
+        assert "the CVEs the indicator exploits, its confidence" not in guide
+
+    def test_premise_no_collector_writes_an_indicator_cve_tag(self):
+        """The guide's premise: the sync reads an indicator's CVE from an ``exploits:`` tag (or a
+        ``cve="CVE-…"`` / ``cve:CVE-…`` tag) on its MISP attribute, and no collector writes one. A
+        collector that starts writing one makes the guide's "No CVEs from the graph" wrong."""
+        sync = (_ROOT / "src" / "run_misp_to_neo4j.py").read_text()
+        assert 'tag_name.startswith("exploits:")' in sync, "premise: the tag the sync reads"
+        for path in sorted((_ROOT / "src" / "collectors").rglob("*.py")):
+            text = path.read_text()
+            assert "exploits:" not in text, f"{path.name} writes an exploits: tag; update docs/DEMO.md"
+            assert 'cve="CVE-' not in text and "cve:CVE-" not in text, f"{path.name}: update docs/DEMO.md"
+
+    def test_demo_md_alert_commands_discard_the_startup_warning(self):
+        guide = (_ROOT / "docs" / "DEMO.md").read_text()
+        assert "python demo/alert_enrichment_demo.py --from-graph 1 2>/dev/null | jq '.[0].enrichment'" in guide
+        assert "python demo/alert_enrichment_demo.py --from-graph 3 --zone energy 2>/dev/null" in guide
+        assert "read the exit code before showing a response" in " ".join(guide.split())
+
+    def test_demo_md_url_encodes_the_stix_indicator(self):
+        guide = (_ROOT / "docs" / "DEMO.md").read_text()
+        assert '/stix/export/indicator/<indicator>"' not in guide
+        assert "IND=$(jq -rn --arg v '<indicator>' '$v | @uri')" in guide
+        assert '/stix/export/indicator/$IND"' in guide
