@@ -1603,6 +1603,34 @@ def cmd_dag_status(args) -> int:
     return 0
 
 
+def _release_killed_baseline_lock(run_id: str) -> None:
+    """Remove the baseline lock when it names the baseline run just killed.
+
+    A ``failed`` run otherwise keeps its sentinel until the age cap
+    (``EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC``, 48 h), and every collector and sync skips for it
+    meanwhile. Resuming the killed run later means clearing ``baseline_start``, which takes the
+    lock again. A sentinel of another run is left alone.
+    """
+    try:
+        from baseline_lock import (
+            baseline_lock_path,
+            is_baseline_running,
+            is_own_dag_run_sentinel,
+            release_baseline_lock,
+        )
+    except Exception as exc:
+        warn(f"  Baseline lock not checked: {exc}")
+        return
+    holder = {"dag_id": "edgeguard_baseline", "run_id": run_id}
+    if not is_own_dag_run_sentinel(is_baseline_running(), holder):
+        return
+    release_baseline_lock(holder)
+    if is_own_dag_run_sentinel(is_baseline_running(), holder):
+        warn(f"  Baseline lock still held by the killed run; remove {baseline_lock_path()} by hand.")
+    else:
+        ok("  Released the baseline lock the killed run held (clear baseline_start to resume it).")
+
+
 def cmd_dag_kill(args) -> int:
     """Force-fail stuck DAG runs with checkpoint preservation."""
     import airflow_client as ac
@@ -1660,6 +1688,8 @@ def cmd_dag_kill(args) -> int:
         else:
             ok(f"  Killed: {dag_id} / {run_id}")
             killed += 1
+            if dag_id == "edgeguard_baseline":
+                _release_killed_baseline_lock(run_id)
 
     # Reset circuit breakers since services are fine — it was the DAG that was stuck
     try:
