@@ -23,13 +23,17 @@ links to the indicator, each with the `evidence` of its links. An indicator and 
 same OTX report are linked as `(Indicator)-[:INDICATES]->(CVE)` (`match_type` `otx_pulse`, meaning
 "named in the same OTX report as the indicator"). The indicator's own claim to exploit a CVE
 (`EXPLOITS`, `cve_tag`) comes only from a CVE tag on its MISP record, and no feed gives one:
-EdgeGuard's collectors write no such tag. On a graph they built, `cves` therefore lists the CVEs of
-the indicator's OTX reports: an alert built with `--from-graph` shows CVEs when the selected
-indicator comes from an OTX pulse that lists CVEs, and `cves: []` with `cves_found: 0` otherwise.
+EdgeGuard's collectors write no such tag. On a graph they built, `cves` therefore lists the CVEs the
+graph links to the indicator as named in the same OTX report: an alert built with `--from-graph`
+shows CVEs when the graph links the selected indicator to such a CVE (`INDICATES`, `otx_pulse`), and
+`cves: []` with `cves_found: 0` otherwise. An indicator of a pulse that lists CVEs can have no such
+link: the sync builds it per MISP event and per pulse, for at most 2,000 indicators and 50 CVEs of
+the pulse, and an indicator or CVE MISP already held from an earlier pulse is not linked to a later
+one ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#relationship-types)).
 A same-report CVE says that one report names the indicator and the CVE, not that the indicator
 exploits it, and its recommendation says so (`Apply patch for <CVE id> (named in the same OTX report
-as the indicator)`). To show such an alert, pick an indicator with this read-only query and enrich
-it from an alert file (`--alerts`, below):
+as the indicator)`). To show such an alert, pick an indicator that has the link with this read-only
+query and enrich it from an alert file (`--alerts`, below):
 
 ```cypher
 MATCH (i:Indicator)-[r:INDICATES]->(:CVE)
@@ -336,7 +340,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide shows how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles.
+- 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide states when an alert shows them (the indicator has the link; per-event build and per-pulse caps) and how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles.
 - 2026-10-18 — Step 1 says that `stats` warns when it reads no sync state file on the host (none there, or unreadable).
 - 2026-10-18 — The alert enrichment shows no CVE from the graph (an indicator links to a CVE only through its own CVE tag, which the collectors do not write), so the output shape shows `cves: []` and the workflow takes `<CVE id>` from the GraphQL step instead of the alert output; the demo commands discard the configuration warning on stderr (`2>/dev/null`); the STIX example URL-encodes the indicator and adds a CVE bundle.
 

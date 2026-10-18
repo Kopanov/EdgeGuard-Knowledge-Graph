@@ -21,7 +21,8 @@ relationship writer receives and the Cypher it sends:
 * the builder: pairs, caps, provenance, no link to a CVE outside the report, no ``EXPLOITS``;
 * the sync reads the pulse of a CVE attribute (an OTX indicator of type CVE and a ``cve_references``
   item, both as MISPWriter writes them), in a full sync, an incremental sync (a changed indicator links
-  to an unchanged CVE of its pulse and the other way round) and the paged path of a large event;
+  to an unchanged CVE of its pulse and the other way round) and the paged path of a large event, and the
+  caps pick the same CVEs and indicators of a pulse in a full and an incremental sync;
 * the relationship writer routes the row to a template that MATCHes both ends and MERGEs only the link.
 """
 
@@ -484,6 +485,66 @@ class TestSync:
         _run_event(syncer, _attributes(_collect(PULSE_WITH_CVES, PULSE_OTHER)))
         expected = {(v, c) for v in A_INDICATORS for c in A_CVES} | {("192.0.2.99", "CVE-2023-4966")}
         assert set(_cve_links(syncer.rels)) == expected
+
+    # A pulse over the CVE cap: the indicators of PULSE_WITH_CVES (two of them CVEs) and 55 more CVEs
+    # among its ``cve_references``, 58 CVEs in all.
+    BIG_PULSE_REFS = [f"CVE-2026-{1000 + n}" for n in range(55)]
+
+    def _big_pulse_attrs(self) -> List[Dict[str, Any]]:
+        pulse = dict(copy.deepcopy(PULSE_WITH_CVES), cve_references=list(self.BIG_PULSE_REFS))
+        return _attributes(_collect(pulse), timestamp="1700000000")
+
+    def _incremental(self, attrs: List[Dict[str, Any]], changed: List[str]) -> MISPToNeo4jSync:
+        attrs = copy.deepcopy(attrs)
+        for attr in attrs:
+            if attr["value"] in changed:
+                attr["timestamp"] = "1792000000"
+        syncer = _syncer()
+        syncer._attr_since = datetime.fromtimestamp(1791000000, tz=timezone.utc)
+        _run_event(syncer, attrs)
+        return syncer
+
+    def test_the_caps_pick_the_same_cves_in_a_full_and_an_incremental_sync(self):
+        # Review finding: the caps took the first CVEs of the build input, and an incremental run put the
+        # changed items first, so a changed CVE beyond the first 50 of the event was linked as well and
+        # the graph held links to 51 CVEs of the report.
+        attrs = self._big_pulse_attrs()
+        full = _syncer()
+        _run_event(full, copy.deepcopy(attrs))
+        full_links = set(_cve_links(full.rels))
+        full_cves = {cve for _, cve in full_links}
+        assert len(full_cves) == 50
+        beyond = [c for c in self.BIG_PULSE_REFS if c not in full_cves]
+        assert beyond, "the pulse is over the cap"
+        for changed in ([beyond[-1]], [beyond[0], "203.0.113.17"], [sorted(full_cves)[0]]):
+            incremental = self._incremental(attrs, changed)
+            assert {i.get("cve_id") or i.get("value") for i in incremental.written} == set(changed)
+            assert set(_cve_links(incremental.rels)) == full_links, changed
+
+    def test_the_paged_path_picks_the_same_cves_in_an_incremental_sync(self, monkeypatch):
+        monkeypatch.setattr(MISPToNeo4jSync, "_ATTR_PAGE_SIZE", 3)
+        attrs = self._big_pulse_attrs()
+        full = _syncer()
+        _run_event(full, copy.deepcopy(attrs))
+        full_links = set(_cve_links(full.rels))
+        assert len({cve for _, cve in full_links}) == 50
+        beyond = [c for c in self.BIG_PULSE_REFS if c not in {cve for _, cve in full_links}]
+        # Four changed attributes, more than a page, so the incremental run takes the paged path too.
+        changed = beyond[-2:] + ["203.0.113.17", "update-check.example.net"]
+        incremental = self._incremental(attrs, changed)
+        assert len(incremental.written) == 4
+        assert set(_cve_links(incremental.rels)) == full_links
+
+    def test_the_indicator_cap_picks_the_same_indicators_in_an_incremental_sync(self, monkeypatch):
+        monkeypatch.setattr(MISPToNeo4jSync, "_MAX_REPORT_INDICATORS", 3)
+        attrs = _attributes(_collect(PULSE_WITH_CVES), timestamp="1700000000")
+        full = _syncer()
+        _run_event(full, copy.deepcopy(attrs))
+        full_links = set(_cve_links(full.rels))
+        assert len({value for value, _ in full_links}) == 3
+        late = [v for v in A_INDICATORS if v not in {value for value, _ in full_links}]
+        incremental = self._incremental(attrs, late)
+        assert set(_cve_links(incremental.rels)) == full_links
 
     def test_a_legacy_cve_note_without_a_pulse_is_not_linked(self):
         items = _collect(PULSE_WITH_CVES)

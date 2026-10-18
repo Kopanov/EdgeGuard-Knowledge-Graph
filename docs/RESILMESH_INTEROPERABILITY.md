@@ -745,25 +745,29 @@ Once the ISIM GraphQL schema is extended (or via direct Bolt access), this query
 MATCH (ip:IP {address: '203.0.113.42'})
 OPTIONAL MATCH (ind:Indicator)-[:INDICATOR_RESOLVES_TO]->(ip)   // planned EdgeGuard bridge
 OPTIONAL MATCH (ind)-[:EXPLOITS]->(cve:CVE)
+OPTIONAL MATCH (ind)-[rc:INDICATES]->(rcve:CVE) WHERE rc.match_type = 'otx_pulse'
 OPTIONAL MATCH (ind)-[:INDICATES]->(m:Malware)-[:ATTRIBUTED_TO]->(ta:ThreatActor)
 OPTIONAL MATCH (ta)-[:EMPLOYS_TECHNIQUE]->(tech:Technique)-[:IN_TACTIC]->(tactic:Tactic)
 OPTIONAL MATCH (ip)<-[:HAS_ASSIGNED]-(n:Node)-[:IS_A]->(h:Host)
 RETURN
   ip.address                      AS ip,
   ind.value                       AS indicator,
-  cve.cve_id                      AS cve,
+  cve.cve_id                      AS exploited_cve,
   cve.cvss_score                  AS cvss_score,
   cve.severity                    AS severity,
+  collect(DISTINCT rcve.cve_id)   AS cves_named_in_the_same_otx_report,
   m.name                          AS malware,
   ta.name                         AS threat_actor,
   collect(DISTINCT tech.mitre_id) AS techniques,
   h.hostname                      AS targeted_host
 ```
 
-The EdgeGuard hops follow the relationships the pipeline writes: an indicator `EXPLOITS` the `CVE` its CVE tag names (and the `Vulnerability`
-of that id, where one exists), `INDICATES` a malware, and the malware is `ATTRIBUTED_TO` an actor.
-The score and severity are the `CVE` node's own (§9: from its first CVSS, null / `UNKNOWN` without
-one).
+The EdgeGuard hops follow the relationships the pipeline writes: an indicator `INDICATES` a `CVE` named in the same OTX
+report (`match_type` `otx_pulse`; returned in `cves_named_in_the_same_otx_report`, never as exploited) and `INDICATES` a
+malware, and the malware is `ATTRIBUTED_TO` an actor. `EXPLOITS` from an indicator comes only from the indicator's own CVE
+tag (and reaches the `Vulnerability` of that id, where one exists), which no collector writes, so `exploited_cve` and its
+score are null on a graph the collectors built. The score and severity are the `CVE` node's own (§9: from its first CVSS,
+null / `UNKNOWN` without one).
 
 > The planned bridge is named `INDICATOR_RESOLVES_TO`, not `RESOLVES_TO`, to avoid a semantic collision with ISIM's `(IP)-[:RESOLVES_TO]->(DomainName)` relationship.
 
@@ -807,7 +811,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — `INDICATES` from an `Indicator` to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6), exported to STIX as `related-to`; §10.3 joins a host's vulnerable software to the indicators of the CVE's reports.
+- 2026-10-18 — `INDICATES` from an `Indicator` to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6), exported to STIX as `related-to`; the §10.2 query returns those CVEs in a column of their own (it followed only `EXPLOITS`, which no collector writes), and §10.3 joins a host's vulnerable software to the indicators of the CVE's reports.
 - 2026-10-18 — `ThreatActor.name`: no country or state names; an OTX adversary the same pulse lists as a malware family only when the canonical threat-actor reference knows the actor.
 - 2026-10-18 — `otx_attack_ids` (`USES_TECHNIQUE` from an OTX pulse's ATT&CK ids, Q8) is 0.6, the confidence of `otx_pulse` from the same ids (it was 0.85).
 - 2026-10-18 — STIX bundle coverage: times from the graph (byte-identical re-exports); an indicator no longer carries `x_edgeguard_last_updated`. § 7: IOB STIX does not ingest bundles from outside producers; EdgeGuard's outward STIX surface is `GET /stix/export` (the table had pointed to the `run_pipeline.py` file export, since removed).

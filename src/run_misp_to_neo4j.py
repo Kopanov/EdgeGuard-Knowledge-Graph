@@ -27,7 +27,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -420,6 +420,23 @@ def _item_report_ids(item: Dict[str, Any]) -> set:
         if isinstance(report_id, str) and report_id.strip():
             ids.add(report_id.strip())
     return ids
+
+
+def _event_order_key(full_event: Dict[str, Any]) -> Callable[[Dict[str, Any]], int]:
+    """Sort key giving a parsed item its attribute's position in *full_event* (2026-10-18).
+
+    An incremental run builds the report-scoped links from the changed items followed by the unchanged
+    items of their reports. Sorted by this key they are back in event order, so the per-report caps of
+    ``_build_cross_item_relationships`` pick the same items as a full sync, whichever attributes changed.
+    An item is found by ``misp_attribute_id`` (the attribute uuid); one not in the event sorts last.
+    """
+    positions: Dict[str, int] = {}
+    for index, attr in enumerate(coerce_misp_attribute_list(full_event.get("Attribute"))):
+        attr_uuid = str(attr.get("uuid") or "")
+        if attr_uuid:
+            positions.setdefault(attr_uuid, index)
+    missing = len(positions)
+    return lambda item: positions.get(str(item.get("misp_attribute_id") or ""), missing)
 
 
 # Outcome of the last index listing (read by ``fetch_edgeguard_events`` to record it in the run
@@ -3568,8 +3585,9 @@ class MISPToNeo4jSync:
         ``build_relationships`` Q3).
 
         Caps per report: ``_MAX_REPORT_INDICATORS`` indicators, ``_MAX_REPORT_MALWARE`` malware,
-        ``_MAX_REPORT_CVES`` CVEs and ``_MAX_REPORT_ACTORS`` actors, the first ones in event order;
-        a cap that applies is logged.
+        ``_MAX_REPORT_CVES`` CVEs and ``_MAX_REPORT_ACTORS`` actors, the first ones in the order of
+        ``items``; a cap that applies is logged. The callers pass the items in event order, an
+        incremental run too (``_event_order_key``), so a full and an incremental sync pair the same items.
 
         Args:
             items: Parsed items for **one** event only.
@@ -5583,6 +5601,8 @@ class MISPToNeo4jSync:
         )
         if context:
             cross_input = _dedupe_parsed_items(unique_event_items + context)
+            # 2026-10-18: back in event order (the changed items came first) before the per-report caps.
+            cross_input.sort(key=_event_order_key(full_event))
         cross_rels = self._build_cross_item_relationships(cross_input)
 
         logger.info(
@@ -5660,6 +5680,8 @@ class MISPToNeo4jSync:
             # cited every advisory, unlike the same attribute in a smaller event.
             "stated_zones",
             "stated_refs",
+            # 2026-10-18: the attribute's uuid, which gives the item its place in the event (``_event_order_key``).
+            "misp_attribute_id",
         )
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size
@@ -5722,10 +5744,13 @@ class MISPToNeo4jSync:
         gc.collect()
 
         # Incremental run: unchanged items of the same reports join the cross-item build only.
-        for _item in self._same_report_context(
-            context_attrs, full_event, set().union(*map(_item_report_ids, _rel_items))
-        ):
+        _context = self._same_report_context(context_attrs, full_event, set().union(*map(_item_report_ids, _rel_items)))
+        for _item in _context:
             _rel_items.append({k: _item.get(k) for k in _REL_KEYS if _item.get(k) is not None})
+        if _context:
+            # 2026-10-18: back in event order (the changed items came first) before the per-report caps.
+            _rel_items.sort(key=_event_order_key(full_event))
+        del _context
 
         # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
         # Uses the lightweight accumulator, not the full parsed items.
