@@ -10,8 +10,7 @@ Fixes pinned here:
 1. **STIX bundle determinism** (Devil's Advocate + Logic Tracker
    Tier S, both flagged independently): bundle.id must be a stable
    uuid5 of the sorted-id content hash; objects[] must be sorted;
-   the wall-clock timestamp must drop out when
-   EDGEGUARD_DETERMINISTIC_BUNDLE is set.
+   the producer identity carries no wall-clock timestamp.
 
 2. **Sector edgeguard_managed=true stamp** (Devil's Advocate Tier S):
    build_relationships 7a/7b auto-create Sector nodes; without the
@@ -95,32 +94,23 @@ def _producer_identity(bundle: dict) -> dict:
     return next(o for o in bundle["objects"] if o["id"] == EDGEGUARD_IDENTITY_ID)
 
 
-def test_stix_bundle_omits_wall_clock_when_deterministic_env_set(monkeypatch):
-    """When EDGEGUARD_DETERMINISTIC_BUNDLE=1, ``x_edgeguard_generated_at``
-    must be omitted entirely so two bundles with the same content are
-    byte-stable (used by ResilMesh diff polls and CI snapshot tests)."""
+def test_stix_bundle_carries_no_wall_clock_and_no_env_switch(monkeypatch):
+    """The producer identity carries no ``x_edgeguard_generated_at`` whatever the environment, so
+    two bundles with the same content are byte-stable; the former opt-in switch
+    ``EDGEGUARD_DETERMINISTIC_BUNDLE`` has no effect (output is always deterministic)."""
     from stix_exporter import StixExporter
 
-    monkeypatch.setenv("EDGEGUARD_DETERMINISTIC_BUNDLE", "1")
     exporter = StixExporter(neo4j_client=None)
-    bundle = exporter._bundle([{"id": "indicator--x", "type": "indicator"}])
-    assert "x_edgeguard_generated_at" not in _producer_identity(bundle), (
-        "EDGEGUARD_DETERMINISTIC_BUNDLE=1 must drop the wall-clock timestamp"
-    )
-
-
-def test_stix_bundle_keeps_wall_clock_by_default(monkeypatch):
-    """Default ON: ``x_edgeguard_generated_at`` is present on the producer
-    identity so operators can answer 'when did this bundle leave EdgeGuard'
-    from the bundle alone."""
-    from stix_exporter import StixExporter
-
-    monkeypatch.delenv("EDGEGUARD_DETERMINISTIC_BUNDLE", raising=False)
-    exporter = StixExporter(neo4j_client=None)
-    bundle = exporter._bundle([])
-    assert "x_edgeguard_generated_at" in _producer_identity(bundle), (
-        "default behavior must keep generated_at for forensics"
-    )
+    bundles = []
+    for value in (None, "1"):
+        if value is None:
+            monkeypatch.delenv("EDGEGUARD_DETERMINISTIC_BUNDLE", raising=False)
+        else:
+            monkeypatch.setenv("EDGEGUARD_DETERMINISTIC_BUNDLE", value)
+        bundle = exporter._bundle([{"id": "indicator--x", "type": "indicator"}])
+        assert "x_edgeguard_generated_at" not in _producer_identity(bundle)
+        bundles.append(bundle)
+    assert bundles[0] == bundles[1]
 
 
 # ---------------------------------------------------------------------------

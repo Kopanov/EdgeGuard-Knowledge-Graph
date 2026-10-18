@@ -1,32 +1,38 @@
-"""Graph → STIX 2.1 exporter for ResilMesh integration.
+"""Graph → STIX 2.1 exporter.
 
-This module is a **prototype** proposal implementation — see
-``docs/STIX21_EXPORTER_PROPOSAL.md`` for design notes, open questions and
-the list of follow-ups. It builds STIX 2.1 bundles centred on a single
-seed object (indicator / threat actor / technique / CVE) plus the
-immediate threat-intel neighbourhood, so ResilMesh can enrich an asset
-with "what do we know about this indicator/actor/etc." without pulling
-the whole graph.
+Builds STIX 2.1 bundles centred on a single seed object (indicator /
+threat actor / technique / CVE) plus the immediate threat-intel
+neighbourhood, so a STIX consumer (a threat-intelligence platform, a
+SIEM, ResilMesh) can enrich an asset with "what do we know about this
+indicator/actor/etc." without pulling the whole graph. The consumer
+guide, the design decisions and the open points are in
+``docs/RESILMESH_QUICKSTART_STIX.md``.
 
-Key design decisions (see proposal doc for justification):
+Key design decisions:
 - Uses the ``stix2`` SDK (already pinned in ``pyproject.toml``) for object
   construction so we get ID generation, timestamp formatting and schema
   validation for free.
-- STIX IDs are **deterministic** (UUIDv5 over the node's natural key) so
-  re-exports of the same graph state produce the same bundle — ResilMesh
-  can diff bundles safely.
+- STIX IDs are **deterministic** (UUIDv5 over the node's natural key) and
+  every timestamp comes from the graph, never from the clock, so
+  re-exports of the same graph state produce byte-identical bundles, so
+  consumers can diff bundles safely. ``modified`` follows the documented
+  sources; an indicator does not carry ``x_edgeguard_last_updated``, which
+  every full sync moves (docs/RESILMESH_QUICKSTART_STIX.md § 4 lists the few
+  changes that leave ``modified`` as it is).
 - All Cypher queries filter on ``x.edgeguard_managed = true OR x.edgeguard_enriched = true`` — nodes EdgeGuard created or enriched — (strict
   equality — null fails) so we never leak ResilMesh-owned
   asset/vulnerability nodes into an outbound bundle. Originally written
   as ``coalesce(x.edgeguard_managed, true) = true``, which defaulted
   missing properties to ``true`` and let ResilMesh-owned nodes pass the
   filter — fixed in the bugbot pass on PR #25.
-- ``EMPLOYS_TECHNIQUE`` (attribution: ThreatActor/Campaign → Technique),
-  ``IMPLEMENTS_TECHNIQUE`` (capability: Malware/Tool → Technique), and
-  ``USES_TECHNIQUE`` (observation: Indicator → Technique) all collapse
-  back to STIX 2.1 ``relationship_type: "uses"`` on export. Pre-release
-  fresh start has no legacy ``USES`` edges; the read paths match only
-  the post-PR-#24 specialised edge types.
+- ``EMPLOYS_TECHNIQUE`` (attribution: ThreatActor/Campaign → Technique)
+  and ``IMPLEMENTS_TECHNIQUE`` (capability: Malware/Tool → Technique)
+  become STIX 2.1 ``relationship_type: "uses"`` on export;
+  ``USES_TECHNIQUE`` (observation: Indicator → Technique) becomes
+  ``"indicates"``, the only relationship STIX 2.1 defines from an
+  indicator to an attack-pattern (``_SRO_BY_EDGE``). The read paths match
+  only these specialised edge types; the graph holds no generic ``USES``
+  edges.
 - ATT&CK tactics are emitted as ``kill_chain_phases`` on the
   ``attack-pattern`` SDO, not as standalone objects (per STIX 2.1 ATT&CK
   convention).
@@ -56,9 +62,8 @@ Export hardening (2026-10):
   top-level extension properties intact, and ``extension-definition``
   objects parse natively. The exporter therefore emits (a) an EdgeGuard
   producer ``identity`` object, referenced by ``created_by_ref`` from
-  every SDO/SRO, that carries the former bundle-level provenance
-  (exporter, git SHA, generation time) as top-level extension
-  properties, and (b) a single ``extension-definition`` object
+  every SDO/SRO, that names the exporter (``x_edgeguard_exporter``) as a
+  top-level extension property, and (b) a single ``extension-definition`` object
   (``EDGEGUARD_EXTENSION_ID``) declaring every ``x_edgeguard_*``
   property name (``EDGEGUARD_EXTENSION_PROPERTIES``). Each object that
   carries at least one ``x_edgeguard_*`` property declares the extension
@@ -90,6 +95,24 @@ Export hardening (2026-10):
   the exporter as ``neo4j.time.DateTime``; ``_iso_str`` converts them to
   Python values and ``_stix_ts`` cuts any fraction beyond six digits, the
   most ``stix2`` accepts (nine digits made every such export fail).
+- **Versions from the data.** STIX 2.1 (sections 3.2 and 3.6) identifies a
+  version of an object by ``id`` and ``modified``, and ``created`` never
+  changes between versions; ``modified`` is never before ``created``. An
+  SDO's ``created`` is the node's ``first_imported_at`` (else
+  ``created_at``), its ``modified`` the later of ``created`` and
+  ``last_updated`` (``_producer_created_modified``; the indicator's own
+  rule is ``_indicator_created_modified``); an SRO's ``created`` is the
+  edge's ``created_at`` (else ``imported_at``), its ``modified`` the later
+  of ``created`` and ``updated_at`` (``_relationship_created_modified``),
+  and an SRO behind several edges takes the earliest ``created`` and the
+  latest ``modified``. Only an object without any such time takes the
+  fixed ``_PROVENANCE_OBJECTS_CREATED``. No value comes from the clock, so
+  ``stix2`` never stamps one.
+- **Indicator confidence and expiry.** ``confidence`` is the aged
+  ``confidence_score`` on the 0–100 scale (else ``source_confidence``);
+  ``valid_until`` is ``retired_at``, else the time the aging rule retires
+  the indicator (``indicator_aging.retirement_time``), on nodes the aging
+  rule has evaluated (``aging_basis`` or ``retired_at``).
 """
 
 from __future__ import annotations
@@ -98,7 +121,6 @@ import datetime as _dt
 import hashlib
 import json
 import logging
-import os
 import re
 import unicodedata
 import uuid
@@ -142,11 +164,6 @@ _STIX_QUERY_TIMEOUT = 300
 # ResilMesh smoke tests that want a minimal bundle.
 _DEFAULT_DEPTH = 2
 
-# Optional git SHA baked into bundle provenance so ResilMesh can tell
-# exactly which EdgeGuard build produced a given bundle. Populated from
-# the EDGEGUARD_GIT_SHA env var at import time; empty string if unset.
-_GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
-
 # PR (S5) (bugbot LOW): the previously-defined ``_EMIT_SIGHTINGS``
 # env-var hook for opt-in Sighting SRO emission was removed — it was
 # evaluated on import but never read by any function (no consumer
@@ -169,51 +186,134 @@ from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 _STIX_EXCESS_FRACTION_RE = re.compile(r"(T\d{2}:\d{2}:\d{2}\.\d{6})\d+")
 
 
+def _time_of(value: Any) -> Optional[str]:
+    """A graph time as a ``_stix_ts`` string; ``None`` when absent or unparsable."""
+    ts = _stix_ts(_iso_str(value))
+    return ts if ts and _parse_stix_ts(ts) is not None else None
+
+
+def _later(ts: str, other: Optional[str]) -> str:
+    """The later of two ``_stix_ts`` strings (``ts`` when ``other`` is absent or not later)."""
+    if other is None:
+        return ts
+    at, other_at = _parse_stix_ts(ts), _parse_stix_ts(other)
+    return other if at is not None and other_at is not None and other_at > at else ts
+
+
+def _first_time(props: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[str]:
+    """The first usable time among ``keys`` of a node or relationship (``_time_of``)."""
+    return next((ts for ts in (_time_of(props.get(key)) for key in keys) if ts), None)
+
+
+def _graph_created_modified(props: Dict[str, Any], created_keys: Tuple[str, ...], modified_key: str) -> Dict[str, str]:
+    """``{created, modified}`` of an object from graph times: ``created`` is the first usable value
+    of ``created_keys``, ``modified`` the later of ``created`` and ``modified_key``. An object
+    without any ``created_keys`` value takes the fixed ``_PROVENANCE_OBJECTS_CREATED``, so no
+    timestamp comes from the clock (STIX 2.1 sections 3.2 and 3.6: ``created`` / ``modified``
+    identify a version, and ``modified`` is never before ``created``)."""
+    created = _first_time(props, created_keys) or _PROVENANCE_OBJECTS_CREATED
+    return {"created": created, "modified": _later(created, _time_of(props.get(modified_key)))}
+
+
+# The times of a graph node / relationship that date an object's ``created``, in order of preference.
+_NODE_CREATED_KEYS: Tuple[str, ...] = ("first_imported_at", "created_at")
+_RELATIONSHIP_CREATED_KEYS: Tuple[str, ...] = ("created_at", "imported_at")
+
+
 def _producer_created_modified(props: Dict[str, Any]) -> Dict[str, str]:
-    """Return ``{created, modified}`` kwargs for stix2 SDK constructors,
-    sourced from EdgeGuard's DB-local timestamps when present.
+    """Return ``{created, modified}`` kwargs for an SDO, from the node's own times.
 
-    PR (S5) (Cross-Checker v3 F3 MED): STIX 2.1 §3.2 says
-    ``created`` = "when the producer created this version of the
-    object". For EdgeGuard re-exporting threat-intel data, the
-    closest analogue is ``n.first_imported_at`` (when EdgeGuard
-    first MERGEd the node). Without this override, stix2 SDK
-    auto-stamps ``created = now()`` — every SDO emitted today says
-    "created today" even for entities EdgeGuard has tracked for
-    months. Same fix for ``modified`` from ``n.last_updated``.
-
-    ``_tactic_sdo`` already does this manually (it's a custom dict,
-    not via stix2 SDK). This helper brings the 6 SDK-built SDOs
-    (Malware/IntrusionSet/AttackPattern/Tool/Campaign/Vulnerability)
-    into the same convention.
-
-    Falls back to "now" when the node lacks the corresponding field.
-    Z-suffix-normalized for stix2 validator compatibility.
+    STIX 2.1 §3.2 says ``created`` = "when the producer created this version of the object". For
+    EdgeGuard re-exporting threat-intel data, the closest analogue is ``n.first_imported_at``
+    (when EdgeGuard first MERGEd the node), else ``n.created_at`` (a Campaign; a Sector created by
+    the sync's sector links; the relationship build stamps ``first_imported_at`` on the Sectors it
+    creates). ``modified`` is the later of ``created`` and ``n.last_updated``. Every SDO builder
+    uses it (``_indicator_created_modified`` builds on it); passing both values keeps stix2 from
+    stamping the wall clock.
     """
-    now_iso = _stix_ts(_dt.datetime.now(_dt.timezone.utc).isoformat()) or ""
-    created = _stix_ts(_iso_str(props.get("first_imported_at"))) or now_iso
-    modified = _stix_ts(_iso_str(props.get("last_updated"))) or now_iso
-    return {"created": created, "modified": modified}
+    return _graph_created_modified(props, _NODE_CREATED_KEYS, "last_updated")
+
+
+def _relationship_created_modified(rel: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Return ``{created, modified}`` kwargs for an SRO, from its graph relationship's times:
+    ``created`` is ``r.created_at`` (else ``r.imported_at``), ``modified`` the later of ``created``
+    and ``r.updated_at``; a relationship without them takes the fixed constant
+    (``_graph_created_modified``). Several edges behind one SRO are merged first
+    (``_merge_rel_props``, ``_merge_relationship``): the earliest ``created``, the latest
+    ``modified``."""
+    return _graph_created_modified(rel or {}, _RELATIONSHIP_CREATED_KEYS, "updated_at")
 
 
 def _indicator_created_modified(props: Dict[str, Any]) -> Dict[str, str]:
-    """``{created, modified}`` of an indicator SDO (2026-10-16, ``indicator_aging``).
+    """``{created, modified}`` of an indicator SDO (``indicator_aging``).
 
-    ``created`` is ``first_imported_at`` as for every SDO. ``modified`` is the latest of
-    ``created``, ``last_recorded_at`` (the latest MISP record of a report) and ``aging_since``
+    ``created`` follows ``_producer_created_modified`` as for every SDO. ``modified`` is the latest
+    of ``created``, ``last_recorded_at`` (the latest MISP record of a report) and ``aging_since``
     (when the indicator's aging state last changed), so it moves when a source reports the
     indicator again or its confidence or lifecycle changes, and not when a full sync merely
-    writes the node again (``last_updated``, which it read before).
+    writes the node again (``last_updated``, which it does not read).
     """
-    base = _producer_created_modified(props)
-    created = base["created"]
-    latest, latest_at = created, _parse_stix_ts(created)
+    created = _producer_created_modified(props)["created"]
+    latest = created
     for key in ("last_recorded_at", "aging_since"):
-        ts = _stix_ts(_iso_str(props.get(key)))
-        at = _parse_stix_ts(ts) if ts else None
-        if ts and at is not None and (latest_at is None or at > latest_at):
-            latest, latest_at = ts, at
+        latest = _later(latest, _time_of(props.get(key)))
     return {"created": created, "modified": latest}
+
+
+def _indicator_confidence(props: Dict[str, Any]) -> Optional[int]:
+    """The indicator's STIX ``confidence`` (0–100): ``confidence_score`` (the aged value), else
+    ``source_confidence``, each only when it is a number in [0, 1] (a boolean is not)."""
+    for key in ("confidence_score", "source_confidence"):
+        value = _unit_confidence(props.get(key))
+        if value >= 0:
+            return int(round(value * 100))
+    return None
+
+
+# Set once a wrong aging setting has been logged by ``_indicator_valid_until``, so a misconfigured
+# deployment produces one warning per process rather than one per exported indicator.
+_AGING_POLICY_WARNED = False
+
+
+def _indicator_valid_until(props: Dict[str, Any], valid_from: Optional[str]) -> Optional[str]:
+    """The indicator's STIX ``valid_until``: ``retired_at`` when set (a decay or a manual
+    retirement), otherwise the time the aging rule will retire it (``indicator_aging.retirement_time``:
+    the basis plus ``EDGEGUARD_AGING_RETIRE_DAYS``), the value the aging job then writes as
+    ``retired_at``.
+
+    Emitted only on a node the aging rule has evaluated (``aging_basis`` or ``retired_at``), so a node
+    written before the rule existed gets no date the rule did not set, and only when strictly later
+    than ``valid_from`` (``stix2`` rejects any other value). A wrong aging setting
+    (``load_aging_policy`` raises ``ValueError``) is logged once and the value omitted: the export
+    stays available.
+    """
+    global _AGING_POLICY_WARNED
+    if not props.get("aging_basis") and not props.get("retired_at"):
+        return None
+    until = _time_of(props.get("retired_at"))
+    if until is None:
+        from indicator_aging import load_aging_policy, retirement_time
+
+        try:
+            policy = load_aging_policy()
+        except ValueError as exc:
+            if not _AGING_POLICY_WARNED:
+                _AGING_POLICY_WARNED = True
+                logger.warning(
+                    "[stix-export] Aging policy unavailable (%s); indicators exported without valid_until", exc
+                )
+            return None
+        reported, imported = (_time_of(props.get(key)) for key in ("last_reported_at", "first_imported_at"))
+        when = retirement_time(
+            _parse_stix_ts(reported) if reported else None, _parse_stix_ts(imported) if imported else None, policy
+        )
+        until = _stix_ts(when.isoformat()) if when is not None else None
+    if until is None or valid_from is None:
+        return None
+    until_at, from_at = _parse_stix_ts(until), _parse_stix_ts(valid_from)
+    if until_at is None or from_at is None or until_at <= from_at:
+        return None
+    return until
 
 
 def _parse_stix_ts(ts: str) -> Optional[_dt.datetime]:
@@ -374,6 +474,10 @@ EDGEGUARD_EXTENSION_ID = _deterministic_id("extension-definition", "edgeguard-pr
 # fixed (not wall-clock) so the two objects are byte-stable across exports;
 # ``modified`` and ``version`` are bumped when the definition changes.
 _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
+# The version of the producer identity: later than ``_PROVENANCE_OBJECTS_CREATED`` because the
+# identity no longer carries a generation time or a build (both changed its content under one
+# ``modified``); bumped whenever the identity's content changes.
+_IDENTITY_MODIFIED = "2026-10-18T00:00:00.000Z"
 # 1.1.0 (2026-10-14): relationship provenance properties on SROs.
 # 1.2.0 (2026-10-15): x_edgeguard_status (NVD's record status) on vulnerabilities.
 # 1.3.0 (2026-10-15): explainability. x_edgeguard_cited_ids on SROs (the ATT&CK ids the sources
@@ -453,7 +557,9 @@ _INDICATOR_AGING_FIELDS: Tuple[Tuple[str, str], ...] = (
 # emitted property is missing from it.
 EDGEGUARD_EXTENSION_PROPERTIES: Tuple[str, ...] = (
     (
-        # Producer identity
+        # Producer identity. ``x_edgeguard_git_sha`` and ``x_edgeguard_generated_at`` are no longer
+        # emitted (the export response's ``X-EdgeGuard-Git-Sha`` and ``Date`` headers carry them);
+        # they stay declared, which is valid and keeps definition version 1.7.0.
         "x_edgeguard_exporter",
         "x_edgeguard_git_sha",
         "x_edgeguard_generated_at",
@@ -725,6 +831,8 @@ _ATTACK_URL_PATHS: Tuple[Tuple[str, str], ...] = (
     ("M", "mitigations"),
     ("C", "campaigns"),
 )
+# An ATT&CK software id (``S0039``): a tool carries it as its ``mitre-attack`` external reference.
+_ATTACK_SOFTWARE_ID_RE = re.compile(r"^S\d{4}$")
 # Bounds per SRO: an OTX-reported link can name hundreds of pulses.
 _MAX_EXTERNAL_REFERENCES = 20
 _MAX_SOURCE_REFS = 200
@@ -1264,7 +1372,7 @@ class StixExporter:
         Cartesian product of O(actors × malware × tools × indicators)
         intermediate rows that a final ``DISTINCT`` collapses. A
         well-connected technique (T1059 command-and-scripting is the
-        hotspot called out in the proposal doc) would generate thousands
+        documented hotspot) would generate thousands
         of throwaway rows under the naive query shape. Aggregating at
         each step bounds the row count by the size of one collection at
         a time.
@@ -1678,16 +1786,15 @@ class StixExporter:
         """Turn a Neo4j node dict into a STIX 2.1 SDO dict.
 
         We build objects through the stix2 SDK so the library enforces
-        schema and emits correct timestamps, then serialise back to a
+        schema and formats timestamps, then serialise back to a
         plain dict for the bundle (``stix2.parsing.dict_to_stix2`` would
         round-trip but the dict form is what FastAPI serialises anyway).
 
         After the SDO is built, any EdgeGuard zone tags on the source
         node (stored in Neo4j as ``n.zone`` list — ``healthcare``,
         ``energy``, ``finance``, ``global``) are attached to the SDO as
-        an ``x_edgeguard_zones`` custom property. This resolves open
-        question §7.4 of the proposal doc: ResilMesh can filter bundles
-        by sector without traversing the graph itself.
+        an ``x_edgeguard_zones`` custom property, so a consumer can
+        filter bundles by sector without traversing the graph itself.
 
         PR (S5) (architecture redesign): the source-truthful
         first_seen / last_seen used to live on the node; they're now
@@ -1775,6 +1882,8 @@ class StixExporter:
           wall-clock (analogous to OpenCTI `updated_at`). Cross-Checker
           F8: symmetric with `first_imported_at`; consumers polling for
           "has this SDO been touched since my last read" need the pair.
+          ``_indicator_sdo`` removes it again: an indicator's ``modified``
+          does not follow ``last_updated``.
         """
         if props.get("first_seen_at_source"):
             sdo_dict["x_edgeguard_first_seen_at_source"] = _iso_str(props["first_seen_at_source"])
@@ -1803,67 +1912,35 @@ class StixExporter:
             "indicator",
             f"{canonicalize_field_value(ind_type)}|{canonicalize_field_value(value)}",
         )
-        # PR (S5): valid_from is the canonical STIX 2.1 timestamp for
-        # "when did the world first observe this indicator". Resolution
-        # order:
-        #   1. n.first_seen_at_source — source-truthful, populated from
-        #      MISP-native attr.first_seen / NVD published / etc. (see
-        #      source_truthful_timestamps.py)
-        #   2. n.first_imported_at — when EdgeGuard first synced the
-        #      node (always set on ON CREATE; never overwritten)
-        #   3. n.first_seen — legacy field name; preserved for back-compat
-        #      with any node that hasn't been re-synced since the field
-        #      was added
-        #
-        # The previous code fell back to "1970-01-01T00:00:00Z" when
-        # ``props.get("first_seen")`` was missing — and PR #34 R17
-        # had dropped that field, so EVERY indicator shipped with
-        # valid_from=1970-01-01 to ResilMesh. The audit Logic Tracker
-        # caught this; this fix kills the epoch leak.
-        #
-        # PR (S5) (bugbot HIGH): explicitly cast each candidate
-        # via ``_iso_str`` so a ``neo4j.time.DateTime`` returned by the
-        # driver becomes a plain ISO-8601 string before stix2 sees it.
-        # Without the cast, ``stix2.utils.parse_into_datetime()`` raises
-        # because it doesn't recognize the neo4j driver type.
-        # PR (S5) (Cross-Checker F1 — MEDIUM): replace the
-        # ``"1970-01-01T00:00:00Z"`` tail-of-chain fallback with the
-        # CURRENT wall-clock. STIX 2.1 §4.8 `valid_from` semantic is
-        # "time from which this Indicator is considered valid". A
-        # 1970 sentinel reads to consumers as a real claim and is
-        # misleading. OpenCTI's convention + MITRE's own indicator SDOs
-        # use the object's ``created`` timestamp when no source first-
-        # seen exists — we mirror that here via ``now()`` (our ``created``
-        # is auto-stamped by stix2 at this same instant).
-        # PR (S5) (Bug Hunter v2 #1 HIGH): dropped the back-compat
-        # ``props.get("first_seen")`` step in the chain. The legacy node
-        # field was being written by the alert-path Indicator merge (see
-        # neo4j_client.py:merge_resilmesh_indicator BEFORE this commit) —
-        # which polluted ``valid_from`` with the alert-arrival wall-clock
-        # for any indicator that arrived via an alert. The alert path
-        # is now fixed; consumers reading the legacy ``i.first_seen``
-        # field on ANY remaining baseline node get None here, falling
-        # through to ``first_imported_at`` (the canonical DB-local sync
-        # time) — semantically correct.
-        # PR-M2 design choice (c): split the resolution into
-        # source-truthful vs inferred so we can stamp
-        # ``x_edgeguard_first_seen_inferred`` on the inferred branches.
-        # Spec: docs/TIMESTAMPS.md "valid_from fallback chain".
+        # valid_from is the canonical STIX 2.1 timestamp for "when did the world first observe this
+        # indicator". Resolution order (docs/TIMESTAMPS.md "valid_from fallback chain"):
+        #   1. first_seen_at_source — source-truthful, the MIN of ``r.source_reported_first_at`` over
+        #      the SOURCED_FROM edges (see source_truthful_timestamps.py)
+        #   2. first_imported_at — when EdgeGuard first synced the node (set on create, never
+        #      overwritten)
+        #   3. the SDO's ``created`` (``_producer_created_modified``), the convention of OpenCTI and
+        #      of MITRE's own indicators when no first-seen exists
+        # Branches 2 and 3 stamp ``x_edgeguard_first_seen_inferred`` so consumers can filter for
+        # source-truthful evidence. Each candidate goes through ``_iso_str`` so a
+        # ``neo4j.time.DateTime`` becomes a plain ISO-8601 string before stix2 sees it. No branch
+        # reads the clock: re-exporting the same node gives the same value.
+        created_modified = _indicator_created_modified(props)
         source_truthful = _iso_str(props.get("first_seen_at_source"))
         if source_truthful:
             valid_from = _stix_ts(source_truthful)
             valid_from_inferred = False
         else:
-            inferred = _iso_str(props.get("first_imported_at")) or _dt.datetime.now(_dt.timezone.utc).isoformat()
-            valid_from = _stix_ts(inferred)
+            valid_from = _time_of(props.get("first_imported_at")) or created_modified["created"]
             valid_from_inferred = True
-        # PR-M2: apply ``_producer_created_modified`` so Indicator
-        # SDO's ``created`` / ``modified`` come from EdgeGuard's
-        # ``first_imported_at`` / ``last_updated`` (concepts 3 / 4 in
-        # docs/TIMESTAMPS.md), not from the stix2 SDK's auto-stamp of
-        # current wall-clock. Brings Indicator into line with the 6
-        # other SDK-built SDO helpers (Malware/IntrusionSet/AttackPattern/
-        # Tool/Campaign/Vulnerability) that already use this helper.
+        # STIX confidence (the aged ``confidence_score``) and expiry (the retirement), each when the
+        # node has it; ``revoked`` is not set (a retired indicator expires, it is not withdrawn).
+        optional: Dict[str, Any] = {}
+        confidence = _indicator_confidence(props)
+        if confidence is not None:
+            optional["confidence"] = confidence
+        valid_until = _indicator_valid_until(props, valid_from)
+        if valid_until is not None:
+            optional["valid_until"] = valid_until
         obj = stix2.Indicator(
             id=stix_id,
             pattern=pattern,
@@ -1874,7 +1951,8 @@ class StixExporter:
             created_by_ref=EDGEGUARD_IDENTITY_ID,
             object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
-            **_indicator_created_modified(props),
+            **optional,
+            **created_modified,
         )
         # PR (S5): expose source-truthful + import-wall-clock timestamps
         # as producer-specific custom properties so consumers can
@@ -1883,6 +1961,10 @@ class StixExporter:
         # SDO type emits the same envelope (Logic Tracker HIGH —
         # previously only Indicator got the custom props).
         sdo_dict = self._apply_source_truthful_custom_props(_to_dict(obj), props)
+        # An indicator's ``modified`` does not follow ``last_updated`` (every full sync moves it), so
+        # the property is not emitted: a full sync that writes the same data again does not change
+        # the exported indicator under the same ``modified``.
+        sdo_dict.pop("x_edgeguard_last_updated", None)
         # PR-M2: mark indicators whose valid_from came from the fallback
         # chain so consumers can filter for source-truthful evidence
         # only. Conscientious consumers (analyst UIs) check the flag;
@@ -1895,15 +1977,14 @@ class StixExporter:
     def _malware_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
         stix_id = _deterministic_id("malware", name)
-        # _listify returns Optional[list[str]]; fall back to the default so
-        # the `any(...)` iteration below can't hit None.
-        malware_types = _listify(props.get("malware_types") or ["unknown"]) or ["unknown"]
-        is_family = any("family" in (mt or "").lower() for mt in malware_types) or bool(props.get("is_family"))
+        # A graph Malware node is a named family (MITRE software, a feed's family label), so
+        # ``is_family`` is always true. ``malware_types`` is an open vocabulary: only the
+        # placeholder ``malware`` (no type) is dropped, ``unknown`` when nothing else remains.
         obj = stix2.Malware(
             id=stix_id,
             name=name,
-            is_family=is_family,
-            malware_types=malware_types,
+            is_family=True,
+            malware_types=_typed_vocabulary(props.get("malware_types"), "malware"),
             aliases=_listify(props.get("aliases")),
             description=props.get("description"),
             created_by_ref=EDGEGUARD_IDENTITY_ID,
@@ -1982,18 +2063,30 @@ class StixExporter:
 
     def _tool_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
+        # The id derives from the name, not from ``mitre_id``: Tool is the documented exception to
+        # the ``n.uuid`` parity (``node_identity``); consumers match the ATT&CK reference below.
         stix_id = _deterministic_id("tool", name)
-        obj = stix2.Tool(
-            id=stix_id,
-            name=name,
-            tool_types=_listify(props.get("tool_types") or ["unknown"]),
-            description=props.get("description"),
-            aliases=_listify(props.get("aliases")),
-            created_by_ref=EDGEGUARD_IDENTITY_ID,
-            object_marking_refs=[_marking_ref_for(props)],
-            allow_custom=True,
-            **_producer_created_modified(props),
-        )
+        kwargs: Dict[str, Any] = {
+            "id": stix_id,
+            "name": name,
+            # Open vocabulary: only the placeholder ``tool`` (no type) is dropped.
+            "tool_types": _typed_vocabulary(props.get("tool_types"), "tool"),
+            "description": props.get("description"),
+            "aliases": _listify(props.get("aliases")),
+            "created_by_ref": EDGEGUARD_IDENTITY_ID,
+            "object_marking_refs": [_marking_ref_for(props)],
+            "allow_custom": True,
+        }
+        mitre_id = str(props.get("mitre_id") or "").strip().upper()
+        if _ATTACK_SOFTWARE_ID_RE.match(mitre_id):
+            reference = {
+                "source_name": "mitre-attack",
+                "external_id": mitre_id,
+                "url": f"https://attack.mitre.org/software/{mitre_id}/",
+            }
+            kwargs["external_references"] = [reference]
+        kwargs.update(_producer_created_modified(props))
+        obj = stix2.Tool(**kwargs)
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _tactic_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
@@ -2028,26 +2121,16 @@ class StixExporter:
                     "url": f"https://attack.mitre.org/tactics/{mitre_id}",
                 }
             )
-        # PR (S5) (bugbot c136baf MED): STIX 2.1 §3.2 + §11.2
-        # require ``created`` + ``modified`` on EVERY SDO including
-        # custom types. Every other SDO builder uses the stix2 SDK
-        # which auto-stamps these. Since x-mitre-tactic is a custom
-        # type the SDK doesn't natively model, we stamp them here:
-        # - ``created`` = node's first_imported_at (when EdgeGuard
-        #   first added the Tactic — closest analogue to STIX's
-        #   "when this object was created by the producer")
-        # - ``modified`` = last_updated (when last touched).
-        # Both fall back to NOW if the node lacks them (defensive).
-        # Z-suffix normalized for STIX validator compatibility.
-        now_iso = _stix_ts(_dt.datetime.now(_dt.timezone.utc).isoformat())
-        created = _stix_ts(_iso_str(props.get("first_imported_at"))) or now_iso
-        modified = _stix_ts(_iso_str(props.get("last_updated"))) or now_iso
+        # STIX 2.1 §3.2 + §11.2 require ``created`` + ``modified`` on EVERY SDO including custom
+        # types. x-mitre-tactic is a custom type the SDK doesn't natively model, so they are set
+        # here, by the rule of every SDO (``_producer_created_modified``).
+        created_modified = _producer_created_modified(props)
         sdo: Dict[str, Any] = {
             "type": "x-mitre-tactic",
             "spec_version": "2.1",
             "id": stix_id,
-            "created": created,
-            "modified": modified,
+            "created": created_modified["created"],
+            "modified": created_modified["modified"],
             "created_by_ref": EDGEGUARD_IDENTITY_ID,
             "object_marking_refs": [_marking_ref_for(props)],
             "name": name,
@@ -2162,6 +2245,9 @@ class StixExporter:
             created_by_ref=EDGEGUARD_IDENTITY_ID,
             object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
+            # A Sector node carries ``first_imported_at`` (relationship build) or ``created_at``
+            # (sync sector links).
+            **_producer_created_modified(props),
         )
         return _to_dict(obj)
 
@@ -2188,7 +2274,10 @@ class StixExporter:
         then also carries its ``confidence`` (0–100), its record ids as
         ``external_references`` and ``x_edgeguard_match_type`` /
         ``x_edgeguard_sources`` / ``x_edgeguard_source_refs`` /
-        ``x_edgeguard_misp_event_ids`` (``_attach_relationship_provenance``).
+        ``x_edgeguard_misp_event_ids`` (``_attach_relationship_provenance``),
+        and its ``created`` / ``modified`` come from the relationship's
+        ``created_at`` / ``imported_at`` / ``updated_at``
+        (``_relationship_created_modified``).
         """
         source_type = source_ref.split("--", 1)[0]
         target_type = target_ref.split("--", 1)[0]
@@ -2229,6 +2318,8 @@ class StixExporter:
             object_marking_refs=[marking],
             allow_custom=True,
             **optional,
+            # The graph relationship's own times; without them stix2 stamps the wall clock.
+            **_relationship_created_modified(rel),
         )
         sro = _to_dict(obj)
         _attach_relationship_provenance(sro, rel)
@@ -2269,13 +2360,11 @@ class StixExporter:
         #   1. Sort ``objects`` by ``id`` (stable across runs).
         #   2. Compute ``bundle.id`` as ``uuid5`` of the sorted-id
         #      content hash, so identical content → identical id.
-        #   3. Provenance ``generated_at`` is OPTIONALLY frozen by the
-        #      ``EDGEGUARD_DETERMINISTIC_BUNDLE`` env var so callers
-        #      that need byte-stable bundles (CI fixtures, snapshot
-        #      tests, ResilMesh diff polls) can opt in. Default keeps
-        #      the wall-clock timestamp for forensics — so an operator
-        #      can still answer "when was this bundle generated" from
-        #      the bundle alone.
+        #   3. No object carries a wall-clock value: every ``created`` /
+        #      ``modified`` / ``valid_from`` comes from the graph
+        #      (``_producer_created_modified``, ``_relationship_created_modified``)
+        #      and the producer identity is fixed, so re-exporting the same
+        #      graph gives a byte-identical bundle.
         #
         # Strict-parser compliance (see the module docstring): a STIX 2.1
         # Bundle carries only ``type``, ``id`` and ``objects``. The
@@ -2348,6 +2437,14 @@ def _listify(value: Any) -> Optional[List[str]]:
     return [str(value)]
 
 
+def _typed_vocabulary(value: Any, placeholder: str) -> List[str]:
+    """An open-vocabulary list (``malware_types``, ``tool_types``) without the placeholder value
+    (the label name itself, which says no type), ``["unknown"]`` when nothing else remains. Other
+    values are kept: the vocabularies are open, and values from MISP tags carry meaning."""
+    values = [v for v in (_listify(value) or []) if v.strip() and v.strip().lower() != placeholder]
+    return values or ["unknown"]
+
+
 def _unit_confidence(value: Any) -> float:
     """A ``confidence_score`` in [0, 1], or ``-1.0`` when absent or not a unit-interval number."""
     if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1:
@@ -2363,8 +2460,10 @@ def _merge_rel_props(rels: Any) -> Dict[str, Any]:
     ``USES_MALWARE`` both become ``intrusion-set uses malware``. The merged map carries the
     union of ``sources`` / ``source_refs`` / ``misp_event_ids``, the highest
     ``confidence_score``, the ``match_type`` of the strongest edge (on a tie, the
-    alphabetically first) and the most restrictive ``tlp``, so the result does not depend on
-    row order.
+    alphabetically first), the most restrictive ``tlp``, and as ``created_at`` / ``updated_at``
+    the earliest ``created`` and the latest ``modified`` of the edges
+    (``_relationship_created_modified``; edges without times add none), so the result does not
+    depend on row order.
     """
     if isinstance(rels, dict):
         return dict(rels)
@@ -2392,7 +2491,23 @@ def _merge_rel_props(rels: Any) -> Dict[str, Any]:
     levels = sorted({str(r["tlp"]).strip().lower() for r in maps if str(r.get("tlp") or "").strip()})
     if levels:
         merged["tlp"] = max(levels, key=_relationship_tlp_rank)
+    created = [ts for ts in (_first_time(r, _RELATIONSHIP_CREATED_KEYS) for r in maps) if ts]
+    updated = [ts for ts in (_time_of(r.get("updated_at")) for r in maps) if ts] + created
+    if created:
+        merged["created_at"] = _earliest(created)
+    if updated:
+        merged["updated_at"] = _latest(updated)
     return merged
+
+
+def _earliest(timestamps: Iterable[str]) -> str:
+    """The earliest of non-empty ``_stix_ts`` strings, by time (not by text: fractions differ in length)."""
+    return min(timestamps, key=lambda ts: _parse_stix_ts(ts) or _dt.datetime.max.replace(tzinfo=_dt.timezone.utc))
+
+
+def _latest(timestamps: Iterable[str]) -> str:
+    """The latest of non-empty ``_stix_ts`` strings, by time."""
+    return max(timestamps, key=lambda ts: _parse_stix_ts(ts) or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc))
 
 
 def _with_rels(items: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -2483,7 +2598,9 @@ def _merge_relationship(existing: Dict[str, Any], incoming: Dict[str, Any]) -> N
     ``confidence``, ``external_references`` and the ``x_edgeguard_*`` provenance of ``existing``
     are then rebuilt from the merged map, so the result does not depend on which edge came
     first. The capped lists stay exact: each SRO holds the first entries of its sorted list, and
-    the first entries of the merged list are among them.
+    the first entries of the merged list are among them. ``created`` is the earlier and
+    ``modified`` the later of the two SROs' values; a side that carries only the fixed
+    ``_PROVENANCE_OBJECTS_CREATED`` adds no time, as in ``_merge_rel_props``.
     """
 
     def _as_rel_props(sro: Dict[str, Any]) -> Dict[str, Any]:
@@ -2505,6 +2622,11 @@ def _merge_relationship(existing: Dict[str, Any], incoming: Dict[str, Any]) -> N
             *(existing.get("object_marking_refs") or []), *(incoming.get("object_marking_refs") or [])
         )
     ]
+    for key, pick in (("created", _earliest), ("modified", _latest)):
+        values = [o[key] for o in (existing, incoming) if o.get(key)]
+        graph_values = [v for v in values if v != _PROVENANCE_OBJECTS_CREATED]
+        if values:
+            existing[key] = pick(graph_values or values)
     merged = _merge_rel_props([_as_rel_props(existing), _as_rel_props(incoming)])
     for key in ("confidence", "external_references", "x_edgeguard_match_type") + tuple(
         key for _prop, key, _cap in _SRO_PROVENANCE_LISTS
@@ -2566,58 +2688,27 @@ def _extract_zones(props: Dict[str, Any]) -> List[str]:
     return valid
 
 
-def _bundle_provenance() -> Dict[str, Any]:
-    """Build the provenance dict carried by the producer identity.
-
-    Kept in a module-level helper so tests can freeze the timestamp by
-    monkeypatching ``_utcnow``. ``git_sha`` is read from the module
-    constant so it is stable for a given process lifetime.
-
-    PR #37: when ``EDGEGUARD_DETERMINISTIC_BUNDLE`` is truthy, the
-    ``generated_at`` timestamp is omitted entirely so the bundle dict
-    becomes byte-stable across runs of the same graph state. Used by
-    ResilMesh diff-poll callers + CI snapshot tests. Default OFF so
-    forensic "when did this bundle leave EdgeGuard" use cases keep
-    working without code change.
-    """
-    provenance: Dict[str, Any] = {
-        "producer": EDGEGUARD_IDENTITY_NAME,
-        "exporter": "stix_exporter",
-        "git_sha": _GIT_SHA or None,
-    }
-    if not _is_truthy_env("EDGEGUARD_DETERMINISTIC_BUNDLE"):
-        provenance["generated_at"] = _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    return provenance
-
-
 def _producer_identity() -> Dict[str, Any]:
     """Build the EdgeGuard producer ``identity`` SDO.
 
-    Every exported object references it through ``created_by_ref``. It
-    carries the provenance that used to sit on the bundle as top-level
-    extension properties (``x_edgeguard_exporter``,
-    ``x_edgeguard_git_sha`` when known, ``x_edgeguard_generated_at``
-    unless ``EDGEGUARD_DETERMINISTIC_BUNDLE`` is set). ``created`` and
-    ``modified`` are fixed so the object is byte-stable; the identity is
-    marked TLP:WHITE because it describes the producer, not the data.
+    Every exported object references it through ``created_by_ref``. It names the exporter
+    (``x_edgeguard_exporter``) as a top-level extension property. Its content is fixed, so the
+    object is byte-stable and ``modified`` (``_IDENTITY_MODIFIED``) names its one version; the
+    build that served a bundle is the ``X-EdgeGuard-Git-Sha`` header of the export response and the
+    time is the response's ``Date`` header. The identity is marked TLP:WHITE because it describes
+    the producer, not the data.
     """
-    provenance = _bundle_provenance()
-    custom: Dict[str, Any] = {"x_edgeguard_exporter": provenance["exporter"]}
-    if provenance.get("git_sha"):
-        custom["x_edgeguard_git_sha"] = provenance["git_sha"]
-    if provenance.get("generated_at"):
-        custom["x_edgeguard_generated_at"] = provenance["generated_at"]
     obj = stix2.Identity(
         id=EDGEGUARD_IDENTITY_ID,
         created=_PROVENANCE_OBJECTS_CREATED,
-        modified=_PROVENANCE_OBJECTS_CREATED,
-        name=provenance["producer"],
+        modified=_IDENTITY_MODIFIED,
+        name=EDGEGUARD_IDENTITY_NAME,
         identity_class="system",
         description="Producer of this STIX 2.1 bundle: the EdgeGuard threat-intelligence knowledge graph exporter.",
         object_marking_refs=[stix2.TLP_WHITE.id],
         extensions={EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}},
         allow_custom=True,
-        **custom,
+        x_edgeguard_exporter="stix_exporter",
     )
     return _to_dict(obj)
 
@@ -2668,19 +2759,6 @@ def _declare_extension(sdo: Dict[str, Any]) -> None:
         extensions = {}
         sdo["extensions"] = extensions
     extensions.setdefault(EDGEGUARD_EXTENSION_ID, {"extension_type": "toplevel-property-extension"})
-
-
-def _is_truthy_env(name: str) -> bool:
-    """Same boolean parsing the rest of the codebase uses for env vars
-    (1/true/yes/on). Centralized here to keep the deterministic-bundle
-    behavior easy to swap without spelunking."""
-    val = os.getenv(name, "").strip().lower()
-    return val in {"1", "true", "yes", "on"}
-
-
-def _utcnow() -> _dt.datetime:
-    """Return the current UTC time. Overridable in tests."""
-    return _dt.datetime.now(_dt.timezone.utc)
 
 
 def _attach_zones(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:

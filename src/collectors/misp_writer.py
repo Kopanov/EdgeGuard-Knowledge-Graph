@@ -1846,18 +1846,24 @@ class MISPWriter:
             logger.error("Event lookup for %r failed (%s: %s) — no event is created", event_name, type(e).__name__, e)
             return None
 
+        # MISP is the single store every collector writes to and the store the knowledge graph is
+        # built from (FIRST EPSS scores on existing CVE nodes are the one feed written to Neo4j
+        # directly). Distribution 1 is MISP's "This community only": every organisation on this
+        # MISP instance can read the event (0 would be "Your organisation only"). EdgeGuard does not
+        # publish the events, so MISP server synchronisation and feeds do not forward them to other
+        # instances.
         event_data = {
             "Event": {
                 "info": event_name,
-                "distribution": 1,  # This organization only
+                "distribution": 1,  # This community only (see above)
                 "threat_level_id": 3,  # Low
                 "analysis": 0,  # Initial
                 "date": date,
                 "Attribute": [],
                 # Event is an organizational container: ``EdgeGuard-{source}-{date}`` groups by
                 # source + day.  Zone classification lives on **attributes** (``zone:…`` tags)
-                # so multi-zone items are handled correctly.  Single event tag marks data
-                # from this platform for consumers (e.g. ResilMesh).
+                # so multi-zone items are handled correctly.  The single event tag marks the
+                # events EdgeGuard wrote (provenance inside this MISP instance).
                 "Tag": [{"name": "EdgeGuard"}],
             }
         }

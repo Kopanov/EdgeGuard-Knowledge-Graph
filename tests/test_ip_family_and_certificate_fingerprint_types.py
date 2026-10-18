@@ -264,7 +264,7 @@ def test_stix_pattern_takes_the_family_from_the_address(indicator_type, value, p
 
 
 def test_misp_to_stix_conversion_takes_the_family_from_the_address():
-    """``MISPToNeo4jSync.convert_to_stix21`` (``run_pipeline.py`` STIX export and ``--stix-flow``)
+    """``MISPToNeo4jSync.convert_to_stix21`` (``run_pipeline.py`` ``--stix-flow``)
     falls back to ``_attribute_to_stix21``: PyMISP has no ``to_stix2``."""
     sync = MISPToNeo4jSync(neo4j_client=MagicMock())
     sco = sync._attribute_to_stix21({"type": "ip-dst", "value": _IPV6, "uuid": _ATTRIBUTE_UUID}, "event-uuid")

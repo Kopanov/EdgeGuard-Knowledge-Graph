@@ -5,10 +5,9 @@ Test script for STIX 2.1 integration in EdgeGuard pipeline.
 This script tests:
 1. STIX library availability
 2. PyMISP to_stix2() functionality
-3. STIX 2.1 bundle creation
+3. The STIX flow methods of the pipeline (MISP → STIX 2.1 → Neo4j)
 """
 
-import json
 import logging
 import os
 import sys
@@ -69,59 +68,6 @@ def test_pymisp_stix_conversion():
         logger.info(f"   First object ID: {obj.id}")
 
 
-def test_stix21_bundle_creation(tmp_path):
-    """Test manual STIX 2.1 bundle creation."""
-    logger.info("\nTesting STIX 2.1 bundle creation...")
-
-    import uuid
-    from datetime import datetime, timezone
-
-    # Create a STIX 2.1 bundle manually
-    bundle = {
-        "type": "bundle",
-        "id": f"bundle--{uuid.uuid4()}",
-        "spec_version": "2.1",
-        "objects": [
-            {
-                "type": "ipv4-addr",
-                "spec_version": "2.1",
-                "id": f"ipv4-addr--{uuid.uuid4()}",
-                "value": "192.168.1.100",
-            },
-            {
-                "type": "domain-name",
-                "spec_version": "2.1",
-                "id": f"domain-name--{uuid.uuid4()}",
-                "value": "evil.example.com",
-            },
-            {
-                "type": "indicator",
-                "spec_version": "2.1",
-                "id": f"indicator--{uuid.uuid4()}",
-                "created": datetime.now(timezone.utc).isoformat(),
-                "modified": datetime.now(timezone.utc).isoformat(),
-                "name": "Malicious IP Indicator",
-                "pattern": "[ipv4-addr:value = '192.168.1.100']",
-                "pattern_type": "stix",
-                "valid_from": datetime.now(timezone.utc).isoformat(),
-            },
-        ],
-    }
-
-    logger.info(f"✅ Created STIX 2.1 bundle with {len(bundle['objects'])} objects")
-    logger.info(f"   Bundle ID: {bundle['id']}")
-    logger.info(f"   Spec version: {bundle['spec_version']}")
-
-    output_path = tmp_path / "test_stix21_bundle.json"
-    with open(output_path, "w") as f:
-        json.dump(bundle, f, indent=2)
-    logger.info(f"✅ Test bundle saved to: {output_path}")
-
-    assert bundle["type"] == "bundle"
-    assert len(bundle["objects"]) == 3
-    assert output_path.is_file()
-
-
 def test_pipeline_stix_integration():
     """Test the pipeline STIX integration imports."""
     logger.info("\nTesting pipeline STIX integration...")
@@ -131,9 +77,12 @@ def test_pipeline_stix_integration():
     assert STIX_AVAILABLE, "STIX integration must be available (stix2 installed)"
     logger.info("✅ STIX integration available in pipeline")
 
-    for method in ("export_to_stix21", "export_single_event_to_stix21"):
+    for method in ("load_stix21_to_neo4j", "_run_stix_flow"):
         assert hasattr(EdgeGuardPipeline, method), f"EdgeGuardPipeline.{method} missing"
         logger.info(f"✅ EdgeGuardPipeline.{method}() available")
+    # The MISP-event STIX file export is removed; the outward STIX surface is GET /stix/export.
+    for method in ("export_to_stix21", "export_single_event_to_stix21"):
+        assert not hasattr(EdgeGuardPipeline, method), f"EdgeGuardPipeline.{method} is removed"
 
 
 def test_misp_to_neo4j_stix_conversion():
@@ -161,7 +110,7 @@ def main():
             "-v",
             "--tb=short",
             "-k",
-            "test_stix_library or test_pymisp_stix_conversion or test_stix21_bundle_creation "
+            "test_stix_library or test_pymisp_stix_conversion "
             "or test_pipeline_stix_integration or test_misp_to_neo4j_stix_conversion",
         ]
     )

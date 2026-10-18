@@ -398,11 +398,12 @@ def test_deterministic_ids_stable_across_calls():
     e2 = StixExporter(_mk_client(rows))
     b1 = e1.export_indicator("1.2.3.4")
     b2 = e2.export_indicator("1.2.3.4")
-    # Bundle IDs differ (random), but object IDs must be identical.
     ids1 = sorted(o["id"] for o in b1["objects"])
     ids2 = sorted(o["id"] for o in b2["objects"])
     assert ids1 == ids2
     assert ids1  # not empty
+    # The whole bundle is identical: ids and every timestamp come from the graph.
+    assert b1 == b2
 
 
 def test_deterministic_id_helper_uses_uuid5():
@@ -636,11 +637,12 @@ def test_sdo_has_no_zone_property_when_node_has_no_zones():
 
 
 def test_bundle_carries_producer_identity_provenance(monkeypatch):
-    """Every bundle — including empty ones — must carry provenance so
-    ResilMesh can tell which EdgeGuard build produced it. STIX 2.1 permits
-    no custom properties on the Bundle itself, so the provenance lives on
-    the EdgeGuard producer ``identity`` as top-level extension properties."""
-    monkeypatch.setattr(stix_exporter, "_GIT_SHA", "d5dc41f")
+    """Every bundle — including empty ones — carries the EdgeGuard producer
+    ``identity``. STIX 2.1 permits no custom properties on the Bundle itself,
+    so the exporter's name lives on the identity as a top-level extension
+    property; the build is the export response's ``X-EdgeGuard-Git-Sha``
+    header, not a property of any object."""
+    monkeypatch.setenv("EDGEGUARD_GIT_SHA", "d5dc41f")
     rows = [
         {
             "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
@@ -657,10 +659,7 @@ def test_bundle_carries_producer_identity_provenance(monkeypatch):
     assert ident["name"] == "EdgeGuard Knowledge Graph"
     assert ident["identity_class"] == "system"
     assert ident["x_edgeguard_exporter"] == "stix_exporter"
-    assert ident["x_edgeguard_git_sha"] == "d5dc41f"
-    # generated_at is ISO 8601 Z-suffixed UTC
-    assert ident["x_edgeguard_generated_at"].endswith("Z")
-    assert "T" in ident["x_edgeguard_generated_at"]
+    assert "x_edgeguard_git_sha" not in ident and "x_edgeguard_generated_at" not in ident
     assert ident["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
     # Every exported object names the identity as its creator.
     for o in _exported(bundle):
@@ -776,10 +775,10 @@ def test_depth_default_preserves_legacy_behavior():
     exporter = StixExporter(_mk_client(rows))
     default = exporter.export_indicator("1.2.3.4")
     explicit = exporter.export_indicator("1.2.3.4", depth=2)
-    # Object IDs and types must match. Bundle IDs differ (random).
     ids_default = sorted(o["id"] for o in default["objects"])
     ids_explicit = sorted(o["id"] for o in explicit["objects"])
     assert ids_default == ids_explicit
+    assert default == explicit
 
 
 # ---------------------------------------------------------------------------
@@ -1273,7 +1272,6 @@ def test_rich_bundle_passes_strict_stix2_parse(monkeypatch):
     ``x_edgeguard_*`` property. Negative control: removing the extension
     declaration from one object makes the same bundle fail, which proves
     the parser is strict and the extension is what makes it acceptable."""
-    monkeypatch.setattr(stix_exporter, "_GIT_SHA", "d5dc41f")
     bundle = StixExporter(_mk_client(_rich_indicator_rows(), _rich_aggregates())).export_indicator("203.0.113.5")
 
     parsed = stix2.parse(bundle)  # allow_custom defaults to False
@@ -1287,7 +1285,7 @@ def test_rich_bundle_passes_strict_stix2_parse(monkeypatch):
     assert indicator["x_edgeguard_first_seen_at_source"].startswith("2023-01-01")
     assert indicator["x_edgeguard_first_imported_at"].startswith("2026-04-21")
     assert _by_type(bundle, "vulnerability")[0]["x_edgeguard_cvss_score"] == 10.0
-    assert _producer_identity(bundle)["x_edgeguard_git_sha"] == "d5dc41f"
+    assert _producer_identity(bundle)["x_edgeguard_exporter"] == "stix_exporter"
     assert indicator["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
 
     # Negative control: the bare x_ properties are rejected without the extension.
@@ -1648,3 +1646,452 @@ def test_an_sdo_names_the_source_of_its_description_and_parses_strictly():
     (vulnerability,) = _by_type(bundle, "vulnerability")
     assert vulnerability["x_edgeguard_description_source"] == "cisa_kev"
     stix2.parse(bundle)
+
+
+# ---------------------------------------------------------------------------
+# Versions from the data (STIX 2.1 sections 3.2 and 3.6): ``created`` / ``modified`` identify a
+# version of an object, so re-exporting the same graph gives byte-identical objects and
+# ``modified`` is never before ``created``; indicator confidence and expiry; vocabularies; the
+# producer identity.
+# ---------------------------------------------------------------------------
+
+import datetime as _real_dt  # noqa: E402
+import json as _json  # noqa: E402
+import types as _types  # noqa: E402
+
+from stix2.utils import STIXdatetime  # noqa: E402
+
+import indicator_aging  # noqa: E402
+
+_CLOCK_A = (2031, 1, 2, 3, 4, 5)
+_CLOCK_B = (2032, 6, 7, 8, 9, 10)
+
+
+def _freeze_clocks(monkeypatch, at: Tuple[int, ...]) -> None:
+    """Patch every clock the exporter could read: stix2's default timestamp and the module's
+    ``datetime``. Any wall-clock value that reaches a bundle then differs between two clocks."""
+    frozen = _real_dt.datetime(*at, tzinfo=_real_dt.timezone.utc)
+
+    class _FrozenDatetime(_real_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen if tz is None else frozen.astimezone(tz)
+
+        @classmethod
+        def utcnow(cls):
+            return frozen.replace(tzinfo=None)
+
+    fake = _types.SimpleNamespace(
+        datetime=_FrozenDatetime, timezone=_real_dt.timezone, timedelta=_real_dt.timedelta, date=_real_dt.date
+    )
+    monkeypatch.setattr(stix_exporter, "_dt", fake)
+    monkeypatch.setattr(stix2.base, "get_timestamp", lambda: STIXdatetime(*at, tzinfo=_real_dt.timezone.utc))
+
+
+def _at(ts: str) -> _real_dt.datetime:
+    return _real_dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def _assert_versions_hold(bundle: Dict[str, Any], name: str) -> None:
+    """``modified >= created`` on every object that has both; ``valid_until > valid_from`` where present."""
+    for obj in bundle["objects"]:
+        if "created" in obj and "modified" in obj:  # a marking-definition has no modified
+            assert _at(obj["modified"]) >= _at(obj["created"]), (name, obj["id"], obj["created"], obj["modified"])
+        if "valid_until" in obj:
+            assert _at(obj["valid_until"]) > _at(obj["valid_from"]), (name, obj["id"])
+
+
+def _pair(node: Dict[str, Any], rel: Any) -> Dict[str, Any]:
+    return {"n": node, "r": rel}
+
+
+# Nodes and edges in the shapes the writers leave: some with every time, some with only a part
+# (a campaign and a sector the sync created carry ``created_at`` but no ``first_imported_at``;
+# an edge without ``created_at`` carries ``imported_at``) and some with none at all.
+_EDGE_MITRE = {
+    "match_type": "mitre_explicit",
+    "confidence_score": 0.95,
+    "sources": ["mitre_attck"],
+    "source_refs": ["mitre_attck:G0007"],
+    "created_at": "2026-10-13T12:31:00+00:00",
+    "updated_at": "2026-10-16T00:50:00+00:00",
+}
+_EDGE_OTX = {
+    "match_type": "otx_pulse",
+    "confidence_score": 0.6,
+    "sources": ["alienvault_otx"],
+    "imported_at": "2026-10-14T09:00:00+00:00",
+    "updated_at": "2026-10-15T09:00:00+00:00",
+}
+_INDICATOR = {
+    "value": "203.0.113.5",
+    "indicator_type": "ipv4",
+    "tlp": "amber",
+    "last_updated": "2026-10-16T03:00:00+00:00",
+    "confidence_score": 0.66,
+    "source_confidence": 0.8,
+    "aging_basis": "source_date",
+    "last_reported_at": "2026-09-01T00:00:00+00:00",
+}
+_MALWARE = {
+    "name": "emotet",
+    "malware_types": ["malware"],
+    "first_imported_at": "2026-10-13T12:31:00+00:00",
+    "last_updated": "2026-10-16T00:50:00+00:00",
+}
+_CAMPAIGN = {
+    "name": "apt28 campaign",
+    "created_at": "2026-10-14T01:00:00+00:00",
+    "last_updated": "2026-10-16T02:36:48+00:00",
+}
+_SECTOR = {"name": "energy", "created_at": "2026-10-13T13:00:00+00:00", "last_updated": "2026-10-16T01:00:00+00:00"}
+_TECHNIQUE = {"mitre_id": "T1059", "name": "Command and Scripting Interpreter", "tactic_phases": ["execution"]}
+_TOOL = {"name": "net", "mitre_id": "S0039", "tool_types": ["tool"], "first_imported_at": "2026-10-13T12:31:00+00:00"}
+_CVE = {"cve_id": "CVE-2021-44228", "first_imported_at": "2026-10-13T12:35:00+00:00"}
+
+_REPLAY_ROWS: Dict[str, Tuple[str, Dict[str, Any]]] = {
+    "export_indicator": (
+        "203.0.113.5",
+        {
+            "seed": _INDICATOR,
+            "malware": [_pair(_MALWARE, _EDGE_OTX)],
+            "vulns": [_pair(_CVE, [_EDGE_OTX, {"created_at": "2026-10-13T20:00:00+00:00"}])],
+            "techniques": [_pair(_TECHNIQUE, {})],
+            "sectors": [_pair(_SECTOR, {"sources": ["threatfox"]})],
+            "campaigns": [_pair(_CAMPAIGN, {"match_type": "campaign_grouping"})],
+        },
+    ),
+    "export_threat_actor": (
+        "APT28",
+        {
+            "seed": {"name": "apt28", "aliases": ["APT28"]},
+            "malware": [_pair(_MALWARE, _EDGE_OTX)],
+            "actor_tech": [_pair(_TECHNIQUE, _EDGE_MITRE)],
+            "mal_tech": [{"m": _MALWARE, "t": _TECHNIQUE, "r": _EDGE_MITRE}],
+            "campaigns": [_pair(_CAMPAIGN, {})],
+            "uses_malware": [_pair(_MALWARE, _EDGE_MITRE)],
+            "tools": [_pair(_TOOL, _EDGE_MITRE)],
+            "exploits": [_pair(_CVE, {})],
+            "sectors": [_pair(_SECTOR, {})],
+        },
+    ),
+    "export_technique": (
+        "T1059",
+        {
+            "seed": _TECHNIQUE,
+            "actors": [_pair({"name": "apt28"}, _EDGE_MITRE)],
+            "malware": [_pair(_MALWARE, _EDGE_MITRE)],
+            "tools": [_pair(_TOOL, {})],
+            "indicators": [_pair(_INDICATOR, _EDGE_OTX)],
+            "parents": [],
+            "subtechniques": [_pair({"mitre_id": "T1059.001", "name": "PowerShell"}, _EDGE_MITRE)],
+        },
+    ),
+    "export_cve": (
+        "CVE-2021-44228",
+        {
+            "seed": _CVE,
+            "indicators": [_pair(_INDICATOR, [_EDGE_OTX])],
+            "threats": [{"n": _MALWARE, "r": [_EDGE_MITRE], "kind": "Malware"}],
+            "sectors": [_pair(_SECTOR, [])],
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("method", sorted(_REPLAY_ROWS))
+def test_re_exporting_the_same_graph_gives_byte_identical_bundles(monkeypatch, method):
+    """Every seed type, exported twice under two different clocks: the JSON is byte-identical, so
+    no wall-clock value reaches the bundle, and every object is a well-formed version."""
+    identifier, row = _REPLAY_ROWS[method]
+    bundles = []
+    for clock in (_CLOCK_A, _CLOCK_B):
+        _freeze_clocks(monkeypatch, clock)
+        bundles.append(getattr(StixExporter(_mk_client([row], {})), method)(identifier))
+    first, second = (_json.dumps(b) for b in bundles)
+    assert first == second, method
+    assert len(_by_type(bundles[0], "relationship")) >= 3, "non-vacuous: relationships of every timestamp shape"
+    _assert_versions_hold(bundles[0], method)
+    stix2.parse(bundles[0])  # strict
+
+
+def test_a_campaign_without_first_imported_at_takes_its_created_at():
+    """A Campaign node carries ``created_at`` and no ``first_imported_at``: ``created`` is that time and
+    ``modified`` the later of it and ``last_updated`` (the export time made ``modified`` earlier than
+    ``created`` before)."""
+    _identifier, row = _REPLAY_ROWS["export_indicator"]
+    (campaign,) = _by_type(StixExporter(_mk_client([row], {})).export_indicator("203.0.113.5"), "campaign")
+    assert campaign["created"] == "2026-10-14T01:00:00.000Z"
+    assert campaign["modified"] == "2026-10-16T02:36:48.000Z"
+    stale = StixExporter(object())._campaign_sdo(dict(_CAMPAIGN, last_updated="2026-10-01T00:00:00+00:00"))
+    assert stale["modified"] == stale["created"] == "2026-10-14T01:00:00.000Z", "never before created"
+
+
+def test_a_sector_identity_takes_the_times_of_its_node():
+    sector = StixExporter(object())._sector_sdo(dict(_SECTOR))
+    assert (sector["created"], sector["modified"]) == ("2026-10-13T13:00:00.000Z", "2026-10-16T01:00:00.000Z")
+    bare = StixExporter(object())._sector_sdo({"name": "global"})
+    assert bare["created"] == bare["modified"] == stix_exporter._PROVENANCE_OBJECTS_CREATED
+
+
+def test_an_sdo_without_any_time_takes_the_fixed_constant():
+    exporter = StixExporter(object())
+    for sdo in (
+        exporter._malware_sdo({"name": "undated"}),
+        exporter._actor_sdo({"name": "undated"}),
+        exporter._technique_sdo({"mitre_id": "T1001"}),
+        exporter._tool_sdo({"name": "undated"}),
+        exporter._vulnerability_sdo({"cve_id": "CVE-2026-0001"}),
+        exporter._tactic_sdo({"mitre_id": "TA0002", "name": "Execution"}),
+    ):
+        assert sdo["created"] == sdo["modified"] == stix_exporter._PROVENANCE_OBJECTS_CREATED, sdo["type"]
+    updated_only = exporter._malware_sdo({"name": "undated", "last_updated": "2026-10-16T00:50:00+00:00"})
+    assert updated_only["created"] == stix_exporter._PROVENANCE_OBJECTS_CREATED
+    assert updated_only["modified"] == "2026-10-16T00:50:00.000Z"
+
+
+def test_a_relationship_takes_the_times_of_its_graph_edge():
+    actor = _deterministic_id("intrusion-set", "apt28")
+    technique = _deterministic_id("attack-pattern", "T1059")
+    exporter = StixExporter(object())
+    sro = exporter._edge_to_sro("EMPLOYS_TECHNIQUE", actor, technique, _EDGE_MITRE)
+    assert (sro["created"], sro["modified"]) == ("2026-10-13T12:31:00.000Z", "2026-10-16T00:50:00.000Z")
+    sro = exporter._edge_to_sro("EMPLOYS_TECHNIQUE", actor, technique, _EDGE_OTX)
+    assert (sro["created"], sro["modified"]) == ("2026-10-14T09:00:00.000Z", "2026-10-15T09:00:00.000Z")
+    older_update = {"created_at": "2026-10-14T00:00:00+00:00", "updated_at": "2026-10-01T00:00:00+00:00"}
+    sro = exporter._edge_to_sro("EMPLOYS_TECHNIQUE", actor, technique, older_update)
+    assert sro["created"] == sro["modified"] == "2026-10-14T00:00:00.000Z", "never before created"
+    for rel in ({}, None, {"sources": ["mitre_attck"]}):
+        sro = exporter._edge_to_sro("EMPLOYS_TECHNIQUE", actor, technique, rel)
+        assert sro["created"] == sro["modified"] == stix_exporter._PROVENANCE_OBJECTS_CREATED
+
+
+def test_edges_to_twin_cve_nodes_give_the_earliest_created_and_the_latest_modified():
+    early = {"sources": ["nvd"], "imported_at": "2026-10-13T08:00:00+00:00", "updated_at": "2026-10-14T08:00:00+00:00"}
+    late = {"sources": ["misp"], "created_at": "2026-10-15T08:00:00+00:00", "updated_at": "2026-10-16T08:00:00+00:00"}
+    for order in ([early, late], [late, early]):
+        merged = stix_exporter._merge_rel_props(order)
+        assert merged["sources"] == ["misp", "nvd"]
+        row = {"seed": _CVE, "indicators": [_pair(_INDICATOR, order)], "threats": [], "sectors": []}
+        (sro,) = _by_type(StixExporter(_mk_client([row], {})).export_cve("CVE-2021-44228"), "relationship")
+        assert (sro["created"], sro["modified"]) == ("2026-10-13T08:00:00.000Z", "2026-10-16T08:00:00.000Z"), order
+    # An edge without times adds none; edges without any keep the merged map free of them.
+    assert "created_at" not in stix_exporter._merge_rel_props([{"sources": ["a"]}, {"sources": ["b"]}])
+
+
+def test_attribution_and_mitre_uses_merged_into_one_sro_take_the_earliest_created_and_latest_modified():
+    attributed = dict(_EDGE_OTX, created_at="2026-10-12T00:00:00+00:00", updated_at="2026-10-17T00:00:00+00:00")
+    results = []
+    for first, second in ((attributed, _EDGE_MITRE), (_EDGE_MITRE, attributed)):
+        row = {
+            "seed": {"name": "apt28"},
+            "malware": [_pair(_MALWARE, first)],
+            "actor_tech": [],
+            "mal_tech": [],
+            "campaigns": [],
+            "uses_malware": [_pair(_MALWARE, second)],
+            "tools": [],
+            "exploits": [],
+            "sectors": [],
+        }
+        (sro,) = _by_type(StixExporter(_mk_client([row], {})).export_threat_actor("apt28"), "relationship")
+        results.append(sro)
+    assert results[0] == results[1]
+    assert (results[0]["created"], results[0]["modified"]) == ("2026-10-12T00:00:00.000Z", "2026-10-17T00:00:00.000Z")
+
+
+def test_a_merged_sro_side_without_times_adds_no_time():
+    # The side without times resolves to the fixed constant; it must not become the merged
+    # created or modified while the other side carries graph times (as in _merge_rel_props).
+    undated = {k: v for k, v in _EDGE_OTX.items() if k not in ("imported_at", "updated_at")}
+    results = []
+    for first, second in ((undated, _EDGE_MITRE), (_EDGE_MITRE, undated)):
+        row = {
+            "seed": {"name": "apt28"},
+            "malware": [_pair(_MALWARE, first)],
+            "actor_tech": [],
+            "mal_tech": [],
+            "campaigns": [],
+            "uses_malware": [_pair(_MALWARE, second)],
+            "tools": [],
+            "exploits": [],
+            "sectors": [],
+        }
+        (sro,) = _by_type(StixExporter(_mk_client([row], {})).export_threat_actor("apt28"), "relationship")
+        results.append(sro)
+    assert results[0] == results[1]
+    assert (results[0]["created"], results[0]["modified"]) == ("2026-10-13T12:31:00.000Z", "2026-10-16T00:50:00.000Z")
+
+
+# ---- indicators: confidence, valid_from, valid_until -------------------------------------------
+
+
+def _indicator(**props: Any) -> Dict[str, Any]:
+    base = {"value": "203.0.113.9", "indicator_type": "ipv4", "first_imported_at": "2026-10-13T12:31:00+00:00"}
+    base.update(props)
+    return StixExporter(object())._indicator_sdo({k: v for k, v in base.items() if v is not None})
+
+
+def test_indicator_valid_from_falls_back_to_the_created_value_not_the_clock(monkeypatch):
+    _freeze_clocks(monkeypatch, _CLOCK_A)
+    sdo = _indicator(first_imported_at=None, created_at="2026-10-14T00:00:00+00:00")
+    assert sdo["valid_from"].startswith("2026-10-14T00:00:00") and sdo["x_edgeguard_first_seen_inferred"] is True
+    sdo = _indicator(first_imported_at=None)
+    assert _at(sdo["valid_from"]) == _at(stix_exporter._PROVENANCE_OBJECTS_CREATED) == _at(sdo["created"])
+
+
+def test_a_full_sync_write_does_not_change_the_exported_indicator():
+    """An indicator's ``modified`` does not follow ``last_updated``, so the property is not
+    emitted: a write that only moves ``last_updated`` gives the same object, while every other
+    SDO keeps ``x_edgeguard_last_updated`` (its ``modified`` follows it)."""
+    before = _indicator(last_recorded_at="2026-10-14T00:00:00+00:00", last_updated="2026-10-15T00:00:00+00:00")
+    after = _indicator(last_recorded_at="2026-10-14T00:00:00+00:00", last_updated="2026-10-17T00:00:00+00:00")
+    assert "x_edgeguard_last_updated" not in before
+    assert _json.dumps(before, sort_keys=True) == _json.dumps(after, sort_keys=True)
+    malware = StixExporter(object())._malware_sdo(dict(_MALWARE, last_updated="2026-10-17T00:00:00+00:00"))
+    assert malware["x_edgeguard_last_updated"].startswith("2026-10-17T00:00:00")
+
+
+def test_a_retired_indicator_is_valid_until_its_retirement():
+    sdo = _indicator(
+        aging_basis="source_date",
+        last_reported_at="2023-09-08T00:00:00+00:00",
+        retired_at="2025-09-07T00:00:00+00:00",
+        retired_by="decay",
+        active=False,
+        first_seen_at_source="2021-09-08T00:00:00+00:00",
+    )
+    assert _at(sdo["valid_until"]) == _at("2025-09-07T00:00:00Z")
+    decommissioned = _indicator(retired_at="2026-10-14T00:00:00+00:00", retired_by="analyst", active=False)
+    assert _at(decommissioned["valid_until"]) == _at("2026-10-14T00:00:00Z"), "any retirement, not only decay"
+    stix2.parse(_json.dumps(sdo), allow_custom=True)
+
+
+def test_an_aging_indicator_is_valid_until_the_rule_retires_it(monkeypatch):
+    monkeypatch.delenv(indicator_aging.RETIRE_DAYS_ENV, raising=False)
+    reported = _indicator(aging_basis="source_date", last_reported_at="2026-09-01T00:00:00+00:00")
+    assert _at(reported["valid_until"]) == _at("2026-09-01T00:00:00Z") + _real_dt.timedelta(days=730)
+    imported_only = _indicator(aging_basis="first_imported")
+    assert _at(imported_only["valid_until"]) == _at("2026-10-13T12:31:00Z") + _real_dt.timedelta(days=730)
+    monkeypatch.setenv(indicator_aging.RETIRE_DAYS_ENV, "400")
+    shorter = _indicator(aging_basis="source_date", last_reported_at="2026-09-01T00:00:00+00:00")
+    assert _at(shorter["valid_until"]) == _at("2026-09-01T00:00:00Z") + _real_dt.timedelta(days=400)
+
+
+def test_valid_until_not_later_than_valid_from_is_omitted():
+    for retired_at in ("2026-01-01T00:00:00+00:00", "2026-10-13T12:31:00+00:00"):
+        sdo = _indicator(retired_at=retired_at, retired_by="decay", active=False, aging_basis="source_date")
+        assert "valid_until" not in sdo, retired_at
+        assert _at(sdo["valid_from"]) == _at("2026-10-13T12:31:00Z")
+
+
+def test_an_indicator_without_aging_properties_gets_no_valid_until():
+    sdo = _indicator(last_reported_at="2026-09-01T00:00:00+00:00", confidence_score=0.8)
+    assert "valid_until" not in sdo
+
+
+def test_a_bad_aging_setting_leaves_the_export_working_without_valid_until(monkeypatch, caplog):
+    monkeypatch.setenv(indicator_aging.RETIRE_DAYS_ENV, "not-a-number")
+    monkeypatch.setattr(stix_exporter, "_AGING_POLICY_WARNED", False, raising=False)
+    with caplog.at_level("WARNING", logger="stix_exporter"):
+        sdo = _indicator(aging_basis="source_date", last_reported_at="2026-09-01T00:00:00+00:00")
+        _indicator(aging_basis="first_imported")
+    assert "valid_until" not in sdo
+    warnings = [r for r in caplog.records if indicator_aging.RETIRE_DAYS_ENV in r.getMessage()]
+    assert len(warnings) == 1, "logged once per process"
+    retired = _indicator(aging_basis="source_date", retired_at="2026-12-01T00:00:00+00:00")
+    assert _at(retired["valid_until"]) == _at("2026-12-01T00:00:00Z"), "a stored retirement needs no policy"
+    row = dict(_REPLAY_ROWS["export_indicator"][1])
+    bundle = StixExporter(_mk_client([row], {})).export_indicator("203.0.113.5")
+    assert "valid_until" not in _by_type(bundle, "indicator")[0]
+
+
+@pytest.mark.parametrize(
+    "props, expected",
+    [
+        ({"confidence_score": 0.66, "source_confidence": 0.8}, 66),
+        ({"confidence_score": 0.0}, 0),
+        ({"confidence_score": 1}, 100),
+        ({"source_confidence": 0.8}, 80),
+        ({"confidence_score": True, "source_confidence": 0.5}, 50),
+        ({"confidence_score": 1.5, "source_confidence": 0.3}, 30),
+        ({"confidence_score": "0.9"}, None),
+        ({"confidence_score": None, "source_confidence": False}, None),
+        ({}, None),
+    ],
+)
+def test_indicator_confidence_is_the_aged_confidence_score(props, expected):
+    sdo = _indicator(**props)
+    assert sdo.get("confidence") == expected
+
+
+# ---- vocabularies ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "malware_types, expected",
+    [
+        (["malware"], ["unknown"]),
+        (["Malware"], ["unknown"]),
+        (["malware", "trojan"], ["trojan"]),
+        (["ransomware", "worm"], ["ransomware", "worm"]),
+        (["botnet-loader"], ["botnet-loader"]),
+        (None, ["unknown"]),
+    ],
+)
+def test_malware_is_a_family_and_loses_only_the_placeholder_type(malware_types, expected):
+    sdo = StixExporter(object())._malware_sdo({"name": "emotet", "malware_types": malware_types})
+    assert sdo["is_family"] is True
+    assert sdo["malware_types"] == expected
+
+
+@pytest.mark.parametrize(
+    "tool_types, expected",
+    [(["tool"], ["unknown"]), (["tool", "remote-access"], ["remote-access"]), (None, ["unknown"])],
+)
+def test_tool_loses_only_the_placeholder_type(tool_types, expected):
+    sdo = StixExporter(object())._tool_sdo({"name": "net", "tool_types": tool_types})
+    assert sdo["tool_types"] == expected
+
+
+def test_tool_carries_its_attack_reference_and_keeps_its_id():
+    sdo = StixExporter(object())._tool_sdo(dict(_TOOL))
+    assert sdo["id"] == _deterministic_id("tool", "net"), "the documented id exception stays"
+    assert sdo["external_references"] == [
+        {"source_name": "mitre-attack", "external_id": "S0039", "url": "https://attack.mitre.org/software/S0039/"}
+    ]
+    for mitre_id in (None, "", "T1059", "S39", "S00390", "G0007"):
+        sdo = StixExporter(object())._tool_sdo({"name": "net", "mitre_id": mitre_id})
+        assert "external_references" not in sdo, mitre_id
+    stix2.parse(_json.dumps(StixExporter(object())._tool_sdo(dict(_TOOL))), allow_custom=True)
+
+
+# ---- producer identity -------------------------------------------------------------------------
+
+
+def test_the_producer_identity_carries_no_export_time_or_build(monkeypatch):
+    monkeypatch.setenv("EDGEGUARD_GIT_SHA", "d5dc41f")
+    monkeypatch.delenv("EDGEGUARD_DETERMINISTIC_BUNDLE", raising=False)
+    ident = _producer_identity(StixExporter(_mk_client([])).export_indicator("nothing-here"))
+    assert ident["x_edgeguard_exporter"] == "stix_exporter"
+    assert "x_edgeguard_generated_at" not in ident and "x_edgeguard_git_sha" not in ident
+    assert ident["created"] == stix_exporter._PROVENANCE_OBJECTS_CREATED
+    assert ident["modified"] == stix_exporter._IDENTITY_MODIFIED, "a new version: its content changed"
+    assert _at(ident["modified"]) > _at(ident["created"])
+    declared = set(stix_exporter.EDGEGUARD_EXTENSION_PROPERTIES)
+    assert {"x_edgeguard_generated_at", "x_edgeguard_git_sha"} <= declared, "kept declared: no new version"
+
+
+def test_the_export_route_names_the_build_in_a_header(monkeypatch):
+    query_api, http = _api_client(monkeypatch)
+    monkeypatch.setattr(query_api, "neo4j_client", _mk_client([_TECHNIQUE_ROW]))
+    monkeypatch.setenv("EDGEGUARD_GIT_SHA", "d5dc41f")
+    resp = http.get("/stix/export/technique/T1059")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["X-EdgeGuard-Git-Sha"] == "d5dc41f"
+    assert "x_edgeguard_git_sha" not in _producer_identity(resp.json())
+    monkeypatch.setattr(query_api, "neo4j_client", _mk_client([_TECHNIQUE_ROW]))
+    monkeypatch.delenv("EDGEGUARD_GIT_SHA", raising=False)
+    resp = http.get("/stix/export/technique/T1059")
+    assert resp.status_code == 200, resp.text
+    assert "X-EdgeGuard-Git-Sha" not in resp.headers

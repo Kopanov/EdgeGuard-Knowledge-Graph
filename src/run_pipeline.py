@@ -11,7 +11,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
-import json
 import logging
 import time
 import uuid
@@ -183,108 +182,14 @@ class EdgeGuardPipeline:
             "malwarebazaar": MalwareBazaarCollector(misp_writer=self.misp_writer),
         }
         self.mitre_collector = self.collectors["mitre"]  # Store for relationships
+        # The MISP → STIX converter of the ``--stix-flow`` path (MISP → STIX 2.1 → Neo4j).
         self.stix_exporter = None
         if STIX_AVAILABLE:
             try:
                 self.stix_exporter = MISPToNeo4jSync(neo4j_client=self.neo4j)
-                logger.info("[OK] STIX exporter initialized successfully")
+                logger.info("[OK] STIX converter initialized successfully")
             except Exception as e:
-                logger.warning(f"[WARN] Could not initialize STIX exporter: {type(e).__name__}: {e}")
-
-    def export_to_stix21(self, output_path: str = None) -> dict:
-        """
-        Export all MISP events to STIX 2.1 format.
-
-        Args:
-            output_path: Optional path to save STIX 2.1 JSON bundle
-
-        Returns:
-            STIX 2.1 bundle as dictionary
-        """
-        if not STIX_AVAILABLE or not self.stix_exporter:
-            logger.error("STIX 2.1 export not available. Install stix2 library.")
-            return {"error": "STIX library not available"}
-
-        logger.info("\n🔄 Exporting MISP events to STIX 2.1 format...")
-
-        try:
-            # Fetch all EdgeGuard events from MISP
-            events = self.stix_exporter.fetch_edgeguard_events()
-
-            if not events:
-                logger.info("No events found to export")
-                return {"type": "bundle", "id": f"bundle--{uuid.uuid4()}", "spec_version": "2.1", "objects": []}
-
-            # Convert all events to STIX 2.1
-            all_stix_objects = []
-
-            for event in events:
-                event_id = event.get("id")
-                if event_id is None:
-                    logger.warning("Skipping MISP event row with no id during STIX export")
-                    continue
-                logger.debug(f"Converting event {event_id} to STIX 2.1")
-
-                # Fetch full event details
-                full_event = self.stix_exporter.fetch_event_details(str(event_id))
-                if not full_event:
-                    logger.warning(f"Skipping event {event_id} - failed to fetch details")
-                    continue
-
-                # Convert to STIX 2.1 using PyMISP to_stix2()
-                stix_bundle = self.stix_exporter.convert_to_stix21(full_event)
-
-                if "objects" in stix_bundle:
-                    all_stix_objects.extend(stix_bundle["objects"])
-
-            # Create master bundle
-            master_bundle = {
-                "type": "bundle",
-                "id": f"bundle--{uuid.uuid4()}",
-                "spec_version": "2.1",
-                "objects": all_stix_objects,
-            }
-
-            # Save to file if output path provided
-            if output_path:
-                with open(output_path, "w") as f:
-                    json.dump(master_bundle, f, indent=2)
-                logger.info(f"   [OK] STIX 2.1 bundle saved to: {output_path}")
-
-            logger.info(f"   [OK] Exported {len(events)} events ({len(all_stix_objects)} STIX objects)")
-            return master_bundle
-
-        except Exception as e:
-            logger.error(f"   [ERR] STIX 2.1 export failed: {e}")
-            return {"error": str(e)}
-
-    def export_single_event_to_stix21(self, event_id: str) -> dict:
-        """
-        Export a single MISP event to STIX 2.1 format using PyMISP to_stix2().
-
-        Args:
-            event_id: MISP event ID
-
-        Returns:
-            STIX 2.1 bundle as dictionary
-        """
-        if not STIX_AVAILABLE or not self.stix_exporter:
-            logger.error("STIX 2.1 export not available")
-            return {"error": "STIX library not available"}
-
-        try:
-            # Fetch event details
-            event = self.stix_exporter.fetch_event_details(event_id)
-            if not event:
-                return {"error": f"Event {event_id} not found"}
-
-            # Convert using PyMISP to_stix2()
-            stix_bundle = self.stix_exporter.convert_to_stix21(event)
-            return stix_bundle
-
-        except Exception as e:
-            logger.error(f"Error exporting event {event_id} to STIX 2.1: {e}")
-            return {"error": str(e)}
+                logger.warning(f"[WARN] Could not initialize STIX converter: {type(e).__name__}: {e}")
 
     def _extract_zones_from_stix_labels(self, obj: dict) -> list:
         """Extract zones from a STIX object.
@@ -918,9 +823,6 @@ class EdgeGuardPipeline:
 
     def run(
         self,
-        stix_export: bool = False,
-        stix_output: str = None,
-        stix_event_id: str = None,
         use_stix_flow: bool = False,
         baseline: bool = False,
         baseline_days: int | None = None,
@@ -930,9 +832,6 @@ class EdgeGuardPipeline:
         Run the complete pipeline.
 
         Args:
-            stix_export: If True, export to STIX 2.1 format after pipeline completion
-            stix_output: Output file path for STIX 2.1 bundle
-            stix_event_id: If provided, export only this specific event to STIX 2.1
             use_stix_flow: If True, use STIX 2.1 as intermediate format (MISP → STIX → Neo4j)
             baseline: If True, collect historical data (all available, not just latest)
             baseline_days: How many days back to collect in baseline mode. ``None``
@@ -1195,9 +1094,6 @@ class EdgeGuardPipeline:
 
         try:
             return self._run_pipeline_inner(
-                stix_export=stix_export,
-                stix_output=stix_output,
-                stix_event_id=stix_event_id,
                 use_stix_flow=use_stix_flow,
                 baseline=baseline,
                 baseline_days=baseline_days,
@@ -1208,9 +1104,6 @@ class EdgeGuardPipeline:
 
     def _run_pipeline_inner(
         self,
-        stix_export=False,
-        stix_output=None,
-        stix_event_id=None,
         use_stix_flow=False,
         baseline=False,
         baseline_days=None,
@@ -1303,10 +1196,6 @@ class EdgeGuardPipeline:
             logger.info(f"📌 Git commit: {git_commit}")
         if use_stix_flow:
             logger.info("🔄 STIX 2.1 pipeline flow enabled (MISP → STIX → Neo4j)")
-        if stix_export:
-            logger.info("[PUSH] STIX 2.1 export enabled")
-        if stix_event_id:
-            logger.info(f"[PUSH] Single event STIX export: Event {stix_event_id}")
         logger.info("=" * 60)
 
         # Step 1: Connect to Neo4j
@@ -1747,26 +1636,6 @@ class EdgeGuardPipeline:
         # Close connection
         self.neo4j.close()
 
-        # Step 7: Export to STIX 2.1 if requested
-        if stix_export or stix_event_id:
-            logger.info("\n[PUSH] Step 7: Exporting to STIX 2.1 format...")
-
-            if stix_event_id:
-                # Export single event
-                stix_bundle = self.export_single_event_to_stix21(stix_event_id)
-                if "error" not in stix_bundle:
-                    output_file = stix_output or f"stix_event_{stix_event_id}.json"
-                    with open(output_file, "w") as f:
-                        json.dump(stix_bundle, f, indent=2)
-                    logger.info(f"   [OK] Single event exported to: {output_file}")
-                    logger.info(f"   [STATS] Objects in bundle: {len(stix_bundle.get('objects', []))}")
-            else:
-                # Export all events
-                stix_bundle = self.export_to_stix21(output_path=stix_output)
-                if "error" not in stix_bundle:
-                    logger.info("   [OK] STIX 2.1 export complete")
-                    logger.info(f"   [STATS] Total objects: {len(stix_bundle.get('objects', []))}")
-
         if use_stix_flow:
             return total_loaded > 0
         # Non-STIX flow: pipeline only pushes to MISP (Step 2).
@@ -1777,23 +1646,10 @@ class EdgeGuardPipeline:
 
 def main():
     """Main entry point with argument parsing"""
+    # No abbreviations: ``--stix`` would otherwise be read as ``--stix-flow`` instead of being refused.
     parser = argparse.ArgumentParser(
-        description="EdgeGuard Pipeline - Orchestrates threat intel collection and STIX 2.1 export"
-    )
-    parser.add_argument(
-        "--stix", action="store_true", help="Export MISP events to STIX 2.1 format after pipeline completion"
-    )
-    parser.add_argument(
-        "--stix-output",
-        type=str,
-        default="edgeguard_stix21.json",
-        help="Output file path for STIX 2.1 bundle (default: edgeguard_stix21.json)",
-    )
-    parser.add_argument(
-        "--stix-event",
-        type=str,
-        metavar="EVENT_ID",
-        help="Export a specific MISP event to STIX 2.1 format (provide event ID)",
+        description="EdgeGuard Pipeline - Orchestrates threat intel collection, MISP and the Neo4j load",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--stix-flow",
@@ -1846,9 +1702,6 @@ def main():
 
     pipeline = EdgeGuardPipeline()
     success = pipeline.run(
-        stix_export=args.stix,
-        stix_output=args.stix_output,
-        stix_event_id=args.stix_event,
         use_stix_flow=args.stix_flow,
         baseline=args.baseline,
         baseline_days=args.baseline_days,
@@ -1859,8 +1712,6 @@ def main():
         print("\n🎉 Pipeline completed successfully!")
         if args.stix_flow:
             print("🔄 STIX 2.1 pipeline flow was used")
-        if args.stix or args.stix_event:
-            print(f"📤 STIX 2.1 export: {'Enabled' if args.stix else f'Event {args.stix_event}'}")
     else:
         print("\n❌ Pipeline failed. Check logs.")
 

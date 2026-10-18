@@ -6,7 +6,9 @@ and the labels a query reads. This module writes a small graph the way the write
 runs the export paths against it:
 
 * the STIX exports of nodes whose timestamps were written with ``datetime()`` (they answered
-  HTTP 500: the driver's ``isoformat()`` prints nine fractional digits, stix2 accepts six);
+  HTTP 500: the driver's ``isoformat()`` prints nine fractional digits, stix2 accepts six), and
+  each export path exported twice: byte-identical bundles whose times come from the graph
+  (``modified`` never before ``created``, ``valid_until`` after ``valid_from``);
 * the Graph Explorer's default view on ``(Indicator)-[:INDICATES]->(Malware)``;
 * ``/search/indicator``: related nodes by kind, typed, directed, bounded per kind, and those of
   the indicator returned when one value is stored under two types;
@@ -73,7 +75,7 @@ def raw_driver():
 FIXTURE = f"""
 CREATE (src:Source:{LABEL} {{source_id: 'threatfox', edgeguard_managed: true}})
 CREATE (i:Indicator:{LABEL} {{indicator_type: 'ipv4', value: '203.0.113.5', uuid: 'u-i', edgeguard_managed: true,
-        zone: ['energy'], tlp: 'amber', active: true, confidence_score: 0.8,
+        zone: ['energy'], tlp: 'amber', active: true, confidence_score: 0.8, aging_basis: 'first_imported',
         first_imported_at: datetime('2026-10-15T08:00:00.123456789Z'), last_updated: datetime()}})
 CREATE (m:Malware:{LABEL} {{name: 'emotet', uuid: 'u-m', edgeguard_managed: true, malware_types: ['trojan'],
         first_imported_at: datetime(), last_updated: datetime()}})
@@ -88,11 +90,15 @@ CREATE (c:CVE:{LABEL} {{cve_id: 'CVE-2021-44228', uuid: 'u-c', edgeguard_managed
         published: '2021-12-10T10:15:09.143', tlp: 'white',
         first_imported_at: datetime('2026-10-14T07:30:00Z'), last_updated: datetime()}})
 CREATE (camp:Campaign:{LABEL} {{name: 'apt28 campaign', uuid: 'u-camp', edgeguard_managed: true,
-        first_seen: datetime('2023-01-01T00:00:00.987654321Z'), last_seen: datetime(), last_updated: datetime()}})
-CREATE (sec:Sector:{LABEL} {{name: 'energy', edgeguard_managed: true}})
+        first_seen: datetime('2023-01-01T00:00:00.987654321Z'), last_seen: datetime(),
+        created_at: datetime('2026-10-15T09:00:00Z'), last_updated: datetime()}})
+CREATE (sec:Sector:{LABEL} {{name: 'energy', edgeguard_managed: true,
+        created_at: datetime('2026-10-15T07:00:00Z'), last_updated: datetime('2026-10-15T10:00:00Z')}})
 CREATE (al:Alert:{LABEL} {{alert_id: 'alert-1', edgeguard_managed: true}})
-CREATE (i)-[:INDICATES {{sources: ['threatfox'], confidence_score: 0.8, match_type: 'malware_family'}}]->(m)
-CREATE (i)-[:EXPLOITS {{sources: ['alienvault_otx'], confidence_score: 0.5}}]->(c)
+CREATE (i)-[:INDICATES {{sources: ['threatfox'], confidence_score: 0.8, match_type: 'malware_family',
+        created_at: datetime('2026-10-15T08:30:00.123456789Z'), updated_at: datetime('2026-10-16T08:30:00Z')}}]->(m)
+CREATE (i)-[:EXPLOITS {{sources: ['alienvault_otx'], confidence_score: 0.5,
+        imported_at: datetime('2026-10-15T08:40:00Z'), updated_at: datetime('2026-10-15T08:20:00Z')}}]->(c)
 CREATE (i)-[:USES_TECHNIQUE {{sources: ['alienvault_otx']}}]->(t)
 CREATE (i)-[:TARGETS {{sources: ['threatfox']}}]->(sec)
 CREATE (i)-[:PART_OF_CAMPAIGN {{match_type: 'campaign_grouping'}}]->(camp)
@@ -170,6 +176,62 @@ def test_stix_exports_of_synced_nodes_parse_strictly(client, rest):
     for path in ("indicator/203.0.113.5", "actor/APT28", "technique/T1059", "cve/CVE-2021-44228"):
         resp = rest.get(f"/stix/export/{path}")
         assert resp.status_code == 200, (path, resp.text)
+
+
+def _stix_time(value: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def test_stix_exports_are_reproducible_versions_of_the_graph(client):
+    """Each export path exported twice gives byte-identical JSON (STIX 2.1 sections 3.2 and 3.6: ``created``
+    and ``modified`` identify a version, so they come from the graph, never from the clock), and every
+    object holds ``modified >= created`` and ``valid_until > valid_from``. The times are the ones the
+    fixture wrote: an edge's ``created_at`` (else ``imported_at``) and the later ``updated_at``, a campaign's
+    and a sector's ``created_at``, an indicator's retirement by the aging rule."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from stix_exporter import StixExporter
+
+    exporter = StixExporter(client)
+    paths = {
+        "indicator": (exporter.export_indicator, "203.0.113.5"),
+        "actor": (exporter.export_threat_actor, "APT28"),
+        "technique": (exporter.export_technique, "T1059"),
+        "cve": (exporter.export_cve, "CVE-2021-44228"),
+    }
+    bundles = {}
+    for name, (export, key) in paths.items():
+        first, second = export(key), export(key)
+        assert json.dumps(first) == json.dumps(second), name
+        assert len([o for o in first["objects"] if o["type"] == "relationship"]) >= 1, name
+        for obj in first["objects"]:
+            if "created" in obj and "modified" in obj:  # a marking-definition has no modified
+                assert _stix_time(obj["modified"]) >= _stix_time(obj["created"]), (name, obj["id"])
+            if "valid_until" in obj:
+                assert _stix_time(obj["valid_until"]) > _stix_time(obj["valid_from"]), (name, obj["id"])
+        bundles[name] = {o["id"]: o for o in first["objects"]}
+    objects = bundles["indicator"]
+    by_type = {}
+    for obj in objects.values():
+        by_type.setdefault(obj["type"], []).append(obj)
+    (indicator,) = by_type["indicator"]
+    retirement = datetime(2026, 10, 15, 8, 0, 0, 123456, tzinfo=timezone.utc) + timedelta(days=730)
+    assert _stix_time(indicator["valid_until"]) == retirement  # first_imported_at + 730 days
+    assert indicator["confidence"] == 80
+    sros = {objects[s["target_ref"]]["type"]: s for s in by_type["relationship"]}
+    assert (sros["malware"]["created"], sros["malware"]["modified"]) == (
+        "2026-10-15T08:30:00.123456Z",
+        "2026-10-16T08:30:00.000Z",
+    )
+    # No created_at on the EXPLOITS edge: imported_at; its updated_at is earlier, so modified = created.
+    assert sros["vulnerability"]["created"] == sros["vulnerability"]["modified"] == "2026-10-15T08:40:00.000Z"
+    (campaign,) = by_type["campaign"]
+    assert campaign["created"] == "2026-10-15T09:00:00.000Z"
+    (sector,) = [o for o in by_type["identity"] if o.get("identity_class") == "class"]
+    assert (sector["created"], sector["modified"]) == ("2026-10-15T07:00:00.000Z", "2026-10-15T10:00:00.000Z")
 
 
 # ---------------------------------------------------------------------------

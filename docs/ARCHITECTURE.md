@@ -86,7 +86,7 @@ No STIX bundle is materialized on this path: each MISP attribute is parsed into 
 MISP → convert_to_stix21() / PyMISP to_stix2 → load_stix21_to_neo4j() → Neo4j
 ```
 
-STIX is also used for **export** (`--stix`, `export_to_stix21`) and lives in **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** for tooling — those helpers are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow.
+The MISP → STIX conversion of this path lives in **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** — those helpers are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow. STIX leaves EdgeGuard only through the graph exporter, **`GET /stix/export/{object_type}/{identifier}`** (`src/stix_exporter.py`, [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
 
 **After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging — one rule for every Indicator, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later, so a re-run of an older run never moves a node's aging back ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*) —, campaigns, FIRST EPSS). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
 
@@ -500,6 +500,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The MISP-event STIX file export of `run_pipeline.py` (`--stix`, `export_to_stix21`) is removed; STIX leaves EdgeGuard only through `GET /stix/export`.
 - 2026-10-18 — The co-occurrence calibration job was removed from the post-sync enrichment jobs (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, the handling of graphs from earlier versions to the appendix.

@@ -1,13 +1,10 @@
-# ResilMesh ↔ EdgeGuard — STIX 2.1 Quickstart
+# EdgeGuard STIX 2.1 export — guide for threat-intelligence platforms and ResilMesh
 
 The fastest path to pulling STIX 2.1 bundles out of EdgeGuard's
-threat-intel graph. Intended for a ResilMesh integrator running their
-first smoke test. Full design notes are in
-[STIX21_EXPORTER_PROPOSAL.md](STIX21_EXPORTER_PROPOSAL.md).
-
-**Status:** prototype. The four object types listed below work; the
-gaps (TAXII, per-partner auth, bulk export, push) are tracked as
-follow-ups in the proposal doc § 10.
+threat-intel graph. Intended for anyone who consumes STIX: a
+threat-intelligence platform or SIEM integrating EdgeGuard as a source,
+or a ResilMesh integrator running a first smoke test. The design
+decisions behind the bundles are in § 8, the open points in § 9.
 
 ---
 
@@ -16,7 +13,7 @@ follow-ups in the proposal doc § 10.
 - EdgeGuard Query API reachable (default `http://127.0.0.1:8000`; in
   production `https://edgeguard.org` or the ResilMesh-side hostname)
 - A valid `X-API-Key` (ask the EdgeGuard team — this is the internal
-  read key; per-partner keys are a follow-up)
+  read key; per-partner credentials are an open point, § 9)
 - `curl` + `jq` installed (the smoke script uses both)
 
 ```bash
@@ -88,7 +85,9 @@ curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" \
 ```
 
 The response is always a STIX 2.1 `bundle` with
-`Content-Type: application/stix+json;version=2.1`.
+`Content-Type: application/stix+json;version=2.1`. When the server sets
+`EDGEGUARD_GIT_SHA`, the response header `X-EdgeGuard-Git-Sha` names the
+EdgeGuard build that served it; the HTTP `Date` header gives the time.
 
 ### URL-like indicators
 
@@ -113,9 +112,20 @@ Every bundle carries:
   (and identical object IDs, because object IDs are also deterministic
   UUIDv5 over the node's natural key, sharing the same namespace UUID).
   This makes diffing + content-addressed caching safe across versions.
-  The `EDGEGUARD_DETERMINISTIC_BUNDLE` env var omits
-  `x_edgeguard_generated_at` on the producer identity for fully
-  reproducible output
+  Every `created`, `modified` and `valid_from` comes from the graph,
+  never from the clock (§ 8), so re-exporting the same graph state gives
+  a **byte-identical** bundle. `modified` follows the node's or
+  relationship's own times (§ 8). An indicator's `modified` moves when a
+  source reports it with a later time or its aging state changes, which
+  covers the usual changes of its `confidence` and `valid_until`; it
+  does not carry `x_edgeguard_last_updated`, which every full sync
+  moves. A few changes leave `modified` as it is: a report with an
+  earlier time than the indicator's latest report (it can add
+  provenance or raise `confidence`), a change of
+  `EDGEGUARD_AGING_RETIRE_DAYS` (the projected `valid_until`), and a
+  change of an endpoint's TLP (a relationship's `object_marking_refs`).
+  A consumer that must see those compares objects rather than keying on
+  (`id`, `modified`) alone
 - `objects: [...]` — SDOs + SROs for the seed and its neighborhood,
   plus three kinds of supporting objects in every bundle:
   the EdgeGuard producer `identity` (referenced by `created_by_ref`
@@ -226,6 +236,15 @@ the source's), `x_edgeguard_active` whether it is active and `x_edgeguard_retire
 MISP record of a report and the time its aging state last changed, so it moves when a source reports the
 indicator again or its confidence or lifecycle changes, not when a sync merely writes the node again.
 
+An `indicator` also carries the standard fields platforms act on. `confidence` is the aged confidence on
+the 0–100 scale (`confidence_score` × 100; the source's confidence when the node holds no aged value).
+`valid_until` is when the indicator stops being valid: its retirement time when it is retired, otherwise
+the time the aging rule will retire it if no source reports it again (the basis of its age plus
+`EDGEGUARD_AGING_RETIRE_DAYS`, 730 days by default); a newer report moves it later. The projected value
+uses the current `EDGEGUARD_AGING_RETIRE_DAYS`, so changing that setting changes the `valid_until` of an
+indicator that is not yet retired without a later `modified`. An indicator written before the aging rule
+existed carries no `valid_until`. `revoked` is never set: a retired indicator expires, it is not withdrawn.
+
 ```json
 {
   "type": "relationship",
@@ -259,14 +278,16 @@ deterministic id; every other object's `created_by_ref` points to it):
   "identity_class": "system",
   "object_marking_refs": ["marking-definition--613f2e26-407d-48c7-9eca-b8e91df99dc9"],
   "extensions": {"extension-definition--a9516685-381e-5b4f-9bd4-5cad8c3b1511": {"extension_type": "toplevel-property-extension"}},
-  "x_edgeguard_exporter": "stix_exporter",
-  "x_edgeguard_git_sha": "d5dc41f",
-  "x_edgeguard_generated_at": "2026-04-15T13:42:07Z"
+  "x_edgeguard_exporter": "stix_exporter"
 }
 ```
 
-`x_edgeguard_git_sha` comes from the `EDGEGUARD_GIT_SHA` env var set on
-the API pod at deploy time and is omitted if unset.
+The identity is the same object in every bundle (`created`
+`2026-10-11T00:00:00.000Z`, `modified` `2026-10-18T00:00:00.000Z`). It
+carries no export time and no build, so it never changes between
+exports: the build is the `X-EdgeGuard-Git-Sha` response header (from
+the `EDGEGUARD_GIT_SHA` env var set on the API container at deploy time;
+absent if unset).
 
 ### EdgeGuard extension definition
 
@@ -289,7 +310,9 @@ definition version: 1.1.0 the relationship provenance properties, 1.2.0 the reco
 `x_edgeguard_evidence_types`, 1.6.0 `x_edgeguard_description_source`, 1.7.0 the aging
 properties of an indicator). The definition
 object is included in every bundle; its `extension_properties` lists
-every property name EdgeGuard can emit. Each object that carries at
+every property name EdgeGuard can emit, and two it does not emit:
+`x_edgeguard_git_sha` and `x_edgeguard_generated_at` (declaring a property
+that is not emitted is valid). Each object that carries at
 least one such property declares the extension in its `extensions`
 map, as in the identity above. Objects without `x_edgeguard_*`
 properties carry no `extensions` map.
@@ -367,7 +390,8 @@ scripts/resilmesh_stix_smoke.sh --no-pretty   # raw JSON on stdout
 
 The script reads `/stix/types` first, then curls every listed object
 type at its example identifier. It asserts HTTP 200 and bundle shape,
-and prints the producer identity's provenance. Exit code `0` on success.
+and prints the producer identity and the build (`X-EdgeGuard-Git-Sha`).
+Exit code `0` on success.
 
 ## 7. Validation
 
@@ -390,21 +414,107 @@ Notes:
   custom properties are emitted.
 - The TLP markings are the four STIX 2.1 marking definitions with their
   fixed identifiers; `stix2` rejects any deviation from them.
+- The test suite checks every export path, on a real Neo4j as well, for
+  the rules `stix2` does not check: re-exporting gives byte-identical
+  JSON, and `modified` is never before `created`. It also asserts that
+  `valid_until` is after `valid_from`. `stix2` enforces that rule when it
+  builds the object, so the exporter omits a `valid_until` that is not
+  later.
 
-## 8. Known gaps (proposal § 10)
+## 8. Design decisions
 
-These are **not** in the prototype; each is a planned follow-up:
+- **Groups are `intrusion-set`.** MITRE ATT&CK models named groups (APT28,
+  FIN7, …) as `intrusion-set` and keeps `threat-actor` for individuals;
+  no collector ingests individual actors. A consumer that expects
+  `threat-actor` maps the type on its side.
+- **Relationship types.** Each graph relationship becomes the
+  `relationship_type` the STIX 2.1 relationship summary table defines
+  for its (source, target) pair, reversed where the table models the
+  pair the other way round (§ 5); a pair the table does not define is
+  `related-to`. An indicator's technique link is `indicates`, the only
+  relationship STIX 2.1 defines from an indicator to an attack-pattern.
+  Two pairs follow MITRE ATT&CK's own STIX instead: `tool uses
+  attack-pattern` and `subtechnique-of`. The table is `_SRO_BY_EDGE` in
+  `src/stix_exporter.py`, served as `relationship_mappings` by
+  `/stix/types`.
+- **Deterministic identifiers.** Every id is
+  `uuid5(5f2e1f9a-6a1b-5e0f-9b25-ed9ea2d574cb, "<type>:<natural key>".lower())`;
+  the namespace equals the one of `n.uuid` (`src/node_identity.py`,
+  checked when the module loads), so the UUID part of an SDO id is the
+  node's `n.uuid`. Tool is the documented exception
+  ([CLOUD_SYNC.md](CLOUD_SYNC.md)): its id derives from the name, while
+  `n.uuid` keys on the ATT&CK id; consumers match a tool by its
+  `mitre-attack` reference.
 
-- No TAXII 2.1 collection/manifest endpoints
-- No bulk / full-graph export
-- No push / webhook subscriptions (delta bundles over NATS)
-- No per-partner API keys / audit log
-- No bundle signing (JWS)
-- Indicator pattern coverage is limited to the common MISP types
+  | SDO type | Natural key |
+  |----------|-------------|
+  | `indicator` | `{indicator_type}\|{value}` |
+  | `malware`, `intrusion-set`, `tool`, `campaign`, `identity` (sector) | `{name}` |
+  | `attack-pattern` | `{mitre_id}` |
+  | `vulnerability` | `{cve_id}` |
+  | `relationship` | `{source_ref}\|{relationship_type}\|{target_ref}` |
+
+- **External references.** A relationship cites EdgeGuard's own source
+  records (`source_name` = the source id such as `mitre_attck` or
+  `alienvault_otx`, `external_id` = the record id, § 4). An
+  `attack-pattern` carries a `mitre-attack` reference (the ATT&CK id
+  and its page), and so does a `tool` whose ATT&CK software id (S
+  followed by four digits) is known; a `vulnerability` carries a `cve`
+  reference (the CVE id and its NVD page).
+- **One top-level property extension.** Every `x_edgeguard_*` property
+  sits at the top level of its object and is declared by one
+  `extension-definition` of type `toplevel-property-extension` (§ 4), so
+  strict parsers accept the bundle and consumers read the properties
+  without unwrapping an extension.
+- **TLP 1.0 markings.** Objects carry the four STIX 2.1 TLP marking
+  definitions (§ 4); `clear` is exported as TLP:WHITE and
+  `amber+strict`, which has no STIX 2.1 marking, as TLP:RED, never
+  loosened to TLP:AMBER.
+- **Where the times, the confidence and the expiry come from.** Nothing
+  is read from the clock:
+
+  | Field | Source |
+  |-------|--------|
+  | SDO `created` | the node's `first_imported_at`, else its `created_at` (a campaign, or a sector created by the sync) |
+  | SDO `modified` | the later of `created` and the node's `last_updated` |
+  | `indicator` `modified` | the latest of `created`, `last_recorded_at` (the latest MISP record of a report) and `aging_since` (the latest change of its aging state) |
+  | SRO `created` | the relationship's `created_at`, else its `imported_at` |
+  | SRO `modified` | the later of `created` and the relationship's `updated_at` |
+  | SRO behind several graph relationships (the edges to twin CVE / Vulnerability nodes; `ATTRIBUTED_TO` and `USES_MALWARE`) | the earliest `created` and the latest `modified` |
+  | an object without any of these times | `2026-10-11T00:00:00.000Z` |
+  | `indicator` `valid_from` | the earliest source claim of a first observation, else `first_imported_at`, else `created` (both marked `x_edgeguard_first_seen_inferred`) |
+  | `indicator` `confidence` | `confidence_score` (the aged value) × 100, else `source_confidence` × 100 |
+  | `indicator` `valid_until` | `retired_at`, else the basis of the age plus `EDGEGUARD_AGING_RETIRE_DAYS`; only on a node the aging rule evaluated (`aging_basis` or `retired_at`) and only when later than `valid_from`; a wrong aging setting omits it (logged) and the export stays available |
+  | `malware` `is_family` | always `true`: a graph Malware node is a named family |
+  | `malware_types`, `tool_types` | the node's values without the placeholder `malware` / `tool`; `unknown` when nothing else remains |
+
+  [TIMESTAMPS.md](TIMESTAMPS.md) describes the graph's times.
+
+## 9. Open points
+
+- **TAXII 2.1.** A read-only TAXII 2.1 collection (discovery, one API
+  root, an indicators collection, paging with `added_after`) would let
+  platforms such as Microsoft Sentinel, Elastic and OpenCTI poll
+  EdgeGuard by configuration alone. It is not built; the per-seed
+  export above is the only STIX surface.
+- **Per-partner credentials.** The export accepts the internal
+  `X-API-Key` only; separate credentials per partner (HTTP Basic or
+  Bearer for TAXII clients) are not built.
+- **No signal when `limit` cuts a collection.** A collection that holds
+  exactly `limit` objects may have been cut; the response does not say
+  so.
+- **ATT&CK ids on groups and malware.** Intrusion-sets and malware carry
+  no `mitre-attack` reference, because the graph's ThreatActor and
+  Malware nodes hold no ATT&CK group or software id (`G…`, `S…`); adding
+  them is a change on the write side.
+- **Bitcoin addresses.** STIX 2.1 has no Cyber-observable type for a
+  bitcoin address, so such an indicator uses the custom pattern
+  `[x-edgeguard-observable:value = '…']`: valid under the patterning
+  grammar, but no consumer evaluates it.
 
 For anything surprising, file an issue with `stix-exporter` in the title.
 
-## 9. Who owns what
+## 10. Who owns what
 
 | Concern                                      | Owner     |
 |-----------------------------------------------|-----------|
@@ -412,7 +522,7 @@ For anything surprising, file an issue with `stix-exporter` in the title.
 | Asset layer and scanner findings (Host, Device, IP, SoftwareVersion, Vulnerability) | ResilMesh |
 | The STIX exporter itself                      | EdgeGuard |
 | Downstream scoring / alerting on received bundles | ResilMesh |
-| Bundle signing, TAXII, per-partner auth (future) | EdgeGuard |
+| TAXII 2.1 and per-partner credentials (open points, § 9) | EdgeGuard |
 
 See [RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md)
 for the full node/relationship mapping across both sides.
@@ -423,6 +533,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until` and no longer `x_edgeguard_last_updated`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: no bundle carries `malware targets identity` or `campaign uses malware`, so `x_edgeguard_evidence_types` appears on `campaign attributed-to intrusion-set` and `indicator indicates campaign` only; `x_edgeguard_misp_attribute_ids` is on every SDO a MISP attribute wrote; a node in a sector never also carries `global` in `x_edgeguard_zones`; § 9 gives EdgeGuard the CVE + CVSS nodes and ResilMesh the asset layer and scanner findings.
 - 2026-10-16 — `advisory_sector` (confidence 90) on a vulnerability's sector link where CISA's ICS advisory states the sector, with the advisory's cisa.gov page in `external_references`.
