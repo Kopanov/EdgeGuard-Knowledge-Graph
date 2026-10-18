@@ -160,16 +160,11 @@ Usually **MITRE-specific** types/tags vs MISP policy. Read the full MISP error b
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. In a MISP kept across an upgrade:
-
-- **OTX malware-family and adversary attributes written before 2026-10-15** carry the pulse's description on the line after the `MITRE_USES_TECHNIQUES` block. MISP keeps them; the sync takes no description from an OTX attribute.
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; the change history moved to this section, the historical note on early prototypes that skipped MISP folded into the architecture section as the product path, and data written by earlier versions moved to the appendix.
 - 2026-10-17 — Source catalog of 15 sources as in DATA_SOURCES.md, with the flag-guarded CISA ICS Advisories and MalwareBazaar collectors (Tier 3 had said CISA ICS had no collector) and the FIRST EPSS enrichment; no malware family maps to a sector by keyword; the metadata prefixes list the keys as written, `MITRE_TACTIC_PHASES` included; the cross-event listing covers every event carrying the source tag, and NVD and CISA ICS keep cursors too.
 - 2026-10-16 — Duplicate avoidance: a complete cross-event listing is checked before the day's event is looked up, so an entirely held re-run or a group whose items all fail conversion creates no event, and items that fail conversion are logged as `[CONVERT]` and count as failed only when they are all or at least half of a source's items.

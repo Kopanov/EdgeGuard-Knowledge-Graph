@@ -419,19 +419,11 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. On a graph kept across an upgrade:
-
-- **`x_edgeguard_description_source`** is absent on an object whose node was written before 2026-10-16.
-- **An indicator's `modified`:** before 2026-10-16, `modified` was the node's last database write. Where EdgeGuard moved to the current rule on a graph it kept (no new baseline), an indicator's new `modified` can be earlier than the one a consumer already holds, so re-ingest the full bundle once after that rollout; a new baseline avoids it.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: no bundle carries `malware targets identity` or `campaign uses malware`, so `x_edgeguard_evidence_types` appears on `campaign attributed-to intrusion-set` and `indicator indicates campaign` only; `x_edgeguard_misp_attribute_ids` is on every SDO a MISP attribute wrote; a node in a sector never also carries `global` in `x_edgeguard_zones`; § 9 gives EdgeGuard the CVE + CVSS nodes and ResilMesh the asset layer and scanner findings.
 - 2026-10-16 — `advisory_sector` (confidence 90) on a vulnerability's sector link where CISA's ICS advisory states the sector, with the advisory's cisa.gov page in `external_references`.
 - 2026-10-16 — Indicator aging (extension definition 1.7.0) and an indicator's `modified` from its reports and aging instead of the last database write; `x_edgeguard_description_source` (1.6.0); `x_edgeguard_evidence_types` on campaign links (1.5.0).

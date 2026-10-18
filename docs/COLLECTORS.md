@@ -20,8 +20,7 @@ This document details all data collectors in EdgeGuard, including their sources,
 12. [MISP Collector](#11-misp-collector)
 13. [CISA ICS Advisories Collector](#12-cisa-ics-advisories-collector)
 14. [MalwareBazaar Collector](#13-malwarebazaar-collector)
-15. [Appendix: data written by earlier versions](#appendix-data-written-by-earlier-versions)
-16. [History](#history)
+15. [History](#history)
 
 ---
 
@@ -426,7 +425,6 @@ Every run follows one path (`CISACollector._update_misp`, `src/collectors/vulner
 - That `POST /attributes/edit` moves the event's timestamp, which the sync selects events by, rests on MISP 2.5's code (`AttributesController::edit` → `unpublishEvent`), not on a test against MISP; the first live edit is the check ([RUNBOOK.md](RUNBOOK.md)).
 - A KEV copy in an event the sync reads but EdgeGuard did not create (`Event.info` containing `EdgeGuard` without starting with `EdgeGuard-`, or an event of the `EdgeGuard` organisation with another title) is synced but never edited: when the sync merges it after EdgeGuard's copy (a full sync reads events by ascending attribute count), its older record sets the node's four KEV fields and the edge's `raw_data` back. Such copies are not counted apart from EdgeGuard's.
 - KEV copies in other events are not edited; NVD's update path does edit such copies, and its edit loop keeps its own code without these stop rules (moving it to `vulnerability_update` is a planned follow-up).
-- A MISP kept across an upgrade can hold KEV copies that the first runs edit once each ([appendix](#appendix-data-written-by-earlier-versions)).
 
 ---
 
@@ -1288,24 +1286,11 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. A MISP instance or graph kept across an upgrade can hold data that earlier versions wrote differently; this is how the current code treats it.
-
-- **OTX family names with the ATT&CK software id** (versions before 2026-10-15): `Malware` nodes named like `cobalt strike - s0154` beside the ATT&CK node, with the family's indicators split between them, are repaired after the sync: see `docs/KNOWLEDGE_GRAPH.md`, "Malware named after an ATT&CK software id".
-- **OTX pairs without a pulse** (`family::adversary`, written before 2026-10-15): `build_relationships` Q2d links such a pair when a pulse naming both ends names one actor, or when the two nodes record no common pulse (its provenance is then empty).
-- **OTX malware and actor attributes with the pulse's text** (written before 2026-10-15): MISP keeps them, with the pulse's description after the `MITRE_USES_TECHNIQUES` block; the sync takes no description from them.
-- **NVD copies that compare as changed once.** A stored `source:NVD` copy written before 2026-10 compares as changed once, and is edited, if its CVE has more than 10 CPE matches, because its `affected_products` held a hash-order-dependent 10 of them and the collector keeps NVD's first 10 (21% of a 2,000-record sample and 33 of 768 planned edits in the live dry run of 2026-10-14). Likewise a copy of a CVE for which NVD has more than one of CVSS 3.1, 3.0 and 2 (the collector kept only the first; the edit adds the others, whose sub-nodes the sync then keeps), and a copy of a CVE whose record carries CISA's SSVC decision, written before the collector kept it (the edit adds `ssvc`). These edits count against `EDGEGUARD_NVD_MAX_PER_RUN`.
-- **NVD copies with a letter as attack vector.** Copies written before 2026-10 hold a letter (`N`) or `UNKNOWN` as `attack_vector` where the rebuilt item has NVD's word; the `NVD_META` digest ignores `attack_vector`, so they plan no edit.
-- **CVE nodes without `status`** (written before 2026-10): a node gets `status` at its next write from an NVD record, and a full sync writes it on every NVD CVE.
-- **CVSS edges written before `sources` existed:** the sub-node's `tag` names the feed that asserted it; the first write to such an edge keeps that feed in `sources` beside its own, so a sub-node NVD asserted that way stays NVD's on every later CISA ICS write.
-- **CISA KEV copies from before 2026-10-15** carry ransomware-derived `severity:` / `cvss:` tags and no `known_ransomware_use` in `NVD_META`: the first runs edit almost every copy once (about 1,740 on the hosted MISP of 2026-10-13, 500 per run, over four runs or 12 to 16 hours). After a wipe and a new baseline the first run edits none.
-- **SSL Blacklist rows typed `sha1`** (before 2026-10-15): a MISP instance or graph loaded earlier keeps those `sha1` attributes and `hash` nodes until it is wiped and re-baselined; MISP does not treat an `x509-fingerprint-sha1` attribute as a duplicate of a `sha1` attribute with the same value, so a kept MISP holds both.
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; the change history moved to this section and the handling of data written by earlier versions to the appendix.
 - 2026-10-17 — OTX cursor: after a push with stored and failed items it stops below the oldest pulse with an item the writer lists in `last_push_unstored_items` (a failed batch or event lookup, or a systemic conversion drop), because the newest pulse of the first `success` items by position could pass a failed batch's pulses so that no later run read them.
 - 2026-10-17 — CISA ICS: `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` is the per-run limit of daily runs instead of the 200-item incremental limit, which counted (advisory, CVE) items, stopped every run inside the same large advisory and kept the cut CVEs and every newer advisory out of MISP.

@@ -739,24 +739,13 @@ docker volume rm <project>_prometheus_data <project>_grafana_data <project>_aler
 - [Grafana Documentation](https://grafana.com/docs/)
 - [PromQL Query Guide](https://prometheus.io/docs/prometheus/latest/querying/basics/)
 
-## Appendix: data written by earlier versions
-
-A fresh baseline with a newly created `metrics_multiproc` volume needs nothing from this section. A
-metrics directory kept across an upgrade can hold series that earlier versions wrote:
-
-- `edgeguard_neo4j_nodes{zone="unknown"}`: earlier versions set four labels to 0 under
-  `zone="unknown"` on every sync. Those series stay at 0 in the metrics directory until the
-  `metrics_multiproc` volume is recreated; the per-label panels read `zone="all"` only.
-- `edgeguard_dag_run_start_timestamp`: the predecessor of
-  `edgeguard_dag_run_in_progress_start_timestamp`, refreshed on every task success and never
-  cleared. The values it left in the metrics directory are read by no rule.
-
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the leftover metric series of earlier versions to the appendix.
 - 2026-10-17 — Metric descriptions follow the code: `edgeguard_dag_runs_total` counts collector and sync task attempts under `dag_id="edgeguard_pipeline"`, `edgeguard_misp_events_total` counts collector runs, `edgeguard_misp_attributes_total` and `edgeguard_dag_run_duration_seconds` are written by no code path, `edgeguard_neo4j_relationships` holds the counts of the last `build_relationships` run, and the `last_seen_before_first_seen` drop reason is listed.
 - 2026-10-17 — The metrics read by alert rules are listed with the rule that reads each (39 alert rules and 3 recording rules in nine groups, preflight check `[7]`); `EdgeGuardSyncEventsFailed` is critical, `EdgeGuardMispEventAttributesTruncated` fires for the CLI pipeline only, and failures of the primary MISP listing do not increment the fallback counter.

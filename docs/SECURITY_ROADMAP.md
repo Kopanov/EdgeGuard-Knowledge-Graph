@@ -189,28 +189,14 @@ operator exposure to surface any unexpected interaction.
 - `docs/BASELINE_LAUNCH_CHECKLIST.md` step `[6]` — pre-launch unicode-bypass audit
 - `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only audit
   pairing with the `_ZERO_WIDTH_AND_BIDI_CHARS` Tier-1 defense above
-  (see the appendix)
-
-## Appendix: data written by earlier versions
-
-A graph kept from a version whose placeholder-name check did not strip
-the zero-width / bidi-control / variation-selector characters can hold
-`Malware` / `ThreatActor` / `Tool` nodes whose name is a placeholder
-padded with invisible characters (e.g. `"unknown​"`). The read-only
-script `scripts/audit_legacy_unicode_bypass_nodes.py` (session in
-`READ_ACCESS`) counts the nodes of these labels whose `name` contains a
-character of `_ZERO_WIDTH_AND_BIDI_CHARS` and recommends one of: close
-as no-op (0 hits), one-shot Cypher (1–10 hits), a migration (>10 hits).
-It is step `[6]` of [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md);
-[MIGRATIONS.md](MIGRATIONS.md) lists it with the other operator
-scripts. A fresh baseline has no such nodes.
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Corrected the character table (37 characters, stripped before the placeholder-name check and in the read-side IOC refang, not in natural-key canonicalization), the `EDGEGUARD_ENV=unset` warning and the gauge writers (every Airflow task process that loads `metrics_server`, served by the `metrics` service, so an allowlist change needs `docker compose up -d airflow`); the main text describes current behavior only, the legacy-node audit moved to the appendix, and Tier 2 is marked as in place.
 - 2026-04-26 — Added the Tier 1 bullet on zero-width / bidi-control / variation-selector stripping and the read-only legacy-node audit, and cross-linked RUNBOOK § 8 and BASELINE_LAUNCH_CHECKLIST step `[6]`.
 - 2026-04-25 — The stripped character table was extended with the combining grapheme joiner U+034F, the variation selectors VS1–VS16 and the Arabic letter mark U+061C, and the read-only audit `scripts/audit_legacy_unicode_bypass_nodes.py` was added for nodes written before the strip.

@@ -423,28 +423,11 @@ Any change to `coerce_iso`, `_stix_ts`, or `_clamp_future_to_now` must:
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. A graph or MISP kept across an
-upgrade can hold timestamps written before the rules above; the remedy
-for all of them is a wipe and a fresh baseline (`edgeguard fresh-baseline`);
-the downtime is one baseline cycle.
-
-| Data written before | What it can hold | Repair without a fresh baseline |
-|---|---|---|
-| The `+00:00` injection in `coerce_iso` (2026-04) | NVD timestamps parsed by Neo4j as server-local time, shifted by the server's UTC offset on a non-UTC server | Cypher `+ duration({hours: <server offset>})` when the offset is known |
-| The honest-NULL rule (2026-04) | Wall-clock run times stored as source first / last seen (VirusTotal, OTX, MISP collector) | None: the source value was never stored; such records age out |
-| The 30.437-day month and the one-day sync margin (2026-04) | Events missing at the oldest end of a window or at an incremental boundary | Re-run the baseline; the MIN/MAX CASE merges without harm |
-| The ` UTC` suffix handling for ThreatFox (2026-10-13) | ThreatFox `SOURCED_FROM` edges without `source_reported_*` (the values were unparseable) | None other than a fresh baseline |
-
-STIX bundles need no repair: they are a view computed at export time.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; the change notes of the timestamp model and its backwards-compatibility guide moved to History and the appendix.
 - 2026-10-17 — Corrected against the code: a Vulnerability SDO's `created` / `modified` are `first_imported_at` / `last_updated` (NVD's dates are `x_edgeguard_published` / `x_edgeguard_last_modified`; only Indicator SDOs carry the inferred flag); OTX claims dropped by the reliable first-seen allowlist; CISA ICS row; `coerce_iso` keeps an aware input's offset and has no year floor for strings; an Indicator's `SOURCED_FROM` edge keeps the report values, not the basis kind; collectors that set `last_updated`; reliable sources marked by `reliable_first_seen=True` in `src/source_registry.py`.
 - 2026-10-16 — Indicator aging times (`last_reported_at` with source, ref and basis, `last_recorded_at`, `aging_since`, `aging_evaluated_at`) on the Indicator and its `SOURCED_FROM` edge, forward only; aging from `coalesce(last_reported_at, first_imported_at)`, never from `last_updated`; the STIX Indicator's `modified` changed from `last_updated` to the latest of `created`, `last_recorded_at` and `aging_since`.

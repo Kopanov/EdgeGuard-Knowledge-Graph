@@ -314,20 +314,11 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. A MISP or graph kept across an upgrade can also hold:
-
-- **CyberCure attributes.** MISP attributes tagged `source:CyberCure` (a source EdgeGuard does not collect) are ingested by the sync under `source_id = misp`; each such tag name is logged once and counted in `edgeguard_misp_unmapped_source_tags_total`.
-- **SSL Blacklist fingerprints as file hashes.** Versions before 2026-10-15 wrote the fingerprints as MISP `sha1` file-hash attributes and `sha1` Indicators, not as `x509-fingerprint-sha1`.
-- **CISA ICS records without the per-advisory fields.** A graph built before 2026-10-16 carries no `advisory_ids`, `ics_sectors` or `advisory_zones` on CISA ICS records, and CVSS sub-nodes written from CISA ICS records can carry impact and exploitability sub-scores of 0.0, which CSAF does not give. A fresh baseline has neither.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — CISA ICS daily runs bounded by `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200 advisory files) instead of `EDGEGUARD_INCREMENTAL_LIMIT`, whose 200 (advisory, CVE) items stopped a run inside a large advisory and held the cursor there.
 - 2026-10-17 — Sections aligned with the code: OTX every 30 minutes from a stored cursor with its page limits (it said on demand, 50 pulses per run); SSL Blacklist classified by the listing reason, which does not reach MISP; CISA KEV every 4 hours, with `notes` and `cwes` not stored in MISP; NVD key optional, every 8 hours, CPE text searched; MISP described as the staging hub; main text limited to current behaviour, with the change history (the 2026-03 notes included) in this section and data written by earlier versions in the appendix.
 - 2026-10-16 — CISA ICS: one item per CVE with the newest advisory's text (the first item pushed won); advisory ids, CISA's sector names and per-advisory zones carried to the graph (the documented `ics_sectors` had never left the collector); sector links as `advisory_sector` statements at 0.9; no impact or exploitability sub-score (the collector sent 0.0); NVD's CVSS sub-nodes and lists hold whatever the sync order (the record merged last won).

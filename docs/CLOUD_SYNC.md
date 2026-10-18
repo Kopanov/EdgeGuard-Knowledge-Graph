@@ -779,29 +779,11 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-## Appendix: data written by earlier versions
-
-A graph populated by a fresh baseline needs nothing from this section.
-
-- **Nodes or edges without uuids.** A graph written by a build that did
-  not stamp uuids has nodes with `n.uuid IS NULL`. Edges to such nodes keep
-  `r.src_uuid` / `r.trg_uuid` null (the `coalesce` invents no value), and
-  the delta and snapshot queries of Recipe 1 and the first-run procedure
-  leave the nodes out, so they never reach the cloud. No backfill script
-  ships: pause ingest, wipe and rebaseline (see
-  [MIGRATIONS.md](MIGRATIONS.md)), then run the post-baseline verification
-  of the operator runbook.
-- **Reverting to a build without uuid support.** Such a build does not
-  read `n.uuid`, `r.src_uuid` or `r.trg_uuid`; the properties stay on the
-  graph unused, the graph stays queryable, and no data is lost in either
-  direction.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the notes for graphs written by earlier builds to the appendix (the revert of the uuid deploy is no longer a rollback recipe, so the uuid cleanup and re-stamp recipes are Rollback B and C).
 - 2026-10-17 — Rollback A dumps offline and passes directories to `--to-path` / `--from-path`, as Recipe 3 and BACKUP.md do.
 - 2026-10-17 — Recipe 1 and the full snapshot merge the delta as on-match properties too, because `{}` left changed nodes and edges stale in the cloud; the delta selects nodes aged since `$since` (`aging_evaluated_at`), names the primary label, because secondary sector labels made `apoc.merge.node` miss and `labels(a)[0]` pick a sector, and gains a reconciliation for deletions.
