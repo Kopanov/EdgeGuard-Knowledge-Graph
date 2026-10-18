@@ -368,3 +368,7 @@ class TestInstallShRecordsTheCommit:
         assert done.returncode == 0, done.stdout + done.stderr
         assert "EDGEGUARD_GIT_SHA in .env not updated" in done.stdout + done.stderr
         assert (tarball / ".env").read_text() == "A=1\nEDGEGUARD_GIT_SHA=0000000\n"
+        # The stale value exported in the operator's shell does not reach docker compose either.
+        calls = (tmp_path / "docker.log").read_text().splitlines()
+        compose = [c for c in calls if c.startswith(("compose build", "compose up"))]
+        assert compose and all(c.endswith("| shell=<unset>") for c in compose), compose
