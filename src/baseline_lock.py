@@ -49,7 +49,8 @@ The sentinel records who holds it:
   32 h ``dagrun_timeout``). ``baseline_release_lock`` removes it after a
   successful run. A ``failed`` run keeps the sentinel (clearing the failed
   task resumes the same run, which must stay under the mutex) until the age
-  cap; a ``success`` state prunes it. Exception (2026-10-16): a refusal of
+  cap; a ``success`` state prunes it. ``edgeguard dag kill`` removes the sentinel
+  of a baseline run it kills. Exception (2026-10-16): a refusal of
   ``baseline_clean`` before the wipe (conf typo, ``wipe_scope``, backup gate)
   releases it, and ``baseline_clean`` and ``baseline_start`` take it again
   when they run; the collectors refuse while no baseline holds it, and the
