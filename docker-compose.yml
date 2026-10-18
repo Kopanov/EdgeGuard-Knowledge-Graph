@@ -335,29 +335,11 @@ services:
       - |
         set -e
         mkdir -p /opt/airflow/state /opt/airflow/checkpoints
-        # One-time migration for deployments created before the bind mounts: the airflow_db volume
-        # (mounted read-only at /legacy) may still hold the sync state file and the collector
-        # checkpoints at these paths. Copy them into the host directories without overwriting
-        # anything already there, so the recorded sync watermark and the resume points are not
-        # hidden by the new mounts (a hidden state file would trigger a full sync and a
-        # re-collection from scratch).
-        # The two process-held lock files are not migrated: they belong to processes of the
-        # previous container (a different hostname), where the dead-PID pruning cannot see them,
-        # and a copied baseline_in_progress.lock would make the scheduled DAGs skip for up to the
-        # lock age cap (48 h) although no baseline runs.
-        for d in state checkpoints; do
-          if [ -d "/legacy/$d" ]; then
-            find "/legacy/$d" -mindepth 1 -maxdepth 1 \
-              ! -name baseline_in_progress.lock ! -name pipeline.lock \
-              -exec cp -an {} "/opt/airflow/$d/" \; || true
-          fi
-        done
         chown -R 50000:0 /opt/airflow/state /opt/airflow/checkpoints
         chmod -R u+rwX,g+rwX /opt/airflow/state /opt/airflow/checkpoints
     volumes:
       - ./state:/opt/airflow/state
       - ./checkpoints:/opt/airflow/checkpoints
-      - airflow_db:/legacy:ro
     networks:
       - edgeguard_net
 
@@ -539,9 +521,8 @@ services:
       EDGEGUARD_MITRE_MAX_RELATIONSHIPS: ${EDGEGUARD_MITRE_MAX_RELATIONSHIPS:-}
       EDGEGUARD_SUBPROCESS_TAIL_LINES: ${EDGEGUARD_SUBPROCESS_TAIL_LINES:-}
       EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC: ${EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC:-}
-      # Operations-only escape hatches (truthy values disable a safeguard; leave unset in production).
+      # Operations-only escape hatch (a truthy value disables a safeguard; leave unset in production).
       EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION: ${EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION:-}
-      EDGEGUARD_RESPECT_CALIBRATOR: ${EDGEGUARD_RESPECT_CALIBRATOR:-}
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./src:/opt/airflow/src:ro
@@ -549,10 +530,9 @@ services:
       - airflow_logs:/opt/airflow/logs
       - airflow_db:/opt/airflow
       - metrics_multiproc:/opt/airflow/metrics_multiproc
-      # Shared with the host (2026-10): the sync state file, the collector checkpoints and the
-      # baseline lock sentinel live here. Before this, they lived only in the airflow_db volume and
-      # the host CLI (doctor, monitor, stats, checkpoint status) read empty host directories.
-      # airflow-init below creates the directories owned by the container user (uid 50000).
+      # Shared with the host: the sync state file, the collector checkpoints and the baseline lock
+      # sentinel live here, so the host CLI (doctor, monitor, stats, checkpoint status) reads what
+      # the DAGs wrote. airflow-init creates the directories owned by the container user (uid 50000).
       - ./state:/opt/airflow/state
       - ./checkpoints:/opt/airflow/checkpoints
     depends_on:

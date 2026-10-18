@@ -395,8 +395,8 @@ class EdgeGuardPipeline:
                                 # — do NOT substitute wall-clock NOW. The prior
                                 # ``datetime.now(...).isoformat()`` default violated PR-N5
                                 # C7 honest-NULL: re-importing an old CVE-2013 bundle today
-                                # stamped ``first_seen=2026-04-21``, poisoning the
-                                # calibrator's age calculations.
+                                # stamped ``first_seen=2026-04-21``, poisoning every
+                                # age calculation.
                                 "first_seen": obj.get("created") or None,
                                 "last_updated": obj.get("modified") or None,
                                 "confidence_score": 0.7,
@@ -1561,7 +1561,7 @@ class EdgeGuardPipeline:
                     extra={"degraded": True, "step": "build_relationships"},
                 )
 
-            # Step 5c: post-sync enrichment_jobs (the seven jobs of
+            # Step 5c: post-sync enrichment_jobs (the six jobs of
             # run_all_enrichment_jobs, including the actor alias merge and,
             # 2026-10, the Malware ATT&CK-id twin merge). In-process because
             # each job is short-running and shares the existing Neo4jClient.

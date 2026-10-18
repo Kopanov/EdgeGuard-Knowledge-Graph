@@ -36,7 +36,6 @@ code change or image rebuild is needed.
 
 | Env var | Default | When to set | What it reverts |
 |---|---|---|---|
-| `EDGEGUARD_RESPECT_CALIBRATOR` | unset (guard active) | Calibrator demotions cause false negatives; the operator wants the relationship writes to overwrite a calibrated confidence | `_confidence_respect_calibrator` emits the bare literal (an unconditional overwrite), not the CASE guard that keeps the confidence of an edge the calibrator stamped (`r.calibrated_at`) |
 | `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` | unset (inspection active) | Result-counter inspection itself throwing (driver API drift, double-consume) — mid-baseline | `_record_batch_counters` short-circuits to a no-op: only the zero-write check stops; the batch's result is still read, so a server error in the batch is still retried and counted. Emits a `[KILL-SWITCH-ACTIVE]` WARN at module import when set so on-call can confirm the flag took effect via `docker logs edgeguard_airflow 2>&1 \| grep -m1 '\[KILL-SWITCH-ACTIVE\]'`. |
 | `EDGEGUARD_EARLIEST_IOC_DATE` | `1995-01-01` | Importing pre-1995 corpora; seeing ingest silently drop historical IOCs with a `before earliest-allowed` WARN | Loosens the `_clamp_future_to_now` earliest-date floor. Accepts ISO date (e.g. `1970-01-01`). Invalid values fall back to default with a WARN. It also bounds the source date that dates an indicator for aging (`misp_report_times`). With a lower floor, older `last_seen` dates count, and those indicators may be retired (730 days). |
 
@@ -45,22 +44,17 @@ Set for one run (one-off):
 ```bash
 # Docker Compose deployment: one sync run in the container with the variable set
 # (a real sync, run in-process; Airflow records no task state)
-docker compose exec -e EDGEGUARD_RESPECT_CALIBRATOR=0 airflow \
+docker compose exec -e EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1 airflow \
   airflow tasks test edgeguard_neo4j_sync run_neo4j_sync
 ```
 
 Airflow 3 has no `airflow tasks run`. A kill switch for the scheduled runs
-goes in `.env`, and the airflow container must be recreated (below). The
-calibrator switch affects only the relationship writes of the MISP → Neo4j
-sync (`create_misp_relationships_batch` and the `create_*_relationship`
-helpers of `src/neo4j_client.py`), not the collectors, `build_relationships`
-or the enrichment jobs.
+goes in `.env`, and the airflow container must be recreated (below).
 
 Or persistent in `.env` at repo root (compose interpolates it into the
 airflow service's environment; there is no `env_file`):
 
 ```
-EDGEGUARD_RESPECT_CALIBRATOR=0
 EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1
 EDGEGUARD_EARLIEST_IOC_DATE=1970-01-01
 ```
@@ -873,7 +867,6 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    container has ≥ 4 GB RAM: `docker inspect edgeguard_airflow | grep -i mem`.
 7. **Kill-switches staged.** Decide in advance what signal would make
    you set each:
-   - `EDGEGUARD_RESPECT_CALIBRATOR=0` → if edges flap confidence 0.3 ↔ 0.8 nightly (a regression signal of the calibrator guard).
    - `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1` → if `_record_batch_counters` raises persistently in logs.
    - `EDGEGUARD_EARLIEST_IOC_DATE=1970-01-01` → if ingesting historical corpora and seeing `before earliest-allowed` WARNs.
 8. **Collector pool present.** `docker compose exec airflow airflow pools list`
@@ -902,17 +895,12 @@ Run these post-run validation queries (each via
 `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`):
 
 ```cypher
-// 1. Calibrated edges whose confidence a relationship write raised again (calibrator flap) — expect ~0.
-MATCH ()-[r]->()
-WHERE r.calibrated_at IS NOT NULL AND r.confidence_score > 0.5
-RETURN count(r) AS post_fix_candidates;
-
-// 2. Orphan Indicators (silent-write signal) — expect 0.
+// 1. Orphan Indicators (silent-write signal) — expect 0.
 MATCH (i:Indicator)
 WHERE NOT EXISTS { (i)-[:SOURCED_FROM]->(:Source) }
 RETURN count(i) AS orphans;
 
-// 3. Clamp check: CVSS and confidence values out of range — expect 0.
+// 2. Clamp check: CVSS and confidence values out of range — expect 0.
 MATCH (n)
 WHERE n.cvss_score > 10 OR n.cvss_score < 0
 RETURN count(n) AS cvss_out_of_range;
@@ -920,18 +908,18 @@ MATCH ()-[r]->()
 WHERE r.confidence_score > 1 OR r.confidence_score < 0
 RETURN count(r) AS confidence_out_of_range;
 
-// 4. Aliases type integrity — expect 0.
+// 3. Aliases type integrity — expect 0.
 MATCH (n) WHERE n.aliases IS NOT NULL
 AND NOT (n.aliases IS :: LIST<ANY>)
 RETURN count(n) AS aliases_scalar_corruption;
 
-// 5. Node count by label — diff vs. expected baseline scale.
+// 4. Node count by label — diff vs. expected baseline scale.
 CALL db.labels() YIELD label
 CALL { WITH label MATCH (n) WHERE label IN labels(n) RETURN count(n) AS c }
 RETURN label, c ORDER BY c DESC;
 ```
 
-Any non-zero on #1–#4 = regression; file issue.
+Any non-zero on #1–#3 = regression; file issue.
 
 Then run the acceptance script, `python scripts/verify_fresh_baseline.py`
 ([BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § "Fresh-baseline
@@ -945,18 +933,17 @@ It also checks the sector evidence, the description sources and the indicator ag
 |---|---|---|
 | `sector_links_name_only_feeds_that_gave_the_sector` | a link to a `Sector` names a feed whose `SOURCED_FROM.zones` do not hold that sector | no `SOURCED_FROM` edge has `zones` (a graph written by an earlier version) |
 | `advisory_sector_only_where_cisa_stated` | `advisory_sector` sits on anything but an `AFFECTS` link from a CVE to a sector the `cisa_ics` edge lists in `stated_zones` | no link carries the label |
-| `cisa_stated_sectors_linked_as_advisory_sector` | a sector CISA stated is not linked as `advisory_sector`; with `--require-cisa-ics`, also when no sector is stated although the `cisa_ics` edges carry `zones` | no stated sector, when `--require-cisa-ics` is not given, no `cisa_ics` edge carries `zones` (a graph written by an earlier version, or kept and not re-read since) or `--legacy-graph` is given |
+| `cisa_stated_sectors_linked_as_advisory_sector` | a sector CISA stated is not linked as `advisory_sector`; with `--require-cisa-ics`, also when no sector is stated although the `cisa_ics` edges carry `zones` | no stated sector, when `--require-cisa-ics` is not given or no `cisa_ics` edge carries `zones` (a graph written by an earlier version, or kept and not re-read since) |
 | `sector_links_cite_only_records_that_gave_the_sector` | a sector link cites a CISA ICS advisory whose sector note does not name its sector (the `cisa_ics` edge records the advisories per sector in `stated_refs`) | no `SOURCED_FROM` edge has `stated_refs` |
 | `sector_confidence_follows_label` | a sector link's confidence is not the label table's value (`src/sector_evidence.py`; a label outside the table is not judged) | no sector link |
-| `descriptions_name_their_source` | a node with a ranked description (CVE, Vulnerability, Malware, ThreatActor, Tool, Technique, Tactic) has no `description_source` | `--legacy-graph`, or no description |
-| `indicators_have_aging_basis` | an Indicator has no `aging_basis` or no `source_confidence` | `--legacy-graph`, or no Indicator |
+| `descriptions_name_their_source` | a node with a ranked description (CVE, Vulnerability, Malware, ThreatActor, Tool, Technique, Tactic) has no `description_source` | no description |
+| `indicators_have_aging_basis` | an Indicator has no `aging_basis` or no `source_confidence` | no Indicator |
 
 It also reports, without judging, the sector links by type, start label, sector and label
 (`sector_evidence_breakdown`), what CISA ICS adds per sector (`cisa_ics_contribution`: stated, by CISA
 alone, also inferred, and the CISA records whose advisory named no tracked sector) and the node sectors no
 feed gave and the nodes holding `global` next to a sector (`node_sectors_without_a_feed`). After the
-730-day baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`, run it with `--require-cisa-ics`. `--legacy-graph`
-is for a graph written by an earlier version.
+730-day baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`, run it with `--require-cisa-ics`.
 
 **Measuring CISA ICS and ATT&CK for ICS.** Count CISA's sector statements by label (`advisory_sector` on
 `AFFECTS`) or through the `cisa_ics` `SOURCED_FROM` edge's `stated_zones`; count ATT&CK for ICS through
@@ -1256,12 +1243,10 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 - `docs/VERSIONING.md` — CalVer release cadence
 - `prometheus/alerts.yml` — alert rule source of truth
 - `src/neo4j_client.py:_record_batch_counters` — ineffective-batch detector
-- `src/neo4j_client.py:_confidence_respect_calibrator` — calibrator-respect helper
 - `src/neo4j_client.py:_execute_batch_with_retry` — batch retry helper
 - `src/neo4j_client.py:_is_retryable_neo4j_error` — exception classifier
 - `src/collectors/nvd_collector.py:NvdBatchFetchError` — NVD silent-window-drop guard
 - `src/node_identity.py:_REJECTED_PLACEHOLDER_NAMES` — placeholder blocklist
-- `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only check for legacy unicode-bypass nodes (`BASELINE_LAUNCH_CHECKLIST.md` item `[6]`)
 - `src/run_misp_to_neo4j.py:_MispFallbackHardError` — sentinel exception raised by the paginated MISP fetch fallback on any of 4 hard-failure modes (errors-payload, unexpected-shape, non-200, cap-hit; see § 8 above) and by the primary event listing (a failed later index page, any other listing error)
 
 ---
@@ -1270,6 +1255,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed. The kill switch `EDGEGUARD_RESPECT_CALIBRATOR`, the relationship-write guard it controlled and the post-run query for calibrated edges were removed with the co-occurrence calibration job, which was the only writer of `r.calibrated_at`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restructured as a guide to current behaviour: the change history moved to this section and the repairs of data written by earlier versions to the appendix.
 - 2026-10-17 — Post-run summary grep: OTX keeps its cursor below the pulses of the items a systemic conversion drop leaves unstored, so they are read again once the collector is fixed.

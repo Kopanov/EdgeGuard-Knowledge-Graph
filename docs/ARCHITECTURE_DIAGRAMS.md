@@ -35,7 +35,7 @@ graph TB
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ _MispFallbackHardError sentinel<br/>+ MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
         BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ provenance on every edge: sources, source_refs, misp_event_ids"]
-        ENRICH[Enrichment Jobs<br/>Bridge / Actor alias merge /<br/>Malware twin merge / Indicator aging /<br/>Campaigns / Calibration / EPSS]
+        ENRICH[Enrichment Jobs<br/>Bridge / Actor alias merge /<br/>Malware twin merge / Indicator aging /<br/>Campaigns / EPSS]
     end
 
     subgraph APIs
@@ -105,8 +105,7 @@ flowchart LR
         ALIAS --> TWIN[Malware twin merge]
         TWIN --> AGING[Indicator aging]
         AGING --> CAMP[Campaign Builder]
-        CAMP --> CALIB["Co-occurrence calibration (no-op on a fresh baseline)"]
-        CALIB --> EPSS[FIRST EPSS]
+        CAMP --> EPSS[FIRST EPSS]
     end
 
     EPSS --> GRAPH[(Knowledge Graph)]
@@ -215,7 +214,7 @@ flowchart LR
     A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_health_check<br/>Health check]
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 8h timeout]
     C --> D["build_relationships<br/>20 link steps → many edge types incl. INDICATES (family + same-pulse), EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL"]
-    D --> E[run_enrichment_jobs<br/>7 post-sync jobs]
+    D --> E[run_enrichment_jobs<br/>6 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
     A -->|"skip: a baseline holds the lock, or the last sync started < 24 h ago (force_sync bypasses the 24 h guard)"| SKIP[All downstream<br/>SKIPPED]
@@ -297,28 +296,18 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    subgraph "Job 1/7: CVE Bridge"
+    subgraph "Job 1/6: CVE Bridge"
         BR1[Vulnerability] -->|matching cve_id| BR2[CVE]
         BR2 -->|REFERS_TO| BR1
     end
 
-    subgraph "Job 5/7: Campaign Builder"
+    subgraph "Job 5/6: Campaign Builder"
         CB1[ThreatActor] --> CB2{"Actor has ATTRIBUTED_TO or USES_MALWARE malware<br/>with an active INDICATES indicator?"}
         CB2 -->|Yes| CB3[Create/reactivate Campaign]
         CB3 --> CB4["Link: RUNS + PART_OF_CAMPAIGN (r.evidence_types)<br/>No evidence left: delete campaign + links<br/>Evidence but no active indicator: inactive"]
     end
 
-    subgraph "Job 6/7: Calibration (no-op on a fresh baseline)"
-        CAL0[Pre-compute: one COUNT<br/>per MISP event] --> CAL1[Group events by tier]
-        CAL1 --> CAL2{Event size tier}
-        CAL2 -->|1-10| CAL3[conf = 0.50]
-        CAL2 -->|11-20| CAL3b[conf = 0.45]
-        CAL2 -->|21-100| CAL4[conf = 0.40]
-        CAL2 -->|101-500| CAL5[conf = 0.35]
-        CAL2 -->|> 500| CAL6[conf = 0.30]
-    end
-
-    subgraph "Job 4/7: Indicator aging (before the campaigns)"
+    subgraph "Job 4/6: Indicator aging (before the campaigns)"
         D1[Every Indicator,<br/>whoever supplied it] --> D2{Days since the<br/>latest report}
         D2 -->|from 90d| D3[source_confidence x 0.85]
         D2 -->|from 180d| D4[source_confidence x 0.70]
@@ -327,9 +316,9 @@ flowchart LR
     end
 ```
 
-`run_all_enrichment_jobs` (`src/enrichment_jobs.py`) runs seven jobs in this order: 1/7 the CVE bridge,
-2/7 the actor alias merge, 3/7 the Malware ATT&CK-id twin merge, 4/7 the indicator aging, 5/7 the
-campaign builder, 6/7 the calibration and 7/7 FIRST EPSS. Jobs 2/7, 3/7 and 7/7 are not drawn above.
+`run_all_enrichment_jobs` (`src/enrichment_jobs.py`) runs six jobs in this order: 1/6 the CVE bridge,
+2/6 the actor alias merge, 3/6 the Malware ATT&CK-id twin merge, 4/6 the indicator aging, 5/6 the
+campaign builder and 6/6 FIRST EPSS. Jobs 2/6, 3/6 and 6/6 are not drawn above.
 
 ---
 
@@ -354,6 +343,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job was removed from § 1, § 2, § 5 and § 8 (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, data from earlier versions to the appendix.
 - 2026-10-17 — Corrected against the code: § 1 NATS has no deployed consumer and the APIs do not publish to it, MISP 2.4 / 2.5; § 2 the further collectors, the seven enrichment jobs and the labels the sync MERGE writes (it said indicators and vulnerabilities); § 3 `HAS_CVSS_v*` in both directions; § 4 MITRE + 7 daily collectors; § 5 task `neo4j_health_check`, the baseline-lock skips and `force_sync`; § 6 the baseline task ids; § 7 report-scoped linking with per-pulse caps, `query_pause` and the 600 s relationship timeout (no cross-product sampling); § 8 jobs numbered of seven and the campaign evidence; technology stack versions.

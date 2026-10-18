@@ -227,7 +227,7 @@ class TestCliDagParity:
     def test_cli_baseline_invokes_run_all_enrichment_jobs(self):
         # CLI baseline path must call enrichment_jobs.run_all_enrichment_jobs
         # (matches the DAG's enrichment task — produces Campaign nodes,
-        # decay, calibrate, bridge_vuln_cve).
+        # decay, bridge_vuln_cve).
         src = self._pipeline_inner_source()
         assert "run_all_enrichment_jobs" in src
         # In-process (we have a Neo4jClient open) — distinct from build_rels

@@ -39,9 +39,7 @@ but on an AFFECTS link to a sector CISA's ICS advisory stated, when a sector CIS
 confidence is not the one its label gives (``src/sector_evidence.py``); it reports the links by evidence
 label, what CISA ICS adds per sector and the node sectors no feed gave. Since the same day it also fails
 when a ranked description names no source (``description_source``) or an Indicator has no
-``aging_basis`` / ``source_confidence``; on a graph built before those changes, ``--legacy-graph`` reports
-these two instead of judging them, and does not require a stated CISA sector under
-``--require-cisa-ics``.
+``aging_basis`` / ``source_confidence``.
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -55,7 +53,6 @@ Usage:
   python scripts/verify_fresh_baseline.py --json          # machine-readable
   python scripts/verify_fresh_baseline.py --require-ics --require-cisa-ics
   python scripts/verify_fresh_baseline.py --require-malwarebazaar   # after enabling that source
-  python scripts/verify_fresh_baseline.py --legacy-graph            # a graph built before 2026-10-16
 
 Exit code 0 = every mandatory check passed; 1 = at least one failed; 2 = could
 not reach Neo4j. A warning (``[WARN]``; ``ok: false`` with ``mandatory: false`` in the
@@ -248,7 +245,7 @@ _TLP_LABELS = ("Indicator", "CVE", "Vulnerability", "Malware", "ThreatActor", "T
 # rewrote them to ``%WINDIR%\`` before the 2026-10 fix, so they vanished.
 _MANGLED_TECHNIQUES = ("T1047", "T1021.006", "T1543.003", "T1222.001", "T1546.003")
 _MANGLED_TOOLS_HINT = (
-    "requires the MISP Import Regexp fix (docs/BASELINE_LAUNCH_CHECKLIST.md § [7], step 1) before the re-feed"
+    "requires the MISP Import Regexp fix (docs/BASELINE_LAUNCH_CHECKLIST.md § [6], step 1) before the re-feed"
 )
 # NVD analysis lag: reference tags + CPE configurations appear weeks after publication.
 _NVD_ANALYSIS_LAG_DAYS = 45
@@ -364,7 +361,7 @@ _SECTOR_LINKED_WHERE = "(" + " OR ".join(f"n:{label}" for label in _SECTOR_LINKE
 _N_ZONES = _as_list("n.zone")
 
 
-def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, legacy_graph: bool = False) -> None:
+def _sector_evidence_checks(rep: Report, require_cisa_ics: bool) -> None:
     """Checks 10d-10k (2026-10-16): each link to a Sector names only the feeds that gave its sector and
     cites only the records that gave it, its label and confidence follow the table (``sector_evidence``),
     and CISA's ICS statements are linked as ``advisory_sector`` on AFFECTS only. The per-source zones are
@@ -420,7 +417,7 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, legacy_graph: b
     # 10f. Every sector CISA's ICS advisory stated is linked as ``advisory_sector``. With
     #      ``--require-cisa-ics`` at least one must be stated once the CISA ICS records carry their zones;
     #      without the flag, or on a graph whose CISA ICS records carry none (built before 2026-10-16, or
-    #      kept and not re-read since), or with ``--legacy-graph``, no stated sector is informational.
+    #      kept and not re-read since), no stated sector is informational.
     r = _one(
         "MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: 'cisa_ics'}) WHERE c:CVE OR c:Vulnerability "
         "UNWIND " + _as_list("sf.stated_zones") + " AS z "
@@ -433,7 +430,7 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, legacy_graph: b
     stated_ok: Optional[bool]
     if r.get("stated"):
         stated_ok = r.get("not_labelled") == 0
-    elif require_cisa_ics and cisa_with_zones > 0 and not legacy_graph:
+    elif require_cisa_ics and cisa_with_zones > 0:
         stated_ok = False
     else:
         stated_ok = None
@@ -523,10 +520,9 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, legacy_graph: b
     )
 
 
-def _ranked_description_and_aging_checks(rep: Report, legacy_graph: bool) -> None:
+def _ranked_description_and_aging_checks(rep: Report) -> None:
     """Checks 16a / 16b (2026-10-16): every ranked description names its source and every Indicator has
-    an aging basis and a source confidence. A graph built before those changes has neither: with
-    ``--legacy-graph`` both are reported, not judged."""
+    an aging basis and a source confidence. Informational on a graph without such nodes."""
     r = _one(
         "MATCH (n) WHERE n.edgeguard_managed = true AND any(l IN labels(n) WHERE l IN $labels) "
         "AND n.description IS NOT NULL AND n.description <> '' "
@@ -535,7 +531,7 @@ def _ranked_description_and_aging_checks(rep: Report, legacy_graph: bool) -> Non
         {"labels": list(_RANKED_DESCRIPTION_LABELS)},
     )
     r["labels"] = list(_RANKED_DESCRIPTION_LABELS)
-    judged = bool(r.get("described")) and not legacy_graph
+    judged = bool(r.get("described"))
     rep.add("descriptions_name_their_source", r.get("without_source") == 0 if judged else None, r)
     r = _one(
         "MATCH (i:Indicator) WHERE i.edgeguard_managed = true "
@@ -543,14 +539,12 @@ def _ranked_description_and_aging_checks(rep: Report, legacy_graph: bool) -> Non
         "sum(CASE WHEN i.aging_basis IS NULL THEN 1 ELSE 0 END) AS without_aging_basis, "
         "sum(CASE WHEN i.source_confidence IS NULL THEN 1 ELSE 0 END) AS without_source_confidence"
     )
-    judged = bool(r.get("indicators")) and not legacy_graph
+    judged = bool(r.get("indicators"))
     ok = r.get("without_aging_basis") == 0 and r.get("without_source_confidence") == 0
     rep.add("indicators_have_aging_basis", ok if judged else None, r)
 
 
-def run_checks(
-    require_ics: bool, require_cisa_ics: bool, require_malwarebazaar: bool = False, legacy_graph: bool = False
-) -> Report:
+def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar: bool = False) -> Report:
     rep = Report()
 
     # 0. Inventory for the record.
@@ -909,7 +903,7 @@ def run_checks(
         "RETURN s.name AS sector, labels(n)[0] AS label, count(DISTINCT n) AS nodes ORDER BY sector, label"
     )
     rep.add("sector_coverage", None, cov)
-    _sector_evidence_checks(rep, require_cisa_ics, legacy_graph)
+    _sector_evidence_checks(rep, require_cisa_ics)
 
     # 11. ResilMesh-facing schema unchanged.
     types = [x["t"] for x in _post("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t")]
@@ -1138,7 +1132,7 @@ def run_checks(
     )
 
     # 16. Ranked descriptions and indicator aging (2026-10-16).
-    _ranked_description_and_aging_checks(rep, legacy_graph)
+    _ranked_description_and_aging_checks(rep)
     return rep
 
 
@@ -1152,18 +1146,10 @@ def main() -> int:
         action="store_true",
         help="fail if the malwarebazaar source has no sha256 indicator",
     )
-    ap.add_argument(
-        "--legacy-graph",
-        action="store_true",
-        help=(
-            "a graph built before 2026-10-16: report, do not judge, the description-source and aging checks "
-            "and, with --require-cisa-ics, a graph without a stated CISA sector"
-        ),
-    )
     args = ap.parse_args()
 
     try:
-        rep = run_checks(args.require_ics, args.require_cisa_ics, args.require_malwarebazaar, args.legacy_graph)
+        rep = run_checks(args.require_ics, args.require_cisa_ics, args.require_malwarebazaar)
     except (urllib.error.URLError, OSError, RuntimeError) as exc:
         print(f"ERROR: cannot query {URL}: {exc}", file=sys.stderr)
         return 2

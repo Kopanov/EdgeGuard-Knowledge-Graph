@@ -2,7 +2,7 @@
 """
 EdgeGuard — Post-Sync Enrichment Jobs
 ======================================
-Seven graph-quality jobs that run AFTER every MISP→Neo4j sync.
+Six graph-quality jobs that run AFTER every MISP→Neo4j sync.
 They are designed to be idempotent — safe to re-run at any time.
 
 Jobs
@@ -11,14 +11,13 @@ Jobs
                             indicator_aging): confidence by age since the last report, retirement
                             after 730 days without one
 2. build_campaign_nodes   — Group ThreatActor / Malware / Indicator into Campaigns
-3. calibrate_cooccurrence — Adjust INDICATES/EXPLOITS confidence for large MISP feed dumps
-4. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
-5. merge_alias_duplicate_actors — Fold duplicate ThreatActors into their canonical actor (ATT&CK
+3. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
+4. merge_alias_duplicate_actors — Fold duplicate ThreatActors into their canonical actor (ATT&CK
    aliases and the canonical threat-actor reference, src/reference/canonical_threat_actors.json)
-6. merge_malware_attack_twins — Fold Malware nodes named "<family> - S####" (the ATT&CK software id
+5. merge_malware_attack_twins — Fold Malware nodes named "<family> - S####" (the ATT&CK software id
    of the MISP galaxy naming) into the MITRE Malware node of that id, or, for software without one,
    into the node of the base name (2026-10)
-7. enrich_cve_epss          — FIRST EPSS scores onto CVE nodes (cve_feed_enrichment.py; CISA's SSVC
+6. enrich_cve_epss          — FIRST EPSS scores onto CVE nodes (cve_feed_enrichment.py; CISA's SSVC
                                comes with the NVD records, not from a job)
 """
 
@@ -945,223 +944,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# 3. CO-OCCURRENCE CONFIDENCE CALIBRATION
-# ---------------------------------------------------------------------------
-
-
-def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
-    """
-    Adjust confidence of MISP-event-co-occurrence INDICATES/EXPLOITS edges.
-
-    Large bulk feed dumps (e.g. Feodo Tracker with 5,000 IPs and one malware
-    tag) create co-occurrence relationships with artificially high confidence.
-    The larger the MISP event, the weaker the actual co-occurrence signal.
-
-    Confidence tiers by event size (number of indicators in same event),
-    capped at 0.50 (co-occurrence ceiling):
-      ≤ 10  → 0.50  (tight incident report)
-      ≤ 20  → 0.45  (small report)
-      ≤ 100 → 0.40  (medium feed)
-      ≤ 500 → 0.35  (large feed)
-      > 500 → 0.30  (bulk dump — weak signal)
-
-    Only edges whose evidence label (``r.match_type``) is
-    ``misp_cooccurrence`` or ``misp_correlation`` are modified. Explicit
-    matches (``cve_tag``, ``mitre_explicit``, ``malware_family``) and
-    manually curated edges are untouched.
-
-    2026-10: no producer writes event co-occurrence edges any more (removed
-    with the fresh-baseline PR — EdgeGuard MISP events are per-source,
-    per-day buckets, so sharing one asserted nothing), so on a fresh graph
-    this job finds nothing to calibrate. The filter moved from the dropped
-    ``r.source_id`` / ``r.source_ids`` fields (which mixed feed names with
-    evidence names) to ``r.match_type``, where the kind of evidence lives.
-    """
-    if not neo4j_client.driver:
-        logger.error("calibrate_cooccurrence_confidence: no Neo4j connection")
-        return {}
-
-    results = {}
-
-    # Map: (min_size, max_size, new_confidence)
-    # Co-occurrence confidence tiers — capped at 0.50 per co-occurrence ceiling.
-    # Tight events (few indicators) get higher confidence within the range;
-    # bulk dumps get lower confidence.
-    tiers = [
-        (0, 10, 0.50),
-        (11, 20, 0.45),
-        (21, 100, 0.40),
-        (101, 500, 0.35),
-        (501, None, 0.30),
-    ]
-
-    try:
-        with neo4j_client.driver.session() as session:
-            # Step 1: Pre-compute event sizes ONCE (instead of per-edge).
-            # Previously each edge re-counted all indicators in its event — millions
-            # of redundant COUNT queries. Now: one COUNT per event, then join.
-            #
-            # PR #33 round 10: dropped legacy scalar misp_event_id; event
-            # membership comes only from misp_event_ids[].
-            logger.info("  [CALIBRATE] Pre-computing MISP event sizes...")
-            event_sizes_query = """
-            MATCH (i:Indicator)
-            WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0
-            UNWIND [eid IN i.misp_event_ids WHERE eid IS NOT NULL AND eid <> ''] AS eid
-            RETURN eid, count(DISTINCT i) AS sz
-            """
-            event_size_result = session.run(event_sizes_query, timeout=NEO4J_READ_TIMEOUT)
-            event_sizes = {r["eid"]: r["sz"] for r in event_size_result}
-            if event_sizes:
-                min_sz = min(event_sizes.values())
-                max_sz = max(event_sizes.values())
-                avg_sz = sum(event_sizes.values()) / len(event_sizes)
-                logger.info(
-                    f"  [CALIBRATE] Pre-computed sizes for {len(event_sizes)} events "
-                    f"(min={min_sz}, max={max_sz}, avg={avg_sz:.0f})"
-                )
-            else:
-                logger.info("  [CALIBRATE] No events with indicators found — skipping calibration")
-                return results
-
-            # Step 2: For each tier, collect matching event IDs and update edges in chunks.
-            failed_tiers: List[Tuple[str, str]] = []
-            for min_s, max_s, conf in tiers:
-                tier_label = f"size {min_s}\u2013{max_s if max_s else '\u221e'} \u2192 conf={conf}"
-                try:
-                    tier_eids = [
-                        eid for eid, sz in event_sizes.items() if sz >= min_s and (max_s is None or sz <= max_s)
-                    ]
-                    if not tier_eids:
-                        logger.info(f"  [CALIBRATE] {tier_label}: 0 events in range — skipped")
-                        results[tier_label] = 0
-                        continue
-
-                    # Match indicators that have this event id in misp_event_ids[].
-                    # PR #33 round 10: dropped legacy scalar misp_event_id leg.
-                    # 2026-10 (relationship provenance): the kind of evidence lives in
-                    # ``r.match_type``; ``r.source_id`` / ``r.source_ids`` were dropped
-                    # (they mixed feed names with evidence names). See the docstring.
-                    update_cypher = """
-                    UNWIND $eids AS eid
-                    MATCH (i:Indicator)
-                    WHERE i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids
-                    MATCH (i)-[r:INDICATES|EXPLOITS]->(target)
-                    WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"]
-                    SET r.confidence_score = $conf,
-                        r.calibrated_at = datetime()
-                    RETURN count(r) AS updated
-                    """
-                    total_updated = 0
-                    # Split large events (>1000 indicators) into individual chunks
-                    # to avoid transaction memory issues from millions of edges
-                    large_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) > 1000]
-                    small_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) <= 1000]
-
-                    # Small events: batch 1000 event IDs at a time with 3s pause
-                    for ci in range(0, len(small_eids), 1000):
-                        chunk = small_eids[ci : ci + 1000]
-                        result = session.run(update_cypher, eids=chunk, conf=conf, timeout=NEO4J_READ_TIMEOUT)
-                        record = result.single()
-                        total_updated += record["updated"] if record else 0
-                        if ci + 1000 < len(small_eids):
-                            query_pause()
-
-                    # Large events: use apoc.periodic.iterate to batch at edge level.
-                    # A 96K-indicator event can have millions of edges — too many for one tx.
-                    if large_eids:
-                        logger.info(
-                            f"  [CALIBRATE] {tier_label}: processing {len(large_eids)} large events "
-                            f"(>{1000} indicators each) via apoc.periodic.iterate"
-                        )
-                    # Same array-only semantics as the small-event path.
-                    #
-                    # Parameterized via apoc.periodic.iterate's ``params`` config so $eid and
-                    # $conf are safely bound inside both the matcher and the action.
-                    #
-                    # PR #34 round 19 (bugbot MED): cross-transaction entity safety.
-                    # apoc.periodic.iterate runs the inner action in a NEW transaction
-                    # per batch — raw entity references from the outer query (``r``)
-                    # cannot safely be used as bound entities in the inner. Pattern:
-                    # outer returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
-                    # ``MATCH ()-[r]->() WHERE id(r) = rid`` to bind a fresh handle. In the
-                    # default batch mode apoc.periodic.iterate exposes the outer columns to
-                    # the inner statement as *variables* (it prepends
-                    # ``UNWIND $_batch AS _batch WITH _batch.rid AS rid``), not as
-                    # parameters: ``$rid`` fails with "Expected parameter(s): rid", which
-                    # every run before 2026-10-12 swallowed (the tier was logged FAILED and
-                    # the job ended "complete"). Only ``params`` entries are ``$``-parameters.
-                    # PR-M3c: same array-or-scalar filter as the small path
-                    # (see ``update_cypher`` above).  Must be expressed inside
-                    # the apoc.periodic.iterate OUTER matcher; a single line
-                    # with both branches concatenated with OR.
-                    large_batch_query = (
-                        "CALL apoc.periodic.iterate("
-                        "  'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids "
-                        "  MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
-                        '  WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"] '
-                        "  RETURN id(r) AS rid', "
-                        "  'MATCH ()-[r]->() WHERE id(r) = rid "
-                        "  SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
-                        "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
-                        ") YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated, "
-                        "  batch, operations, updateStatistics "
-                        "RETURN total AS updated, batches, errorMessages, failedBatches, failedOperations, "
-                        "  wasTerminated, batch, operations, updateStatistics"
-                    )
-                    for eid in large_eids:
-                        evt_size = event_sizes.get(eid, 0)
-                        result = session.run(large_batch_query, eid=eid, conf=conf, timeout=NEO4J_READ_TIMEOUT)
-                        record = result.single()
-                        failures = apoc_iterate_failures(record) if record else []
-                        if failures:
-                            # A failed batch leaves part of the event uncalibrated; the
-                            # outer ``total`` would still count every outer row.
-                            raise RuntimeError(
-                                f"[CALIBRATE] event {eid} apoc.periodic.iterate batch failures: {failures}"
-                            )
-                        evt_updated = record["updated"] if record else 0
-                        total_updated += evt_updated
-                        logger.info(
-                            f"  [CALIBRATE]   event {eid} ({evt_size} indicators): {evt_updated} edges calibrated"
-                        )
-                        query_pause()  # Let Neo4j flush between large event batches
-
-                    results[tier_label] = total_updated
-                    if total_updated:
-                        logger.info(f"  [CALIBRATE] {tier_label}: {total_updated} edges ({len(tier_eids)} events)")
-                except Exception as tier_err:
-                    logger.error(f"  [CALIBRATE] {tier_label} FAILED: {tier_err}")
-                    results[tier_label] = 0
-                    failed_tiers.append((tier_label, str(tier_err)))
-
-            if failed_tiers:
-                # Every tier was attempted (best effort per tier), but a failed
-                # tier leaves edges uncalibrated, so the job must not end green.
-                raise RuntimeError(f"[CALIBRATE] {len(failed_tiers)} tier(s) failed: {failed_tiers}")
-
-    except Exception as e:
-        # PR-N21 BLOCKER: see decay_ioc_confidence + build_campaign_nodes
-        # for full rationale. Re-raise so enrichment task fails loudly.
-        # Note: per-tier exception handling above catches per-event
-        # failures and continues with the next tier (results[tier_label]
-        # = 0 + log) so the remaining tiers still get calibrated; the
-        # job then raises once all tiers ran. The OUTER except (here)
-        # also catches whole-session failures (driver dead, schema
-        # corruption, etc.) which must NOT be silently swallowed.
-        logger.error(f"[CALIBRATE] calibrate_cooccurrence_confidence FAILED: {e}", exc_info=True)
-        raise
-
-    total = sum(results.values())
-    tier_summary = ", ".join(f"{k}: {v}" for k, v in results.items() if v > 0)
-    logger.info(f"[CALIBRATE] Confidence calibration complete — {total} edges updated")
-    if tier_summary:
-        logger.info(f"[CALIBRATE] Tier breakdown: {tier_summary}")
-    return results
-
-
-# ---------------------------------------------------------------------------
-# JOB 4: Vulnerability ↔ CVE REFERS_TO Bridge
+# JOB 3: Vulnerability ↔ CVE REFERS_TO Bridge
 # ---------------------------------------------------------------------------
 # The ResilMesh data model defines bidirectional REFERS_TO relationships
 # between Vulnerability and CVE nodes (neo4j_relationships_properties.csv).
@@ -1272,7 +1055,7 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# JOB 5: ThreatActor alias-duplicate merge
+# JOB 4: ThreatActor alias-duplicate merge
 # ---------------------------------------------------------------------------
 # OTX pulses and MISP galaxy tags name the same actor under several labels
 # (``reddelta`` / ``twill typhoon`` / ``unc6384`` next to the MITRE node
@@ -1511,7 +1294,7 @@ def _strongest_on_parallel_edges(direction: str) -> str:
 # kept the canonical's description and could take ``description_source`` from a duplicate where the
 # canonical had none, so the node could name a source that did not write its text.
 # 2026-10: the statements are built per label (``_alias_merge_statements``) so the Malware
-# twin merge (JOB 6) runs the same merge; the actor statements are unchanged.
+# twin merge (JOB 5) runs the same merge; the actor statements are unchanged.
 def _alias_merge_apply_cypher(
     label: str, canonical_guard: str, list_props: Tuple[str, ...], duplicate_guard: str = ""
 ) -> str:
@@ -1871,8 +1654,7 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
     of failing the enrichment run. Any other per-batch failure rolls the
     whole batch back (2026-10-16: one transaction per batch, so its
     duplicates stay and merge on a later run), is logged, counted in
-    ``errors`` and the next batch proceeds (same best-effort shape as the
-    per-tier handler in ``calibrate_cooccurrence_confidence``);
+    ``errors`` and the next batch proceeds;
     whole-session failures re-raise per PR-N21.
 
     Returns ``{candidates, merged, skipped_ambiguous, errors,
@@ -2037,7 +1819,7 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# JOB 6: Malware ATT&CK-id twin merge (2026-10)
+# JOB 5: Malware ATT&CK-id twin merge (2026-10)
 # ---------------------------------------------------------------------------
 # OTX pulses name malware families as the MISP ATT&CK galaxy does, with the ATT&CK software id as
 # a suffix ("Cobalt Strike - S0154"). Until 2026-10 the collector passed such a name through and it
@@ -2297,7 +2079,7 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
 
 def run_all_enrichment_jobs(neo4j_client) -> Dict:
     """
-    Run all seven post-sync enrichment jobs in sequence.
+    Run all six post-sync enrichment jobs in sequence.
 
     Order matters: ``merge_alias_duplicate_actors`` and ``merge_malware_attack_twins`` run
     BEFORE ``build_campaign_nodes`` so campaigns are built on merged actors and malware. Since
@@ -2323,30 +2105,27 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
                 logger.debug("Metrics recording failed", exc_info=True)
         return result
 
-    logger.info("\n[1/7] Vulnerability↔CVE REFERS_TO Bridge...")
+    logger.info("\n[1/6] Vulnerability↔CVE REFERS_TO Bridge...")
     summary["bridge"] = _timed("bridge", bridge_vulnerability_cve, neo4j_client)
 
     # Must precede build_campaign_nodes: campaigns are keyed on actor name.
-    logger.info("\n[2/7] ThreatActor Alias-Duplicate Merge...")
+    logger.info("\n[2/6] ThreatActor Alias-Duplicate Merge...")
     summary["actor_alias_merge"] = _timed("actor_alias_merge", merge_alias_duplicate_actors, neo4j_client)
 
     # 2026-10: also before build_campaign_nodes, so a campaign links the ATT&CK malware node, not a twin.
-    logger.info("\n[3/7] Malware ATT&CK-id Twin Merge...")
+    logger.info("\n[3/6] Malware ATT&CK-id Twin Merge...")
     summary["malware_twin_merge"] = _timed("malware_twin_merge", merge_malware_attack_twins, neo4j_client)
 
     # 2026-10-16: before build_campaign_nodes, which links only active indicators.
-    logger.info("\n[4/7] Indicator Aging...")
+    logger.info("\n[4/6] Indicator Aging...")
     summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
-    logger.info("\n[5/7] Campaign Node Builder...")
+    logger.info("\n[5/6] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)
-
-    logger.info("\n[6/7] Co-occurrence Confidence Calibration...")
-    summary["calibration"] = _timed("calibration", calibrate_cooccurrence_confidence, neo4j_client)
 
     # FIRST EPSS, the one feed written straight to Neo4j. Flag-off = INFO line, no network call.
     # A feed outage is logged and skipped inside the job (never raises).
-    logger.info("\n[7/7] EPSS scores...")
+    logger.info("\n[6/6] EPSS scores...")
     if config.ENABLE_EPSS:
         summary["epss"] = _timed("epss", enrich_cve_epss, neo4j_client)
     else:
@@ -2354,21 +2133,19 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
         summary["epss"] = {"skipped": "disabled"}
 
     # PR #33 round 13: explicit aggregated summary so an operator scanning logs
-    # sees totals from all 7 jobs without grepping each function's output.
+    # sees totals from all 6 jobs without grepping each function's output.
     def _sum(d):
         if isinstance(d, dict):
             return sum(v for v in d.values() if isinstance(v, (int, float)))
         return d if isinstance(d, (int, float)) else 0
 
     logger.info(
-        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s malware_twin_merge=%s campaigns=%s calibration=%s "
-        "decay=%s epss=%s",
+        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s malware_twin_merge=%s campaigns=%s decay=%s epss=%s",
         _sum(summary.get("bridge")),
         _sum(summary.get("actor_alias_merge")),
         # The twins merged, not a sum of its counts (candidates and twins without a target are no work).
         _sum({"merged": (summary.get("malware_twin_merge") or {}).get("merged", 0)}),
         _sum(summary.get("campaigns")),
-        _sum(summary.get("calibration")),
         # 2026-10-16: the Indicators whose aging changed, not a sum of its counts (tier counts are state).
         _sum({"changed": (summary.get("decay") or {}).get("changed", 0)}),
         # The CVE nodes EPSS updated, not a sum of its counts: the feed's row count is not work done.

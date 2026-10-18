@@ -25,12 +25,9 @@ edge types actually got the wire-up. PR-N26 closes the gap in 6 queries:
 * **Q7b** — AFFECTS: propagate ``v.misp_event_ids[]``
 * **Q9** — INDICATES (family-match): propagate ``i.misp_event_ids[]``
 
-Plus a backfill migration (`scripts/backfill_edge_misp_event_ids.py`) for
-~82,500 existing edges that were created before the fix.
-
 ## Test strategy
 
-Three layers of pin:
+Two layers of pin:
 
 1. **Static text pins** — every modified inner-query string contains the
    ``r.misp_event_ids = apoc.coll.toSet(coalesce(r.misp_event_ids, []) +
@@ -42,11 +39,6 @@ Three layers of pin:
    value contains the SET clause structurally. Catches the case where
    someone reorganizes the queries into a helper function and breaks the
    string-literal anchor.
-
-3. **Backfill script structural pins** — assert ``scripts/backfill_edge_
-   misp_event_ids.py`` exists, exposes 5 named patterns, uses
-   ``apoc.periodic.iterate`` (bounded TX), and is gated on
-   ``coalesce(size(r.misp_event_ids), 0) = 0`` (idempotent).
 
 We deliberately do NOT add a behavioural integration test that runs
 build_relationships against a live Neo4j — that's covered by the
@@ -63,8 +55,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
-SCRIPTS = REPO_ROOT / "scripts"
-MIGRATIONS = REPO_ROOT / "migrations"
 
 
 # ===========================================================================
@@ -260,148 +250,6 @@ class TestNoNewQueryForgetsToWireMispEventIds:
             f"{self.AFFECTED_REL_TYPES} but DO NOT SET r.misp_event_ids — "
             "this is the PR-N26 bug class:\n  " + "\n  ".join(offenders)
         )
-
-
-# ===========================================================================
-# Section 3 — backfill script structural pins
-# ===========================================================================
-
-
-_BACKFILL = SCRIPTS / "backfill_edge_misp_event_ids.py"
-
-
-class TestBackfillScriptStructure:
-    """``scripts/backfill_edge_misp_event_ids.py`` must:
-
-    1. Exist + be executable.
-    2. Define a ``PATTERNS`` list with at least 5 entries (one per fix site).
-    3. Use ``apoc.periodic.iterate`` so transactions stay bounded.
-    4. Gate on ``coalesce(size(r.misp_event_ids), 0) = 0`` so it's idempotent.
-    5. For the cooccurrence pattern, compute the intersection of source +
-       target arrays (the EXACT historical event set), not the union.
-    """
-
-    def test_backfill_script_exists(self):
-        assert _BACKFILL.exists(), f"backfill script missing at {_BACKFILL}"
-
-    def test_backfill_script_is_executable(self):
-        import os
-
-        assert os.access(_BACKFILL, os.X_OK), "backfill script must be chmod +x for operator runbook"
-
-    def test_backfill_script_has_five_patterns(self):
-        text = _BACKFILL.read_text()
-        # Each pattern is a ('name', count_q, write_q) tuple in the PATTERNS list.
-        # We don't import the module (would require neo4j-driver in the test env);
-        # parse the AST to count tuple-literal entries inside PATTERNS.
-        # PATTERNS may be either an Assign (``PATTERNS = [...]``) or an
-        # AnnAssign (``PATTERNS: List[Tuple[str, str, str]] = [...]``) —
-        # check both shapes.
-        tree = ast.parse(text)
-        for node in ast.walk(tree):
-            target_name = None
-            value_node = None
-            if isinstance(node, ast.Assign):
-                for tgt in node.targets:
-                    if isinstance(tgt, ast.Name) and tgt.id == "PATTERNS":
-                        target_name = "PATTERNS"
-                        value_node = node.value
-                        break
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "PATTERNS":
-                target_name = "PATTERNS"
-                value_node = node.value
-
-            if target_name is None or value_node is None:
-                continue
-            assert isinstance(value_node, ast.List), "PATTERNS must be a list literal"
-            assert len(value_node.elts) >= 5, (
-                f"PATTERNS must have at least 5 entries (one per fix site); found {len(value_node.elts)}"
-            )
-            return
-        raise AssertionError("PATTERNS list not found in backfill script")
-
-    def test_backfill_uses_apoc_periodic_iterate(self):
-        text = _BACKFILL.read_text()
-        assert text.count("apoc.periodic.iterate") >= 5, (
-            "every pattern's write_query must use apoc.periodic.iterate to keep TX bounded — "
-            "expected ≥5 occurrences (one per pattern)"
-        )
-
-    def test_backfill_is_idempotent_via_size_gate(self):
-        text = _BACKFILL.read_text()
-        # The Cypher gate ``coalesce(size(r.misp_event_ids), 0) = 0`` ensures
-        # we only touch edges that currently lack the array. Re-runs are no-ops.
-        assert "coalesce(size(r.misp_event_ids), 0) = 0" in text, (
-            "every pattern must gate on coalesce(size(r.misp_event_ids), 0) = 0 to be idempotent"
-        )
-
-    def test_cooccurrence_pattern_uses_intersection(self):
-        """For the ``misp_cooccurrence`` INDICATES edge specifically, we have
-        BOTH endpoints' arrays available — so we can recover the EXACT
-        historical event set (the intersection) rather than over-stamping
-        with a superset.
-
-        PR-N30 (2026-04-24) added empty-string filter + cap, so the
-        comprehension's WHERE clause is now ``eid IS NOT NULL AND
-        size(eid) > 0 AND eid IN coalesce(m.misp_event_ids, [])`` —
-        the intersection check is preceded by the new filter."""
-        text = _BACKFILL.read_text()
-        # The intersection idiom: list comprehension filtering one array
-        # against the other. Accept both pre-N30 form and post-N30 form
-        # (which has the null/empty filter prepended).
-        assert "eid IN coalesce(m.misp_event_ids" in text, (
-            "indicates_cooccurrence pattern must compute "
-            "[eid IN coalesce(i.misp_event_ids, []) WHERE ... eid IN coalesce(m.misp_event_ids, [])] — "
-            "the exact intersection that originally produced the edge (with PR-N30 null+empty filter)"
-        )
-
-    def test_backfill_supports_dry_run(self):
-        text = _BACKFILL.read_text()
-        assert "--dry-run" in text, "backfill must support --dry-run for operator preflight"
-
-    def test_backfill_supports_only_filter(self):
-        text = _BACKFILL.read_text()
-        assert "--only" in text, "backfill must support --only <pattern> for incremental rollout"
-
-    def test_backfill_reports_committed_operations_not_total(self):
-        """PR-N26 Bugbot round 1 LOW (2026-04-23): apoc.periodic.iterate's
-        ``total`` field reports INPUT rows consumed from the outer query, not
-        rows actually MUTATED by the inner statement. For patterns with an
-        inner-query filter (indicates_cooccurrence has
-        ``WHERE size(shared) > 0`` to skip empty intersections), ``total``
-        OVERCOUNTS. Operators re-running the script would see misleading
-        "backfilled N edges" reports when zero were actually modified.
-
-        Fix: YIELD ``committedOperations`` and report that as the written
-        count. ``total`` is kept as ``scanned`` so operators can see the
-        filter-skip delta."""
-        text = _BACKFILL.read_text()
-        # All 5 write queries must YIELD committedOperations.
-        committed_yield_count = text.count("YIELD batches, total, committedOperations, errorMessages")
-        assert committed_yield_count >= 5, (
-            f"all 5 write queries must YIELD committedOperations for accurate write counts; "
-            f"found only {committed_yield_count} occurrences. "
-            "See Bugbot round 1 LOW finding on PR #109."
-        )
-        # And the Python driver must read the field (not total).
-        assert 'write_record["committedOperations"]' in text, (
-            "Python driver must read write_record['committedOperations'] to report "
-            "accurate write counts, not write_record['total'] which overcounts"
-        )
-        # The operator log must surface both scanned + written so the delta
-        # (filter-skipped) is visible.
-        assert "filter-skipped" in text, (
-            "operator-facing log must surface the scanned vs written delta as "
-            "``filter-skipped`` so ops can see the filter impact without re-querying"
-        )
-
-
-# ===========================================================================
-# Section 4 — operator runbook exists and references the script
-# ===========================================================================
-
-
-_RUNBOOK = MIGRATIONS / "2026_05_edge_misp_event_ids_backfill_runbook.md"
 
 
 class TestBaselineCompleteTriggerRule:
@@ -736,18 +584,8 @@ class TestPRN27PostcheckUpstreamFailedSentinel:
 
 class TestPRN26AuditFollowupFixes:
     """PR-N26 multi-agent audit (2026-04-23) corroborated findings folded
-    into this PR. Each test pins one of the 4 in-scope follow-up fixes:
+    into this PR. The follow-up fixes pinned here and in the classes above:
 
-    * **H1** — SSL_VERIFY drift (Red Team LOW-2 + Prod Readiness HIGH-1):
-      docstring previously claimed ``EDGEGUARD_SSL_VERIFY`` was honored,
-      but ``get_driver()`` doesn't consult it. Fixed by dropping the
-      claim + documenting that TLS strictness comes from the URI scheme
-      (``bolt+s://`` for strict, ``bolt+ssc://`` for self-signed).
-    * **H2** — backfill needs baseline-concurrency check (Prod Readiness
-      HIGH-2): refuse to write while a baseline is in progress (both
-      writers contend on the same edges → TX timeouts). Wired
-      ``is_baseline_running()`` from ``src/baseline_lock.py`` + ``--force``
-      override flag.
     * **MED** — hardcoded upstream task IDs (Cross-Checker + Maintainer
       + Bug Hunter, 3-agent corroboration): switched to
       ``ti.task.get_flat_relatives(upstream=True)`` for dynamic enumeration.
@@ -755,80 +593,8 @@ class TestPRN26AuditFollowupFixes:
       (Maintainer + Prod Readiness): added Section 7 to ``docs/RUNBOOK.md``.
     """
 
-    BACKFILL = REPO_ROOT / "scripts" / "backfill_edge_misp_event_ids.py"
     RUNBOOK_DOC = REPO_ROOT / "docs" / "RUNBOOK.md"
-    BACKFILL_RUNBOOK = REPO_ROOT / "migrations" / "2026_05_edge_misp_event_ids_backfill_runbook.md"
     SRC_FILE = REPO_ROOT / "src" / "run_misp_to_neo4j.py"
-
-    def test_h1_ssl_verify_claim_dropped_from_backfill_docstring(self):
-        """H1: docstring no longer claims EDGEGUARD_SSL_VERIFY is honored."""
-        text = self.BACKFILL.read_text()
-        # The old docstring entry was: EDGEGUARD_SSL_VERIFY | (optional) `true`
-        # for strict TLS (default strict)
-        # Verify it's gone (the env-var name may still appear in the
-        # explanatory note that explains WHY it's not honored).
-        # Pin: there must be no "(optional) `true` for strict TLS" claim.
-        assert "(optional) ``true`` for strict TLS" not in text, (
-            "H1 (Red Team + Prod Readiness): backfill docstring must not claim "
-            "EDGEGUARD_SSL_VERIFY is honored — the script doesn't actually consult it. "
-            "TLS strictness comes from the URI scheme (bolt+s://)."
-        )
-        # Positive pin: the docstring now documents the URI scheme behavior
-        assert "bolt+s://" in text and "bolt+ssc://" in text, (
-            "H1 fix: docstring must document that TLS strictness comes from "
-            "the URI scheme (bolt+s:// strict, bolt+ssc:// self-signed)"
-        )
-
-    def test_h2_backfill_imports_baseline_lock_check(self):
-        """H2: backfill script must wire ``is_baseline_running`` from
-        ``src/baseline_lock.py`` so concurrent writes are blocked."""
-        text = self.BACKFILL.read_text()
-        assert "from baseline_lock import is_baseline_running" in text, (
-            "H2 (Prod Readiness): backfill must import is_baseline_running from "
-            "src/baseline_lock.py and refuse to run while a baseline is writing"
-        )
-        # Also verify the operator-facing log token is present
-        assert "[BACKFILL-CONCURRENCY-BLOCK]" in text, (
-            "H2 fix: backfill must emit [BACKFILL-CONCURRENCY-BLOCK] log token "
-            "when refusing to run due to active baseline"
-        )
-
-    def test_h2_backfill_has_force_override_flag(self):
-        """H2: must support ``--force`` to override the concurrency check
-        (operator's responsibility to verify safety on non-prod targets)."""
-        text = self.BACKFILL.read_text()
-        assert "--force" in text, "H2: backfill must support --force flag to override the concurrency check"
-
-    def test_h2_runbook_documents_concurrency_preflight(self):
-        text = self.BACKFILL_RUNBOOK.read_text()
-        assert "baseline_in_progress.lock" in text, (
-            "H2: runbook must document the baseline_in_progress.lock pre-flight check"
-        )
-
-    def test_audit_round2_h1_backfill_summary_always_emitted(self):
-        """PR-N26 multi-agent audit round 2 Bug Hunter H-1: if a pattern
-        crashes mid-run, the summary log must still fire so the operator
-        sees how much got backfilled before the crash (idempotent re-runs
-        resume from there). Pre-fix, a mid-run Exception raised out of
-        main() and skipped the summary entirely."""
-        text = self.BACKFILL.read_text()
-        # The summary log must live inside a ``finally`` block
-        assert "finally:" in text and "Summary" in text, (
-            "H-1 fix: backfill script must emit summary in finally block so mid-run crashes still produce accounting"
-        )
-        # The PARTIAL-summary path must exist (aborted_at sentinel)
-        assert "aborted_at" in text, (
-            "H-1 fix: backfill must track which pattern aborted (aborted_at) and surface it in the partial-summary log"
-        )
-        assert "Summary (PARTIAL" in text, (
-            "H-1 fix: operator-facing partial-summary log line must include "
-            "the 'PARTIAL' marker so they can distinguish clean vs aborted runs"
-        )
-        # driver=None pre-binding (H-1 + Red Team LOW-2)
-        assert "driver = None" in text, (
-            "H-1 fix: driver must be pre-bound to None before the try so "
-            "a get_driver() failure in finally can't NameError-mask the real exception"
-        )
 
     def test_audit_round2_h2_placeholder_metric_call_is_wrapped(self):
         """PR-N26 multi-agent audit round 2 Bug Hunter H-2 + Red Team M3
@@ -862,37 +628,4 @@ class TestPRN26AuditFollowupFixes:
         # Section header mentioning postcheck (Section 7 per the fix):
         assert "Baseline postcheck skipped" in text, (
             "LOW: RUNBOOK section header must reference baseline postcheck skip scenario for greppability"
-        )
-
-
-class TestRunbookExists:
-    def test_runbook_file_exists(self):
-        assert _RUNBOOK.exists(), f"operator runbook missing at {_RUNBOOK}"
-
-    def test_runbook_references_backfill_script(self):
-        text = _RUNBOOK.read_text()
-        assert "scripts/backfill_edge_misp_event_ids.py" in text, "runbook must reference the backfill script by path"
-
-    def test_runbook_has_dry_run_step(self):
-        text = _RUNBOOK.read_text()
-        assert "--dry-run" in text, "runbook must instruct operators to dry-run first"
-
-    def test_runbook_has_idempotency_note(self):
-        text = _RUNBOOK.read_text()
-        assert "Idempoten" in text or "idempoten" in text, (
-            "runbook must explicitly state the script is idempotent (so operators feel safe re-running)"
-        )
-
-    def test_runbook_has_verification_step(self):
-        text = _RUNBOOK.read_text()
-        # Operators need to know HOW to verify the backfill landed.
-        assert "Verify" in text or "verify" in text or "verification" in text.lower(), (
-            "runbook must include a post-backfill verification step"
-        )
-
-    def test_runbook_clarifies_not_a_baseline_blocker(self):
-        text = _RUNBOOK.read_text()
-        assert "NOT a blocker" in text or "not a blocker" in text or "not block" in text.lower(), (
-            "runbook should clarify this migration is NOT a blocker for the next 730d baseline launch — "
-            "operators need this signal so they don't delay baseline-day for a non-critical migration"
         )

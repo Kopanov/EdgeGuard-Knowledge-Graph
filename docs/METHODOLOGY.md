@@ -285,7 +285,7 @@ The values each collector sets on its items (layer 1 below says which of them re
 
 There is no data-quality factor or other multiplier on the source
 confidence: downstream consumers (including the Stage-2 fine-tuning
-dataset) must not assume one. The model is three independent layers:
+dataset) must not assume one. The model is two independent layers:
 
 1. **Source prior** — each collector sets a confidence (table above). It
    reaches Neo4j through MISP only as a band: `MISPWriter` tags each
@@ -295,16 +295,7 @@ dataset) must not assume one. The model is three independent layers:
    indicator's `source_confidence`. CVE, Malware and ThreatActor attributes
    carry no confidence tag and are stored at 0.5; Technique, Tactic and
    Tool are stored at 0.8, 0.95 and 0.9.
-2. **Co-occurrence calibration** (post-sync, `enrichment_jobs.py`
-   `calibrate_cooccurrence_confidence`): co-occurrence-derived `INDICATES`
-   **and** `EXPLOITS` edges from large bulk-feed MISP events are
-   down-weighted by event size into the 0.30–0.50 band (≤10 → 0.50,
-   ≤20 → 0.45, ≤100 → 0.40, ≤500 → 0.35, >500 → 0.30); only edges marked
-   `misp_cooccurrence` / `misp_correlation` are touched. The pipeline writes
-   no such edges — links are report-scoped (same OTX pulse,
-   `match_type='otx_pulse'`, 0.6) — so this step changes nothing on a fresh
-   baseline.
-3. **Indicator aging** (`src/indicator_aging.py`; applied by
+2. **Indicator aging** (`src/indicator_aging.py`; applied by
    every Indicator write and by the post-sync job `decay_ioc_confidence`):
    one rule for every `Indicator`, whoever supplied it — the age counts
    from the latest report of any source (the source's own `last_seen`
@@ -323,8 +314,7 @@ dataset) must not assume one. The model is three independent layers:
    backwards.
 
 When explaining a score, cite the layer that produced it (source prior,
-`source_confidence`, the co-occurrence calibration band, or the aging tier
-with its basis) — multi-source
+`source_confidence`, or the aging tier with its basis) — multi-source
 corroboration is visible through per-source `SOURCED_FROM` edges and, for a
 relationship, through `r.sources[]` (`size(r.sources) >= 2` = two or more
 sources assert it), not folded into a single multiplier.
@@ -506,6 +496,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Confidence is a two-layer model (source prior, indicator aging): the co-occurrence calibration job was removed, because no current code writes the `misp_cooccurrence` / `misp_correlation` edges it rescored.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; history and repairs of data from earlier versions moved to the end.
 - 2026-10-17 — Corrected against the code: each collector's confidence value (MITRE by object type; ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker, SSL Blacklist and CISA ICS rows), only an indicator's band (0.8 / 0.5 / 0.3) reaches Neo4j, collection flow through MISP, production zone matching and keywords, malware families not sector keywords, CISA ICS / MalwareBazaar / FIRST EPSS sources, `ATTRIBUTED_TO` as Malware → ThreatActor, `INDICATOR_RESOLVES_TO` as the planned DNS bridge, merge pseudo-code with write-time `last_updated` and Indicator aging, MISP `uri` not read as a URL.

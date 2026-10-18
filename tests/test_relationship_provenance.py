@@ -457,12 +457,6 @@ class TestEnrichment:
         )
         assert campaign_evidence.evidence_types("x") == "apoc.coll.sort(apoc.coll.toSet([_et IN x | type(_et)]))"
 
-    def test_calibrator_filters_on_the_evidence_label(self):
-        src = Path(enrichment_jobs.__file__).read_text()
-        body = src.split("def calibrate_cooccurrence_confidence")[1].split("\ndef ")[0]
-        assert body.count('r.match_type IN ["misp_cooccurrence", "misp_correlation"]') == 2
-        assert "r.source_ids IS NOT NULL" not in body and "r.source_id IN" not in body
-
     def test_alias_merge_keeps_lists_as_lists(self):
         node_props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
         edge_props = enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS

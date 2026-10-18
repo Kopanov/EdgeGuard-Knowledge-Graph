@@ -86,6 +86,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed `scripts/backfill_cve_dates_from_nvd_meta.py`, `scripts/backfill_edge_misp_event_ids.py` with its runbook in `migrations/`, and the read-only audit `scripts/audit_legacy_unicode_bypass_nodes.py`: they repaired or inspected data written by earlier versions, which a fresh baseline rebuilds.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — The heal path pauses the five scheduled DAGs and leaves `edgeguard_baseline` unpaused (its lock holds the scheduled writers off), wipes with `scripts/clear_neo4j.py --force` (the script has no `--yes`), and verifies with the read-only `scripts/verify_fresh_baseline.py`; the main text describes current behavior only, and the runbooks and the fix-up and audit scripts for earlier-version graphs moved to the appendix.
 - 2026-04-26 — Retracted the claim that no Python backfill scripts ship, listed the three operator scripts in `scripts/`, and added the 2026_05 edge `misp_event_ids` backfill runbook to the runbook table.
