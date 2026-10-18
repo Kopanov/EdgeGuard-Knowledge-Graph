@@ -399,6 +399,19 @@ class MITRECollector:
                 + malware[: int(effective_limit * 0.15)]
                 + tools[: int(effective_limit * 0.15)]
             )
+            # A run cut by an item limit (only EDGEGUARD_MAX_ENTRIES applies to scheduled runs) does
+            # not store the bundle's ETag: a stored ETag makes every later run "not modified", so the
+            # objects left out would never be read again.
+            total_objects = len(tactics) + len(techniques) + len(actors) + len(malware) + len(tools)
+            store_etag = bool(new_etag) and len(all_items) == total_objects
+            if new_etag and not store_etag:
+                logger.warning(
+                    "[MITRE] item limit %s kept %d of %d objects; the bundle's ETag is not stored, so the "
+                    "next run reads the bundle again",
+                    limit,
+                    len(all_items),
+                    total_objects,
+                )
 
             if baseline and len(all_items) == 0:
                 logger.warning("MITRE baseline returned 0 items — verify STIX bundle URL")
@@ -420,7 +433,7 @@ class MITRECollector:
                 if failed > 0:
                     logger.warning(f"[WARN] MITRE ATT&CK: Failed to push {failed} items to MISP")
 
-                if new_etag and failed == 0:
+                if store_etag and failed == 0:
                     update_source_incremental("mitre", mitre_bundle_etag=new_etag)
 
                 MITRE_CIRCUIT_BREAKER.record_success()
@@ -432,7 +445,7 @@ class MITRECollector:
                     err = f"MISP push reported {failed} failed attribute(s) ({success} ok; {MISP_PUSH_FAILURE_CAUSES})"
                 return self._return_status(success=ok, count=len(all_items), failed=failed, error=err)
             else:
-                if new_etag:
+                if store_etag:
                     update_source_incremental("mitre", mitre_bundle_etag=new_etag)
                 MITRE_CIRCUIT_BREAKER.record_success()
                 return all_items if limit is None else all_items[:limit]

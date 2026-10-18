@@ -247,7 +247,7 @@ EDGEGUARD_INCREMENTAL_LIMIT=500
 EDGEGUARD_INCREMENTAL_LIMIT=0
 ```
 
-This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV and CISA ICS do not use it: each applies its own per-run cap. CISA KEV compares its whole catalogue with MISP in every run and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500). CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, because a cut at 200 (advisory, CVE) items would stop inside the window, and an advisory naming 200 or more CVEs would hold its cursor for good, every run green. ThreatFox and URLhaus read a 7-day and a 30-day window of about 1,100 new entries per day each, of which a cut at 200 would lose about 80%. Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 would leave the stored copies of the others unreported, so they would age while still listed. AbuseIPDB makes one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan. The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
+This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV, CISA ICS and MITRE ATT&CK do not use it: each applies its own per-run cap. MITRE downloads the ATT&CK bundle only when its ETag changed and pushes every object in it, since a cut run that stored the new ETag would never read the objects it left out. CISA KEV compares its whole catalogue with MISP in every run and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500). CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, because a cut at 200 (advisory, CVE) items would stop inside the window, and an advisory naming 200 or more CVEs would hold its cursor for good, every run green. ThreatFox and URLhaus read a 7-day and a 30-day window of about 1,100 new entries per day each, of which a cut at 200 would lose about 80%. Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 would leave the stored copies of the others unreported, so they would age while still listed. AbuseIPDB makes one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan. The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
 
 ### Priority order in `get_effective_limit()`
 
@@ -256,7 +256,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
 2. EDGEGUARD_MAX_ENTRIES ≠ 0 (hard global override)    → that value
 3. OWN_RUN_CAP_SOURCES (nvd, malwarebazaar,            → None here; the collector applies
    threatfox, urlhaus, feodo, sslbl,                     its own cap (EDGEGUARD_NVD_MAX_PER_RUN,
-   abuseipdb, cisa / cisa_kev, cisa_ics)                 EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN,
+   abuseipdb, cisa / cisa_kev, cisa_ics, mitre)          EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN,
                                                          EDGEGUARD_THREATFOX_MAX_PER_RUN 10000,
                                                          EDGEGUARD_URLHAUS_MAX_PER_RUN 50000,
                                                          EDGEGUARD_FEODO_MAX_PER_RUN 15000,
@@ -273,7 +273,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
 
 | | Baseline | Incremental |
 |--|----------|-------------|
-| Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB and CISA ICS use their own per-run caps, and CISA KEV compares its whole catalogue (edits capped by `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`) |
+| Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB and CISA ICS use their own per-run caps, MITRE ATT&CK pushes its whole bundle when it changed, and CISA KEV compares its whole catalogue (edits capped by `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`) |
 | Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | From each collector's cursor (NVD, OTX, CISA ICS) or its feed's current window (ThreatFox: 7 days; URLhaus: `csv_recent`; Feodo Tracker: the servers active in the last 30 days); CISA KEV and MITRE ATT&CK read the whole catalogue (see [Incremental Collection Limit](#incremental-collection-limit)) |
 | Trigger | Manual (once before production) | Automatic (cron schedules) |
 | Scope | Full historical load | New / updated data only |
@@ -505,6 +505,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — MITRE ATT&CK is in `OWN_RUN_CAP_SOURCES`: a scheduled run pushes the whole changed bundle (the cut at 200 kept about 140 objects and stored the new ETag, so the rest never arrived).
 - 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job and its section were removed (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — Baseline vs Incremental table: the incremental lookback is each collector's cursor or its feed's current window, not 72 hours.
