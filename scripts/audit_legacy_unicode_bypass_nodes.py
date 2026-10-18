@@ -248,8 +248,8 @@ def render_human(per_label: List[Dict[str, Any]]) -> str:
         lines.append("  2. Policy decision tree (rename / re-merge / delete) per pattern.")
         lines.append("  3. Behavioural test on a fake driver (no live Neo4j needed in CI).")
         lines.append("")
-        lines.append("A wipe and fresh baseline (docs/BASELINE_LAUNCH_CHECKLIST.md § [7])")
-        lines.append("removes them without a migration.")
+        lines.append("The project's path is a wipe and fresh baseline (docs/BASELINE_LAUNCH_CHECKLIST.md § [7]),")
+        lines.append("which removes them; build the migration above only for a graph that cannot be wiped.")
     lines.append("")
     return "\n".join(lines)
 

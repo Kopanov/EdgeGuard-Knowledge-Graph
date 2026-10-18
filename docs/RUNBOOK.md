@@ -1261,7 +1261,6 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 - `src/neo4j_client.py:_is_retryable_neo4j_error` — exception classifier
 - `src/collectors/nvd_collector.py:NvdBatchFetchError` — NVD silent-window-drop guard
 - `src/node_identity.py:_REJECTED_PLACEHOLDER_NAMES` — placeholder blocklist
-- `scripts/backfill_edge_misp_event_ids.py` — edge `r.misp_event_ids[]` backfill (pairs with `migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`)
 - `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only check for legacy unicode-bypass nodes (`BASELINE_LAUNCH_CHECKLIST.md` item `[6]`)
 - `src/run_misp_to_neo4j.py:_MispFallbackHardError` — sentinel exception raised by the paginated MISP fetch fallback on any of 4 hard-failure modes (errors-payload, unexpected-shape, non-200, cap-hit; see § 8 above) and by the primary event listing (a failed later index page, any other listing error)
 
