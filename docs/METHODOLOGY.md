@@ -423,7 +423,7 @@ def enrich_alert_with_rag(ip_address):
     Associated malware: {malware}
     Known threat actors: {actors}
     Used techniques: {techniques}
-    CVEs exploited: {cves}
+    CVEs (named in the same report / exploited, per evidence): {cves}
     """
     
     # 2. Build prompt for LLM
@@ -497,7 +497,7 @@ _Last updated: 2026-10-19_
 ## History
 
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
-- 2026-10-18 — `INDICATES` also links an indicator to a CVE named in the same OTX pulse.
+- 2026-10-18 — `INDICATES` also links an indicator to a CVE named in the same OTX pulse; the GraphRAG query pattern labels an indicator's CVEs by their evidence.
 - 2026-10-18 — Confidence is a two-layer model (source prior, indicator aging): the co-occurrence calibration job was removed, because no current code writes the `misp_cooccurrence` / `misp_correlation` edges it rescored.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; history and repairs of data from earlier versions moved to the end.

@@ -132,8 +132,8 @@ Each alert built from a selected indicator holds only what the graph says about 
 indicator's value and type, its first stored zone other than `global` (or the `--zone` given),
 the time the alert was built, the alert id `demo-graph-<n>` and the source `edgeguard-demo`. It
 names no malware, CVE or host, so everything in `known_malware`, `threat_actors`, `techniques` and
-`cves` comes from the graph; `cves` holds the CVEs named in the indicator's OTX reports, if any (see
-"CVEs from the graph: named in the same report" above).
+`cves` comes from the graph; `cves` holds the CVEs the graph links to the indicator as named in the
+same OTX report, if any (see "CVEs from the graph: named in the same report" above).
 
 An alert file uses the ResilMesh alert schema ([TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) § Alert
 Format, `ResilMeshAlert` in `src/alert_processor.py`). Only `alert_id` (a non-empty string) is
@@ -227,8 +227,8 @@ REST API on `http://localhost:8000`, the GraphQL API on `http://localhost:4001` 
 `/redoc` and `/openapi.json`) requires the `X-API-Key` header when the key is set). Take
 `<indicator>` and `<actor>` from the alert enrichment demo's output (`enrichment.indicator` and a
 name in `enrichment.threat_actors`), and `<CVE id>` from a `cveId` that step 5 (GraphQL
-vulnerabilities) returns or from the alert output's `cves` (a CVE named in the indicator's OTX
-report), so each check shows data the graph holds.
+vulnerabilities) returns or from the alert output's `cves` (a CVE the graph links to the indicator as
+named in the same OTX report), so each check shows data the graph holds.
 
 ### 1. MISP events by source
 
@@ -310,14 +310,15 @@ curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" \
 ```
 
 `object_type` is `indicator`, `actor`, `technique` or `cve`; `depth` (1 or 2) and `limit` (1–500)
-are query parameters. A CVE bundle holds the `vulnerability` and the indicators named in the same
-OTX report as the CVE (`related-to`, `x_edgeguard_match_type` `otx_pulse`; at `depth=1` too), at
-depth 2 also the sectors it affects and the threat actors and malware a curated package says exploit
-it; a CVE no OTX report names has no indicator, and at `depth=1` its bundle holds the
-`vulnerability` alone next to the producer `identity`, the `extension-definition` and the TLP
-markings. An indicator bundle holds, at depth 2, the CVEs named in the indicator's OTX reports
-(`related-to`). `scripts/resilmesh_stix_smoke.sh`
-runs every listed type ([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
+are query parameters. A CVE bundle holds the `vulnerability` and the indicators the graph links to
+the CVE as named in the same OTX report, if any (`related-to`, `x_edgeguard_match_type` `otx_pulse`;
+at `depth=1` too), at depth 2 also the sectors it affects and the threat actors and malware a curated
+package says exploit it. A CVE without such a link has no indicator, and at `depth=1` its bundle holds
+the `vulnerability` alone next to the producer `identity`, the `extension-definition` and the TLP
+markings. An indicator bundle holds, at depth 2, the CVEs the graph links to the indicator as named in
+the same OTX report, if any (`related-to`; see "CVEs from the graph: named in the same report" above
+for when the graph has the link). `scripts/resilmesh_stix_smoke.sh` runs every listed type
+([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
 
 ### 7. Wazuh CDB export
 
@@ -336,11 +337,11 @@ lines were written, how many keys were skipped (URL and IPv6 keys contain `:`) a
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
-- 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide states when an alert shows them (the indicator has the link; per-event build and per-pulse caps) and how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles.
+- 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide states when an alert shows them (the indicator has the link; per-event build and per-pulse caps) and how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles (those the graph links as named in the same OTX report, if any).
 - 2026-10-18 — Step 1 says that `stats` warns when it reads no sync state file on the host (none there, or unreadable).
 - 2026-10-18 — The alert enrichment shows no CVE from the graph (an indicator links to a CVE only through its own CVE tag, which the collectors do not write), so the output shape shows `cves: []` and the workflow takes `<CVE id>` from the GraphQL step instead of the alert output; the demo commands discard the configuration warning on stderr (`2>/dev/null`); the STIX example URL-encodes the indicator and adds a CVE bundle.
 

@@ -548,7 +548,6 @@ Each entry: symptom → detection signal → remediation.
 ## Requesting a full MISP → Neo4j sync (`NEO4J_FULL_SYNC`)
 
 - **When.** An incremental sync writes only the attributes whose MISP `timestamp` moved, so a change that touches no attribute (event-level tags), a Neo4j restored from a dump older than MISP, or a curated layer removed by hand needs a full sync.
-- **After deploying a change to the links the sync derives.** The same-report links from an indicator to a CVE (`(Indicator)-[:INDICATES]->(CVE)`, `otx_pulse`) are written by the sync: a full sync after the deploy creates them for the OTX data MISP already holds, from the pulse each OTX CVE attribute names in its `OTX_META` block; no wipe is needed. A `cve_references` attribute MISP holds with the plain note "Referenced in OTX pulse: <name>" names no pulse and gets no link. `scripts/verify_fresh_baseline.py` reports the links afterwards (`indicator_cve_report_links`) and fails when one is not labelled `otx_pulse` or cites no OTX report (`indicator_cve_links_are_same_report`).
 - **How.** Set the Airflow Variable and let the next scheduled run pick it up, or trigger one now:
   ```bash
   docker compose exec airflow airflow variables set NEO4J_FULL_SYNC true
@@ -1120,7 +1119,7 @@ A `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tact
 
 - **Ranking.** NVD > CISA KEV > CISA ICS > any other source. A CVE without an NVD record shows the KEV's text when the KEV lists it, else CISA ICS's, else another source's, whatever the order of the events.
 - **Revised records.** The KEV text is the catalogue's latest: every KEV run edits the stored copy of an entry CISA revised ([CISA KEV revisions](#cisa-kev-revisions)), and the sync's rule, under which a source's revised record replaces its own text, carries it to the node. The CISA ICS text is that of the first record MISP stored: MISPWriter skips a CISA ICS attribute its source already holds, so a revised ICS advisory reaches neither MISP nor the graph.
-- **What is no description.** For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the OTX collector's "Referenced in OTX pulse: <name>", MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP").
+- **What is no description.** For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the pulse reference "Referenced in OTX pulse: <name>", the comment of a `cve_references` attribute written without an `OTX_META` block; MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP").
 - **Dates.** A CVE's `published` and `last_modified` come from NVD's record: a record from any other source (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has none. Without an NVD record the dates are the CISA ICS record's (the advisory's release dates), the only other record in MISP that gives dates: MISP holds one CISA ICS attribute per CVE, from the first advisory that named it (MISPWriter skips the CVE in later advisories), so the dates do not depend on the order either. They stay outside the ranking, since they are the advisory's dates rather than the CVE's, and NVD's record replaces them.
 - **CVSS sub-nodes and list properties.** NVD's record also comes first for a CVE's CVSS sub-nodes and its lists (`cwe`, `ref_tags`, `cpe_type`, `result_impacts`, `reference_urls`, `affected_products`): a sub-node NVD has asserted keeps NVD's payload and a CISA ICS payload only fills a property it lacks, and NVD's record sets the lists while any other record only fills a list the node does not have ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), the `CVE` properties). The CISA ICS collector sends no impact and exploitability sub-scores, which a CSAF advisory does not give. When NVD's record drops a CVSS version CISA ICS also gives, NVD leaves `sources` and its event leaves `misp_event_ids` of that sub-node's edges, and CISA ICS's next record (at the latest the next full sync) sets its values and the CVE's score; until then the sub-node keeps NVD's values, and its impact and exploitability sub-scores, which CSAF does not give, keep NVD's on a graph that is kept.
 
@@ -1254,11 +1253,11 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
-- 2026-10-18 — A full sync after the deploy creates the same-report Indicator → CVE links for the data MISP already holds.
+- 2026-10-19 — The pulse reference "Referenced in OTX pulse: <name>" that gives a CVE no description is named as the comment of a `cve_references` attribute written without an `OTX_META` block.
 - 2026-10-18 — Canonical threat-actor reference: the OTX collector also reads it to decide whether an adversary the pulse lists as a malware family is an actor (an ambiguous or never_merge name counts as unknown; `[ACTOR-NAMES]` log line with every distinct name; kept without the reference), and how to add an actor the reference lacks.
 - 2026-10-18 — "At each ATT&CK release": a scheduled run adds the release's new and renamed objects; changes to objects already in MISP arrive with the next fresh baseline.
 - 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed. The kill switch `EDGEGUARD_RESPECT_CALIBRATOR`, the relationship-write guard it controlled and the post-run query for calibrated edges were removed with the co-occurrence calibration job, which was the only writer of `r.calibrated_at`.

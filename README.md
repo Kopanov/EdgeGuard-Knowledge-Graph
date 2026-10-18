@@ -675,7 +675,7 @@ Set the flags in `.env` (`docker-compose.yml` forwards them into the `airflow` c
 
 ### 7. Graph Knowledge Base
 - Nodes: `Indicator`, `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique`, `Tactic`, `Campaign`, `Sector`, `Source`, and the CVSS sub-nodes `CVSSv2` / `CVSSv30` / `CVSSv31` / `CVSSv40`
-- Relationships: `INDICATES` *(Indicator → Malware: IOC-level `malware_family` 0.8, or same-pulse `otx_pulse` 0.6 — the latter on the baseline and on regular updates alike; Indicator → CVE: named in the same OTX pulse, `otx_pulse` 0.6)*, `EXPLOITS` *(Indicator → CVE from the indicator's own CVE tag, which no collector writes; ThreatActor / Malware → CVE from curated packages)*, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique, observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `USES_MALWARE` / `USES_TOOL` *(ThreatActor → Malware / Tool, MITRE explicit or curated packages)*, `SUBTECHNIQUE_OF` *(sub-technique → parent Technique)*, `IN_TACTIC`, `REFERS_TO`, `PART_OF_CAMPAIGN` *(campaign membership; `PART_OF` is ResilMesh's asset hierarchy)*, `RUNS`, `HAS_CVSS_*`
+- Relationships: `INDICATES` *(Indicator → Malware: IOC-level `malware_family` 0.8, or same-pulse `otx_pulse` 0.6 — the latter on the baseline and on regular updates alike; Indicator → CVE: named in the same OTX pulse, `otx_pulse` 0.6)*, `EXPLOITS` *(Indicator → CVE from the indicator's own CVE tag, which no collector writes; ThreatActor / Malware → CVE from curated packages)*, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique: the indicator's OTX report lists the technique, not an observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `USES_MALWARE` / `USES_TOOL` *(ThreatActor → Malware / Tool, MITRE explicit or curated packages)*, `SUBTECHNIQUE_OF` *(sub-technique → parent Technique)*, `IN_TACTIC`, `REFERS_TO`, `PART_OF_CAMPAIGN` *(campaign membership; `PART_OF` is ResilMesh's asset hierarchy)*, `RUNS`, `HAS_CVSS_*`
 - Every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, their record ids, the MISP events); the linking relationships also carry `confidence_score` and the evidence label `match_type` (structural edges such as `REFERS_TO` and `HAS_CVSS_*` carry neither; the campaign links `RUNS` and `PART_OF_CAMPAIGN` carry `campaign_grouping` and the relationship types they rest on, `evidence_types`)
 - See [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) for full relationship schema with confidence scores.
 
@@ -1322,10 +1322,11 @@ Open work is tracked in a single list — see *Roadmap & Status → In Progress 
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` also links an indicator to a CVE named in the same OTX pulse (`otx_pulse`, 0.6).
 - 2026-10-18 — `EDGEGUARD_RATE_LIMIT_GRAPHQL` sets the GraphQL rate limit (it was fixed at 120/minute in code).
 - 2026-10-18 — Deploy instructions rebuild every image (`docker compose build && docker compose up -d --force-recreate`; they rebuilt only the Airflow image, which left REST, GraphQL and STIX on the old code); `EDGEGUARD_GIT_SHA` forwarded by Compose, written into `.env` by `scripts/record_deployed_commit.sh` (run by `./install.sh`) and reported as `git_sha` by both `/health` responses.

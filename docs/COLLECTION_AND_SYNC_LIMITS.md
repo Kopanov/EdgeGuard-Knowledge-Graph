@@ -33,7 +33,7 @@ Several numbers (**200**, **500**) appear across EdgeGuard docs and code. They c
 2. **MISP → Neo4j sync** (`run_misp_to_neo4j`, Airflow **`run_neo4j_sync`** / **`full_neo4j_sync`**)  
    Reads events from MISP and merges into Neo4j. **Baseline item caps do not configure this step.**  
    Event **discovery** uses the **index + client filter** path first (see table above); **restSearch** is fallback only.  
-   **Per event:** parse → dedupe within the event → **cross-item relationships** (same-event only) → merge nodes → create edges. On an **incremental** sync only the attributes whose MISP `timestamp` falls inside the window are written (**`EDGEGUARD_SYNC_ATTRIBUTE_FILTER`**, default `true`); unchanged items of the same OTX pulse join only the report-scoped link build, and an event without a changed attribute makes no Neo4j call.  
+   **Per event:** parse → dedupe within the event → **cross-item relationships** (same-event only) → merge nodes → create edges. On an **incremental** sync only the attributes whose MISP `timestamp` falls inside the window are written (**`EDGEGUARD_SYNC_ATTRIBUTE_FILTER`**, default `true`); unchanged items of the same OTX pulse join only the report-scoped link build, and an event without a changed attribute makes no Neo4j call. Report-scoped links take at most 2,000 indicators, 50 malware, 50 CVEs and 10 actors per OTX pulse, the first in event order (full and incremental syncs alike; an incremental sync rebuilds the links of the pulses of its changed items only).  
    **Chunk size** for Neo4j **node** writes is **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500** items; no pause between chunks unless `EDGEGUARD_QUERY_PAUSE_SECONDS` is set — default 0, at most 60; not forwarded by `docker-compose.yml`). **Relationship** batches use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions).
    **Large events** (>5000 attributes): processed in **pages** of 5000 via `_process_large_event_paged()` — each page is parsed, synced to Neo4j, and released before the next page loads (`gc.collect()` between pages, plus the `EDGEGUARD_QUERY_PAUSE_SECONDS` pause, default 0). After all pages complete, cross-item relationships (Actor→Technique, Malware→Actor, Indicator→Malware etc.) are built using a lightweight accumulator (~100 bytes/item) that collects only relationship-relevant fields from each page. Keeps peak RAM bounded while preserving full relationship coverage.
 
@@ -66,10 +66,11 @@ Several numbers (**200**, **500**) appear across EdgeGuard docs and code. They c
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The per-pulse caps of the report-scoped links stated (2,000 indicators, 50 malware, 50 CVEs, 10 actors, the first in event order in full and incremental syncs), and that an incremental sync rebuilds the links of the pulses of its changed items only.
 - 2026-10-17 — CISA ICS and CISA KEV listed among the sources with their own per-run rule (CISA ICS at most `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` advisory files, so `EDGEGUARD_INCREMENTAL_LIMIT` does not cut its scheduled runs; KEV the whole catalogue with at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` edits); `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` also paces the KEV edits and the refresh of re-reported indicators; no pause between Neo4j sync chunks or large-event pages unless `EDGEGUARD_QUERY_PAUSE_SECONDS` is set (the page said 3 s); main text limited to current behaviour, with the change history in this section.
 - 2026-10-16 — Event discovery lists each event once on a MISP that ignores the query-string `limit` / `page` (MISP 2.5.45); an incomplete listing (a failed later index page, a listing cut at `EDGEGUARD_MISP_MAX_PAGES`, a non-JSON fallback page, a fallback request error that is not transient, any other listing error) fails the run, where the rows read so far had been taken as the whole listing.
 - 2026-10-16 — The restSearch fallback asks for event headers only, filtered with `eventinfo` and the client-side filter (it sent `search`, which is not a restSearch parameter).

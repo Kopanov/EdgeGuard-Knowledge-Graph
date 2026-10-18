@@ -228,7 +228,7 @@ Flag any new MISP→sync code that assumes a flat event dict without normalizati
 | **`NVD_META:`** | `misp_writer.create_vulnerability_attribute` | `run_misp_to_neo4j.parse_attribute` (vulnerability) |
 | **`MITRE_USES_TECHNIQUES:`** | `misp_writer.create_malware_attribute`, `create_actor_attribute`, `create_tool_attribute` (actors also carry `uses_malware` / `uses_tools` as keys `m` / `s`) | `run_misp_to_neo4j.parse_attribute` → **`uses_techniques`** on **`merge_malware`** / **`merge_actor`** / **`merge_tool`** |
 | **`MITRE_TACTIC_PHASES:`** | `misp_writer.create_technique_attribute` | `run_misp_to_neo4j.parse_attribute` (`tactic_phases`) |
-| **`OTX_META:`** | `misp_writer.create_attribute` (OTX items) | `run_misp_to_neo4j.parse_attribute` (pulse malware families, ATT&CK ids, several-actor marks) |
+| **`OTX_META:`** | `misp_writer.create_attribute` (OTX items), `create_vulnerability_attribute` (OTX CVEs, `_cve_pulse_meta`) | `run_misp_to_neo4j.parse_attribute` (pulse malware families, ATT&CK ids, several-actor marks; the pulse ids of an OTX CVE, `_vulnerability_report_ids`) |
 | **`TF_META:`** | `misp_writer.create_attribute` (ThreatFox items) | `run_misp_to_neo4j.parse_attribute` |
 
 Flag new embedded JSON sentinels added on one side without the other, or truncation that breaks JSON parsing.
@@ -1053,7 +1053,7 @@ _Last updated: 2026-10-19_
 ## History
 
 - 2026-10-19 — The `USES_TECHNIQUE` pattern comment says what the link is: the indicator's OTX report lists the technique.
-- 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag.
+- 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag. The `OTX_META` sentinel pair lists the OTX CVE writer (`create_vulnerability_attribute`) and reader (`_vulnerability_report_ids`).
 - 2026-10-18 — Rule added: `ThreatActor` names pass `actor_name_hygiene` (country and state names included), and the OTX actor items, pairs and several-actor decision use one list of names per pulse.
 - 2026-10-18 — The rule on enrichment job failures no longer names the removed co-occurrence calibration job.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

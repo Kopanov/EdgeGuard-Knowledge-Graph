@@ -350,9 +350,10 @@ links to the indicator, and a `cve` bundle, at `depth=1` too, the indicators lin
 link is built per MISP event and per OTX report, for at most 2,000 indicators and 50 CVEs of a report,
 and an item MISP already held from an earlier report gets no link to a later one (see
 [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)); so an indicator of a report that names CVEs can have none.
-A CVE without such a link has no indicator, and its `depth=1` bundle holds the `vulnerability` alone. An indicator with both links to one CVE has one SRO whose provenance merges
-both (`x_edgeguard_match_type` names the stronger link's label). The ThreatActors and Malware that
-exploit a CVE come from curated packages.
+A CVE without such a link has no indicator, and its `depth=1` bundle holds the `vulnerability`
+alone. An indicator with both links to one CVE has one SRO whose provenance merges both
+(`x_edgeguard_match_type` names the stronger link's label). The ThreatActors and Malware that exploit
+a CVE come from curated packages.
 
 Today `depth` is a Python-side filter — the Cypher always fetches the
 full neighborhood and the exporter drops the non-primary groups when
@@ -557,8 +558,7 @@ _Last updated: 2026-10-19_
 
 ## History
 
-- 2026-10-19 — The indicator–CVE paragraph states when the graph has the link (per MISP event and OTX report, within the per-report caps) instead of promising every CVE of an indicator's reports.
-- 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs named in the same OTX report (`INDICATES`, `otx_pulse`).
+- 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs the graph links to it as named in the same OTX report (`INDICATES`, `otx_pulse`; built per MISP event and OTX report, within the per-report caps).
 - 2026-10-18 — § 6: the smoke script runs on bash 3.2, exports identifiers a baseline graph holds (`APT28`, `T1059`, `CVE-2021-44228`, the newest indicator; flags name others) and fails a bundle without a graph object (it passed on the empty bundle of the `/stix/types` indicator example).
 - 2026-10-18 — § 5 states that the collectors link no indicator to a CVE, so a `cve` bundle at `depth=1` holds the `vulnerability` alone.
 - 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until` and no longer `x_edgeguard_last_updated`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).

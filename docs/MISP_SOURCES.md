@@ -112,7 +112,7 @@ Collectors embed structured metadata as JSON in MISP attribute comments using th
 
 | Prefix | Source | Fields |
 |--------|--------|--------|
-| `OTX_META:` | AlienVault OTX | attack_ids, targeted_countries, pulse_tags, pulse_references, pulse_author, pulse_tlp, otx_industries, pulse_name, indicator_role, is_active, the indicator's own description (not the pulse's); the pulses that listed the IOC (`pulse_id`, `report_ids`), their families (`mf`), their `family::adversary::pulse` pairs (`pa`, the first pair of each family and adversary before the later pulses' pairs) and those of them naming several actors (`sap`, judged with the canonical threat-actor reference and stored on `Indicator.several_actor_pulses`; `sapn`, judged by name without it, used by the sync's run only) |
+| `OTX_META:` | AlienVault OTX | attack_ids, targeted_countries, pulse_tags, pulse_references, pulse_author, pulse_tlp, otx_industries, pulse_name, indicator_role, is_active, the indicator's own description (not the pulse's); the pulses that listed the IOC (`pulse_id`, `report_ids`), their families (`mf`), their `family::adversary::pulse` pairs (`pa`, the first pair of each family and adversary before the later pulses' pairs) and those of them naming several actors (`sap`, judged with the canonical threat-actor reference and stored on `Indicator.several_actor_pulses`; `sapn`, judged by name without it, used by the sync's run only); on a CVE an OTX pulse names (`vulnerability`, from the pulse's `cve_references`): `pulse_id`, `report_ids`, `pulse_name`, no description; the sync groups the CVE into its pulse from it |
 | `TF_META:` | ThreatFox, URLhaus, Feodo Tracker, MalwareBazaar, VirusTotal | malware_malpedia, reference, tags, last_seen, threat_type_desc, malware_family, reporter, attributed_to, threat_type, ioc_id, malware_alias; url_status, last_online, threat_label, yara_rules and sigma_rules only when the item carries them |
 | `MITRE_USES_TECHNIQUES:` | MITRE ATT&CK; AlienVault OTX (malware families, adversaries) | Technique IDs from STIX uses relationships (`t`), an OTX pulse's ATT&CK ids and pulse id (`rt`, `pid`); ATT&CK's description of the entity follows on the next line. The block is never a description, and the sync takes no description from an OTX attribute |
 | `NVD_META:` | NVD, CISA KEV, CISA ICS | CVSS payloads, CWE, references, affected products, status, `ssvc`; KEV: the four cisa_* fields and known_ransomware_use; CISA ICS: advisory_ids, advisory_zones, ics_sectors |
@@ -160,10 +160,11 @@ Usually **MITRE-specific** types/tags vs MISP policy. Read the full MISP error b
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The `OTX_META` row lists the block on a CVE an OTX pulse names (`pulse_id`, `report_ids`, `pulse_name`), from which the sync groups the CVE into its pulse.
 - 2026-10-18 — The events' MISP distribution stated as it is: 1 ("This community only", every organisation on the instance), unpublished, so neither server synchronisation nor feeds forward them; MISP is the single store the collectors write to and the graph is built from (the writer's code comment had said "This organization only"); the `EdgeGuard` tag marks the events EdgeGuard wrote.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; the change history moved to this section, the historical note on early prototypes that skipped MISP folded into the architecture section as the product path, and data written by earlier versions moved to the appendix.

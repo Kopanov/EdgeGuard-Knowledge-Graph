@@ -22,7 +22,7 @@ The current valid technique edge types (per
 ``docs/KNOWLEDGE_GRAPH.md``) are:
   * ``EMPLOYS_TECHNIQUE``  — ThreatActor / Campaign → Technique (attribution)
   * ``IMPLEMENTS_TECHNIQUE`` — Malware / Tool → Technique (capability)
-  * ``USES_TECHNIQUE`` — Indicator → Technique (observation, OTX)
+  * ``USES_TECHNIQUE`` — Indicator → Technique (the indicator's OTX report lists the technique)
 
 The bare ``USES`` edge type (no suffix) was retired and must not appear
 in any active Cypher fragment, query, MERGE site, or backward-compat
