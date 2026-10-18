@@ -98,11 +98,14 @@ for ot in "${OBJECT_TYPES[@]}"; do
     url="$API_BASE/stix/export/$ot/$encoded?depth=$DEPTH"
     echo "▶ GET /stix/export/$ot/$example  (depth=$DEPTH)"
 
-    # --write-out captures status + size; --output captures body to stdout.
+    # --write-out captures status + size; --output captures body to stdout;
+    # --dump-header keeps the response headers (the build is a header).
     response=$(mktemp)
+    headers=$(mktemp)
     status=$(curl --silent --show-error \
         --write-out '%{http_code}' \
         --output "$response" \
+        --dump-header "$headers" \
         -H "X-API-Key: $API_KEY" \
         -H "Accept: application/stix+json;version=2.1" \
         "$url")
@@ -110,6 +113,7 @@ for ot in "${OBJECT_TYPES[@]}"; do
     if [[ "$status" != "200" ]]; then
         echo "  ✗ HTTP $status (see $response for body)"
         FAILED=$((FAILED + 1))
+        rm -f "$headers"
         continue
     fi
 
@@ -119,21 +123,23 @@ for ot in "${OBJECT_TYPES[@]}"; do
         echo "  ✗ response is not a valid STIX bundle"
         jq . "$response" | head -20
         FAILED=$((FAILED + 1))
-        rm -f "$response"
+        rm -f "$response" "$headers"
         continue
     fi
 
-    # Provenance lives on the EdgeGuard producer identity (the identity
-    # object with an x_edgeguard_exporter property), not on the bundle.
+    # The producer is the EdgeGuard producer identity (the identity object
+    # with an x_edgeguard_exporter property); the build that served the
+    # bundle is the X-EdgeGuard-Git-Sha response header (absent when the
+    # server has no EDGEGUARD_GIT_SHA).
     obj_count=$(jq '.objects | length' "$response")
     producer=$(jq -r '[.objects[] | select(.type == "identity" and has("x_edgeguard_exporter"))][0].name // "missing"' "$response")
-    generated=$(jq -r '[.objects[] | select(.type == "identity" and has("x_edgeguard_exporter"))][0].x_edgeguard_generated_at // "missing"' "$response")
-    echo "  ✓ $obj_count objects   producer=$producer   generated_at=$generated"
+    build=$(grep -i '^x-edgeguard-git-sha:' "$headers" | head -1 | cut -d: -f2- | tr -d ' \r' || true)
+    echo "  ✓ $obj_count objects   producer=$producer   build=${build:-not set}"
 
     if [[ $PRETTY -eq 1 ]]; then
         jq '{type, id, producer: ([.objects[] | select(.type == "identity" and has("x_edgeguard_exporter"))][0]), object_count: (.objects | length), object_types: ([.objects[].type] | group_by(.) | map({(.[0]): length}) | add)}' "$response"
     fi
-    rm -f "$response"
+    rm -f "$response" "$headers"
     echo
 done
 

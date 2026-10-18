@@ -137,6 +137,48 @@ class TestPolicy:
         assert "[1.0, 0.9, 0.5][_tier]" in body and "[0, 30, 60][_tier]" in body
         assert "_age >= 400" in body and "duration({days: 400})" in body
 
+    @pytest.mark.parametrize(
+        "reported, imported, env, basis",
+        [
+            (datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC), {}, datetime(2026, 9, 1, tzinfo=UTC)),
+            (None, datetime(2026, 1, 1, 12, 30, tzinfo=UTC), {}, datetime(2026, 1, 1, 12, 30, tzinfo=UTC)),
+            (datetime(2024, 2, 29, tzinfo=UTC), None, {ia.RETIRE_DAYS_ENV: "400"}, datetime(2024, 2, 29, tzinfo=UTC)),
+            (
+                datetime(2026, 9, 1, 23, 59, 59, 999999, tzinfo=UTC),
+                datetime(2026, 1, 1, tzinfo=UTC),
+                {ia.TIER_DAYS_ENV: "30,60", ia.FACTORS_ENV: "0.9,0.5", ia.RETIRE_DAYS_ENV: "90"},
+                datetime(2026, 9, 1, 23, 59, 59, 999999, tzinfo=UTC),
+            ),
+        ],
+    )
+    def test_the_retirement_time_is_when_the_rule_retires(self, reported, imported, env, basis):
+        """``retirement_time`` (the STIX ``valid_until`` of an indicator not yet retired) is the time at which
+        the rule retires the node: the basis ``coalesce(last_reported_at, first_imported_at)`` plus the retire
+        days, the ``retired_at`` the rule then writes. At that time the age in whole days
+        (``duration.inDays(_basis, _at).days``) reaches the retire days; one second earlier it does not."""
+        policy = ia.load_aging_policy(env)
+        when = ia.retirement_time(reported, imported, policy)
+        assert when == basis + timedelta(days=policy.retire_days)
+        assert (when - basis).days == policy.retire_days
+        assert (when - timedelta(seconds=1) - basis).days == policy.retire_days - 1
+        body = ia.aging_map("n", "datetime()", policy)
+        assert ia.basis_expr("n") == "coalesce(n.last_reported_at, n.first_imported_at)"
+        assert f"[_basis IN [{ia.basis_expr('n')}]" in body
+        assert f"_age >= {policy.retire_days}" in body
+        assert f"retired_at: CASE WHEN _age IS NULL OR {ia.manual_decommission_expr('n')} THEN n.retired_at " in body
+        assert f"WHEN _age >= {policy.retire_days} THEN _basis + duration({{days: {policy.retire_days}}})" in body
+
+    def test_no_time_gives_no_retirement_time(self):
+        assert ia.retirement_time(None, None, ia.AgingPolicy()) is None
+
+    def test_the_retirement_time_reads_the_configured_policy(self, monkeypatch):
+        monkeypatch.setenv(ia.RETIRE_DAYS_ENV, "500")
+        basis = datetime(2026, 1, 1, tzinfo=UTC)
+        assert ia.retirement_time(basis, None) == basis + timedelta(days=500)
+        monkeypatch.setenv(ia.RETIRE_DAYS_ENV, "100")
+        with pytest.raises(ValueError):
+            ia.retirement_time(basis, None)
+
 
 class TestOneDefinitionWithoutOwnership:
     def test_no_aging_statement_reads_the_ownership_markers(self):

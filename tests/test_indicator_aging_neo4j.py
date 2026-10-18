@@ -741,6 +741,32 @@ def test_the_job_follows_the_tiers_and_is_idempotent(client, raw_driver):
 # ================================================================ the time never moves backwards
 
 
+def test_the_job_retires_at_the_retirement_time_the_export_projects(client, raw_driver):
+    """``indicator_aging.retirement_time`` (the STIX ``valid_until`` of an indicator not yet retired) is the
+    time at which the job retires the node, and the ``retired_at`` it writes: one second earlier the node is
+    active. A reported node ages from its report, a node no report dated from ``first_imported_at``."""
+    from indicator_aging import retirement_time
+
+    nodes = {
+        "203.0.113.95": (AS_OF - timedelta(days=700), AS_OF - timedelta(days=710)),
+        "203.0.113.96": (None, AS_OF - timedelta(days=500)),
+    }
+    for value, (reported, imported) in nodes.items():
+        props = {"first_imported_at": imported, "confidence_score": 0.5, "active": True}
+        if reported is not None:
+            props.update(last_reported_at=reported, aging_basis="source_date", source_confidence=0.8)
+        _indicator(raw_driver, value, **props)
+    # In order of the two times, so every job evaluates at a later time than the one before.
+    for value, (reported, imported) in nodes.items():
+        when = retirement_time(reported, imported, POLICY)
+        enrichment_jobs.decay_ioc_confidence(client, as_of=when - timedelta(seconds=1))
+        before = _aging(raw_driver, value)
+        assert (before["active"], before["retired_at"], before["retired_by"]) == (True, None, None), value
+        enrichment_jobs.decay_ioc_confidence(client, as_of=when)
+        after = _aging(raw_driver, value)
+        assert (after["active"], after["retired_at"], after["retired_by"]) == (False, when, "decay"), value
+
+
 def _evaluated_at(raw_driver, value: str):
     return _props(raw_driver, "Indicator", "value", value).get("aging_evaluated_at")
 

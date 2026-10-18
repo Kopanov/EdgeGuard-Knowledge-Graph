@@ -1674,11 +1674,13 @@ async def stix_export(
     the ``x_edgeguard_*`` properties, and the TLP ``marking-definition``
     objects referenced by ``object_marking_refs``.
 
-    Response Content-Type: ``application/stix+json;version=2.1``.
+    Re-exporting the same graph gives a byte-identical bundle: every
+    ``created`` / ``modified`` comes from the graph, never from the clock.
 
-    Prototype — see ``docs/STIX21_EXPORTER_PROPOSAL.md`` for auth,
-    pagination, and rate-limit notes (no custom rate-limit middleware is
-    added yet; the endpoint is subject to the default read rate limit).
+    Response Content-Type: ``application/stix+json;version=2.1``. The
+    response names the EdgeGuard build in ``X-EdgeGuard-Git-Sha`` when
+    ``EDGEGUARD_GIT_SHA`` is set. The endpoint is subject to the default
+    read rate limit. Consumer guide: ``docs/RESILMESH_QUICKSTART_STIX.md``.
     """
     from fastapi.responses import JSONResponse as _JSON
 
@@ -1734,9 +1736,13 @@ async def stix_export(
     except Exception as exc:
         _raise_api_error(exc, "STIX export failed")
 
+    # The build that served the bundle travels as a header, not in the bundle: an object in it
+    # changes only when the graph changes.
+    git_sha = os.environ.get("EDGEGUARD_GIT_SHA", "").strip()
     return _JSON(
         content=bundle,
         media_type=StixExporter.MEDIA_TYPE,
+        headers={"X-EdgeGuard-Git-Sha": git_sha} if git_sha else None,
     )
 
 

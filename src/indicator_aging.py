@@ -56,7 +56,9 @@ in that write) without depending on the order in which one ``SET`` clause applie
 ``enrichment_jobs.decay_ioc_confidence`` applies it to every Indicator and writes a node when any
 of its ``AGING_FIELDS`` differs from the stored value. ``node_report_items`` /
 ``edge_report_items`` are the forward-only report properties of the node and of its
-``SOURCED_FROM`` edge. Tests pin every splice.
+``SOURCED_FROM`` edge. Tests pin every splice. ``retirement_time`` is the Python form of the time at
+which the rule retires a node (the basis plus the retire days), which the STIX export gives as an
+indicator's ``valid_until``; a test pins it against the rule.
 
 The time of an evaluation
 -------------------------
@@ -103,7 +105,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Mapping, Optional, Tuple
 
@@ -224,6 +226,23 @@ def load_aging_policy(environ: Optional[Mapping[str, str]] = None) -> AgingPolic
             f"{RETIRE_DAYS_ENV}={retire_days}: the retirement age must be above the last tier day ({tier_days[-1]})"
         )
     return AgingPolicy(tier_days=tuple(tier_days), factors=tuple(factors), retire_days=retire_days)
+
+
+def retirement_time(
+    last_reported_at: Optional[datetime], first_imported_at: Optional[datetime], policy: Optional[AgingPolicy] = None
+) -> Optional[datetime]:
+    """Python form of the time at which the rule retires an Indicator: the basis
+    (``coalesce(last_reported_at, first_imported_at)``, ``basis_expr``) plus the retire days, which is
+    the ``retired_at`` the rule writes once the age in whole days reaches them (``aging_map``).
+    ``None`` when the node holds neither time (the rule leaves such a node unchanged). A newer report
+    moves the basis forward (``last_reported_at`` is forward only) and the time with it. The STIX
+    exporter gives this time as the ``valid_until`` of an indicator not yet retired. Raises
+    ``ValueError`` on a wrong setting, as ``load_aging_policy`` does."""
+    basis = last_reported_at if last_reported_at is not None else first_imported_at
+    if basis is None:
+        return None
+    p = policy or load_aging_policy()
+    return basis + timedelta(days=p.retire_days)
 
 
 def _num(value: float) -> str:

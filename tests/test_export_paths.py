@@ -256,11 +256,13 @@ def test_exports_of_driver_datetimes_parse_strictly(monkeypatch, method):
     # created / modified come from first_imported_at / last_updated with the fraction cut to six
     # digits — the exact values, not the export time. stix2 prints created / modified with at least
     # millisecond precision, so nanosecond 0 reads ``.000Z``. The indicator is checked below.
+    # modified is the later of created and last_updated: the CVE's last_updated is earlier than its
+    # first_imported_at, so its modified is its created (never before it).
     expected = {
         "emotet": ("2026-10-14T07:30:00.000Z", "2026-10-15T08:00:00.123456Z"),
         "apt28": ("2026-10-15T08:00:00.123456Z", "2026-10-15T08:00:00.123456Z"),
         "Command and Scripting Interpreter": ("2026-10-14T07:30:00.000Z", "2026-10-15T08:00:00.123456Z"),
-        "CVE-2021-44228": ("2026-10-15T08:00:00.123456Z", "2026-10-14T07:30:00.000Z"),
+        "CVE-2021-44228": ("2026-10-15T08:00:00.123456Z", "2026-10-15T08:00:00.123456Z"),
     }
     checked = 0
     for name, stamps in expected.items():
