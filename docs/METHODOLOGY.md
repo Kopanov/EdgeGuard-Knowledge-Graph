@@ -160,7 +160,8 @@ Malware family names are deliberately **not** sector keywords (`src/config.py`: 
 keywords, no malware families). A feed's family links an indicator to its `Malware` node
 (`INDICATES`, `malware_family`, `build_relationships` step 9). A sector comes from sector
 keywords in the record's text or from a sector the source states itself (OTX pulse
-`industries`; CISA ICS advisory sectors → `advisory_sector`). Feodo Tracker, SSL Blacklist and
+`industries` → `otx_industries` on `TARGETS`; CISA ICS advisory sectors → `advisory_sector` on
+`AFFECTS`). Feodo Tracker, SSL Blacklist and
 MalwareBazaar IOCs are therefore `global` unless their text names a sector:
 `detect_zones_from_text("QakBot C&C server")` returns `['global']`.
 
@@ -336,7 +337,8 @@ sources assert it), not folded into a single multiplier.
 | `INDICATES` | Malware | Indicator indicates Malware (same OTX pulse `otx_pulse` 0.6, or malware_family match 0.8; never from whole-event co-occurrence) |
 
 Also written: `USES_MALWARE` / `USES_TOOL` (MITRE explicit, 0.95), `SUBTECHNIQUE_OF`, `IN_TACTIC`,
-`TARGETS` / `AFFECTS` (`zone_classification` 0.5, `advisory_sector` 0.9), `RUNS` /
+`TARGETS` / `AFFECTS` (`zone_classification` 0.5, `otx_industries` 0.6 on `TARGETS`, `advisory_sector`
+0.9 on `AFFECTS`), `RUNS` /
 `PART_OF_CAMPAIGN` and `REFERS_TO`; see [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md), "Complete Relationship Schema".
 
 ### 5.2 Relationship Quality
@@ -496,6 +498,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — An OTX pulse's own industries label its `TARGETS` sector links `otx_industries` (0.6).
 - 2026-10-18 — Confidence is a two-layer model (source prior, indicator aging): the co-occurrence calibration job was removed, because no current code writes the `misp_cooccurrence` / `misp_correlation` edges it rescored.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; history and repairs of data from earlier versions moved to the end.

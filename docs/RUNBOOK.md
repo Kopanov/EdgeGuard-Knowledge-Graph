@@ -934,13 +934,15 @@ It also checks the sector evidence, the description sources and the indicator ag
 | `sector_links_name_only_feeds_that_gave_the_sector` | a link to a `Sector` names a feed whose `SOURCED_FROM.zones` do not hold that sector | no `SOURCED_FROM` edge has `zones` (a graph written by an earlier version) |
 | `advisory_sector_only_where_cisa_stated` | `advisory_sector` sits on anything but an `AFFECTS` link from a CVE to a sector the `cisa_ics` edge lists in `stated_zones` | no link carries the label |
 | `cisa_stated_sectors_linked_as_advisory_sector` | a sector CISA stated is not linked as `advisory_sector`; with `--require-cisa-ics`, also when no sector is stated although the `cisa_ics` edges carry `zones` | no stated sector, when `--require-cisa-ics` is not given or no `cisa_ics` edge carries `zones` (a graph written by an earlier version, or kept and not re-read since) |
-| `sector_links_cite_only_records_that_gave_the_sector` | a sector link cites a CISA ICS advisory whose sector note does not name its sector (the `cisa_ics` edge records the advisories per sector in `stated_refs`) | no `SOURCED_FROM` edge has `stated_refs` |
+| `sector_links_cite_only_records_that_gave_the_sector` | a sector link cites a CISA ICS advisory whose sector note does not name its sector (the `cisa_ics` edge records the advisories per sector in `stated_refs`) | no `cisa_ics` edge has `stated_refs` (judged only for the feeds whose records state every zone they give: an OTX record also gives zones by keyword, for which it records no reference) |
+| `otx_industries_only_where_otx_stated` | `otx_industries` sits on anything but a `TARGETS` link from an Indicator, ThreatActor or Malware to a sector the `alienvault_otx` edge lists in `stated_zones` (an `AFFECTS` link with it fails), or such a link cites none of the pulses the edge records for its sector in `stated_refs` | no link carries the label |
+| `otx_stated_sectors_linked_as_otx_industries` | a sector an OTX record stated (the `alienvault_otx` edge's `stated_zones` on an Indicator, ThreatActor or Malware) has no `TARGETS` link, or one labelled `zone_classification` (a label outside the table is not judged) | no OTX record states a sector (a graph synced by an earlier version) |
 | `sector_confidence_follows_label` | a sector link's confidence is not the label table's value (`src/sector_evidence.py`; a label outside the table is not judged) | no sector link |
 | `descriptions_name_their_source` | a node with a ranked description (CVE, Vulnerability, Malware, ThreatActor, Tool, Technique, Tactic) has no `description_source` | no description |
 | `indicators_have_aging_basis` | an Indicator has no `aging_basis` or no `source_confidence` | no Indicator |
 
-It also reports, without judging, the sector links by type, start label, sector and label
-(`sector_evidence_breakdown`), what CISA ICS adds per sector (`cisa_ics_contribution`: stated, by CISA
+It also reports, without judging, the sector links by type and label (`sector_links_by_evidence_label`)
+and by type, start label, sector and label (`sector_evidence_breakdown`), what CISA ICS adds per sector (`cisa_ics_contribution`: stated, by CISA
 alone, also inferred, and the CISA records whose advisory named no tracked sector) and the node sectors no
 feed gave and the nodes holding `global` next to a sector (`node_sectors_without_a_feed`). After the
 730-day baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`, run it with `--require-cisa-ics`.
@@ -1257,6 +1259,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Acceptance: `otx_industries_only_where_otx_stated`, `otx_stated_sectors_linked_as_otx_industries` and the report `sector_links_by_evidence_label`; the per-sector reference check judges CISA ICS only.
 - 2026-10-18 — Canonical threat-actor reference: the OTX collector also reads it to decide whether an adversary the pulse lists as a malware family is an actor (an ambiguous or never_merge name counts as unknown; `[ACTOR-NAMES]` log line with every distinct name; kept without the reference), and how to add an actor the reference lacks.
 - 2026-10-18 — "At each ATT&CK release": a scheduled run adds the release's new and renamed objects; changes to objects already in MISP arrive with the next fresh baseline.
 - 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed. The kill switch `EDGEGUARD_RESPECT_CALIBRATOR`, the relationship-write guard it controlled and the post-run query for calibrated edges were removed with the co-occurrence calibration job, which was the only writer of `r.calibrated_at`.

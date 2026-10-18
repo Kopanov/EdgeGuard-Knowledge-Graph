@@ -80,6 +80,7 @@ WHERE m.attributed_to = a.name OR a.name = m.attributed_to
 | `malware_family` | 0.8 | The family label a source gives the indicator (`INDICATES`) |
 | `otx_pulse` | 0.6 | Named in the same OTX pulse |
 | `otx_attack_ids` | 0.6 | An ATT&CK id the indicator's OTX pulse lists (`USES_TECHNIQUE`); a report-level association like `otx_pulse`, with a label of its own |
+| `otx_industries` | 0.6 | An OTX pulse's own industries state that its campaign targets the sector (`TARGETS` only; the pulse's keyword hits stay `zone_classification`) |
 | `zone_classification` | 0.5 | EdgeGuard's sector inference (`AFFECTS`, `TARGETS`) |
 
 The full table, with the curated, campaign and MISP-attribute-tag labels: [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#evidence-labels-report-provenance-tlp) and `docs/RESILMESH_INTEROPERABILITY.md` §3.2.2.
@@ -126,6 +127,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — `otx_industries` (0.6): the sectors an OTX pulse's own industries name, on `TARGETS` (they were `zone_classification`, 0.5).
 - 2026-10-18 — `otx_attack_ids` (`USES_TECHNIQUE` from an OTX pulse's ATT&CK ids) is 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-17 — Main text restated as a guide to current behaviour: the fixes of 2026-03 are described as the rules they established, and change history moved to this section.
 - 2026-10-17 — The merge logic matches `merge_node_with_source` (`first_imported_at`; the `SOURCED_FROM` edge's `imported_at` and source-reported times; source id `alienvault_otx`; max-wins or aging-rule confidence; node and edge in two statements); the confidence table lists the current evidence labels; the audit message reads "Keeping the higher confidence" (it read "Skipping lower-confidence update"); `IMPLEMENTS_TECHNIQUE` also comes from OTX pulses and curated claims.

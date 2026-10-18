@@ -245,7 +245,7 @@ When data is pushed to MISP, it gets tagged with:
 
 | Relationship | From → To | How it is created |
 |---|---|---|
-| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`, that source's `misp_event_ids[]` and `source_refs[]`, which the links derived after the sync copy; the zones this source's records gave the node (`zones`), the part of them the source stated itself (`stated_zones`, CISA ICS) and which record stated which zone (`stated_refs`); on an Indicator's edge, that source's latest report (`last_recorded_at`, `last_reported_at`, `last_reported_source`, `last_reported_ref`, forward only). A CVE's edge replaces `raw_data` with the source's latest record on every write from MISP; other labels keep the record that created the edge. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
+| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`, that source's `misp_event_ids[]` and `source_refs[]`, which the links derived after the sync copy; the zones this source's records gave the node (`zones`), the part of them the source stated itself (`stated_zones`: CISA ICS, and OTX for the sectors a pulse's own industries name) and which record stated which zone (`stated_refs`); on an Indicator's edge, that source's latest report (`last_recorded_at`, `last_reported_at`, `last_reported_source`, `last_reported_ref`, forward only). A CVE's edge replaces `raw_data` with the source's latest record on every write from MISP; other labels keep the record that created the edge. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
 | `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor (`match_type='mitre_explicit'`, 0.95); OTX pulse `attack_ids` → `reported_techniques` (`match_type='otx_pulse'`, 0.6) → `build_relationships.py`; a curated package's claim, written by the sync: the package's curated label and 0.85 on a link it creates, only its provenance on an existing link. |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` (`mitre_explicit`, 0.95); OTX pulse ids → `reported_techniques` (`otx_pulse`, 0.6); a malware's curated-package claim as for `EMPLOYS_TECHNIQUE`. MISP round-trip via **`MITRE_USES_TECHNIQUES:`** (`t` / `rt` / `pid`) → `build_relationships.py`. |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX pulse `attack_ids` inherited by each indicator of the pulse → `build_relationships.py` (`match_type='otx_attack_ids'`, 0.6, the confidence of every link from a pulse's ATT&CK ids). |
@@ -256,7 +256,7 @@ When data is pushed to MISP, it gets tagged with:
 | `SUBTECHNIQUE_OF` | Technique → Technique | Sub-technique → parent technique (MITRE dotted id) |
 | `USES_MALWARE` | ThreatActor → Malware | MITRE explicit group → malware `uses`; also a curated package's claim (curated label and 0.85 on a link it creates) |
 | `USES_TOOL` | ThreatActor → Tool | MITRE explicit group → tool `uses`; also a curated package's claim (curated label and 0.85 on a link it creates) |
-| `TARGETS` | Indicator / ThreatActor / Malware → Sector | Node `zone` list → the sync (indicators) and `build_relationships.py` (indicators, actors and malware; `zone_classification`, 0.5; never to `global`); each link names only the feeds whose `SOURCED_FROM.zones` give its sector |
+| `TARGETS` | Indicator / ThreatActor / Malware → Sector | Node `zone` list → the sync (indicators) and `build_relationships.py` (indicators, actors and malware): `otx_industries`, 0.6, where an OTX pulse's own industries state the sector, else `zone_classification`, 0.5; never to `global`; each link names only the feeds whose `SOURCED_FROM.zones` give its sector (`src/sector_evidence.py`) |
 | `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → the sync and `build_relationships.py`: `advisory_sector`, 0.9, where CISA's ICS advisory states the sector (the product is deployed in it), else `zone_classification`, 0.5; each link names only the feeds that gave its sector (`src/sector_evidence.py`) |
 | `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` for an actor with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware with an active indicator (`r.evidence_types`, `src/campaign_evidence.py`); a campaign whose actor has neither link is deleted with its links |
 | `PART_OF_CAMPAIGN` | Malware / Indicator → Campaign | Built by `enrichment_jobs.build_campaign_nodes()`; a type of its own because `PART_OF` is ResilMesh's asset hierarchy |
@@ -403,7 +403,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/build_relationships.py` | Graph relationship builder (exact / MITRE-ID / scoped co-occurrence — **no `CONTAINS`**) |
 | `src/indicator_aging.py` | The one Indicator aging rule (basis, tiers, retirement, `aging_evaluated_at`) |
 | `src/campaign_evidence.py` | What a campaign rests on (`ATTRIBUTED_TO` / `USES_MALWARE`) |
-| `src/sector_evidence.py` | Evidence label and confidence of links to `Sector` (`zone_classification` 0.5, `advisory_sector` 0.9) |
+| `src/sector_evidence.py` | Evidence label and confidence of links to `Sector` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9) and the zones a record states |
 | `src/description_ranking.py` | Fixed source ranking of node descriptions |
 | `src/relationship_provenance.py` | `sources` / `source_refs` / `misp_event_ids` on derived links; curated claims |
 | `src/baseline_lock.py` | Baseline lock sentinel (collectors and sync tasks skip while a baseline holds it) |
@@ -500,6 +500,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — `TARGETS` carries `otx_industries` (0.6) where an OTX pulse's own industries state the sector.
 - 2026-10-18 — `USES_TECHNIQUE` from an OTX pulse's ATT&CK ids (`otx_attack_ids`, step 8) is created at 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-18 — The MISP-event STIX file export of `run_pipeline.py` (`--stix`, `export_to_stix21`) is removed; STIX leaves EdgeGuard only through `GET /stix/export`.
 - 2026-10-18 — The co-occurrence calibration job was removed from the post-sync enrichment jobs (no current code writes the edges it rescored).
