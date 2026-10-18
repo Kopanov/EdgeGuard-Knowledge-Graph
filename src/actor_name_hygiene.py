@@ -407,6 +407,10 @@ def strip_trailing_parenthetical(fragment: str) -> str:
     m = _TRAILING_PAREN_RE.match(fragment)
     if not m:
         return fragment
+    # A country name with a parenthetical of its own ("falkland islands (malvinas)") stays whole, so
+    # rule (c) drops it instead of keeping the parenthetical as a name.
+    if _is_geopolitical_name(fragment.strip(" .")):
+        return fragment
     head = m.group("head").strip()
     inner = m.group("inner").strip()
     if (
@@ -416,6 +420,21 @@ def strip_trailing_parenthetical(fragment: str) -> str:
     ):
         return inner
     return head if len(head) > 1 else fragment
+
+
+def _rejoin_country_names(sides: List[str]) -> List[str]:
+    """Join adjacent ``and``-split sides back into a country or state name that contains "and"
+    (``["apt28", "bosnia", "herzegovina"]`` -> ``["apt28", "bosnia and herzegovina"]``)."""
+    out: List[str] = []
+    i = 0
+    while i < len(sides):
+        if i + 1 < len(sides) and _is_geopolitical_name(f"{sides[i]} and {sides[i + 1]}".strip(_EDGE_PUNCT)):
+            out.append(f"{sides[i]} and {sides[i + 1]}")
+            i += 2
+        else:
+            out.append(sides[i])
+            i += 1
+    return out
 
 
 def _try_and_split(fragment: str) -> List[str]:
@@ -435,8 +454,11 @@ def _try_and_split(fragment: str) -> List[str]:
     if fragment.lower().startswith(AND_SPLIT_PROTECTED_PREFIXES):
         return [fragment]
     # 2026-10-18: a country name with "and" ("bosnia and herzegovina") is one name, which rule (c)
-    # then drops, not two names.
+    # then drops, not two names; so is one inside a longer list ("apt28 and bosnia and herzegovina").
     if _is_geopolitical_name(fragment.strip(_EDGE_PUNCT)):
+        return [fragment]
+    sides = _rejoin_country_names(sides)
+    if len(sides) < 2:
         return [fragment]
     for side in sides:
         if len(side) < AND_SPLIT_MIN_SIDE_LEN or side.lower() in AND_SPLIT_PROTECTED_SIDES:

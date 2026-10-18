@@ -382,6 +382,23 @@ class TestCountryAndStateNames:
     from, never which actor it is: OTX adversary fields list "APT37, North Korea"."""
 
     @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # A country name with a parenthetical of its own is dropped whole, not kept as "Malvinas".
+            ("Falkland Islands (Malvinas)", []),
+            # A country name with "and" inside a longer "and" list is one name, then dropped.
+            ("APT28 and Bosnia and Herzegovina", ["APT28"]),
+            ("Lazarus and Saint Kitts and Nevis", ["Lazarus"]),
+            ("Trinidad & Tobago and APT41", ["APT41"]),
+            # Ordinary "and" lists still split.
+            ("Head Mare and Twelve", ["Head Mare", "Twelve"]),
+            ("APT28 and APT29", ["APT28", "APT29"]),
+        ],
+    )
+    def test_country_names_inside_composites_never_leave_fragments(self, raw, expected):
+        assert clean_actor_names(raw) == expected
+
+    @pytest.mark.parametrize(
         "name",
         [
             # ISO 3166 short names, any case, edge punctuation tolerated.
