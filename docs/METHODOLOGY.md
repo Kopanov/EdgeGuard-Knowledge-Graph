@@ -329,7 +329,7 @@ sources assert it), not folded into a single multiplier.
 |-------------|--------|-------|
 | `EMPLOYS_TECHNIQUE` | MITRE | ThreatActor employs Technique (attribution — from STIX `uses`) |
 | `IMPLEMENTS_TECHNIQUE` | MITRE | Malware / Tool implements Technique (capability — from STIX `uses`) |
-| `USES_TECHNIQUE` | OTX | Indicator observed tied to Technique (from `attack_ids`) |
+| `USES_TECHNIQUE` | OTX | The indicator's OTX report lists the technique (from `attack_ids`; not that the indicator executed it) |
 | `ATTRIBUTED_TO` | Malware's own claim / OTX | Malware attributed to ThreatActor: exact `attributed_to` name or alias match (1.0), or named in the same OTX pulse when the pulse's actors are one actor (`otx_pulse`, 0.6) |
 | `INDICATOR_RESOLVES_TO` (planned) | DNS | Indicator → IP; not written |
 | `EXPLOITS` | CVEs | Indicator exploits Vulnerability (exact CVE ID match) |
@@ -492,10 +492,11 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` also links an indicator to a CVE named in the same OTX pulse.
 - 2026-10-18 — Confidence is a two-layer model (source prior, indicator aging): the co-occurrence calibration job was removed, because no current code writes the `misp_cooccurrence` / `misp_correlation` edges it rescored.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

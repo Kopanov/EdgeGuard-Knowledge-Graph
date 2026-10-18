@@ -148,7 +148,7 @@ graph TB
     %% Edge legend:
     %%   EMPLOYS_TECHNIQUE    = attribution  (who is doing the TTP)
     %%   IMPLEMENTS_TECHNIQUE = capability   (what the code/tool can do)
-    %%   USES_TECHNIQUE       = observation  (indicator observed tied to a TTP)
+    %%   USES_TECHNIQUE       = report       (the indicator's OTX report lists the TTP)
     %%
     %% Indicator -[:INDICATES]-> CVE: named in the same OTX pulse (otx_pulse,
     %% 0.6, written by the sync); Indicator -[:EXPLOITS]-> CVE only from the
@@ -344,10 +344,11 @@ campaign builder and 6/6 FIRST EPSS. Jobs 2/6, 3/6 and 6/6 are not drawn above.
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — The report-scoped build pairs a pulse's indicators with its CVEs too (cap 50 CVEs per pulse); § 3 draws `INDICATES` from `Indicator` to `CVE` with a legend line.
 - 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job was removed from § 1, § 2, § 5 and § 8 (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

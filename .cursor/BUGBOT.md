@@ -293,7 +293,7 @@ Flag any version that checks only `event_info.get("info")` (event name) as fallb
 
 ### ThreatActor→Technique EMPLOYS_TECHNIQUE must use `uses_techniques` list, not `misp_event_id` co-occurrence
 
-In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation)):
+In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-report)):
 
 ```cypher
 // CORRECT
@@ -429,7 +429,7 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 (Campaign)    -[:EMPLOYS_TECHNIQUE]->  (Technique)          # campaign-level attribution (future)
 (Malware)     -[:IMPLEMENTS_TECHNIQUE]->(Technique)         # capability: malware implements TTP
 (Tool)        -[:IMPLEMENTS_TECHNIQUE]->(Technique)         # capability: tool implements TTP
-(Indicator)   -[:USES_TECHNIQUE]->     (Technique)          # observation: IOC tied to TTP (OTX attack_ids)
+(Indicator)   -[:USES_TECHNIQUE]->     (Technique)          # report: the IOC's OTX report lists the TTP (OTX attack_ids)
 (Technique)   -[:IN_TACTIC]->          (Tactic)
 (ThreatActor) -[:RUNS]->               (Campaign)
 (Malware|Indicator)-[:PART_OF_CAMPAIGN]-> (Campaign)     # not PART_OF, which is ResilMesh's topology relationship (IP / Subnet / OrganizationUnit)
@@ -1048,10 +1048,11 @@ When code changes affect user-visible behavior (CLI commands, env vars, DAG sett
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The `USES_TECHNIQUE` pattern comment says what the link is: the indicator's OTX report lists the technique.
 - 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag.
 - 2026-10-18 — Rule added: `ThreatActor` names pass `actor_name_hygiene` (country and state names included), and the OTX actor items, pairs and several-actor decision use one list of names per pulse.
 - 2026-10-18 — The rule on enrichment job failures no longer names the removed co-occurrence calibration job.

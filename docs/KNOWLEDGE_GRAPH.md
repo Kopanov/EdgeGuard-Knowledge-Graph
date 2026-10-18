@@ -61,7 +61,7 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `RUNS` | ThreatActor → Campaign | `build_campaign_nodes()`; `campaign_grouping`, the confidence of the actor's strongest link to a malware (`ATTRIBUTED_TO` or `USES_MALWARE`); `r.evidence_types[]` names the types of those links; recomputed on every run from the actor's current links, and removed when it comes from an actor that is not the campaign's or has neither link (a campaign whose actor has none left is deleted) |
 | `PART_OF_CAMPAIGN` | Malware, Indicator → Campaign | `build_campaign_nodes()`; a malware is a member while it is attributed to the campaign's actor or used by it (`USES_MALWARE`), an indicator while it `INDICATES` a member (the 100 newest active ones, each once); `campaign_grouping`, the confidence of the malware's strongest link to the actor (malware) or of the indicator's best path, `INDICATES` then `ATTRIBUTED_TO` or `USES_MALWARE`, each path as strong as its weaker link (indicator); `r.evidence_types[]` names the relationship types it rests on, e.g. `["ATTRIBUTED_TO", "USES_MALWARE"]` on a malware, `["INDICATES", "USES_MALWARE"]` on an indicator (not `PART_OF`, because ResilMesh uses `PART_OF` for its asset hierarchy, and one name must have one meaning in the shared database) |
 | `INVOLVES` | Alert → Indicator | `neo4j_client` alert path (`alert_processor`, NATS) — not part of the collector pipeline; excluded from the acceptance script's policed types |
-| `USES_TECHNIQUE` | Indicator → Technique | OTX pulse `attack_ids` exact MITRE ID match (`match_type='otx_attack_ids'`, 0.6: the ids are the pulse's, so the link has the confidence of every other link from them); an id ATT&CK revoked matches its successor |
+| `USES_TECHNIQUE` | Indicator → Technique | "The OTX report this indicator came from lists this technique" (not that the indicator executed it). OTX pulse `attack_ids` exact MITRE ID match (`match_type='otx_attack_ids'`, 0.6: the ids are the pulse's, so the link has the confidence of every other link from them); an id ATT&CK revoked matches its successor |
 | `AFFECTS` | Vulnerability/CVE → Sector | "The vulnerable product is used in this sector." Zone list unwind, per sector only the feeds whose `SOURCED_FROM.zones` give it; `advisory_sector`, 0.9, where CISA's ICS advisory states the sector (deployed in it), else `zone_classification`, 0.5 (inferred sector); `global` never linked |
 | `TARGETS` | Indicator / ThreatActor / Malware → Sector | "Reported in connection with attacks on this sector." Zone list unwind, per sector only the feeds that gave it; `zone_classification`, 0.5 (a CISA deployment statement never labels TARGETS); `global` never linked |
 | `IN_TACTIC` | Technique → Tactic | Kill-chain phase exact match (confidence 1.0) |
@@ -227,15 +227,15 @@ Aging depends on the kind of fact, not on who supplied it or who created the nod
 - **Known limits.** The alert path (`create_indicator_from_alert`; no subscriber is deployed) and the command-line writers (the STIX import, the VirusTotal re-enrichment) record no report: a node they create ages from `first_imported_at`, an existing node keeps its basis. What an alert's time means for aging, and whether an alert is independent evidence or a match of a list EdgeGuard exported to Wazuh, is to be designed with the ResilMesh alert integration. ResilMesh's own MISP events stay outside the sync.
 - **Where it is exposed.** REST (the node's properties; `/indicators` and the Wazuh CDB indicator list newest first by `coalesce(last_reported_at, first_imported_at)`; `/zone/{zone}` every label it lists by one clock, `coalesce(last_reported_at, first_imported_at, created_at)`: an indicator's latest report, otherwise when the node entered the graph, a campaign's `created_at`; none of these moves when a sync or the campaign builder rewrites a node, whereas ordering the other labels by `last_updated` would put every node just rewritten above an indicator reported in the latest run), GraphQL (`lastReportedAt`, `lastReportedSource`, `lastReportedRef`, `lastRecordedAt`, `sourceConfidence`, `agingBasis`, `agingTier`, `agingFactor`, `agingSince`, `agingEvaluatedAt`, `active`, `retiredBy`, `retiredAt` on `Indicator`) and the STIX export (`x_edgeguard_last_reported_at`, `x_edgeguard_last_reported_source`, `x_edgeguard_last_reported_ref`, `x_edgeguard_source_confidence`, `x_edgeguard_aging_basis`, `x_edgeguard_aging_tier`, `x_edgeguard_active`, `x_edgeguard_retired_by` on indicators, extension definition 1.7.0; an indicator's `modified` is the latest of `created`, `last_recorded_at` and `aging_since`). A retired indicator drops out of the GraphQL `indicators` default list, the Wazuh CDB export and campaigns; it is never deleted.
 
-### Technique edges: attribution vs capability vs observation
+### Technique edges: attribution vs capability vs report
 
-The three X→Technique edges are specialized types, so Cypher queries and LLM/GraphRAG retrieval can distinguish **who does it** from **what the code can do** from **what an indicator observes**:
+The three X→Technique edges are specialized types, so Cypher queries and LLM/GraphRAG retrieval can distinguish **who does it** from **what the code can do** from **what the report an indicator came from lists**:
 
 | Specialized type | Source | Semantic |
 |---|---|---|
 | `EMPLOYS_TECHNIQUE` | `ThreatActor` (or `Campaign`) | Attribution — e.g. *"APT28 employs T1059"* |
 | `IMPLEMENTS_TECHNIQUE` | `Malware` or `Tool` | Capability — e.g. *"Mimikatz implements T1059"* |
-| `USES_TECHNIQUE` | `Indicator` | Observation — e.g. *"this IOC was observed executing T1059"* (from OTX `attack_ids`) |
+| `USES_TECHNIQUE` | `Indicator` | Report — e.g. *"the OTX report this indicator came from lists T1059"*: the pulse's `attack_ids`, inherited by every indicator of the pulse. It does not say the indicator executed the technique |
 
 When emitting STIX 2.1, `EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE` become `relationship_type: "uses"` and `USES_TECHNIQUE` becomes `"indicates"` (indicator indicates attack-pattern); the source and target types give the same disambiguation. See `src/stix_exporter.py` (`_SRO_BY_EDGE`) and `GET /stix/types` (`relationship_mappings`).
 
@@ -570,10 +570,11 @@ ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6), written by the sync's report-scoped build; a CVE item of a pulse joins its report (`OTX_META.pulse_id`), and a pulse's `cve_references` item reaches MISP with an `OTX_META` block naming the pulse; the per-pulse caps take the first items in event order in an incremental sync too (it put the changed items first, so over several runs a pulse could be linked to more than 50 CVEs).
 - 2026-10-18 — Threat-actor names: country and state names and nationality adjectives are never actor names (`"north korea (apt37)"` is `apt37`), and an OTX adversary the same pulse lists as a malware family is an actor only when the canonical threat-actor reference resolves it.
 - 2026-10-18 — `USES_TECHNIQUE` from an OTX pulse's ATT&CK ids (`otx_attack_ids`, step 8) is created at 0.6, the confidence of every other link from those ids (it was 0.85).

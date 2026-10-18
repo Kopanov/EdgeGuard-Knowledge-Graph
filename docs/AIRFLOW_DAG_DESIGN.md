@@ -310,7 +310,7 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 > `IMPLEMENTS_TECHNIQUE`, rather than one generic `USES`, for Cypher
 > clarity and LLM/GraphRAG retrieval. Both edges collapse back to STIX 2.1
 > `relationship_type: "uses"` on export. See
-> [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation)
+> [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-report)
 > for the semantic rationale.
 
 ### 2. run_enrichment_jobs

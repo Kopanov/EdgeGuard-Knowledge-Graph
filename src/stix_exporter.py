@@ -28,7 +28,7 @@ Key design decisions:
 - ``EMPLOYS_TECHNIQUE`` (attribution: ThreatActor/Campaign → Technique)
   and ``IMPLEMENTS_TECHNIQUE`` (capability: Malware/Tool → Technique)
   become STIX 2.1 ``relationship_type: "uses"`` on export;
-  ``USES_TECHNIQUE`` (observation: Indicator → Technique) becomes
+  ``USES_TECHNIQUE`` (report-level: the indicator's OTX report lists the technique) becomes
   ``"indicates"``, the only relationship STIX 2.1 defines from an
   indicator to an attack-pattern (``_SRO_BY_EDGE``). The read paths match
   only these specialised edge types; the graph holds no generic ``USES``

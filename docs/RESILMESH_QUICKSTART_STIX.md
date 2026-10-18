@@ -345,10 +345,12 @@ An indicator is linked to a CVE in two ways, both exported as `indicator related
 the CVEs named in the same OTX report as the indicator (`INDICATES`, `x_edgeguard_match_type`
 `otx_pulse`, confidence 60, an `external_references` entry per report with its OTX link), and the CVE
 the indicator's own MISP record tags (`EXPLOITS`, `cve_tag`), which EdgeGuard's collectors do not
-write. On a graph they built, an `indicator` bundle therefore holds, at `depth=2`, the CVEs of the
-indicator's OTX reports, and a `cve` bundle, at `depth=1` too, the indicators of the reports that
-name the CVE; a CVE no OTX report names has no indicator, and its `depth=1` bundle holds the
-`vulnerability` alone. An indicator with both links to one CVE has one SRO whose provenance merges
+write. On a graph they built, an `indicator` bundle therefore holds, at `depth=2`, the CVEs the graph
+links to the indicator, and a `cve` bundle, at `depth=1` too, the indicators linked to the CVE. The
+link is built per MISP event and per OTX report, for at most 2,000 indicators and 50 CVEs of a report,
+and an item MISP already held from an earlier report gets no link to a later one (see
+[KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)); so an indicator of a report that names CVEs can have none.
+A CVE without such a link has no indicator, and its `depth=1` bundle holds the `vulnerability` alone. An indicator with both links to one CVE has one SRO whose provenance merges
 both (`x_edgeguard_match_type` names the stronger link's label). The ThreatActors and Malware that
 exploit a CVE come from curated packages.
 
@@ -551,10 +553,11 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The indicator–CVE paragraph states when the graph has the link (per MISP event and OTX report, within the per-report caps) instead of promising every CVE of an indicator's reports.
 - 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs named in the same OTX report (`INDICATES`, `otx_pulse`).
 - 2026-10-18 — § 6: the smoke script runs on bash 3.2, exports identifiers a baseline graph holds (`APT28`, `T1059`, `CVE-2021-44228`, the newest indicator; flags name others) and fails a bundle without a graph object (it passed on the empty bundle of the `/stix/types` indicator example).
 - 2026-10-18 — § 5 states that the collectors link no indicator to a CVE, so a `cve` bundle at `depth=1` holds the `vulnerability` alone.
