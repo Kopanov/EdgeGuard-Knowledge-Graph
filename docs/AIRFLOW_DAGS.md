@@ -2,7 +2,7 @@
 
 **Purpose:** Automated ETL pipeline for threat intelligence collection and synchronization.  
 **DAG Python files:** repository `dags/` directory.
-**Airflow version:** Apache Airflow 3.3.x — base image `apache/airflow:3.3.2-python3.12` (see [Airflow version and image](#airflow-version-and-image)). To upgrade an existing deployment from Airflow 2.11 or 3.2, see [Appendix: data written by earlier versions](#appendix-data-written-by-earlier-versions).
+**Airflow version:** Apache Airflow 3.3.x — base image `apache/airflow:3.3.2-python3.12` (see [Airflow version and image](#airflow-version-and-image)).
 
 **Where you are in the docs:** Step **2** of the operator path — read after **[SETUP_GUIDE.md](SETUP_GUIDE.md)**. **Next →** **[BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)** for a safe first **`edgeguard_baseline`**. Full order: [README.md § Recommended reading order](../README.md#-recommended-reading-order-new-operators).
 
@@ -113,8 +113,6 @@ The start command of the Compose `airflow` service creates or resizes the pool `
 **Resizing.** Set `EDGEGUARD_COLLECTOR_POOL_SLOTS` in `.env` and run `docker compose up -d airflow`, which recreates the container; `docker compose restart airflow` keeps the old environment and so the old size. `airflow pools set edgeguard_collectors <n> "..."` in the container changes the size at once, but the next start of the container sets it back to the `.env` value. A value that is not a positive integer falls back to 4 with a message in `docker compose logs airflow`; while the pool cannot be set (for example before the metadata DB is migrated on a first start), the cause is logged every 30 failed attempts: the last exception line of the CLI output, or else its last line other than SQLAlchemy's "(Background on this error at: ...)" link.
 
 **Without Compose** (the manual venv path in [SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker)): run `airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"` once after `airflow db migrate` and before the DAGs are unpaused; otherwise the collector tasks are never scheduled.
-
-A running deployment whose DAG code does not yet use the pool needs the pool before it pulls the new code: see [Collector pool: first update of a running deployment](#collector-pool-first-update-of-a-running-deployment).
 
 #### `edgeguard_baseline` task chain — additive vs destructive
 
@@ -714,80 +712,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh install and a fresh baseline. The procedures below matter only for an Airflow deployment, a graph or a MISP kept across an upgrade.
-
-### Airflow 2 to 3 upgrade
-
-Applies only to an existing EdgeGuard deployment on Airflow 2.11; a fresh install targets Airflow 3.3.2 directly. DAG file names, `dag_id`s (`edgeguard_pipeline`, `edgeguard_medium_freq`, `edgeguard_low_freq`, `edgeguard_daily`, `edgeguard_neo4j_sync`, `edgeguard_baseline`), schedules, `default_args`, execution timeouts and task logic (the same Python callables, Neo4j/MISP writes and Prometheus instrumentation) are the same on both lines. What differs between a 2.11 deployment and the current code:
-
-| Item | Airflow 2.11 | Current code (see [Airflow version and image](#airflow-version-and-image)) |
-|---|---|---|
-| Operators | `airflow.operators.bash.BashOperator`, `airflow.operators.python.PythonOperator` / `ShortCircuitOperator` | `airflow.providers.standard.operators.*` |
-| `Variable` / `TaskGroup` | `airflow.models.Variable`, `airflow.utils.task_group.TaskGroup`; `Variable.get(..., default_var=…)` | `airflow.sdk.Variable` / `airflow.sdk.TaskGroup` with `ImportError` fallback; positional default |
-| Schedule keyword | `DAG(schedule_interval=…)` | `DAG(schedule=…)` |
-| Base image / tag | `apache/airflow:2.11.2-python3.12` / `edgeguard-airflow:2.11.2-python3.12` | `apache/airflow:3.3.2-python3.12` / `edgeguard-airflow:3.3.2-python3.12` |
-| `requirements.txt` | `apache-airflow[postgres]~=2.11` | `apache-airflow[postgres]~=3.3` + `apache-airflow-providers-standard~=1.5` |
-| API server port key | `AIRFLOW__WEBSERVER__WEB_SERVER_PORT` (`[webserver]`) | `AIRFLOW__API__PORT` (`[api]`) |
-| JWT secret | — | `AIRFLOW__API_AUTH__JWT_SECRET` from `AIRFLOW_API_AUTH_JWT_SECRET` |
-
-Run these steps in order:
-
-1. **Back up the Airflow metadata DB.** The schema migration is destructive and not cleanly reversible:
-   ```bash
-   docker exec edgeguard_airflow_postgres pg_dump -U airflow airflow \
-     > airflow_postgres_$(date +%Y%m%d_%H%M%S).sql
-   ```
-2. **Set the JWT secret** `AIRFLOW_API_AUTH_JWT_SECRET` in `.env` (see *JWT secret* in [Airflow version and image](#airflow-version-and-image)).
-3. **Pause all DAGs** in the 2.11 instance (UI or `airflow dags pause <dag_id>`) and wait for in-flight tasks to finish — the migration must run on an idle scheduler.
-4. **Stop the 2.11 container:** `docker compose stop airflow`.
-5. **Rebuild the image** with the new base: `docker compose build airflow`.
-6. **Force-recreate the container** so the JWT secret is picked up: `docker compose up -d --force-recreate airflow`.
-7. **Migrate the metadata DB:** `docker compose run --rm airflow airflow db migrate` upgrades the schema in place. If it fails midway, restore from the backup and file a ticket before retrying.
-8. **Start the new container:** `docker compose up -d airflow`.
-9. **Unpause the DAGs** once the UI shows them as imported with zero parse errors. A `schedule_interval` error at parse time means an older code checkout.
-10. **Validate** with a single small collector run (e.g. `edgeguard_medium_freq` → `collect_cisa`, CISA KEV) before the full scheduled cadence resumes.
-
-**Rollback:** restore the metadata DB (`psql -U airflow airflow < airflow_postgres_<timestamp>.sql`); `git checkout` a commit from before the upgrade, or pin the compose `image:` tag to `edgeguard-airflow:2.11.2-python3.12` and rebuild; `docker compose up -d airflow`. The data in Neo4j and MISP is unaffected — the schema migration touches only Airflow's own metadata DB.
-
-### Airflow 3.2 to 3.3.2 upgrade
-
-For a deployment on the `apache/airflow:3.2.0-python3.12` base. The DAGs need no change: Airflow 3.3.x's "Significant Changes" remove or rename nothing they use (`airflow.sdk.Variable` / `TaskGroup`, `airflow.providers.standard.*` operators, `TriggerRule`).
-
-1. Back up the metadata DB (command in step 1 above): 3.3 ships schema migrations, which `airflow standalone` applies on first boot.
-2. `docker compose build airflow && docker compose up -d airflow`; follow `docker compose logs -f airflow` until the API server reports healthy.
-3. `edgeguard doctor` reports Airflow `3.3.x` with no drift warning; run `edgeguard validate` as usual.
-
-### Collector pool: first update of a running deployment
-
-A deployment whose DAG code does not yet use the collector pool has no pool `edgeguard_collectors`. Every DAG run created after the new DAG code is parsed puts its collectors in the pool, so they are not scheduled until it exists (see [Collector pool: setup and resizing](#collector-pool-setup-and-resizing)); task instances of a run already in progress keep the pool they were created with, so a running baseline is not affected. In this order:
-
-1. Create the pool in the running container **before** pulling the new code:
-   ```bash
-   docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"
-   ```
-2. Pull the code (`git pull --ff-only`). `./install.sh --update` and `make update` pull, rebuild and recreate in one step, so use them only when no baseline is running, and only after step 1.
-3. When no `edgeguard_baseline` run is in progress: `docker compose build airflow && docker compose up -d airflow`.
-4. Check the pool as described in [Collector pool: setup and resizing](#collector-pool-setup-and-resizing).
-
-### Shared state directories of an earlier deployment
-
-On a deployment created before `./state` and `./checkpoints` were bind-mounted, `airflow-init` first copies the state file and the checkpoints still stored in the `airflow_db` volume into the host directories (without overwriting), so the sync watermark and the collector resume points are kept.
-
-### Neo4j sync schedule of an earlier deployment
-
-Deployed within 72 h of the last run of the cron schedule `0 3 */3 * *` that earlier versions used, the first run of the 72 h schedule is due 72 h after that run, at 03:00 UTC. The Airflow Variable `NEO4J_SYNC_INTERVAL` and `EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN`, which earlier versions read, have no effect.
-
-### MISP events and Neo4j constraints of earlier versions
-
-- Events written by earlier versions may carry `sector:…`, `source:…` or TLP tags on the event; the sync and the parsers read them. New writes follow [MISP Tagging](#misp-tagging).
-- `create_constraints` drops a UNIQUE constraint on Device, NetworkService, SoftwareVersion, Application, Role or User that an earlier build created.
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to the current system: change history moved to this section, upgrade procedures to the appendix.
 - 2026-10-17 — MISP push accounting: the OTX cursor after a push with failures advances up to the oldest pulse with an item the writer lists as unstored, so a few bad records hold no cursor.
 - 2026-10-17 — The baseline chain (collectors, `full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`) and the sync DAG's writing tasks check the baseline lock; a refusal of `baseline_clean` before the wipe releases it; `source_key_check` has `retries=0`; troubleshooting of repeatedly failing collectors (each task starts with every circuit breaker closed).

@@ -175,7 +175,7 @@ Optional: **`edgeguard doctor`** / **`edgeguard validate`** after `pip install -
 
 ## 4. Path B — Python / venv (no Docker)
 
-Requires **Python 3.12+** (same as `pyproject.toml` and GitHub Actions). Apache Airflow 3.3 supports **3.10–3.14** upstream; this repo tests on **3.12** only. To migrate an existing Airflow 2 install, see the [appendix](#appendix-data-written-by-earlier-versions).
+Requires **Python 3.12+** (same as `pyproject.toml` and GitHub Actions). Apache Airflow 3.3 supports **3.10–3.14** upstream; this repo tests on **3.12** only.
 
 For developers or minimal setups:
 
@@ -296,20 +296,11 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh install. For an install kept across an upgrade:
-
-- **Airflow 2 install.** To migrate an existing Airflow 2 install to Airflow 3, see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade).
-- **First update to the collector pool code.** Every collector task runs in the Airflow pool **`edgeguard_collectors`**, and while the pool does not exist the collectors of new DAG runs are never scheduled (no failure alert). On an install from before the pool, create it before you update: on a Compose stack in the running container, **`docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`**; on the venv path, **`airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`**. Details: [AIRFLOW_DAGS.md § Collector pool: first update of a running deployment](AIRFLOW_DAGS.md#collector-pool-first-update-of-a-running-deployment).
-- **Stack created from an older compose file.** Compose files before 2026-10 set the Airflow 2 heartbeat names (**`SCHEDULER_ZOMBIE_TASK_THRESHOLD`** / **`LOCAL_TASK_JOB_HEARTBEAT_SEC`** / **`ZOMBIE_DETECTION_INTERVAL`**), which Airflow 3 ignores, so such a stack runs with the 300 s default: recreate it with `docker compose up -d airflow` and check the value as in § 9.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; upgrade steps for kept installs moved to the appendix.
 - 2026-10-17 — An empty `AIRFLOW_API_AUTH_JWT_SECRET` stops the API server from starting; the reading-order table names `docker compose up -d airflow` after a `.env` change.
 - 2026-10-17 — Corrected against the code: `install.sh` generates the four secrets only when it creates `.env`; `AIRFLOW_API_AUTH_JWT_SECRET` among the minimum variables; host RAM for a 730-day baseline from the container limits (about 47 GB, plan ~48 GB); `pip install -e '.[airflow]'`; venv path points the DAG and plugin folders at the repository; host health check sets `NEO4J_URI=bolt://localhost:7687`; first Airflow login and the `misp_health_check` / `source_key_check` task names; `EDGEGUARD_SSL_VERIFY` always set on Compose; symbol pointers instead of compose line numbers.
