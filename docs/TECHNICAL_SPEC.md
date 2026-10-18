@@ -571,7 +571,8 @@ Auth:    Configured via environment variables
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; `mitre_explicit` (0.95) via `uses_techniques`, `otx_pulse` (0.6) via `reported_techniques` (`build_relationships.py` Q6/Q6b/Q10); curated-package claims: see below the table. |
 | `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path and Q2d, the pulse in `source_refs[]`; only from a pulse whose actors are one actor); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
 | `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. No code path writes the `misp_cooccurrence` level (0.5) |
-| `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` |
+| `INDICATES` | Indicator | `CVE` | `match_type='otx_pulse'` (0.6): indicator and CVE named in the same OTX pulse (sync path, the pulse in `source_refs[]`; at most 50 CVEs and 2,000 indicators per pulse); "named in the same report", never an exploitation claim; the `CVE` node is matched by `cve_id`, never created; `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
+| `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` (the indicator's own CVE tag; no collector writes one) |
 | `EXPLOITS` | ThreatActor / Malware | `CVE` | Curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 (both written when the claim creates the link), `tlp` = the package's TLP level |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`match_type='otx_attack_ids'`, `confidence_score` 0.6, written when the link is created) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |
@@ -869,7 +870,9 @@ as the code builds them):
     "known_malware": [{"name": "<malware>", "family": "<family or null>", "malware_types": ["<type>"], "description": "<text or null>"}],
     "threat_actors": [{"name": "<actor>", "aliases": ["<alias>"], "description": "<text or null>"}],
     "techniques": [{"mitre_id": "<T####>", "name": "<technique>", "description": "<text or null>"}],
-    "cves": [{"cve_id": "<CVE id>", "cvss_score": "<score or null>", "severity": "<severity or null>"}],
+    "cves": [{"cve_id": "<CVE id>", "cvss_score": "<score or null>", "severity": "<severity or null>",
+              "evidence": [{"relationship": "<EXPLOITS | INDICATES>", "match_type": "<cve_tag | otx_pulse>",
+                            "meaning": "<the indicator's own CVE tag | named in the same OTX report as the indicator>"}]}],
     "assets": [],
     "users": [],
     "confidence": "<the indicator's confidence_score>",
@@ -884,9 +887,12 @@ as the code builds them):
 ```
 
 What the enrichment reads: `(Indicator)-[:INDICATES]->(Malware)`, `(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)`,
-`(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` and `(Indicator)-[:EXPLOITS]->` a `CVE` or
-`Vulnerability` node. `cves` has one entry per CVE id, its score and
-severity taken as a pair from one node: the `CVE` node's (a null score with severity `UNKNOWN` when
+`(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`, `(Indicator)-[:EXPLOITS]->` a `CVE` or
+`Vulnerability` node (the indicator's own CVE tag, which no collector writes) and `(Indicator)-[:INDICATES]->(CVE)`
+(a CVE named in the same OTX report as the indicator). `cves` has one entry per CVE id; `evidence` lists each
+link of the CVE once (relationship type, `match_type`, meaning), the indicator's own claim first, and the
+recommendation for a CVE linked only by the same report says so. The score and
+severity are taken as a pair from one node: the `CVE` node's (a null score with severity `UNKNOWN` when
 the CVE has no CVSS), or the `Vulnerability` node's when no `CVE` node of that id states them. A
 CVE the alert names is listed with `"source": "alert"`, a malware the alert names with the
 description `From alert (not in graph)`. `assets` and `users` stay empty: no code path writes
@@ -1011,6 +1017,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6); the alert enrichment reads it, and each CVE entry names its links (`evidence`).
 - 2026-10-18 — `GET /health` reports the deployed commit as `git_sha` (`EDGEGUARD_GIT_SHA`).
 - 2026-10-18 — `USES_TECHNIQUE` from an OTX pulse's ATT&CK ids (`otx_attack_ids`, step 8) is created at 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-18 — STIX export row: times from the graph (byte-identical re-exports), indicator `confidence` and `valid_until`, the `X-EdgeGuard-Git-Sha` header.

@@ -18,12 +18,26 @@ threat actors those families are attributed to and the ATT&CK techniques the act
 confidence, first / last seen and zones, and recommendations generated from those fields. The demo
 hands alerts to that code and prints the response as JSON.
 
-**No CVEs from the graph.** The enrichment also lists the CVEs the indicator exploits, but the graph
-links an indicator to a CVE (`EXPLOITS`) only when the indicator's own MISP record tags that CVE,
-and EdgeGuard's collectors write no such tag. On a graph they built, every alert built with
-`--from-graph` therefore shows `cves: []` and `cves_found: 0`; `cves` lists a CVE only when the
-alert itself names one (`"source": "alert"`). Show CVEs with the GraphQL step of the workflow below
-instead.
+**CVEs from the graph: named in the same report.** The enrichment also lists the CVEs the graph
+links to the indicator, each with the `evidence` of its links. An indicator and a CVE named in the
+same OTX report are linked as `(Indicator)-[:INDICATES]->(CVE)` (`match_type` `otx_pulse`, meaning
+"named in the same OTX report as the indicator"). The indicator's own claim to exploit a CVE
+(`EXPLOITS`, `cve_tag`) comes only from a CVE tag on its MISP record, and no feed gives one:
+EdgeGuard's collectors write no such tag. On a graph they built, `cves` therefore lists the CVEs of
+the indicator's OTX reports: an alert built with `--from-graph` shows CVEs when the selected
+indicator comes from an OTX pulse that lists CVEs, and `cves: []` with `cves_found: 0` otherwise.
+A same-report CVE says that one report names the indicator and the CVE, not that the indicator
+exploits it, and its recommendation says so (`Apply patch for <CVE id> (named in the same OTX report
+as the indicator)`). To show such an alert, pick an indicator with this read-only query and enrich
+it from an alert file (`--alerts`, below):
+
+```cypher
+MATCH (i:Indicator)-[r:INDICATES]->(:CVE)
+WHERE i.active = true AND r.match_type = 'otx_pulse'
+RETURN i.value AS value, i.indicator_type AS indicator_type, count(r) AS cves
+ORDER BY cves DESC, value
+LIMIT 5
+```
 
 - **Real enrichment, read-only.** The demo calls `AlertProcessor.enrich_alert_read_only`: the same
   validation, indicator canonicalization (refang, case-fold, type inference) and enrichment
@@ -38,11 +52,11 @@ instead.
 - **Graph patterns read** (each one written by the MISP → Neo4j sync or `build_relationships`):
   `(Indicator)-[:INDICATES]->(Malware)`, `(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)`,
   `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`, `(Indicator)-[:EXPLOITS]->(CVE | Vulnerability)`,
-  the indicator's `SOURCED_FROM` edges (first / last seen as the sources report them) and its
-  `zone` list. Techniques are those of the attributed actors; the indicator's own
-  `USES_TECHNIQUE` links and the malware's `IMPLEMENTS_TECHNIQUE` links are not part of the
-  enrichment. The `EXPLOITS` pattern finds nothing on a graph the collectors built (see "No CVEs
-  from the graph" above).
+  `(Indicator)-[:INDICATES]->(CVE)`, the indicator's `SOURCED_FROM` edges (first / last seen as the
+  sources report them) and its `zone` list. Techniques are those of the attributed actors; the
+  indicator's own `USES_TECHNIQUE` links and the malware's `IMPLEMENTS_TECHNIQUE` links are not part
+  of the enrichment. The `EXPLOITS` pattern finds nothing on a graph the collectors built; the CVEs
+  come from `INDICATES` (see "CVEs from the graph: named in the same report" above).
 
 How the read-only answer differs from a `process_alert` answer, because nothing is recorded:
 
@@ -114,7 +128,8 @@ Each alert built from a selected indicator holds only what the graph says about 
 indicator's value and type, its first stored zone other than `global` (or the `--zone` given),
 the time the alert was built, the alert id `demo-graph-<n>` and the source `edgeguard-demo`. It
 names no malware, CVE or host, so everything in `known_malware`, `threat_actors`, `techniques` and
-`cves` comes from the graph, and `cves` is empty (see "No CVEs from the graph" above).
+`cves` comes from the graph; `cves` holds the CVEs named in the indicator's OTX reports, if any (see
+"CVEs from the graph: named in the same report" above).
 
 An alert file uses the ResilMesh alert schema ([TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) § Alert
 Format, `ResilMeshAlert` in `src/alert_processor.py`). Only `alert_id` (a non-empty string) is
@@ -154,7 +169,7 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       "malware_found": "<true | false>",
       "actor_found": "<true | false>",
       "techniques_found": "<count>",
-      "cves_found": 0,
+      "cves_found": "<count>",
       "assets_found": 0,
       "users_found": 0
     },
@@ -166,7 +181,11 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       ],
       "threat_actors": [{"name": "<actor>", "aliases": ["<alias>"], "description": "<text or null>"}],
       "techniques": [{"mitre_id": "<T####>", "name": "<technique>", "description": "<text or null>"}],
-      "cves": [],
+      "cves": [
+        {"cve_id": "<CVE id>", "cvss_score": "<score or null>", "severity": "<severity>",
+         "evidence": [{"relationship": "INDICATES", "match_type": "otx_pulse",
+                       "meaning": "named in the same OTX report as the indicator"}]}
+      ],
       "assets": [],
       "users": [],
       "confidence": "<the indicator's confidence_score>",
@@ -183,11 +202,13 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
 
 A failed enrichment query gives `enriched: false` with `query_metadata.error` and the defaults in
 `enrichment`; a rejected alert is `enriched: false` with `query_metadata.error` and an empty
-`enrichment`. `cves` is empty for an alert built with `--from-graph` (see "No CVEs from the graph"
-above). A CVE the alert names is listed as `{"cve_id": "<CVE id>", "source": "alert"}`. A CVE the
-graph links to the indicator would be listed as `{"cve_id", "cvss_score", "severity"}`, with the
-score and severity of one node: the `CVE` node's (a null score with severity `UNKNOWN` when the CVE
-has no CVSS), or the `Vulnerability` node's when no `CVE` node of that id states them.
+`enrichment`. A CVE the alert names is listed as `{"cve_id": "<CVE id>", "source": "alert"}`. A CVE
+the graph links to the indicator is listed as `{"cve_id", "cvss_score", "severity", "evidence"}`, with
+the score and severity of one node: the `CVE` node's (a null score with severity `UNKNOWN` when the
+CVE has no CVSS), or the `Vulnerability` node's when no `CVE` node of that id states them. `evidence`
+names each link of the CVE once: `INDICATES` / `otx_pulse` ("named in the same OTX report as the
+indicator") and, the indicator's own claim, `EXPLOITS` / `cve_tag` ("the indicator's own CVE tag"),
+listed first when present.
 
 ---
 
@@ -202,8 +223,8 @@ REST API on `http://localhost:8000`, the GraphQL API on `http://localhost:4001` 
 `/redoc` and `/openapi.json`) requires the `X-API-Key` header when the key is set). Take
 `<indicator>` and `<actor>` from the alert enrichment demo's output (`enrichment.indicator` and a
 name in `enrichment.threat_actors`), and `<CVE id>` from a `cveId` that step 5 (GraphQL
-vulnerabilities) returns, so each check shows data the graph holds. The alert output holds no CVE
-from the graph (see "No CVEs from the graph" above).
+vulnerabilities) returns or from the alert output's `cves` (a CVE named in the indicator's OTX
+report), so each check shows data the graph holds.
 
 ### 1. MISP events by source
 
@@ -285,10 +306,13 @@ curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" \
 ```
 
 `object_type` is `indicator`, `actor`, `technique` or `cve`; `depth` (1 or 2) and `limit` (1–500)
-are query parameters. A CVE bundle holds the `vulnerability`, at depth 2 the sectors it affects
-and the threat actors and malware a curated package says exploit it, and no indicator (see "No
-CVEs from the graph" above): at `depth=1` it holds the `vulnerability` alone next to the producer
-`identity`, the `extension-definition` and the TLP markings. `scripts/resilmesh_stix_smoke.sh`
+are query parameters. A CVE bundle holds the `vulnerability` and the indicators named in the same
+OTX report as the CVE (`related-to`, `x_edgeguard_match_type` `otx_pulse`; at `depth=1` too), at
+depth 2 also the sectors it affects and the threat actors and malware a curated package says exploit
+it; a CVE no OTX report names has no indicator, and at `depth=1` its bundle holds the
+`vulnerability` alone next to the producer `identity`, the `extension-definition` and the TLP
+markings. An indicator bundle holds, at depth 2, the CVEs named in the indicator's OTX reports
+(`related-to`). `scripts/resilmesh_stix_smoke.sh`
 runs every listed type ([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
 
 ### 7. Wazuh CDB export
@@ -312,6 +336,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide shows how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles.
 - 2026-10-18 — Step 1 says that `stats` warns when it reads no sync state file on the host (none there, or unreadable).
 - 2026-10-18 — The alert enrichment shows no CVE from the graph (an indicator links to a CVE only through its own CVE tag, which the collectors do not write), so the output shape shows `cves: []` and the workflow takes `<CVE id>` from the GraphQL step instead of the alert output; the demo commands discard the configuration warning on stderr (`2>/dev/null`); the STIX example URL-encodes the indicator and adds a CVE bundle.
 

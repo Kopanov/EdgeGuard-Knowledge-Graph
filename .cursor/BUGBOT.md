@@ -420,7 +420,8 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 
 ```
 (Indicator)   -[:INDICATES]->          (Malware)            # same OTX pulse (otx_pulse) or malware_family label (credited to FAMILY_LABEL_FEEDS)
-(Indicator)   -[:EXPLOITS]->           (Vulnerability|CVE)
+(Indicator)   -[:INDICATES]->          (CVE)                # named in the same OTX pulse (otx_pulse, sync); never EXPLOITS, never a new type
+(Indicator)   -[:EXPLOITS]->           (Vulnerability|CVE)  # the indicator's own CVE tag (cve_tag) only
 (Malware)     -[:ATTRIBUTED_TO]->      (ThreatActor)        # malware attributed to actor
 (ThreatActor) -[:USES_MALWARE]->       (Malware)            # MITRE uses / curated claim; campaign evidence with ATTRIBUTED_TO
 (ThreatActor) -[:USES_TOOL]->          (Tool)
@@ -1051,6 +1052,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag.
 - 2026-10-18 — Rule added: `ThreatActor` names pass `actor_name_hygiene` (country and state names included), and the OTX actor items, pairs and several-actor decision use one list of names per pulse.
 - 2026-10-18 — The rule on enrichment job failures no longer names the removed co-occurrence calibration job.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

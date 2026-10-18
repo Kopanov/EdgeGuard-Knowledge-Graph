@@ -78,7 +78,7 @@ WHERE m.attributed_to = a.name OR a.name = m.attributed_to
 | `mitre_explicit` | 0.95 (1.0 on `SUBTECHNIQUE_OF`) | MITRE ATT&CK's explicit `uses` relationship, or the dotted sub-technique id |
 | `advisory_sector` | 0.9 | CISA's ICS advisory states the sector (`AFFECTS`) |
 | `malware_family` | 0.8 | The family label a source gives the indicator (`INDICATES`) |
-| `otx_pulse` | 0.6 | Named in the same OTX pulse |
+| `otx_pulse` | 0.6 | Named in the same OTX pulse (`INDICATES` to Malware and to CVE, `ATTRIBUTED_TO`, and the techniques a pulse lists for its actors and malware); on Indicator → CVE it says "named in the same report", never that the indicator exploits the CVE (`cve_tag`) |
 | `otx_attack_ids` | 0.6 | An ATT&CK id the indicator's OTX pulse lists (`USES_TECHNIQUE`); a report-level association like `otx_pulse`, with a label of its own |
 | `zone_classification` | 0.5 | EdgeGuard's sector inference (`AFFECTS`, `TARGETS`) |
 
@@ -126,6 +126,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — `otx_pulse` also labels `INDICATES` from an indicator to a CVE named in the same OTX pulse.
 - 2026-10-18 — `otx_attack_ids` (`USES_TECHNIQUE` from an OTX pulse's ATT&CK ids) is 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-17 — Main text restated as a guide to current behaviour: the fixes of 2026-03 are described as the rules they established, and change history moved to this section.
 - 2026-10-17 — The merge logic matches `merge_node_with_source` (`first_imported_at`; the `SOURCED_FROM` edge's `imported_at` and source-reported times; source id `alienvault_otx`; max-wins or aging-rule confidence; node and edge in two statements); the confidence table lists the current evidence labels; the audit message reads "Keeping the higher confidence" (it read "Skipping lower-confidence update"); `IMPLEMENTS_TECHNIQUE` also comes from OTX pulses and curated claims.

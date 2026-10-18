@@ -786,14 +786,20 @@ class TestDemoMaterial:
         assert "&lt;150ms</span>" not in page and "<150ms typical" not in page
         assert "docs/DEMO.md" in page
 
-    def test_demo_md_promises_no_graph_cve_in_the_alert_output(self):
-        """No collector writes the CVE tag on an indicator that ``(Indicator)-[:EXPLOITS]->`` rests on,
-        so every ``--from-graph`` alert shows ``cves: []`` (2026-10-18). The guide says so, shows that
-        shape, and takes ``<CVE id>`` from the GraphQL step instead of the alert output."""
+    def test_demo_md_states_where_the_graph_cves_of_an_alert_come_from(self):
+        """No collector writes the CVE tag on an indicator that ``(Indicator)-[:EXPLOITS]->`` rests on, so the
+        CVEs an alert lists from the graph are those named in the same OTX report (``INDICATES``,
+        ``otx_pulse``, 2026-10-18). The guide says so, keeps the statement that no feed gives an indicator's
+        own CVE claim, shows the evidence in the output shape and how to pick such an indicator, and still
+        offers the GraphQL step for ``<CVE id>``."""
         guide = " ".join((_ROOT / "docs" / "DEMO.md").read_text().split())
-        assert "**No CVEs from the graph.**" in guide
-        assert "`cves: []` and `cves_found: 0`" in guide
-        assert '"cves": [],' in guide and '"cves_found": 0,' in guide
+        assert "**CVEs from the graph: named in the same report.**" in guide
+        assert "no feed gives one: EdgeGuard's collectors write no such tag" in guide
+        assert "`(Indicator)-[:INDICATES]->(CVE)`" in guide and "named in the same OTX report as the indicator" in guide
+        assert "`cves: []` with `cves_found: 0` otherwise" in guide
+        assert '"cves_found": "<count>",' in guide and '"evidence": [{"relationship": "INDICATES"' in guide
+        assert "MATCH (i:Indicator)-[r:INDICATES]->(:CVE)" in guide
+        assert "**No CVEs from the graph.**" not in guide and '"cves": [],' not in guide
         assert "Take the identifiers (`<indicator>`, `<actor>`, `<CVE id>`) from the alert enrichment" not in guide
         assert "`<CVE id>` from a `cveId` that step 5 (GraphQL vulnerabilities) returns" in guide
         assert "the CVEs the indicator exploits, its confidence" not in guide
@@ -801,7 +807,7 @@ class TestDemoMaterial:
     def test_premise_no_collector_writes_an_indicator_cve_tag(self):
         """The guide's premise: the sync reads an indicator's CVE from an ``exploits:`` tag (or a
         ``cve="CVE-…"`` / ``cve:CVE-…`` tag) on its MISP attribute, and no collector writes one. A
-        collector that starts writing one makes the guide's "No CVEs from the graph" wrong."""
+        collector that starts writing one makes the guide's "no feed gives one" wrong."""
         sync = (_ROOT / "src" / "run_misp_to_neo4j.py").read_text()
         assert 'tag_name.startswith("exploits:")' in sync, "premise: the tag the sync reads"
         for path in sorted((_ROOT / "src" / "collectors").rglob("*.py")):

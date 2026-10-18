@@ -548,6 +548,7 @@ Each entry: symptom → detection signal → remediation.
 ## Requesting a full MISP → Neo4j sync (`NEO4J_FULL_SYNC`)
 
 - **When.** An incremental sync writes only the attributes whose MISP `timestamp` moved, so a change that touches no attribute (event-level tags), a Neo4j restored from a dump older than MISP, or a curated layer removed by hand needs a full sync.
+- **After deploying a change to the links the sync derives.** The same-report links from an indicator to a CVE (`(Indicator)-[:INDICATES]->(CVE)`, `otx_pulse`) are written by the sync: a full sync after the deploy creates them for the OTX data MISP already holds, from the pulse each OTX CVE attribute names in its `OTX_META` block; no wipe is needed. A `cve_references` attribute MISP holds with the plain note "Referenced in OTX pulse: <name>" names no pulse and gets no link. `scripts/verify_fresh_baseline.py` reports the links afterwards (`indicator_cve_report_links`) and fails when one is not labelled `otx_pulse` or cites no OTX report (`indicator_cve_links_are_same_report`).
 - **How.** Set the Airflow Variable and let the next scheduled run pick it up, or trigger one now:
   ```bash
   docker compose exec airflow airflow variables set NEO4J_FULL_SYNC true
@@ -1257,6 +1258,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — A full sync after the deploy creates the same-report Indicator → CVE links for the data MISP already holds.
 - 2026-10-18 — Canonical threat-actor reference: the OTX collector also reads it to decide whether an adversary the pulse lists as a malware family is an actor (an ambiguous or never_merge name counts as unknown; `[ACTOR-NAMES]` log line with every distinct name; kept without the reference), and how to add an actor the reference lacks.
 - 2026-10-18 — "At each ATT&CK release": a scheduled run adds the release's new and renamed objects; changes to objects already in MISP arrive with the next fresh baseline.
 - 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed. The kill switch `EDGEGUARD_RESPECT_CALIBRATOR`, the relationship-write guard it controlled and the post-run query for calibrated edges were removed with the co-occurrence calibration job, which was the only writer of `r.calibrated_at`.

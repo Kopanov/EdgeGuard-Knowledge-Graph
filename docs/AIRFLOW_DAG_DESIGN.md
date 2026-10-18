@@ -293,6 +293,7 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 | Relationship | Method | Confidence / properties |
 |-------------|--------|-------------------------|
 | `(Indicator)-[:INDICATES]->(Malware)` | Same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (`match_type='otx_pulse'`, the pulse in `r.source_refs[]`), or `malware_family` name match in `build_relationships.py` Q9; there is no whole-event `misp_event_ids[]` co-occurrence query | **0.6** (`otx_pulse`) / **0.8** (`malware_family`) |
+| `(Indicator)-[:INDICATES]->(CVE)` | Same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (not a `build_relationships` step): the indicator and the CVE are named in the same pulse, the pulse in `r.source_refs[]` | **0.6**, `match_type='otx_pulse'` |
 | `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'` |
 | `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** (Q5); also `a.reported_techniques` from OTX pulse `attack_ids` (Q5b) | **0.95** (`match_type='mitre_explicit'`) / **0.6** (`match_type='otx_pulse'`) |
 | `(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN m.uses_techniques` — **same STIX `uses` rows** (malware → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
@@ -505,6 +506,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The relationship table lists `(Indicator)-[:INDICATES]->(CVE)`, written by the sync for an indicator and a CVE named in the same OTX pulse.
 - 2026-10-18 — MITRE ATT&CK is in `OWN_RUN_CAP_SOURCES`: a scheduled run pushes the whole changed bundle (the cut at 200 kept about 140 objects and stored the new ETag, so the rest never arrived).
 - 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job and its section were removed (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

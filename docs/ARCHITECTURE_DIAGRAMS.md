@@ -278,7 +278,7 @@ flowchart TD
     CHECK -->|No: Normal event| NORMAL[Process all in memory]
 
     PAGED --> PAGE_LOOP["For each page:<br/>parse + dedup + sync<br/>then gc.collect + query_pause<br/>(EDGEGUARD_QUERY_PAUSE_SECONDS, default 0)"]
-    PAGE_LOOP --> BUILD_REL_P["Build report-scoped rels after all pages<br/>(same OTX pulse only)<br/>per-pulse caps: indicators 2000,<br/>malware 50, actors 10"]
+    PAGE_LOOP --> BUILD_REL_P["Build report-scoped rels after all pages<br/>(same OTX pulse only)<br/>per-pulse caps: indicators 2000,<br/>malware 50, CVEs 50, actors 10"]
 
     NORMAL --> DEDUP_N[Deduplicate items]
     DEDUP_N --> BUILD_REL_N["Build report-scoped rels<br/>same per-pulse caps"]
@@ -343,6 +343,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The report-scoped build pairs a pulse's indicators with its CVEs too (cap 50 CVEs per pulse).
 - 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job was removed from § 1, § 2, § 5 and § 8 (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, data from earlier versions to the appendix.
