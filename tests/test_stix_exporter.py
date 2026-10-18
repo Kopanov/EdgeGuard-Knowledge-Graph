@@ -832,8 +832,14 @@ def test_every_collection_is_ordered_and_limited_by_parameter(method, identifier
     # No unbounded collect() of related nodes remains: every collect() is
     # preceded by a limited stage, so the counts agree.
     # Collections, not the CVE-twin folds (``head(collect(...))`` / ``collect(v) AS twins``) nor the
-    # per-neighbour relationship folds (``collect(properties(r))``, CVE twins).
-    folds = q.count("head(collect(") + q.count("collect(v) AS twins") + q.count("collect(properties(")
+    # per-neighbour relationship folds (``collect(properties(r))``, CVE twins; 2026-10-18
+    # ``collect(r {.*, edge_type: type(r)})``, the CVE links of several types).
+    folds = (
+        q.count("head(collect(")
+        + q.count("collect(v) AS twins")
+        + q.count("collect(properties(")
+        + q.count("{.*, edge_type: type(")
+    )
     assert q.count("collect(") - folds == collections
 
 
@@ -1051,7 +1057,9 @@ def test_indicator_export_dedupes_cve_twins_before_limit():
     bundle = StixExporter(client).export_indicator("1.2.3.4")
     q = client.driver._session.main_cypher
     prefer = q.index("WITH i, malware, v, r2 ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)")
-    dedupe = q.index("WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS vn, collect(properties(r2)) AS r2s")
+    dedupe = q.index("WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS vn,")
+    # 2026-10-18: each edge keeps its type (EXPLOITS, or INDICATES to the CVE node).
+    assert q.index("collect(r2 {.*, edge_type: type(r2)}) AS r2s") > dedupe
     bound = q.index("WITH i, malware, {n: vn, r: r2s} AS vr ORDER BY vr.n.cve_id LIMIT $limit")
     collect = q.index("WITH i, malware, collect(vr) AS vulns")
     assert prefer < dedupe < bound < collect
@@ -1090,13 +1098,14 @@ def test_cve_export_walks_both_twins_and_aggregates_either_label():
     # Seed folding: one row, CVE-preferred head, every twin kept.
     assert "LIMIT 1" not in q
     fold = q.index("WITH head(collect(v)) AS seed, collect(v) AS twins")
-    exploits = q.index("OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS]->(tw)")
+    exploits = q.index("OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS|INDICATES]->(tw)")
     threats = q.index("OPTIONAL MATCH (x)-[r2:EXPLOITS]->(tw)")
     affects = q.index("OPTIONAL MATCH (tw)-[r3:AFFECTS]->(s:Sector)")
     assert fold < exploits < threats < affects
     assert q.count("UNWIND twins AS tw") == 3
     # One row per neighbour before each bound (its edges to both twins folded), nulls last.
-    assert "WITH seed, twins, i, collect(properties(r1)) AS r1s\n" in q
+    assert "WITH seed, twins, i, collect(r1 {.*, edge_type: type(r1)}) AS r1s\n" in q
+    assert 'WHERE (type(r1) = "EXPLOITS" OR tw:CVE)' in q, "INDICATES only to the CVE twin"
     assert "ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit" in q
     assert "WITH seed, twins, indicators, x, collect(properties(r2)) AS r2s\n" in q
     assert "WITH seed, indicators, threats, s, collect(properties(r3)) AS r3s\n" in q

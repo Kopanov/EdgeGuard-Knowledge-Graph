@@ -87,10 +87,13 @@ def client(raw_driver):
         session.run(f"MATCH (n:{LABEL}) DETACH DELETE n")
         session.run(
             f"UNWIND $rows AS row CREATE (:Indicator:{LABEL} {{indicator_type: row.indicator_type, "
-            "value: row.value, uuid: 'u-' + row.value})",
+            "value: row.value, uuid: 'u-' + row.value, edgeguard_managed: true})",
             rows=indicators,
         )
-        session.run(f"UNWIND $ids AS id CREATE (:CVE:{LABEL} {{cve_id: id, uuid: 'u-' + id}})", ids=list(CVES_IN_GRAPH))
+        session.run(
+            f"UNWIND $ids AS id CREATE (:CVE:{LABEL} {{cve_id: id, uuid: 'u-' + id, edgeguard_managed: true}})",
+            ids=list(CVES_IN_GRAPH),
+        )
     c = neo4j_client.Neo4jClient(
         URI, os.getenv("EDGEGUARD_IT_NEO4J_USER", "neo4j"), os.getenv("EDGEGUARD_IT_NEO4J_PASSWORD", "")
     )
@@ -183,3 +186,27 @@ def test_no_exploits_link_is_written(client, raw_driver):
     client.create_misp_relationships_batch(_rows(client.parsed), source_id="misp")
     with raw_driver.session() as session:
         assert session.run("MATCH ()-[r:EXPLOITS]->() RETURN count(r) AS c").single()["c"] == 0
+
+
+def test_the_stix_bundles_carry_the_links_as_related_to(client, raw_driver):
+    """The export queries walk the link on the database (the indicator's CVE stage and the CVE's indicator
+    stage), and the bundles parse strictly."""
+    import stix2
+
+    from stix_exporter import StixExporter
+
+    client.create_misp_relationships_batch(_rows(client.parsed), source_id="misp")
+    exporter = StixExporter(client)
+    indicator_bundle = exporter.export_indicator("203.0.113.17")
+    cve_bundle = exporter.export_cve("CVE-2024-21887", depth=1)
+    for bundle in (indicator_bundle, cve_bundle):
+        stix2.parse(bundle)  # strict: allow_custom defaults to False
+    by_id = {o["id"]: o for o in indicator_bundle["objects"]}
+    links = [o for o in indicator_bundle["objects"] if o["type"] == "relationship"]
+    assert sorted(by_id[o["target_ref"]]["name"] for o in links) == ["CVE-2023-46805", "CVE-2024-21887"]
+    for link in links:
+        assert link["relationship_type"] == "related-to" and link["x_edgeguard_match_type"] == "otx_pulse"
+        assert link["x_edgeguard_source_refs"] == [f"alienvault_otx:{PULSE_A}"] and link["confidence"] == 60
+    cve_links = [o for o in cve_bundle["objects"] if o["type"] == "relationship"]
+    assert len(cve_links) == 7, "the seven indicators of the pulse"
+    assert {o["relationship_type"] for o in cve_links} == {"related-to"}
