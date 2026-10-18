@@ -357,7 +357,7 @@ fi
 # [9] kill-switches not forced on
 # -----------------------------------------------------------------------------
 hdr "[9] kill-switch env vars"
-for sw in EDGEGUARD_RESPECT_CALIBRATOR EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION; do
+for sw in EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION; do
   if [[ -n "${!sw:-}" ]]; then
     warn "$sw=${!sw} is set — confirm this is intentional (see RUNBOOK § Kill-switches)"
   else

@@ -490,8 +490,8 @@ class EdgeGuardPipeline:
                                 # — do NOT substitute wall-clock NOW. The prior
                                 # ``datetime.now(...).isoformat()`` default violated PR-N5
                                 # C7 honest-NULL: re-importing an old CVE-2013 bundle today
-                                # stamped ``first_seen=2026-04-21``, poisoning the
-                                # calibrator's age calculations.
+                                # stamped ``first_seen=2026-04-21``, poisoning every
+                                # age calculation.
                                 "first_seen": obj.get("created") or None,
                                 "last_updated": obj.get("modified") or None,
                                 "confidence_score": 0.7,

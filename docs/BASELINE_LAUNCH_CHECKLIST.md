@@ -63,8 +63,8 @@ fails under STRICT=1) and skips check [5]. Specifically:
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
 * `[7b] alertmanager.yml has no placeholder / un-rendered ${...} pager key`
 * `[8] no stale baseline_lock sentinel`
-* `[9] kill-switch env vars` — `EDGEGUARD_RESPECT_CALIBRATOR` and
-  `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` unset (a set one is a warning)
+* `[9] kill-switch env vars` — `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION`
+  unset (a warning when it is set)
 * `[10] test suite syntax check` — `pytest --collect-only` collects the
   suite cleanly (a warning when `.venv/bin/pytest` is missing)
 * `[11] baseline hardening invariants` — sentinel class, retries=0, 48h lock
@@ -543,7 +543,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — The unicode-bypass audit item was removed, so the fresh-baseline item is [6]. The acceptance script has no `--legacy-graph` option: the description-source and aging checks are judged whenever the graph holds such nodes, and `--require-cisa-ics` requires a stated sector once the `cisa_ics` edges carry `zones`.
+- 2026-10-18 — The unicode-bypass audit item was removed, so the fresh-baseline item is [6]. The acceptance script has no `--legacy-graph` option: the description-source and aging checks are judged whenever the graph holds such nodes, and `--require-cisa-ics` requires a stated sector once the `cisa_ics` edges carry `zones`. Preflight check [9] covers `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` only (`EDGEGUARD_RESPECT_CALIBRATOR` was removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restated as a guide to the current behaviour: change history moved here, the steps for kept deployments and graphs moved to the appendix.
 - 2026-10-17 — Preflight with `--launch-path=dag` and checks [2], [7b], [9], [10] described; the DAG holds the baseline lock; smoke run applied with `docker compose up -d airflow`; the 50,000-event index cap; expected end state and memory thresholds of a 730-day baseline; minimum code checked by commit; acceptance rows for `no_global_sector_edges`, `pulse_indicates_complete`, `in_tactic_same_domain` and ResilMesh conformance.

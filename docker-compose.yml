@@ -521,9 +521,8 @@ services:
       EDGEGUARD_MITRE_MAX_RELATIONSHIPS: ${EDGEGUARD_MITRE_MAX_RELATIONSHIPS:-}
       EDGEGUARD_SUBPROCESS_TAIL_LINES: ${EDGEGUARD_SUBPROCESS_TAIL_LINES:-}
       EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC: ${EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC:-}
-      # Operations-only escape hatches (truthy values disable a safeguard; leave unset in production).
+      # Operations-only escape hatch (a truthy value disables a safeguard; leave unset in production).
       EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION: ${EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION:-}
-      EDGEGUARD_RESPECT_CALIBRATOR: ${EDGEGUARD_RESPECT_CALIBRATOR:-}
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./src:/opt/airflow/src:ro

@@ -36,7 +36,6 @@ code change or image rebuild is needed.
 
 | Env var | Default | When to set | What it reverts |
 |---|---|---|---|
-| `EDGEGUARD_RESPECT_CALIBRATOR` | unset (guard active) | Calibrator demotions cause false negatives; the operator wants the relationship writes to overwrite a calibrated confidence | `_confidence_respect_calibrator` emits the bare literal (an unconditional overwrite), not the CASE guard that keeps the confidence of an edge the calibrator stamped (`r.calibrated_at`) |
 | `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` | unset (inspection active) | Result-counter inspection itself throwing (driver API drift, double-consume) — mid-baseline | `_record_batch_counters` short-circuits to a no-op: only the zero-write check stops; the batch's result is still read, so a server error in the batch is still retried and counted. Emits a `[KILL-SWITCH-ACTIVE]` WARN at module import when set so on-call can confirm the flag took effect via `docker logs edgeguard_airflow 2>&1 \| grep -m1 '\[KILL-SWITCH-ACTIVE\]'`. |
 | `EDGEGUARD_EARLIEST_IOC_DATE` | `1995-01-01` | Importing pre-1995 corpora; seeing ingest silently drop historical IOCs with a `before earliest-allowed` WARN | Loosens the `_clamp_future_to_now` earliest-date floor. Accepts ISO date (e.g. `1970-01-01`). Invalid values fall back to default with a WARN. It also bounds the source date that dates an indicator for aging (`misp_report_times`). With a lower floor, older `last_seen` dates count, and those indicators may be retired (730 days). |
 
@@ -45,22 +44,17 @@ Set for one run (one-off):
 ```bash
 # Docker Compose deployment: one sync run in the container with the variable set
 # (a real sync, run in-process; Airflow records no task state)
-docker compose exec -e EDGEGUARD_RESPECT_CALIBRATOR=0 airflow \
+docker compose exec -e EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1 airflow \
   airflow tasks test edgeguard_neo4j_sync run_neo4j_sync
 ```
 
 Airflow 3 has no `airflow tasks run`. A kill switch for the scheduled runs
-goes in `.env`, and the airflow container must be recreated (below). The
-calibrator switch affects only the relationship writes of the MISP → Neo4j
-sync (`create_misp_relationships_batch` and the `create_*_relationship`
-helpers of `src/neo4j_client.py`), not the collectors, `build_relationships`
-or the enrichment jobs.
+goes in `.env`, and the airflow container must be recreated (below).
 
 Or persistent in `.env` at repo root (compose interpolates it into the
 airflow service's environment; there is no `env_file`):
 
 ```
-EDGEGUARD_RESPECT_CALIBRATOR=0
 EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1
 EDGEGUARD_EARLIEST_IOC_DATE=1970-01-01
 ```
@@ -873,7 +867,6 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    container has ≥ 4 GB RAM: `docker inspect edgeguard_airflow | grep -i mem`.
 7. **Kill-switches staged.** Decide in advance what signal would make
    you set each:
-   - `EDGEGUARD_RESPECT_CALIBRATOR=0` → if edges flap confidence 0.3 ↔ 0.8 nightly (a regression signal of the calibrator guard).
    - `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1` → if `_record_batch_counters` raises persistently in logs.
    - `EDGEGUARD_EARLIEST_IOC_DATE=1970-01-01` → if ingesting historical corpora and seeing `before earliest-allowed` WARNs.
 8. **Collector pool present.** `docker compose exec airflow airflow pools list`
@@ -902,17 +895,12 @@ Run these post-run validation queries (each via
 `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`):
 
 ```cypher
-// 1. Calibrated edges whose confidence a relationship write raised again (calibrator flap) — expect ~0.
-MATCH ()-[r]->()
-WHERE r.calibrated_at IS NOT NULL AND r.confidence_score > 0.5
-RETURN count(r) AS post_fix_candidates;
-
-// 2. Orphan Indicators (silent-write signal) — expect 0.
+// 1. Orphan Indicators (silent-write signal) — expect 0.
 MATCH (i:Indicator)
 WHERE NOT EXISTS { (i)-[:SOURCED_FROM]->(:Source) }
 RETURN count(i) AS orphans;
 
-// 3. Clamp check: CVSS and confidence values out of range — expect 0.
+// 2. Clamp check: CVSS and confidence values out of range — expect 0.
 MATCH (n)
 WHERE n.cvss_score > 10 OR n.cvss_score < 0
 RETURN count(n) AS cvss_out_of_range;
@@ -920,18 +908,18 @@ MATCH ()-[r]->()
 WHERE r.confidence_score > 1 OR r.confidence_score < 0
 RETURN count(r) AS confidence_out_of_range;
 
-// 4. Aliases type integrity — expect 0.
+// 3. Aliases type integrity — expect 0.
 MATCH (n) WHERE n.aliases IS NOT NULL
 AND NOT (n.aliases IS :: LIST<ANY>)
 RETURN count(n) AS aliases_scalar_corruption;
 
-// 5. Node count by label — diff vs. expected baseline scale.
+// 4. Node count by label — diff vs. expected baseline scale.
 CALL db.labels() YIELD label
 CALL { WITH label MATCH (n) WHERE label IN labels(n) RETURN count(n) AS c }
 RETURN label, c ORDER BY c DESC;
 ```
 
-Any non-zero on #1–#4 = regression; file issue.
+Any non-zero on #1–#3 = regression; file issue.
 
 Then run the acceptance script, `python scripts/verify_fresh_baseline.py`
 ([BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § "Fresh-baseline
@@ -1255,7 +1243,6 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 - `docs/VERSIONING.md` — CalVer release cadence
 - `prometheus/alerts.yml` — alert rule source of truth
 - `src/neo4j_client.py:_record_batch_counters` — ineffective-batch detector
-- `src/neo4j_client.py:_confidence_respect_calibrator` — calibrator-respect helper
 - `src/neo4j_client.py:_execute_batch_with_retry` — batch retry helper
 - `src/neo4j_client.py:_is_retryable_neo4j_error` — exception classifier
 - `src/collectors/nvd_collector.py:NvdBatchFetchError` — NVD silent-window-drop guard
@@ -1268,7 +1255,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed.
+- 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed. The kill switch `EDGEGUARD_RESPECT_CALIBRATOR`, the relationship-write guard it controlled and the post-run query for calibrated edges were removed with the co-occurrence calibration job, which was the only writer of `r.calibrated_at`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restructured as a guide to current behaviour: the change history moved to this section and the repairs of data written by earlier versions to the appendix.
 - 2026-10-17 — Post-run summary grep: OTX keeps its cursor below the pulses of the items a systemic conversion drop leaves unstored, so they are read again once the collector is fixed.

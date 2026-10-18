@@ -303,8 +303,9 @@ class TestFix3RunbookShipped:
 
     def test_runbook_documents_kill_switches(self):
         runbook = self._runbook()
-        assert "EDGEGUARD_RESPECT_CALIBRATOR" in runbook
         assert "EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION" in runbook
+        # 2026-10-18: the calibrator kill switch was removed with the co-occurrence calibration job.
+        assert "EDGEGUARD_RESPECT_CALIBRATOR" not in runbook.split("## History")[0]
 
     def test_runbook_has_baseline_day_protocol(self):
         runbook = self._runbook()

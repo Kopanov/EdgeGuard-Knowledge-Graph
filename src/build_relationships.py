@@ -876,7 +876,7 @@ def build_relationships():
             # while preserving every legitimate attribution path (Branches
             # 1+2 above, which key on the malware's OWN attributed_to claim).
             # Malware-alias signal is still used — safely — by Q9 INDICATES
-            # (indicator.malware_family ∈ m.aliases) at calibrated confidence.
+            # (indicator.malware_family ∈ m.aliases) at its own confidence (0.8).
             ") "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
             'ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() '
@@ -1070,14 +1070,8 @@ def build_relationships():
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/20 Indicator → Vulnerability (exact CVE match)...")
         _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND size(i.cve_id) > 0 RETURN i"
-        # PR-M3c §8-RI-S3-Q9: accumulate ``r.source_ids`` (set-valued) in
-        # addition to writing scalar ``r.source_id`` (last-writer-wins, kept
-        # for legacy readers and observability). Multiple merge passes (e.g.
-        # Q4 co-occurrence and Q9 malware-family-match) share the same
-        # INDICATES edge endpoints — scalar overwrite hides prior provenance
-        # from the calibrator filter. Accumulating via ``apoc.coll.toSet``
-        # preserves every source tag that has ever applied to the edge; the
-        # calibrator can then match on ANY() over the array.
+        # Provenance accumulates (``_prov_set``): a later step that MERGEs the same edge adds its
+        # feeds, record ids and MISP events and never replaces those already recorded.
         _q3a_inner = (
             "WITH $i AS i "
             + _prov_with("i", _node_feeds("i"))
@@ -1455,54 +1449,9 @@ def build_relationships():
             f"AND NOT toLower(trim(i.malware_family)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "RETURN i"
         )
-        # PR-M3c §8-RI-S3-Q9 (HIGH): this is the overwrite site. The SAME
-        # INDICATES edge may already exist from Q4 (co-occurrence) with
-        # ``r.source_id = "misp_cooccurrence"``. Before this fix, Q9's MERGE
-        # matched that edge and clobbered ``r.source_id`` with
-        # ``"malware_family_match"``, so the calibrator's filter
-        # (``source_id IN ["misp_cooccurrence", "misp_correlation"]``)
-        # missed the edge and its confidence stayed at 0.8 even when the
-        # underlying MISP event was a 96k-indicator bulk dump that should
-        # have demoted it to 0.30. Estimated 30-50% of INDICATES edges on
-        # a 730-day baseline were inflated this way.
-        #
-        # Fix: accumulate ``"malware_family_match"`` into ``r.source_ids``
-        # via ``apoc.coll.toSet`` — both sources now coexist on the edge.
-        # The scalar ``r.source_id`` write is kept (last-writer-wins, for
-        # legacy readers) but the calibrator filter is updated in
-        # enrichment_jobs.py to match against the ``r.source_ids`` array
-        # so co-occurrence provenance is always seen.
-        # PR-N8 BLOCK-MERGE (audit Logic Tracker, 2026-04-21): the CASE
-        # expression below now gates on ``r.calibrated_at IS NOT NULL``
-        # to RESPECT the calibrator's demotion.
-        #
-        # Pre-fix: ``SET r.confidence_score = CASE WHEN 0.8 >
-        # r.confidence_score THEN 0.8 ELSE r.confidence_score END`` ran
-        # unconditionally on every re-MERGE. An edge that the calibrator
-        # had just demoted from 0.8 → 0.30 (e.g. for a 96K-indicator
-        # bulk MISP dump) would be re-inflated to 0.8 on the very next
-        # build_relationships run. The flap cycle was daily:
-        #
-        #     Day 1  → build_relationships Q4     sets 0.5 (ON CREATE)
-        #     Day 1  → build_relationships Q9     re-stamps 0.8 (CASE floor)
-        #     Day 1  → enrichment calibrator      detects bulk dump, sets 0.30 + calibrated_at
-        #     Day 2  → build_relationships Q9     RE-INFLATES to 0.8 ←── BUG
-        #     Day 2  → enrichment calibrator      detects bulk dump again, sets 0.30
-        #     … repeats nightly since the calibrator shipped (months) …
-        #
-        # Since the calibrator stamps ``r.calibrated_at`` at both of its
-        # write sites (``enrichment_jobs.py:661`` small-event path, and
-        # ``:710`` large-event path — see commit audit trail), we key
-        # the respect-clause on ``r.calibrated_at IS NOT NULL``. On a
-        # calibrated edge the CASE now short-circuits to the existing
-        # value, preserving the calibrator's work. On a fresh (never-
-        # calibrated) edge the previous max-wins floor still applies.
-        #
-        # Note: this does NOT recursively mean calibrated edges never
-        # upgrade again — if the calibrator later decides a bulk-dump
-        # edge deserves 0.8 (e.g. the dump was re-classified as
-        # "curated"), it clears or re-writes r.calibrated_at and the
-        # floor runs again.
+        # Q9 MERGEs an INDICATES edge another step may have written (the sync's same-pulse
+        # ``otx_pulse`` link): its provenance accumulates (``_prov_set``), and the confidence keeps
+        # the maximum, so the 0.8 family match raises a weaker link and never lowers a stronger one.
         # PR-N8 HIGH (audit Bug Hunter H1, 2026-04-21): canonicalization
         # parity — apply ``trim() + toLower()`` on BOTH sides of every
         # string comparison. Pre-fix ``m.name`` was NFC+strip+lower'd
@@ -1543,9 +1492,6 @@ def build_relationships():
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.created_at = datetime() "
             "SET r.confidence_score = CASE "
-            # PR-N8 BLOCK-MERGE: respect calibrator. Must be the FIRST
-            # clause so it short-circuits before the 0.8 floor.
-            "       WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score "
             "       WHEN r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8 "
             "       ELSE r.confidence_score "
             "    END, "

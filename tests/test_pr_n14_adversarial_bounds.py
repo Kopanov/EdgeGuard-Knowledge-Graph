@@ -20,7 +20,7 @@ Fix: ``clamp_cvss_score(value)`` helper rejects non-finite + out-of-
 
 ``r.confidence_score`` is max-wins CASE-updated in every upsert. A
 source shipping ``confidence_score: "1e309"`` would pin the edge
-confidence to inf permanently, defeating calibrator demotion.
+confidence to inf permanently.
 
 Fix: ``clamp_confidence_score(value)`` helper. Applied in
 ``merge_node_with_source`` and both batched UNWIND paths.
@@ -46,7 +46,7 @@ Fix: ``_sanitize_array_value`` helper in ``merge_node_with_source``:
 ResilMesh feedback loop). Three sites substituted
 ``datetime.now(...).isoformat()`` when STIX lacked ``created`` /
 ``modified`` fields. Re-importing CVE-2013 today stamped
-``first_seen=2026-04-21``, poisoning calibrator age math (PR-N5 C7
+``first_seen=2026-04-21``, poisoning every age calculation (PR-N5 C7
 violation).
 
 Fix: pass None through (honest-NULL). The merge layer's ``ON CREATE

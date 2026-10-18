@@ -406,58 +406,6 @@ def _emit_batch_permanent_failure(*, label: str, source_id: str, reason: str) ->
         )
 
 
-def _confidence_respect_calibrator(value) -> str:
-    """PR-N10 (7-agent audit Cross-Checker BLOCK 1, 2026-04-21): return
-    a Cypher ``CASE`` expression for ``r.confidence_score`` writes that
-    respects the calibrator's demotion stamp.
-
-    Background: PR-N8 added a calibrator-respect guard to Q9 in
-    ``build_relationships.py:817`` so Q9's max-wins floor doesn't
-    re-inflate calibrator-demoted edges (0.30 → 0.8). But the cross-
-    checker audit found that 6 ``create_*_relationship`` helpers in
-    this module + ``create_misp_relationships_batch._set_clause``
-    ALSO unconditionally SET ``r.confidence_score``, undoing the
-    calibrator on every sync. The flap was bidirectional:
-
-        Enrichment  → calibrator sets 0.30 + r.calibrated_at
-        Next sync   → create_*_relationship UNCONDITIONALLY sets 0.7
-                      (or 0.5, 0.6, 1.0 depending on helper)
-                      → calibrator's work erased
-
-    This helper generates the same CASE pattern Q9 uses, so a SET like
-
-        SET r.confidence_score = 0.7
-
-    becomes
-
-        SET r.confidence_score = CASE
-            WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score
-            ELSE 0.7
-        END
-
-    Usage in an f-string Cypher template:
-
-        f"SET r.confidence_score = {_confidence_respect_calibrator(0.7)}"
-
-    Accepts numeric literals or Cypher expressions (e.g. the ``$conf``
-    parameter in the batched `_set_clause` path).
-
-    Kill-switch: setting ``EDGEGUARD_RESPECT_CALIBRATOR`` to one of
-    ``0``/``false``/``no``/``off`` restores the pre-PR-N10 behaviour
-    (unconditional overwrite). Intended for on-call operators to revert
-    the semantic change without a code revert if a regression is
-    discovered post-deploy. Default (unset or any other value) keeps
-    the calibrator-respect guard active.
-    """
-    import os as _os
-
-    _disable_values = ("0", "false", "no", "off")
-    if _os.environ.get("EDGEGUARD_RESPECT_CALIBRATOR", "").strip().lower() in _disable_values:
-        # Pre-PR-N10 behaviour: unconditional overwrite. Ops-only escape hatch.
-        return f"{value}"
-    return f"CASE WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score ELSE {value} END"
-
-
 # Configuration constants
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 # seconds; 120 s was too low for a 441K-node graph and 300 s for the 730-day "Indicator -> Malware
@@ -1138,8 +1086,8 @@ def clamp_confidence_score(value: Any) -> Optional[float]:
     Pre-PR-N14, the max-wins CASE in every ``_upsert_sourced_relationship``
     and batched UNWIND happily accepted ``$confidence = inf`` from a
     compromised feed and pinned ``r.confidence_score = Infinity``
-    forever — defeating calibrator demotion, and corrupting every
-    query that sorts or filters on confidence.
+    forever, corrupting every query that sorts or filters on
+    confidence.
 
     Returns None for unparseable / non-finite / out-of-range so callers
     can fall back to the documented default (0.5 at most sites).
@@ -2558,9 +2506,8 @@ class Neo4jClient:
             # confidence_score to [0.0, 1.0] + reject non-finite (inf/
             # nan). A compromised feed shipping ``confidence_score:
             # "1e309"`` would otherwise pin ``r.confidence_score = inf``
-            # on every max-wins upsert, permanently defeating the
-            # calibrator. Fall back to 0.5 on bad input (same default
-            # as the missing-field case).
+            # on every max-wins upsert. Fall back to 0.5 on bad input
+            # (same default as the missing-field case).
             _claimed_conf = data.get("confidence_score")
             _clamped_conf = clamp_confidence_score(_claimed_conf)
             if _claimed_conf is not None and _clamped_conf is None:
@@ -4805,7 +4752,7 @@ class Neo4jClient:
         MATCH (t:Technique {{mitre_id: $technique_mitre_id}})
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = {_confidence_respect_calibrator(0.7)},
+            r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, a.uuid),
@@ -4876,7 +4823,7 @@ class Neo4jClient:
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.match_type = coalesce(r.match_type, $match_type),
             r.edgeguard_managed = true,
-            r.confidence_score = {_confidence_respect_calibrator(0.7)},
+            r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, m.uuid),
@@ -4941,7 +4888,7 @@ class Neo4jClient:
         MATCH (v:Vulnerability {{cve_id: $cve_id}})
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = {_confidence_respect_calibrator(0.5)},
+            r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -4953,7 +4900,7 @@ class Neo4jClient:
         MATCH (v:CVE {{cve_id: $cve_id}})
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = {_confidence_respect_calibrator(0.5)},
+            r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -5011,7 +4958,7 @@ class Neo4jClient:
         WHERE (m.name = $malware_name OR $malware_name IN coalesce(m.aliases, []))
         MERGE (i)-[r:INDICATES]->(m)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = {_confidence_respect_calibrator(0.6)},
+            r.confidence_score = 0.6,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -5080,7 +5027,7 @@ class Neo4jClient:
         MATCH (s:Sector {{name: $sector_name}})
         MERGE (i)-[r:TARGETS]->(s)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = {_confidence_respect_calibrator(0.5)},
+            r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -5147,7 +5094,7 @@ class Neo4jClient:
 
         rel_props = f"""
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = {_confidence_respect_calibrator(0.5)},
+            r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, v.uuid),
@@ -5596,14 +5543,7 @@ class Neo4jClient:
                 if curated
                 else ""
             )
-            # PR-N10 (7-agent audit Cross-Checker BLOCK 1): respect the
-            # calibrator's demotion stamp. Pre-fix this batched helper
-            # (the chokepoint for create_misp_relationships_batch, called
-            # on every sync) unconditionally SET ``r.confidence_score =
-            # row.confidence``, undoing the calibrator's 0.30 demotion
-            # the next time the sync ran. Post-fix the CASE preserves
-            # any value written after ``r.calibrated_at`` was stamped.
-            confidence_expr = _confidence_respect_calibrator("row.confidence")
+            confidence_expr = "row.confidence"
             # 2026-10 (fresh-baseline PR): every EdgeGuard edge carries the
             # ownership marker (shared-database contract with ResilMesh) and the
             # kind of evidence behind it (``match_type``, when the producer
