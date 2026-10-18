@@ -782,28 +782,11 @@ one).
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. On a graph or MISP kept across an upgrade, the following applies.
-
-- **Generic `USES` edges to `Technique`** (written before 2026-04): no migration script exists; a fresh baseline writes `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` instead (§3.2.1). Queries on `[:USES]` return nothing on a fresh baseline.
-- **Nodes without the ownership marker** (written before the marker existed): treated as not EdgeGuard-created; such a node receives `edgeguard_enriched` on the next sync and stays visible to the APIs (§3.4).
-- **UNIQUE constraints on partner labels:** constraint creation drops any constraint on `Device`, `NetworkService`, `SoftwareVersion`, `Application`, `Role` or `User` that an earlier EdgeGuard build created (§3.4).
-- **`misp_cooccurrence` edges:** `calibrate_cooccurrence_confidence` is kept for graphs that still hold such edges; it is a no-op on a fresh baseline (§3.2.2).
-- **Sector links at 1.0:** `build_relationships` Q7a–Q7d bring a `zone_classification` link written at 1.0 back to 0.5 (§3.2.2).
-- **CVE descriptions without `description_source`** (written before 2026-10-16): such a description counts as NVD's, so only NVD's record replaces it; `description_source` is null on the node and its STIX object carries no `x_edgeguard_description_source` (§3.2.x, §5). [RUNBOOK.md](RUNBOOK.md#repairing-cve-descriptions-and-dates) repairs a kept graph.
-- **CVSS sub-nodes written by CISA ICS before 2026-10-16** carry 0.0 for `impact_score` and `exploitability_score` until a wipe and new baseline (§5).
-- **`CVE.attack_vector` on graphs built before 2026-10** mixes NVD's vector-string letters (`N`, `L`, `A`, `P`), NVD's words and an invented `UNKNOWN`, and KEV and OTX records wrote `NETWORK`: on the hosted graph of 2026-10-15, 147 CVEs showed `NETWORK` against a `LOCAL`, `ADJACENT_NETWORK` or `PHYSICAL` CVSS 3.1, and `attack_vector = 'NETWORK'` matched 3,305 CVEs where a re-merge gives 100,779 (§5).
-- **`Tactic` descriptions:** a `Tactic` synced from a MISP kept from before 2026-10 has no description, because that MISP holds a placeholder there (§3.1).
-- **Indicator `modified` in STIX** on a graph kept through the aging change of 2026-10-16: an indicator's `modified` can be earlier than the one an earlier export gave (it was the last database write), so a consumer re-ingests the full bundle once after the rollout; a new baseline avoids it. On an indicator written before 2026-10-16, `x_edgeguard_source_confidence` is its `confidence_score` (§3.2.x).
-- **Names padded with invisible characters:** [`scripts/audit_legacy_unicode_bypass_nodes.py`](../scripts/audit_legacy_unicode_bypass_nodes.py) lists, read-only, the `Malware` / `ThreatActor` / `Tool` nodes created before the name placeholder filter (2026-04-24) whose `name` holds zero-width, bidi-control or variation-selector characters.
-
----
-
 _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — §8.2 and §8.3: EdgeGuard's `CVE` nodes are queryable through ISIM GraphQL; the `Vulnerability` nodes there are ResilMesh's, since the scheduled pipeline writes none (§3.1).
 - 2026-10-17 — Rewritten as a guide to current behaviour, with history and kept-graph procedures at the end, and checked against the code: `Vulnerability` and `MAPS_TO` are not EdgeGuard output, `Technique.is_subtechnique` is true for a dotted id (every sync wrote false before), `--edgeguard-only` keeps EdgeGuard relationships between partner nodes, UNIQUE constraints cover the shared vulnerability labels, and the `misp_attribute_tag` row names the tags the sync reads.
 - 2026-10-16 — Sector links name only the feeds whose `SOURCED_FROM.zones` give the sector (they named every feed of the node: on that day's graph 2,639 of 6,506 `AFFECTS` links named a feed that never gave their sector), and a sector CISA's ICS advisory states is `advisory_sector` at 0.9 on `AFFECTS` only.

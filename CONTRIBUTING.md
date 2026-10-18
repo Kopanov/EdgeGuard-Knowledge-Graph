@@ -23,7 +23,7 @@ Every document in the repository follows one convention:
 - **Main text: current behavior, present tense.** The body of a document is a guide to how the system works today: settings, defaults, limits, commands, procedures, known limits, and the rationale for them ("because …"). It carries no pull request or issue numbers, no change dates, and no before/after narration.
 - **Dates that are data stay.** A measurement stated with the dataset it came from, an external version (for example Airflow 3.3.2 or MISP 2.4.177), and a reference-data version are part of the main text.
 - **Changes go to History.** Each change is recorded as a dated entry, newest first, one line each (`- YYYY-MM-DD — <what changed and why>`), in the document's `## History` section at the end, directly below a single `_Last updated: YYYY-MM-DD_` line. An entry whose day is not known carries `YYYY-MM` and follows the dated entries of that month.
-- **Data written by earlier versions goes to the appendix.** Steps that matter only for a Neo4j graph or MISP instance kept across an upgrade (repairs of data written by earlier versions, one-off migrations) go, condensed, to `## Appendix: data written by earlier versions`, placed before `## History`. The main text assumes a fresh baseline.
+- **No procedures for data written by earlier versions.** After larger changes the project wipes MISP and Neo4j and runs a fresh baseline, so the documents describe a fresh deployment only: repairs and one-off migrations of data kept across an upgrade are not documented (git history keeps earlier procedures). A change that a reader needs in order to understand the current system is recorded as one dated History line.
 - **Historical records keep their text.** `docs/flow_audits/`, `migrations/*.md`, `docs/DOCUMENTATION_AUDIT.md` and `docs/STIX21_EXPORTER_PROPOSAL.md` record a past state; each opens with a one-line note that points to the current document.
 
 When a heading changes, its anchor changes too: update every link to the old anchor in the same pull request.
@@ -42,6 +42,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Documents no longer keep procedures for data written by earlier versions; the project re-baselines after larger changes.
 - 2026-10-18 — A History entry whose day is not known carries `YYYY-MM`.
 - 2026-10-17 — Added the documentation convention (current behavior in the present tense, dated History entries, an appendix for data written by earlier versions, historical records marked as such) and renamed the section "New CLI / version behavior" to "CLI and version behavior".
 - 2026-10-17 — The CI and versioning links resolve from the repository root; the CI list names the Neo4j integration job, the Trivy scans of both images, and Mypy's scope (`src/` and `scripts/` in CI, `src/` in `make type-check`).

@@ -496,21 +496,11 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a graph built by a fresh baseline. A graph kept across an upgrade can hold data that earlier versions wrote differently:
-
-- **Generic `USES` technique edges.** Earlier versions wrote one generic `USES` edge from `ThreatActor`, `Malware` and `Tool` to `Technique` where the graph now has `EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE`. No migration script ships; a fresh baseline writes the specialized edge types directly.
-- **Edges without `r.misp_event_ids[]`.** [`scripts/backfill_edge_misp_event_ids.py`](../scripts/backfill_edge_misp_event_ids.py) with the [`migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`](../migrations/2026_05_edge_misp_event_ids_backfill_runbook.md) runbook backfills the array on `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS` only; a fresh baseline writes `sources[]`, `source_refs[]` and `misp_event_ids[]` on every relationship built from the sources.
-- **Nodes without `uuid`, edges without `src_uuid` / `trg_uuid`.** No backfill script ships; a fresh baseline stamps every uuid at write time. See [MIGRATIONS.md](MIGRATIONS.md) for the heal-by-rebaseline contract.
-- **Timestamps.** [TIMESTAMPS.md](TIMESTAMPS.md) describes the backwards-compatibility handling of data written before the source-truthful timestamp properties existed.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, the handling of graphs from earlier versions to the appendix.
 - 2026-10-17 — Corrected against the code: 12 collector sources (2 flag-guarded) and 2 placeholders, the seven enrichment jobs, the node list, `tag` outside the Indicator key, the `SOURCED_FROM` properties and when `raw_data` is replaced, what `RUNS` rests on, `confidence:*` tags on indicator attributes only, 20 link steps, no DAG task for `VirusTotalCollector`, further key files, and the zone example with two event tags.
 - 2026-10-16 — Links to a `Sector` name only the feeds whose `SOURCED_FROM.zones` give the sector; `AFFECTS` is `advisory_sector` (0.9) where CISA's ICS advisory states the sector.

@@ -19,7 +19,6 @@ These tests pin:
   2. The NVD_META parser is correct + safe against malformed input
   3. The date extractor normalizes empty/missing to None
   4. The Cypher write uses ``coalesce`` (idempotency guard)
-  5. RUNBOOK documents the migration (when/how/verify/idempotency)
 """
 
 from __future__ import annotations
@@ -32,7 +31,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
-DOCS = REPO_ROOT / "docs"
 
 # The script lives in scripts/ and imports neo4j/requests at module load;
 # tests that exercise parser functions bypass the driver import by
@@ -338,49 +336,6 @@ class TestCliContract:
         src = BACKFILL_SCRIPT.read_text()
         # Must return 1 if any unrecoverable error; 0 on clean run.
         assert "return 1 if summary.get(" in src, "script must return exit 1 when errors > 0"
-
-
-# ===========================================================================
-# Fix #5 — RUNBOOK documents the migration
-# ===========================================================================
-
-
-class TestRunbookDocumentsBackfill:
-    def _runbook(self) -> str:
-        return (DOCS / "RUNBOOK.md").read_text()
-
-    def test_runbook_has_backfill_section(self):
-        rb = self._runbook()
-        assert "### Backfilling CVE `published` / `last_modified`" in rb, (
-            "RUNBOOK must have a CVE date backfill section so operators can find it"
-        )
-        section = rb.split("### Backfilling CVE `published` / `last_modified`", 1)[1].split("\n## ", 1)[0]
-        assert "scripts/backfill_cve_dates_from_nvd_meta.py" in section
-
-    def test_runbook_shows_dry_run_first(self):
-        """The operator protocol must emphasize dry-run first — a 100K-CVE
-        real-run with a misconfigured env var would be painful."""
-        rb = self._runbook()
-        assert "--dry-run" in rb, "RUNBOOK must show --dry-run as the first step"
-        dry_run_pos = rb.find("--dry-run")
-        real_run_pos = rb.find("./scripts/backfill_cve_dates_from_nvd_meta.py --batch-size")
-        # Dry-run must appear BEFORE the real-run command in the RUNBOOK order.
-        if real_run_pos != -1:
-            assert dry_run_pos < real_run_pos, "RUNBOOK must document dry-run BEFORE the real-run command"
-
-    def test_runbook_documents_idempotency(self):
-        rb = self._runbook()
-        assert "idempotent" in rb.lower() or "idempotenc" in rb.lower(), (
-            "RUNBOOK must explicitly state the script is idempotent so operators feel safe re-running"
-        )
-
-    def test_runbook_shows_verify_cypher(self):
-        """Operators need post-migration verification queries — paste-ready
-        Cypher for 'did this actually work?'"""
-        rb = self._runbook()
-        assert "still_null" in rb or "Verify success" in rb, (
-            "RUNBOOK must include a verification Cypher block (e.g. count of still-NULL CVEs)"
-        )
 
 
 # ===========================================================================

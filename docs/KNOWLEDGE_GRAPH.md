@@ -548,42 +548,11 @@ ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a graph and a MISP built from a fresh baseline. A graph or MISP kept across an upgrade can hold data that earlier versions wrote differently; this appendix lists what remains of it and how it is repaired.
-
-### Relationships
-
-- **Provenance properties.** Relationships written before 2026-10-14 carry a single `r.source_id` (last writer wins; it held evidence names such as `otx_pulse`, `malware_family_match`, `cve_tag_match` or the hub `misp`), a set `r.source_ids` of such names and OTX-only `r.report_ids[]`; EdgeGuard no longer writes any of the three.
-- **`r.misp_event_ids[]`.** Relationships of a graph created before 2026-04-23 carry none; between 2026-04-23 and 2026-10-14 only the four `build_relationships.py` types `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS` carried the list. `scripts/backfill_edge_misp_event_ids.py` fills those four types on a graph created before 2026-04-23; it copies every MISP event of the node, not the per-source / per-sector events the pipeline writes, so a graph built since then does not need it.
-- **Technique edges.** A graph built before 2026-04-15 holds a generic `USES` relationship in place of `EMPLOYS_TECHNIQUE`, `IMPLEMENTS_TECHNIQUE` and `USES_TECHNIQUE`. No migration script is shipped; a fresh baseline writes the specialized types directly.
-- **Links to a Sector.** On a graph built before 2026-10-16, `SOURCED_FROM` edges carry no `zones` and therefore count as giving every zone of the node (the rule in "Links to a Sector" keeps such a graph behaving as before), and no `stated_refs`, so such an edge gives all of its `source_refs` to a sector link. `r.sources` of a sector link on such a graph names every feed of the node until the next baseline, because provenance only accumulates; on the graph of 2026-10-16, 2,639 of the 6,506 `AFFECTS` links named a feed that never gave their sector, among them 420 NVD or OTX guesses that named `cisa_ics`.
-
-### CVE and Vulnerability nodes
-
-- **`status[]`.** A CVE node written by an earlier version without it gets `status[]` at its next write; a full sync writes it on every NVD CVE.
-- **`attack_vector`.** Graphs built before 2026-10-15 mix the letters of the vector strings (`N`, `L`, `A`, `P`), NVD's words and an invented `UNKNOWN` (the KEV and OTX records sent `NETWORK`): on the hosted graph of 2026-10-15, `attack_vector = 'NETWORK'` matched 3,305 CVEs, and a re-merge of every CVE gives 100,779.
-- **CVSS versions.** Before 2026-10-15 an NVD record carried only one of CVSS 3.1, 3.0 and 2, so an update removed the sub-node of an older version when NVD added a newer one.
-- **CISA ICS sub-scores.** Until 2026-10-16 the CISA ICS collector sent 0.0 for both `impact_score` and `exploitability_score` of its CVSS payload.
-- **CVSS sub-node edges without `sources`.** On a CVE's `HAS_CVSS_*` edge written before the edge carried `sources`, the sub-node's `tag` names the feed that asserted it: that edge's `sources` takes the tag before the writing feed is added, so a sub-node NVD wrote counts as NVD's.
-- **Descriptions and dates.** Before 2026-10-15 the record merged last set a CVE's `description`, `published` and `last_modified`: a CVE an OTX pulse listed as an indicator could show the pulse's raw `OTX_META` JSON or the reference "Referenced in OTX pulse: <name>", a KEV record CISA's short description and a CISA ICS record the advisory's dates. An existing graph is repaired by one full sync after cleanup statements ([RUNBOOK.md § Repairing CVE descriptions and dates](RUNBOOK.md#repairing-cve-descriptions-and-dates)).
-- **Descriptions without `description_source`.** Nodes written before 2026-10-16 have a description but no `description_source`. Their text counts as the top source's: only NVD's record (CVE, Vulnerability) or MITRE's (the other labels) replaces it, and any other record fills only an empty description. The repair sections of [RUNBOOK.md](RUNBOOK.md#repairing-cve-descriptions-and-dates) remove those descriptions on the nodes EdgeGuard created before one full sync writes them again, each with its source.
-
-### ATT&CK entities and malware names
-
-- **`Technique.is_subtechnique`.** Graphs built before 2026-10-16 carry `false` on every Technique, sub-techniques included, because every sync wrote false; `merge_technique` sets it from the id on each write, so a technique carries the right value after its next write.
-- **Malware, ThreatActor and Tool descriptions.** Before 2026-10-15 the record merged last set the description: ATT&CK's text of Cobalt Strike or APT29 could give way to an OTX pulse's description, a family from a pulse without a description stored the raw `MITRE_USES_TECHNIQUES:{"rt":[...],"pid":"..."}` block, and every `Tactic` showed "MITRE ATT&CK tactic". OTX malware and actor attributes that MISP keeps from before 2026-10-15 carry a pulse's text after their block, and the tactic attributes of such a MISP hold MISPWriter's placeholder, so a `Tactic` synced from it carries no description. An existing graph is repaired by one full sync after cleanup statements ([RUNBOOK.md § Repairing Malware, ThreatActor and Tool descriptions](RUNBOOK.md#repairing-malware-threatactor-and-tool-descriptions)).
-- **Malware twins.** Before 2026-10-15 the OTX collector passed names with an ATT&CK software id through, and the sync and `merge_malware` kept them (lower-cased), so each became a `Malware` node of its own beside the ATT&CK node; on the graph of 2026-10-14, 136 such twins held 16,005 `INDICATES` links, and a query on the ATT&CK Cobalt Strike node found 55 indicators instead of about 2,078. `malware-type` attributes MISP keeps from that time carry the suffix, and the sync strips it as for any other writer. `merge_malware_attack_twins` folds the twins of such a graph without a new baseline; a later pulse creates the node of the base name beside such a twin (`mimikatz` beside `mimikatz - s0002`), which `base_name_targets` folds the twin into.
-- **Revoked and deprecated ATT&CK objects.** Before 2026-10-15 both became ordinary nodes: on the hosted graph of 2026-10-15, 158 of 982 Technique nodes and 6 ThreatActor nodes were revoked objects (`apt34`, `charming kitten`, `unc2452`, `monsoon`, `dragonfly 2.0`, `stolen pencil`, next to their successors `oilrig`, `magic hound`, `apt29`, `patchwork`, `dragonfly`, `kimsuky`), and deprecated objects were not marked (12 Technique nodes said so only in their description). Of the 24,452 links into revoked techniques there, 24,440 come from feed ids (`USES_TECHNIQUE` 22,278, `IMPLEMENTS_TECHNIQUE` 1,772, `EMPLOYS_TECHNIQUE` 390) and land on 37 successors: 1,371 of them are already there, the rest become 22,572 new links (a source that cited two revoked ids of one successor gets one link); the other 12 are `SUBTECHNIQUE_OF` links of revoked sub-techniques and go with them. Revoked techniques that MISP keeps from that time do not bring the node back, since the sync skips every technique the map lists.
-
-### Indicators
-
-- **Aging properties.** Indicators written before 2026-10-16 have no `source_confidence`. Until their next write the job keeps their `confidence_score` (it may carry the old decay, so it is neither aged again nor copied into `source_confidence`), and the readers show `coalesce(source_confidence, confidence_score)`. Their `last_decayed_tier` and `last_decayed_at` are neither written nor read. A node evaluated before `aging_evaluated_at` existed is written once by the aging job to store it. After deployment one full sync writes the new properties ([RUNBOOK.md](RUNBOOK.md#indicator-aging-properties)).
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and data written by earlier versions to the appendix; the `build_relationships` step numbers and the alias round trip are stated in the relationship table's notes.
 - 2026-10-17 — Corrected against the code: the `misp_attribute_tag` evidence label, `USES_TECHNIQUE` exported as STIX `indicates`, the constraint and index lists, sector labels (never `:Global`, no `global` next to a sector), item-level negative keywords, lower-case actor names in the examples and the zone examples.
 - 2026-10-17 — A CVSS edge written before it carried `sources` takes its feed from the sub-node's `tag`, `NVD_META` scores that are not finite numbers are dropped, a failed CVE sub-write makes `merge_cve` return False, and a partner write through `merge_resilmesh_cve` sets four CVE list properties.

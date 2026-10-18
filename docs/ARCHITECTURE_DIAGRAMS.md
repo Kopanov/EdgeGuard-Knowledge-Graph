@@ -350,19 +350,11 @@ campaign builder, 6/7 the calibration and 7/7 FIRST EPSS. Jobs 2/7, 3/7 and 7/7 
 
 ---
 
-## Appendix: data written by earlier versions
-
-The diagrams assume a graph built by a fresh baseline. On a graph kept across an upgrade:
-
-- **`r.misp_event_ids[]` on older edges.** `scripts/backfill_edge_misp_event_ids.py` backfills the array on `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS` edges written before those types carried it; a fresh baseline writes the provenance lists on every relationship.
-- **Co-occurrence calibration (job 6/7).** `calibrate_cooccurrence_confidence` changes only `INDICATES` and `EXPLOITS` edges at the `misp_cooccurrence` / `misp_correlation` level, which earlier versions wrote and no current code path writes; on a fresh baseline it changes nothing.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, data from earlier versions to the appendix.
 - 2026-10-17 — Corrected against the code: § 1 NATS has no deployed consumer and the APIs do not publish to it, MISP 2.4 / 2.5; § 2 the further collectors, the seven enrichment jobs and the labels the sync MERGE writes (it said indicators and vulnerabilities); § 3 `HAS_CVSS_v*` in both directions; § 4 MITRE + 7 daily collectors; § 5 task `neo4j_health_check`, the baseline-lock skips and `force_sync`; § 6 the baseline task ids; § 7 report-scoped linking with per-pulse caps, `query_pause` and the 600 s relationship timeout (no cross-product sampling); § 8 jobs numbered of seven and the campaign evidence; technology stack versions.
 - 2026-10-16 — The sync DAG runs every 72 hours, skips its chain when the last sync started less than 24 hours ago, and its writing tasks skip while a baseline holds the lock.

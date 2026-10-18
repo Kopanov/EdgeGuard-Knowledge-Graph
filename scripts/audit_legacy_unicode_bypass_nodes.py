@@ -236,8 +236,8 @@ def render_human(per_label: List[Dict[str, Any]]) -> str:
         lines.append("  * RE-MERGE — find the canonical node + ``CALL apoc.refactor.mergeNodes(...)``")
         lines.append("  * DELETE — node has no real edges; ``MATCH (n) WHERE elementId(n)=... DETACH DELETE n``")
         lines.append("")
-        lines.append("No need for a migration PR — keep it as a one-shot in")
-        lines.append("docs/MIGRATIONS.md with a date stamp + the count above.")
+        lines.append("No migration PR is needed. A wipe and fresh baseline")
+        lines.append("(docs/BASELINE_LAUNCH_CHECKLIST.md § [7]) removes them as well.")
     else:
         lines.append(f"RECOMMENDATION: {total_suspicious} suspicious nodes — full PR-N32 migration warranted.")
         lines.append("")
@@ -246,8 +246,10 @@ def render_human(per_label: List[Dict[str, Any]]) -> str:
         lines.append("     backfill_edge_misp_event_ids.py — --dry-run + --commit modes,")
         lines.append("     READ_ACCESS in dry-run, idempotency guard).")
         lines.append("  2. Policy decision tree (rename / re-merge / delete) per pattern.")
-        lines.append("  3. Docs/MIGRATIONS.md entry + RUNBOOK pointer.")
-        lines.append("  4. Behavioural test on a fake driver (no live Neo4j needed in CI).")
+        lines.append("  3. Behavioural test on a fake driver (no live Neo4j needed in CI).")
+        lines.append("")
+        lines.append("The project's path is a wipe and fresh baseline (docs/BASELINE_LAUNCH_CHECKLIST.md § [7]),")
+        lines.append("which removes them; build the migration above only for a graph that cannot be wiped.")
     lines.append("")
     return "\n".join(lines)
 

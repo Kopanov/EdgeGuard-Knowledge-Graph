@@ -15,14 +15,15 @@ conventions drift apart. This stub exists so that:
 If you arrived here looking for the contributor checklist, dev
 setup, lint/format/test commands, PR conventions, or the
 documentation convention (current behavior in the present tense,
-dated History entries, an appendix for data written by earlier
+dated History entries, no procedures for data written by earlier
 versions) — **→ [open `/CONTRIBUTING.md`](../CONTRIBUTING.md).**
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The documentation convention keeps no procedures for data written by earlier versions.
 - 2026-10-17 — The stub names the documentation convention among the topics of the root guide; the main text describes the current arrangement only.
 - 2026-04-28 — Replaced the byte-identical duplicate of the root guide with this stub, because two copies of the same conventions drift apart.

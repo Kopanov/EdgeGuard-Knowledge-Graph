@@ -1912,8 +1912,7 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
 # created): its aliases are ATT&CK's own. Its ``description`` is ATT&CK's too since 2026-10 (MITRE's
 # record ranks first, ``description_ranking``; ``description_source`` names it since 2026-10-16); a
 # graph built before that may still hold
-# the text of the feed merged last there until it is repaired (RUNBOOK "Repairing Malware,
-# ThreatActor and Tool descriptions"), so the group link is read from the delivered record first.
+# the text of the feed merged last there, so the group link is read from the delivered record first.
 _EXPORT_CYPHER = """
 MATCH (a:ThreatActor)
 OPTIONAL MATCH (a)-[sf:SOURCED_FROM]->(:Source {source_id: $mitre_source})

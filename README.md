@@ -245,7 +245,7 @@ Highlights:
 ### Prerequisites
 
 - Docker + Docker Compose (recommended — Neo4j, **`airflow_postgres`**, Airflow, REST API, GraphQL)
-- **or** **Python 3.12+** (required for pip/venv installs; `pyproject.toml` / CI match this) + Neo4j + MISP. For **pip-installed Airflow** with PostgreSQL metadata, use **`pip install ".[airflow]"`** or **`apache-airflow[postgres]~=3.3`** + **`apache-airflow-providers-standard~=1.5`** (see `requirements.txt`). *Note: Airflow 3.3 supports Python 3.10–3.14 upstream; EdgeGuard standardizes on 3.12+ and runs Airflow 3.3.2 (`apache/airflow:3.3.2-python3.12` base image). For a deployment that still runs Airflow 2.11, see [Appendix: data written by earlier versions](#appendix-data-written-by-earlier-versions).*
+- **or** **Python 3.12+** (required for pip/venv installs; `pyproject.toml` / CI match this) + Neo4j + MISP. For **pip-installed Airflow** with PostgreSQL metadata, use **`pip install ".[airflow]"`** or **`apache-airflow[postgres]~=3.3`** + **`apache-airflow-providers-standard~=1.5`** (see `requirements.txt`). *Note: Airflow 3.3 supports Python 3.10–3.14 upstream; EdgeGuard standardizes on 3.12+ and runs Airflow 3.3.2 (`apache/airflow:3.3.2-python3.12` base image).*
 
 ### Option A — One-line install (Docker, recommended)
 
@@ -362,7 +362,7 @@ make ci                         # lint + type-check + tests in one command
 ./install.sh --update --python --dev     # include dev extras
 ```
 
-Every `collect_*` task runs in the Airflow pool `edgeguard_collectors`, which the Compose `airflow` service creates or resizes at every start (`EDGEGUARD_COLLECTOR_POOL_SLOTS`). A stack installed by a version without that pool needs one step before the update: see [Appendix: data written by earlier versions](#appendix-data-written-by-earlier-versions).
+Every `collect_*` task runs in the Airflow pool `edgeguard_collectors`, which the Compose `airflow` service creates or resizes at every start (`EDGEGUARD_COLLECTOR_POOL_SLOTS`).
 
 ### Option C — Conda environment
 
@@ -466,7 +466,6 @@ python edgeguard.py doctor
 python edgeguard.py heal
 
 # Pull latest from git + reinstall (from clone root; same as ./install.sh --update)
-# (a stack installed by a version without the collector pool: see the appendix first)
 edgeguard update              # auto: Docker Compose if available, else pip
 edgeguard --update            # synonym for the above
 edgeguard update --docker     # force Docker only
@@ -598,10 +597,10 @@ After every MISP → Neo4j sync, **seven** enrichment jobs run automatically (`e
 |-----|-------------|
 | **Indicator aging** | One rule for every `Indicator`, whoever supplied it or created the node (`decay_ioc_confidence`, `src/indicator_aging.py`): from the latest report of any source (`last_reported_at`: the source's own `last_seen` capped at the MISP timestamp; `first_imported_at` when no report dated it), `confidence_score = max(0.10, round(source_confidence × factor, 2))` with ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, and retirement (`active = false`, `retired_by = 'decay'`, `retired_at` = basis + 730 days) from 730 days. Recomputed at the database's current time (lifted to a node's later `aging_evaluated_at`) before the campaign builder, only changed nodes written; a newer report reactivates a node in the same write, a re-sync changes nothing, a manual decommission (`retired_at` without that tag) stays. Each node shows `aging_basis`, `aging_tier`, `aging_factor`, `aging_since`, `last_reported_source`, `last_reported_ref` (the MISP attribute). No other label ages, and partner nodes get no EdgeGuard lifecycle property ([docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md#indicator-aging)). An indicator a collector run reports again has its stored MISP copy edited once MISP last wrote it more than `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` (30) ago; it gets younger when the source's date moved |
 | **Campaign Node Builder** | Creates `Campaign` nodes from ThreatActor → Malware → Indicator chains (`build_campaign_nodes`): an actor's malware are those attributed to it (`ATTRIBUTED_TO`) or used by it (`USES_MALWARE`, MITRE's `uses` and curated claims); each campaign link carries `campaign_grouping`, the confidence of the links it rests on and their types (`r.evidence_types`); a campaign whose actor has neither link left is deleted with its links, one whose indicators all expired stays inactive |
-| **Co-occurrence Calibration** | Rescores `INDICATES`/`EXPLOITS` edges whose `match_type` is `misp_cooccurrence` / `misp_correlation` by MISP event size (`calibrate_cooccurrence_confidence`). No such edges are written (links are report-scoped: same OTX pulse, `match_type='otx_pulse'`), so the job is a no-op on a fresh baseline (see the [appendix](#appendix-data-written-by-earlier-versions)) |
+| **Co-occurrence Calibration** | Rescores `INDICATES`/`EXPLOITS` edges whose `match_type` is `misp_cooccurrence` / `misp_correlation` by MISP event size (`calibrate_cooccurrence_confidence`). No such edges are written (links are report-scoped: same OTX pulse, `match_type='otx_pulse'`), so the job is a no-op on a fresh baseline |
 | **Vulnerability↔CVE bridge** | Idempotent `REFERS_TO` between `Vulnerability` and `CVE` (`bridge_vulnerability_cve`) |
 | **Actor alias merge** | Folds a non-MITRE `ThreatActor` into its canonical actor when its name is an alias of exactly one MITRE actor, or when the canonical threat-actor reference resolves it to another actor that is a node (APOC `mergeNodes`, edges re-pointed). A MITRE-sourced node is never folded; a node the two rules give different canonicals, or that would be both a canonical and a duplicate, is skipped, and so is an ATT&CK-alias pair whose name the reference marks ambiguous or never_merge. `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE=false` = dry run that only logs candidates (`merge_alias_duplicate_actors`, runs before the Campaign builder) |
-| **Malware ATT&CK-id twin merge** | Folds a non-MITRE `Malware` node named after an ATT&CK software id (`cobalt strike - s0154`: OTX names families as the MISP ATT&CK galaxy does, `"Cobalt Strike - S0154"`) into the MITRE `Malware` node of that id, read from the record MITRE delivered, or of that base name when the id cannot be read; for software without such a node (an ATT&CK tool), into the `Malware` node of its base name once a pulse has created it; a twin with neither is left and counted. Same merge as the actor alias merge (`merge_malware_attack_twins`, runs before the Campaign builder; `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE=false` = dry run). The collectors and the sync name such a family by its base name; the job repairs graphs written by earlier versions (see the [appendix](#appendix-data-written-by-earlier-versions)) |
+| **Malware ATT&CK-id twin merge** | Folds a non-MITRE `Malware` node named after an ATT&CK software id (`cobalt strike - s0154`: OTX names families as the MISP ATT&CK galaxy does, `"Cobalt Strike - S0154"`) into the MITRE `Malware` node of that id, read from the record MITRE delivered, or of that base name when the id cannot be read; for software without such a node (an ATT&CK tool), into the `Malware` node of its base name once a pulse has created it; a twin with neither is left and counted. Same merge as the actor alias merge (`merge_malware_attack_twins`, runs before the Campaign builder; `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE=false` = dry run). The collectors and the sync name such a family by its base name; the job repairs graphs written by earlier versions |
 | **FIRST EPSS** | The day's EPSS score and percentile on the `CVE` nodes that exist (`enrich_cve_epss`, `EDGEGUARD_ENABLE_EPSS`); see the data-source row below |
 
 **Canonical threat actors.** `src/reference/canonical_threat_actors.json` names one canonical actor per threat actor, with its ATT&CK group id and the names that mean it. It is built by `scripts/build_canonical_threat_actors.py` from the MITRE ATT&CK groups (the copy in the public MISP galaxy and the version EdgeGuard loaded, with revoked groups folded into their successors) and the public MISP threat-actor galaxies (CC0), plus the curated override decisions in `src/reference/canonical_threat_actor_overrides.json`, and is versioned by its build date (CalVer `YYYY.MM.DD`). The actor alias merge uses it next to the ATT&CK aliases; when the file is missing or invalid the merge logs one warning and falls back to the ATT&CK aliases alone. `EDGEGUARD_CANONICAL_THREAT_ACTORS` overrides the path. Rebuilding and the check at each ATT&CK release: [docs/RUNBOOK.md](docs/RUNBOOK.md), "Canonical threat-actor reference".
@@ -665,7 +664,7 @@ All node types are available: `CVE`, `Vulnerability`, `Indicator`, `ThreatActor`
 | `EDGEGUARD_ENABLE_MITRE_ICS=true` | MITRE ATT&CK for ICS: ~97 techniques (T08xx), 12 tactics (TA01xx), 14 groups, 23 malware; techniques and tactics carry `attack_domain = ics` (groups and malware carry no domain: one in both ATT&CK bundles keeps the Enterprise item, so measure ICS through the links into ICS techniques); `IN_TACTIC` and `SUBTECHNIQUE_OF` join within a domain only, because 9 of the 12 ICS tactic names equal Enterprise ones | The whole current matrix, every time the Enterprise bundle changes (no time window; a baseline always fetches). On an existing graph, run a baseline or set `MITRE_FORCE_REFETCH=true` for one daily run. ICS techniques are not auto-tagged to `energy` (planned follow-up). |
 | `EDGEGUARD_ENABLE_MALWAREBAZAAR=true` | MalwareBazaar (abuse.ch): one `sha256` indicator per recent malware sample, source `malwarebazaar`, with the family label (`signature`) as `malware_family` — linked to `Malware` nodes by `INDICATES` through the same path as the ThreatFox family; md5/sha1, file name, file type, reporter and the sample URL are carried along. No API key required (a configured `THREATFOX_API_KEY` is sent as the abuse.ch `Auth-Key`) | **Baseline and daily alike:** the public recent export (last 48 hours, about 1,000 samples), at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) per run, labelled samples first. The full export is not used, so the history builds up over the daily runs. |
 
-Set the flags in `.env` (`docker-compose.yml` forwards them into the `airflow` container through `x-common-env`), then run `docker compose up -d airflow`. Verify with `python scripts/verify_fresh_baseline.py --require-cisa-ics --require-ics --require-malwarebazaar` (on a graph kept from an earlier version, see the [appendix](#appendix-data-written-by-earlier-versions)). Mechanics: [`docs/COLLECTORS.md`](docs/COLLECTORS.md) § 4, § 12 and § 13; launch order: [`docs/BASELINE_LAUNCH_CHECKLIST.md` § \[7\]](docs/BASELINE_LAUNCH_CHECKLIST.md).
+Set the flags in `.env` (`docker-compose.yml` forwards them into the `airflow` container through `x-common-env`), then run `docker compose up -d airflow`. Verify with `python scripts/verify_fresh_baseline.py --require-cisa-ics --require-ics --require-malwarebazaar`. Mechanics: [`docs/COLLECTORS.md`](docs/COLLECTORS.md) § 4, § 12 and § 13; launch order: [`docs/BASELINE_LAUNCH_CHECKLIST.md` § \[7\]](docs/BASELINE_LAUNCH_CHECKLIST.md).
 
 **What each means for you:**
 - *CISA KEV* = "these are the most dangerous vulnerabilities hackers actually use"
@@ -821,7 +820,7 @@ This README stays the **short** entry (quick start, ports, env vars). Deep onboa
 | [docs/HEARTBEAT.md](docs/HEARTBEAT.md) | Airflow zombie tasks, OOM/SIGKILL, heartbeat timeout |
 | [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md) | Prometheus + Grafana monitoring stack |
 | [docs/MISP_SOURCES.md](docs/MISP_SOURCES.md) | MISP as single source of truth, event discovery, metadata prefixes |
-| [docs/MIGRATIONS.md](docs/MIGRATIONS.md) | Neo4j schema changes — the heal path (back up, then rebaseline against the current code), the fresh-baseline acceptance script, and the fix-up and audit scripts for graphs written by earlier versions that cannot be wiped |
+| [docs/MIGRATIONS.md](docs/MIGRATIONS.md) | Neo4j schema changes — the heal path (back up, then rebaseline against the current code) and the fresh-baseline acceptance script |
 | [docs/RESILIENCE_CONFIG.md](docs/RESILIENCE_CONFIG.md) | Circuit breakers, retry logic, timeout tuning |
 | [docs/SECRETS_MANAGEMENT.md](docs/SECRETS_MANAGEMENT.md) | Credential handling, env vars, key rotation |
 
@@ -1323,23 +1322,11 @@ Open work is tracked in a single list — see *Roadmap & Status → In Progress 
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. The points below matter only for a deployment, a graph or a MISP kept across an upgrade.
-
-- **Collector pool on an existing Compose stack.** A stack installed by a version without the Airflow pool `edgeguard_collectors` needs the pool before the update: create it on the running stack with `docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`, and update only when no `edgeguard_baseline` run is in progress; otherwise the collectors of new DAG runs are not scheduled until the pool exists. See [AIRFLOW_DAGS.md § Collector pool: first update of a running deployment](docs/AIRFLOW_DAGS.md#collector-pool-first-update-of-a-running-deployment).
-- **Airflow 2.11 deployments.** Migration notes for a deployment that still runs Airflow 2.11: [`docs/AIRFLOW_DAGS.md`](docs/AIRFLOW_DAGS.md#airflow-2-to-3-upgrade).
-- **Acceptance check on a kept graph.** On a graph built before 2026-10-16 (an existing graph with an additive baseline), add `--legacy-graph` to `python scripts/verify_fresh_baseline.py`, since the description-source and indicator aging checks fail there by construction.
-- **Co-occurrence edges.** The co-occurrence calibration job (`calibrate_cooccurrence_confidence`) acts only on `INDICATES` / `EXPLOITS` edges with `match_type` `misp_cooccurrence` / `misp_correlation`, which earlier versions wrote.
-- **Malware ATT&CK-id twins.** Earlier versions named such a family after its ATT&CK software id (`cobalt strike - s0154`); the Malware ATT&CK-id twin merge (`merge_malware_attack_twins`) folds those nodes into the `Malware` node of the id or of the base name.
-- **UNIQUE constraints on partner-owned labels** that earlier versions created are dropped automatically at the next sync.
-
----
-
 _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — Corrected against the code: the architecture pin test checks env vars, container names, `src/*.py` paths and the removed `python -m` command forms, not `edgeguard` subcommands; while a baseline holds the lock (until its successful end; a failed run keeps it until it is resumed and succeeds or the 48 h age limit) a scheduled collector task succeeds with `skipped: true` and the sync tasks are skipped; the baseline runs for up to 32 hours.
 - 2026-10-17 — README restructured: the main text describes the current system only; the change history moved to this section and the steps for kept deployments to the appendix.
 - 2026-10-17 — CISA ICS uses its own per-run cap (`EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`) on scheduled runs instead of `EDGEGUARD_INCREMENTAL_LIMIT`.

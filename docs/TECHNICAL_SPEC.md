@@ -570,7 +570,7 @@ Auth:    Configured via environment variables
 | `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` + `match_type` per evidence: `mitre_explicit` (0.95, `uses_techniques`) or `otx_pulse` (0.6, `reported_techniques`); curated-package claims: see below the table; `created_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` (`build_relationships.py` Q5/Q5b). |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; `mitre_explicit` (0.95) via `uses_techniques`, `otx_pulse` (0.6) via `reported_techniques` (`build_relationships.py` Q6/Q6b/Q10); curated-package claims: see below the table. |
 | `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path and Q2d, the pulse in `source_refs[]`; only from a pulse whose actors are one actor); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
-| `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. No code path writes the `misp_cooccurrence` level (0.5); `calibrate_cooccurrence_confidence` changes only `INDICATES` / `EXPLOITS` edges at the `misp_cooccurrence` or `misp_correlation` level (see the appendix) |
+| `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. No code path writes the `misp_cooccurrence` level (0.5); `calibrate_cooccurrence_confidence` changes only `INDICATES` / `EXPLOITS` edges at the `misp_cooccurrence` or `misp_correlation` level |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` |
 | `EXPLOITS` | ThreatActor / Malware | `CVE` | Curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 (both written when the claim creates the link), `tlp` = the package's TLP level |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`confidence_score` 0.85) |
@@ -1002,27 +1002,16 @@ other type is compared as given.
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a graph built by a fresh baseline. A graph kept across an upgrade can hold data that earlier versions wrote differently:
-
-- **`description_source`.** `Vulnerability`, `Malware`, `ThreatActor`, `Technique` and `Tool` nodes whose description was written before the source ranking carry no `description_source` (null).
-- **Suffixed malware families on indicators.** `Indicator.pulse_malware_families` entries can carry an ATT&CK software id suffix; step 9b looks them up by the name as given and without the suffix, each through the names in a Malware node's `merged_from`.
-- **Older same-pulse pairs.** `Indicator.pulse_malware_actor_pairs` entries can have the form `family::adversary` (without the pulse) or a suffixed family; step 2d looks them up as step 9b does.
-- **Co-occurrence edges.** `INDICATES` and `EXPLOITS` edges at the `misp_cooccurrence` (0.5) or `misp_correlation` level come only from earlier versions; `calibrate_cooccurrence_confidence` changes only those, so on a fresh baseline it changes nothing.
-- **Constraints on shared ResilMesh labels.** `create_constraints()` drops any UNIQUE constraint on `Device`, `NetworkService`, `SoftwareVersion`, `Application`, `Role` or `User` that an earlier EdgeGuard build created.
-
----
-
 *Technical Specification Version: 2.0*
 *For ResilMesh Engineers*
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, the handling of data from earlier versions to the appendix.
 - 2026-10-17 — Corrected against the code: a CVE's `confidence_score` is 0.5 from the MISP sync and does not mark KEV entries; NVD and CISA KEV ownership of CVE properties; Technique fields and the Tactic, Campaign and Sector schemas; the `SOURCED_FROM` properties; `HAS_CVSS_v*` in both directions; 19 UNIQUE constraints; the uuid indexes EdgeGuard creates on ResilMesh labels instead of ResilMesh indexes no code creates; `EDGEGUARD_MISP_MAX_PAGES` (a listing that reaches the cap fails the sync run), `EDGEGUARD_MISP_BATCH_THROTTLE_SEC`, `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC` and the `MISP_URL` default.
 - 2026-10-16 — Links to a `Sector` name only the feeds that gave the sector; `AFFECTS` is `advisory_sector` (0.9) where CISA's ICS advisory states the sector.
@@ -1039,6 +1028,7 @@ _Last updated: 2026-10-17_
 - 2026-10-14 — CVE score from the first CVSS (v3.1 → v3.0 → v2 → v4.0) with `cvss_version`, a null score and severity `UNKNOWN` without CVSS; `known_ransomware_use`.
 - 2026-10-14 — Every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]`, and `source_id`, `source_ids` and `report_ids` were dropped from relationships; campaign membership renamed from `PART_OF` to `PART_OF_CAMPAIGN`; curated packages add claims to existing links.
 - 2026-10-13 — VirusTotal `threat_label` and the URLhaus / Feodo Tracker fields `url_status` / `last_online` reach the graph.
+- 2026-10-11 — Shared-database contract: EdgeGuard creates no UNIQUE constraint on the ResilMesh labels `Device`, `NetworkService`, `SoftwareVersion`, `Application`, `Role` and `User` (earlier builds did).
 - 2026-10-11 — The interactive API documentation routes require the key in production.
 - 2026-10-10 — Report-scoped linking: same-pulse `INDICATES` / `ATTRIBUTED_TO` (`otx_pulse`) replaced whole-event co-occurrence, so the `misp_cooccurrence` level is no longer written; OTX pulse techniques as `reported_techniques`; `SUBTECHNIQUE_OF`, `USES_MALWARE` / `USES_TOOL` and `TARGETS` from actors and malware added.
 - 2026-06-12 — `GET /export/wazuh/cdb` added, the first Wazuh integration deliverable.

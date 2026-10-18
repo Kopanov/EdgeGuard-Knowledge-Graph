@@ -163,7 +163,7 @@ docker compose up -d
 
 The `airflow` service creates the Airflow pool `edgeguard_collectors` on every start (every collector task runs in it); `docker compose logs airflow | grep 'collector pool'` shows `[edgeguard] collector pool edgeguard_collectors set to <n> slots` once it is set.
 
-**Updating a running stack:** `./dags` is re-parsed live, but the pool is only created when the `airflow` container is recreated. (1) Pull; (2) only when no baseline is running (a recreate kills running tasks), `docker compose build && docker compose up -d` (rebuilds the Airflow image and the `edgeguard-kg` image that `api` and `graphql` bake `src/` into, and recreates every service whose image or configuration changed; the `metrics` service reads `./src` from a bind mount, so run `docker compose restart metrics` when it was not recreated); (3) check the pool with `docker exec edgeguard_airflow airflow pools list`. A stack from before the collector pool needs the pool first: see the [appendix](#appendix-data-written-by-earlier-versions).
+**Updating a running stack:** `./dags` is re-parsed live, but the pool is only created when the `airflow` container is recreated. (1) Pull; (2) only when no baseline is running (a recreate kills running tasks), `docker compose build && docker compose up -d` (rebuilds the Airflow image and the `edgeguard-kg` image that `api` and `graphql` bake `src/` into, and recreates every service whose image or configuration changed; the `metrics` service reads `./src` from a bind mount, so run `docker compose restart metrics` when it was not recreated); (3) check the pool with `docker exec edgeguard_airflow airflow pools list`.
 
 Wait for healthchecks (often **~60s** for Neo4j/Airflow), then:
 
@@ -283,18 +283,11 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh stack. For a stack kept across an upgrade:
-
-- **Upgrading a running stack to the collector pool.** Until the pool `edgeguard_collectors` exists, the collectors of new DAG runs are never scheduled (no failure alert), and the `airflow` service creates it only when its container is recreated, while `./dags` is re-parsed live after the pull. So create the pool before pulling: `docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`; then follow the update steps of § 4. Details: [AIRFLOW_DAGS.md § Collector pool: first update of a running deployment](AIRFLOW_DAGS.md#collector-pool-first-update-of-a-running-deployment).
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; the collector pool upgrade for a running stack moved to the appendix; § 6 renamed to "Checklist of common setup ideas".
 - 2026-10-17 — Corrected against the code: `NEO4J_TX_MEMORY_MAX` sets `dbms.memory.transaction.total.max` (all running transactions together); Tiny dev TX max 4g; the baseline-capable values are commented out in `.env.example` and must be set in `.env`; host RAM from the container limits (about 47g, plan 48g); `docker compose down -v` keeps `./state` and `./checkpoints`; the update rebuilds every image; the MISP check uses the container's `MISP_URL`; the batch throttle also paces KEV revisions and indicator refreshes; the MISP circuit breaker opens after 3 recorded failures; node count of the 2026-10-16 baseline.
 - 2026-10-16 — Collector pool `edgeguard_collectors`: created by the `airflow` service on every start; upgrade order for a running stack (pool before the pull, recreate only when no baseline runs); resizing by `docker compose up -d airflow`.

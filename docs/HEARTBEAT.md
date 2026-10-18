@@ -38,14 +38,11 @@ Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies
 
 ---
 
-## Appendix: data written by earlier versions
-
-A `.env` or compose override kept from an earlier version may set the Airflow 2 names `AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD`, `AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC` and `AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL`. Airflow 3 renamed them without an alias and does not read them: with the three set and no Airflow 3 name, Airflow 3.3.2 applies its defaults, `task_instance_heartbeat_timeout` = **300** s and `task_instance_heartbeat_timeout_detection_interval` = **10** s (measured). Use the Airflow 3 names above; the `airflow config get-value` command shows the value in effect.
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to the current system; the Airflow 2 variable names moved to the appendix.
 - 2026-10-17 — Airflow 3 heartbeats described (the supervisor's heartbeat every `[workers] min_heartbeat_interval`, the scheduler's `task_instance_heartbeat_timeout` and detection interval); `docker-compose.yml` sets the Airflow 3 names (3600 s timeout, 60 s detection interval) instead of the Airflow 2 names `SCHEDULER_ZOMBIE_TASK_THRESHOLD=3600`, `LOCAL_TASK_JOB_HEARTBEAT_SEC=30` and `ZOMBIE_DETECTION_INTERVAL=60`, which Airflow 3 does not read, so Airflow's defaults (300 s, 10 s) applied until then.
 - 2026-04-26 — The Airflow version is named as Airflow 3.x (EdgeGuard's pinned version since 2026-04-15) instead of "Airflow 2.11 and 3.2".

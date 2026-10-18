@@ -502,20 +502,11 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. A graph kept across an upgrade can still hold:
-
-- **Co-occurrence edges.** Versions before report-scoped linking wrote `INDICATES` and `EXPLOITS` edges from whole-event co-occurrence (`match_type` `misp_cooccurrence` / `misp_correlation`). The calibration job `calibrate_cooccurrence_confidence` (§ 4.3, layer 2) down-weights them by event size; a fresh baseline writes none.
-- **Attributions from multi-actor pulses.** `build_relationships` step 2d removes an `ATTRIBUTED_TO` edge that rests only on OTX pulses naming several actors (a graph built before that rule holds them), unless another feed asserts the link too, and drops such pulses from the provenance of the attributions that remain; see [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md).
-- **Sector tags without the CPE vendor vocabulary.** Tags are assigned at collection, so CVEs collected before the vocabulary of § 3.6b keep their earlier zones until a baseline or a daily run collects them again.
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; history and repairs of data from earlier versions moved to the end.
 - 2026-10-17 — Corrected against the code: each collector's confidence value (MITRE by object type; ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker, SSL Blacklist and CISA ICS rows), only an indicator's band (0.8 / 0.5 / 0.3) reaches Neo4j, collection flow through MISP, production zone matching and keywords, malware families not sector keywords, CISA ICS / MalwareBazaar / FIRST EPSS sources, `ATTRIBUTED_TO` as Malware → ThreatActor, `INDICATOR_RESOLVES_TO` as the planned DNS bridge, merge pseudo-code with write-time `last_updated` and Indicator aging, MISP `uri` not read as a URL.
 - 2026-10-16 — Time decay replaced by indicator aging: one rule for every Indicator from the latest report of any source, ×0.85 / ×0.70 / ×0.55 from 90 / 180 / 365 days, retirement from 730 days, `aging_*` properties (incl. `aging_evaluated_at`) instead of `last_decayed_tier`; Vulnerability decay tiers removed.

@@ -339,28 +339,11 @@ LIMIT 25
 
 *Save queries to test the prototype*
 
-## Appendix: data written by earlier versions
-
-The queries above assume a graph built from a fresh baseline. On a graph kept across an upgrade:
-
-- **CVE scores.** Graphs built before 2026-10-15 show a CVE without any CVSS as 3.0 / LOW.
-- **Attack vector.** Graphs built before 2026-10-15 mix the vector-string letters (`N`, `L`, `A`, `P`) with the words and `UNKNOWN`, so `c.attack_vector = 'NETWORK'` there misses most network-exploitable CVEs (3,305 matches on the hosted graph of 2026-10-15; 100,779 after a re-merge).
-- **`cisa_exploit_add` and `aliases`.** On baselines built before June 2026 only NVD-enriched CVEs carry `cisa_exploit_add`, and the `aliases` of `ThreatActor` nodes are empty (0/917 actors), so the alias-aware actor query resolves only canonical names there.
-- **CISA ICS on sector links.** On a graph built before 2026-10-16 `r.sources` of a sector link names every feed of the node, so count CISA there through MISP (the `source:CISA-ICS` attributes and their `zone:*` tags) or through `SOURCED_FROM.raw_data`, not `r.sources`.
-- **Edges without `misp_event_ids`.** A graph built before 2026-04-23 has relationships without the list. `scripts/backfill_edge_misp_event_ids.py` copies every MISP event of the node onto such an edge of the types `INDICATES`, `EXPLOITS`, `TARGETS` and `AFFECTS`, not the per-source / per-sector events the pipeline writes, so it is not needed on a graph built since then. To estimate its scope before running it:
-
-```cypher
-// Edges written before 2026-04-23 have no array; later edges always do.
-MATCH ()-[r]->()
-WHERE type(r) IN ['INDICATES', 'EXPLOITS', 'TARGETS', 'AFFECTS']
-  AND (r.misp_event_ids IS NULL OR size(r.misp_event_ids) = 0)
-RETURN type(r) AS edge_type, count(r) AS gap
-```
-
 _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — *Count by zone* unwinds the `zone` list and counts each node once per zone.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and queries for graphs built by earlier versions to the appendix.
 - 2026-10-17 — The `IMPLEMENTS_TECHNIQUE` sample filters on `mitre_explicit`, because OTX-reported and curated links share the type; code references name functions instead of line numbers; the properties `merge_technique` writes are listed.

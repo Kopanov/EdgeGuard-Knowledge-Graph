@@ -356,7 +356,7 @@ Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `i
 
 #### Co-occurrence Confidence Calibration
 
-Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.match_type IN ('misp_cooccurrence', 'misp_correlation')`, using the number of indicators in the same MISP event. No producer writes such edges (the sync links report-scoped, `match_type='otx_pulse'`), so the pass is a no-op on a fresh baseline; what it does on a graph that holds such edges is described in the [appendix](#co-occurrence-edges-and-their-calibration). Other edges, curated-package claims included, are untouched. (CVE-tag `EXPLOITS` edges carry `match_type='cve_tag'` and are not tuned by this pass.)
+Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.match_type IN ('misp_cooccurrence', 'misp_correlation')`, using the number of indicators in the same MISP event. No producer writes such edges (the sync links report-scoped, `match_type='otx_pulse'`), so the pass is a no-op on a fresh baseline. Other edges, curated-package claims included, are untouched. (CVE-tag `EXPLOITS` edges carry `match_type='cve_tag'` and are not tuned by this pass.)
 
 ## Data Quality Targets
 
@@ -467,7 +467,7 @@ No base-plus-bonus confidence formula is implemented. How `confidence_score` is 
 
 ## Airflow Setup Requirements
 
-**Docker Compose (`docker-compose.yml`):** the **`airflow`** service is **built** from **`Dockerfile.airflow`**, which installs **`requirements-airflow-docker.txt`** (e.g. **`neo4j`**, **`pymisp`**, **`apache-airflow-providers-standard`**) on top of **`apache/airflow:3.3.2-python3.12`**. After dependency changes, run **`docker compose build airflow`**. The service uses **`LocalExecutor`** with **PostgreSQL** (`airflow_postgres`) for metadata. Optional credentials: `AIRFLOW_POSTGRES_*` in `.env`. If runs stall, see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting; for operators upgrading from an existing 2.11 deployment see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade).
+**Docker Compose (`docker-compose.yml`):** the **`airflow`** service is **built** from **`Dockerfile.airflow`**, which installs **`requirements-airflow-docker.txt`** (e.g. **`neo4j`**, **`pymisp`**, **`apache-airflow-providers-standard`**) on top of **`apache/airflow:3.3.2-python3.12`**. After dependency changes, run **`docker compose build airflow`**. The service uses **`LocalExecutor`** with **PostgreSQL** (`airflow_postgres`) for metadata. Optional credentials: `AIRFLOW_POSTGRES_*` in `.env`. If runs stall, see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting.
 
 ```bash
 # Install Airflow + PostgreSQL driver (matches docker-compose metadata backend)
@@ -506,41 +506,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline. The notes below matter only for a graph kept across an upgrade.
-
-### Generic `USES` technique edges
-
-A graph built before the technique edges were split holds a single generic `USES` edge from actors, malware and tools to techniques. No migration script is shipped; a fresh baseline writes `EMPLOYS_TECHNIQUE` and `IMPLEMENTS_TECHNIQUE` directly.
-
-### Co-occurrence edges and their calibration
-
-Earlier versions wrote `INDICATES` and `EXPLOITS` edges from MISP co-occurrence (`match_type` `misp_cooccurrence` or `misp_correlation`). On a graph that still holds them, `calibrate_cooccurrence_confidence` sets their confidence from the number of indicators in the same MISP event:
-
-| Event size (indicators in same event) | Confidence set to |
-|--------------------------------------|-------------------|
-| ≤ 10 (tight incident report) | 0.50 |
-| 11–20 (small report) | 0.45 |
-| 21–100 (medium feed) | 0.40 |
-| 101–500 (large feed) | 0.35 |
-| > 500 (bulk dump, e.g. Feodo) | 0.30 |
-
-Only edges with `match_type IN ['misp_cooccurrence', 'misp_correlation']` are modified; other edges, curated-package claims included, are untouched.
-
-> **Multi-event event sizing (array-only):** the event-size pre-compute
-> UNWINDs `misp_event_ids[]` and counts distinct Indicators per event id,
-> so multi-event Indicators contribute to the size of every event they
-> appear in. The matcher and the large-event `apoc.periodic.iterate`
-> path use the same array IN-membership semantics; the large-event path
-> uses APOC's `params:` config so the event id is bound (no f-string
-> interpolation), and binds the batch column `rid` as a variable in the
-> inner statement.
-
 _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — Baseline vs Incremental table: the incremental lookback is each collector's cursor or its feed's current window, not 72 hours.
 - 2026-10-17 — Rewritten as a guide to the current system: change history moved to this section, co-occurrence calibration details to the appendix.
 - 2026-10-17 — CISA ICS uses its own per-run cap (`EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`, `cisa_ics` in `OWN_RUN_CAP_SOURCES`); the incremental collectors read from their cursor or feed window (the text said the last 2–3 days without an item cap); the sync's ShortCircuit also skips while a baseline holds the lock and the writing tasks check it again; `source_key_check` has `retries=0`; every baseline collector installs the liveness callback; the confidence formulas are marked illustrative.

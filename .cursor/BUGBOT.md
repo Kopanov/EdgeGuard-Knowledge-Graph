@@ -436,7 +436,7 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 
 **Sector links.** Flag a write of a link to a `Sector` that names in `r.sources` (or copies `source_refs` / `misp_event_ids` from) a feed whose `SOURCED_FROM.zones` do not hold that sector: use `relationship_provenance.zone_prov_with`, never `prov_with(n, node_feeds(n))`, for a sector link. Flag `advisory_sector` anywhere but on `AFFECTS` from a CVE / Vulnerability whose `cisa_ics` record stated the sector (`sector_evidence.STATEMENT_LABELS`; a CISA advisory sector means "deployed in", never TARGETS), a hard-coded confidence on a sector link (it comes from `sector_evidence.LABEL_CONFIDENCE`), and a statement label whose confidence is not above `zone_classification`'s. A new `SOURCED_FROM` write site must set `zones`, `stated_zones` and `stated_refs` (`neo4j_client._sourced_zone_items`). Flag a sector link that cites every record of a stating feed instead of those recorded for its sector (`sector_evidence.zone_refs`, `stated_refs`), and a light copy of a parsed item (the paged sync's `_REL_KEYS`) that drops `stated_zones` or `stated_refs`.
 
-> **Technique edges:** a Technique edge is `EMPLOYS_TECHNIQUE`, `IMPLEMENTS_TECHNIQUE` or `USES_TECHNIQUE`, never a generic `USES`. `create_misp_relationships_batch` has no `rel_type="USES"` route: `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` rows must name `from_type`, and a row without it is dropped with a warning. Flag any code that **emits** `USES` for a Technique edge; code that also reads `USES` is fine (see the appendix).
+> **Technique edges:** a Technique edge is `EMPLOYS_TECHNIQUE`, `IMPLEMENTS_TECHNIQUE` or `USES_TECHNIQUE`, never a generic `USES`. `create_misp_relationships_batch` has no `rel_type="USES"` route: `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` rows must name `from_type`, and a row without it is dropped with a warning. Flag any code that **emits** `USES` for a Technique edge.
 
 Flag **`(ThreatActor)-[:ATTRIBUTED_TO]->(Malware)`** (reversed). Flag any relationship creation that reverses the rows above. Wrong `ATTRIBUTED_TO` direction makes traversals return empty results silently.
 
@@ -1045,18 +1045,11 @@ When code changes affect user-visible behavior (CLI commands, env vars, DAG sett
 
 ---
 
-## Appendix: data written by earlier versions
-
-The rules above assume a graph built by a fresh baseline. A graph kept across an upgrade can hold data the current code does not write; code that only reads such data is fine, code that writes it is flagged by the rules above.
-
-- **Generic `USES` Technique edges.** ThreatActor→Technique, Malware→Technique and Tool→Technique links can be a generic `USES` edge instead of `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE`. No migration script exists; a fresh baseline writes the specialized edge types. A query that reads both is fine; a write of `USES` for a Technique edge is flagged (§4, §5).
-- **`PART_OF` campaign membership.** Malware→Campaign and Indicator→Campaign membership can be a `PART_OF` edge instead of `PART_OF_CAMPAIGN`; a fresh baseline writes `PART_OF_CAMPAIGN`.
-- **Indicators without `source_confidence`.** Such an Indicator keeps its stored `confidence_score` until a write records `source_confidence` (§14 "Confidence: max-wins per label").
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as the current rules; data written by earlier versions moved to the appendix.
 - 2026-10-17 — Rules added for the CISA KEV whole-catalogue comparison with in-place edits, the CISA ICS per-run cap, the OTX cursor after a partial MISP push and the baseline-lock check in every writing task; review rules corrected against the code and extended to the changes of 2026-10-16.
 - 2026-10-16 — Indicator aging and retirement, max-wins confidence per label, the description ranking, campaign evidence, the collector pool, the `eventinfo` event lookup and per-sector provenance on Sector links introduced.
