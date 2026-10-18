@@ -538,7 +538,7 @@ done
 
 ### Step 4 — Post-run validation
 
-Run the 5 validation Cypher queries in [`docs/RUNBOOK.md § "After the run"`](docs/RUNBOOK.md#after-the-run). Any non-zero on queries #1–#4 means a regression — file an issue before starting incremental syncs.
+Run the 4 validation Cypher queries in [`docs/RUNBOOK.md § "After the run"`](docs/RUNBOOK.md#after-the-run). Any non-zero on queries #1–#3 means a regression — file an issue before starting incremental syncs.
 
 ### Retrieving raw MISP data from a Neo4j node
 
@@ -663,7 +663,7 @@ All node types are available: `CVE`, `Vulnerability`, `Indicator`, `ThreatActor`
 | `EDGEGUARD_ENABLE_MITRE_ICS=true` | MITRE ATT&CK for ICS: ~97 techniques (T08xx), 12 tactics (TA01xx), 14 groups, 23 malware; techniques and tactics carry `attack_domain = ics` (groups and malware carry no domain: one in both ATT&CK bundles keeps the Enterprise item, so measure ICS through the links into ICS techniques); `IN_TACTIC` and `SUBTECHNIQUE_OF` join within a domain only, because 9 of the 12 ICS tactic names equal Enterprise ones | The whole current matrix, every time the Enterprise bundle changes (no time window; a baseline always fetches). On an existing graph, run a baseline or set `MITRE_FORCE_REFETCH=true` for one daily run. ICS techniques are not auto-tagged to `energy` (planned follow-up). |
 | `EDGEGUARD_ENABLE_MALWAREBAZAAR=true` | MalwareBazaar (abuse.ch): one `sha256` indicator per recent malware sample, source `malwarebazaar`, with the family label (`signature`) as `malware_family` — linked to `Malware` nodes by `INDICATES` through the same path as the ThreatFox family; md5/sha1, file name, file type, reporter and the sample URL are carried along. No API key required (a configured `THREATFOX_API_KEY` is sent as the abuse.ch `Auth-Key`) | **Baseline and daily alike:** the public recent export (last 48 hours, about 1,000 samples), at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) per run, labelled samples first. The full export is not used, so the history builds up over the daily runs. |
 
-Set the flags in `.env` (`docker-compose.yml` forwards them into the `airflow` container through `x-common-env`), then run `docker compose up -d airflow`. Verify with `python scripts/verify_fresh_baseline.py --require-cisa-ics --require-ics --require-malwarebazaar`. Mechanics: [`docs/COLLECTORS.md`](docs/COLLECTORS.md) § 4, § 12 and § 13; launch order: [`docs/BASELINE_LAUNCH_CHECKLIST.md` § \[7\]](docs/BASELINE_LAUNCH_CHECKLIST.md).
+Set the flags in `.env` (`docker-compose.yml` forwards them into the `airflow` container through `x-common-env`), then run `docker compose up -d airflow`. Verify with `python scripts/verify_fresh_baseline.py --require-cisa-ics --require-ics --require-malwarebazaar`. Mechanics: [`docs/COLLECTORS.md`](docs/COLLECTORS.md) § 4, § 12 and § 13; launch order: [`docs/BASELINE_LAUNCH_CHECKLIST.md` § \[6\]](docs/BASELINE_LAUNCH_CHECKLIST.md).
 
 **What each means for you:**
 - *CISA KEV* = "these are the most dangerous vulnerabilities hackers actually use"
@@ -1287,7 +1287,7 @@ JSON persistence of run metrics: the `data/metrics.json` writer in `src/metrics.
 
 ## 📈 Current Status
 
-EdgeGuard v2026.10.10 is **production-test ready**. Unit tests + lint + type-check + Docker build (Trivy on the `apache/airflow:3.3.2` base) + dependency scan (pip-audit with no ignore list) are all green on `main`. The MISP import rule, the source flags and the operator order for a fresh baseline (deploy `main` first) are in [`docs/BASELINE_LAUNCH_CHECKLIST.md` § \[7\]](docs/BASELINE_LAUNCH_CHECKLIST.md).
+EdgeGuard v2026.10.10 is **production-test ready**. Unit tests + lint + type-check + Docker build (Trivy on the `apache/airflow:3.3.2` base) + dependency scan (pip-audit with no ignore list) are all green on `main`. The MISP import rule, the source flags and the operator order for a fresh baseline (deploy `main` first) are in [`docs/BASELINE_LAUNCH_CHECKLIST.md` § \[6\]](docs/BASELINE_LAUNCH_CHECKLIST.md).
 
 ### ✅ Implemented
 
@@ -1325,7 +1325,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — Six post-sync enrichment jobs: the co-occurrence calibration job was removed, because no current code writes the `misp_cooccurrence` / `misp_correlation` edges it rescored.
+- 2026-10-18 — Six post-sync enrichment jobs: the co-occurrence calibration job was removed, because no current code writes the `misp_cooccurrence` / `misp_correlation` edges it rescored; Step 4 runs the four post-run validation queries (a non-zero on #1–#3 is a regression); the fresh-baseline launch order is § [6] of the launch checklist.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — Corrected against the code: the architecture pin test checks env vars, container names, `src/*.py` paths and the removed `python -m` command forms, not `edgeguard` subcommands; while a baseline holds the lock (until its successful end; a failed run keeps it until it is resumed and succeeds or the 48 h age limit) a scheduled collector task succeeds with `skipped: true` and the sync tasks are skipped; the baseline runs for up to 32 hours.
 - 2026-10-17 — README restructured: the main text describes the current system only; the change history moved to this section and the steps for kept deployments to the appendix.

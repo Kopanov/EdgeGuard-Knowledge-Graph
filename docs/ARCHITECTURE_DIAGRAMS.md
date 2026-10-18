@@ -214,7 +214,7 @@ flowchart LR
     A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_health_check<br/>Health check]
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 8h timeout]
     C --> D["build_relationships<br/>20 link steps → many edge types incl. INDICATES (family + same-pulse), EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL"]
-    D --> E[run_enrichment_jobs<br/>7 post-sync jobs]
+    D --> E[run_enrichment_jobs<br/>6 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
     A -->|"skip: a baseline holds the lock, or the last sync started < 24 h ago (force_sync bypasses the 24 h guard)"| SKIP[All downstream<br/>SKIPPED]
@@ -343,7 +343,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job was removed from § 2 and § 8 (no current code writes the edges it rescored).
+- 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job was removed from § 1, § 2, § 5 and § 8 (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, data from earlier versions to the appendix.
 - 2026-10-17 — Corrected against the code: § 1 NATS has no deployed consumer and the APIs do not publish to it, MISP 2.4 / 2.5; § 2 the further collectors, the seven enrichment jobs and the labels the sync MERGE writes (it said indicators and vulnerabilities); § 3 `HAS_CVSS_v*` in both directions; § 4 MITRE + 7 daily collectors; § 5 task `neo4j_health_check`, the baseline-lock skips and `force_sync`; § 6 the baseline task ids; § 7 report-scoped linking with per-pulse caps, `query_pause` and the 600 s relationship timeout (no cross-product sampling); § 8 jobs numbered of seven and the campaign evidence; technology stack versions.
