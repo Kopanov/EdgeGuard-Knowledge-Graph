@@ -65,7 +65,7 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │     CVE-tag EXPLOITS, sector edges — no event co-occurrence │
 │  2. enrichment_jobs — Vulnerability↔CVE bridge, actor alias │
 │     merge, Malware twin merge, indicator aging, campaigns   │
-│     (RUNS/PART_OF_CAMPAIGN), calibration, FIRST EPSS        │
+│     (RUNS/PART_OF_CAMPAIGN), FIRST EPSS                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -88,7 +88,7 @@ MISP → convert_to_stix21() / PyMISP to_stix2 → load_stix21_to_neo4j() → Ne
 
 STIX is also used for **export** (`--stix`, `export_to_stix21`) and lives in **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** for tooling — those helpers are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow.
 
-**After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging — one rule for every Indicator, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later, so a re-run of an older run never moves a node's aging back ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*) —, campaigns, calibration, FIRST EPSS). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
+**After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging — one rule for every Indicator, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later, so a re-run of an older run never moves a node's aging back ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*) —, campaigns, FIRST EPSS). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
 
 ---
 
@@ -308,7 +308,7 @@ from `attr.uuid`, set in
 [run_misp_to_neo4j.py `parse_attribute`](../src/run_misp_to_neo4j.py).
 
 **Array-only provenance:** every MISP-derived consumer
-(`calibrate_cooccurrence_confidence`, STIX export) reads only
+(the STIX export among them) reads only
 `misp_event_ids[]` / `misp_attribute_ids[]`; nodes carry no first-seen
 scalars `misp_event_id` / `misp_attribute_id`. A node from several events
 is tracked via the array's full list of contributing events with
@@ -398,7 +398,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/misp_collector.py` | Fetch/normalize events from MISP API (ingest) — **not** used in default baseline collector tier |
 | `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j**: `fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`, optional STIX helpers for CLI/export |
 | `src/run_pipeline.py` | CLI orchestration; optional **STIX flow** to Neo4j; collector steps to MISP |
-| `src/enrichment_jobs.py` | Post-sync enrichment: Vulnerability↔CVE `REFERS_TO` bridge, actor alias merge, Malware ATT&CK-id twin merge (`cobalt strike - s0154` into `cobalt strike`), indicator aging (the rule in `src/indicator_aging.py`), campaigns, co-occurrence calibration, FIRST EPSS |
+| `src/enrichment_jobs.py` | Post-sync enrichment: Vulnerability↔CVE `REFERS_TO` bridge, actor alias merge, Malware ATT&CK-id twin merge (`cobalt strike - s0154` into `cobalt strike`), indicator aging (the rule in `src/indicator_aging.py`), campaigns, FIRST EPSS |
 | `src/cve_feed_enrichment.py` | FIRST EPSS on existing `CVE` nodes: bounded download, parse, batched `SET`, removal for CVEs that left the feed; the one source written to Neo4j without MISP |
 | `src/build_relationships.py` | Graph relationship builder (exact / MITRE-ID / scoped co-occurrence — **no `CONTAINS`**) |
 | `src/indicator_aging.py` | The one Indicator aging rule (basis, tiers, retirement, `aging_evaluated_at`) |
@@ -500,6 +500,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The co-occurrence calibration job was removed from the post-sync enrichment jobs (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, the handling of graphs from earlier versions to the appendix.
 - 2026-10-17 — Corrected against the code: 12 collector sources (2 flag-guarded) and 2 placeholders, the seven enrichment jobs, the node list, `tag` outside the Indicator key, the `SOURCED_FROM` properties and when `raw_data` is replaced, what `RUNS` rests on, `confidence:*` tags on indicator attributes only, 20 link steps, no DAG task for `VirusTotalCollector`, further key files, and the zone example with two event tags.

@@ -623,7 +623,6 @@ class TestTheJob:
             "merge_alias_duplicate_actors",
             "merge_malware_attack_twins",
             "build_campaign_nodes",
-            "calibrate_cooccurrence_confidence",
             "enrich_cve_epss",
         ):
             monkeypatch.setattr(enrichment_jobs, name, lambda c, _n=name: seen.append(_n) or {})

@@ -2,57 +2,13 @@
 
 PR #33 round 10 dropped the legacy scalar ``misp_event_id`` (and
 ``misp_attribute_id``). All MISP provenance now lives in the array fields
-``misp_event_ids[]`` / ``misp_attribute_ids[]``. These tests intercept the
-Cypher strings sent to Neo4j (via a fake driver) and pin that the readers
-use array-only predicates — guarding against regressions where a future
-refactor accidentally re-introduces the scalar.
+``misp_event_ids[]`` / ``misp_attribute_ids[]``. These tests read the
+Cypher templates and pin that the readers use array-only predicates —
+guarding against regressions where a future refactor accidentally
+re-introduces the scalar.
 """
 
 from __future__ import annotations
-
-from typing import Any, Dict, List, Tuple
-from unittest.mock import MagicMock, patch
-
-import pytest
-
-# ---------------------------------------------------------------------------
-# Capturing fake Neo4j driver — records every Cypher session.run() call.
-# ---------------------------------------------------------------------------
-
-
-class _CapSession:
-    def __init__(self, captured: List[Tuple[str, Dict[str, Any]]]):
-        self._captured = captured
-        # Records returned by .single(); empty unless the test populates them.
-        self.next_records: List[Dict[str, Any]] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def run(self, cypher: str, **params: Any):
-        self._captured.append((cypher, params))
-        # Mirror neo4j Result enough for the production code to consume.
-        result = MagicMock()
-        # event_sizes pre-compute iterates — yield records eagerly via __iter__.
-        records = self.next_records or []
-        result.__iter__ = lambda self_: iter(records)
-        result.single = lambda: records[0] if records else None
-        return result
-
-
-class _CapDriver:
-    def __init__(self):
-        self.captured: List[Tuple[str, Dict[str, Any]]] = []
-
-    def session(self, **_kwargs: Any):
-        return _CapSession(self.captured)
-
-    def close(self) -> None:  # for retry decorators that may close
-        pass
-
 
 # ---------------------------------------------------------------------------
 # mark_inactive_nodes — removed 2026-10-16
@@ -66,92 +22,6 @@ def test_mark_inactive_nodes_is_removed():
     from neo4j_client import Neo4jClient
 
     assert not hasattr(Neo4jClient, "mark_inactive_nodes")
-
-
-# ---------------------------------------------------------------------------
-# calibrate_cooccurrence_confidence — array-only event sizing
-# ---------------------------------------------------------------------------
-
-
-def test_calibrate_event_sizes_query_is_array_only():
-    """The pre-compute query must count an Indicator against EVERY MISP event
-    in its misp_event_ids[] array. The legacy scalar fallback was removed in
-    PR #33 round 10."""
-    import enrichment_jobs
-
-    client = MagicMock()
-    client.driver = _CapDriver()
-
-    # No indicators → function exits after first query; that's all we need.
-    enrichment_jobs.calibrate_cooccurrence_confidence(client)
-
-    queries = [c for c, _ in client.driver.captured]
-    assert queries, "expected the event-sizes pre-compute query to run"
-    pre = queries[0]
-    assert "misp_event_ids" in pre, "event_sizes_query must include the array"
-    assert "i.misp_event_id " not in pre and "i.misp_event_id\n" not in pre, (
-        "legacy scalar i.misp_event_id leaked back into event_sizes_query"
-    )
-    assert "UNWIND" in pre, "event_sizes_query must UNWIND the array"
-    assert "count(DISTINCT i)" in pre, "must count distinct indicators per event"
-
-
-def test_calibrate_large_event_query_is_parameterized_array_only():
-    """Large-event path uses apoc.periodic.iterate with parameter binding.
-    PR #33 round 10: scalar leg dropped, only the array IN-membership."""
-    import enrichment_jobs
-
-    client = MagicMock()
-    client.driver = _CapDriver()
-
-    real_session = client.driver.session
-    call_count = {"n": 0}
-
-    def _sess(**_kw):
-        s = real_session()
-        if call_count["n"] == 0:
-            s.next_records = [{"eid": "9001", "sz": 5000}]
-        call_count["n"] += 1
-        return s
-
-    client.driver.session = _sess
-
-    # The stub answers every .single() with the event-sizes record, so the large path
-    # has no "updated" column; that tier fails and the job now raises after all tiers ran.
-    with patch.object(enrichment_jobs.time, "sleep", lambda *_: None):
-        with pytest.raises(RuntimeError, match=r"\[CALIBRATE\] 1 tier\(s\) failed"):
-            enrichment_jobs.calibrate_cooccurrence_confidence(client)
-
-    large_queries = [c for c, _ in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
-    assert large_queries, "expected at least one parameterized apoc.periodic.iterate (large event path)"
-
-    big = large_queries[0]
-    assert "$eid" in big and "$conf" in big, "params must be bound, not interpolated"
-    assert "params: {eid: $eid, conf: $conf}" in big, "apoc.periodic.iterate must forward params to inner queries"
-    assert "misp_event_ids" in big and "i.misp_event_id " not in big, (
-        "large-event query must be array-only (no scalar leg)"
-    )
-
-    # PR #34 round 19 (bugbot MED): cross-transaction entity safety.
-    # Outer must RETURN id(r) (primitive long, transaction-safe);
-    # inner must re-MATCH the relationship by id() in the new tx.
-    assert "RETURN id(r) AS rid" in big, (
-        "outer query must RETURN id(r) — raw entity refs are unsafe across apoc.periodic.iterate per-batch transactions"
-    )
-    assert "id(r) = rid" in big and "$rid" not in big, (
-        "inner action must re-MATCH the relationship by the batch variable rid: apoc.periodic.iterate "
-        "exposes outer columns as variables, and $rid failed with 'Expected parameter(s): rid' (2026-10-12)"
-    )
-    assert "WITH $r AS r" not in big, (
-        "round-19 dropped the unsafe `WITH $r AS r` rebind — entity handles from outer "
-        "query don't survive apoc.periodic.iterate's per-batch transactions"
-    )
-
-    # Negative: no f-string interpolation residue.
-    captured_with_params = [(c, p) for c, p in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
-    for cypher, params in captured_with_params:
-        assert "9001" not in cypher, "event id must be a parameter, not interpolated into the Cypher string"
-        assert params.get("eid") == "9001", "eid must be passed as a session.run param"
 
 
 # ---------------------------------------------------------------------------

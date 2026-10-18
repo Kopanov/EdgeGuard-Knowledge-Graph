@@ -178,7 +178,7 @@ def test_enrichment_jobs_uses_query_pause_in_hot_paths():
     # Bare time.sleep(3) is the smoking gun
     assert "time.sleep(3)" not in src, (
         "enrichment_jobs.py must use query_pause() — bare time.sleep(3) "
-        "burns minutes per calibration run at production scale"
+        "burns minutes per enrichment run at production scale"
     )
     assert "query_pause()" in src
 

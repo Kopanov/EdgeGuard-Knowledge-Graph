@@ -2709,9 +2709,8 @@ class Neo4jClient:
             # properties. A compromised feed can otherwise ship
             # ``aliases=["a1",...,"a100000"]`` and grow a Malware
             # node's aliases to 10M entries over several syncs —
-            # ``calibrate_cooccurrence_confidence`` + Q2 alias-match
-            # then walk that array per-row, OOM-crashing the entire
-            # enrichment pass. Also drop placeholder-name entries
+            # the Q2 alias-match then walks that array per-row,
+            # OOM-crashing the relationship build. Also drop placeholder-name entries
             # (``"unknown"``, ``"n/a"``, …) to mirror the PR-N10
             # reject of placeholder node NAMES to their aliases lists.
             #

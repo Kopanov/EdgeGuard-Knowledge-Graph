@@ -293,7 +293,7 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 | Relationship | Method | Confidence / properties |
 |-------------|--------|-------------------------|
 | `(Indicator)-[:INDICATES]->(Malware)` | Same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (`match_type='otx_pulse'`, the pulse in `r.source_refs[]`), or `malware_family` name match in `build_relationships.py` Q9; there is no whole-event `misp_event_ids[]` co-occurrence query | **0.6** (`otx_pulse`) / **0.8** (`malware_family`) |
-| `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'` (not bulk-calibrated like co-occurrence) |
+| `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'` |
 | `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** (Q5); also `a.reported_techniques` from OTX pulse `attack_ids` (Q5b) | **0.95** (`match_type='mitre_explicit'`) / **0.6** (`match_type='otx_pulse'`) |
 | `(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN m.uses_techniques` — **same STIX `uses` rows** (malware → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
 | `(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN tool.uses_techniques` — **same STIX `uses` rows** (tool → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
@@ -314,15 +314,14 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 ### 2. run_enrichment_jobs
 
-Runs `src/enrichment_jobs.py` — **seven** jobs in sequence (`run_all_enrichment_jobs`):
+Runs `src/enrichment_jobs.py` — **six** jobs in sequence (`run_all_enrichment_jobs`):
 
 1. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
 1b. **Actor alias merge** (`merge_alias_duplicate_actors` — folds non-MITRE actors named by an alias of exactly one MITRE actor, or resolved by the canonical threat-actor reference to another actor on the graph, into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`, `EDGEGUARD_CANONICAL_THREAT_ACTORS`)
 1c. **Malware ATT&CK-id twin merge** (`merge_malware_attack_twins` — folds a non-MITRE `Malware` node named after an ATT&CK software id, `cobalt strike - s0154` from OTX's MISP-galaxy naming, into the MITRE `Malware` node of that id or, when its id cannot be read, of that base name, or, for software without one (an ATT&CK tool), into the `Malware` node of its base name; a twin with neither is left and counted; same merge as 1b; `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`; see [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Malware named after an ATT&CK software id")
 2. **Indicator aging** (`decay_ioc_confidence`: the one aging rule for every `Indicator`, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later (the time at which its aging values were last written; no task passes a time of the run, so a re-run of an older run, or a baseline overlapping a scheduled sync, evaluates at the time it runs and moves no node backwards; [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*); writes only the nodes whose values change, so a run right after it writes nothing unless a node reached a tier day; runs before the campaign builder, which links active indicators only)
 3. **Campaign nodes** (`build_campaign_nodes`)
-4. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`; a no-op on a fresh baseline, since no `misp_cooccurrence` edges are written)
-5. **FIRST EPSS** (`enrich_cve_epss` in `src/cve_feed_enrichment.py` — the day's EPSS score and percentile on the `CVE` nodes that exist, removed from those that left the feed; `EDGEGUARD_ENABLE_EPSS`, default on; a feed outage is logged and skipped, never fails the task; the one source written to Neo4j without MISP, see [DATA_SOURCES.md § 8b](DATA_SOURCES.md)). CISA's SSVC decision points need no job: they come with the NVD records through the sync.
+4. **FIRST EPSS** (`enrich_cve_epss` in `src/cve_feed_enrichment.py` — the day's EPSS score and percentile on the `CVE` nodes that exist, removed from those that left the feed; `EDGEGUARD_ENABLE_EPSS`, default on; a feed outage is logged and skipped, never fails the task; the one source written to Neo4j without MISP, see [DATA_SOURCES.md § 8b](DATA_SOURCES.md)). CISA's SSVC decision points need no job: they come with the NVD records through the sync.
 
 #### Indicator aging
 
@@ -353,10 +352,6 @@ ThreatActor  -[:USES_MALWARE]-> Malware <-[:INDICATES]- Indicator
 Every campaign link carries `match_type = 'campaign_grouping'`, the confidence of the links it rests on and their relationship types (`evidence_types`). A campaign whose actor has neither link left (or whose actor name no longer exists after the actor alias merge) is deleted with its links in the same run; one with evidence whose indicators all expired stays, `active = false`. Its `uuid` comes from the actor's name, so a campaign built again keeps it.
 
 Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `indicator_count`, `malware_count`.
-
-#### Co-occurrence Confidence Calibration
-
-Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.match_type IN ('misp_cooccurrence', 'misp_correlation')`, using the number of indicators in the same MISP event. No producer writes such edges (the sync links report-scoped, `match_type='otx_pulse'`), so the pass is a no-op on a fresh baseline. Other edges, curated-package claims included, are untouched. (CVE-tag `EXPLOITS` edges carry `match_type='cve_tag'` and are not tuned by this pass.)
 
 ## Data Quality Targets
 
@@ -510,6 +505,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job and its section were removed (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — Baseline vs Incremental table: the incremental lookback is each collector's cursor or its feed's current window, not 72 hours.
 - 2026-10-17 — Rewritten as a guide to the current system: change history moved to this section, co-occurrence calibration details to the appendix.

@@ -1672,7 +1672,7 @@ class EdgeGuardPipeline:
                     extra={"degraded": True, "step": "build_relationships"},
                 )
 
-            # Step 5c: post-sync enrichment_jobs (the seven jobs of
+            # Step 5c: post-sync enrichment_jobs (the six jobs of
             # run_all_enrichment_jobs, including the actor alias merge and,
             # 2026-10, the Malware ATT&CK-id twin merge). In-process because
             # each job is short-running and shares the existing Neo4jClient.

@@ -30,8 +30,8 @@ Fix: ``clamp_confidence_score(value)`` helper. Applied in
 ``n.aliases[]``, ``n.malware_types[]``, ``n.uses_techniques[]``,
 ``n.tactic_phases[]`` are accumulated (deduplicated) across sources.
 A compromised feed shipping ``aliases=["a1",...,"a100000"]`` repeatedly
-grows the array unboundedly; ``calibrate_cooccurrence_confidence`` +
-Q2/Q9 alias-match then OOM-crash the entire enrichment pass.
+grows the array unboundedly; the Q2/Q9 alias-match then OOM-crashes
+the relationship build.
 
 Fix: ``_sanitize_array_value`` helper in ``merge_node_with_source``:
 - Drops placeholder entries (``"unknown"``/``"apt"``/etc.) from

@@ -608,7 +608,6 @@ class TestRunnerRegistration:
             "merge_malware_attack_twins",  # 2026-10: the Malware ATT&CK-id twin merge
             "decay_ioc_confidence",  # 2026-10-16: before the campaigns, which link active indicators only
             "build_campaign_nodes",
-            "calibrate_cooccurrence_confidence",
             "enrich_cve_epss",
         ]
 
@@ -626,7 +625,6 @@ class TestRunnerRegistration:
         monkeypatch.setattr(enrichment_jobs, "merge_alias_duplicate_actors", _rec("actor_alias_merge"))
         monkeypatch.setattr(enrichment_jobs, "merge_malware_attack_twins", _rec("malware_twin_merge"))
         monkeypatch.setattr(enrichment_jobs, "build_campaign_nodes", _rec("campaigns"))
-        monkeypatch.setattr(enrichment_jobs, "calibrate_cooccurrence_confidence", _rec("calibration"))
         monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", _rec("decay"))
         monkeypatch.setattr(enrichment_jobs, "enrich_cve_epss", _rec("epss"))
 
@@ -637,7 +635,6 @@ class TestRunnerRegistration:
             "malware_twin_merge",
             "decay",
             "campaigns",
-            "calibration",
             "epss",
         ]
         assert summary["actor_alias_merge"] == {"n": 1}
