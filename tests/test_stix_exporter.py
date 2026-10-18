@@ -1706,8 +1706,8 @@ def _pair(node: Dict[str, Any], rel: Any) -> Dict[str, Any]:
 
 
 # Nodes and edges in the shapes the writers leave: some with every time, some with only a part
-# (a campaign and a sector carry ``created_at`` but no ``first_imported_at``; an edge without
-# ``created_at`` carries ``imported_at``) and some with none at all.
+# (a campaign and a sector the sync created carry ``created_at`` but no ``first_imported_at``;
+# an edge without ``created_at`` carries ``imported_at``) and some with none at all.
 _EDGE_MITRE = {
     "match_type": "mitre_explicit",
     "confidence_score": 0.95,
@@ -1898,6 +1898,29 @@ def test_attribution_and_mitre_uses_merged_into_one_sro_take_the_earliest_create
         results.append(sro)
     assert results[0] == results[1]
     assert (results[0]["created"], results[0]["modified"]) == ("2026-10-12T00:00:00.000Z", "2026-10-17T00:00:00.000Z")
+
+
+def test_a_merged_sro_side_without_times_adds_no_time():
+    # The side without times resolves to the fixed constant; it must not become the merged
+    # created or modified while the other side carries graph times (as in _merge_rel_props).
+    undated = {k: v for k, v in _EDGE_OTX.items() if k not in ("imported_at", "updated_at")}
+    results = []
+    for first, second in ((undated, _EDGE_MITRE), (_EDGE_MITRE, undated)):
+        row = {
+            "seed": {"name": "apt28"},
+            "malware": [_pair(_MALWARE, first)],
+            "actor_tech": [],
+            "mal_tech": [],
+            "campaigns": [],
+            "uses_malware": [_pair(_MALWARE, second)],
+            "tools": [],
+            "exploits": [],
+            "sectors": [],
+        }
+        (sro,) = _by_type(StixExporter(_mk_client([row], {})).export_threat_actor("apt28"), "relationship")
+        results.append(sro)
+    assert results[0] == results[1]
+    assert (results[0]["created"], results[0]["modified"]) == ("2026-10-13T12:31:00.000Z", "2026-10-16T00:50:00.000Z")
 
 
 # ---- indicators: confidence, valid_from, valid_until -------------------------------------------

@@ -1846,8 +1846,9 @@ class MISPWriter:
             logger.error("Event lookup for %r failed (%s: %s) — no event is created", event_name, type(e).__name__, e)
             return None
 
-        # MISP is the single store every collector writes to and the only source the knowledge graph
-        # is built from. Distribution 1 is MISP's "This community only": every organisation on this
+        # MISP is the single store every collector writes to and the store the knowledge graph is
+        # built from (FIRST EPSS scores on existing CVE nodes are the one feed written to Neo4j
+        # directly). Distribution 1 is MISP's "This community only": every organisation on this
         # MISP instance can read the event (0 would be "Your organisation only"). EdgeGuard does not
         # publish the events, so MISP server synchronisation and feeds do not forward them to other
         # instances.

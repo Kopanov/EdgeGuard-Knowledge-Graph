@@ -243,7 +243,7 @@ gives byte-identical objects:
 
 | Object | `created` | `modified` |
 |--------|-----------|------------|
-| Every SDO (`_producer_created_modified`) | Concept 3 (`n.first_imported_at`); on a Campaign or a Sector, which have none, `n.created_at` | The later of `created` and concept 4 (`n.last_updated`) |
+| Every SDO (`_producer_created_modified`) | Concept 3 (`n.first_imported_at`), else `n.created_at` (a Campaign, or a Sector created by the sync) | The later of `created` and concept 4 (`n.last_updated`) |
 | Indicator SDO (`_indicator_created_modified`) | As every SDO | The latest of `created`, `n.last_recorded_at` and `n.aging_since` |
 | Relationship SRO (`_relationship_created_modified`) | `r.created_at`, else `r.imported_at` | The later of `created` and `r.updated_at` |
 | SRO behind several graph relationships (edges to twin CVE / Vulnerability nodes; `ATTRIBUTED_TO` and `USES_MALWARE`) | The earliest `created` of the edges | The latest `modified` of the edges |
@@ -257,7 +257,7 @@ gives byte-identical objects:
 | `created`              | ✅ | Concept 3 (`n.first_imported_at`) via `_producer_created_modified` | When the SDO was created in our system |
 | `modified`             | ✅ | The latest of `created`, `n.last_recorded_at` and `n.aging_since` (`_indicator_created_modified`); concept 4 (`n.last_updated`) is not read | When a source last reported it or its aging state last changed; never before `created` |
 | `valid_from`           | ✅ | Concept 1 (`r.source_reported_first_at`, MIN across edges) `??` Concept 3 (`n.first_imported_at`) `??` the SDO's `created` | See "valid_from fallback chain" below |
-| `valid_until`          | ⏵ | `n.retired_at` `??` the basis of the age (`coalesce(n.last_reported_at, n.first_imported_at)`) plus `EDGEGUARD_AGING_RETIRE_DAYS` (`indicator_aging.retirement_time`) | The real expiry the aging rule sets: the retirement, or when the rule will retire the indicator without a newer report. Only on a node the rule evaluated (`aging_basis` or `retired_at`), only when later than `valid_from`; omitted when the aging setting is wrong |
+| `valid_until`          | ⏵ | `n.retired_at` `??` the basis of the age (`coalesce(n.last_reported_at, n.first_imported_at)`) plus `EDGEGUARD_AGING_RETIRE_DAYS` (`indicator_aging.retirement_time`) | The real expiry the aging rule sets: the retirement, or when the rule will retire the indicator without a newer report. Only on a node the rule evaluated (`aging_basis` or `retired_at`), only when later than `valid_from`; omitted when the aging setting is wrong. The projected value uses the current `EDGEGUARD_AGING_RETIRE_DAYS`, so changing that setting changes the `valid_until` of an indicator that is not yet retired without a later `modified` |
 | `confidence`           | ⏵ | `n.confidence_score` (the aged value) × 100 `??` `n.source_confidence` × 100 | Omitted when neither is a number in [0, 1] |
 | `x_edgeguard_first_seen_at_source` | custom | Concept 1 (verbatim, MIN across edges) | Explicit preservation; absent if no source claim |
 | `x_edgeguard_last_seen_at_source`  | custom | Concept 2 (verbatim, MAX across edges) | Explicit preservation; absent if no source claim |
@@ -300,10 +300,12 @@ Indicator/Vulnerability SDOs that the Report references via `object_refs`.
 In the manual fallback:
 - Report SDO `created` / `modified` / `published` are `now()`; `Event.date`
   (a date-only string, not a valid STIX timestamp) is not used
-- Each contained Indicator SDO gets the same `valid_from` chain as the
-  primary `_indicator_sdo` path (concept 1 → 3 → now, with the inferred
-  flag); `_attribute_to_stix21` passes the MISP `attribute.timestamp`
-  (a Unix epoch int) through `coerce_iso` before using it as `valid_from`
+- Each contained Indicator SDO gets the manual-fallback `valid_from`
+  chain: MISP `Attribute.first_seen` → `Attribute.timestamp` → now(), the
+  last two with the inferred flag (the primary `_indicator_sdo` path ends
+  at the SDO's `created` instead of now(); see the chain below);
+  `_attribute_to_stix21` passes the MISP `attribute.timestamp` (a Unix
+  epoch int) through `coerce_iso` before using it as `valid_from`
 
 ### `valid_from` fallback chain
 

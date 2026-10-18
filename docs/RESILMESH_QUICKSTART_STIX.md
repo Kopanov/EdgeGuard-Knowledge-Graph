@@ -114,8 +114,14 @@ Every bundle carries:
   This makes diffing + content-addressed caching safe across versions.
   Every `created`, `modified` and `valid_from` comes from the graph,
   never from the clock (§ 8), so re-exporting the same graph state gives
-  a **byte-identical** bundle, and an object changes (with a later
-  `modified`) only when its node or relationship changes
+  a **byte-identical** bundle. `modified` follows the node's or
+  relationship's own times (§ 8), so some content can change while
+  `modified` stays the same: an indicator's `x_edgeguard_last_updated`,
+  `confidence` and projected `valid_until` (its `modified` moves only when
+  a source reports it again or its aging state changes), and a
+  relationship's `object_marking_refs`, which it takes from its
+  endpoints as well as its own TLP. A consumer therefore compares
+  objects rather than keying on (`id`, `modified`) alone
 - `objects: [...]` — SDOs + SROs for the seed and its neighborhood,
   plus three kinds of supporting objects in every bundle:
   the EdgeGuard producer `identity` (referenced by `created_by_ref`
@@ -230,9 +236,10 @@ An `indicator` also carries the standard fields platforms act on. `confidence` i
 the 0–100 scale (`confidence_score` × 100; the source's confidence when the node holds no aged value).
 `valid_until` is when the indicator stops being valid: its retirement time when it is retired, otherwise
 the time the aging rule will retire it if no source reports it again (the basis of its age plus
-`EDGEGUARD_AGING_RETIRE_DAYS`, 730 days by default); a newer report moves it later. An indicator written
-before the aging rule existed carries no `valid_until`. `revoked` is never set: a retired indicator
-expires, it is not withdrawn.
+`EDGEGUARD_AGING_RETIRE_DAYS`, 730 days by default); a newer report moves it later. The projected value
+uses the current `EDGEGUARD_AGING_RETIRE_DAYS`, so changing that setting changes the `valid_until` of an
+indicator that is not yet retired without a later `modified`. An indicator written before the aging rule
+existed carries no `valid_until`. `revoked` is never set: a retired indicator expires, it is not withdrawn.
 
 ```json
 {
@@ -299,7 +306,7 @@ definition version: 1.1.0 the relationship provenance properties, 1.2.0 the reco
 `x_edgeguard_evidence_types`, 1.6.0 `x_edgeguard_description_source`, 1.7.0 the aging
 properties of an indicator). The definition
 object is included in every bundle; its `extension_properties` lists
-every property name EdgeGuard can emit, and two it no longer emits:
+every property name EdgeGuard can emit, and two it does not emit:
 `x_edgeguard_git_sha` and `x_edgeguard_generated_at` (declaring a property
 that is not emitted is valid). Each object that carries at
 least one such property declares the extension in its `extensions`
@@ -405,8 +412,10 @@ Notes:
   fixed identifiers; `stix2` rejects any deviation from them.
 - The test suite checks every export path, on a real Neo4j as well, for
   the rules `stix2` does not check: re-exporting gives byte-identical
-  JSON, `modified` is never before `created`, and `valid_until` is after
-  `valid_from`.
+  JSON, and `modified` is never before `created`. It also asserts that
+  `valid_until` is after `valid_from`. `stix2` enforces that rule when it
+  builds the object, so the exporter omits a `valid_until` that is not
+  later.
 
 ## 8. Design decisions
 
@@ -444,10 +453,10 @@ Notes:
 - **External references.** A relationship cites EdgeGuard's own source
   records (`source_name` = the source id such as `mitre_attck` or
   `alienvault_otx`, `external_id` = the record id, § 4). An
-  `attack-pattern`, an `x-mitre-tactic` and a `tool` carry a
-  `mitre-attack` reference (the ATT&CK id and its page); a
-  `vulnerability` carries a `cve` reference (the CVE id and its NVD
-  page).
+  `attack-pattern` carries a `mitre-attack` reference (the ATT&CK id
+  and its page), and so does a `tool` whose ATT&CK software id (S
+  followed by four digits) is known; a `vulnerability` carries a `cve`
+  reference (the CVE id and its NVD page).
 - **One top-level property extension.** Every `x_edgeguard_*` property
   sits at the top level of its object and is declared by one
   `extension-definition` of type `toplevel-property-extension` (§ 4), so
@@ -462,7 +471,7 @@ Notes:
 
   | Field | Source |
   |-------|--------|
-  | SDO `created` | the node's `first_imported_at`; on a campaign or a sector, which have none, `created_at` |
+  | SDO `created` | the node's `first_imported_at`, else its `created_at` (a campaign, or a sector created by the sync) |
   | SDO `modified` | the later of `created` and the node's `last_updated` |
   | `indicator` `modified` | the latest of `created`, `last_recorded_at` (the latest MISP record of a report) and `aging_since` (the latest change of its aging state) |
   | SRO `created` | the relationship's `created_at`, else its `imported_at` |
@@ -520,7 +529,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
-- 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical: campaigns and sectors take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).
+- 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: no bundle carries `malware targets identity` or `campaign uses malware`, so `x_edgeguard_evidence_types` appears on `campaign attributed-to intrusion-set` and `indicator indicates campaign` only; `x_edgeguard_misp_attribute_ids` is on every SDO a MISP attribute wrote; a node in a sector never also carries `global` in `x_edgeguard_zones`; § 9 gives EdgeGuard the CVE + CVSS nodes and ResilMesh the asset layer and scanner findings.
 - 2026-10-16 — `advisory_sector` (confidence 90) on a vulnerability's sector link where CISA's ICS advisory states the sector, with the advisory's cisa.gov page in `external_references`.

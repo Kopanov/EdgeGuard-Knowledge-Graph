@@ -14,8 +14,11 @@ Key design decisions:
   validation for free.
 - STIX IDs are **deterministic** (UUIDv5 over the node's natural key) and
   every timestamp comes from the graph, never from the clock, so
-  re-exports of the same graph state produce byte-identical bundles —
-  consumers can diff bundles and upsert by (id, modified) safely.
+  re-exports of the same graph state produce byte-identical bundles, so
+  consumers can diff bundles safely (``modified`` follows the documented
+  sources, so an indicator's ``x_edgeguard_last_updated``, ``confidence`` or
+  ``valid_until``, or an SRO's endpoint-derived marking, can change while
+  ``modified`` stays the same).
 - All Cypher queries filter on ``x.edgeguard_managed = true OR x.edgeguard_enriched = true`` — nodes EdgeGuard created or enriched — (strict
   equality — null fails) so we never leak ResilMesh-owned
   asset/vulnerability nodes into an outbound bundle. Originally written
@@ -222,10 +225,11 @@ def _producer_created_modified(props: Dict[str, Any]) -> Dict[str, str]:
 
     STIX 2.1 §3.2 says ``created`` = "when the producer created this version of the object". For
     EdgeGuard re-exporting threat-intel data, the closest analogue is ``n.first_imported_at``
-    (when EdgeGuard first MERGEd the node), or ``n.created_at`` on the nodes EdgeGuard builds
-    itself (Campaign, Sector), which carry no ``first_imported_at``. ``modified`` is the later of
-    ``created`` and ``n.last_updated``. Every SDO builder uses it (``_indicator_created_modified``
-    builds on it); passing both values keeps stix2 from stamping the wall clock.
+    (when EdgeGuard first MERGEd the node), else ``n.created_at`` (a Campaign; a Sector created by
+    the sync's sector links; the relationship build stamps ``first_imported_at`` on the Sectors it
+    creates). ``modified`` is the later of ``created`` and ``n.last_updated``. Every SDO builder
+    uses it (``_indicator_created_modified`` builds on it); passing both values keeps stix2 from
+    stamping the wall clock.
     """
     return _graph_created_modified(props, _NODE_CREATED_KEYS, "last_updated")
 
@@ -2235,7 +2239,8 @@ class StixExporter:
             created_by_ref=EDGEGUARD_IDENTITY_ID,
             object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
-            # A Sector node carries ``created_at`` and ``last_updated`` (no ``first_imported_at``).
+            # A Sector node carries ``first_imported_at`` (relationship build) or ``created_at``
+            # (sync sector links).
             **_producer_created_modified(props),
         )
         return _to_dict(obj)
@@ -2588,7 +2593,8 @@ def _merge_relationship(existing: Dict[str, Any], incoming: Dict[str, Any]) -> N
     are then rebuilt from the merged map, so the result does not depend on which edge came
     first. The capped lists stay exact: each SRO holds the first entries of its sorted list, and
     the first entries of the merged list are among them. ``created`` is the earlier and
-    ``modified`` the later of the two SROs' values.
+    ``modified`` the later of the two SROs' values; a side that carries only the fixed
+    ``_PROVENANCE_OBJECTS_CREATED`` adds no time, as in ``_merge_rel_props``.
     """
 
     def _as_rel_props(sro: Dict[str, Any]) -> Dict[str, Any]:
@@ -2612,8 +2618,9 @@ def _merge_relationship(existing: Dict[str, Any], incoming: Dict[str, Any]) -> N
     ]
     for key, pick in (("created", _earliest), ("modified", _latest)):
         values = [o[key] for o in (existing, incoming) if o.get(key)]
+        graph_values = [v for v in values if v != _PROVENANCE_OBJECTS_CREATED]
         if values:
-            existing[key] = pick(values)
+            existing[key] = pick(graph_values or values)
     merged = _merge_rel_props([_as_rel_props(existing), _as_rel_props(incoming)])
     for key in ("confidence", "external_references", "x_edgeguard_match_type") + tuple(
         key for _prop, key, _cap in _SRO_PROVENANCE_LISTS
