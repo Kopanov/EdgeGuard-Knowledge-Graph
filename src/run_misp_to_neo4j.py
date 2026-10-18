@@ -3541,7 +3541,7 @@ class MISPToNeo4jSync:
     _MAX_REPORT_CVES = 50
     _MAX_REPORT_ACTORS = 10
 
-    def _build_cross_item_relationships(self, items: List[Dict]) -> List[Dict]:
+    def _build_cross_item_relationships(self, items: List[Dict], reports: Optional[set] = None) -> List[Dict]:
         """
         Build report-scoped relationships between items from **exactly one** MISP event.
 
@@ -3589,8 +3589,15 @@ class MISPToNeo4jSync:
         ``items``; a cap that applies is logged. The callers pass the items in event order, an
         incremental run too (``_event_order_key``), so a full and an incremental sync pair the same items.
 
+        An incremental run passes ``reports``, the reports of its changed items: only those are grouped.
+        The build input holds every item of them (the changed items and the unchanged items that share a
+        report with one), but of another report only the items that also belong to one of those, and
+        cut at the caps such a partial report could keep an item a full sync does not link.
+
         Args:
             items: Parsed items for **one** event only.
+            reports: The report ids to group (incremental run); None groups every report of ``items``.
+                The zone rows are built for every item either way.
 
         Returns:
             List of relationship definitions to merge in Neo4j.
@@ -3616,7 +3623,7 @@ class MISPToNeo4jSync:
                 if not report_id or not isinstance(report_id, str):
                     continue
                 report_id = report_id.strip()
-                if not report_id:
+                if not report_id or (reports is not None and report_id not in reports):
                     continue
                 bucket = by_report.setdefault(
                     report_id, {"indicators": [], "malware": [], "actors": [], "cves": [], "all": []}
@@ -5596,14 +5603,16 @@ class MISPToNeo4jSync:
 
         # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
         cross_input = unique_event_items
-        context = self._same_report_context(
-            context_attrs, full_event, set().union(*map(_item_report_ids, unique_event_items))
-        )
+        changed_reports = set().union(*map(_item_report_ids, unique_event_items))
+        context = self._same_report_context(context_attrs, full_event, changed_reports)
+        cross_reports: Optional[set] = None
         if context:
             cross_input = _dedupe_parsed_items(unique_event_items + context)
             # 2026-10-18: back in event order (the changed items came first) before the per-report caps.
             cross_input.sort(key=_event_order_key(full_event))
-        cross_rels = self._build_cross_item_relationships(cross_input)
+            # Only the reports of the changed items, whose items the input holds in full.
+            cross_reports = changed_reports
+        cross_rels = self._build_cross_item_relationships(cross_input, reports=cross_reports)
 
         logger.info(
             "Event %s: %s parsed -> %s unique items; %s embedded rel defs; %s cross-item rel defs",
@@ -5744,12 +5753,16 @@ class MISPToNeo4jSync:
         gc.collect()
 
         # Incremental run: unchanged items of the same reports join the cross-item build only.
-        _context = self._same_report_context(context_attrs, full_event, set().union(*map(_item_report_ids, _rel_items)))
+        _changed_reports = set().union(*map(_item_report_ids, _rel_items))
+        _context = self._same_report_context(context_attrs, full_event, _changed_reports)
+        _cross_reports: Optional[set] = None
         for _item in _context:
             _rel_items.append({k: _item.get(k) for k in _REL_KEYS if _item.get(k) is not None})
         if _context:
             # 2026-10-18: back in event order (the changed items came first) before the per-report caps.
             _rel_items.sort(key=_event_order_key(full_event))
+            # Only the reports of the changed items, whose items the input holds in full.
+            _cross_reports = _changed_reports
         del _context
 
         # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
@@ -5757,7 +5770,7 @@ class MISPToNeo4jSync:
         # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
         cross_rels = []
         if _rel_items:
-            cross_rels = self._build_cross_item_relationships(_rel_items)
+            cross_rels = self._build_cross_item_relationships(_rel_items, reports=_cross_reports)
             if cross_rels:
                 logger.info(
                     "Event %s: building %s report-scoped relationships from all pages...", event_id, len(cross_rels)

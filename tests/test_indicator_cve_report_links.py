@@ -22,7 +22,9 @@ relationship writer receives and the Cypher it sends:
 * the sync reads the pulse of a CVE attribute (an OTX indicator of type CVE and a ``cve_references``
   item, both as MISPWriter writes them), in a full sync, an incremental sync (a changed indicator links
   to an unchanged CVE of its pulse and the other way round) and the paged path of a large event, and the
-  caps pick the same CVEs and indicators of a pulse in a full and an incremental sync;
+  caps pick the same CVEs and indicators of a pulse in a full and an incremental sync; an incremental
+  run groups only the pulses of its changed items, so a pulse of which it holds only some items writes
+  no link a full sync does not;
 * the relationship writer routes the row to a template that MATCHes both ends and MERGEs only the link.
 """
 
@@ -545,6 +547,86 @@ class TestSync:
         late = [v for v in A_INDICATORS if v not in {value for value, _ in full_links}]
         incremental = self._incremental(attrs, late)
         assert set(_cve_links(incremental.rels)) == full_links
+
+    # Three pulses of one day. P4 names indicator K and 55 CVEs; CVE-2026-7777, the 53rd, is named in P5
+    # too, so a full sync links K to the first 50 CVEs of P4 only. Indicator J is in P1 and P5, K and L
+    # in P1. A changed J (with L, for the paged path) puts P1 and P5 in the incremental run; K and
+    # CVE-2026-7777 join it as unchanged items of those reports, but P4 holds no changed item.
+    PULSE_P1 = "6a2f5e4d3c2b1a0918273645"
+    PULSE_P4 = "6a3e6f5d4c3b2a1908172635"
+    PULSE_P5 = "6a4d7e6f5c4b3a2918071625"
+    P4_REFS = [f"CVE-2026-{2000 + n}" for n in range(52)] + ["CVE-2026-7777"] + ["CVE-2026-3001", "CVE-2026-3002"]
+
+    def _three_pulse_attrs(self) -> List[Dict[str, Any]]:
+        def pulse(pulse_id: str, name: str, values: List[str], **fields) -> Dict[str, Any]:
+            return {
+                "id": pulse_id,
+                "name": name,
+                "created": "2026-10-16T11:00:00.000000",
+                "modified": "2026-10-16T11:00:00.000000",
+                "TLP": "white",
+                "adversary": "",
+                "malware_families": [],
+                "attack_ids": [],
+                "indicators": [
+                    {"id": n, "indicator": v, "type": "IPv4", "created": "2026-10-16T11:00:00"}
+                    for n, v in enumerate(values)
+                ],
+                **fields,
+            }
+
+        p4 = pulse(self.PULSE_P4, "Edge appliance exploitation wave", ["192.0.2.11"], cve_references=self.P4_REFS)
+        p1 = pulse(self.PULSE_P1, "Scanning infrastructure", ["192.0.2.10", "192.0.2.11", "192.0.2.12"])
+        p5 = pulse(
+            self.PULSE_P5,
+            "Remote access tooling on exploited appliances",
+            ["192.0.2.10"],
+            cve_references=["CVE-2026-7777"],
+            malware_families=[{"id": "SparkRAT", "display_name": "SparkRAT", "target": None}],
+            adversary="Sandworm",
+        )
+        return _attributes(_collect(p4, p1, p5), timestamp="1700000000")
+
+    @staticmethod
+    def _report_rows(rels: List[Dict[str, Any]]) -> set:
+        """The report-scoped rows (``otx_pulse``) as comparable tuples."""
+        return {
+            (
+                r["rel_type"],
+                json.dumps(r["from_key"], sort_keys=True),
+                json.dumps(r["to_key"], sort_keys=True),
+                r["report_id"],
+            )
+            for r in rels
+            if r.get("match_type") == "otx_pulse"
+        }
+
+    @pytest.mark.parametrize("paged", [False, True], ids=["normal", "paged"])
+    def test_a_report_without_a_changed_item_is_not_rebuilt_from_part_of_its_items(self, paged, monkeypatch):
+        # Review finding: the incremental build grouped the unchanged items by every report they belong to,
+        # P4 too, of which it held only K and CVE-2026-7777; cut at the caps that partial P4 kept
+        # CVE-2026-7777, and the run wrote K -> CVE-2026-7777, a link the full sync does not hold.
+        if paged:
+            monkeypatch.setattr(MISPToNeo4jSync, "_ATTR_PAGE_SIZE", 1)
+        attrs = self._three_pulse_attrs()
+        full = _syncer()
+        _run_event(full, copy.deepcopy(attrs))
+        full_links = set(_cve_links(full.rels))
+        assert ("192.0.2.11", "CVE-2026-7777") not in full_links, "CVE-2026-7777 is past the cap of P4"
+        assert ("192.0.2.10", "CVE-2026-7777") in full_links
+        assert len({cve for value, cve in full_links if value == "192.0.2.11"}) == 50
+
+        changed = ["192.0.2.10", "192.0.2.12"] if paged else ["192.0.2.10"]
+        incremental = self._incremental(attrs, changed)
+        assert {i.get("value") for i in incremental.written} == set(changed)
+        assert ("192.0.2.11", "CVE-2026-7777") not in set(_cve_links(incremental.rels))
+        # Every report-scoped row of the run (Indicator -> CVE, Indicator -> Malware, Malware ->
+        # ThreatActor) is one of the full sync, and the reports of the changed items get all of theirs.
+        reports = {self.PULSE_P1, self.PULSE_P5}
+        full_rows = {row for row in self._report_rows(full.rels) if row[3] in reports}
+        assert {row[0] for row in full_rows} == {"INDICATES", "ATTRIBUTED_TO"}
+        assert any('"name": "SparkRAT"' in row[2] for row in full_rows)
+        assert self._report_rows(incremental.rels) == full_rows
 
     def test_a_legacy_cve_note_without_a_pulse_is_not_linked(self):
         items = _collect(PULSE_WITH_CVES)
