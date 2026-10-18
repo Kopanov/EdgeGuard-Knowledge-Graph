@@ -514,16 +514,6 @@ class TestPRN32LaunchChecklistDoc:
         assert "Baseline launch path" in text
         assert "Baseline launch path" in runbook
 
-    def test_references_pr_n32_audit_count_buckets(self):
-        """Item [6]'s decision tree must match the audit script's
-        recommendation buckets (0 / 1–10 / >10). If the script changes
-        bucket boundaries, this test surfaces the drift."""
-        text = self.CHECKLIST.read_text()
-        # Three buckets in the table
-        assert "1–10" in text, "checklist must use the en-dash 1–10 bucket label (matches audit script wording)"
-        # The cutoff must be exactly 10 for the manual-one-shot vs full-migration boundary
-        assert "> 10" in text
-
 
 class TestPRN32ChecklistSourceOfTruthInvariants:
     """Cross-file pins so the checklist + the rest of the repo can't

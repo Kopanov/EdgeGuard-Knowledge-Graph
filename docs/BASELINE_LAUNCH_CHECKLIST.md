@@ -14,9 +14,8 @@ the launch. There is no soft-warn tier here — soft warns belong in
 `scripts/preflight_baseline.sh` (they fire there, and the operator decides
 whether to override). When this file says "block", it means stop and escalate.
 
-The main text assumes a fresh baseline built by the deployed code. Steps
-that matter only for a deployment, graph or MISP kept across an upgrade are
-in the [appendix](#appendix-data-written-by-earlier-versions).
+The checklist assumes a fresh baseline built by the deployed code: § [7]
+clears the EdgeGuard data in MISP and Neo4j before the baseline runs.
 
 ---
 
@@ -259,16 +258,14 @@ with zero-width, bidi-control or variation-selector characters
 (`is_placeholder_name` in `src/node_identity.py`). A graph built by the
 current code therefore holds no such node.
 
-**Pass criteria:**
+**Pass criteria:** passes without a run, because § [7] step 4 wipes the
+graph before the baseline. The read-only audit
+`scripts/audit_legacy_unicode_bypass_nodes.py` counts such nodes in a graph
+and changes nothing.
 
-* Fresh baseline (§ [7] step 4 wipes the graph first): passes without a run.
-* Additive baseline on a graph kept from an earlier version: the read-only
-  audit `scripts/audit_legacy_unicode_bypass_nodes.py` reports 0 suspicious
-  nodes, or ≤ 10 with an operator spot-check OK. Command and decision table:
-  [Appendix: unicode-bypass audit (item [6])](#unicode-bypass-audit-item-6).
-
-**If it fails:** follow the decision table in the appendix; the baseline
-does not fix data written by earlier versions.
+**If it fails:** the audit counts such nodes only in a graph that was not
+wiped; wipe it as § [7] step 4 describes, since the baseline does not
+remove them.
 
 ---
 
@@ -297,9 +294,6 @@ clearing:
    start: after the recreate, `docker exec edgeguard_airflow airflow pools list` must
    list it with the slots of `EDGEGUARD_COLLECTOR_POOL_SLOTS` (default 4); see
    [AIRFLOW_DAGS.md § Collector pool: setup and resizing](AIRFLOW_DAGS.md#collector-pool-setup-and-resizing).
-   A running stack of a version without the pool, or on Airflow 3.2, needs the steps of
-   [Appendix: upgrading a running deployment](#upgrading-a-running-deployment) before
-   the pull.
    The CalVer printed by `edgeguard version` (`2026.10.10`) does not identify these
    commits, so check the commit, not the version:
    `git merge-base --is-ancestor eef87be HEAD && echo ok` must print `ok`, and so must
@@ -331,10 +325,9 @@ clearing:
 4. **One command for the re-feed.** `edgeguard fresh-baseline --days 730` deletes the
    EdgeGuard-managed Neo4j nodes (the default; `--wipe-all` deletes every node)
    and the EdgeGuard MISP events (typed confirmation, blast-radius display, backup-timestamp gate).
-   On a database without partner-written nodes pass `--wipe-all`: the hosted database holds
-   none (verified 2026-10-12), and nodes written before the ownership marker existed would
-   otherwise survive the scoped wipe
-   ([Appendix: nodes without the ownership marker](#nodes-without-the-ownership-marker)).
+   On a database without partner-written nodes pass `--wipe-all` (the hosted database holds
+   none, verified 2026-10-12): it deletes every node, also any node without the ownership
+   marker.
    On a database ResilMesh has started writing to, use the edgeguard-only sequence instead:
    `edgeguard clear neo4j --edgeguard-only`, `edgeguard clear misp`,
    `edgeguard checkpoint clear --include-incremental`, then the additive
@@ -484,13 +477,11 @@ python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json
 ```
 
 It exits non-zero when any of these fail. A warning (`[WARN]`; in the JSON `ok: false` with
-`mandatory: false`) is reported and leaves the exit code unchanged. A graph written by an
-earlier version is checked as the
-[appendix](#acceptance-on-a-graph-written-by-an-earlier-version) describes.
+`mandatory: false`) is reported and leaves the exit code unchanged.
 
 | Check | Expected |
 |---|---|
-| Edges labelled `misp_cooccurrence` (`match_type`, and `source_id` / `source_ids` on a graph written by an earlier version) | 0 |
+| Edges labelled `misp_cooccurrence` (in `match_type`, `source_id` or `source_ids`) | 0 |
 | `match_type = 'mitre_explicit'` edges whose source node has no MITRE source | 0 |
 | `ATTRIBUTED_TO` edges without a `match_type` | 0; median actors per malware ≤ 10 |
 | NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | judged only on CVEs published > 45 days ago (NVD assigns reference tags and CPE configurations during analysis, weeks after publication — day-old CVEs have neither); thresholds 50 / 20 / 20 / 50 %; measured 2026-10-10 on the 730-day event: 93 / 57 / 58 / 91 %. Informational when fewer than 100 analysed CVEs are present (short smoke baselines) |
@@ -519,8 +510,8 @@ earlier version is checked as the
 | No campaign without evidence (`campaigns_have_evidence`) | every `Campaign` EdgeGuard built has an actor of its `actor_name` with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware (`build_campaign_nodes` step 1b deletes the others with their links) and that actor's `RUNS`; no `RUNS` comes from an actor that is not the campaign's or has neither link (step 2c removes it). The detail counts `without_evidence`, `without_runs` and `runs_without_evidence`. A campaign with evidence whose indicators all expired is legitimate (`active = false`). Informational while there is no campaign EdgeGuard built and no `RUNS` without evidence; a `RUNS` without evidence into any campaign, a partner's included, fails |
 | CVE scores (`cve_score_from_cvss`) | an EdgeGuard `CVE` with a CVSS sub-node whose `base_score` is in [0, 10] has the `cvss_score` / `cvss_version` of the sub-node selected in the order 3.1, 3.0, 2.0, 4.0 and a CVSS rating as `severity`; a `CVE` without one has a null score and version and `severity = 'UNKNOWN'`. Informational while there is no CVE |
 | FIRST EPSS and CISA's SSVC (`cve_epss_and_ssvc`, **warning**) | warns when `CVE` nodes exist and none carries `epss_score`: EPSS is off (`EDGEGUARD_ENABLE_EPSS=false`) or the feed was unavailable (the enrichment task log has an `[EPSS]` line). Reports the CVEs with EPSS, the number of EPSS score dates (one expected; more mean a run stopped before clearing, or matched too few nodes to clear) and the latest, and the CVEs with a CISA SSVC decision and with `ssvc_exploitation = 'active'`. Informational while there is no CVE. On the hosted graph of 2026-10-15 (written by a test run of the job): 137,753 of 141,932 CVEs with EPSS, 2 score dates |
-| Sector evidence (`sector_links_name_only_feeds_that_gave_the_sector`, `advisory_sector_only_where_cisa_stated`, `cisa_stated_sectors_linked_as_advisory_sector`, `sector_links_cite_only_records_that_gave_the_sector`, `sector_confidence_follows_label`) | every link to a `Sector` names only the feeds whose `SOURCED_FROM.zones` hold that sector (not judged when no edge has `zones`); `advisory_sector` only on `AFFECTS` from a CVE to a sector the `cisa_ics` edge lists in `stated_zones`, and every such stated sector linked with it (with `--require-cisa-ics`, at least one once the `cisa_ics` edges carry `zones`; not required with `--legacy-graph`); a sector link cites, of the CISA ICS advisories, only those whose sector note names its sector (the edge's `stated_refs`; not judged when no edge has them); the confidence of a sector link is its label's value in `src/sector_evidence.py` (`zone_classification` 0.5, `advisory_sector` 0.9). Reported: `sector_evidence_breakdown`, `cisa_ics_contribution` (per sector: stated, by CISA alone, also inferred; CISA records with no tracked sector) and `node_sectors_without_a_feed` (and nodes with `global` next to a sector) |
-| Ranked descriptions and indicator aging (`descriptions_name_their_source`, `indicators_have_aging_basis`) | every EdgeGuard node with a ranked description (labels from `src/description_ranking.py`) names its source in `description_source`; every EdgeGuard `Indicator` has `aging_basis` and `source_confidence`. With `--legacy-graph` both are reported instead of judged |
+| Sector evidence (`sector_links_name_only_feeds_that_gave_the_sector`, `advisory_sector_only_where_cisa_stated`, `cisa_stated_sectors_linked_as_advisory_sector`, `sector_links_cite_only_records_that_gave_the_sector`, `sector_confidence_follows_label`) | every link to a `Sector` names only the feeds whose `SOURCED_FROM.zones` hold that sector (not judged when no edge has `zones`); `advisory_sector` only on `AFFECTS` from a CVE to a sector the `cisa_ics` edge lists in `stated_zones`, and every such stated sector linked with it (with `--require-cisa-ics`, at least one once the `cisa_ics` edges carry `zones`); a sector link cites, of the CISA ICS advisories, only those whose sector note names its sector (the edge's `stated_refs`; not judged when no edge has them); the confidence of a sector link is its label's value in `src/sector_evidence.py` (`zone_classification` 0.5, `advisory_sector` 0.9). Reported: `sector_evidence_breakdown`, `cisa_ics_contribution` (per sector: stated, by CISA alone, also inferred; CISA records with no tracked sector) and `node_sectors_without_a_feed` (and nodes with `global` next to a sector) |
+| Ranked descriptions and indicator aging (`descriptions_name_their_source`, `indicators_have_aging_basis`) | every EdgeGuard node with a ranked description (labels from `src/description_ranking.py`) names its source in `description_source`; every EdgeGuard `Indicator` has `aging_basis` and `source_confidence` |
 | Per-source presence (`default_sources_delivered`, **warning**) | the `SOURCED_FROM` count of every `Source` node is listed; a source collected by default (`cisa_kev`, `mitre_attck`, `nvd`, `urlhaus`, `feodo_tracker`, `ssl_blacklist`) with none is a warning — look at that collector's task in the baseline run (an upstream outage skips it without failing the run). Keyed sources without data (`alienvault_otx`, `virustotal`, `threatfox`, `abuseipdb`: skipped by design without a key) and the flag-guarded ones (`cisa_ics`, `malwarebazaar`) are only listed |
 
 ### GraphRAG readiness verification
@@ -568,111 +559,17 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-## Appendix: data written by earlier versions
-
-The main text assumes a fresh baseline built by the current code. The steps
-below matter only when a deployment, a graph or a MISP is kept across an
-upgrade.
-
-### Upgrading a running deployment
-
-* **Collector pool.** A running stack of a version without the collector pool
-  does not create it. Before the `git pull` of § [7] step 0, create it in the
-  running container:
-  `docker exec edgeguard_airflow airflow pools set edgeguard_collectors 4 "Collector tasks of all DAGs"`
-  ([AIRFLOW_DAGS.md § Collector pool: first update of a running deployment](AIRFLOW_DAGS.md#collector-pool-first-update-of-a-running-deployment)).
-* **Airflow 3.2.** Back up the Airflow metadata DB before the image rebuild of
-  § [7] step 0 and follow [AIRFLOW_DAGS.md § Airflow 3.2 to 3.3.2 upgrade](AIRFLOW_DAGS.md#airflow-32-to-332-upgrade).
-* **Compose flags.** A `docker-compose.yml` whose `x-common-env` block does not
-  forward the source flags silently ignores them in `.env`.
-* **Outdated checkout.** A checkout without the CVE description rule re-feeds
-  `OTX_META` JSON, OTX pulse names and the text of whichever KEV, OTX or ICS record
-  merged last as CVE descriptions; without the entity description rule it writes
-  into MISP, as the description of each family and adversary, the description of
-  the first pulse that named it, and an entity MITRE and OTX both name shows the
-  text of whichever record merged last. The commit check of § [7] step 0 rules
-  this out.
-* **Smoke run of item [2].** A smoke run against a commit that lacks the
-  fallback metric wiring and the unicode-bypass audit script (both added on
-  2026-04-25) does not count; re-run it.
-
-### A kept graph: CVE and entity descriptions
-
-A graph that is kept instead of re-fed holds CVE descriptions and dates written
-by earlier versions: those of the record merged last (raw `OTX_META` JSON, OTX
-pulse names, CISA's KEV text, CISA ICS dates). Remove the descriptions that are
-metadata blocks or OTX pulse references, then run one full sync
-(`NEO4J_FULL_SYNC=true` with `force_sync`) as
-[RUNBOOK § Repairing CVE descriptions and dates](RUNBOOK.md#repairing-cve-descriptions-and-dates)
-describes. Its `Malware`, `ThreatActor` and `Tool` descriptions are likewise those
-of the record merged last (an OTX pulse's text, a raw `MITRE_USES_TECHNIQUES`
-block): run the cleanup statements of
-[RUNBOOK § Repairing Malware, ThreatActor and Tool descriptions](RUNBOOK.md#repairing-malware-threatactor-and-tool-descriptions)
-before the same full sync, which serves both. A re-feed needs neither.
-
-### Unicode-bypass audit (item [6])
-
-`Malware` / `ThreatActor` / `Tool` nodes merged before the placeholder filter
-(before 2026-04-24) may still carry placeholder names padded with zero-width /
-bidi-control characters. Before an additive baseline on such a graph, run the
-read-only audit (no mutation):
-
-```bash
-./scripts/audit_legacy_unicode_bypass_nodes.py
-```
-
-**Pass criteria:** total suspicious count = 0 OR ≤ 10 with operator
-spot-check OK.
-
-| Count    | Action                                                                 |
-|----------|------------------------------------------------------------------------|
-| 0        | ✅ pass                                                                |
-| 1–10     | One-shot Cypher per node (rename / re-merge / delete); no PR needed   |
-| > 10     | 🛑 build a proper migration BEFORE the baseline. The baseline doesn't fix legacy data. |
-
-The audit script's recommendation block names the bucket and what to do.
-
-### Nodes without the ownership marker
-
-Nodes EdgeGuard wrote before the ownership marker existed carry neither
-`edgeguard_managed` nor `edgeguard_enriched` (on the hosted database, verified
-2026-10-10 and 2026-10-12, 221 such nodes, all EdgeGuard's own `Campaign` and
-`Source` nodes). The scoped wipe leaves them and `ownership_marker_on_nodes`
-then fails, so a database without partner-written nodes is wiped with
-`--wipe-all` (§ [7] step 4). On a database ResilMesh has started writing to,
-delete the unmarked leftovers by hand before the edgeguard-only sequence:
-`MATCH (c:Campaign) WHERE c.edgeguard_managed IS NULL AND c.edgeguard_enriched IS NULL DETACH DELETE c`.
-The first sync of the current code drops the six UNIQUE constraints earlier
-versions held on partner labels (`device_key`, `networkservice_key`,
-`softwareversion_key`, `application_key`, `role_key`, `user_key`) — no manual
-DDL needed.
-
-### Acceptance on a graph written by an earlier version
-
-Report-scoped linking, evidence labels, CVE properties, TLP, the ownership
-marker and the optional ICS sources are complete only on a fresh re-feed. On a
-graph written by an earlier version (an existing graph with an additive
-baseline), run `scripts/verify_fresh_baseline.py --legacy-graph`: it reports the
-description-source and indicator aging checks instead of judging them, and
-`--require-cisa-ics` then does not require CISA's stated sectors. The
-co-occurrence check also counts the relationship properties `source_id` /
-`source_ids` such a graph carries; the sector-evidence checks are not judged
-where no edge carries `zones` or `stated_refs`. The revoked ATT&CK object checks
-fail on such a graph (on the hosted graph of 2026-10-15: 158 techniques, 6
-groups, 1 piece of software), and so does `translated_links_record_cited_ids`
-(1,218 links, none recorded).
-
----
-
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restated as a guide to the current behaviour: change history moved here, the steps for kept deployments and graphs moved to the appendix.
 - 2026-10-17 — Preflight with `--launch-path=dag` and checks [2], [7b], [9], [10] described; the DAG holds the baseline lock; smoke run applied with `docker compose up -d airflow`; the 50,000-event index cap; expected end state and memory thresholds of a 730-day baseline; minimum code checked by commit; acceptance rows for `no_global_sector_edges`, `pulse_indicates_complete`, `in_tactic_same_domain` and ResilMesh conformance.
 - 2026-10-16 — Acceptance checks for sector evidence, ranked descriptions and indicator aging (`--legacy-graph` for older graphs) and for campaign evidence (`campaign_malware_attributed` became `campaign_malware_has_evidence`; `campaigns_have_evidence` added); collector pool step; fallback event count via `eventinfo`; description source ranking and STIX extension definitions 1.5.0 to 1.7.0.
 - 2026-10-15 — CVE and entity description rules with the repair of kept graphs; acceptance checks for malware twins, revoked ATT&CK objects, explainability, EPSS and SSVC, relationship provenance, campaign membership, CVE scores and per-source presence; batched clean step and MISP delete timeout.
 - 2026-10-12 — MalwareBazaar added as the third flag-guarded source; the scoped Neo4j wipe became the default of `fresh-baseline`.
+- 2026-10-11 — Shared-database contract: `edgeguard_managed` on the nodes EdgeGuard creates, `edgeguard_enriched` on partner nodes it writes to, and every sync drops the six UNIQUE constraints earlier versions held on partner labels (`device_key`, `networkservice_key`, `softwareversion_key`, `application_key`, `role_key`, `user_key`).
 - 2026-10-10 — Item [7] added for the October 2026 fresh re-feed: deploy `main` first (Airflow 3.3.2 image), MISP Import Regexp fix, optional source flags forwarded through compose `x-common-env`, snapshot and backup gate, one-command re-feed, hand-back.
 - 2026-06-12 — GraphRAG readiness verification added, because the pre-June snapshot had 0/917 actors with aliases, ~480 CISA-only CVEs without `cisa_exploit_add` and none of the `build_relationships` edge types.
 - 2026-06-11 — Pause list extended to all five scheduled DAGs; the CLI wrappers documented as triggers of the same DAG.
