@@ -19,7 +19,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import urllib3
 
@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import requests
 
 # Import MISP writer
-from actor_name_hygiene import clean_actor_names
+from actor_name_hygiene import clean_actor_names, strip_trailing_parenthetical
 from attack_software_names import split_attack_software_id
 
 # Import baseline checkpoint (incremental cursor only — no page-based checkpointing)
@@ -36,7 +36,13 @@ from baseline_checkpoint import (
     get_source_incremental,
     update_source_incremental,
 )
-from canonical_threat_actors import ReferenceUnavailable, actor_identities, load_canonical_reference
+from canonical_threat_actors import (
+    CanonicalReference,
+    ReferenceUnavailable,
+    actor_identities,
+    load_canonical_reference,
+    name_key,
+)
 
 # Shared utilities
 from collectors.collector_utils import (
@@ -174,6 +180,54 @@ def _pulse_family_names(families: Any) -> List[str]:
     return out
 
 
+def _pulse_family_keys(families: Any) -> Set[str]:
+    """The ``ThreatActor`` keys (``canonical_threat_actors.name_key``, whitespace collapsed) of every
+    family name a pulse lists, as given, without its ATT&CK software id, and without a trailing
+    parenthetical as the actor-name hygiene drops it (``"Lumma Stealer (LummaC2)"`` is also
+    ``lumma stealer``) (2026-10-18). Every entry counts, not only the first ``_MAX_PULSE_FAMILIES``:
+    each one becomes a malware item."""
+    keys: Set[str] = set()
+    for fam in families or []:
+        raw = _family_entry_name(fam)
+        if not raw:
+            continue
+        base, _attack_id = split_attack_software_id(raw)
+        base = " ".join(base.split())
+        for name in (raw, base, strip_trailing_parenthetical(base)):
+            key = name_key(" ".join(name.split()))
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _adversaries_not_named_as_pulse_families(
+    adversaries: List[str], families: Any, reference: Optional[CanonicalReference]
+) -> Tuple[List[str], List[str]]:
+    """``(kept, dropped)`` of a pulse's adversary names (2026-10-18).
+
+    A name the same pulse lists both as adversary and as a malware family (equal ``name_key``,
+    ``_pulse_family_keys``) is an actor only when the canonical threat-actor reference resolves it
+    (``reference.canonical_for``): "Kimsuky" or "Akira" stay actors, "Lumma Stealer" or "AsyncRAT"
+    are dropped and stay the pulse's malware item. A name the reference lists as ambiguous or
+    never_merge (``winnti``, ``golden chickens``, ``lumma stealer``) does not resolve and counts as
+    unknown. A name only another pulse lists as a family is kept. Without the reference (``None``)
+    the rule cannot decide and every name is kept. An actor the reference lacks is added through
+    ``src/reference/canonical_threat_actor_overrides.json``."""
+    if reference is None or not adversaries:
+        return list(adversaries), []
+    family_keys = _pulse_family_keys(families)
+    if not family_keys:
+        return list(adversaries), []
+    kept: List[str] = []
+    dropped: List[str] = []
+    for name in adversaries:
+        if name_key(name) in family_keys and reference.canonical_for(name) is None:
+            dropped.append(name)
+        else:
+            kept.append(name)
+    return kept, dropped
+
+
 def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> None:
     """Fold a same-run duplicate into the kept item.
 
@@ -276,9 +330,11 @@ class OTXCollector:
         self._actor_reference_loaded = False
 
     def _report_actor_reference(self):
-        """The canonical threat-actor reference that tells whether a pulse's adversaries are one actor,
-        or ``None`` when it is unavailable (logged once): the names are then told apart as written, so
-        the aliases of one actor count as several and the pulse attributes nothing."""
+        """The canonical threat-actor reference that tells whether a pulse's adversaries are one actor
+        and whether an adversary the pulse also lists as a malware family is an actor, or ``None`` when
+        it is unavailable (logged once): the names are then told apart as written, so the aliases of one
+        actor count as several and the pulse attributes nothing, and an adversary named like one of the
+        pulse's families is kept as an actor (``_adversaries_not_named_as_pulse_families``)."""
         if not getattr(self, "_actor_reference_loaded", False):
             self._actor_reference_loaded = True
             self._actor_reference = None
@@ -286,7 +342,8 @@ class OTXCollector:
                 self._actor_reference = load_canonical_reference()
             except ReferenceUnavailable as exc:
                 logger.warning(
-                    "[ATTRIBUTION] canonical reference unavailable (%s): a pulse's adversaries are told apart by name",
+                    "[ATTRIBUTION] canonical reference unavailable (%s): a pulse's adversaries are told apart by "
+                    "name, and an adversary the pulse also lists as a malware family is kept as an actor",
                     exc,
                 )
         return getattr(self, "_actor_reference", None)
@@ -584,6 +641,11 @@ class OTXCollector:
             # Process pulses
             processed = []
             non_file_hashes = 0
+            # 2026-10-18: adversary names a pulse also lists as its malware family, unknown to the
+            # canonical reference (``_adversaries_not_named_as_pulse_families``), per run, and the
+            # number of pulses that left one out.
+            adversaries_named_as_family: Set[str] = set()
+            pulses_naming_an_adversary_as_family = 0
 
             to_process = pulses if limit is None else pulses[:limit]
             for pulse in to_process:
@@ -679,8 +741,18 @@ class OTXCollector:
                 # no pair, but the mark goes to ``several_actor_pulses_by_name``, which the sync uses for
                 # its own run and never stores on a node, so build_relationships step 2d removes no link
                 # on a judgement made without the reference.
-                pulse_all_actor_names = clean_actor_names(pulse_adversary or "")
+                # 2026-10-18: the adversary names are decided once, here, and the several-actor decision,
+                # the pairs and the actor items below all use them: ``clean_actor_names`` drops composites'
+                # junk, descriptions and country / state names ("APT37, North Korea" is one actor), and a
+                # name the pulse also lists as a malware family is an actor only when the canonical
+                # reference resolves it (``_adversaries_not_named_as_pulse_families``; kept without it).
                 actor_reference = self._report_actor_reference()
+                pulse_all_actor_names, _named_as_family = _adversaries_not_named_as_pulse_families(
+                    clean_actor_names(pulse_adversary or ""), pulse.get("malware_families", []), actor_reference
+                )
+                if _named_as_family:
+                    adversaries_named_as_family.update(n.lower() for n in _named_as_family)
+                    pulses_naming_an_adversary_as_family += 1
                 pulse_several_actors = len(actor_identities(pulse_all_actor_names, actor_reference)) > 1
                 pulse_mark = [str(pulse.get("id"))] if pulse_several_actors and pulse.get("id") else []
                 pulse_actor_names = pulse_all_actor_names[:_MAX_PULSE_ADVERSARIES]
@@ -814,8 +886,9 @@ class OTXCollector:
                 # "head mare and twelve") and descriptions ("multiple russian
                 # state-backed groups"). ``clean_actor_names`` splits the former into
                 # one actor item each and drops the latter, so no ThreatActor node is
-                # ever created from a phrase.
-                for adversary_name in clean_actor_names(pulse_adversary or ""):
+                # ever created from a phrase. 2026-10-18: the names decided above
+                # (``pulse_all_actor_names``), uncapped.
+                for adversary_name in pulse_all_actor_names:
                     actor_item: Dict[str, Any] = {
                         "type": "actor",
                         "name": adversary_name,
@@ -840,6 +913,15 @@ class OTXCollector:
             unique = _dedupe_pulse_items(processed)
 
             logger.info(f"[OK] OTX: Processed {len(unique)} unique items")
+            if adversaries_named_as_family:
+                logger.info(
+                    "[ACTOR-NAMES] OTX: %d distinct adversary name(s) in %d pulse(s), which the same pulse lists "
+                    "as a malware family and the canonical threat-actor reference does not know, not taken as "
+                    "actors (they stay malware): %s",
+                    len(adversaries_named_as_family),
+                    pulses_naming_an_adversary_as_family,
+                    ", ".join(sorted(adversaries_named_as_family)),
+                )
             if non_file_hashes:
                 logger.info(
                     "[SKIP] OTX: %d indicators of a non-file hash type (%s) not collected",

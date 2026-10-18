@@ -237,8 +237,6 @@ class TestIsGenericActorName:
             "cyber army of russia reborn",
             "syrian electronic army",
             "iranian cyber army",
-            "north korea",
-            "russia",
             # Hyphen / digit names.
             "apt-c-13",
             "dev-0586",
@@ -372,3 +370,189 @@ def test_real_names_pass_through_unchanged(name):
     assert split_composite_actor_name(name) == [name]
     assert is_generic_actor_name(name) is False
     assert clean_actor_names(name) == [name]
+
+
+# ===========================================================================
+# Country and state names, nationality adjectives (2026-10-18)
+# ===========================================================================
+
+
+class TestCountryAndStateNames:
+    """A country or state, or a nationality adjective on its own, says where an actor is said to be
+    from, never which actor it is: OTX adversary fields list "APT37, North Korea"."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # ISO 3166 short names, any case, edge punctuation tolerated.
+            "north korea",
+            "North Korea",
+            "russia",
+            "China",
+            "iran",
+            "Israel.",
+            "(china)",
+            "viet nam",
+            "türkiye",
+            "turkey",
+            "côte d'ivoire",
+            "united states of america",
+            "guinea-bissau",
+            # Long and short state forms.
+            "dprk",
+            "DPRK",
+            "prc",
+            "roc",
+            "usa",
+            "us",
+            "U.S.",
+            "U.S.A.",
+            "uk",
+            "U.K.",
+            "uae",
+            "ussr",
+            "russian federation",
+            "people's republic of china",
+            "people’s republic of china",  # typographic apostrophe
+            "democratic people's republic of korea",
+            "islamic republic of iran",
+            "republic of korea",
+            "south korea",
+            "korea",
+            "taiwan",
+            "palestine",
+            "gaza",
+            "crimea",
+            "kosovo",
+            "great britain",
+            "soviet union",
+            # Names with " and " are not split into two halves.
+            "bosnia and herzegovina",
+            "Trinidad and Tobago",
+            # A nationality adjective on its own.
+            "russian",
+            "Chinese",
+            "iranian",
+            "north korean",
+            "korean",
+            "israeli",
+            "ukrainian",
+            "belarusian",
+            # Spellings compared without apostrophes, dots or hyphens.
+            "peoples republic of china",
+            "people\u02bcs republic of china",  # modifier-letter apostrophe
+            "democratic peoples republic of korea",
+            "N. Korea",
+            "N.Korea",
+            "North-Korea",
+            "u. s.",
+            # Long state forms and adjectives.
+            "state of israel",
+            "kingdom of saudi arabia",
+            "republic of türkiye",
+            "republic of turkey",
+            "socialist republic of vietnam",
+            "republic of ireland",
+            "Lao PDR",
+            "persia",
+            "persian",
+            "kurdish",
+            "azeri",
+            "belarussian",
+        ],
+    )
+    def test_generic(self, name):
+        assert is_generic_actor_name(name) is True, name
+        assert clean_actor_names(name) == [], name
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # A country or nationality inside a longer name stays a name.
+            "cyber army of russia reborn",
+            "anonymous sudan",
+            "syrian electronic army",
+            "iranian cyber army",
+            "gaza hackers team",
+            "turk hack team",
+            "russian business network",
+            "korean dragon",
+            "china chopper crew",
+            "lazarus group",
+            "kimsuky",
+        ],
+    )
+    def test_names_containing_a_country_stay_names(self, name):
+        assert is_generic_actor_name(name) is False, name
+
+    def test_a_country_beside_an_actor_is_dropped(self):
+        # The OTX adversary field of a pulse on APT37 (ScarCruft).
+        assert clean_actor_names("APT37, North Korea") == ["APT37"]
+        assert clean_actor_names("Lazarus Group; DPRK") == ["Lazarus Group"]
+        assert clean_actor_names("Kimsuky and North Korea") == ["Kimsuky"]
+        assert clean_actor_names("Lazarus Group (North Korea)") == ["Lazarus Group"]
+        # The actor in parentheses behind a country is the name.
+        assert clean_actor_names("North Korea (APT37)") == ["APT37"]
+        assert clean_actor_names("DPRK (Kimsuky)") == ["Kimsuky"]
+        assert clean_actor_names("Korea (Democratic People's Republic of)") == []
+        assert clean_actor_names("North Korea (unknown)") == []
+        assert clean_actor_names("apt28, Bosnia and Herzegovina") == ["apt28"]
+        assert clean_actor_names("Sandworm, Russia, Russian Federation") == ["Sandworm"]
+
+    def test_inverted_country_names_leave_no_fragment(self):
+        assert clean_actor_names("Korea, North") == []
+        assert clean_actor_names("Korea, South") == []
+        assert clean_actor_names("APT37, Korea, North") == ["APT37"]
+        assert clean_actor_names("Korea, Democratic People's Republic of") == []
+        assert clean_actor_names("Macedonia, the Former Yugoslav Republic of") == []
+
+    def test_a_country_name_with_and_is_never_split(self):
+        assert split_composite_actor_name("Bosnia and Herzegovina") == ["Bosnia and Herzegovina"]
+        assert split_composite_actor_name("Antigua & Barbuda") == ["Antigua & Barbuda"]
+
+
+# ===========================================================================
+# No name of the canonical threat-actor reference is generic
+# ===========================================================================
+
+# Names the reference gives an actor that the rules judged generic before the country rule
+# (2026-10-18): galaxy records named as placeholders, and "hacking team" (rule b4: both words are
+# descriptors). Pinned so that a change to any rule list that makes another reference name generic,
+# or one of these a name again, is a decision taken here.
+REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE = frozenset(
+    {"[unnamed group]", "hacking team", "unnamed actor", "unnamed actor group", "unnamed actor team"}
+)
+
+
+class TestTheCanonicalReferenceIsNeverGeneric:
+    @pytest.fixture(scope="class")
+    def reference_names(self):
+        import json
+
+        from canonical_threat_actors import DEFAULT_REFERENCE_PATH
+
+        doc = json.loads(DEFAULT_REFERENCE_PATH.read_text(encoding="utf-8"))
+        names = set()
+        for actor in doc["actors"]:
+            names.add(actor["key"])
+            names.update(actor["synonyms"])
+        assert len(names) > 5000, "every key and synonym of the shipped reference"
+        return names
+
+    def test_no_key_or_synonym_is_generic(self, reference_names):
+        generic = {n for n in reference_names if is_generic_actor_name(n)}
+        assert generic == REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE
+
+    def test_the_reference_resolves_no_country_state_or_nationality_name(self):
+        from actor_name_hygiene import COUNTRY_AND_STATE_NAMES, NATIONALITY_ADJECTIVES
+        from canonical_threat_actors import load_canonical_reference
+
+        reference = load_canonical_reference()
+        resolved = sorted(n for n in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES if reference.canonical_for(n))
+        assert resolved == []
+
+    def test_the_lists_are_lower_case_and_trimmed(self):
+        from actor_name_hygiene import COUNTRY_AND_STATE_NAMES, NATIONALITY_ADJECTIVES
+
+        for name in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES:
+            assert name == " ".join(name.lower().split()), name
