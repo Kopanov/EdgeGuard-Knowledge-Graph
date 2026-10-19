@@ -330,11 +330,11 @@ sources assert it), not folded into a single multiplier.
 |-------------|--------|-------|
 | `EMPLOYS_TECHNIQUE` | MITRE | ThreatActor employs Technique (attribution — from STIX `uses`) |
 | `IMPLEMENTS_TECHNIQUE` | MITRE | Malware / Tool implements Technique (capability — from STIX `uses`) |
-| `USES_TECHNIQUE` | OTX | Indicator observed tied to Technique (from `attack_ids`) |
+| `USES_TECHNIQUE` | OTX | The indicator's OTX report lists the technique (from `attack_ids`; not that the indicator executed it) |
 | `ATTRIBUTED_TO` | Malware's own claim / OTX | Malware attributed to ThreatActor: exact `attributed_to` name or alias match (1.0), or named in the same OTX pulse when the pulse's actors are one actor (`otx_pulse`, 0.6) |
 | `INDICATOR_RESOLVES_TO` (planned) | DNS | Indicator → IP; not written |
 | `EXPLOITS` | CVEs | Indicator exploits Vulnerability (exact CVE ID match) |
-| `INDICATES` | Malware | Indicator indicates Malware (same OTX pulse `otx_pulse` 0.6, or malware_family match 0.8; never from whole-event co-occurrence) |
+| `INDICATES` | Malware, CVEs | Indicator indicates Malware (same OTX pulse `otx_pulse` 0.6, or malware_family match 0.8; never from whole-event co-occurrence); Indicator and CVE named in the same OTX pulse (`otx_pulse` 0.6; not an exploitation claim) |
 
 Also written: `USES_MALWARE` / `USES_TOOL` (MITRE explicit, 0.95), `SUBTECHNIQUE_OF`, `IN_TACTIC`,
 `TARGETS` / `AFFECTS` (`zone_classification` 0.5, `otx_industries` 0.6 on `TARGETS`, `advisory_sector`
@@ -346,7 +346,7 @@ Also written: `USES_MALWARE` / `USES_TOOL` (MITRE explicit, 0.95), `SUBTECHNIQUE
 - **EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE**: High quality - direct from MITRE STIX `uses` relationships. Two types separate attribution (actor→technique) from capability (malware/tool→technique), so that Cypher queries and LLM/GraphRAG retrieval can tell the two semantics apart; both collapse back to STIX `uses` on export.
 - **ATTRIBUTED_TO**: Exact (1.0) when the malware's own `attributed_to` names the actor; medium (0.6, `otx_pulse`) when malware and actor are named in the same OTX pulse and the pulse's actors are one actor. A pulse naming several actors does not say which malware is whose and attributes nothing; aliases of one actor count as one. EdgeGuard does not attribute by whole-event co-occurrence, because a large MISP event can link one malware to up to 152 actors.
 - **EXPLOITS**: High quality - deterministic CVE ID match (confidence 1.0)
-- **INDICATES**: Medium quality - same OTX pulse (0.6, `otx_pulse`) or malware_family name match (0.8). No `INDICATES` edge comes from whole-event co-occurrence.
+- **INDICATES**: Medium quality - same OTX pulse (0.6, `otx_pulse`) or malware_family name match (0.8); to a CVE only from the same OTX pulse (0.6), which says that one report names the indicator and the CVE. No `INDICATES` edge comes from whole-event co-occurrence.
 - **INDICATOR_RESOLVES_TO** (planned): requires external DNS data; not written
 
 ---
@@ -425,7 +425,7 @@ def enrich_alert_with_rag(ip_address):
     Associated malware: {malware}
     Known threat actors: {actors}
     Used techniques: {techniques}
-    CVEs exploited: {cves}
+    CVEs (named in the same report / exploited, per evidence): {cves}
     """
     
     # 2. Build prompt for LLM
@@ -494,10 +494,12 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
+- 2026-10-18 — `INDICATES` also links an indicator to a CVE named in the same OTX pulse; the GraphRAG query pattern labels an indicator's CVEs by their evidence.
 - 2026-10-18 — An OTX pulse's own industries label its `TARGETS` sector links `otx_industries` (0.6).
 - 2026-10-18 — Confidence is a two-layer model (source prior, indicator aging): the co-occurrence calibration job was removed, because no current code writes the `misp_cooccurrence` / `misp_correlation` edges it rescored.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

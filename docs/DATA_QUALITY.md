@@ -78,14 +78,14 @@ WHERE m.attributed_to = a.name OR a.name = m.attributed_to
 | `mitre_explicit` | 0.95 (1.0 on `SUBTECHNIQUE_OF`) | MITRE ATT&CK's explicit `uses` relationship, or the dotted sub-technique id |
 | `advisory_sector` | 0.9 | CISA's ICS advisory states the sector (`AFFECTS`) |
 | `malware_family` | 0.8 | The family label a source gives the indicator (`INDICATES`) |
-| `otx_pulse` | 0.6 | Named in the same OTX pulse |
+| `otx_pulse` | 0.6 | Named in the same OTX pulse (`INDICATES` to Malware and to CVE, `ATTRIBUTED_TO`, and the techniques a pulse lists for its actors and malware); on Indicator → CVE it says "named in the same report", never that the indicator exploits the CVE (`cve_tag`) |
 | `otx_attack_ids` | 0.6 | An ATT&CK id the indicator's OTX pulse lists (`USES_TECHNIQUE`); a report-level association like `otx_pulse`, with a label of its own |
 | `otx_industries` | 0.6 | An OTX pulse's own industries state that its campaign targets the sector (`TARGETS` only; the pulse's keyword hits stay `zone_classification`) |
 | `zone_classification` | 0.5 | EdgeGuard's sector inference (`AFFECTS`, `TARGETS`) |
 
 The full table, with the curated, campaign and MISP-attribute-tag labels: [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#evidence-labels-report-provenance-tlp) and `docs/RESILMESH_INTEROPERABILITY.md` §3.2.2.
 
-**Malware ↔ Technique:** No description-based inference (such as a **`CAN_USE`** relationship) is used, because it risks the same class of false links. **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** is created from **MITRE STIX `uses`** relationships, stored as **`uses_techniques`** (with MISP **`MITRE_USES_TECHNIQUES:`** round-trip), matching **`Technique.mitre_id`** exactly in `build_relationships.py` (`mitre_explicit`, 0.95); also from the ATT&CK ids an OTX pulse lists (`reported_techniques`, step 6b, `otx_pulse`, 0.6) and from curated-package claims (0.85), each by exact id. `IMPLEMENTS_TECHNIQUE` (malware/tool capability) is distinct from actor attribution (`EMPLOYS_TECHNIQUE`) — see [`KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation).
+**Malware ↔ Technique:** No description-based inference (such as a **`CAN_USE`** relationship) is used, because it risks the same class of false links. **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** is created from **MITRE STIX `uses`** relationships, stored as **`uses_techniques`** (with MISP **`MITRE_USES_TECHNIQUES:`** round-trip), matching **`Technique.mitre_id`** exactly in `build_relationships.py` (`mitre_explicit`, 0.95); also from the ATT&CK ids an OTX pulse lists (`reported_techniques`, step 6b, `otx_pulse`, 0.6) and from curated-package claims (0.85), each by exact id. `IMPLEMENTS_TECHNIQUE` (malware/tool capability) is distinct from actor attribution (`EMPLOYS_TECHNIQUE`) — see [`KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-report).
 
 ### Audit logging for kept confidences
 
@@ -127,6 +127,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — `otx_pulse` also labels `INDICATES` from an indicator to a CVE named in the same OTX pulse.
 - 2026-10-18 — `otx_industries` (0.6): the sectors an OTX pulse's own industries name, on `TARGETS` (they were `zone_classification`, 0.5).
 - 2026-10-18 — `otx_attack_ids` (`USES_TECHNIQUE` from an OTX pulse's ATT&CK ids) is 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-17 — Main text restated as a guide to current behaviour: the fixes of 2026-03 are described as the rules they established, and change history moved to this section.

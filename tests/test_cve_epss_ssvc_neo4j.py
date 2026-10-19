@@ -204,14 +204,16 @@ def test_cisa_ics_dates_fill_and_nvd_record_replaces_them(client, raw_driver):
     assert _text(raw_driver, "CVE", "CVE-2025-14272") == _expected(nvd)
 
 
+@pytest.mark.parametrize("legacy", [True, False], ids=["note", "otx_meta"])
 @pytest.mark.parametrize("first", ["pulse_reference", "kev"])
-def test_an_otx_pulse_reference_is_no_description_and_the_kev_text_fills(client, raw_driver, first):
-    # The OTX collector's cve_references item as MISPWriter writes it ("Referenced in OTX pulse: <name>").
-    # Merged first on a CVE without an NVD record, it used to stay, and CISA's KEV text never replaced it.
+def test_an_otx_pulse_reference_is_no_description_and_the_kev_text_fills(client, raw_driver, first, legacy):
+    # The OTX collector's cve_references item as MISPWriter writes it: an OTX_META block naming the pulse
+    # (2026-10-18), and as MISP still holds it from before ("Referenced in OTX pulse: <name>"). Merged first
+    # on a CVE without an NVD record, the note used to stay, and CISA's KEV text never replaced it.
     from test_cve_description_source import otx_pulse_reference, synced
 
     _create(raw_driver, "CVE", "CVE-2015-5477")
-    reference, kev = synced(otx_pulse_reference()), _real_record("CVE-2015-5477__source:CISA-KEV")
+    reference, kev = synced(otx_pulse_reference(legacy=legacy)), _real_record("CVE-2015-5477__source:CISA-KEV")
     for item in (reference, kev) if first == "pulse_reference" else (kev, reference):
         assert client.merge_cve(item, item["tag"])
     assert _text(raw_driver, "CVE", "CVE-2015-5477") == {

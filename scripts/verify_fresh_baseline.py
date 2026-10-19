@@ -45,7 +45,9 @@ an OTX record stated is not linked as ``otx_industries`` (with ``--require-otx-i
 OTX records give sectors and none states one); the per-sector reference check judges only the feeds whose
 records state every zone they give (CISA ICS). Since 2026-10-16 it also fails
 when a ranked description names no source (``description_source``) or an Indicator has no
-``aging_basis`` / ``source_confidence``.
+``aging_basis`` / ``source_confidence``. Since the same-report CVE links of 2026-10-18 it reports how many
+indicators are linked to a CVE named in the same OTX report (``Indicator -[:INDICATES]-> CVE``) and fails
+when such a link is not labelled ``otx_pulse`` or cites no OTX report (``alienvault_otx:<pulse id>``).
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -963,6 +965,34 @@ def run_checks(
         {"software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX, "folded_families": folded_families},
     )
     rep.add("pulse_indicates_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
+
+    # 10a6. Indicators and CVEs named in the same OTX report (2026-10-18): the sync links them as
+    #       ``(Indicator)-[:INDICATES]->(CVE)`` with ``match_type`` ``otx_pulse`` and the report as
+    #       ``alienvault_otx:<pulse id>`` in ``source_refs``. Informational: how many links, CVEs and
+    #       indicators, and how many INDICATES links from an indicator reach a node that is neither a
+    #       Malware nor a CVE (no writer creates one). Mandatory: no such CVE link is unlabelled, labelled
+    #       otherwise or without an OTX report (the link says "named in the same report", nothing else);
+    #       not judged while there is none.
+    r = _one(
+        "MATCH (i:Indicator)-[r:INDICATES]->(c:CVE) "
+        "WITH r, c, i, " + _as_list("r.source_refs") + " AS refs "
+        "RETURN count(r) AS indicator_cve_links, count(DISTINCT c) AS cves, count(DISTINCT i) AS indicators, "
+        "sum(CASE WHEN r.match_type = 'otx_pulse' THEN 0 ELSE 1 END) AS not_otx_pulse, "
+        "sum(CASE WHEN any(x IN refs WHERE x STARTS WITH 'alienvault_otx:') THEN 0 ELSE 1 END) AS without_otx_report"
+    )
+    r.update(
+        _one(
+            "MATCH (:Indicator)-[r:INDICATES]->(x) WHERE NOT x:Malware AND NOT x:CVE "
+            "RETURN count(r) AS indicates_other_targets"
+        )
+    )
+    rep.add("indicator_cve_report_links", None, dict(r))
+    links = r.get("indicator_cve_links") or 0
+    rep.add(
+        "indicator_cve_links_are_same_report",
+        None if links == 0 else (r.get("not_otx_pulse") or 0) == 0 and (r.get("without_otx_report") or 0) == 0,
+        {k: r.get(k) for k in ("indicator_cve_links", "not_otx_pulse", "without_otx_report")},
+    )
 
     # 10a5. Malware twins folded (2026-10): no Malware node from another source is named after an
     #       ATT&CK software id ("cobalt strike - s0154", the MISP galaxy naming OTX uses), or carries

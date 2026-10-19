@@ -185,6 +185,16 @@ RETURN i.value AS indicator, m.name AS malware, a.name AS actor
 LIMIT 10
 ```
 
+### CVEs named in the same OTX report as an indicator
+```cypher
+// INDICATES to a CVE says only that one OTX pulse names both (r.source_refs names the pulse);
+// the indicator's own claim to exploit a CVE is EXPLOITS (cve_tag).
+MATCH (i:Indicator {value: $value})-[r:INDICATES]->(c:CVE)
+WHERE r.match_type = 'otx_pulse'
+RETURN c.cve_id AS cve, c.cvss_score AS cvss, c.severity AS severity, r.source_refs AS reports
+ORDER BY cve
+```
+
 ---
 
 ## Edge provenance (`r.misp_event_ids[]`, `r.sources[]`, `r.source_refs[]`)
@@ -360,6 +370,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Sample query: the CVEs named in the same OTX report as an indicator (`INDICATES` to a `CVE`).
 - 2026-10-18 — Sector links: OTX's industries statement (`otx_industries`) and a query of who targets a sector by evidence.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — *Count by zone* unwinds the `zone` list and counts each node once per zone.
