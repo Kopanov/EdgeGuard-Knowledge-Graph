@@ -258,16 +258,24 @@ if [ "$USE_DOCKER" = true ]; then
     # api and graphql cannot start while MISP_API_KEY is the template value: stop waiting for them.
     misp_template=false
     grep -qE '^MISP_API_KEY=(your-misp-api-key-here)?$' .env 2>/dev/null && misp_template=true
+    # Services that define a healthcheck: for them an empty Health (a moment in a restart loop, or
+    # before the first probe) is not "done". Unknown when compose config cannot be read.
+    with_healthcheck="$(docker compose config --format json 2>/dev/null | python3 -c '
+import json, sys
+services = json.load(sys.stdin).get("services", {})
+print(" ".join(n for n, s in services.items() if (s.get("healthcheck") or {}).get("test") and not s["healthcheck"].get("disable")))
+' 2>/dev/null || true)"
     while :; do
         states="$(docker compose ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null || true)"
         if [ -z "$states" ]; then
             warn "docker compose ps listed no services — skipped the health wait"
             break
         fi
-        not_ready="$(printf '%s\n' "$states" | awk -F'|' '
+        not_ready="$(printf '%s\n' "$states" | awk -F'|' -v hc="$with_healthcheck" '
+            BEGIN { n = split(hc, names, " "); for (i = 1; i <= n; i++) checked[names[i]] = 1 }
             $2 == "exited" && $4 == "0" { next }
             $3 == "healthy" { next }
-            $3 == "" && $2 == "running" { next }
+            $3 == "" && $2 == "running" && !($1 in checked) { next }
             { print $1 ": " ($3 != "" ? $2 " (" $3 ")" : $2) }')"
         [ -z "$not_ready" ] && break
         if [ "$misp_template" = true ] && ! printf '%s\n' "$not_ready" | grep -qvE '^(api|graphql): '; then

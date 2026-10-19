@@ -22,6 +22,7 @@ case "$*" in
     "compose version --short") echo "2.29.0" ;;
     "compose version") echo "Docker Compose version v2.29.0" ;;
     "compose ps -a --format "*) [ -n "$FAKE_PS" ] && printf '%s\\n' "$FAKE_PS" ;;
+    "compose config --format json") [ -n "$FAKE_CONFIG" ] && printf '%s\\n' "$FAKE_CONFIG" ;;
 esac
 exit 0
 """
@@ -38,7 +39,9 @@ _HEALTHY = "\n".join(
 )
 
 
-def _install(tmp_path: Path, fake_ps: str, env_text: str = "", wait: str = "2") -> subprocess.CompletedProcess:
+def _install(
+    tmp_path: Path, fake_ps: str, env_text: str = "", wait: str = "2", config: str = ""
+) -> subprocess.CompletedProcess:
     work = tmp_path / "work"
     work.mkdir()
     for rel in ("install.sh", ".env.example", "docker-compose.yml"):
@@ -54,6 +57,7 @@ def _install(tmp_path: Path, fake_ps: str, env_text: str = "", wait: str = "2") 
         DOCKER_LOG=str(tmp_path / "docker.log"),
         FAKE_PS=fake_ps,
         EDGEGUARD_INSTALL_WAIT_SEC=wait,
+        FAKE_CONFIG=config,
     )
     return subprocess.run(["bash", "install.sh"], cwd=work, env=env, capture_output=True, text=True, timeout=60)
 
@@ -127,3 +131,13 @@ def test_other_unhealthy_services_are_still_waited_for(tmp_path):
     started = time.monotonic()
     _install(tmp_path, ps, wait="4")
     assert time.monotonic() - started >= 4
+
+
+def test_a_service_with_a_healthcheck_between_restarts_is_not_counted_as_done(tmp_path):
+    # In a restart loop Compose reports the service as running with an empty Health for a moment.
+    config = '{"services": {"api": {"healthcheck": {"test": ["CMD", "true"]}}, "metrics": {}}}'
+    ps = _HEALTHY.replace("api|running|healthy|0", "api|running||0")
+    done = _install(tmp_path, ps, config=config)
+    out = done.stdout + done.stderr
+    assert "api: running" in out
+    assert "metrics" not in out.split("Not healthy")[-1]  # no healthcheck: running counts as done
