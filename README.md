@@ -258,11 +258,16 @@ cd EdgeGuard-Knowledge-Graph
 `install.sh` handles everything: checks Docker, copies `.env.example → .env`, builds the image, and runs `docker compose up -d`. After it finishes, edit `.env` with your API keys and run `docker compose up -d` again (a plain `restart` does not re-read `.env`).
 
 **Post-install validation (run this after any install method):**
+
+The CLI reads its settings from the environment; it does not read `.env`. With the Docker install, run it in the `airflow` container, which receives the settings `docker-compose.yml` forwards from `.env` and the container addresses (`bolt://neo4j:7687`, your `MISP_URL`):
+
 ```bash
-python src/edgeguard.py preflight  # comprehensive readiness check (env vars, APIs, Neo4j, MISP, Airflow, disk)
-python src/edgeguard.py doctor     # checks MISP, Neo4j, Airflow, NATS, schema, API keys, version compatibility
-python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pipeline runs
+docker compose exec airflow python /opt/airflow/src/edgeguard.py preflight  # readiness check (env vars, APIs, Neo4j, MISP, Airflow, disk)
+docker compose exec airflow python /opt/airflow/src/edgeguard.py doctor     # MISP, Neo4j, Airflow, NATS, schema, API keys, version compatibility
+docker compose exec airflow python /opt/airflow/src/edgeguard.py stats      # node counts, last sync, pipeline runs
 ```
+
+In the container the CLI reads the Airflow API password from the file `airflow standalone` generates; a host shell needs `AIRFLOW_API_PASSWORD` (see `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` under Settings), otherwise `preflight` warns "Could not query DAG list". The same warning appears while no EdgeGuard DAG is registered yet; `doctor` prints the reason. `doctor`'s NATS and memory-setting lines read variables Compose does not forward to `airflow`; check those with the host variant. On the host (Options B and C, or a host shell against the Docker stack), export `.env` first: `set -a; . ./.env; set +a`. Against the Docker stack, also point the host at the published ports (`export NEO4J_URI=bolt://localhost:7687`, and `MISP_URL` when it names a container). Then run `python src/edgeguard.py preflight` (and `doctor`, `stats`) from a venv with the requirements installed.
 
 `preflight` runs 7 check categories (env vars/API keys, Neo4j + APOC, MISP health, Airflow, disk space, checkpoint state, circuit breakers) and exits 0 = ready or 1 = issues found. `stats` shows what data is in the system right now.
 
@@ -1326,6 +1331,7 @@ _Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The post-install validation runs the CLI in the `airflow` container (`docker compose exec airflow python /opt/airflow/src/edgeguard.py …`); the documented host commands exited 1 with "Required environment variable NEO4J_PASSWORD is not set", because the CLI does not read `.env` and `.env` holds container addresses.
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` also links an indicator to a CVE named in the same OTX pulse (`otx_pulse`, 0.6).
 - 2026-10-18 — `EDGEGUARD_RATE_LIMIT_GRAPHQL` sets the GraphQL rate limit (it was fixed at 120/minute in code).
