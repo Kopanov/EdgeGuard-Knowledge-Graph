@@ -127,7 +127,7 @@ def test_unlisted_services_skip_the_wait(tmp_path):
 
 def test_a_failing_state_check_is_not_reported_as_running(tmp_path):
     # For example a Compose that rejects the --format template, or a daemon error.
-    done = _install(tmp_path, "", extra_env={"FAKE_PS_RC": "1"})
+    done = _install(tmp_path, _HEALTHY, extra_env={"FAKE_PS_RC": "1"})
     out = done.stdout + done.stderr
     assert done.returncode == 0, out
     assert "EdgeGuard is running!" not in out
@@ -204,10 +204,13 @@ def test_a_real_key_gets_no_hint_and_the_full_wait(tmp_path):
 def test_a_real_key_exported_in_the_shell_takes_precedence_over_env(tmp_path):
     # Compose prefers the shell value to .env, so api starts although .env holds the template value.
     ps = _HEALTHY.replace("api|running|healthy|0", "api|running|starting|0")
+    started = time.monotonic()
     done = _install(tmp_path, ps, wait="2", extra_env={"MISP_API_KEY": "3f9c2a7be1d04c58a6e2b9d7c1f0e4a8"})
     out = done.stdout + done.stderr
     assert "api: running (starting)" in out
     assert "placeholder" not in out
+    # The shell's real key means api is waited for, not given up on as blocked by a placeholder.
+    assert time.monotonic() - started >= 1, "the wait was cut short"
 
 
 def test_a_placeholder_exported_in_the_shell_is_recognised(tmp_path):

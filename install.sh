@@ -279,15 +279,15 @@ if [ "$USE_DOCKER" = true ]; then
         misp_key="$MISP_API_KEY"
     else
         misp_key="$(awk -v sq="'" '
-            /^[[:space:]]*(export[[:space:]]+)?MISP_API_KEY[[:space:]]*=/ {
+            /^[ \t]*(export[ \t]+)?MISP_API_KEY[ \t]*=/ {
                 v = $0
                 sub(/\r$/, "", v)
-                sub(/^[^=]*=[[:space:]]*/, "", v)
+                sub(/^[^=]*=[ \t]*/, "", v)
                 q = substr(v, 1, 1)
                 if (q == "\"" || q == sq) {
                     v = substr(v, 2); i = index(v, q); if (i > 0) v = substr(v, 1, i - 1)
                 } else {
-                    sub(/[[:space:]]+#.*$/, "", v); sub(/[[:space:]]+$/, "", v)
+                    sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v)
                 }
                 key = v
             }
@@ -305,7 +305,7 @@ services = json.load(sys.stdin).get("services", {})
 print(" ".join(n for n, s in services.items() if (s.get("healthcheck") or {}).get("test") and not s["healthcheck"].get("disable")))
 ' 2>/dev/null || true)"
     while :; do
-        states="$(docker compose ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null || true)"
+        states="$(docker compose ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null)" || states=""
         if [ -z "$states" ]; then
             # The command failed (for example a Compose without --format templates) or listed nothing:
             # the state is unknown, so the summary does not claim success.
