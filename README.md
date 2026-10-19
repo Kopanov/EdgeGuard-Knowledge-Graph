@@ -258,11 +258,16 @@ cd EdgeGuard-Knowledge-Graph
 `install.sh` handles everything: checks Docker, copies `.env.example → .env`, builds the image, and runs `docker compose up -d`. After it finishes, edit `.env` with your API keys and run `docker compose up -d` again (a plain `restart` does not re-read `.env`).
 
 **Post-install validation (run this after any install method):**
+
+The CLI reads its settings from the environment; it does not read `.env`. With the Docker install, run it in the `airflow` container, which has the `.env` values and the container addresses (`bolt://neo4j:7687`, your `MISP_URL`) already:
+
 ```bash
-python src/edgeguard.py preflight  # comprehensive readiness check (env vars, APIs, Neo4j, MISP, Airflow, disk)
-python src/edgeguard.py doctor     # checks MISP, Neo4j, Airflow, NATS, schema, API keys, version compatibility
-python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pipeline runs
+docker compose exec airflow python /opt/airflow/src/edgeguard.py preflight  # readiness check (env vars, APIs, Neo4j, MISP, Airflow, disk)
+docker compose exec airflow python /opt/airflow/src/edgeguard.py doctor     # MISP, Neo4j, Airflow, NATS, schema, API keys, version compatibility
+docker compose exec airflow python /opt/airflow/src/edgeguard.py stats      # node counts, last sync, pipeline runs
 ```
+
+In the container, `preflight` warns "Could not query DAG list" unless `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` are set. On the host (Option B, or a host shell against the Docker stack), export `.env` first: `set -a; . ./.env; set +a`. Against the Docker stack, also point the host at the published ports (`export NEO4J_URI=bolt://localhost:7687`, and `MISP_URL` when it names a container). Then run `python src/edgeguard.py preflight` (and `doctor`, `stats`) from a venv with the requirements installed.
 
 `preflight` runs 7 check categories (env vars/API keys, Neo4j + APOC, MISP health, Airflow, disk space, checkpoint state, circuit breakers) and exits 0 = ready or 1 = issues found. `stats` shows what data is in the system right now.
 
@@ -1322,10 +1327,11 @@ Open work is tracked in a single list — see *Roadmap & Status → In Progress 
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The post-install validation runs the CLI in the `airflow` container (`docker compose exec airflow python /opt/airflow/src/edgeguard.py …`); the documented host commands exited 1 with "Required environment variable NEO4J_PASSWORD is not set", because the CLI does not read `.env` and `.env` holds container addresses.
 - 2026-10-18 — `EDGEGUARD_RATE_LIMIT_GRAPHQL` sets the GraphQL rate limit (it was fixed at 120/minute in code).
 - 2026-10-18 — Deploy instructions rebuild every image (`docker compose build && docker compose up -d --force-recreate`; they rebuilt only the Airflow image, which left REST, GraphQL and STIX on the old code); `EDGEGUARD_GIT_SHA` forwarded by Compose, written into `.env` by `scripts/record_deployed_commit.sh` (run by `./install.sh`) and reported as `git_sha` by both `/health` responses.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1 (an empty sync window is a failed run).
