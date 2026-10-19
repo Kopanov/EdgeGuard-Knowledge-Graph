@@ -65,12 +65,18 @@ def test_stix_types_discovery_endpoint():
         assert entry["returns"]
 
 
-def test_stix_types_states_that_collectors_link_no_indicator_to_a_cve():
+def test_stix_types_qualifies_the_links_between_indicators_and_cves():
     """``(Indicator)-[:EXPLOITS]->(CVE)`` rests on the indicator's own CVE tag, which no collector
-    writes (2026-10-18): the indicator and cve entries must not promise those links unqualified."""
+    writes (2026-10-18): the indicator and cve entries must not promise those links unqualified. The
+    links a graph the collectors built holds are ``(Indicator)-[:INDICATES]->(CVE)``, an indicator and a
+    CVE named in the same OTX report (2026-10-18), and both entries and the route say so."""
     types = {t["name"]: t for t in client.get("/stix/types").json()["object_types"]}
     assert "collectors write no such tag" in types["indicator"]["returns"]
     assert "collectors do not write" in types["cve"]["returns"]
     assert "threat actors and malware (EXPLOITS)" in types["cve"]["returns"]
+    assert "INDICATES CVEs (named in the same OTX report)" in types["indicator"]["returns"]
+    assert "INDICATES, an indicator named in the same OTX report" in types["cve"]["returns"]
     doc = " ".join((query_api.stix_export.__doc__ or "").split())
-    assert "on a graph they built ``depth=1`` returns the CVE alone" in doc
+    assert "INDICATES CVEs (named in the same OTX report, 2026-10-18)" in doc
+    assert "INDICATES, an indicator named in the same OTX report, 2026-10-18" in doc
+    assert "on a graph they built ``depth=1`` returns the CVE alone" not in doc

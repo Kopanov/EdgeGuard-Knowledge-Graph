@@ -53,7 +53,7 @@
 
 **How classified:**
 - The whole pulse — name, tags, description, indicators — searched for keywords (hospital, scada, bank, etc.); the sectors found apply to every item of the pulse
-- OTX's own `industries` classification added to them
+- OTX's own `industries` classification added to them (the whole name, case ignored: Energy, Utilities, Oil, Gas, Petroleum → `energy`; Finance, Financial, Financial Services, Banking, Insurance, Investment, Investments → `finance`; Healthcare, Health, Medical, Pharmaceutical, Pharmaceuticals, Pharmacy → `healthcare`; `config.OTX_INDUSTRY_ZONE_ALIASES`; Government, Transportation and the other industries map to no sector). These are the report's statement of the sectors its campaign targets: an indicator's, actor's or malware's `TARGETS` link to such a sector carries `otx_industries` (0.6), a sector only the keywords found `zone_classification` (0.5)
 - Word boundary matching prevents false positives
 
 ---
@@ -318,6 +318,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — OTX: the sectors the pulse's own industries name are its statement (`otx_industries` on `TARGETS`); Financial Services, Investment(s), Pharmaceuticals, Pharmacy and Petroleum map to a sector.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — CISA ICS daily runs bounded by `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200 advisory files) instead of `EDGEGUARD_INCREMENTAL_LIMIT`, whose 200 (advisory, CVE) items stopped a run inside a large advisory and held the cursor there.
 - 2026-10-17 — Sections aligned with the code: OTX every 30 minutes from a stored cursor with its page limits (it said on demand, 50 pulses per run); SSL Blacklist classified by the listing reason, which does not reach MISP; CISA KEV every 4 hours, with `notes` and `cwes` not stored in MISP; NVD key optional, every 8 hours, CPE text searched; MISP described as the staging hub; main text limited to current behaviour, with the change history (the 2026-03 notes included) in this section and data written by earlier versions in the appendix.

@@ -270,7 +270,8 @@ class TestCrossItemRelKeys:
     def test_indicator_vulnerability_exploits_not_emitted(self):
         """Indicator × CVE in the same pulse no longer yields EXPLOITS —
         only the indicator's own ``cve_id`` tag asserts that
-        (build_relationships Q3 / parse_attribute embedded rels)."""
+        (build_relationships Q3 / parse_attribute embedded rels). Since 2026-10-18 the pair gives
+        Indicator -> INDICATES -> CVE ("named in the same report", ``otx_pulse``), keyed without tag."""
         items = [
             {"type": "indicator", "indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp", "pulse_id": "p1"},
             {
@@ -283,7 +284,9 @@ class TestCrossItemRelKeys:
         ]
         rels = self._build_rels(items)
         assert not [r for r in rels if r["rel_type"] == "EXPLOITS"]
-        assert rels == []
+        assert [(r["rel_type"], r["to_type"], r["match_type"]) for r in rels] == [("INDICATES", "CVE", "otx_pulse")]
+        assert rels[0]["from_key"] == {"value": "1.2.3.4", "indicator_type": "ipv4"}
+        assert rels[0]["to_key"] == {"cve_id": "CVE-2021-44228"}
 
     def test_vulnerability_sector_affects_no_tag(self):
         """PR #33 round 12: Vulnerability → Sector emits ``rel_type="AFFECTS"``

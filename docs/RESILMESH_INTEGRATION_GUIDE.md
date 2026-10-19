@@ -1,6 +1,6 @@
 # EdgeGuard × ResilMesh integration guide
 
-> **Code alignment:** Cross-layer helpers exist on **`Neo4jClient`** (`src/neo4j_client.py`). Verify names with `grep "def create_" src/neo4j_client.py`. The **contract** for what production **writes today** (e.g. **`REFERS_TO`** Vuln↔CVE, **`EXPLOITS`**, **`INDICATES`** Indicator→Malware) is **[RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md)** — some rows below are **ResilMesh target shapes**, not all implemented as named methods.
+> **Code alignment:** Cross-layer helpers exist on **`Neo4jClient`** (`src/neo4j_client.py`). Verify names with `grep "def create_" src/neo4j_client.py`. The **contract** for what production **writes today** (e.g. **`REFERS_TO`** Vuln↔CVE, **`EXPLOITS`**, **`INDICATES`** Indicator→Malware / CVE) is **[RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md)** — some rows below are **ResilMesh target shapes**, not all implemented as named methods.
 
 ## How EdgeGuard integrates with ResilMesh
 
@@ -263,6 +263,7 @@ creation; calling such a name raises `AttributeError`.
 │    - Threat actors that malware is ATTRIBUTED_TO                │
 │    - MITRE techniques those actors EMPLOY (EMPLOYS_TECHNIQUE)   │
 │    - CVEs the indicator EXPLOITS (CVE / Vulnerability nodes)    │
+│    - CVEs named in the same OTX report (INDICATES to CVE)       │
 │    - Network context (hosts, subnets): planned, not read        │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -320,7 +321,8 @@ processor = AlertProcessor(neo4j_client=client)
 response = processor.process_alert(alert_data)
 # Records: the Alert node, the alert's Indicator node, (Alert)-[:INVOLVES]->(Indicator)
 # Reads: malware (INDICATES), actors (ATTRIBUTED_TO), techniques (EMPLOYS_TECHNIQUE),
-#        CVEs (EXPLOITS to CVE / Vulnerability), the indicator's zones and source dates
+#        CVEs (EXPLOITS to CVE / Vulnerability, INDICATES to CVE: named in the same OTX report),
+#        the indicator's zones and source dates
 # Returns: an EnrichedAlert; response.to_dict() is the JSON (TECHNICAL_SPEC.md § Output)
 # Without recording the alert: processor.enrich_alert_read_only(alert_data)
 #   (demo/alert_enrichment_demo.py, DEMO.md)
@@ -543,11 +545,13 @@ ORDER BY count DESC;
 // MATCH (i:Indicator)-[r:INDICATOR_RESOLVES_TO]->(ip:IP)
 // RETURN i.value as indicator, ip.address as resolved_ip;
 
-// Test enrichment chain: an indicator INDICATES malware and EXPLOITS the CVE its own CVE tag names
+// Test enrichment chain: an indicator INDICATES malware, EXPLOITS the CVE its own CVE tag names,
+// and INDICATES the CVEs named in the same OTX report (match_type 'otx_pulse')
 MATCH (i:Indicator {value: '192.168.1.100'})
 OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
 OPTIONAL MATCH (i)-[:EXPLOITS]->(c:CVE)
-RETURN i.value, collect(DISTINCT m.name), collect(DISTINCT c.cve_id);
+OPTIONAL MATCH (i)-[:INDICATES]->(rc:CVE)
+RETURN i.value, collect(DISTINCT m.name), collect(DISTINCT c.cve_id), collect(DISTINCT rc.cve_id);
 
 // Clean up the test nodes, only those EdgeGuard created
 MATCH (n)
@@ -711,10 +715,11 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — The alert enrichment also reads `(Indicator)-[:INDICATES]->(CVE)`, a CVE named in the same OTX report.
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: 22 relationship types; the relationship examples call the helpers with their real arguments (no `tag`); `merge_cve` takes a data dict and runs its CVSS sub-writes in transactions of their own; the test examples count nodes and `ON` edges directly; the manual Cypher selects and cleans up the test nodes by key and follows `INDICATES` / `EXPLOITS` to `CVE`; `SOURCED_FROM.imported_at` is set on create only; `zone` is a list.
 - 2026-10-16 — `merge_resilmesh_cve` / `merge_resilmesh_vulnerability` write the description with `description_source` `resilmesh`, below every registered feed; the alert flow and its code example state what the alert path writes and reads (the example called a stub that returned sample data).
 - 2026-10-15 — `merge_resilmesh_cve` only fills `description`, `published` and `last_modified` and keeps the lists a call omits (a call without them had removed NVD's lists).

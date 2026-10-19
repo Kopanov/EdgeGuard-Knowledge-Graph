@@ -449,10 +449,12 @@ DETACH DELETE n
 ### Recipe 2 — extract a self-describing subgraph for an LLM / RAG store
 
 ```cypher
-// Seed: a CVE. Pull 1 hop on each side. Output is fully self-describing —
-// every edge document carries src_uuid + trg_uuid, every node carries uuid.
-MATCH (v:Vulnerability {cve_id: $cve_id})
-OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS]->(v)
+// Seed: the CVE node (EdgeGuard's label; the Vulnerability twin shares its uuid,
+// see the twin-node design above). Pull 1 hop on each side. Output is fully
+// self-describing — every edge document carries src_uuid + trg_uuid, every node
+// carries uuid.
+MATCH (v:CVE {cve_id: $cve_id})
+OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS|INDICATES]->(v)
 OPTIONAL MATCH (v)-[r2:AFFECTS]->(s:Sector)
 WITH collect(DISTINCT v) + collect(DISTINCT i) + collect(DISTINCT s) AS nodes,
      collect(DISTINCT r1) + collect(DISTINCT r2) AS rels
@@ -475,7 +477,11 @@ RETURN
 
 Each chunk in the result is independently meaningful. An LLM can be
 given a subset and still reason about the relationships because every
-`src_uuid` / `trg_uuid` resolves back to the source.
+`src_uuid` / `trg_uuid` resolves back to the source. An indicator reaches
+the CVE in two ways, and the edge document's `type` keeps them apart:
+`INDICATES` (`match_type` `otx_pulse`: the indicator and the CVE are named
+in the same OTX report) and `EXPLOITS` (`cve_tag`: the indicator's own CVE
+tag).
 
 ### Recipe 3 — re-derive after pipeline change (reproducibility check)
 
@@ -779,10 +785,11 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — Recipe 2 seeds on the `CVE` node and takes both links from an indicator, `INDICATES` (named in the same OTX report) and `EXPLOITS` (the indicator's own CVE tag), kept apart by the edge type; it seeded on the `Vulnerability` twin and took `EXPLOITS` only.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the notes for graphs written by earlier builds to the appendix (the revert of the uuid deploy is no longer a rollback recipe, so the uuid cleanup and re-stamp recipes are Rollback B and C).
 - 2026-10-17 — Rollback A dumps offline and passes directories to `--to-path` / `--from-path`, as Recipe 3 and BACKUP.md do.

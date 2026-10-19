@@ -21,7 +21,7 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from neo4j import READ_ACCESS
 
@@ -111,8 +111,25 @@ def _invalid_payload_reason(alert_data: Dict) -> Optional[str]:
     return None
 
 
+# What each link from an indicator to a CVE says (2026-10-18), by (relationship type, ``match_type``):
+# the indicator's own CVE tag (``build_relationships`` steps 3a / 3b, the sync's ``exploits:`` tag), or
+# the indicator and the CVE named in the same OTX report (the sync's report-scoped rows).
+CVE_EVIDENCE_MEANINGS: Dict[Tuple[str, str], str] = {
+    ("EXPLOITS", "cve_tag"): "the indicator's own CVE tag",
+    ("INDICATES", "otx_pulse"): "named in the same OTX report as the indicator",
+}
+# The order of the evidence of one CVE: the indicator's own claim first.
+_CVE_EVIDENCE_ORDER = {"EXPLOITS": 0, "INDICATES": 1}
+
+
 def _graph_cves(rows: List[Optional[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """One ``{cve_id, cvss_score, severity}`` entry per CVE id the indicator EXPLOITS (2026-10).
+    """One ``{cve_id, cvss_score, severity, evidence}`` entry per CVE id the graph links the indicator to.
+
+    The links (2026-10-18): ``(Indicator)-[:EXPLOITS]->`` a ``CVE`` or ``Vulnerability`` node (the
+    indicator's own CVE tag, ``cve_tag``) and ``(Indicator)-[:INDICATES]->(CVE)`` (named in the same
+    OTX report, ``otx_pulse``). ``evidence`` lists each distinct (``relationship``, ``match_type``) of
+    the CVE's links with its ``meaning`` (``CVE_EVIDENCE_MEANINGS``; null for a pair outside the table),
+    the indicator's own claim first; a row without a relationship type adds none.
 
     The graph can link an indicator to two nodes of one id, the ``CVE`` node (NVD's record; its
     score and severity come from the CVSS sub-nodes, ``merge_cve``) and a ``Vulnerability`` node.
@@ -128,6 +145,7 @@ def _graph_cves(rows: List[Optional[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         return row.get("cvss_score") is not None or row.get("severity") is not None
 
     chosen: Dict[str, Dict[str, Any]] = {}
+    evidence: Dict[str, set] = {}
     for row in rows:
         if not row or not row.get("cve_id"):
             continue
@@ -135,10 +153,38 @@ def _graph_cves(rows: List[Optional[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         rank = (_states(row), row.get("node_label") == "CVE")
         if current is None or rank > (_states(current), current.get("node_label") == "CVE"):
             chosen[row["cve_id"]] = row
+        relationship = row.get("relationship")
+        if isinstance(relationship, str) and relationship:
+            match_type = row.get("match_type") if isinstance(row.get("match_type"), str) else None
+            evidence.setdefault(row["cve_id"], set()).add((relationship, match_type))
     return [
-        {"cve_id": cve_id, "cvss_score": chosen[cve_id].get("cvss_score"), "severity": chosen[cve_id].get("severity")}
+        {
+            "cve_id": cve_id,
+            "cvss_score": chosen[cve_id].get("cvss_score"),
+            "severity": chosen[cve_id].get("severity"),
+            "evidence": [
+                {
+                    "relationship": relationship,
+                    "match_type": match_type,
+                    "meaning": CVE_EVIDENCE_MEANINGS.get((relationship, match_type or "")),
+                }
+                for relationship, match_type in sorted(
+                    evidence.get(cve_id, ()),
+                    key=lambda pair: (_CVE_EVIDENCE_ORDER.get(pair[0], 9), pair[0], pair[1] or ""),
+                )
+            ],
+        }
         for cve_id in sorted(chosen)
     ]
+
+
+def _only_same_report(cve: Dict[str, Any]) -> bool:
+    """True when every link of a graph CVE entry is a same-report link (no claim of the indicator's own)."""
+    evidence = cve.get("evidence") if isinstance(cve, dict) else None
+    return bool(evidence) and all(
+        isinstance(e, dict) and e.get("relationship") == "INDICATES" and e.get("match_type") == "otx_pulse"
+        for e in evidence
+    )
 
 
 @dataclass
@@ -166,7 +212,8 @@ class EnrichedAlert:
         "known_malware": [{"name": ..., "family": ..., "malware_types": [...], "description": ...}],
         "threat_actors": [{"name": ..., "aliases": [...], "description": ...}],
         "techniques": [{"mitre_id": ..., "name": ..., "description": ...}],
-        "cves": [{"cve_id": ..., "cvss_score": ..., "severity": ...}],
+        "cves": [{"cve_id": ..., "cvss_score": ..., "severity": ...,
+                  "evidence": [{"relationship": ..., "match_type": ..., "meaning": ...}]}],
         "assets": [], "users": [],
         "confidence": <the indicator's confidence_score>,
         "first_seen": "<ISO-8601 or null>", "last_updated": "<ISO-8601 or null>",
@@ -220,6 +267,9 @@ class AlertProcessor:
       - (Indicator)-[:EXPLOITS]->(CVE) and (Indicator)-[:EXPLOITS]->(Vulnerability): the CVE
         the indicator's own CVE tag names (steps 3a / 3b; the query read ``INDICATES`` to a
         ``Vulnerability``, which no code path writes, and found no CVE before 2026-10)
+      - (Indicator)-[:INDICATES]->(CVE): a CVE named in the same OTX report as the indicator
+        (2026-10-18, the sync's report-scoped rows, ``match_type`` ``otx_pulse``); each CVE entry
+        says which links it has (``evidence``)
       - the indicator's ``zone`` list
       - (Alert)-[:TARGETS]->(Asset) and (Alert)-[:INVOLVES_USER]->(User): no code path writes
         these, so ``assets`` and ``users`` are always empty
@@ -424,7 +474,8 @@ class AlertProcessor:
         2. Find related Malware (via INDICATES)
         3. Find related ThreatActors (via ATTRIBUTED_TO from Malware)
         4. Find Techniques (via EMPLOYS_TECHNIQUE from Actor)
-        5. Find CVEs (named in the alert, or the indicator EXPLOITS them in the graph)
+        5. Find CVEs (named in the alert, or linked in the graph: the indicator EXPLOITS them, or
+           they are named in the same OTX report, INDICATES)
         6. Find related Assets and Users from Alert context
 
         Every statement here only reads. ``read_only`` (2026-10, ``enrich_alert_read_only``) also
@@ -593,18 +644,21 @@ class AlertProcessor:
                 # Also query for CVEs linked to this indicator. 2026-10: the graph links an
                 # indicator to the CVE its own CVE tag names as (Indicator)-[:EXPLOITS]->, to the
                 # ``CVE`` node and, where one exists, the ``Vulnerability`` node of that id
-                # (build_relationships steps 3a / 3b, the sync's EXPLOITS rows). The one writer of
-                # INDICATES to either label, ``create_indicator_vulnerability_relationship``, has
-                # no caller, so the former ``-[:INDICATES]->(v:Vulnerability)`` never found a CVE.
-                # ``_graph_cves`` gives one entry per CVE id.
+                # (build_relationships steps 3a / 3b, the sync's EXPLOITS rows). 2026-10-18: and to
+                # a CVE named in the same OTX report as (Indicator)-[:INDICATES]->(CVE) (the sync's
+                # report-scoped rows, ``otx_pulse``). The one writer of INDICATES to a
+                # ``Vulnerability``, ``create_indicator_vulnerability_relationship``, has no caller.
+                # ``_graph_cves`` gives one entry per CVE id, with the links it has (``evidence``).
                 cve_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
-                    OPTIONAL MATCH (i)-[:EXPLOITS]->(v)
-                    WHERE v:CVE OR v:Vulnerability
+                    OPTIONAL MATCH (i)-[r:EXPLOITS|INDICATES]->(v)
+                    WHERE (type(r) = "EXPLOITS" AND (v:CVE OR v:Vulnerability))
+                       OR (type(r) = "INDICATES" AND v:CVE)
                     RETURN collect(DISTINCT v {
                         .cve_id, .cvss_score, .severity,
-                        node_label: CASE WHEN v:CVE THEN "CVE" ELSE "Vulnerability" END
+                        node_label: CASE WHEN v:CVE THEN "CVE" ELSE "Vulnerability" END,
+                        relationship: type(r), match_type: r.match_type
                     }) as cves
                 """,
                     indicator=indicator,
@@ -753,12 +807,16 @@ class AlertProcessor:
             name = malware.get("name", "Unknown")
             recommendations.append(f"Deploy signatures for {name}")
 
-        # CVE-specific recommendations
+        # CVE-specific recommendations. 2026-10-18: a CVE the graph links to the indicator only as
+        # named in the same OTX report says so.
         cves = enrichment.get("cves", [])
         for cve in cves:
             cve_id = cve.get("cve_id") if isinstance(cve, dict) else cve
             if cve_id and cve_id.startswith("CVE-"):
-                recommendations.append(f"Apply patch for {cve_id}")
+                if _only_same_report(cve):
+                    recommendations.append(f"Apply patch for {cve_id} (named in the same OTX report as the indicator)")
+                else:
+                    recommendations.append(f"Apply patch for {cve_id}")
 
         # Network recommendations
         dest_ip = alert.threat.get("dest_ip")

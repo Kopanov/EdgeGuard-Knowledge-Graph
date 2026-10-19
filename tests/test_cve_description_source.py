@@ -85,12 +85,18 @@ def attribute(key: str) -> dict:
     return copy.deepcopy(MISP[key])
 
 
-def otx_pulse_reference(description: str | None = None) -> dict:
+def otx_pulse_reference(description: str | None = None, legacy: bool = False) -> dict:
     """The MISP attribute MISPWriter writes for the OTX collector's ``cve_references`` item (CVE-2015-5477
-    in pulse "BIND TKEY exploitation"); *description* replaces the item's text when given."""
+    in pulse "BIND TKEY exploitation"); *description* replaces the item's text when given. Since
+    2026-10-18 the comment is an ``OTX_META`` block naming the pulse; *legacy* gives the attribute as
+    MISPWriter wrote it before (the item's text, "Referenced in OTX pulse: <name>", or the placeholder
+    "CVE from alienvault_otx"), which MISP still holds."""
     item = _otx_cve_item()
     if description is not None:
         item["description"] = description
+    if legacy:
+        for key in ("pulse_id", "report_ids"):
+            item.pop(key, None)
     return WRITER.create_vulnerability_attribute(item)
 
 
@@ -259,22 +265,44 @@ class TestCommentDescription:
 class TestProvenanceNotes:
     """A vulnerability comment that only says where the CVE was seen is no description."""
 
-    def test_the_otx_pulse_reference_and_the_placeholder_as_written(self):
-        assert otx_pulse_reference()["comment"] == "Referenced in OTX pulse: BIND TKEY exploitation"
-        assert otx_pulse_reference(description="")["comment"] == "CVE from alienvault_otx"
+    def test_the_otx_pulse_reference_and_the_placeholder_as_written_before_2026_10_18(self):
+        assert otx_pulse_reference(legacy=True)["comment"] == "Referenced in OTX pulse: BIND TKEY exploitation"
+        assert otx_pulse_reference(description="", legacy=True)["comment"] == "CVE from alienvault_otx"
+
+    @pytest.mark.parametrize("description", [None, ""], ids=["pulse_reference", "placeholder"])
+    def test_the_pulse_reference_as_written_now_names_the_pulse(self, description):
+        # 2026-10-18: an OTX_META block with the pulse, so the sync groups the CVE into its report; the
+        # item's text is not written (the pulse's name says where the CVE was seen).
+        prefix, _, payload = otx_pulse_reference(description)["comment"].partition(":")
+        assert prefix == "OTX_META"
+        assert json.loads(payload) == {
+            "pulse_id": "6aa4409a4290cc035d81500c",
+            "report_ids": [],
+            "pulse_name": "BIND TKEY exploitation",
+        }
 
     @pytest.mark.parametrize("description", [None, ""], ids=["pulse_reference", "placeholder"])
     def test_neither_becomes_a_description(self, description):
-        attr = otx_pulse_reference(description)
+        attr = otx_pulse_reference(description, legacy=True)
         assert _comment_description(attr["comment"]) == attr["comment"], "the generic helper keeps plain text"
         assert _vulnerability_comment_description(attr["comment"]) is None
         item = synced(attr)
         assert item["cve_id"] == "CVE-2015-5477" and item["tag"] == "alienvault_otx"
         assert item["description"] is None and not item["nvd_record"]
+        assert "pulse_id" not in item, "the note names no pulse id"
+
+    @pytest.mark.parametrize("description", [None, ""], ids=["pulse_reference", "placeholder"])
+    def test_the_block_is_no_description_and_names_the_pulse(self, description):
+        attr = otx_pulse_reference(description)
+        assert _vulnerability_comment_description(attr["comment"]) is None
+        item = synced(attr)
+        assert item["cve_id"] == "CVE-2015-5477" and item["tag"] == "alienvault_otx"
+        assert item["description"] is None and not item["nvd_record"]
+        assert item["pulse_id"] == "6aa4409a4290cc035d81500c"
 
     def test_a_cut_pulse_name_is_still_the_note(self):
-        attr = otx_pulse_reference("Referenced in OTX pulse: " + "x" * 300)
-        assert attr["comment"].endswith("...")  # MISPWriter cuts the item's text at 200 characters
+        attr = otx_pulse_reference("Referenced in OTX pulse: " + "x" * 300, legacy=True)
+        assert attr["comment"].endswith("...")  # MISPWriter cut the item's text at 200 characters
         assert synced(attr)["description"] is None
 
     @pytest.mark.parametrize("first", ["pulse_reference", "kev"])
@@ -287,8 +315,8 @@ class TestProvenanceNotes:
 
     def test_the_stix_vulnerability_carries_neither(self):
         syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
-        for description in (None, ""):
-            attr = otx_pulse_reference(description)
+        for description, legacy in itertools.product((None, ""), (False, True)):
+            attr = otx_pulse_reference(description, legacy=legacy)
             attr["uuid"] = "6f1f2d0e-0000-4000-8000-000000000001"
             obj = syncer._attribute_to_stix21(attr, "00000000-0000-4000-8000-000000000000", ["global"])
             assert obj["type"] == "vulnerability" and "description" not in obj
