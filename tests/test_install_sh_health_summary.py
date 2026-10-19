@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -107,3 +108,22 @@ def test_a_wait_that_is_not_whole_seconds_falls_back_to_the_default(tmp_path):
     assert done.returncode == 0, out
     assert "EDGEGUARD_INSTALL_WAIT_SEC=5m" in out
     assert "EdgeGuard is running!" in out
+
+
+def test_template_misp_values_end_the_wait_for_api_and_graphql_at_once(tmp_path):
+    # They cannot start before MISP_URL / MISP_API_KEY are set, so waiting longer only delays the hint.
+    ps = _HEALTHY.replace("api|running|healthy|0", "api|restarting||1").replace(
+        "graphql|running|healthy|0", "graphql|restarting||1"
+    )
+    started = time.monotonic()
+    done = _install(tmp_path, ps, wait="60")
+    out = done.stdout + done.stderr
+    assert time.monotonic() - started < 30, "waited for services that cannot start yet"
+    assert "api: restarting" in out and "MISP_API_KEY" in out
+
+
+def test_other_unhealthy_services_are_still_waited_for(tmp_path):
+    ps = _HEALTHY.replace("neo4j|running|healthy|0", "neo4j|running|starting|0")
+    started = time.monotonic()
+    _install(tmp_path, ps, wait="4")
+    assert time.monotonic() - started >= 4

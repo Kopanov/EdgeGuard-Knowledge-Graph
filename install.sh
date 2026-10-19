@@ -255,6 +255,9 @@ if [ "$USE_DOCKER" = true ]; then
     [ "$wait_sec" -lt 10 ] && poll=1
     deadline=$((SECONDS + wait_sec))
     not_ready=""
+    # api and graphql cannot start while MISP_API_KEY is the template value: stop waiting for them.
+    misp_template=false
+    grep -qE '^MISP_API_KEY=(your-misp-api-key-here)?$' .env 2>/dev/null && misp_template=true
     while :; do
         states="$(docker compose ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null || true)"
         if [ -z "$states" ]; then
@@ -267,6 +270,9 @@ if [ "$USE_DOCKER" = true ]; then
             $3 == "" && $2 == "running" { next }
             { print $1 ": " ($3 != "" ? $2 " (" $3 ")" : $2) }')"
         [ -z "$not_ready" ] && break
+        if [ "$misp_template" = true ] && ! printf '%s\n' "$not_ready" | grep -qvE '^(api|graphql): '; then
+            break
+        fi
         [ "$SECONDS" -ge "$deadline" ] && break
         sleep "$poll"
     done
@@ -280,10 +286,10 @@ if [ "$USE_DOCKER" = true ]; then
         echo -e "${BOLD}${YELLOW}════════════════════════════════════════════${NC}"
         echo -e "${BOLD}${YELLOW}  EdgeGuard started, but some services are not healthy${NC}"
         echo -e "${BOLD}${YELLOW}════════════════════════════════════════════${NC}"
-        warn "Not healthy after ${wait_sec}s:"
+        warn "Not healthy:"
         printf '%s\n' "$not_ready" | sed 's/^/       /'
         warn "  Logs: docker compose logs --tail 50 <service>"
-        if grep -qE '^MISP_API_KEY=(your-misp-api-key-here)?$' .env 2>/dev/null; then
+        if [ "$misp_template" = true ]; then
             warn "  MISP_URL / MISP_API_KEY still hold template values: api and graphql do not start until"
             warn "  they are set in .env (then run docker compose up -d)."
         fi

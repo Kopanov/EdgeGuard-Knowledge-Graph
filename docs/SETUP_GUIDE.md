@@ -120,7 +120,7 @@ This will:
 1. Create **`.env`** from **`.env.example`** if it is missing, and only in that case generate **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`**, **`AIRFLOW_FERNET_KEY`** and **`GRAFANA_ADMIN_PASSWORD`** (an existing **`.env`** is left as it is)  
 2. **`docker compose build`** (API image + **Airflow image** from **`Dockerfile.airflow`**)  
 3. **`docker compose up -d`**
-4. Wait up to **`EDGEGUARD_INSTALL_WAIT_SEC`** seconds (default 300) for the services and name any that are not healthy, with a pointer to **`docker compose logs`** and to the MISP values when they are still the template ones
+4. Wait up to **`EDGEGUARD_INSTALL_WAIT_SEC`** seconds (default 300) for the services (not for `api` and `graphql` while the MISP values are the template ones: they cannot start yet) and name any that are not healthy, with a pointer to **`docker compose logs`** and to the MISP values when they are still the template ones
 
 When **`install.sh`** creates **`.env`**, it starts the stack in the same run with the template values, so fill in **`.env`** first (§ 3.2, § 3.3).
 
