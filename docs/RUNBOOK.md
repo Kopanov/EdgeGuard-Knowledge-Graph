@@ -934,16 +934,20 @@ It also checks the sector evidence, the description sources and the indicator ag
 | `sector_links_name_only_feeds_that_gave_the_sector` | a link to a `Sector` names a feed whose `SOURCED_FROM.zones` do not hold that sector | no `SOURCED_FROM` edge has `zones` (a graph written by an earlier version) |
 | `advisory_sector_only_where_cisa_stated` | `advisory_sector` sits on anything but an `AFFECTS` link from a CVE to a sector the `cisa_ics` edge lists in `stated_zones` | no link carries the label |
 | `cisa_stated_sectors_linked_as_advisory_sector` | a sector CISA stated is not linked as `advisory_sector`; with `--require-cisa-ics`, also when no sector is stated although the `cisa_ics` edges carry `zones` | no stated sector, when `--require-cisa-ics` is not given or no `cisa_ics` edge carries `zones` (a graph written by an earlier version, or kept and not re-read since) |
-| `sector_links_cite_only_records_that_gave_the_sector` | a sector link cites a CISA ICS advisory whose sector note does not name its sector (the `cisa_ics` edge records the advisories per sector in `stated_refs`) | no `SOURCED_FROM` edge has `stated_refs` |
+| `sector_links_cite_only_records_that_gave_the_sector` | a sector link cites a CISA ICS advisory whose sector note does not name its sector (the `cisa_ics` edge records the advisories per sector in `stated_refs`) | no `cisa_ics` edge has `stated_refs` (judged only for the feeds whose records state every zone they give: an OTX record also gives zones by keyword, for which it records no reference) |
+| `otx_industries_only_where_otx_stated` | `otx_industries` sits on anything but a `TARGETS` link from an Indicator, ThreatActor or Malware to a sector the `alienvault_otx` edge lists in `stated_zones` (an `AFFECTS` link with it fails; `examples`), or such a link cites none of the pulses the edge records for its sector in `stated_refs` (`citing_examples`) | no link carries the label |
+| `otx_stated_sectors_linked_as_otx_industries` | a sector an OTX record stated (the `alienvault_otx` edge's `stated_zones` on an Indicator, ThreatActor or Malware) has no `TARGETS` link, or one labelled `zone_classification` (a label outside the table is not judged); with `--require-otx-industries`, also when no sector is stated although the `alienvault_otx` edges give a sector (`otx_records_with_a_sector`) | no OTX record states a sector, when `--require-otx-industries` is not given or no `alienvault_otx` edge gives a sector (a graph synced by an earlier version) |
 | `sector_confidence_follows_label` | a sector link's confidence is not the label table's value (`src/sector_evidence.py`; a label outside the table is not judged) | no sector link |
 | `descriptions_name_their_source` | a node with a ranked description (CVE, Vulnerability, Malware, ThreatActor, Tool, Technique, Tactic) has no `description_source` | no description |
 | `indicators_have_aging_basis` | an Indicator has no `aging_basis` or no `source_confidence` | no Indicator |
 
-It also reports, without judging, the sector links by type, start label, sector and label
-(`sector_evidence_breakdown`), what CISA ICS adds per sector (`cisa_ics_contribution`: stated, by CISA
+It also reports, without judging, the sector links by type and label (`sector_links_by_evidence_label`)
+and by type, start label, sector and label (`sector_evidence_breakdown`), what CISA ICS adds per sector (`cisa_ics_contribution`: stated, by CISA
 alone, also inferred, and the CISA records whose advisory named no tracked sector) and the node sectors no
 feed gave and the nodes holding `global` next to a sector (`node_sectors_without_a_feed`). After the
-730-day baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`, run it with `--require-cisa-ics`.
+730-day baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`, run it with `--require-cisa-ics`, and after a
+baseline that collected OTX with `--require-otx-industries` (a run that lost the pulses' industries on the
+way to the sync otherwise looks like a graph without OTX statements, which the OTX checks do not judge).
 
 **Measuring CISA ICS and ATT&CK for ICS.** Count CISA's sector statements by label (`advisory_sector` on
 `AFFECTS`) or through the `cisa_ics` `SOURCED_FROM` edge's `stated_zones`; count ATT&CK for ICS through
@@ -1119,7 +1123,7 @@ A `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tact
 
 - **Ranking.** NVD > CISA KEV > CISA ICS > any other source. A CVE without an NVD record shows the KEV's text when the KEV lists it, else CISA ICS's, else another source's, whatever the order of the events.
 - **Revised records.** The KEV text is the catalogue's latest: every KEV run edits the stored copy of an entry CISA revised ([CISA KEV revisions](#cisa-kev-revisions)), and the sync's rule, under which a source's revised record replaces its own text, carries it to the node. The CISA ICS text is that of the first record MISP stored: MISPWriter skips a CISA ICS attribute its source already holds, so a revised ICS advisory reaches neither MISP nor the graph.
-- **What is no description.** For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the OTX collector's "Referenced in OTX pulse: <name>", MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP").
+- **What is no description.** For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the pulse reference "Referenced in OTX pulse: <name>", the comment of a `cve_references` attribute written without an `OTX_META` block; MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP").
 - **Dates.** A CVE's `published` and `last_modified` come from NVD's record: a record from any other source (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has none. Without an NVD record the dates are the CISA ICS record's (the advisory's release dates), the only other record in MISP that gives dates: MISP holds one CISA ICS attribute per CVE, from the first advisory that named it (MISPWriter skips the CVE in later advisories), so the dates do not depend on the order either. They stay outside the ranking, since they are the advisory's dates rather than the CVE's, and NVD's record replaces them.
 - **CVSS sub-nodes and list properties.** NVD's record also comes first for a CVE's CVSS sub-nodes and its lists (`cwe`, `ref_tags`, `cpe_type`, `result_impacts`, `reference_urls`, `affected_products`): a sub-node NVD has asserted keeps NVD's payload and a CISA ICS payload only fills a property it lacks, and NVD's record sets the lists while any other record only fills a list the node does not have ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), the `CVE` properties). The CISA ICS collector sends no impact and exploitability sub-scores, which a CSAF advisory does not give. When NVD's record drops a CVSS version CISA ICS also gives, NVD leaves `sources` and its event leaves `misp_event_ids` of that sub-node's edges, and CISA ICS's next record (at the latest the next full sync) sets its values and the CVE's score; until then the sub-node keeps NVD's values, and its impact and exploitability sub-scores, which CSAF does not give, keep NVD's on a graph that is kept.
 
@@ -1253,10 +1257,12 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The pulse reference "Referenced in OTX pulse: <name>" that gives a CVE no description is named as the comment of a `cve_references` attribute written without an `OTX_META` block.
+- 2026-10-18 — Acceptance: `otx_industries_only_where_otx_stated`, `otx_stated_sectors_linked_as_otx_industries` (`--require-otx-industries`) and the report `sector_links_by_evidence_label`; the per-sector reference check judges CISA ICS only.
 - 2026-10-18 — Canonical threat-actor reference: the OTX collector also reads it to decide whether an adversary the pulse lists as a malware family is an actor (an ambiguous or never_merge name counts as unknown; `[ACTOR-NAMES]` log line with every distinct name; kept without the reference), and how to add an actor the reference lacks.
 - 2026-10-18 — "At each ATT&CK release": a scheduled run adds the release's new and renamed objects; changes to objects already in MISP arrive with the next fresh baseline.
 - 2026-10-18 — The acceptance script has no `--legacy-graph` option, so the description-source and aging checks are judged whenever the graph holds such nodes; the unicode-bypass audit script was removed. The kill switch `EDGEGUARD_RESPECT_CALIBRATOR`, the relationship-write guard it controlled and the post-run query for calibrated edges were removed with the co-occurrence calibration job, which was the only writer of `r.calibrated_at`.

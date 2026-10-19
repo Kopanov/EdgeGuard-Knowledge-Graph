@@ -536,6 +536,138 @@ class TestBundles:
         assert sro["relationship_type"] == "indicates" and "x_edgeguard_sources" not in sro
 
 
+# --------------------------------------------------------------------------- indicator and CVE named in one report
+# 2026-10-18: (Indicator)-[:INDICATES]->(CVE), a CVE named in the same OTX report as the indicator, with the
+# properties the sync's relationship writer gives it.
+SAME_REPORT = {
+    "edge_type": "INDICATES",
+    "match_type": "otx_pulse",
+    "confidence_score": 0.6,
+    "sources": ["alienvault_otx"],
+    "source_refs": ["alienvault_otx:6a0f3c2e9b1d4e5f60718293"],
+    "misp_event_ids": ["4127"],
+    "edgeguard_managed": True,
+    "imported_at": "2026-10-18T06:00:00+00:00",
+    "updated_at": "2026-10-18T07:30:00+00:00",
+}
+OWN_CLAIM = {
+    "edge_type": "EXPLOITS",
+    "match_type": "cve_tag",
+    "confidence_score": 1.0,
+    "sources": ["misp"],
+    "source_refs": [],
+    "misp_event_ids": ["99"],
+    "imported_at": "2026-10-17T06:00:00+00:00",
+    "updated_at": "2026-10-17T06:00:00+00:00",
+}
+
+
+class TestIndicatorCveSameReport:
+    def test_the_pair_is_related_to_explicitly(self, caplog):
+        assert sx._SRO_BY_EDGE[("INDICATES", "indicator", "vulnerability")] == ("related-to", False)
+        assert {
+            "graph_relationship": "INDICATES",
+            "graph_source": "indicator",
+            "graph_target": "vulnerability",
+            "relationship_type": "related-to",
+            "source": "indicator",
+            "target": "vulnerability",
+        } in sx.stix_relationship_mappings()
+        indicator = sx._deterministic_id("indicator", "1.2.3.4")
+        cve = sx._deterministic_id("vulnerability", "CVE-2024-21887")
+        with caplog.at_level("WARNING", logger="stix_exporter"):
+            sro = _exporter({})._edge_to_sro("INDICATES", indicator, cve, SAME_REPORT)
+        assert not [r for r in caplog.records if "No STIX 2.1 relationship mapping" in r.getMessage()]
+        assert sro["relationship_type"] == "related-to"
+
+    def test_an_indicator_bundle_carries_the_same_report_cve(self):
+        row = {
+            "seed": {"value": "203.0.113.17", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [_pair({"cve_id": "CVE-2024-21887"}, [SAME_REPORT])],
+            "techniques": [],
+            "sectors": [],
+        }
+        bundle = _exporter(row).export_indicator("203.0.113.17")
+        parsed = stix2.parse(json.dumps(bundle))  # strict: every x_edgeguard_* property is declared
+        (sro,) = [o for o in parsed.objects if o.type == "relationship"]
+        objects = _by_type(bundle)
+        assert objects[sro.source_ref]["type"] == "indicator" and objects[sro.target_ref]["type"] == "vulnerability"
+        assert sro.relationship_type == "related-to"
+        assert sro.confidence == 60
+        assert sro["x_edgeguard_match_type"] == "otx_pulse"
+        assert sro["x_edgeguard_sources"] == ["alienvault_otx"]
+        assert sro["x_edgeguard_source_refs"] == ["alienvault_otx:6a0f3c2e9b1d4e5f60718293"]
+        assert sro["x_edgeguard_misp_event_ids"] == ["4127"]
+        assert sro.external_references[0].url == "https://otx.alienvault.com/pulse/6a0f3c2e9b1d4e5f60718293"
+        # The link's own times, never the clock (``_relationship_created_modified``).
+        assert str(sro.created).startswith("2026-10-18 06:00:00") and str(sro.modified).startswith("2026-10-18 07:30")
+        assert "edge_type" not in json.dumps(bundle)
+
+    def test_a_cve_the_indicator_claims_and_its_report_names_is_one_sro(self):
+        row = {
+            "seed": {"value": "203.0.113.17", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [_pair({"cve_id": "CVE-2024-21887"}, [SAME_REPORT, OWN_CLAIM])],
+            "techniques": [],
+            "sectors": [],
+        }
+        bundle = _exporter(row).export_indicator("203.0.113.17")
+        stix2.parse(json.dumps(bundle))
+        (sro,) = _sros(bundle)
+        # The stronger link's label; the provenance of both.
+        assert sro["x_edgeguard_match_type"] == "cve_tag" and sro["confidence"] == 100
+        assert sro["x_edgeguard_sources"] == ["alienvault_otx", "misp"]
+        assert sro["x_edgeguard_misp_event_ids"] == ["4127", "99"]
+        assert sro["created"].startswith("2026-10-17T06:00:00") and sro["modified"].startswith("2026-10-18T07:30")
+
+    def test_depth_1_of_an_indicator_bundle_leaves_the_cves_out(self):
+        row = {
+            "seed": {"value": "203.0.113.17", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [_pair({"cve_id": "CVE-2024-21887"}, [SAME_REPORT])],
+            "techniques": [],
+            "sectors": [],
+        }
+        assert _sros(_exporter(row).export_indicator("203.0.113.17", depth=1)) == []
+
+    @pytest.mark.parametrize("depth", [1, 2])
+    def test_a_cve_bundle_carries_the_indicators_its_report_names(self, depth):
+        row = {
+            "seed": {"cve_id": "CVE-2024-21887"},
+            "indicators": [
+                _pair({"value": "203.0.113.17", "indicator_type": "ipv4"}, [SAME_REPORT]),
+                _pair({"value": "update-check.example.net", "indicator_type": "domain"}, [SAME_REPORT, OWN_CLAIM]),
+            ],
+            "threats": [],
+            "sectors": [],
+        }
+        bundle = _exporter(row).export_cve("CVE-2024-21887", depth=depth)
+        stix2.parse(json.dumps(bundle))
+        objects = _by_type(bundle)
+        # An indicator SDO is named "<type>:<value>".
+        by_indicator = {objects[s["source_ref"]]["name"].split(":", 1)[1]: s for s in _sros(bundle)}
+        assert set(by_indicator) == {"203.0.113.17", "update-check.example.net"}
+        assert {s["relationship_type"] for s in by_indicator.values()} == {"related-to"}
+        assert by_indicator["203.0.113.17"]["x_edgeguard_match_type"] == "otx_pulse"
+        assert by_indicator["update-check.example.net"]["x_edgeguard_match_type"] == "cve_tag"
+
+    def test_the_queries_walk_indicates_to_the_cve_node_only(self):
+        session = _Session({"seed": None})
+        client = MagicMock()
+        client.driver.session.return_value = session
+        exporter = sx.StixExporter(client)
+        exporter.export_indicator("203.0.113.17")
+        exporter.export_cve("CVE-2024-21887")
+        indicator_q, cve_q = (" ".join(c.split()) for c in session.calls if "SOURCED_FROM" not in c)
+        assert "OPTIONAL MATCH (i)-[r2:EXPLOITS|INDICATES]->(v)" in indicator_q
+        assert '(type(r2) = "INDICATES" AND v:CVE)' in indicator_q
+        assert "collect(r2 {.*, edge_type: type(r2)}) AS r2s" in indicator_q
+        assert "OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS|INDICATES]->(tw)" in cve_q
+        assert 'WHERE (type(r1) = "EXPLOITS" OR tw:CVE)' in cve_q
+        assert "collect(r1 {.*, edge_type: type(r1)}) AS r1s" in cve_q
+
+
 # --------------------------------------------------------------------------- the link's own TLP
 AMBER_CURATED = dict(CURATED, tlp="amber")
 

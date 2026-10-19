@@ -123,8 +123,9 @@ graph TB
     M -->|ATTRIBUTED_TO| TA
     M -->|PART_OF_CAMPAIGN| CAMP
     I[Indicator] -->|INDICATES| M
+    I -->|INDICATES| CVE[CVE]
     I -->|EXPLOITS| V[Vulnerability]
-    I -->|EXPLOITS| CVE[CVE]
+    I -->|EXPLOITS| CVE
     I -->|TARGETS| S[Sector]
     I -->|USES_TECHNIQUE| T
     I -->|PART_OF_CAMPAIGN| CAMP
@@ -147,7 +148,11 @@ graph TB
     %% Edge legend:
     %%   EMPLOYS_TECHNIQUE    = attribution  (who is doing the TTP)
     %%   IMPLEMENTS_TECHNIQUE = capability   (what the code/tool can do)
-    %%   USES_TECHNIQUE       = observation  (indicator observed tied to a TTP)
+    %%   USES_TECHNIQUE       = report       (the indicator's OTX report lists the TTP)
+    %%
+    %% Indicator -[:INDICATES]-> CVE: named in the same OTX pulse (otx_pulse,
+    %% 0.6, written by the sync); Indicator -[:EXPLOITS]-> CVE only from the
+    %% indicator's own CVE tag (cve_tag), which no collector writes.
     %%
     %% HAS_CVSS_v* expands to four concrete edge types written by
     %% _merge_cvss_node inside merge_cve(): HAS_CVSS_v2, HAS_CVSS_v30,
@@ -278,7 +283,7 @@ flowchart TD
     CHECK -->|No: Normal event| NORMAL[Process all in memory]
 
     PAGED --> PAGE_LOOP["For each page:<br/>parse + dedup + sync<br/>then gc.collect + query_pause<br/>(EDGEGUARD_QUERY_PAUSE_SECONDS, default 0)"]
-    PAGE_LOOP --> BUILD_REL_P["Build report-scoped rels after all pages<br/>(same OTX pulse only)<br/>per-pulse caps: indicators 2000,<br/>malware 50, actors 10"]
+    PAGE_LOOP --> BUILD_REL_P["Build report-scoped rels after all pages<br/>(same OTX pulse only)<br/>per-pulse caps: indicators 2000,<br/>malware 50, CVEs 50, actors 10"]
 
     NORMAL --> DEDUP_N[Deduplicate items]
     DEDUP_N --> BUILD_REL_N["Build report-scoped rels<br/>same per-pulse caps"]
@@ -339,10 +344,12 @@ campaign builder and 6/6 FIRST EPSS. Jobs 2/6, 3/6 and 6/6 are not drawn above.
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
+- 2026-10-18 — The report-scoped build pairs a pulse's indicators with its CVEs too (cap 50 CVEs per pulse); § 3 draws `INDICATES` from `Indicator` to `CVE` with a legend line.
 - 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job was removed from § 1, § 2, § 5 and § 8 (no current code writes the edges it rescored).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to current behaviour: change notes moved to this history, data from earlier versions to the appendix.

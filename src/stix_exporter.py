@@ -28,7 +28,7 @@ Key design decisions:
 - ``EMPLOYS_TECHNIQUE`` (attribution: ThreatActor/Campaign → Technique)
   and ``IMPLEMENTS_TECHNIQUE`` (capability: Malware/Tool → Technique)
   become STIX 2.1 ``relationship_type: "uses"`` on export;
-  ``USES_TECHNIQUE`` (observation: Indicator → Technique) becomes
+  ``USES_TECHNIQUE`` (report-level: the indicator's OTX report lists the technique) becomes
   ``"indicates"``, the only relationship STIX 2.1 defines from an
   indicator to an attack-pattern (``_SRO_BY_EDGE``). The read paths match
   only these specialised edge types; the graph holds no generic ``USES``
@@ -742,8 +742,10 @@ def _industry_sectors(name: str) -> Optional[List[str]]:
 # - indicator → malware / attack-pattern: ``indicates`` (table: indicator
 #   indicates attack-pattern, campaign, infrastructure, intrusion-set,
 #   malware, threat-actor, tool).
-# - indicator → vulnerability (EXPLOITS): the table defines no
-#   indicator → vulnerability pair, so ``related-to``.
+# - indicator → vulnerability (EXPLOITS, the indicator's own CVE tag; INDICATES, named in the same
+#   OTX report, 2026-10-18): the table defines no indicator → vulnerability pair, so ``related-to``
+#   for both. Both links of one pair are one SRO (same id), whose provenance merges them
+#   (``_merge_relationship``); ``x_edgeguard_match_type`` names the stronger link's label.
 # - indicator → identity (TARGETS): ``indicator`` has no ``targets``
 #   relationship in the table, so ``related-to``.
 # - malware → intrusion-set (ATTRIBUTED_TO): ``attributed-to`` is defined
@@ -759,6 +761,7 @@ _SRO_BY_EDGE: Dict[Tuple[str, str, str], Tuple[str, bool]] = {
     ("INDICATES", "indicator", "malware"): ("indicates", False),
     ("USES_TECHNIQUE", "indicator", "attack-pattern"): ("indicates", False),
     ("EXPLOITS", "indicator", "vulnerability"): ("related-to", False),
+    ("INDICATES", "indicator", "vulnerability"): ("related-to", False),
     ("TARGETS", "indicator", "identity"): ("related-to", False),
     ("ATTRIBUTED_TO", "malware", "intrusion-set"): ("uses", True),
     ("EMPLOYS_TECHNIQUE", "intrusion-set", "attack-pattern"): ("uses", False),
@@ -1022,8 +1025,9 @@ class StixExporter:
 
         Neighbourhood: INDICATES→Malware, EXPLOITS→CVE/Vulnerability (only a
         CVE the indicator's own MISP record tags; EdgeGuard's collectors write
-        no such tag), USES_TECHNIQUE→Technique, TARGETS→Sector,
-        PART_OF_CAMPAIGN→Campaign.
+        no such tag), INDICATES→CVE (a CVE named in the same OTX report,
+        2026-10-18; both CVE links are ``related-to``), USES_TECHNIQUE→Technique,
+        TARGETS→Sector, PART_OF_CAMPAIGN→Campaign.
         Every SRO carries the provenance of its graph relationship
         (``_edge_to_sro``, 2026-10).
 
@@ -1057,11 +1061,15 @@ class StixExporter:
         # (indicator_type, value), so one value may exist under several
         # types) and every stage is ordered and limited before it is
         # collected. A CVE may exist as twin ``CVE`` / ``Vulnerability``
-        # nodes sharing one cve_id (and one STIX id); the EXPLOITS stage
+        # nodes sharing one cve_id (and one STIX id); the CVE stage
         # keeps one node per cve_id — the ``CVE`` twin when present, the
         # same preference as ``export_cve`` — before the bound, so twins
         # never take two of the ``limit`` slots; the edges to both twins
         # stay with it and their provenance is merged (``_merge_rel_props``).
+        # The CVE stage walks EXPLOITS to either twin and (2026-10-18)
+        # INDICATES to the ``CVE`` node (named in the same OTX report); each
+        # edge keeps its type (``edge_type``), so each becomes the SRO of its
+        # own type (``_with_typed_rels``).
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
@@ -1071,11 +1079,12 @@ class StixExporter:
               WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
             WITH i, m, r1 ORDER BY m.name LIMIT $limit
             WITH i, collect({n: m, r: properties(r1)}) AS malware
-            OPTIONAL MATCH (i)-[r2:EXPLOITS]->(v)
-              WHERE (v:CVE OR v:Vulnerability)
+            OPTIONAL MATCH (i)-[r2:EXPLOITS|INDICATES]->(v)
+              WHERE ((type(r2) = "EXPLOITS" AND (v:CVE OR v:Vulnerability)) OR (type(r2) = "INDICATES" AND v:CVE))
                 AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
             WITH i, malware, v, r2 ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
-            WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS vn, collect(properties(r2)) AS r2s
+            WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS vn,
+                 collect(r2 {.*, edge_type: type(r2)}) AS r2s
             WITH i, malware, {n: vn, r: r2s} AS vr ORDER BY vr.n.cve_id LIMIT $limit
             WITH i, malware, collect(vr) AS vulns
             OPTIONAL MATCH (i)-[r3:USES_TECHNIQUE]->(t:Technique)
@@ -1106,7 +1115,7 @@ class StixExporter:
             return self._empty_bundle()
 
         malware = _with_rels(row["malware"])
-        vulns = _with_rels(row["vulns"]) if depth >= 2 else []
+        vulns = _with_typed_rels(row["vulns"], "EXPLOITS") if depth >= 2 else []
         techniques = _with_rels(row["techniques"]) if depth >= 2 else []
         sectors = _with_rels(row["sectors"]) if depth >= 2 else []
         campaigns = _with_rels(row.get("campaigns")) if depth >= 2 else []
@@ -1131,10 +1140,11 @@ class StixExporter:
         # relation type (INDICATES→Malware). See the docstring above.
         if depth < 2:
             return self._bundle(objects.values())
-        for vd, rel in vulns:
+        for vd, typed in vulns:
             v_sdo = self._node_to_sdo("Vulnerability", vd)
             self._add(objects, v_sdo)
-            self._add(objects, self._edge_to_sro("EXPLOITS", seed_sdo["id"], v_sdo["id"], rel))
+            for edge_type, rel in typed:
+                self._add(objects, self._edge_to_sro(edge_type, seed_sdo["id"], v_sdo["id"], rel))
         for td, rel in techniques:
             t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
@@ -1498,19 +1508,22 @@ class StixExporter:
         return self._bundle(objects.values())
 
     def export_cve(self, cve_id: str, depth: int = _DEFAULT_DEPTH, limit: int = _DEFAULT_LIMIT) -> Dict[str, Any]:
-        """Bundle centred on a CVE/Vulnerability + exploiting indicators + affected sectors.
+        """Bundle centred on a CVE/Vulnerability + its indicators + affected sectors.
 
-        ``depth=1`` returns the CVE plus only the exploiting Indicators
-        (primary relation). ``depth=2`` (default) also includes affected
-        sectors and the ThreatActors and Malware that exploit it. See
+        ``depth=1`` returns the CVE plus only its Indicators (primary
+        relation). ``depth=2`` (default) also includes affected sectors and
+        the ThreatActors and Malware that exploit it. See
         ``export_indicator`` for the general semantics; ``limit`` bounds the
         indicator and sector collections.
 
-        An Indicator exploits a CVE only when its own MISP record tags that
-        CVE (``build_relationships`` steps 3a / 3b, ``match_type = cve_tag``).
-        EdgeGuard's collectors write no such tag, so on a graph they built
-        the bundle holds no indicator and ``depth=1`` returns the CVE alone;
-        actor and malware links come from curated packages.
+        The indicators: an Indicator exploits a CVE only when its own MISP
+        record tags that CVE (``build_relationships`` steps 3a / 3b,
+        ``match_type = cve_tag``), which EdgeGuard's collectors do not write;
+        an Indicator ``INDICATES`` the ``CVE`` node when an OTX report names
+        both (2026-10-18, ``match_type = otx_pulse``). Both links are
+        ``related-to`` SROs; an indicator with both has one SRO whose
+        provenance merges them. Actor and malware links come from curated
+        packages.
 
         A CVE may exist as two twin nodes (``CVE`` — NVD canonical — and
         ``Vulnerability`` — MISP derived) that share one cve_id and one
@@ -1518,7 +1531,8 @@ class StixExporter:
         node when present, because it carries the NVD enrichment promoted
         by ``_vulnerability_sdo`` — while the EXPLOITS and AFFECTS
         relationships are walked from every twin, so edges that exist
-        only on the other twin still enter the bundle. Each neighbour is
+        only on the other twin still enter the bundle (an indicator's INDICATES
+        link exists only to the ``CVE`` twin). Each neighbour is
         one row before each bound — a neighbour linked to both twins is
         one SRO, whose provenance merges both edges (``_merge_rel_props``)
         — and rows without a match sort last, so they never displace real
@@ -1538,9 +1552,10 @@ class StixExporter:
             WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
             WITH head(collect(v)) AS seed, collect(v) AS twins
             UNWIND twins AS tw
-            OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS]->(tw)
-              WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
-            WITH seed, twins, i, collect(properties(r1)) AS r1s
+            OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS|INDICATES]->(tw)
+              WHERE (type(r1) = "EXPLOITS" OR tw:CVE)
+                AND (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
+            WITH seed, twins, i, collect(r1 {.*, edge_type: type(r1)}) AS r1s
                  ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit
             WITH seed, twins, collect({n: i, r: r1s}) AS indicators
             UNWIND twins AS tw
@@ -1571,7 +1586,7 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
-        indicators = _with_rels(row["indicators"])
+        indicators = _with_typed_rels(row["indicators"], "EXPLOITS")
         sectors = _with_rels(row["sectors"]) if depth >= 2 else []
         threats: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
         if depth >= 2:
@@ -1590,11 +1605,12 @@ class StixExporter:
         seed_sdo = self._node_to_sdo("Vulnerability", dict(seed))
         self._add(objects, seed_sdo)
 
-        for idn, rel in indicators:
+        for idn, typed in indicators:
             i_sdo = self._node_to_sdo("Indicator", idn)
             self._add(objects, i_sdo)
-            self._add(objects, self._edge_to_sro("EXPLOITS", i_sdo["id"], seed_sdo["id"], rel))
-        # depth=1: primary relation only (CVE + exploiting indicators).
+            for edge_type, rel in typed:
+                self._add(objects, self._edge_to_sro(edge_type, i_sdo["id"], seed_sdo["id"], rel))
+        # depth=1: primary relation only (CVE + its indicators).
         if depth < 2:
             return self._bundle(objects.values())
         # 2026-10: the actors and malware that exploit the CVE (curated-package claims
@@ -2539,6 +2555,40 @@ def _with_rels(items: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
             out.append((dict(node), _merge_rel_props(item.get("r"))))
         else:
             out.append((dict(item), {}))
+    return out
+
+
+def _with_typed_rels(items: Any, default_type: str) -> List[Tuple[Dict[str, Any], List[Tuple[str, Dict[str, Any]]]]]:
+    """``[(node, [(edge type, relationship)])]`` from a collected export list (2026-10-18).
+
+    For a stage that walks several relationship types to one neighbour (an indicator's CVE links:
+    ``EXPLOITS`` and ``INDICATES``): the query collects ``r {.*, edge_type: type(r)}`` maps, and the maps
+    of each type are merged by ``_merge_rel_props`` (CVE twins), so each type becomes the SRO of its own
+    type. A map without ``edge_type`` counts as *default_type*; a neighbour without a map yields one
+    relationship of *default_type* with no properties. Entries without a node are dropped, as in
+    ``_with_rels``.
+    """
+    out: List[Tuple[Dict[str, Any], List[Tuple[str, Dict[str, Any]]]]] = []
+    for item in items or []:
+        if item is None:
+            continue
+        if not (isinstance(item, dict) and "n" in item and set(item) <= {"n", "r", "kind"}):
+            out.append((dict(item), [(default_type, {})]))
+            continue
+        node = item.get("n")
+        if node is None:
+            continue
+        rels = item.get("r")
+        maps = [rels] if isinstance(rels, dict) else [r for r in rels or [] if isinstance(r, dict)]
+        by_type: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in maps:
+            props = dict(rel)
+            edge_type = props.pop("edge_type", None)
+            by_type.setdefault(edge_type if isinstance(edge_type, str) and edge_type else default_type, []).append(
+                props
+            )
+        typed = [(edge_type, _merge_rel_props(by_type[edge_type])) for edge_type in sorted(by_type)]
+        out.append((dict(node), typed or [(default_type, {})]))
     return out
 
 

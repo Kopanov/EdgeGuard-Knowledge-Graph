@@ -676,6 +676,18 @@ _TI_GRAPHRAG = [
         expect_rows=False,
         expect_keys=("source", "indicators"),
     ),
+    # 2026-10-18: indicators named in the same OTX report as a CVE (not an exploitation claim).
+    CatalogQuery(
+        "ti-cve-same-report-indicators",
+        "threat_intel",
+        "Indicators named in the same OTX report as one CVE",
+        "MATCH (c:CVE {cve_id: $cve_id})<-[r:INDICATES]-(i:Indicator) WHERE r.match_type = 'otx_pulse' "
+        "RETURN i.value AS indicator, i.indicator_type AS type, r.source_refs AS reports "
+        "ORDER BY indicator LIMIT 25",
+        params={"cve_id": "CVE-2024-21887"},
+        expect_rows=False,
+        expect_keys=("indicator", "type", "reports"),
+    ),
     # -- Cat 5: MITRE ATT&CK ------------------------------------------------- #
     CatalogQuery(
         "ti-technique-family",

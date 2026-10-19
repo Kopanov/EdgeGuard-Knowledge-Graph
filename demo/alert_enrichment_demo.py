@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-graph",
         metavar="N",
         type=int,
-        help="build N alerts from active indicators that have an INDICATES link (query below)",
+        help="build N alerts from active indicators that INDICATE a malware family (query below)",
     )
     parser.add_argument(
         "--zone",
@@ -210,7 +210,10 @@ def main(argv: Optional[Sequence[str]] = None, client_factory: Optional[Callable
                 _err(f"The selection query failed ({type(exc).__name__}: {exc})")
                 return EXIT_NEO4J
             if not rows:
-                _err("No active indicator with an INDICATES link" + (f" in zone {args.zone}" if args.zone else ""))
+                _err(
+                    "No active indicator that INDICATES a malware family"
+                    + (f" in zone {args.zone}" if args.zone else "")
+                )
                 return EXIT_NOTHING_SELECTED
             built_at = datetime.now(timezone.utc).isoformat()
             alerts = [build_alert_from_indicator(row, n, built_at, args.zone) for n, row in enumerate(rows, 1)]

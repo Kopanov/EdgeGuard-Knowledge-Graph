@@ -992,19 +992,24 @@ class TestDocumentation:
         """``(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)``, ``(Indicator)-[:INDICATES]->(Malware)``,
         ``(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`` and ``(Indicator)-[:EXPLOITS]->`` a CVE or
         Vulnerability, as ``build_relationships`` writes them (2026-10: the page listed INDICATES to a
-        Vulnerability, which no pipeline path writes, and no EXPLOITS row)."""
+        Vulnerability, which no pipeline path writes, and no EXPLOITS row), and (2026-10-18)
+        ``(Indicator)-[:INDICATES]->(CVE)``, the sync's same-report link."""
         demo = (ROOT / "docs" / "demo.html").read_text()
-        rows = dict(re.findall(r"<td>([A-Z_]+)</td>\s*<td>([^<]+)</td>", demo))
-        assert rows["ATTRIBUTED_TO"] == "Malware → ThreatActor"
-        assert rows["INDICATES"] == "Indicator → Malware"
-        assert rows["EXPLOITS"] == "Indicator → CVE / Vulnerability"
-        assert rows["EMPLOYS_TECHNIQUE"] == "ThreatActor → Technique"
+        rows: dict = {}
+        for rel, direction in re.findall(r"<td>([A-Z_]+)</td>\s*<td>([^<]+)</td>", demo):
+            rows.setdefault(rel, []).append(direction)
+        assert rows["ATTRIBUTED_TO"] == ["Malware → ThreatActor"]
+        assert rows["INDICATES"] == ["Indicator → Malware", "Indicator → CVE (named in the same OTX report)"]
+        assert rows["EXPLOITS"] == ["Indicator → CVE / Vulnerability"]
+        assert rows["EMPLOYS_TECHNIQUE"] == ["ThreatActor → Technique"]
         assert "USES" not in rows
         assert "— Indicator → Malware</span>" not in demo
         build = (ROOT / "src" / "build_relationships.py").read_text()
         assert "MERGE (m)-[r:ATTRIBUTED_TO]->(a)" in build and "MERGE (i)-[r:INDICATES]->(m)" in build
         assert "MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v)" in build
         assert "MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c)" in build
+        client = " ".join((ROOT / "src" / "neo4j_client.py").read_text().split())
+        assert "MATCH (c:CVE {{cve_id: row.cve_id}}) MERGE (i)-[r:INDICATES]->(c)" in client
 
     def test_the_stix_export_docstring_names_what_stix_types_returns(self, monkeypatch):
         """The route's OpenAPI description and ``/stix/types`` describe the same neighbourhoods."""

@@ -123,9 +123,10 @@ def zone_prov_with(
     in ``stated_zones`` (a statement of the feed, ``sector_evidence``). ``_prov_refs`` /
     ``_prov_events`` are those feeds' record ids and MISP events, the events cut by the fixed sorted
     rule (``capped_event_ids``). Of an edge that records its references per sector (``stated_refs``,
-    ``"<zone>|<ref>"``: the CISA ICS advisories that name each sector) only the references recorded for
-    the sector are taken, so a sector link never cites an advisory that does not name its sector; an
-    edge without one for the sector gives all of its references (``sector_evidence.zone_refs``).
+    ``"<zone>|<ref>"``: the CISA ICS advisories that name each sector, the OTX pulses whose industries
+    state it) only the references recorded for the sector are taken, so a sector link never cites an
+    advisory that does not name its sector; an edge without one for the sector (a sector the feed
+    inferred) gives all of its references (``sector_evidence.zone_refs``).
 
     Legacy rule, so a graph written before the per-source zones behaves as before: a ``SOURCED_FROM``
     edge without ``zones`` counts as giving every zone of the node, and so does a feed of the node

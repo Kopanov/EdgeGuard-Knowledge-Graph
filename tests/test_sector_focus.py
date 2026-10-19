@@ -50,17 +50,19 @@ class TestActorAndMalwareTargetSector:
         assert f"MERGE ({var})-[r:TARGETS]->(sec)" in body
         assert '_z <> "global"' in body, "no (actor)-[:TARGETS]->(global) edges"
         # The label is computed (``zone_classification`` unless a feed stated the sector) and its
-        # confidence comes from the table; TARGETS has no statement label (``sector_evidence``).
+        # confidence comes from the table; the TARGETS statement label is OTX's (``sector_evidence``).
         assert 'reduce(_b = "zone_classification"' in body and "SET r.match_type = _kept" in body
         assert "r.edgeguard_managed = true" in body
         assert "MERGE (sec:Sector {name: zone_name})" in body and "sec.edgeguard_managed = true" in body
         assert f"r.src_uuid = coalesce(r.src_uuid, {var}.uuid)" in body
 
-    def test_targets_steps_carry_no_statement_label(self):
+    def test_targets_steps_carry_only_the_otx_statement_label(self):
+        """2026-10-18: an OTX report's industries are the one targeting statement (``otx_industries``);
+        CISA's deployment statement stays on AFFECTS."""
         import build_relationships as br
 
         for name in ("_Q7A_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"):
-            assert getattr(br, name).params["sector_statements"] == {}, name
+            assert getattr(br, name).params["sector_statements"] == {"alienvault_otx": "otx_industries"}, name
         assert br._Q7B_STATEMENTS.params["sector_statements"] == {"cisa_ics": "advisory_sector"}
 
     def test_outer_queries_select_nodes_with_a_zone(self):
