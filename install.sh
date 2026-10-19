@@ -251,6 +251,7 @@ if [ "$USE_DOCKER" = true ]; then
         warn "EDGEGUARD_INSTALL_WAIT_SEC=$wait_sec is not a whole number of seconds; waiting 300"
         wait_sec=300
     fi
+    wait_sec=$((10#$wait_sec))  # 08 would otherwise be read as an invalid octal number
     poll=5
     [ "$wait_sec" -lt 10 ] && poll=1
     deadline=$((SECONDS + wait_sec))

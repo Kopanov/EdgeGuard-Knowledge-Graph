@@ -141,3 +141,10 @@ def test_a_service_with_a_healthcheck_between_restarts_is_not_counted_as_done(tm
     out = done.stdout + done.stderr
     assert "api: running" in out
     assert "metrics" not in out.split("Not healthy")[-1]  # no healthcheck: running counts as done
+
+
+def test_a_wait_with_a_leading_zero_is_read_as_decimal(tmp_path):
+    done = _install(tmp_path, _HEALTHY, wait="08")
+    out = done.stdout + done.stderr
+    assert done.returncode == 0, out
+    assert "EdgeGuard is running!" in out
