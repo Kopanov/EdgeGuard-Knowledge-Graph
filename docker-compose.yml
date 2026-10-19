@@ -627,9 +627,9 @@ services:
     # ``ports: 127.0.0.1:8000:8000`` requires the container app to bind to
     # 0.0.0.0 (binding to the container's own 127.0.0.1 makes the docker
     # bridge unable to deliver traffic). To keep ``./install.sh && docker
-    # compose up`` from crashlooping on the safety check, install.sh now
-    # auto-generates a strong EDGEGUARD_API_KEY in .env on first creation
-    # (see ``install.sh:71-100`` and the comment block in .env.example).
+    # compose up`` from crashlooping on the safety check, install.sh
+    # auto-generates a strong EDGEGUARD_API_KEY in .env whenever it is blank
+    # (see install.sh and the comment block in .env.example).
     # Operators who clone + ``docker compose up`` without install.sh hit
     # the safety check's RuntimeError with an actionable message.
     command: ["python", "-m", "src.query_api"]
