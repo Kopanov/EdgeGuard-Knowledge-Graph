@@ -33,6 +33,7 @@ case "$*" in
     "compose version --short") echo "2.29.0" ;;
     "compose version") echo "Docker Compose version v2.29.0" ;;
     "compose config --format json") echo '{"name": "egtest"}' ;;
+    info) [ -n "$FAKE_DAEMON_DOWN" ] && exit 1 ;;
     "volume inspect "*)
         for v in $FAKE_VOLUMES; do [ "volume inspect $v" = "$*" ] && exit 0; done
         exit 1 ;;
@@ -49,7 +50,7 @@ def _workdir(tmp_path: Path) -> Path:
     return work
 
 
-def _install(tmp_path: Path, work: Path, volumes: str = "") -> subprocess.CompletedProcess:
+def _install(tmp_path: Path, work: Path, volumes: str = "", **extra_env: str) -> subprocess.CompletedProcess:
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir(exist_ok=True)
     (fake_bin / "docker").write_text(_FAKE_DOCKER)
@@ -59,8 +60,12 @@ def _install(tmp_path: Path, work: Path, volumes: str = "") -> subprocess.Comple
         PATH=f"{fake_bin}:{os.environ['PATH']}",
         DOCKER_LOG=str(tmp_path / "docker.log"),
         FAKE_VOLUMES=volumes,
+        **extra_env,
     )
     env.pop("EDGEGUARD_GIT_SHA", None)
+    for key in _SECRETS:
+        if key not in extra_env:
+            env.pop(key, None)
     return subprocess.run(["bash", "install.sh"], cwd=work, env=env, capture_output=True, text=True, timeout=120)
 
 
@@ -157,3 +162,41 @@ def test_make_env_target_creates_a_private_file(tmp_path):
     done = subprocess.run(["make", ".env"], cwd=work, capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stdout + done.stderr
     assert stat.S_IMODE((work / ".env").stat().st_mode) == 0o600
+
+
+def test_blank_api_key_is_kept_when_unauthenticated_mode_is_chosen(tmp_path):
+    work = _workdir(tmp_path)
+    _prepared_env(work, NEO4J_PASSWORD="operator-chosen", EDGEGUARD_ALLOW_UNAUTH="1")
+    done = _install(tmp_path, work)
+    assert done.returncode == 0, done.stdout + done.stderr
+    values = _values(work / ".env")
+    assert values["EDGEGUARD_API_KEY"] == ""
+    assert "EDGEGUARD_ALLOW_UNAUTH" in done.stdout + done.stderr
+    assert values["AIRFLOW_API_AUTH_JWT_SECRET"]  # the Airflow secrets are still generated
+
+
+def test_secret_exported_in_the_shell_is_not_written(tmp_path):
+    work = _workdir(tmp_path)
+    _prepared_env(work, NEO4J_PASSWORD="operator-chosen")
+    done = _install(tmp_path, work, AIRFLOW_FERNET_KEY="exported-in-shell")
+    assert done.returncode == 0, done.stdout + done.stderr
+    values = _values(work / ".env")
+    assert values.get("AIRFLOW_FERNET_KEY", "") == ""
+    assert "AIRFLOW_FERNET_KEY" in done.stdout + done.stderr
+    assert values["EDGEGUARD_API_KEY"]
+
+
+def test_default_neo4j_password_is_kept_when_docker_cannot_be_asked(tmp_path):
+    work = _workdir(tmp_path)
+    _prepared_env(work)  # NEO4J_PASSWORD=changeme from the template
+    done = _install(tmp_path, work, FAKE_DAEMON_DOWN="1")
+    assert _values(work / ".env")["NEO4J_PASSWORD"] == "changeme"
+
+
+def test_unwritable_env_fails_and_names_the_saved_content(tmp_path):
+    work = _workdir(tmp_path)
+    env_file = _prepared_env(work, NEO4J_PASSWORD="operator-chosen")
+    env_file.chmod(0o400)
+    done = _install(tmp_path, work)
+    assert done.returncode != 0
+    assert "could not write .env" in done.stdout + done.stderr
