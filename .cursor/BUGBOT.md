@@ -226,9 +226,9 @@ Flag any new MISP→sync code that assumes a flat event dict without normalizati
 | Prefix | Writer | Reader |
 |--------|--------|--------|
 | **`NVD_META:`** | `misp_writer.create_vulnerability_attribute` | `run_misp_to_neo4j.parse_attribute` (vulnerability) |
-| **`MITRE_USES_TECHNIQUES:`** | `misp_writer.create_malware_attribute`, `create_actor_attribute`, `create_tool_attribute` (actors also carry `uses_malware` / `uses_tools` as keys `m` / `s`) | `run_misp_to_neo4j.parse_attribute` → **`uses_techniques`** on **`merge_malware`** / **`merge_actor`** / **`merge_tool`** |
+| **`MITRE_USES_TECHNIQUES:`** | `misp_writer.create_malware_attribute`, `create_actor_attribute`, `create_tool_attribute` (actors also carry `uses_malware` / `uses_tools` as keys `m` / `s`; OTX families and adversaries their pulse's `industries` as `ind` and the sectors the later pulses of the run state as `rsz`) | `run_misp_to_neo4j.parse_attribute` → **`uses_techniques`** on **`merge_malware`** / **`merge_actor`** / **`merge_tool`** |
 | **`MITRE_TACTIC_PHASES:`** | `misp_writer.create_technique_attribute` | `run_misp_to_neo4j.parse_attribute` (`tactic_phases`) |
-| **`OTX_META:`** | `misp_writer.create_attribute` (OTX items) | `run_misp_to_neo4j.parse_attribute` (pulse malware families, ATT&CK ids, several-actor marks) |
+| **`OTX_META:`** | `misp_writer.create_attribute` (OTX items), `create_vulnerability_attribute` (OTX CVEs, `_cve_pulse_meta`) | `run_misp_to_neo4j.parse_attribute` (pulse malware families, ATT&CK ids, several-actor marks, the pulses' industries `otx_industries` / `report_stated_zones`; the pulse ids of an OTX CVE, `_vulnerability_report_ids`) |
 | **`TF_META:`** | `misp_writer.create_attribute` (ThreatFox items) | `run_misp_to_neo4j.parse_attribute` |
 
 Flag new embedded JSON sentinels added on one side without the other, or truncation that breaks JSON parsing.
@@ -293,7 +293,7 @@ Flag any version that checks only `event_info.get("info")` (event name) as fallb
 
 ### ThreatActor→Technique EMPLOYS_TECHNIQUE must use `uses_techniques` list, not `misp_event_id` co-occurrence
 
-In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation)):
+In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-report)):
 
 ```cypher
 // CORRECT
@@ -393,7 +393,7 @@ Assigning a static `confidence_score = 0.8` to every node regardless of source q
 | Co-occurrence inference | 0.30 – 0.50 |
 | Text keyword detection only | 0.10 – 0.30 |
 
-Links to a `Sector` take their confidence from `sector_evidence.LABEL_CONFIDENCE` (`zone_classification` 0.5, `advisory_sector` 0.9), not from this table.
+Links to a `Sector` take their confidence from `sector_evidence.LABEL_CONFIDENCE` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9), not from this table.
 
 Flag any node or relationship that hardcodes a confidence score above `0.70` for data that has not been explicitly corroborated by source material. Flag any relationship with `confidence_score > 0.80` and `match_type = 'misp_cooccurrence'` — co-occurrence is inherently weak signal.
 
@@ -420,7 +420,8 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 
 ```
 (Indicator)   -[:INDICATES]->          (Malware)            # same OTX pulse (otx_pulse) or malware_family label (credited to FAMILY_LABEL_FEEDS)
-(Indicator)   -[:EXPLOITS]->           (Vulnerability|CVE)
+(Indicator)   -[:INDICATES]->          (CVE)                # named in the same OTX pulse (otx_pulse, sync); never EXPLOITS, never a new type
+(Indicator)   -[:EXPLOITS]->           (Vulnerability|CVE)  # the indicator's own CVE tag (cve_tag) only
 (Malware)     -[:ATTRIBUTED_TO]->      (ThreatActor)        # malware attributed to actor
 (ThreatActor) -[:USES_MALWARE]->       (Malware)            # MITRE uses / curated claim; campaign evidence with ATTRIBUTED_TO
 (ThreatActor) -[:USES_TOOL]->          (Tool)
@@ -428,7 +429,7 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 (Campaign)    -[:EMPLOYS_TECHNIQUE]->  (Technique)          # campaign-level attribution (future)
 (Malware)     -[:IMPLEMENTS_TECHNIQUE]->(Technique)         # capability: malware implements TTP
 (Tool)        -[:IMPLEMENTS_TECHNIQUE]->(Technique)         # capability: tool implements TTP
-(Indicator)   -[:USES_TECHNIQUE]->     (Technique)          # observation: IOC tied to TTP (OTX attack_ids)
+(Indicator)   -[:USES_TECHNIQUE]->     (Technique)          # report: the IOC's OTX report lists the TTP (OTX attack_ids)
 (Technique)   -[:IN_TACTIC]->          (Tactic)
 (ThreatActor) -[:RUNS]->               (Campaign)
 (Malware|Indicator)-[:PART_OF_CAMPAIGN]-> (Campaign)     # not PART_OF, which is ResilMesh's topology relationship (IP / Subnet / OrganizationUnit)
@@ -436,7 +437,7 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 (Vulnerability|CVE)-[:AFFECTS]->       (Sector)             # sector from zone list (build_relationships)
 ```
 
-**Sector links.** Flag a write of a link to a `Sector` that names in `r.sources` (or copies `source_refs` / `misp_event_ids` from) a feed whose `SOURCED_FROM.zones` do not hold that sector: use `relationship_provenance.zone_prov_with`, never `prov_with(n, node_feeds(n))`, for a sector link. Flag `advisory_sector` anywhere but on `AFFECTS` from a CVE / Vulnerability whose `cisa_ics` record stated the sector (`sector_evidence.STATEMENT_LABELS`; a CISA advisory sector means "deployed in", never TARGETS), a hard-coded confidence on a sector link (it comes from `sector_evidence.LABEL_CONFIDENCE`), and a statement label whose confidence is not above `zone_classification`'s. A new `SOURCED_FROM` write site must set `zones`, `stated_zones` and `stated_refs` (`neo4j_client._sourced_zone_items`). Flag a sector link that cites every record of a stating feed instead of those recorded for its sector (`sector_evidence.zone_refs`, `stated_refs`), and a light copy of a parsed item (the paged sync's `_REL_KEYS`) that drops `stated_zones` or `stated_refs`.
+**Sector links.** Flag a write of a link to a `Sector` that names in `r.sources` (or copies `source_refs` / `misp_event_ids` from) a feed whose `SOURCED_FROM.zones` do not hold that sector: use `relationship_provenance.zone_prov_with`, never `prov_with(n, node_feeds(n))`, for a sector link. Flag `advisory_sector` anywhere but on `AFFECTS` from a CVE / Vulnerability whose `cisa_ics` record stated the sector (`sector_evidence.STATEMENT_LABELS`; a CISA advisory sector means "deployed in", never TARGETS), `otx_industries` anywhere but on `TARGETS` from an Indicator / ThreatActor / Malware whose `alienvault_otx` record stated the sector through its pulse's industries (a targeted industry is never a deployment statement, never AFFECTS), a stated zone of an OTX record that is not one its industries, or those of a later pulse of the run that listed the item (`report_stated_zones`), map to (`sector_evidence.stated_zones`: keyword hits stay inferred; a same-run fold of OTX items keeps each later pulse's stated zones with its pulse id, `otx_collector._fold_duplicate_pulse_item`; the industry table has one definition, `config.OTX_INDUSTRY_ZONE_ALIASES` through `config.otx_industry_zones`), a hard-coded confidence on a sector link (it comes from `sector_evidence.LABEL_CONFIDENCE`), and a statement label whose confidence is not above `zone_classification`'s. A new `SOURCED_FROM` write site must set `zones`, `stated_zones` and `stated_refs` (`neo4j_client._sourced_zone_items`). Flag a sector link that cites every record of a stating feed instead of those recorded for its sector (`sector_evidence.zone_refs`, `stated_refs`), and a light copy of a parsed item (the paged sync's `_REL_KEYS`) that drops `stated_zones` or `stated_refs`.
 
 > **Technique edges:** a Technique edge is `EMPLOYS_TECHNIQUE`, `IMPLEMENTS_TECHNIQUE` or `USES_TECHNIQUE`, never a generic `USES`. `create_misp_relationships_batch` has no `rel_type="USES"` route: `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` rows must name `from_type`, and a row without it is dropped with a warning. Flag any code that **emits** `USES` for a Technique edge.
 
@@ -1047,10 +1048,13 @@ When code changes affect user-visible behavior (CLI commands, env vars, DAG sett
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — The `USES_TECHNIQUE` pattern comment says what the link is: the indicator's OTX report lists the technique.
+- 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag. The `OTX_META` sentinel pair lists the OTX CVE writer (`create_vulnerability_attribute`) and reader (`_vulnerability_report_ids`).
+- 2026-10-18 — Sector links: `otx_industries` (0.6) only on `TARGETS` to a sector an OTX pulse's industries state; `MITRE_USES_TECHNIQUES.ind` / `rsz`, `OTX_META.report_stated_zones`.
 - 2026-10-18 — Rule added: `ThreatActor` names pass `actor_name_hygiene` (country and state names included), and the OTX actor items, pairs and several-actor decision use one list of names per pulse.
 - 2026-10-18 — The rule on enrichment job failures no longer names the removed co-occurrence calibration job.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

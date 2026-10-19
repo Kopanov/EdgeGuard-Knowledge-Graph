@@ -64,9 +64,9 @@ def _syncer(attributes, since=SINCE):
 
     real_build = MISPToNeo4jSync._build_cross_item_relationships
 
-    def build(items):
+    def build(items, reports=None):
         syncer.cross_input.extend(items)
-        return real_build(syncer, items)
+        return real_build(syncer, items, reports=reports)
 
     syncer._build_cross_item_relationships = build
     syncer.rels = []

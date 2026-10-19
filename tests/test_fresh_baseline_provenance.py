@@ -556,7 +556,7 @@ class TestPagedPathKeepsReportProvenance:
         syncer = self._syncer_with_parsed()
         captured: dict = {}
 
-        def fake_builder(items):
+        def fake_builder(items, reports=None):
             captured["items"] = items
             return []
 
@@ -577,7 +577,7 @@ class TestPagedPathKeepsReportProvenance:
         monkeypatch.setattr(MISPToNeo4jSync, "_ATTR_PAGE_SIZE", 10)  # single page → in-page dedupe
         syncer = self._syncer_with_parsed()
         captured: dict = {}
-        syncer._build_cross_item_relationships = lambda items: captured.setdefault("items", items) and []
+        syncer._build_cross_item_relationships = lambda items, reports=None: captured.setdefault("items", items) and []
         syncer._create_relationships = MagicMock(return_value=0)
 
         syncer._process_large_event_paged("99", {"Event": {"id": "99"}}, self._attrs())
