@@ -129,8 +129,10 @@ def test_template_misp_values_end_the_wait_for_api_and_graphql_at_once(tmp_path)
 def test_other_unhealthy_services_are_still_waited_for(tmp_path):
     ps = _HEALTHY.replace("neo4j|running|healthy|0", "neo4j|running|starting|0")
     started = time.monotonic()
-    _install(tmp_path, ps, wait="4")
-    assert time.monotonic() - started >= 4
+    done = _install(tmp_path, ps, wait="4")
+    # Bash SECONDS counts whole seconds, so a 4-second deadline can end after a little over 3.
+    assert time.monotonic() - started >= 3
+    assert "neo4j: running" in done.stdout + done.stderr
 
 
 def test_a_service_with_a_healthcheck_between_restarts_is_not_counted_as_done(tmp_path):
