@@ -115,9 +115,11 @@ $(VENV)/bin/activate:
 .env:
 	@if [ ! -f .env ]; then \
 		cp .env.example .env; \
+		chmod 600 .env; \
 		echo ""; \
 		echo "  .env created from .env.example."; \
-		echo "  Edit .env and set NEO4J_PASSWORD, MISP_URL, MISP_API_KEY before starting."; \
+		echo "  Edit .env and set MISP_URL and MISP_API_KEY. ./install.sh generates the other secrets;"; \
+		echo "  without it, set NEO4J_PASSWORD before the first start (Neo4j keeps its first password)."; \
 		echo ""; \
 	fi
 

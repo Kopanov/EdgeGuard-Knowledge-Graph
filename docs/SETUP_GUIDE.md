@@ -78,9 +78,9 @@ cd EdgeGuard-Knowledge-Graph
 cp .env.example .env
 ```
 
-**`./install.sh`** (§ 3.4) generates **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`**, **`AIRFLOW_FERNET_KEY`** and **`GRAFANA_ADMIN_PASSWORD`** (used by `docker-compose.monitoring.yml`) only when **`.env`** does not exist yet; an existing **`.env`**, such as the copy above, is left as it is. After the copy, set these yourself together with the variables of § 3.3.
+**`./install.sh`** (§ 3.4) generates **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`** and **`AIRFLOW_FERNET_KEY`** whenever one of them is blank, so a copy like the one above gets them on its first run; a value already set is kept. It generates **`GRAFANA_ADMIN_PASSWORD`** (used by `docker-compose.monitoring.yml`) only when it creates **`.env`** itself. Without the installer, set these yourself together with the variables of § 3.3.
 
-Edit **`.env`** before the first start: Neo4j takes its password from **`NEO4J_PASSWORD`** on the first start only (while its data volume is empty), and a later change in **`.env`** does not change it. **Inside Docker**, services talk to Neo4j as **`bolt://neo4j:7687`** — that is already set in **`docker-compose.yml`** via `x-common-env`; your **`.env`** should still define **`NEO4J_PASSWORD`** (and any other secrets) — Compose substitutes them into the stack.
+Edit **`.env`** before the first start: Neo4j takes its password from **`NEO4J_PASSWORD`** on the first start only (while its data volume is empty), and a later change in **`.env`** does not change it. On the Docker path, **`./install.sh`** replaces the template value **`changeme`** with a generated password while the Neo4j data volume does not exist; once the volume exists, it keeps the value and prints a warning. **Inside Docker**, services talk to Neo4j as **`bolt://neo4j:7687`** — that is already set in **`docker-compose.yml`** via `x-common-env`; your **`.env`** should still define **`NEO4J_PASSWORD`** (and any other secrets) — Compose substitutes them into the stack.
 
 ### 3.3 Minimum variables to set (Compose)
 
@@ -117,11 +117,11 @@ From the repo root:
 
 This will:
 
-1. Create **`.env`** from **`.env.example`** if it is missing, and only in that case generate **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`**, **`AIRFLOW_FERNET_KEY`** and **`GRAFANA_ADMIN_PASSWORD`** (an existing **`.env`** is left as it is)  
+1. Create **`.env`** from **`.env.example`** (mode 600) if it is missing and generate **`GRAFANA_ADMIN_PASSWORD`** in that case; generate a blank **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`** or **`AIRFLOW_FERNET_KEY`** in every case (**`.env`** is rewritten in place, so a symlinked **`.env`** stays a symlink); on the Docker path, replace **`NEO4J_PASSWORD=changeme`** before Neo4j's first start  
 2. **`docker compose build`** (API image + **Airflow image** from **`Dockerfile.airflow`**)  
 3. **`docker compose up -d`**
 
-When **`install.sh`** creates **`.env`**, it starts the stack in the same run with the template values, so fill in **`.env`** first (§ 3.2, § 3.3).
+When **`install.sh`** creates **`.env`**, it starts the stack in the same run with the template MISP values: **`api`** and **`graphql`** refuse the placeholder **`MISP_API_KEY`** and restart until **`MISP_URL`** and **`MISP_API_KEY`** are set. Set them (§ 3.2, § 3.3) and run **`docker compose up -d`**.
 
 If you change **`requirements-airflow-docker.txt`** or **`Dockerfile.airflow`**, rebuild Airflow:
 
@@ -296,10 +296,11 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `install.sh` generates a blank `EDGEGUARD_API_KEY`, `AIRFLOW_API_AUTH_JWT_SECRET` or `AIRFLOW_FERNET_KEY` on every run (a `.env` prepared before the first run kept them blank and the stack did not start), rewrites `.env` in place so a symlinked `.env` stays a symlink, creates it with mode 600 (also `make .env`), and replaces `NEO4J_PASSWORD=changeme` before Neo4j's first start (the first start locked the template password in, and the documented edit afterwards left the stack waiting on an unhealthy Neo4j).
 - 2026-10-18 — The tarball update recreates every container (`docker compose up -d --force-recreate`) after rebuilding every image; the deployed commit is recorded in `.env` as `EDGEGUARD_GIT_SHA` (`./install.sh --update` runs `scripts/record_deployed_commit.sh`; a tarball deploy passes the commit to it).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; upgrade steps for kept installs moved to the appendix.
