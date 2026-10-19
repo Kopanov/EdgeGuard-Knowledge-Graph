@@ -351,12 +351,125 @@ if [ "$USE_DOCKER" = true ]; then
     info "Image built"
 
     section "Starting the full stack"
-    docker compose up -d
+    # A failed start (for example a dependency that stays unhealthy) still gets the service summary
+    # below; the installer then exits with the status of docker compose up -d.
+    up_rc=0
+    docker compose up -d || up_rc=$?
+    if [ "$up_rc" -ne 0 ]; then
+        error "docker compose up -d failed (exit status $up_rc)"
+    fi
+
+    # Wait for the services and report the state they reach: a service can crash-loop (a placeholder
+    # MISP_API_KEY) or never start because a dependency stays unhealthy. EDGEGUARD_INSTALL_WAIT_SEC
+    # (default 300) bounds the wait; 0 checks once. After a failed docker compose up -d the state is
+    # checked once: the services it did not start stay as they are. One-shot services that exited 0
+    # count as done.
+    section "Waiting for the services"
+    wait_sec="${EDGEGUARD_INSTALL_WAIT_SEC:-300}"
+    if ! [[ "$wait_sec" =~ ^[0-9]+$ ]]; then
+        warn "EDGEGUARD_INSTALL_WAIT_SEC=$wait_sec is not a whole number of seconds; waiting 300"
+        wait_sec=300
+    fi
+    wait_sec=$((10#$wait_sec))  # 08 would otherwise be read as an invalid octal number
+    if [ "$up_rc" -ne 0 ]; then
+        wait_sec=0
+    fi
+    poll=5
+    [ "$wait_sec" -lt 10 ] && poll=1
+    deadline=$((SECONDS + wait_sec))
+    not_ready=""
+    state_checked=true
+    # api and graphql exit at start while MISP_API_KEY is a placeholder (the values src/config.py
+    # rejects: empty, your-misp-api-key-here, changeme, YOUR_API_KEY_HERE): stop waiting for them.
+    # Compose takes a value exported in the shell before .env, and so does this check. In .env the
+    # last assignment counts; quotes, an "export " prefix and a " # comment" are removed as Compose does.
+    if [ -n "${MISP_API_KEY+set}" ]; then
+        misp_key="$MISP_API_KEY"
+    else
+        misp_key="$(awk -v sq="'" '
+            /^[ \t]*(export[ \t]+)?MISP_API_KEY[ \t]*=/ {
+                v = $0
+                sub(/\r$/, "", v)
+                sub(/^[^=]*=[ \t]*/, "", v)
+                q = substr(v, 1, 1)
+                if (q == "\"" || q == sq) {
+                    v = substr(v, 2); i = index(v, q); if (i > 0) v = substr(v, 1, i - 1)
+                } else {
+                    sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v)
+                }
+                key = v
+            }
+            END { print key }' .env 2>/dev/null || true)"
+    fi
+    misp_placeholder=false
+    case "$misp_key" in
+        ""|your-misp-api-key-here|changeme|YOUR_API_KEY_HERE) misp_placeholder=true ;;
+    esac
+    # Services that define a healthcheck: for them an empty Health (a moment in a restart loop, or
+    # before the first probe) is not "done". Unknown when compose config cannot be read.
+    with_healthcheck="$(docker compose config --format json 2>/dev/null | python3 -c '
+import json, sys
+services = json.load(sys.stdin).get("services", {})
+print(" ".join(n for n, s in services.items() if (s.get("healthcheck") or {}).get("test") and not s["healthcheck"].get("disable")))
+' 2>/dev/null || true)"
+    while :; do
+        states="$(docker compose ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null)" || states=""
+        if [ -z "$states" ]; then
+            # The command failed (for example a Compose without --format templates) or listed nothing:
+            # the state is unknown, so the summary does not claim success.
+            warn "docker compose ps failed or listed no services — skipped the health wait"
+            state_checked=false
+            not_ready=""
+            break
+        fi
+        not_ready="$(printf '%s\n' "$states" | awk -F'|' -v hc="$with_healthcheck" '
+            BEGIN { n = split(hc, names, " "); for (i = 1; i <= n; i++) checked[names[i]] = 1 }
+            $2 == "exited" && $4 == "0" { next }
+            $3 == "healthy" { next }
+            $3 == "" && $2 == "running" && !($1 in checked) { next }
+            {
+                s = ($3 != "" ? $2 " (" $3 ")" : $2)
+                if ($2 == "exited" && $4 != "") s = s " (code " $4 ")"
+                print $1 ": " s
+            }')"
+        [ -z "$not_ready" ] && break
+        if [ "$misp_placeholder" = true ] && ! printf '%s\n' "$not_ready" | grep -qvE '^(api|graphql): '; then
+            break
+        fi
+        [ "$SECONDS" -ge "$deadline" ] && break
+        sleep "$poll"
+    done
 
     echo ""
-    echo -e "${BOLD}${GREEN}════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}${GREEN}  EdgeGuard is running!${NC}"
-    echo -e "${BOLD}${GREEN}════════════════════════════════════════════${NC}"
+    all_healthy=false
+    if [ "$up_rc" -ne 0 ]; then
+        banner_colour="$RED"
+        banner_text="EdgeGuard did not start completely: docker compose up -d failed"
+    elif [ "$state_checked" != true ]; then
+        banner_colour="$YELLOW"
+        banner_text="EdgeGuard started; service health not checked: run docker compose ps"
+    elif [ -z "$not_ready" ]; then
+        all_healthy=true
+        banner_colour="$GREEN"
+        banner_text="EdgeGuard is running!"
+    else
+        banner_colour="$YELLOW"
+        banner_text="EdgeGuard started, but some services are not healthy"
+    fi
+    echo -e "${BOLD}${banner_colour}════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${banner_colour}  ${banner_text}${NC}"
+    echo -e "${BOLD}${banner_colour}════════════════════════════════════════════${NC}"
+    if [ -n "$not_ready" ]; then
+        warn "Not healthy:"
+        printf '%s\n' "$not_ready" | sed 's/^/       /'
+    fi
+    if [ "$all_healthy" != true ]; then
+        warn "  Logs: docker compose logs --tail 50 <service>"
+        if [ "$misp_placeholder" = true ]; then
+            warn "  MISP_API_KEY is still a placeholder: api and graphql do not start until MISP_URL and"
+            warn "  MISP_API_KEY are set in .env (then run docker compose up -d)."
+        fi
+    fi
     echo ""
     echo -e "  Neo4j Browser  →  ${BOLD}http://localhost:7474${NC}"
     echo -e "  Airflow UI     →  ${BOLD}http://localhost:8082${NC}  (port 8082 — avoids ResilMesh Temporal)"
@@ -365,8 +478,10 @@ if [ "$USE_DOCKER" = true ]; then
     echo ""
     echo -e "Next steps:"
     echo -e "  1. Edit ${BOLD}.env${NC} and add your API keys (MISP_URL, MISP_API_KEY, collector keys)"
-    # 2026-10: a restart keeps the container's old environment, so a .env change needs a recreate.
-    echo -e "  2. ${BOLD}docker compose up -d airflow${NC} after editing .env (a restart keeps the old values)"
+    # A restart keeps a container's old environment, so a .env change needs a recreate: docker
+    # compose up -d recreates every service whose settings changed (api and graphql read the MISP
+    # values too, so recreating only airflow is not enough).
+    echo -e "  2. ${BOLD}docker compose up -d${NC} after editing .env (a restart keeps the old values)"
     echo -e "  3. Open Airflow UI → trigger ${BOLD}edgeguard_baseline${NC} DAG once for historical load"
     echo ""
     echo -e "Useful commands:"
@@ -374,7 +489,9 @@ if [ "$USE_DOCKER" = true ]; then
     echo -e "  ${BOLD}docker compose down${NC}             — stop all services"
     echo -e "  ${BOLD}make help${NC}                       — see all Makefile shortcuts"
     echo ""
-    exit 0
+    # Services that are not healthy after the wait leave the status at 0 (after a first install the
+    # operator usually still has to edit .env); a failed docker compose up -d keeps its status.
+    exit "$up_rc"
 fi
 
 # ── Python / pip path ─────────────────────────────────────────────────────────
