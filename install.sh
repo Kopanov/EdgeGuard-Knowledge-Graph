@@ -55,7 +55,10 @@ for arg in "$@"; do
       # Portable on macOS (BSD sed) and Linux — print header comment body
       sed -n '6,25p' "$0" | sed 's/^# *//'
       exit 0 ;;
-    *) warn "Unknown option: $arg (ignored)" ;;
+    *)
+      # Stop before any change: a mistyped --update would otherwise redeploy without pulling.
+      error "Unknown option: $arg (see ./install.sh --help)"
+      exit 2 ;;
   esac
 done
 

@@ -23,7 +23,7 @@ echo ""
 if docker info >/dev/null 2>&1; then
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^edgeguard_airflow$'; then
     echo "Optional: probing edgeguard_airflow health..."
-    docker exec edgeguard_airflow curl -sf http://localhost:8082/health && echo " Airflow OK" || echo " Airflow health check failed"
+    docker exec edgeguard_airflow curl -sf http://localhost:8082/api/v2/monitor/health && echo " Airflow OK" || echo " Airflow health check failed"
   else
     echo "(edgeguard_airflow not running — skipping docker probes)"
   fi
