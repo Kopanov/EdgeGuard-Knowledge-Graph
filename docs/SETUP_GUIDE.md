@@ -120,7 +120,7 @@ This will:
 1. Create **`.env`** from **`.env.example`** if it is missing, and only in that case generate **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`**, **`AIRFLOW_FERNET_KEY`** and **`GRAFANA_ADMIN_PASSWORD`** (an existing **`.env`** is left as it is)  
 2. **`docker compose build`** (API image + **Airflow image** from **`Dockerfile.airflow`**)  
 3. **`docker compose up -d`**
-4. Wait up to **`EDGEGUARD_INSTALL_WAIT_SEC`** seconds (default 300) for the services (not for `api` and `graphql` while the MISP values are the template ones: they cannot start yet) and name any that are not healthy, with a pointer to **`docker compose logs`** and to the MISP values when they are still the template ones
+4. Wait up to **`EDGEGUARD_INSTALL_WAIT_SEC`** seconds (default 300) for the services and name any that are not healthy, with a pointer to **`docker compose logs`** (a one-shot service that exited with an error is listed with its exit code; when **`docker compose ps`** fails, the health is reported as not checked). It does not wait for `api` and `graphql` while **`MISP_API_KEY`** is a placeholder (empty, `your-misp-api-key-here`, `changeme` or `YOUR_API_KEY_HERE`): they do not start until **`MISP_URL`** and **`MISP_API_KEY`** are set in **`.env`** (then run **`docker compose up -d`**), and the installer says so. Services that are still not healthy after the wait leave the exit status at 0 (after a first install **`.env`** usually still needs editing); when **`docker compose up -d`** fails, the installer checks the services once, prints the summary and exits with that command's status
 
 When **`install.sh`** creates **`.env`**, it starts the stack in the same run with the template values, so fill in **`.env`** first (§ 3.2, § 3.3).
 
@@ -301,7 +301,7 @@ _Last updated: 2026-10-19_
 
 ## History
 
-- 2026-10-19 — `install.sh` waits for the services after `docker compose up -d` and names those that are not healthy instead of always reporting success.
+- 2026-10-19 — `install.sh` waits for the services after `docker compose up -d` and names those that are not healthy instead of always reporting success; it recognises the `MISP_API_KEY` placeholders, and after a failed `docker compose up -d` prints the summary and keeps that command's exit status.
 - 2026-10-18 — The tarball update recreates every container (`docker compose up -d --force-recreate`) after rebuilding every image; the deployed commit is recorded in `.env` as `EDGEGUARD_GIT_SHA` (`./install.sh --update` runs `scripts/record_deployed_commit.sh`; a tarball deploy passes the commit to it).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; upgrade steps for kept installs moved to the appendix.
