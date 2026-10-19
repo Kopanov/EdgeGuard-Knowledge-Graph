@@ -44,6 +44,25 @@ replace_env() {
     fi
     rm -f "$1"
 }
+# Writes a generated secret into .env with the awk program given as $2. The program reads the value
+# from the environment (ENVIRON["EDGEGUARD_NEW_SECRET"]), never from awk's command line, which other
+# local users can list with ps. .env keeps the mode its owner gave it; when other users can read it,
+# the operator is told once (the mode is not changed).
+env_mode_warned=false
+write_secret() {
+    local tmp
+    tmp="$(mktemp)"
+    if ! EDGEGUARD_NEW_SECRET="$1" awk "$2" .env > "$tmp"; then
+        rm -f "$tmp"
+        error "could not rewrite .env (awk failed); .env is unchanged"
+        exit 1
+    fi
+    replace_env "$tmp"
+    if [ "$env_mode_warned" != true ] && [ -n "$(find -L .env \( -perm -040 -o -perm -004 \) 2>/dev/null)" ]; then
+        warn ".env holds secrets and other users can read it: run chmod 600 .env"
+        env_mode_warned=true
+    fi
+}
 # Compose prefers a variable exported in the shell to .env: a different value written into .env
 # would take over at the next compose run from another shell. Such a secret is left as it is.
 exported_in_shell() {
@@ -53,13 +72,24 @@ exported_in_shell() {
     fi
     return 1
 }
+# The value Compose uses: the last active assignment in .env, without quotes and spaces.
+env_value() { sed -n "s/^$1=//p" .env 2>/dev/null | tail -1 | tr -d " \"'"; }
+# A key with a value on any active line of .env holds the operator's value: it is never generated
+# or written again. Compose keeps the last assignment, so a later blank line overrides that value;
+# the operator is told instead.
+operator_value_set() {
+    [ -n "$(sed -n "s/^$1=//p" .env 2>/dev/null | tr -d " \"'")" ] || return 1
+    if [ -z "$(env_value "$1")" ]; then
+        warn "$1 has a value in .env, but a later blank $1= line overrides it (Compose uses the last one): .env left as it is; remove that line"
+    fi
+    return 0
+}
 # EDGEGUARD_ALLOW_UNAUTH runs REST/GraphQL without a key on purpose, but the APIs honour it only
 # outside production (src/config.py is_production_env: EDGEGUARD_ENV in dev, development, local,
-# staging, test). Only that combination keeps a blank key blank.
-env_value() { sed -n "s/^$1=//p" .env 2>/dev/null | tail -1 | tr -d " \"'"; }
+# staging, test, compared without regard to case). Only that combination keeps a blank key blank.
 unauth_chosen() {
     case "$(env_value EDGEGUARD_ALLOW_UNAUTH | tr '[:upper:]' '[:lower:]')" in 1|true|yes|on) ;; *) return 1 ;; esac
-    case "$(env_value EDGEGUARD_ENV)" in dev|development|local|staging|test) ;; *) return 1 ;; esac
+    case "$(env_value EDGEGUARD_ENV | tr '[:upper:]' '[:lower:]')" in dev|development|local|staging|test) ;; *) return 1 ;; esac
     warn "EDGEGUARD_API_KEY left blank: EDGEGUARD_ALLOW_UNAUTH is set for EDGEGUARD_ENV=$(env_value EDGEGUARD_ENV)"
     return 0
 }
@@ -116,11 +146,11 @@ if [ ! -f ".env" ]; then
             generated_grafana=""
         fi
         if [ -n "$generated_grafana" ]; then
-            tmp_env="$(mktemp)"
-            awk -v pw="$generated_grafana" '
+            write_secret "$generated_grafana" '
+                BEGIN { pw = ENVIRON["EDGEGUARD_NEW_SECRET"] }
                 /^GRAFANA_ADMIN_PASSWORD=changeme$/ { print "GRAFANA_ADMIN_PASSWORD=" pw; next }
                 { print }
-            ' .env > "$tmp_env" && replace_env "$tmp_env"
+            '
             info "Generated random GRAFANA_ADMIN_PASSWORD — stored in .env (visible only in this file)"
         fi
     fi
@@ -130,7 +160,7 @@ fi
 
 # The secrets below have no working default: the stack does not start while one is blank. Each is
 # generated when blank, on every run (a .env prepared by hand or by `make .env` included); a value
-# already set is never changed.
+# set on any line of .env, or a variable exported in the shell, is never changed.
 # PR-A audit fix (Red Team CRITICAL C1): without an EDGEGUARD_API_KEY, the
 # api / graphql containers refuse to start (the security check at
 # src/query_api.py:96 rejects an unauthenticated bind on 0.0.0.0). Auto-
@@ -139,7 +169,8 @@ fi
 # up`` without install.sh will see the actionable RuntimeError and can set
 # EDGEGUARD_API_KEY by hand. We do NOT silently set EDGEGUARD_ALLOW_UNAUTH
 # — that would defeat the safety check entirely.
-if grep -q "^EDGEGUARD_API_KEY=$" .env 2>/dev/null && ! unauth_chosen && ! exported_in_shell EDGEGUARD_API_KEY; then
+if grep -q "^EDGEGUARD_API_KEY=$" .env 2>/dev/null && ! operator_value_set EDGEGUARD_API_KEY \
+    && ! unauth_chosen && ! exported_in_shell EDGEGUARD_API_KEY; then
     if command -v openssl &>/dev/null; then
         generated_key="$(openssl rand -hex 32)"
     elif command -v python3 &>/dev/null; then
@@ -148,12 +179,12 @@ if grep -q "^EDGEGUARD_API_KEY=$" .env 2>/dev/null && ! unauth_chosen && ! expor
         generated_key=""
     fi
     if [ -n "$generated_key" ]; then
-        # Portable in-place sed: explicit -i'' (BSD/mac) and -i (GNU) handled by tmp-file rewrite
-        tmp_env="$(mktemp)"
-        awk -v key="$generated_key" '
+        # A rewrite through a temporary file is portable (sed -i differs between BSD and GNU).
+        write_secret "$generated_key" '
+            BEGIN { key = ENVIRON["EDGEGUARD_NEW_SECRET"] }
             /^EDGEGUARD_API_KEY=$/ { print "EDGEGUARD_API_KEY=" key; next }
             { print }
-        ' .env > "$tmp_env" && replace_env "$tmp_env"
+        '
         info "Generated random EDGEGUARD_API_KEY (32 bytes hex) — stored in .env"
     else
         warn "Neither openssl nor python3 available — leaving EDGEGUARD_API_KEY blank."
@@ -169,8 +200,11 @@ fi
 # auto-generated by install.sh — fresh operators had to copy/paste the
 # ``python3 -c "import secrets..."`` snippet. Auto-gen here matches the
 # EDGEGUARD_API_KEY pattern above.
-if grep -q "^# AIRFLOW_API_AUTH_JWT_SECRET=$\|^AIRFLOW_API_AUTH_JWT_SECRET=$" .env 2>/dev/null \
-    && ! exported_in_shell AIRFLOW_API_AUTH_JWT_SECRET; then
+# The template holds both as commented blank lines. The patterns are extended regular expressions
+# (grep -E): BSD grep (macOS) reads "$\|" in a basic expression as a literal "$", so such a pattern
+# never matches there.
+if grep -qE '^(# )?AIRFLOW_API_AUTH_JWT_SECRET=$' .env 2>/dev/null \
+    && ! operator_value_set AIRFLOW_API_AUTH_JWT_SECRET && ! exported_in_shell AIRFLOW_API_AUTH_JWT_SECRET; then
     if command -v openssl &>/dev/null; then
         generated_jwt="$(openssl rand -base64 64 | tr -d '\n=' | head -c 64)"
     elif command -v python3 &>/dev/null; then
@@ -179,18 +213,18 @@ if grep -q "^# AIRFLOW_API_AUTH_JWT_SECRET=$\|^AIRFLOW_API_AUTH_JWT_SECRET=$" .e
         generated_jwt=""
     fi
     if [ -n "$generated_jwt" ]; then
-        tmp_env="$(mktemp)"
-        awk -v val="$generated_jwt" '
+        write_secret "$generated_jwt" '
+            BEGIN { val = ENVIRON["EDGEGUARD_NEW_SECRET"] }
             /^# AIRFLOW_API_AUTH_JWT_SECRET=$/ { print "AIRFLOW_API_AUTH_JWT_SECRET=" val; next }
             /^AIRFLOW_API_AUTH_JWT_SECRET=$/   { print "AIRFLOW_API_AUTH_JWT_SECRET=" val; next }
             { print }
-        ' .env > "$tmp_env" && replace_env "$tmp_env"
+        '
         info "Generated random AIRFLOW_API_AUTH_JWT_SECRET (64 bytes urlsafe) — stored in .env"
     fi
 fi
 
-if grep -q "^# AIRFLOW_FERNET_KEY=$\|^AIRFLOW_FERNET_KEY=$" .env 2>/dev/null \
-    && ! exported_in_shell AIRFLOW_FERNET_KEY; then
+if grep -qE '^(# )?AIRFLOW_FERNET_KEY=$' .env 2>/dev/null \
+    && ! operator_value_set AIRFLOW_FERNET_KEY && ! exported_in_shell AIRFLOW_FERNET_KEY; then
     # Fernet keys are 32-byte urlsafe-base64 — Airflow's connection-secret
     # encryption is brittle on shorter keys. Use python3 cryptography path
     # if available (canonical generator); fall back to openssl 32 bytes
@@ -203,12 +237,12 @@ if grep -q "^# AIRFLOW_FERNET_KEY=$\|^AIRFLOW_FERNET_KEY=$" .env 2>/dev/null \
         generated_fernet=""
     fi
     if [ -n "$generated_fernet" ]; then
-        tmp_env="$(mktemp)"
-        awk -v val="$generated_fernet" '
+        write_secret "$generated_fernet" '
+            BEGIN { val = ENVIRON["EDGEGUARD_NEW_SECRET"] }
             /^# AIRFLOW_FERNET_KEY=$/ { print "AIRFLOW_FERNET_KEY=" val; next }
             /^AIRFLOW_FERNET_KEY=$/   { print "AIRFLOW_FERNET_KEY=" val; next }
             { print }
-        ' .env > "$tmp_env" && replace_env "$tmp_env"
+        '
         info "Generated AIRFLOW_FERNET_KEY (32-byte urlsafe-base64) — stored in .env"
     fi
 fi
@@ -268,30 +302,40 @@ if [ "$USE_DOCKER" = true ]; then
     unset EDGEGUARD_GIT_SHA
 
     # Neo4j applies NEO4J_PASSWORD only when it creates its data volume and keeps that password
-    # afterwards. Replace the template default while the volume does not exist yet; once it exists,
-    # keep the value, because a different one in .env would lock the stack out of Neo4j.
-    if grep -q "^NEO4J_PASSWORD=changeme$" .env 2>/dev/null; then
-        compose_project="$(docker compose config --format json 2>/dev/null \
-            | python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])' 2>/dev/null || true)"
-        if [ -n "$compose_project" ] && docker info &>/dev/null \
-            && ! docker volume inspect "${compose_project}_neo4j_data" &>/dev/null; then
+    # afterwards. Replace the template default while neither the volume nor the Neo4j container
+    # exists; once one exists, keep the value, because a different one in .env would lock the stack
+    # out of Neo4j. A password exported in the shell is the one Compose uses: .env is left as it is.
+    if grep -q "^NEO4J_PASSWORD=changeme$" .env 2>/dev/null && ! exported_in_shell NEO4J_PASSWORD; then
+        # The project name is the first top-level "name:" key of the resolved configuration (nested
+        # keys are indented); project names are lowercase letters, digits, "-" and "_", never quoted.
+        compose_project="$(docker compose config 2>/dev/null | sed -n 's/^name: //p' | head -1 || true)"
+        neo4j_kept_because=""
+        if [ -z "$compose_project" ] || ! docker info &>/dev/null; then
+            neo4j_kept_because="whether Neo4j's data volume exists could not be read (Docker daemon or compose configuration)"
+        elif docker volume inspect "${compose_project}_neo4j_data" &>/dev/null \
+            || docker container inspect edgeguard_neo4j &>/dev/null; then
+            neo4j_kept_because="Neo4j's data volume or container already exists"
+        else
             if command -v openssl &>/dev/null; then
                 generated_neo4j="$(openssl rand -hex 24)"
             else
                 generated_neo4j="$(python3 -c 'import secrets; print(secrets.token_hex(24))' 2>/dev/null || true)"
             fi
             if [ -n "$generated_neo4j" ]; then
-                tmp_env="$(mktemp)"
-                awk -v pw="$generated_neo4j" '
+                write_secret "$generated_neo4j" '
+                    BEGIN { pw = ENVIRON["EDGEGUARD_NEW_SECRET"] }
                     /^NEO4J_PASSWORD=changeme$/ { print "NEO4J_PASSWORD=" pw; next }
                     { print }
-                ' .env > "$tmp_env" && replace_env "$tmp_env"
+                '
                 info "Generated random NEO4J_PASSWORD before Neo4j's first start — stored in .env"
+            else
+                neo4j_kept_because="neither openssl nor python3 is available to generate one"
             fi
-        else
-            warn "NEO4J_PASSWORD is the default 'changeme' and the Neo4j data volume already exists (or Docker"
-            warn "  or the volume name could not be read): kept, because Neo4j keeps the password of its first start. To change"
-            warn "  it, run ALTER CURRENT USER SET PASSWORD in Neo4j first, then set the new value in .env."
+        fi
+        if [ -n "$neo4j_kept_because" ]; then
+            warn "NEO4J_PASSWORD is the default 'changeme' and $neo4j_kept_because: kept."
+            warn "  Neo4j keeps the password of its first start. Before that start, set a value of your own in .env;"
+            warn "  after it, run ALTER CURRENT USER SET PASSWORD in Neo4j first, then set the new value in .env."
         fi
     fi
 
