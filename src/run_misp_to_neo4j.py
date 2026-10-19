@@ -27,7 +27,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -422,6 +422,23 @@ def _item_report_ids(item: Dict[str, Any]) -> set:
     return ids
 
 
+def _event_order_key(full_event: Dict[str, Any]) -> Callable[[Dict[str, Any]], int]:
+    """Sort key giving a parsed item its attribute's position in *full_event* (2026-10-18).
+
+    An incremental run builds the report-scoped links from the changed items followed by the unchanged
+    items of their reports. Sorted by this key they are back in event order, so the per-report caps of
+    ``_build_cross_item_relationships`` pick the same items as a full sync, whichever attributes changed.
+    An item is found by ``misp_attribute_id`` (the attribute uuid); one not in the event sorts last.
+    """
+    positions: Dict[str, int] = {}
+    for index, attr in enumerate(coerce_misp_attribute_list(full_event.get("Attribute"))):
+        attr_uuid = str(attr.get("uuid") or "")
+        if attr_uuid:
+            positions.setdefault(attr_uuid, index)
+    missing = len(positions)
+    return lambda item: positions.get(str(item.get("misp_attribute_id") or ""), missing)
+
+
 # Outcome of the last index listing (read by ``fetch_edgeguard_events`` to record it in the run
 # stats): ``truncated`` is True when the listing stopped at ``EDGEGUARD_MISP_MAX_PAGES`` with a
 # full last page, i.e. events beyond the cap were not listed.
@@ -750,6 +767,27 @@ def _comment_description(raw_comment: Any) -> Optional[str]:
     if isinstance(description, str) and description.strip():
         return description
     return rest[end:].strip() or None
+
+
+def _vulnerability_report_ids(raw_comment: Any, ref: str = "") -> Dict[str, Any]:
+    """``{"pulse_id", "report_ids"}`` of a vulnerability attribute whose comment is an ``OTX_META`` block
+    (2026-10-18), each key only when the block gives it as a non-blank string / a list of them; ``{}``
+    for any other comment. An unreadable block names no pulse."""
+    if not isinstance(raw_comment, str) or not raw_comment.startswith("OTX_META:"):
+        return {}
+    try:
+        meta = _meta_object(json.loads(raw_comment[len("OTX_META:") :]), "OTX_META", ref)
+    except ValueError:
+        logger.debug("Unreadable OTX_META comment of vulnerability attribute %s — no pulse taken from it", ref)
+        return {}
+    out: Dict[str, Any] = {}
+    pulse_id = meta.get("pulse_id")
+    if isinstance(pulse_id, str) and pulse_id.strip():
+        out["pulse_id"] = pulse_id.strip()
+    report_ids = [str(x).strip() for x in _meta_list(meta, "report_ids") if str(x).strip()]
+    if report_ids:
+        out["report_ids"] = report_ids
+    return out
 
 
 def _vulnerability_comment_description(raw_comment: Any) -> Optional[str]:
@@ -3499,9 +3537,11 @@ class MISPToNeo4jSync:
     _REPORT_LINK_MATCH_TYPE = "otx_pulse"
     _MAX_REPORT_INDICATORS = 2000
     _MAX_REPORT_MALWARE = 50
+    # 2026-10-18: the CVEs of one report an indicator is linked to, under the rule of the malware cap.
+    _MAX_REPORT_CVES = 50
     _MAX_REPORT_ACTORS = 10
 
-    def _build_cross_item_relationships(self, items: List[Dict]) -> List[Dict]:
+    def _build_cross_item_relationships(self, items: List[Dict], reports: Optional[set] = None) -> List[Dict]:
         """
         Build report-scoped relationships between items from **exactly one** MISP event.
 
@@ -3521,6 +3561,10 @@ class MISPToNeo4jSync:
 
         Relationship kinds produced:
         - Indicator -> INDICATES -> Malware          (same pulse; ``match_type`` ``otx_pulse``, 0.6)
+        - Indicator -> INDICATES -> CVE              (same pulse; ``otx_pulse``, 0.6; 2026-10-18): the
+          indicator and the CVE are named in the same report, the same evidence as the Malware row. It
+          never says that the indicator exploits the CVE (``EXPLOITS`` is the indicator's own CVE tag,
+          ``build_relationships`` steps 3a / 3b). The CVE node is matched by ``cve_id``, never created.
         - Malware -> ATTRIBUTED_TO -> ThreatActor    (same pulse, when the actors it names are one actor;
           ``otx_pulse``, 0.6). A pulse that names several actors does not say which malware is whose
           (2026-10): its malware is attributed to none of them. The aliases of one actor count as one
@@ -3540,8 +3584,20 @@ class MISPToNeo4jSync:
         Indicator -> EXPLOITS (only the indicator's own ``cve_id`` tag asserts that; see
         ``build_relationships`` Q3).
 
+        Caps per report: ``_MAX_REPORT_INDICATORS`` indicators, ``_MAX_REPORT_MALWARE`` malware,
+        ``_MAX_REPORT_CVES`` CVEs and ``_MAX_REPORT_ACTORS`` actors, the first ones in the order of
+        ``items``; a cap that applies is logged. The callers pass the items in event order, an
+        incremental run too (``_event_order_key``), so a full and an incremental sync pair the same items.
+
+        An incremental run passes ``reports``, the reports of its changed items: only those are grouped.
+        The build input holds every item of them (the changed items and the unchanged items that share a
+        report with one), but of another report only the items that also belong to one of those, and
+        cut at the caps such a partial report could keep an item a full sync does not link.
+
         Args:
             items: Parsed items for **one** event only.
+            reports: The report ids to group (incremental run); None groups every report of ``items``.
+                The zone rows are built for every item either way.
 
         Returns:
             List of relationship definitions to merge in Neo4j.
@@ -3567,9 +3623,11 @@ class MISPToNeo4jSync:
                 if not report_id or not isinstance(report_id, str):
                     continue
                 report_id = report_id.strip()
-                if not report_id:
+                if not report_id or (reports is not None and report_id not in reports):
                     continue
-                bucket = by_report.setdefault(report_id, {"indicators": [], "malware": [], "actors": [], "all": []})
+                bucket = by_report.setdefault(
+                    report_id, {"indicators": [], "malware": [], "actors": [], "cves": [], "all": []}
+                )
                 bucket["all"].append(item)
                 if item.get("indicator_type") or item.get("type") == "indicator":
                     if item.get("value"):
@@ -3578,6 +3636,12 @@ class MISPToNeo4jSync:
                     bucket["malware"].append(item)
                 elif item.get("type") == "actor" and item.get("name"):
                     bucket["actors"].append(item)
+                elif item.get("type") == "vulnerability":
+                    # 2026-10-18: a CVE the report names (an OTX indicator of type CVE or a pulse's
+                    # ``cve_references`` item, both a MISP ``vulnerability`` attribute), once per report.
+                    cve_id = resolve_vulnerability_cve_id(item)
+                    if cve_id and cve_id not in bucket["cves"]:
+                        bucket["cves"].append(cve_id)
 
         for report_id, bucket in by_report.items():
             # The report is the record behind every link of this bucket (``alienvault_otx:<pulse>``).
@@ -3602,6 +3666,10 @@ class MISPToNeo4jSync:
             if len(actors) > self._MAX_REPORT_ACTORS:
                 logger.info("Report %s: capping actors %s -> %s", report_id, len(actors), self._MAX_REPORT_ACTORS)
                 actors = actors[: self._MAX_REPORT_ACTORS]
+            cve_ids = bucket["cves"]
+            if len(cve_ids) > self._MAX_REPORT_CVES:
+                logger.info("Report %s: capping CVEs %s -> %s", report_id, len(cve_ids), self._MAX_REPORT_CVES)
+                cve_ids = cve_ids[: self._MAX_REPORT_CVES]
 
             # Indicator -> Malware (INDICATES): the pulse lists these IOCs under these
             # malware families.
@@ -3617,6 +3685,30 @@ class MISPToNeo4jSync:
                             },
                             "to_type": "Malware",
                             "to_key": {"name": malware["name"]},
+                            "confidence": self._REPORT_LINK_CONFIDENCE,
+                            "match_type": self._REPORT_LINK_MATCH_TYPE,
+                            "report_id": report_id,
+                            "source": _REPORT_SCOPED_SOURCE_ID,
+                            "source_refs": report_refs,
+                            "misp_event_id": _evt_id,
+                        }
+                    )
+
+            # Indicator -> CVE (INDICATES, 2026-10-18): the pulse names these IOCs and these CVEs. The
+            # same evidence as the Malware rows above ("named in the same report"); EXPLOITS stays the
+            # indicator's own CVE claim.
+            for indicator in indicators:
+                for cve_id in cve_ids:
+                    relationships.append(
+                        {
+                            "rel_type": "INDICATES",
+                            "from_type": "Indicator",
+                            "from_key": {
+                                "value": indicator.get("value"),
+                                "indicator_type": indicator.get("indicator_type", "unknown"),
+                            },
+                            "to_type": "CVE",
+                            "to_key": {"cve_id": cve_id},
                             "confidence": self._REPORT_LINK_CONFIDENCE,
                             "match_type": self._REPORT_LINK_MATCH_TYPE,
                             "report_id": report_id,
@@ -4047,6 +4139,13 @@ class MISPToNeo4jSync:
             _advisory_zones = _meta_advisory_zones(nvd_meta)
             if _advisory_zones:
                 item["advisory_zones"] = _advisory_zones
+            # 2026-10-18: the OTX pulse that names the CVE (``OTX_META.pulse_id`` and the other pulses of the
+            # collector run, ``report_ids``): an OTX indicator of type CVE carries the block as every OTX
+            # indicator does, and since 2026-10-18 so does a pulse's ``cve_references`` item. The report-scoped
+            # build links the pulse's indicators to the CVE (Indicator -> INDICATES -> CVE), and the CVE's
+            # record cites the pulse (``source_refs``). A CVE without the block (an older ``cve_references``
+            # attribute, "Referenced in OTX pulse: <name>") names no pulse and is linked to no indicator.
+            item.update(_vulnerability_report_ids(raw_comment, attr_misp_uuid))
             return self._with_provenance(item, relationships)
 
         # Handle threat actor
@@ -5504,12 +5603,16 @@ class MISPToNeo4jSync:
 
         # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
         cross_input = unique_event_items
-        context = self._same_report_context(
-            context_attrs, full_event, set().union(*map(_item_report_ids, unique_event_items))
-        )
+        changed_reports = set().union(*map(_item_report_ids, unique_event_items))
+        context = self._same_report_context(context_attrs, full_event, changed_reports)
+        cross_reports: Optional[set] = None
         if context:
             cross_input = _dedupe_parsed_items(unique_event_items + context)
-        cross_rels = self._build_cross_item_relationships(cross_input)
+            # 2026-10-18: back in event order (the changed items came first) before the per-report caps.
+            cross_input.sort(key=_event_order_key(full_event))
+            # Only the reports of the changed items, whose items the input holds in full.
+            cross_reports = changed_reports
+        cross_rels = self._build_cross_item_relationships(cross_input, reports=cross_reports)
 
         logger.info(
             "Event %s: %s parsed -> %s unique items; %s embedded rel defs; %s cross-item rel defs",
@@ -5586,6 +5689,8 @@ class MISPToNeo4jSync:
             # cited every advisory, unlike the same attribute in a smaller event.
             "stated_zones",
             "stated_refs",
+            # 2026-10-18: the attribute's uuid, which gives the item its place in the event (``_event_order_key``).
+            "misp_attribute_id",
         )
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size
@@ -5648,17 +5753,24 @@ class MISPToNeo4jSync:
         gc.collect()
 
         # Incremental run: unchanged items of the same reports join the cross-item build only.
-        for _item in self._same_report_context(
-            context_attrs, full_event, set().union(*map(_item_report_ids, _rel_items))
-        ):
+        _changed_reports = set().union(*map(_item_report_ids, _rel_items))
+        _context = self._same_report_context(context_attrs, full_event, _changed_reports)
+        _cross_reports: Optional[set] = None
+        for _item in _context:
             _rel_items.append({k: _item.get(k) for k in _REL_KEYS if _item.get(k) is not None})
+        if _context:
+            # 2026-10-18: back in event order (the changed items came first) before the per-report caps.
+            _rel_items.sort(key=_event_order_key(full_event))
+            # Only the reports of the changed items, whose items the input holds in full.
+            _cross_reports = _changed_reports
+        del _context
 
         # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
         # Uses the lightweight accumulator, not the full parsed items.
         # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
         cross_rels = []
         if _rel_items:
-            cross_rels = self._build_cross_item_relationships(_rel_items)
+            cross_rels = self._build_cross_item_relationships(_rel_items, reports=_cross_reports)
             if cross_rels:
                 logger.info(
                     "Event %s: building %s report-scoped relationships from all pages...", event_id, len(cross_rels)

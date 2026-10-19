@@ -339,12 +339,21 @@ for enrichment and analyst UIs.
 | `indicator` | seed + `INDICATES→Malware`                     | CVE, technique, sector, campaign edges    |
 | `actor`     | seed + attributed Malware                      | actor techniques, mal→tech chain, campaigns, `USES_MALWARE` / `USES_TOOL` software, exploited CVEs, targeted sectors |
 | `technique` | seed + ThreatActors that employ it             | Malware, Tools, Indicators, parent and sub-techniques |
-| `cve`       | seed + exploiting Indicators                   | exploiting ThreatActors and Malware, affected Sectors |
+| `cve`       | seed + its Indicators (both links below)       | exploiting ThreatActors and Malware, affected Sectors |
 
-An Indicator exploits a CVE only when its own MISP record tags that CVE, and EdgeGuard's collectors
-write no such tag: on a graph they built, an `indicator` bundle holds no CVE and a `cve` bundle no
-indicator, so a `cve` bundle at `depth=1` holds the `vulnerability` alone. The ThreatActors and
-Malware that exploit a CVE come from curated packages.
+An indicator is linked to a CVE in two ways, both exported as `indicator related-to vulnerability`:
+the CVEs named in the same OTX report as the indicator (`INDICATES`, `x_edgeguard_match_type`
+`otx_pulse`, confidence 60, an `external_references` entry per report with its OTX link), and the CVE
+the indicator's own MISP record tags (`EXPLOITS`, `cve_tag`), which EdgeGuard's collectors do not
+write. On a graph they built, an `indicator` bundle therefore holds, at `depth=2`, the CVEs the graph
+links to the indicator, and a `cve` bundle, at `depth=1` too, the indicators linked to the CVE. The
+link is built per MISP event and per OTX report, for at most 2,000 indicators and 50 CVEs of a report,
+and an item MISP already held from an earlier report gets no link to a later one (see
+[KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)); so an indicator of a report that names CVEs can have none.
+A CVE without such a link has no indicator, and its `depth=1` bundle holds the `vulnerability`
+alone. An indicator with both links to one CVE has one SRO whose provenance merges both
+(`x_edgeguard_match_type` names the stronger link's label). The ThreatActors and Malware that exploit
+a CVE come from curated packages.
 
 Today `depth` is a Python-side filter — the Cypher always fetches the
 full neighborhood and the exporter drops the non-primary groups when
@@ -372,7 +381,8 @@ attack-pattern`, `intrusion-set uses malware` (the graph's
 `ATTRIBUTED_TO`), `intrusion-set / malware / tool uses attack-pattern`,
 `campaign attributed-to intrusion-set` (the graph's `RUNS`), and
 `related-to` for pairs the table does not define (indicator →
-vulnerability, indicator / vulnerability → sector identity). The
+vulnerability, the graph's `EXPLOITS` and `INDICATES`; indicator /
+vulnerability → sector identity). The
 bundles also carry `intrusion-set uses malware / tool` (the
 graph's `USES_MALWARE` / `USES_TOOL`), `malware exploits vulnerability`
 and `intrusion-set targets vulnerability` (`EXPLOITS` from malware and
@@ -548,6 +558,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs the graph links to it as named in the same OTX report (`INDICATES`, `otx_pulse`; built per MISP event and OTX report, within the per-report caps).
 - 2026-10-18 — § 6: the smoke script runs on bash 3.2, exports identifiers a baseline graph holds (`APT28`, `T1059`, `CVE-2021-44228`, the newest indicator; flags name others) and fails a bundle without a graph object (it passed on the empty bundle of the `/stix/types` indicator example).
 - 2026-10-18 — § 5 states that the collectors link no indicator to a CVE, so a `cve` bundle at `depth=1` holds the `vulnerability` alone.
 - 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until` and no longer `x_edgeguard_last_updated`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).

@@ -414,6 +414,24 @@ def _otx_meta_pairs(pairs: Any) -> List[str]:
     return (firsts + later)[:_MAX_OTX_META_PAIRS]
 
 
+def _cve_pulse_meta(vuln: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``OTX_META`` block of a CVE an OTX pulse names (2026-10-18), ``{}`` for a CVE of no pulse.
+
+    ``pulse_id`` (the pulse), ``report_ids`` (the other pulses of the collector run that named the CVE)
+    and ``pulse_name``; the keys and bounds of an OTX indicator's block (``create_attribute``). No
+    ``description``: the pulse's name says where the CVE was seen, not what it is.
+    """
+    pulse_id = str(vuln.get("pulse_id") or "").strip()[:64]
+    report_ids = [str(x).strip()[:64] for x in (vuln.get("report_ids") or []) if x and str(x).strip()]
+    if not pulse_id and not report_ids:
+        return {}
+    meta: Dict[str, Any] = {"pulse_id": pulse_id, "report_ids": report_ids[:_MAX_REPORT_IDS]}
+    pulse_name = str(vuln.get("pulse_name") or "").strip()
+    if pulse_name:
+        meta["pulse_name"] = pulse_name
+    return meta
+
+
 def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     """Build the ``MITRE_USES_TECHNIQUES:`` JSON block for malware / actor / tool items.
 
@@ -2363,10 +2381,20 @@ class MISPWriter:
             ]
         )
 
+        # 2026-10-18: a CVE an OTX pulse names (the collector's ``cve_references`` item, which carries the
+        # pulse metadata) is written with an ``OTX_META`` block holding the pulse (``pulse_id``, the other
+        # pulses of the run in ``report_ids``, ``pulse_name``), as an OTX indicator of type CVE already is
+        # (``create_attribute``). The sync groups the CVE into its report from it and links the report's
+        # indicators to it (Indicator -> INDICATES -> CVE, ``otx_pulse``). The comment was the note
+        # "Referenced in OTX pulse: <name>", which named no pulse id, so the CVE joined no report.
+        otx_pulse_meta = _cve_pulse_meta(vuln)
+
         if has_nvd_meta:
             import json as _json
 
             comment = "NVD_META:" + _json.dumps(nvd_fields, default=str)
+        elif otx_pulse_meta:
+            comment = _fit_meta_comment("OTX_META:", otx_pulse_meta)
         else:
             comment_parts = []
             if vendor:
@@ -2381,7 +2409,7 @@ class MISPWriter:
             "type": "vulnerability",
             "value": cve_id.upper(),
             # No max_length truncation when storing JSON — truncation would break JSON parsing.
-            "comment": comment if has_nvd_meta else sanitize_value(comment, max_length=500),
+            "comment": comment if (has_nvd_meta or otx_pulse_meta) else sanitize_value(comment, max_length=500),
             "to_ids": False,  # CVEs don't make good IDS indicators
             "Tag": [{"name": tag} for tag in tags],
         }

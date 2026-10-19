@@ -275,12 +275,27 @@ def _sector_evidence_rows(s: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+# Check 10a6 (2026-10-18) on a correct graph: the same-report links of the OTX reports that list CVEs.
+_INDICATOR_CVE_ROW = {
+    "indicator_cve_links": 8859,
+    "cves": 812,
+    "indicators": 4310,
+    "not_otx_pulse": 0,
+    "without_otx_report": 0,
+}
+
+
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
     sector_rows = _sector_evidence_rows(s)
     if sector_rows is not None:
         return sector_rows
+    # 2026-10-18: check 10a6, indicators and CVEs named in the same OTX report.
+    if "AS indicator_cve_links" in s:
+        return [dict(_INDICATOR_CVE_ROW)]
+    if "AS indicates_other_targets" in s:
+        return [{"indicates_other_targets": 0}]
     if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in s:
         return [{"reports": [dict(x) for x in _REPORT_ACTOR_ROWS], "pulses": 1530}]
     if "UNWIND i.several_actor_pulses AS pid" in s:
@@ -2048,3 +2063,64 @@ class TestRankedDescriptionsAndAging:
         with pytest.raises(SystemExit) as exc:
             vfb.main()
         assert exc.value.code == 2
+
+
+class TestIndicatorCveReportLinks:
+    """Check 10a6 (2026-10-18): ``(Indicator)-[:INDICATES]->(CVE)`` says "named in the same OTX report"
+    and nothing else: every such link is labelled ``otx_pulse`` and cites the report
+    (``alienvault_otx:<pulse id>``). The counts are reported; a graph without such a link is not judged."""
+
+    def test_a_correct_graph_passes_and_the_counts_are_reported(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        assert _check(rep, "indicator_cve_links_are_same_report")["ok"] is True
+        info = _check(rep, "indicator_cve_report_links")
+        assert info["ok"] is None
+        assert info["detail"] == dict(_INDICATOR_CVE_ROW, indicates_other_targets=0)
+
+    @pytest.mark.parametrize("defect", ["not_otx_pulse", "without_otx_report"])
+    def test_an_unlabelled_or_unsourced_link_fails(self, vfb, monkeypatch, defect):
+        def broken(statement, rows):
+            if "AS indicator_cve_links" in statement:
+                return [dict(_INDICATOR_CVE_ROW, **{defect: 3})]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=broken)
+        assert [c["check"] for c in rep.failed] == ["indicator_cve_links_are_same_report"]
+        assert _check(rep, "indicator_cve_links_are_same_report")["detail"][defect] == 3
+
+    def test_a_graph_without_such_links_is_not_judged(self, vfb, monkeypatch):
+        def none(statement, rows):
+            if "AS indicator_cve_links" in statement:
+                return [
+                    {"indicator_cve_links": 0, "cves": 0, "indicators": 0, "not_otx_pulse": 0, "without_otx_report": 0}
+                ]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=none)
+        assert _check(rep, "indicator_cve_links_are_same_report")["ok"] is None
+        assert rep.failed == []
+
+    def test_the_statements_read_the_link_label_and_the_report(self, vfb, monkeypatch):
+        seen = []
+
+        def capture(statement, rows):
+            if "INDICATES]->(c:CVE)" in statement or "AS indicates_other_targets" in statement:
+                seen.append(" ".join(statement.split()))
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        links, others = seen
+        assert links.startswith("MATCH (i:Indicator)-[r:INDICATES]->(c:CVE)")
+        assert "r.match_type = 'otx_pulse'" in links and "x STARTS WITH 'alienvault_otx:'" in links
+        assert "apoc.meta.cypher.type(r.source_refs)" in links, "a scalar source_refs is read as a list"
+        assert "WHERE NOT x:Malware AND NOT x:CVE" in others
+
+    def test_informational_other_targets_never_fail(self, vfb, monkeypatch):
+        def legacy(statement, rows):
+            if "AS indicates_other_targets" in statement:
+                return [{"indicates_other_targets": 12}]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=legacy)
+        assert _check(rep, "indicator_cve_report_links")["detail"]["indicates_other_targets"] == 12
+        assert rep.failed == []
