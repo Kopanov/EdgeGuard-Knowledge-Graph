@@ -47,19 +47,21 @@ replace_env() {
 # Compose prefers a variable exported in the shell to .env: a different value written into .env
 # would take over at the next compose run from another shell. Such a secret is left as it is.
 exported_in_shell() {
-    if [ -n "$(printenv "$1" 2>/dev/null)" ]; then
+    if printenv "$1" >/dev/null 2>&1; then  # set, even to an empty value
         warn "$1 is exported in this shell (Compose prefers it to .env): .env left as it is"
         return 0
     fi
     return 1
 }
-# EDGEGUARD_ALLOW_UNAUTH (development only) runs REST/GraphQL without a key on purpose.
+# EDGEGUARD_ALLOW_UNAUTH runs REST/GraphQL without a key on purpose, but the APIs honour it only
+# outside production (src/config.py is_production_env: EDGEGUARD_ENV in dev, development, local,
+# staging, test). Only that combination keeps a blank key blank.
+env_value() { sed -n "s/^$1=//p" .env 2>/dev/null | tail -1 | tr -d " \"'"; }
 unauth_chosen() {
-    if grep -qiE '^EDGEGUARD_ALLOW_UNAUTH=(1|true|yes)$' .env 2>/dev/null; then
-        warn "EDGEGUARD_API_KEY left blank: EDGEGUARD_ALLOW_UNAUTH is set in .env"
-        return 0
-    fi
-    return 1
+    case "$(env_value EDGEGUARD_ALLOW_UNAUTH | tr '[:upper:]' '[:lower:]')" in 1|true|yes|on) ;; *) return 1 ;; esac
+    case "$(env_value EDGEGUARD_ENV)" in dev|development|local|staging|test) ;; *) return 1 ;; esac
+    warn "EDGEGUARD_API_KEY left blank: EDGEGUARD_ALLOW_UNAUTH is set for EDGEGUARD_ENV=$(env_value EDGEGUARD_ENV)"
+    return 0
 }
 
 # ── Defaults ─────────────────────────────────────────────────────────────────

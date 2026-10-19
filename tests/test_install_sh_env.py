@@ -166,7 +166,7 @@ def test_make_env_target_creates_a_private_file(tmp_path):
 
 def test_blank_api_key_is_kept_when_unauthenticated_mode_is_chosen(tmp_path):
     work = _workdir(tmp_path)
-    _prepared_env(work, NEO4J_PASSWORD="operator-chosen", EDGEGUARD_ALLOW_UNAUTH="1")
+    _prepared_env(work, NEO4J_PASSWORD="operator-chosen", EDGEGUARD_ALLOW_UNAUTH="1", EDGEGUARD_ENV="dev")
     done = _install(tmp_path, work)
     assert done.returncode == 0, done.stdout + done.stderr
     values = _values(work / ".env")
@@ -193,6 +193,7 @@ def test_default_neo4j_password_is_kept_when_docker_cannot_be_asked(tmp_path):
     assert _values(work / ".env")["NEO4J_PASSWORD"] == "changeme"
 
 
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write a read-only file")
 def test_unwritable_env_fails_and_names_the_saved_content(tmp_path):
     work = _workdir(tmp_path)
     env_file = _prepared_env(work, NEO4J_PASSWORD="operator-chosen")
@@ -200,3 +201,20 @@ def test_unwritable_env_fails_and_names_the_saved_content(tmp_path):
     done = _install(tmp_path, work)
     assert done.returncode != 0
     assert "could not write .env" in done.stdout + done.stderr
+
+
+def test_unauthenticated_mode_outside_a_non_production_env_still_gets_a_key(tmp_path):
+    # The API honours EDGEGUARD_ALLOW_UNAUTH only outside production; unset EDGEGUARD_ENV is production.
+    work = _workdir(tmp_path)
+    _prepared_env(work, NEO4J_PASSWORD="operator-chosen", EDGEGUARD_ALLOW_UNAUTH="1")
+    done = _install(tmp_path, work)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _values(work / ".env")["EDGEGUARD_API_KEY"]
+
+
+def test_a_secret_exported_empty_in_the_shell_is_not_written(tmp_path):
+    work = _workdir(tmp_path)
+    _prepared_env(work, NEO4J_PASSWORD="operator-chosen")
+    done = _install(tmp_path, work, AIRFLOW_FERNET_KEY="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _values(work / ".env").get("AIRFLOW_FERNET_KEY", "") == ""
