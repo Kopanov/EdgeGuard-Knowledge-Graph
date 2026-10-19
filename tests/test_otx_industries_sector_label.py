@@ -388,6 +388,20 @@ class TestTheIndustriesTravelThroughMisp:
         meta = json.loads(WRITER.create_malware_attribute(item)["comment"][len("MITRE_USES_TECHNIQUES:") :])
         assert len(meta["ind"]) == 20 and all(len(x) <= 64 for x in meta["ind"])
 
+    def test_the_cap_keeps_every_mapped_industry(self):
+        # A pulse listing more than 20 industries, the mapped one last: the cap keeps the mapped name
+        # first, so the family's sector statement survives like the indicator's.
+        item = {
+            "type": "malware",
+            "name": "ExampleLocker",
+            "tag": "alienvault_otx",
+            "zone": ["energy"],
+            "pulse_id": PULSE_ID,
+            "otx_industries": [f"Unmapped industry {i}" for i in range(22)] + ["Energy"],
+        }
+        meta = json.loads(WRITER.create_malware_attribute(item)["comment"][len("MITRE_USES_TECHNIQUES:") :])
+        assert len(meta["ind"]) == 20 and meta["ind"][0] == "Energy"
+
 
 # --------------------------------------------------------------------------- the sync
 class TestSyncStatesTheIndustries:
@@ -574,10 +588,10 @@ class TestSyncStatesTheIndustries:
         monkeypatch.setattr(syncer, "_ATTR_PAGE_SIZE", 1)
         run("_process_large_event_paged")
         assert written["_process_large_event_paged"] == written["_process_event_attributes"]
-        # the CVE attribute of a pulse carries no pulse id (only its description names the pulse)
+        # the CVE attribute of a pulse names the pulse (OTX_META), so its inferred AFFECTS rows cite it
         assert written["_process_event_attributes"] == [
-            (("AFFECTS", "energy"), ("zone_classification", 0.5, ())),
-            (("AFFECTS", "healthcare"), ("zone_classification", 0.5, ())),
+            (("AFFECTS", "energy"), ("zone_classification", 0.5, (PULSE_REF,))),
+            (("AFFECTS", "healthcare"), ("zone_classification", 0.5, (PULSE_REF,))),
             (("TARGETS", "energy"), ("otx_industries", 0.6, (PULSE_REF,))),
             (("TARGETS", "healthcare"), ("zone_classification", 0.5, (PULSE_REF,))),
         ]

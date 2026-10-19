@@ -37,6 +37,7 @@ from config import (
     misp_refresh_last_seen_days,
     misp_refresh_max_per_run,
     misp_refresh_max_seconds,
+    otx_industry_zones,
 )
 from cvss_selection import cvss_rating_tag, normalize_attack_vector
 from sector_evidence import report_zone_entry, report_zone_pairs
@@ -537,6 +538,8 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     industries = item.get("otx_industries")
     if isinstance(industries, (list, tuple)):
         named = [str(x).strip()[:_MAX_INDUSTRY_CHARS] for x in industries if x is not None and str(x).strip()]
+        # The names the industry table maps come first, so the cap never drops a sector statement.
+        named = [x for x in named if otx_industry_zones([x])] + [x for x in named if not otx_industry_zones([x])]
         if named:
             meta["ind"] = named[:_MAX_INDUSTRIES]
     stated_by_reports = _report_stated_zones(item)

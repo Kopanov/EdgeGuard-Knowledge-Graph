@@ -3642,7 +3642,8 @@ class MISPToNeo4jSync:
         Args:
             items: Parsed items for **one** event only.
             reports: The report ids to group (incremental run); None groups every report of ``items``.
-                The zone rows are built for every item either way.
+                The zone rows are built for every item except those marked ``report_context``
+                (unchanged attributes of an incremental run that join only the report-scoped build).
 
         Returns:
             List of relationship definitions to merge in Neo4j.
