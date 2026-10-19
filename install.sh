@@ -247,6 +247,10 @@ if [ "$USE_DOCKER" = true ]; then
     # (default 300) bounds the wait; 0 checks once. One-shot services that exited 0 count as done.
     section "Waiting for the services"
     wait_sec="${EDGEGUARD_INSTALL_WAIT_SEC:-300}"
+    if ! [[ "$wait_sec" =~ ^[0-9]+$ ]]; then
+        warn "EDGEGUARD_INSTALL_WAIT_SEC=$wait_sec is not a whole number of seconds; waiting 300"
+        wait_sec=300
+    fi
     poll=5
     [ "$wait_sec" -lt 10 ] && poll=1
     deadline=$((SECONDS + wait_sec))

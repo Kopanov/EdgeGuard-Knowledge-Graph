@@ -37,7 +37,7 @@ _HEALTHY = "\n".join(
 )
 
 
-def _install(tmp_path: Path, fake_ps: str, env_text: str = "") -> subprocess.CompletedProcess:
+def _install(tmp_path: Path, fake_ps: str, env_text: str = "", wait: str = "2") -> subprocess.CompletedProcess:
     work = tmp_path / "work"
     work.mkdir()
     for rel in ("install.sh", ".env.example", "docker-compose.yml"):
@@ -52,7 +52,7 @@ def _install(tmp_path: Path, fake_ps: str, env_text: str = "") -> subprocess.Com
         PATH=f"{fake_bin}:{os.environ['PATH']}",
         DOCKER_LOG=str(tmp_path / "docker.log"),
         FAKE_PS=fake_ps,
-        EDGEGUARD_INSTALL_WAIT_SEC="2",
+        EDGEGUARD_INSTALL_WAIT_SEC=wait,
     )
     return subprocess.run(["bash", "install.sh"], cwd=work, env=env, capture_output=True, text=True, timeout=60)
 
@@ -99,3 +99,11 @@ def test_unlisted_services_skip_the_wait(tmp_path):
     out = done.stdout + done.stderr
     assert done.returncode == 0, out
     assert "skipped the health wait" in out
+
+
+def test_a_wait_that_is_not_whole_seconds_falls_back_to_the_default(tmp_path):
+    done = _install(tmp_path, _HEALTHY, wait="5m")
+    out = done.stdout + done.stderr
+    assert done.returncode == 0, out
+    assert "EDGEGUARD_INSTALL_WAIT_SEC=5m" in out
+    assert "EdgeGuard is running!" in out
