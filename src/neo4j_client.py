@@ -64,6 +64,7 @@ from node_identity import (  # noqa: E402
     edge_endpoint_uuids,
     is_placeholder_name,
 )
+from sector_evidence import link_evidence as sector_link_evidence  # noqa: E402  — 2026-10-18
 
 try:
     from destructive_ops_audit import record_destructive_op
@@ -767,6 +768,23 @@ def _sourced_zone_items(rel_var: str, zones_expr: str, stated_expr: str, stated_
         f"{rel_var}.zones = CASE WHEN {zones_expr} IS NULL THEN {rel_var}.zones ELSE {zone_rule} END,\n"
         f"            {_growing_set('stated_zones', stated_expr)},\n"
         f"            {_growing_set('stated_refs', stated_refs_expr)}"
+    )
+
+
+def _unstated_sector_link_items(rel_var: str = "r") -> str:
+    """``SET`` items of a link to a Sector written without a record of its own (2026-10-18,
+    ``create_indicator_sector_relationship`` / ``create_vulnerability_sector_relationship``): the label and
+    confidence ``$label`` / ``$confidence`` (``sector_evidence.link_evidence`` of no statement:
+    ``zone_classification`` at the table's 0.5) by the batched writer's rule, so a stored stronger label and
+    its confidence stay (an ``otx_industries`` or ``advisory_sector`` link was reset to 0.5 before)."""
+    if not _PROP_NAME_RE.match(rel_var):
+        raise ValueError(f"_unstated_sector_link_items: invalid rel_var {rel_var!r}")
+    r = rel_var
+    return (
+        f"{r}.match_type = CASE WHEN {r}.confidence_score IS NULL OR $confidence >= {r}.confidence_score "
+        f"THEN $label ELSE {r}.match_type END,\n"
+        f"            {r}.confidence_score = CASE WHEN {r}.confidence_score IS NULL OR $confidence > {r}.confidence_score "
+        f"THEN $confidence ELSE {r}.confidence_score END"
     )
 
 
@@ -5022,12 +5040,14 @@ class Neo4jClient:
         """
 
         # Create the relationship
+        label, confidence = sector_link_evidence(source_id, sec, None, "TARGETS")
         rel_query = f"""
         MATCH (i:Indicator {{value: $indicator_value}})
         MATCH (s:Sector {{name: $sector_name}})
         MERGE (i)-[r:TARGETS]->(s)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = 0.5,
+            {_unstated_sector_link_items("r")},
+            r.edgeguard_managed = true,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -5047,6 +5067,8 @@ class Neo4jClient:
                     indicator_value=iv,
                     sector_name=sec,
                     source_id=source_id,
+                    label=label,
+                    confidence=confidence,
                     timeout=NEO4J_READ_TIMEOUT,
                 ).consume()
             return True
@@ -5092,9 +5114,11 @@ class Neo4jClient:
             s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
+        label, confidence = sector_link_evidence(source_id, sec, None, "AFFECTS")
         rel_props = f"""
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = 0.5,
+            {_unstated_sector_link_items("r")},
+            r.edgeguard_managed = true,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, v.uuid),
@@ -5124,12 +5148,16 @@ class Neo4jClient:
                     sector_uuid=sec_uuid,
                     timeout=NEO4J_READ_TIMEOUT,
                 ).consume()
-                session.run(
-                    vuln_query, cve_id=cve, sector_name=sec, source_id=source_id, timeout=NEO4J_READ_TIMEOUT
-                ).consume()
-                session.run(
-                    cve_query, cve_id=cve, sector_name=sec, source_id=source_id, timeout=NEO4J_READ_TIMEOUT
-                ).consume()
+                for query in (vuln_query, cve_query):
+                    session.run(
+                        query,
+                        cve_id=cve,
+                        sector_name=sec,
+                        source_id=source_id,
+                        label=label,
+                        confidence=confidence,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    ).consume()
             return True
         except Exception as e:
             logger.warning(f"Vulnerability-sector relationship error: {e}")

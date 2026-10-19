@@ -198,8 +198,14 @@ the provenance of the graph relationship it comes from:
   `vulnerability related-to identity` (the graph's `AFFECTS` to a sector):
   `advisory_sector` (confidence 90) when CISA's ICS advisory states that the
   product is deployed in the sector, `zone_classification` (50) when EdgeGuard
-  inferred the sector (values of `x_edgeguard_match_type`, not properties of
-  their own). Read `advisory_sector` as "deployed in", never as targeting;
+  inferred the sector. On an `intrusion-set targets identity` and an
+  `indicator related-to identity` (the graph's `TARGETS` to a sector):
+  `otx_industries` (60) when an OTX pulse's own industries state that its
+  campaign targets the sector (the pulse in `external_references`),
+  `zone_classification` (50) when EdgeGuard inferred the sector (values of
+  `x_edgeguard_match_type`, not properties of their own). Read `advisory_sector`
+  as "deployed in", never as targeting, and `otx_industries` as "targeted",
+  never as deployment;
 - `x_edgeguard_sources` — the sources that assert the link (`mitre_attck`,
   `alienvault_otx`, `threatfox`, `coreideas`, …);
 - `x_edgeguard_source_refs` — their record ids, `"<source>:<id>"` (at most 200);
@@ -559,6 +565,7 @@ _Last updated: 2026-10-18_
 ## History
 
 - 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs the graph links to it as named in the same OTX report (`INDICATES`, `otx_pulse`; built per MISP event and OTX report, within the per-report caps).
+- 2026-10-18 — `otx_industries` (confidence 60) on a sector link the graph holds as `TARGETS`, where an OTX pulse's own industries state the sector.
 - 2026-10-18 — § 6: the smoke script runs on bash 3.2, exports identifiers a baseline graph holds (`APT28`, `T1059`, `CVE-2021-44228`, the newest indicator; flags name others) and fails a bundle without a graph object (it passed on the empty bundle of the `/stix/types` indicator example).
 - 2026-10-18 — § 5 states that the collectors link no indicator to a CVE, so a `cve` bundle at `depth=1` holds the `vulnerability` alone.
 - 2026-10-18 — Addressed to every STIX consumer; the design proposal (deleted, git history keeps it) folded into "Design decisions" (§ 8) and "Open points" (§ 9), and "Known gaps" and the prototype status removed. Every `created` / `modified` / `valid_from` comes from the graph, so re-exports are byte-identical (the response shape says which properties can change under the same `modified`): campaigns and sectors without `first_imported_at` take `created_at`, relationships their own times, `modified` is never before `created` (relationships and sectors had the export time, campaigns a `modified` before `created`); indicators carry `confidence` and `valid_until` and no longer `x_edgeguard_last_updated`; malware is a family and the placeholder types `malware` / `tool` are dropped; tools carry their `mitre-attack` reference; the producer identity no longer carries `x_edgeguard_generated_at` and `x_edgeguard_git_sha` (the build is the `X-EdgeGuard-Git-Sha` header; `EDGEGUARD_DETERMINISTIC_BUNDLE` removed).

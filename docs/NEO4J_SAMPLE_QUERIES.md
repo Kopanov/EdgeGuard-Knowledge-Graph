@@ -272,9 +272,10 @@ LIMIT 25
 the `SOURCED_FROM` edge of the CVE to `cisa_ics` lists it in `stated_zones`; the link cites in `r.source_refs`
 only the advisories whose sector note names that sector (the edge's `stated_refs`, `"<zone>|cisa_ics:<id>"`),
 not every advisory that names the CVE. It is never a `TARGETS`
-link, so it never answers "who targets energy". A sector EdgeGuard infers from text (NVD, KEV, OTX) is
-`zone_classification` (0.5): **a query that filters sector links on `match_type = 'zone_classification'`
-alone misses CISA's statements**; filter on `type(r)` instead, or on both labels.
+link, so it never answers "who targets energy". A sector EdgeGuard infers from text (NVD, KEV, OTX pulse
+text) is `zone_classification` (0.5): **a query that filters sector links on `match_type =
+'zone_classification'` alone misses CISA's and OTX's statements**; filter on `type(r)` instead, or on every
+label.
 
 ```cypher
 // What CISA ICS states, per sector: by CISA alone, or also inferred by another feed
@@ -311,8 +312,24 @@ WHERE sf.zones = ['global']
 RETURN count(c) AS cisa_cves_without_a_tracked_sector
 ```
 
+**OTX's industries.** An OTX pulse that classifies itself into industries states, through its author, which
+sectors its campaign targets: an indicator's, actor's or malware's `TARGETS` link to such a sector carries
+`match_type = 'otx_industries'` (0.6), the `SOURCED_FROM` edge to `alienvault_otx` lists the sector in
+`stated_zones` and each pulse that stated it in `stated_refs` (`"<zone>|alienvault_otx:<pulse id>"`), and the
+link cites those pulses. A sector only the pulse's text gave stays `zone_classification`, and a CVE the pulse names keeps
+`zone_classification` on `AFFECTS`.
+
 ```cypher
-// Every sector link by kind of evidence (both labels; never filter on one alone)
+// Who targets energy, by the kind of evidence: OTX statements and inferences
+MATCH (n)-[r:TARGETS]->(:Sector {name: 'energy'})
+WHERE n:ThreatActor OR n:Malware
+RETURN CASE WHEN n:ThreatActor THEN 'ThreatActor' ELSE 'Malware' END AS label, r.match_type AS evidence,
+       count(*) AS links, collect(n.name)[..10] AS examples
+ORDER BY label, evidence
+```
+
+```cypher
+// Every sector link by kind of evidence (every label; never filter on one alone)
 MATCH (n)-[r:AFFECTS|TARGETS]->(s:Sector)
 RETURN type(r) AS rel, labels(n)[0] AS label, s.name AS sector, r.match_type AS evidence, count(*) AS links
 ORDER BY rel, label, sector, evidence
@@ -354,6 +371,7 @@ _Last updated: 2026-10-18_
 ## History
 
 - 2026-10-18 — Sample query: the CVEs named in the same OTX report as an indicator (`INDICATES` to a `CVE`).
+- 2026-10-18 — Sector links: OTX's industries statement (`otx_industries`) and a query of who targets a sector by evidence.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-18 — *Count by zone* unwinds the `zone` list and counts each node once per zone.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and queries for graphs built by earlier versions to the appendix.

@@ -582,8 +582,8 @@ Auth:    Configured via environment variables
 | `USES_TOOL` | ThreatActor | Tool | As `USES_MALWARE` (Q2c; a curated claim names the tool by its ATT&CK id) |
 | `SUBTECHNIQUE_OF` | Technique | Technique | `match_type='mitre_explicit'`, 1.0 (Q1b, from the dotted ATT&CK id) |
 | `IN_TACTIC` | Technique | Tactic | `match_type='kill_chain_phase'`, 1.0 (Q1; both ends in the same `attack_domain`) |
-| `TARGETS` | Indicator, ThreatActor, Malware | Sector | `match_type='zone_classification'`, 0.5 (sync and Q7a / Q7c / Q7d; never to `global`); `r.sources` names only the feeds whose `SOURCED_FROM.zones` give the sector |
-| `AFFECTS` | Vulnerability / CVE | Sector | `match_type='advisory_sector'`, 0.9, where CISA's ICS advisory states the sector (the product is deployed in it), else `zone_classification`, 0.5 (sync and Q7b, one label table, `src/sector_evidence.py`; never to `global`); `r.sources` names only the feeds that gave the sector |
+| `TARGETS` | Indicator, ThreatActor, Malware | Sector | `match_type='otx_industries'`, 0.6, where an OTX pulse's own industries state the sector (its campaign targets it), else `zone_classification`, 0.5 (sync and Q7a / Q7c / Q7d, one label table, `src/sector_evidence.py`; never to `global`); `r.sources` names only the feeds whose `SOURCED_FROM.zones` give the sector |
+| `AFFECTS` | Vulnerability / CVE | Sector | `match_type='advisory_sector'`, 0.9, where CISA's ICS advisory states the sector (the product is deployed in it), else `zone_classification`, 0.5 (sync and Q7b, one label table, `src/sector_evidence.py`; an OTX pulse's industries never label `AFFECTS`; never to `global`); `r.sources` names only the feeds that gave the sector |
 | `SOURCED_FROM` | any EdgeGuard node | Source | Per-source provenance: `raw_data`, `imported_at`, `updated_at`, `confidence`, `source`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`, that source's `misp_event_ids[]` and `source_refs[]`, `zones`, `stated_zones` and `stated_refs` (what a link to a `Sector` reads), and on an Indicator's edge `last_recorded_at`, `last_reported_at`, `last_reported_source` and `last_reported_ref` (indicator aging) — see `docs/KNOWLEDGE_GRAPH.md` "SOURCED_FROM edge schema" |
 | `INVOLVES` | Alert | Indicator | `created_at`, `updated_at`, `source` (`'resilmesh'`) (`neo4j_client` alert path) |
 
@@ -1018,6 +1018,7 @@ _Last updated: 2026-10-18_
 ## History
 
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6); the alert enrichment reads it, and each CVE entry names its links (`evidence`).
+- 2026-10-18 — `TARGETS` to a sector an OTX pulse's own industries state carries `otx_industries`, 0.6 (it was `zone_classification`).
 - 2026-10-18 — `GET /health` reports the deployed commit as `git_sha` (`EDGEGUARD_GIT_SHA`).
 - 2026-10-18 — `USES_TECHNIQUE` from an OTX pulse's ATT&CK ids (`otx_attack_ids`, step 8) is created at 0.6, the confidence of every other link from those ids (it was 0.85).
 - 2026-10-18 — STIX export row: times from the graph (byte-identical re-exports), indicator `confidence` and `valid_until`, the `X-EdgeGuard-Git-Sha` header.

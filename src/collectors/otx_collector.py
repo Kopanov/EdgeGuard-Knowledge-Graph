@@ -62,10 +62,10 @@ from config import (
     OTX_INCREMENTAL_LOOKBACK_DAYS,
     OTX_INCREMENTAL_MAX_PAGES,
     OTX_INCREMENTAL_OVERLAP_SEC,
-    OTX_INDUSTRY_ZONE_ALIASES,
     SOURCE_TAGS,
     SSL_VERIFY,
     detect_zones_from_text,
+    otx_industry_zones,
     resolve_collection_limit,
 )
 
@@ -76,6 +76,7 @@ from resilience import (
     record_collection_failure,
     record_collection_success,
 )
+from sector_evidence import report_zone_entry
 
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
@@ -241,6 +242,13 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     ``OTX_META.report_ids`` on the MISP attribute; the sync groups on
     ``[pulse_id] + report_ids``) and its ATT&CK ids to ``reported_techniques``.
     The kept item takes the most restrictive ``pulse_tlp`` of the pulses (2026-10).
+
+    2026-10-18: a later pulse's industries are its statement of the sectors its campaign targets
+    (``sector_evidence``). The zones they map to (``config.otx_industry_zones``) join the kept item's
+    ``zone`` (``global`` dropped once a sector is present) and are recorded with the pulse as
+    ``"<zone>|<pulse id>"`` entries in ``report_stated_zones``, so the sync labels and cites the statement
+    whichever pulse listed the item first. The zones keyword detection found in a later pulse's text are
+    not added: the kept item's inferred zones stay the first pulse's.
     """
     # Copy-on-write (Bugbot on PR #134, round 2): ``reported_techniques`` is the pulse's
     # ``pulse_attack_ids`` list object, shared by reference with ``attack_ids`` in
@@ -253,6 +261,17 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
         if dup_pid not in rids:
             rids.append(dup_pid)
         kept["report_ids"] = rids
+    # The later pulse's sector statement (copy-on-write: ``zone`` is the pulse's ``sectors`` list, shared by
+    # every item of the kept pulse).
+    if dup_pid and dup_pid != kept.get("pulse_id"):
+        stated_by_dup = otx_industry_zones(dup.get("otx_industries"))
+        if stated_by_dup:
+            zones = [z for z in (kept.get("zone") or []) if z]
+            zones += [z for z in stated_by_dup if z not in zones]
+            kept["zone"] = [z for z in zones if z != "global"] if len(zones) > 1 else zones
+            entries = list(kept.get("report_stated_zones") or [])
+            entries += [e for e in (report_zone_entry(z, str(dup_pid)) for z in stated_by_dup) if e not in entries]
+            kept["report_stated_zones"] = entries
     extra_tids = [t for t in (dup.get("reported_techniques") or []) if t not in (kept.get("reported_techniques") or [])]
     if extra_tids:
         kept["reported_techniques"] = list(kept.get("reported_techniques") or []) + extra_tids
@@ -653,22 +672,20 @@ class OTXCollector:
                 pulse_text = json.dumps(pulse).lower()
                 sectors = self.detect_sectors(pulse_text)
 
-                # OTX-native industry_sectors override: if OTX itself classified
-                # the pulse into industries, use that as authoritative sector data.
+                # OTX's own classification: the pulse's ``industries`` are the report author's
+                # statement of the sectors its campaign targets. Their zones join the keyword hits
+                # in the item's zones, and the raw list travels with every item (``otx_industries``):
+                # the sync takes the zones it maps to as the pulse's statement (``otx_industries`` on
+                # TARGETS, ``sector_evidence``, 2026-10-18), the keyword hits as inferred.
                 #
-                # PR-N6 hotfix #4 (audit 09, Maintainer #1): the inline
-                # industry map moved to ``config.OTX_INDUSTRY_ZONE_ALIASES``
-                # so it lives side-by-side with ``VALID_ZONES`` /
-                # ``SECTOR_KEYWORDS``. Previously this was a hidden
-                # second source of truth containing vocabulary absent
-                # from ``SECTOR_KEYWORDS`` ("pharmaceutical", "utilities",
-                # "oil", "gas", "insurance") — so vocabulary refinements
-                # in ``config.py`` silently diverged from OTX ingestion.
+                # PR-N6 hotfix #4 (audit 09, Maintainer #1): the industry map lives in
+                # ``config.OTX_INDUSTRY_ZONE_ALIASES`` beside ``VALID_ZONES`` / ``SECTOR_KEYWORDS``,
+                # read through ``config.otx_industry_zones`` (the collector and the sync read it alike).
                 otx_industries = pulse.get("industries", [])
-                if otx_industries:
-                    for ind_name in otx_industries:
-                        mapped = OTX_INDUSTRY_ZONE_ALIASES.get(str(ind_name).lower().strip())
-                        if mapped and mapped not in sectors:
+                industry_zones = otx_industry_zones(otx_industries)
+                if industry_zones:
+                    for mapped in industry_zones:
+                        if mapped not in sectors:
                             sectors.append(mapped)
                     # Remove "global" if we now have specific sectors
                     if len(sectors) > 1 and "global" in sectors:
