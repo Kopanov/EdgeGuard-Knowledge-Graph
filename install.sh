@@ -242,10 +242,48 @@ if [ "$USE_DOCKER" = true ]; then
     section "Starting the full stack"
     docker compose up -d
 
+    # Wait for the services and report the state they reach: a service can crash-loop (a template
+    # MISP_API_KEY) or never start because a dependency stays unhealthy. EDGEGUARD_INSTALL_WAIT_SEC
+    # (default 300) bounds the wait; 0 checks once. One-shot services that exited 0 count as done.
+    section "Waiting for the services"
+    wait_sec="${EDGEGUARD_INSTALL_WAIT_SEC:-300}"
+    poll=5
+    [ "$wait_sec" -lt 10 ] && poll=1
+    deadline=$((SECONDS + wait_sec))
+    not_ready=""
+    while :; do
+        states="$(docker compose ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null || true)"
+        if [ -z "$states" ]; then
+            warn "docker compose ps listed no services — skipped the health wait"
+            break
+        fi
+        not_ready="$(printf '%s\n' "$states" | awk -F'|' '
+            $2 == "exited" && $4 == "0" { next }
+            $3 == "healthy" { next }
+            $3 == "" && $2 == "running" { next }
+            { print $1 ": " ($3 != "" ? $2 " (" $3 ")" : $2) }')"
+        [ -z "$not_ready" ] && break
+        [ "$SECONDS" -ge "$deadline" ] && break
+        sleep "$poll"
+    done
+
     echo ""
-    echo -e "${BOLD}${GREEN}════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}${GREEN}  EdgeGuard is running!${NC}"
-    echo -e "${BOLD}${GREEN}════════════════════════════════════════════${NC}"
+    if [ -z "$not_ready" ]; then
+        echo -e "${BOLD}${GREEN}════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}${GREEN}  EdgeGuard is running!${NC}"
+        echo -e "${BOLD}${GREEN}════════════════════════════════════════════${NC}"
+    else
+        echo -e "${BOLD}${YELLOW}════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}${YELLOW}  EdgeGuard started, but some services are not healthy${NC}"
+        echo -e "${BOLD}${YELLOW}════════════════════════════════════════════${NC}"
+        warn "Not healthy after ${wait_sec}s:"
+        printf '%s\n' "$not_ready" | sed 's/^/       /'
+        warn "  Logs: docker compose logs --tail 50 <service>"
+        if grep -qE '^MISP_API_KEY=(your-misp-api-key-here)?$' .env 2>/dev/null; then
+            warn "  MISP_URL / MISP_API_KEY still hold template values: api and graphql do not start until"
+            warn "  they are set in .env (then run docker compose up -d)."
+        fi
+    fi
     echo ""
     echo -e "  Neo4j Browser  →  ${BOLD}http://localhost:7474${NC}"
     echo -e "  Airflow UI     →  ${BOLD}http://localhost:8082${NC}  (port 8082 — avoids ResilMesh Temporal)"
@@ -254,8 +292,9 @@ if [ "$USE_DOCKER" = true ]; then
     echo ""
     echo -e "Next steps:"
     echo -e "  1. Edit ${BOLD}.env${NC} and add your API keys (MISP_URL, MISP_API_KEY, collector keys)"
-    # 2026-10: a restart keeps the container's old environment, so a .env change needs a recreate.
-    echo -e "  2. ${BOLD}docker compose up -d airflow${NC} after editing .env (a restart keeps the old values)"
+    # A restart keeps a container's old environment, so a .env change needs a recreate, and
+    # api / graphql read the MISP values too, so recreate every service, not only airflow.
+    echo -e "  2. ${BOLD}docker compose up -d${NC} after editing .env (a restart keeps the old values)"
     echo -e "  3. Open Airflow UI → trigger ${BOLD}edgeguard_baseline${NC} DAG once for historical load"
     echo ""
     echo -e "Useful commands:"

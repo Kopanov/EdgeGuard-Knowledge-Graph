@@ -1045,6 +1045,7 @@ These settings also appear in the "Recommended Memory Settings" table below; the
 | `EDGEGUARD_BASE_DIR` | Override project root directory (used by DAGs for path resolution) | `<directory containing dags/>` |
 | `EDGEGUARD_VERSION` | Sets only the `version` label on the Prometheus `APP_INFO` metric. Everywhere else (APIs, logs) the version comes from `package_meta.package_version()` (pyproject CalVer) and ignores this var. | `1.0.0` (metrics label fallback) |
 | `EDGEGUARD_GIT_SHA` | Commit the containers were deployed from, kept in `.env`: `scripts/record_deployed_commit.sh` writes the checked-out commit there (`./install.sh` and `./install.sh --update` run it on a git checkout; a tarball deploy passes the commit as its argument). Run it at every deploy, before `docker compose build && docker compose up -d --force-recreate`, or `/health` reports the previous commit. Compose forwards it to `api` and `graphql` only (`airflow` does not read it, so a changed value never recreates `airflow`) and prefers a shell value to `.env`, so do not export it: a `docker compose` command from a shell with a different value recreates `api` and `graphql`. The REST and GraphQL `/health` responses report it as `git_sha` (`null` when unset) and STIX exports as the `X-EdgeGuard-Git-Sha` header (absent when unset). | *(unset)* |
+| `EDGEGUARD_INSTALL_WAIT_SEC` | Seconds `./install.sh` waits after `docker compose up -d` for every service to become healthy (one-shot services that exited 0 count as done); it then names the services that are not healthy instead of reporting success. `0` checks once. Read from the shell, not from `.env` | `300` |
 | `EDGEGUARD_ENABLE_SLACK_ALERTS` | Enable Slack notifications on collector failure | *(unset)* |
 | `SLACK_WEBHOOK_URL` / `AIRFLOW__SLACK__WEBHOOK_URL` | Slack incoming webhook URL for collector-failure alerts | *(unset)* |
 | `NATS_URL` | NATS server URL — used only by the `edgeguard doctor` reachability check. Actual NATS publishing (`src/nats_client.py`) is configured via `NATSClient(servers=...)` and does not read this var. | *(unset)* |
@@ -1322,10 +1323,11 @@ Open work is tracked in a single list — see *Roadmap & Status → In Progress 
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `./install.sh` waits for the services after `docker compose up -d` (`EDGEGUARD_INSTALL_WAIT_SEC`) and names those that are not healthy; it printed "EdgeGuard is running!" also while api and graphql crash-looped. Its next steps recreate every service after a `.env` edit (`docker compose up -d`; recreating only airflow left api and graphql on the old MISP values).
 - 2026-10-18 — `EDGEGUARD_RATE_LIMIT_GRAPHQL` sets the GraphQL rate limit (it was fixed at 120/minute in code).
 - 2026-10-18 — Deploy instructions rebuild every image (`docker compose build && docker compose up -d --force-recreate`; they rebuilt only the Airflow image, which left REST, GraphQL and STIX on the old code); `EDGEGUARD_GIT_SHA` forwarded by Compose, written into `.env` by `scripts/record_deployed_commit.sh` (run by `./install.sh`) and reported as `git_sha` by both `/health` responses.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1 (an empty sync window is a failed run).

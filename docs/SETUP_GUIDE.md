@@ -120,6 +120,7 @@ This will:
 1. Create **`.env`** from **`.env.example`** if it is missing, and only in that case generate **`EDGEGUARD_API_KEY`**, **`AIRFLOW_API_AUTH_JWT_SECRET`**, **`AIRFLOW_FERNET_KEY`** and **`GRAFANA_ADMIN_PASSWORD`** (an existing **`.env`** is left as it is)  
 2. **`docker compose build`** (API image + **Airflow image** from **`Dockerfile.airflow`**)  
 3. **`docker compose up -d`**
+4. Wait up to **`EDGEGUARD_INSTALL_WAIT_SEC`** seconds (default 300) for the services and name any that are not healthy, with a pointer to **`docker compose logs`** and to the MISP values when they are still the template ones
 
 When **`install.sh`** creates **`.env`**, it starts the stack in the same run with the template values, so fill in **`.env`** first (§ 3.2, § 3.3).
 
@@ -296,10 +297,11 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-19_
 
 ## History
 
+- 2026-10-19 — `install.sh` waits for the services after `docker compose up -d` and names those that are not healthy instead of always reporting success.
 - 2026-10-18 — The tarball update recreates every container (`docker compose up -d --force-recreate`) after rebuilding every image; the deployed commit is recorded in `.env` as `EDGEGUARD_GIT_SHA` (`./install.sh --update` runs `scripts/record_deployed_commit.sh`; a tarball deploy passes the commit to it).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; upgrade steps for kept installs moved to the appendix.
