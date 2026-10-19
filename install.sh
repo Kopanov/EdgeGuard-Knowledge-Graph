@@ -307,8 +307,9 @@ if [ "$USE_DOCKER" = true ]; then
     # out of Neo4j. A password exported in the shell is the one Compose uses: .env is left as it is.
     if grep -q "^NEO4J_PASSWORD=changeme$" .env 2>/dev/null && ! exported_in_shell NEO4J_PASSWORD; then
         # The project name is the first top-level "name:" key of the resolved configuration (nested
-        # keys are indented); project names are lowercase letters, digits, "-" and "_", never quoted.
-        compose_project="$(docker compose config 2>/dev/null | sed -n 's/^name: //p' | head -1 || true)"
+        # keys are indented). Project names are lowercase letters, digits, "-" and "_"; YAML quotes a
+        # name that would read as another type (digits only, "on", "no", "true", ...), so quotes go.
+        compose_project="$(docker compose config 2>/dev/null | sed -n 's/^name: //p' | head -1 | tr -d "\"'" || true)"
         neo4j_kept_because=""
         if [ -z "$compose_project" ] || ! docker info &>/dev/null; then
             neo4j_kept_because="whether Neo4j's data volume exists could not be read (Docker daemon or compose configuration)"

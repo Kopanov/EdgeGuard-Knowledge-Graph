@@ -37,7 +37,7 @@ case "$*" in
     "compose version --short") echo "2.29.0" ;;
     "compose version") echo "Docker Compose version v2.29.0" ;;
     "compose config")
-        printf '%s\\n' 'name: egtest' 'services:' '  neo4j:' '    container_name: edgeguard_neo4j' \\
+        printf '%s\\n' "name: ${FAKE_PROJECT_YAML:-egtest}" 'services:' '  neo4j:' '    container_name: edgeguard_neo4j' \\
             'volumes:' '  neo4j_data:' '    name: egtest_neo4j_data' ;;
     "compose config --format json") echo '{"name": "not-the-yaml-project"}' ;;
     info) [ -n "$FAKE_DAEMON_DOWN" ] && exit 1 ;;
@@ -303,6 +303,27 @@ def test_project_name_is_read_from_the_top_level_key(tmp_path):
     calls = (tmp_path / "docker.log").read_text().splitlines()
     assert "volume inspect egtest_neo4j_data" in calls
     assert _values(work / ".env")["NEO4J_PASSWORD"] == "changeme", done.stdout + done.stderr
+
+
+@pytest.mark.parametrize("yaml_name", ['"2026"', "'2026'"])
+def test_a_quoted_project_name_is_read_without_its_quotes(tmp_path, yaml_name):
+    # YAML quotes a project name that would read as another type (digits only, "on", "no", ...); the
+    # volume of project 2026 exists, so the default password must stay.
+    work = _workdir(tmp_path)
+    _prepared_env(work)
+    done = _install(tmp_path, work, volumes="2026_neo4j_data", FAKE_PROJECT_YAML=yaml_name)
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert "volume inspect 2026_neo4j_data" in calls
+    assert _values(work / ".env")["NEO4J_PASSWORD"] == "changeme", done.stdout + done.stderr
+
+
+def test_no_grep_pattern_uses_a_basic_regex_alternation():
+    # BSD grep (macOS) reads "\\|" in a basic regular expression as a literal character, so such a
+    # pattern never matches there while GNU grep (CI) accepts it; the installer uses grep -E instead.
+    for lineno, line in enumerate((_ROOT / "install.sh").read_text().splitlines(), 1):
+        code = line.split("#", 1)[0] if line.lstrip().startswith("#") else line
+        if "grep" in code:
+            assert "\\|" not in code, f"install.sh:{lineno}: {line.strip()}"
 
 
 @pytest.mark.parametrize("env_name", ["Staging", "DEV", "Test"])
