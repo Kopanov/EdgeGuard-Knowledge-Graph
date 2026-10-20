@@ -175,7 +175,7 @@ To import manually:
 | `edgeguard_misp_honest_null_violation_total` | Counter | `source`, `field` | Items whose `first_seen` / `last_seen` lies within 5 minutes of the current time, a sign that the collector substituted the current time for a missing value (read by `EdgeGuardMispHonestNullViolation`) |
 | `edgeguard_misp_fetch_fallback_active_total` | Counter | `branch`, `outcome` | The sync's event listing fell back to PyMISP or restSearch (`branch` = `pymisp` / `rest_search`; `outcome` = `engaged` / `hard_error`; read by `EdgeGuardMispFetchFallbackActive` and `EdgeGuardMispFetchFallbackHardError`) |
 | `edgeguard_misp_event_attributes_truncated_total` | Counter | `source` | Events `MISPCollector.collect` (CLI pipeline `src/run_pipeline.py`) sliced to 500 attributes (read by `EdgeGuardMispEventAttributesTruncated`) |
-| `edgeguard_misp_attributes_dropped_total` | Counter | `reason` | MISP attributes the sync dropped while parsing or de-duplicating them, by reason (no alert) |
+| `edgeguard_misp_attributes_dropped_total` | Counter | `reason` | MISP attributes the sync dropped while parsing or de-duplicating them, by reason: `missing_cve_id`, `missing_key`, `attack_id_invalid` (a `text` value that starts like an ATT&CK id but holds no valid one, such as a value a MISP Import Regexp rule rewrote; logged as `[ATTACK-VALUE]`) (no alert) |
 | `edgeguard_misp_unmapped_attribute_types_total` | Counter | `attr_type` | MISP attribute types outside EdgeGuard's mapping (no alert) |
 | `edgeguard_misp_unmapped_source_tags_total` | Counter | `source_tag` | MISP `source:*` tags outside EdgeGuard's source mapping (no alert) |
 
@@ -741,10 +741,11 @@ docker volume rm <project>_prometheus_data <project>_grafana_data <project>_aler
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-20_
 
 ## History
 
+- 2026-10-20 — `edgeguard_misp_attributes_dropped_total` lists its reasons, with `attack_id_invalid` for ATT&CK values without a valid ATT&CK id.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the leftover metric series of earlier versions to the appendix.
 - 2026-10-17 — Metric descriptions follow the code: `edgeguard_dag_runs_total` counts collector and sync task attempts under `dag_id="edgeguard_pipeline"`, `edgeguard_misp_events_total` counts collector runs, `edgeguard_misp_attributes_total` and `edgeguard_dag_run_duration_seconds` are written by no code path, `edgeguard_neo4j_relationships` holds the counts of the last `build_relationships` run, and the `last_seen_before_first_seen` drop reason is listed.

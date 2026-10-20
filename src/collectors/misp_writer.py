@@ -25,6 +25,7 @@ import requests
 import urllib3
 
 import source_registry  # noqa: E402  — single source of truth for source→MISP-tag mapping (chip 5a)
+from attack_values import format_attack_value
 from collectors.collector_utils import TransientServerError, retry_after_sleep_seconds, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
@@ -2816,9 +2817,12 @@ class MISPWriter:
         else:
             comment = description if description else f"MITRE ATT&CK technique from {source}"
 
+        # 2026-10-20: "<id> - <name>", without a colon: MISP's default Import Regexp rules rewrote the
+        # form "<id>: <name>" ("T1059.003: Windows Command Shell" was stored as
+        # "T1059.00%WINDIR%\Command Shell"); see ``attack_values``.
         attribute = {
             "type": "text",
-            "value": f"{mitre_id}: {name}",
+            "value": format_attack_value(mitre_id, name),
             "comment": comment,
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
@@ -2833,9 +2837,9 @@ class MISPWriter:
         """
         Create a MISP attribute from a MITRE ATT&CK tactic (x-mitre-tactic).
 
-        Tactics use the same ``text`` pattern as techniques (``TA0001: Name``) so
-        MISP→Neo4j parsing can recognize them. Previously ``push_items`` had no
-        branch for ``type: tactic``, so tactics were silently skipped.
+        Tactics use the same ``text`` value as techniques (``TA0001 - Initial Access``,
+        ``attack_values.format_attack_value``) so MISP→Neo4j parsing can recognize them. Previously
+        ``push_items`` had no branch for ``type: tactic``, so tactics were silently skipped.
         """
         mitre_id = tactic.get("mitre_id")
         name = tactic.get("name")
@@ -2868,7 +2872,7 @@ class MISPWriter:
 
         attribute = {
             "type": "text",
-            "value": f"{mitre_id}: {name}",
+            "value": format_attack_value(mitre_id, name),
             "comment": description if description else "MITRE ATT&CK tactic",
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
@@ -2882,8 +2886,8 @@ class MISPWriter:
         """
         Create a MISP attribute from a MITRE ATT&CK tool (Cobalt Strike, Mimikatz, etc.).
 
-        Tools are stored as ``text`` attributes with ``S####: Name`` format,
-        following the same pattern as techniques and tactics. The
+        Tools are stored as ``text`` attributes with the value ``S#### - Name``
+        (``attack_values.format_attack_value``), as techniques and tactics are. The
         ``uses_techniques`` list is preserved via ``MITRE_USES_TECHNIQUES:``
         comment prefix for round-trip through MISP→Neo4j.
         """
@@ -2930,7 +2934,7 @@ class MISPWriter:
 
         attribute = {
             "type": "text",
-            "value": f"{mitre_id}: {name}",
+            "value": format_attack_value(mitre_id, name),
             "comment": comment,
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],

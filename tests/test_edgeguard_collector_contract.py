@@ -26,7 +26,7 @@ def test_create_tactic_attribute_text_value_and_tags():
     attr = w.create_tactic_attribute(tactic)
     assert attr is not None
     assert attr["type"] == "text"
-    assert attr["value"] == "TA0001: Initial Access"
+    assert attr["value"] == "TA0001 - Initial Access"
     assert attr["to_ids"] is False
     tag_names = [t["name"] for t in attr["Tag"]]
     assert any("mitre-tactic:initial-access" in tn for tn in tag_names)
