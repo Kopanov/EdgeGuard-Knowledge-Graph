@@ -93,8 +93,8 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "f58f4e23fcda6ca1df66c4312524a37d1aa3703ce50bc19c89608317b6e6500b",
-   "decisions": 98
+   "sha256": "d888d560c75186db24d044af133bc80b388a05a446b364fa0a33d77dc2d01837",
+   "decisions": 101
   }
  ],
  "attribution": [
@@ -120,7 +120,7 @@
  "counts": {
   "actors": 1167,
   "attack_groups": 191,
-  "synonyms": 4475,
+  "synonyms": 4478,
   "ambiguous": 77
  },
  "actors": [
@@ -3716,9 +3716,13 @@
    ],
    "synonyms": [
     "bitwise spider group",
-    "bitwise spider team"
+    "bitwise spider team",
+    "lockbit"
    ],
    "synonym_origins": {
+    "override": [
+     "lockbit"
+    ],
     "suffix_rule": [
      "bitwise spider group",
      "bitwise spider team"
@@ -11078,9 +11082,13 @@
    ],
    "synonyms": [
     "gold mansard group",
-    "gold mansard team"
+    "gold mansard team",
+    "nefilim"
    ],
    "synonym_origins": {
+    "override": [
+     "nefilim"
+    ],
     "suffix_rule": [
      "gold mansard group",
      "gold mansard team"
@@ -31316,6 +31324,7 @@
     "threat-actor/bdf4fe4f-af8a-495f-a719-cf175cecda1f"
    ],
    "synonyms": [
+    "conti",
     "dev-0193",
     "dev-0193 group",
     "dev-0193 team",
@@ -31400,6 +31409,9 @@
      "pistachio tempest",
      "temp.mixmaster",
      "unc1878"
+    ],
+    "override": [
+     "conti"
     ],
     "suffix_rule": [
      "dev-0193 group",

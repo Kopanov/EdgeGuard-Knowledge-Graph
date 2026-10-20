@@ -358,6 +358,27 @@
    "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'yurei'. On the graph of 2026-10-17 the node (24 relationships) carries the Yurei family.",
    "date": "2026-10-20",
    "status": "proposed"
+  },
+  {
+   "names": ["conti"],
+   "into": "wizard spider",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary. The ransomware galaxy says Conti was developed by the TrickBot group, the threat-actor galaxy describes Wizard Spider as the operator of the TrickBot malware, malpedia says Conti is thought to be led by the group known as Wizard Spider, and ATT&CK records that Wizard Spider (G0102) uses Conti (S0575); the reference already holds GOLD ULRICK, a name for Conti's operators, as a synonym of Wizard Spider. The name therefore counts as Wizard Spider, and the actor alias merge folds an OTX actor node 'Conti' into the Wizard Spider node. The reference keeps Storm-0230 ('Conti Team 1', whose record lists WIZARD SPIDER as a synonym) as an actor of its own, so 'Conti Team 1' does not resolve to Wizard Spider. On the graph of 2026-10-17 the node (27 relationships) carries Conti, Ryuk and TrickBot.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["lockbit"],
+   "into": "bitwise spider",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary. The threat-actor galaxy records that BITWISE SPIDER uses LockBit (estimated as likely) and that BITWISE SPIDER's leak site has posted the most victims each month since July 2021 through LockBit 2.0; the other actors the galaxies link to LockBit deploy or use it, and no galaxy names another developer or operator. The name therefore counts as BITWISE SPIDER; the actor alias merge folds an OTX actor node 'LockBit' into a BITWISE SPIDER node when the graph holds one, and otherwise the node keeps its name. On the graph of 2026-10-17 the node had 71 relationships.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["nefilim"],
+   "into": "gold mansard",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary. The threat-actor galaxy describes GOLD MANSARD as the group that operated the Nemty ransomware, whose operator retired Nemty in April 2020, after which Nefilim was introduced without an affiliate model; the ransomware galaxy relates Nefilim to Nemty and lists Nefilim among the later names of JSWorm, the family that became Nemty. The threat-actor galaxy names TRAVELING SPIDER, an actor the reference holds, as the developer of Nemty; it does not name Nefilim. The name therefore counts as GOLD MANSARD; the actor alias merge folds an OTX actor node 'Nefilim' into a GOLD MANSARD node when the graph holds one, and otherwise the node keeps its name. On the graph of 2026-10-17 the node had 14 relationships.",
+   "date": "2026-10-20",
+   "status": "proposed"
   }
  ],
  "never_merge": [

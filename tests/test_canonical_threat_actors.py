@@ -1172,9 +1172,13 @@ class TestCommittedReference:
             assert (actor["name"], actor["origins"], actor["records"]) == (name, ["override"], []), key
             assert actor["mitre_attack"] is None and actor["synonyms"] == [], key
         index = gen.build_index(committed)
-        # Left out by the review: the galaxies name an actor the reference holds as the developer or
-        # operator (conti, lockbit, nefilim), or the name also names other malware (kraken, osiris; nitrogen
-        # and morpheus, which malpedia also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
-        for name in ("conti", "lockbit", "nefilim", "kraken", "osiris", "nitrogen", "morpheus"):
-            assert gen.resolve(index, name).how == "unresolved", name
+        # An operation the galaxies attribute to an actor the reference holds as its developer or operator
+        # is a name of that actor (merge into the operator's key).
+        assert gen.resolve(index, "conti").actor == "wizard spider"
+        assert gen.resolve(index, "lockbit").actor == "bitwise spider"
+        assert gen.resolve(index, "nefilim").actor == "gold mansard"
         assert gen.resolve(index, "gold ulrick").actor == "wizard spider"  # Conti's operators
+        # Left out by the review: the name also names other malware (kraken, osiris; nitrogen and morpheus,
+        # which malpedia also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
+        for name in ("kraken", "osiris", "nitrogen", "morpheus"):
+            assert gen.resolve(index, name).how == "unresolved", name

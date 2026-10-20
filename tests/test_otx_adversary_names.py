@@ -9,11 +9,13 @@ its decision whether the pulse names several actors, so all three see the same n
 * A name the same pulse lists both as adversary and as a malware family is an actor only when the
   canonical threat-actor reference resolves it. On the hosted graph of 2026-10-18, 181 of 859
   ThreatActor names were also Malware names. Reference 2026.10.17 knew 34 of them (Kimsuky, Akira,
-  Qilin, Medusa, ...). Reference 2026.10.20 also holds 29 ransomware operations named after their
-  ransomware (Rhysida, BlackSuit, Trigona, ...), added through override decisions, so 63 stay actors.
-  The other 118 (Lumma Stealer, AsyncRAT, Agent Tesla, Mirai, Zloader, and ransomware names the review
-  left out, such as LockBit, Conti and Nitrogen) are dropped for a pulse that lists them as its family,
-  and stay the pulse's malware item. Without the reference the rule cannot decide and the name is kept.
+  Qilin, Medusa, ...). Reference 2026.10.20 also holds, through override decisions, 29 ransomware
+  operations named after their ransomware (Rhysida, BlackSuit, Trigona, ...) as actors of their own,
+  and Conti, LockBit and Nefilim as names of the actor the galaxies name as their developer or operator
+  (Wizard Spider, BITWISE SPIDER, GOLD MANSARD), so 66 stay actors. The other 115 (Lumma Stealer,
+  AsyncRAT, Agent Tesla, Mirai, Zloader, and ransomware names the review left out, such as Nitrogen and
+  Kraken) are dropped for a pulse that lists them as its family, and stay the pulse's malware item.
+  Without the reference the rule cannot decide and the name is kept.
 
 The fixture names are names from that measurement.
 """
@@ -79,13 +81,15 @@ RANSOMWARE_OPERATIONS = (
     "Lynx", "Makop", "Mallox", "NightSpire", "Payouts King", "Rhysida", "SECP0", "Termite", "Trigona", "Vect",
     "Warlock", "Yurei",
 )  # fmt: skip
-# Ransomware names the review left out: the galaxies name an actor the reference holds as their developer
-# or operator (Conti, LockBit, Nefilim, Aurora), or the name also names a stealer, loader, botnet,
-# banking trojan or backdoor (Aurora, Anubis, Kraken, Osiris, Chaos; Nitrogen and Morpheus, which malpedia
-# also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
-RANSOMWARE_NAMES_LEFT_OUT = (
-    "Conti", "LockBit", "Nefilim", "Aurora", "Anubis", "Kraken", "Osiris", "Chaos", "Nitrogen", "Morpheus",
+# Ransomware operations the galaxies attribute to an actor the reference holds as their developer or
+# operator: since 2026-10-20 (override decisions) the name counts as that actor.
+OPERATIONS_OF_A_KNOWN_OPERATOR = (
+    ("Conti", "wizard spider"), ("LockBit", "bitwise spider"), ("Nefilim", "gold mansard"),
 )  # fmt: skip
+# Ransomware names the review left out: the name also names a trojan, stealer, loader, botnet, banking
+# trojan or backdoor (Aurora: ATT&CK Hydraq; Anubis, Kraken, Osiris, Chaos; Nitrogen and Morpheus, which
+# malpedia also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
+RANSOMWARE_NAMES_LEFT_OUT = ("Aurora", "Anubis", "Kraken", "Osiris", "Chaos", "Nitrogen", "Morpheus")
 
 
 class TestCountryNamesInTheAdversaryField:
@@ -143,13 +147,37 @@ class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
         ioc = _ioc(items, "203.0.113.47")
         assert ioc["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-ransom"], "the pulse attributes"
 
+    @pytest.mark.parametrize("name,operator", OPERATIONS_OF_A_KNOWN_OPERATOR)
+    def test_a_ransomware_operation_of_a_known_operator_stays_an_actor_counted_as_the_operator(
+        self, reference, name, operator
+    ):
+        # Reference 2026.10.20: the name resolves to the operator, so the pulse keeps the actor; the actor
+        # alias merge folds the node into the operator's node when the graph holds one.
+        assert reference.canonical_for(name) == operator
+        items = _HARNESS._collect([_pulse("p-operated", [name], name, ["203.0.113.49"])])
+        assert _actors(items) == [name]
+        assert _malware(items) == [name], "the pulse's malware family item is unchanged"
+        assert _ioc(items, "203.0.113.49")["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-operated"]
+
+    def test_an_operation_beside_its_operator_names_one_actor(self):
+        # Conti and Wizard Spider are one actor: the pulse attributes instead of counting two actors.
+        items = _HARNESS._collect([_pulse("p-one", ["Conti"], "Wizard Spider, Conti", ["203.0.113.50"])])
+        assert _actors(items) == ["Wizard Spider", "Conti"]
+        ioc = _ioc(items, "203.0.113.50")
+        assert ioc["several_actor_pulses"] == []
+        assert ioc["pulse_malware_actor_pairs"] == ["Conti::Wizard Spider::p-one", "Conti::Conti::p-one"]
+
     def test_the_operations_are_the_override_decisions_of_2026_10_20(self):
-        # The list above and the docs count 29 operations: one merge into a new key each in the overrides.
+        # The lists above and the docs count 29 operations, each one merge into a new key, and 3 operations
+        # merged into the key of their operator.
         overrides = json.loads((_SRC / "reference" / "canonical_threat_actor_overrides.json").read_text())
-        merged = {d["into"] for d in overrides["merge"] if d["date"] == "2026-10-20"}
-        assert merged == {cta.name_key(n) for n in RANSOMWARE_OPERATIONS}
+        decisions = [d for d in overrides["merge"] if d["date"] == "2026-10-20"]
+        own = {d["into"] for d in decisions if d["names"] == [d["into"]]}
+        into_operator = {(n, d["into"]) for d in decisions if d["names"] != [d["into"]] for n in d["names"]}
+        assert own == {cta.name_key(n) for n in RANSOMWARE_OPERATIONS}
         assert len(RANSOMWARE_OPERATIONS) == 29
-        assert merged.isdisjoint(cta.name_key(n) for n in RANSOMWARE_NAMES_LEFT_OUT)
+        assert into_operator == {(cta.name_key(n), op) for n, op in OPERATIONS_OF_A_KNOWN_OPERATOR}
+        assert own.isdisjoint(cta.name_key(n) for n in RANSOMWARE_NAMES_LEFT_OUT)
 
     def test_a_ransomware_operation_beside_a_known_actor_names_two_actors(self, reference):
         # Rhysida and Vanilla Tempest (Vice Society) are separate actors in the reference.
