@@ -208,7 +208,7 @@
   {
    "names": ["devman"],
    "into": "devman",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'devman'; malpedia describes DEVMAN as ransomware made from a DragonForce build with another file extension, a shared codebase that does not attribute DEVMAN to DragonForce. On the graph of 2026-10-17 the node (16 relationships) carries the DEVMAN family.",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'devman'; malpedia describes DEVMAN as ransomware made from a DragonForce build with another file extension, and adds that in one of the first observed samples the ransom note still claimed to be part of the DragonForce Ransomware Cartel. DragonForce is an actor the reference holds. The decision reads a shared codebase and a note naming the cartel as a brand within the DragonForce cartel, not as DragonForce's own operation, so DEVMAN is an actor of its own; a merge into 'dragonforce' is the alternative decision. On the graph of 2026-10-17 the node (16 relationships, one OTX report) carries the DEVMAN family and, from the same report, DragonForce, BlackLock, Mamona and Conti.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -250,7 +250,7 @@
   {
    "names": ["hellcat"],
    "into": "hellcat",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'hellcat'; malpedia describes the Morpheus ransomware as identical samples operated by the Morpheus and HellCat ransomware groups, which stay two actors. On the graph of 2026-10-17 the node (13 relationships) carries the HellCat and Morpheus families.",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'hellcat'; malpedia describes the Morpheus ransomware (synonym HellCat) as identical samples operated by the Morpheus and HellCat ransomware groups. Morpheus is not an actor of the reference: malpedia also gives that name to a loader ('Morpheus Loader'). On the graph of 2026-10-17 the node (13 relationships) carries the HellCat and Morpheus families.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -264,7 +264,7 @@
   {
    "names": ["hellokitty"],
    "into": "hellokitty",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists HelloKitty (since November 2020, synonym FiveHands); malpedia lists it for Windows and ELF and ATT&CK as HELLOKITTY (S0617), and no galaxy names a group that uses it. On the graph of 2026-10-17 the node (27 relationships) carries HELLOKITTY, FIVEHANDS and DEATHRANSOM.",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists HelloKitty (since November 2020, synonym FiveHands); malpedia lists it for Windows and ELF and ATT&CK as HELLOKITTY (S0617). The threat-actor galaxy describes UNC2447, an actor the reference holds, as a financially motivated actor with ties to multiple hacker groups, 'observed deploying ransomware, including FiveHands and Hello Kitty'; ATT&CK and malpedia list FIVEHANDS and HELLOKITTY as separate software. The galaxies describe UNC2447 as deploying ransomware, not as HelloKitty's developer or operator, so the operation is an actor of its own; a merge into 'unc2447' is the alternative decision. On the graph of 2026-10-17 the node (27 relationships) carries HELLOKITTY, FIVEHANDS and DEATHRANSOM.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -278,7 +278,7 @@
   {
    "names": ["lynx"],
    "into": "lynx",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'lynx' and malpedia describes Lynx as ransomware active since mid-2024. The threat actors whose names contain the word (Hidden Lynx, Silent Lynx, Cosmic Lynx) are other actors. On the graph of 2026-10-17 the node (21 relationships) carries the Lynx family.",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'lynx' and malpedia describes Lynx as ransomware active since mid-2024 that shares similarities with INC ransomware, 'indicating that they bought INC ransomware source code', and one of its references is titled as a rebrand of INC ransomware to Lynx. INC Ransom is an actor the reference holds. A bought codebase does not name Lynx's operator, so the operation is an actor of its own; a merge into 'inc ransom' is the alternative decision. The threat actors whose names contain the word (Hidden Lynx, Silent Lynx, Cosmic Lynx) are other actors. On the graph of 2026-10-17 the node (21 relationships) carries the Lynx family.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -297,23 +297,9 @@
    "status": "proposed"
   },
   {
-   "names": ["morpheus"],
-   "into": "morpheus",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'morpheus'; malpedia lists Morpheus as ransomware operated by the Morpheus and HellCat ransomware groups, which stay two actors. On the graph of 2026-10-17 the node (13 relationships) carries the Morpheus and HellCat families.",
-   "date": "2026-10-20",
-   "status": "proposed"
-  },
-  {
    "names": ["nightspire"],
    "into": "nightspire",
    "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'nightspire'. On the graph of 2026-10-17 the node (31 relationships) carries the NightSpire family.",
-   "date": "2026-10-20",
-   "status": "proposed"
-  },
-  {
-   "names": ["nitrogen"],
-   "into": "nitrogen",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'nitrogen' and malpedia lists Nitrogen Ransomware. On the graph of 2026-10-17 the node (27 relationships) carries the Nitrogen family.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -327,7 +313,7 @@
   {
    "names": ["rhysida"],
    "into": "rhysida",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy describes Rhysida as a ransomware-as-a-service group that emerged in May 2023 and uses a namesake ransomware; malpedia lists it for Windows and ELF. The threat-actor galaxy notes similarities with Vice Society (Vanilla Tempest) that suggest a possible connection, which is not an attribution. On the graph of 2026-10-17 the node (72 relationships) carries the Rhysida family.",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy describes Rhysida as a ransomware-as-a-service group that emerged in May 2023 and uses a namesake ransomware; malpedia lists it for Windows and ELF. The threat-actor galaxy notes similarities with Vice Society (Vanilla Tempest) that suggest a possible connection, which is not an attribution. It also links TAG-124, an actor that distributes malware through a traffic distribution system, to multiple ransomware groups including Rhysida and Interlock: a distributor, not its operator. On the graph of 2026-10-17 the node (72 relationships) carries the Rhysida family.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -341,7 +327,7 @@
   {
    "names": ["termite"],
    "into": "termite",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'termite' (besides an older 'Termite Ransomware' of 2017); Blue Termite in the threat-actor galaxy is another actor. On the graph of 2026-10-17 the node (22 relationships) carries the Termite and Babuk families.",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'termite' (besides an older 'Termite Ransomware' of 2018); Blue Termite in the threat-actor galaxy is another actor. Malpedia 'Termite' (win.termite) has no description; its references (reports on SectorM04, on the 'Internet of Termites' and on FIN7) concern an unrelated tool that other actors use, not this ransomware. On the graph of 2026-10-17 the node (22 relationships) carries the Termite and Babuk families.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -637,23 +623,9 @@
    "status": "proposed"
   },
   {
-   "key": "morpheus",
-   "name": "Morpheus",
-   "reason": "Display name of the actor created by the Morpheus merge: the operation's own name.",
-   "date": "2026-10-20",
-   "status": "proposed"
-  },
-  {
    "key": "nightspire",
    "name": "NightSpire",
    "reason": "Display name of the actor created by the NightSpire merge: the operation's own name.",
-   "date": "2026-10-20",
-   "status": "proposed"
-  },
-  {
-   "key": "nitrogen",
-   "name": "Nitrogen",
-   "reason": "Display name of the actor created by the Nitrogen merge: the operation's own name.",
    "date": "2026-10-20",
    "status": "proposed"
   },

@@ -93,8 +93,8 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "740da7d5eeda64dba42c75af80497bdd7810f2dd90c28c8c262a0b67a65970b0",
-   "decisions": 102
+   "sha256": "f58f4e23fcda6ca1df66c4312524a37d1aa3703ce50bc19c89608317b6e6500b",
+   "decisions": 98
   }
  ],
  "attribution": [
@@ -118,7 +118,7 @@
   "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name."
  ],
  "counts": {
-  "actors": 1169,
+  "actors": 1167,
   "attack_groups": 191,
   "synonyms": 4475,
   "ambiguous": 77
@@ -16139,17 +16139,6 @@
    }
   },
   {
-   "name": "Morpheus",
-   "key": "morpheus",
-   "mitre_attack": null,
-   "origins": [
-    "override"
-   ],
-   "records": [],
-   "synonyms": [],
-   "synonym_origins": {}
-  },
-  {
    "name": "Moses Staff",
    "key": "moses staff",
    "mitre_attack": "G1009",
@@ -17232,17 +17221,6 @@
      "nitro team"
     ]
    }
-  },
-  {
-   "name": "Nitrogen",
-   "key": "nitrogen",
-   "mitre_attack": null,
-   "origins": [
-    "override"
-   ],
-   "records": [],
-   "synonyms": [],
-   "synonym_origins": {}
   },
   {
    "name": "NOCTURNAL SPIDER",

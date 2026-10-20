@@ -9,17 +9,18 @@ its decision whether the pulse names several actors, so all three see the same n
 * A name the same pulse lists both as adversary and as a malware family is an actor only when the
   canonical threat-actor reference resolves it. On the hosted graph of 2026-10-18, 181 of 859
   ThreatActor names were also Malware names. Reference 2026.10.17 knew 34 of them (Kimsuky, Akira,
-  Qilin, Medusa, ...). Reference 2026.10.20 also holds 31 ransomware operations named after their
-  ransomware (Rhysida, BlackSuit, Trigona, ...), added through reviewed overrides, so 65 stay actors.
-  The other 116 (Lumma Stealer, AsyncRAT, Agent Tesla, Mirai, Zloader, and ransomware names the review
-  left out, such as LockBit and Conti) are dropped for a pulse that lists them as its family, and stay
-  the pulse's malware item. Without the reference the rule cannot decide and the name is kept.
+  Qilin, Medusa, ...). Reference 2026.10.20 also holds 29 ransomware operations named after their
+  ransomware (Rhysida, BlackSuit, Trigona, ...), added through override decisions, so 63 stay actors.
+  The other 118 (Lumma Stealer, AsyncRAT, Agent Tesla, Mirai, Zloader, and ransomware names the review
+  left out, such as LockBit, Conti and Nitrogen) are dropped for a pulse that lists them as its family,
+  and stay the pulse's malware item. Without the reference the rule cannot decide and the name is kept.
 
 The fixture names are names from that measurement.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -70,18 +71,21 @@ KNOWN_BEFORE = (
     "night dragon", "play", "qilin", "ransomhub", "romcom", "rtm", "taidoor", "the gentlemen", "tradertraitor",
     "uac-0006", "uta0388",
 )  # fmt: skip
-# Ransomware operations named after their ransomware, in the reference since 2026-10-20 (reviewed
-# overrides), written as their display name.
+# Ransomware operations named after their ransomware, in the reference since 2026-10-20 (override
+# decisions), written as their display name.
 RANSOMWARE_OPERATIONS = (
     "BlackNevas", "BlackSuit", "Brain Cipher", "Cactus", "Cicada3301", "CrazyHunter", "DeadLock", "DEVMAN",
     "ELPACO-team", "Embargo", "Everest", "Global Group", "Gunra", "HellCat", "HellDown", "HelloKitty", "Kyber",
-    "Lynx", "Makop", "Mallox", "Morpheus", "NightSpire", "Nitrogen", "Payouts King", "Rhysida", "SECP0",
-    "Termite", "Trigona", "Vect", "Warlock", "Yurei",
+    "Lynx", "Makop", "Mallox", "NightSpire", "Payouts King", "Rhysida", "SECP0", "Termite", "Trigona", "Vect",
+    "Warlock", "Yurei",
 )  # fmt: skip
 # Ransomware names the review left out: the galaxies name an actor the reference holds as their developer
 # or operator (Conti, LockBit, Nefilim, Aurora), or the name also names a stealer, loader, botnet,
-# banking trojan or backdoor (Aurora, Anubis, Kraken, Osiris, Chaos).
-RANSOMWARE_NAMES_LEFT_OUT = ("Conti", "LockBit", "Nefilim", "Aurora", "Anubis", "Kraken", "Osiris", "Chaos")
+# banking trojan or backdoor (Aurora, Anubis, Kraken, Osiris, Chaos; Nitrogen and Morpheus, which malpedia
+# also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
+RANSOMWARE_NAMES_LEFT_OUT = (
+    "Conti", "LockBit", "Nefilim", "Aurora", "Anubis", "Kraken", "Osiris", "Chaos", "Nitrogen", "Morpheus",
+)  # fmt: skip
 
 
 class TestCountryNamesInTheAdversaryField:
@@ -138,6 +142,14 @@ class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
         assert _malware(items) == [name], "the pulse's malware family item is unchanged"
         ioc = _ioc(items, "203.0.113.47")
         assert ioc["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-ransom"], "the pulse attributes"
+
+    def test_the_operations_are_the_override_decisions_of_2026_10_20(self):
+        # The list above and the docs count 29 operations: one merge into a new key each in the overrides.
+        overrides = json.loads((_SRC / "reference" / "canonical_threat_actor_overrides.json").read_text())
+        merged = {d["into"] for d in overrides["merge"] if d["date"] == "2026-10-20"}
+        assert merged == {cta.name_key(n) for n in RANSOMWARE_OPERATIONS}
+        assert len(RANSOMWARE_OPERATIONS) == 29
+        assert merged.isdisjoint(cta.name_key(n) for n in RANSOMWARE_NAMES_LEFT_OUT)
 
     def test_a_ransomware_operation_beside_a_known_actor_names_two_actors(self, reference):
         # Rhysida and Vanilla Tempest (Vice Society) are separate actors in the reference.
