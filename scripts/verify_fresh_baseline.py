@@ -257,11 +257,23 @@ _REL_PROVENANCE_SCAN = (
 # on alert ingestion (Host, IP, Alert, …) are marker-stamped when EdgeGuard creates them but
 # never have a TLP, so the check is an allowlist, not a skip-list.
 _TLP_LABELS = ("Indicator", "CVE", "Vulnerability", "Malware", "ThreatActor", "Technique", "Tactic", "Tool")
-# ATT&CK entries whose names contain ": Windows " — the MISP Import Regexp rule
-# rewrote them to ``%WINDIR%\`` before the 2026-10 fix, so they vanished.
-_MANGLED_TECHNIQUES = ("T1047", "T1021.006", "T1543.003", "T1222.001", "T1546.003")
+# ATT&CK entries whose names begin with "Windows": MISP's default Import Regexp rules rewrote the
+# value "<id>: Windows ..." (``T1059.003: Windows Command Shell`` → ``T1059.00%WINDIR%\Command Shell``),
+# so they were missing from the graph (nine on the run of 2026-10-20). MISPWriter writes
+# "<id> - <name>" (``src/attack_values.py``), which the rules leave unchanged.
+_MANGLED_TECHNIQUES = (
+    "T1059.003",
+    "T1047",
+    "T1021.006",
+    "T1543.003",
+    "T1222.001",
+    "T1546.003",
+    "T1555.004",
+    "T1686.003",
+)
 _MANGLED_TOOLS_HINT = (
-    "requires the MISP Import Regexp fix (docs/BASELINE_LAUNCH_CHECKLIST.md § [6], step 1) before the re-feed"
+    "the sync skips an ATT&CK value with no valid ATT&CK id: grep '[ATTACK-VALUE]' in the sync log and "
+    "check the value MISP stored and its Import Regexp rules (docs/BASELINE_LAUNCH_CHECKLIST.md § [6], step 1)"
 )
 # NVD analysis lag: reference tags + CPE configurations appear weeks after publication.
 _NVD_ANALYSIS_LAG_DAYS = 45

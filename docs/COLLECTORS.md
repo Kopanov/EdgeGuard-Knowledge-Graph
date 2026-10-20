@@ -465,6 +465,10 @@ The ATT&CK bundles keep replaced and retired objects. `_parse_bundle` (Enterpris
 
 Feeds that still name a revoked technique id (OTX pulses citing `T1086`) are translated to the successor downstream, with `src/reference/attack_revoked_ids.json` (`src/attack_revoked.py`; see `docs/KNOWLEDGE_GRAPH.md`, "Revoked and deprecated ATT&CK objects"). Groups and software need no map: the bundle names every successor. A revoked technique the map does not list is therefore kept, with the warning `[ATTACK-REVOKED] N technique(s) the bundle revokes are not in the revoked-id map (…)`, so the links that cite it are not lost; rebuild the map (`docs/RUNBOOK.md`, "Rebuilding the ATT&CK revoked-id map") and the next run skips it.
 
+### MISP values
+
+MISPWriter writes each technique, tactic (Enterprise and ICS) and tool as a MISP `text` attribute whose value is the ATT&CK id, ` - ` and the name (`attack_values.format_attack_value`): `T1059.003 - Windows Command Shell`, `TA0002 - Execution`, `T0807 - Command-Line Interface`, `S0005 - Windows Credential Editor`. A group is a `threat-actor` attribute and a malware a `malware-type` attribute, each valued by its name. The ATT&CK values carry no colon, so MISP's default Import Regexp rules, which rewrite a value where any character, a colon and any character precede "Windows" (`/.:.Windows./i` → `%WINDIR%\`), leave them unchanged ([MISP_SOURCES.md](MISP_SOURCES.md#attribute-types-and-values)). The MISP → Neo4j sync reads the id and the name back with `attack_values.parse_attack_value`, which also reads `<id>: <name>`, and skips a value without a valid ATT&CK id with an `[ATTACK-VALUE]` warning.
+
 ### Zone Detection
 ```python
 def detect_sectors(self, text):
@@ -1295,10 +1299,11 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-20_
 
 ## History
 
+- 2026-10-20 — MITRE: techniques, tactics and tools reach MISP as `<id> - <name>` (they were `<id>: <name>`, which MISP's default Import Regexp rules rewrote for the entries named "Windows …"); new subsection "MISP values".
 - 2026-10-18 — A pulse's `cve_references` item reaches MISP with an `OTX_META` block naming the pulse (it carried the note "Referenced in OTX pulse: <name>"), and the sync groups an OTX CVE into its pulse, linking the pulse's indicators to it (`INDICATES`, `otx_pulse`; at most 50 CVEs and 2,000 indicators of a pulse).
 - 2026-10-18 — OTX: a pulse's own industries are its sector statement (`otx_industries` on `TARGETS`); malware families and adversaries carry them to the sync in `MITRE_USES_TECHNIQUES.ind`, and the statements of the later pulses of a run that list the same item travel with it (`report_stated_zones`, `rsz`).
 - 2026-10-18 — OTX adversaries: country and state names and nationality adjectives are not actor names (`"APT37, North Korea"` names one actor), and an adversary the same pulse lists as a malware family is an actor only when the canonical threat-actor reference resolves it (kept without the reference); the actor items, pairs and several-actor decision use the same names.

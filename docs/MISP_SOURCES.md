@@ -106,6 +106,26 @@ FS-ISAC, Health-ISAC, etc.: no collector; ingest via MISP or future connectors. 
 
 ---
 
+## Attribute types and values
+
+`MISPWriter` writes one attribute per item:
+
+| Item | MISP type | Value |
+|------|-----------|-------|
+| Indicator | by indicator type (`ip-dst`, `domain`, `hostname`, `url`, `md5` … `sha512`, `x509-fingerprint-sha1`, `email-src`, …); `text` when neither the type nor the value's shape gives one | the value as the source gives it |
+| CVE | `vulnerability` | the CVE id, upper-case |
+| Threat actor | `threat-actor` | the name |
+| Malware | `malware-type` | the name |
+| ATT&CK technique (Enterprise and ICS) | `text` | the id, ` - ` and the name: `T1059.003 - Windows Command Shell`, `T0807 - Command-Line Interface` |
+| ATT&CK tactic (Enterprise and ICS) | `text` | `TA0002 - Execution`, `TA0104 - Execution` |
+| ATT&CK tool | `text` | `S0005 - Windows Credential Editor` |
+
+**MISP Import Regexp.** MISP applies its Import Regexp rules (*Input Filters → Import Regexp*) to the value of every attribute it stores; the comment and the tags are not rewritten. A fresh MISP database holds the default rules, which normalise Windows paths: those for Windows, Program Files, ProgramData, Documents and Settings and Users begin with any character, a colon and any character (`/.:.Windows./i` → `%WINDIR%\`), so MISP stores the file-name indicator `C:\Windows\System32\evil.exe` as `%WINDIR%\System32\evil.exe`. The ATT&CK values carry no colon for this reason: written as `<id>: <name>`, `T1059.003: Windows Command Shell` would be stored as `T1059.00%WINDIR%\Command Shell`, without its id and name, and so would every ATT&CK entry named "Windows …". They are the only values EdgeGuard composes; every other value is a source's (an indicator, a name, a CVE id) and is stored as MISP's rules leave it.
+
+**How the sync reads an ATT&CK value.** `run_misp_to_neo4j` (the node parse and its STIX conversion) reads a `text` value with `attack_values.parse_attack_value` (`src/attack_values.py`): the id (`T1234` or `T1234.123` for a technique, `TA1234` for a tactic, `S1234` for a tool), then ` - ` or `: `, then the name. A value that starts like an ATT&CK id (`T`, `TA` or `S`, three digits, then a fourth digit or `%`) but holds no valid one, such as a value a MISP rule rewrote, creates no node: the sync logs an `[ATTACK-VALUE]` warning naming the attribute and the value, counts it in the run summary and in `edgeguard_misp_attributes_dropped_total{reason="attack_id_invalid"}`, and goes on (the run does not fail). Any other `text` value is an `Indicator` of type `unknown`.
+
+---
+
 ## Metadata Comment Prefixes
 
 Collectors embed structured metadata as JSON in MISP attribute comments using these prefixes:
@@ -160,10 +180,11 @@ Usually **MITRE-specific** types/tags vs MISP policy. Read the full MISP error b
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-20_
 
 ## History
 
+- 2026-10-20 — ATT&CK techniques, tactics and tools are written as `<id> - <name>`, which MISP's default Import Regexp rules leave unchanged (as `<id>: <name>`, the rules rewrote the nine entries named "Windows …" on the run of 2026-10-20); the sync reads both forms and skips a value with no valid ATT&CK id with an `[ATTACK-VALUE]` warning; new section on the attribute types and values.
 - 2026-10-19 — MISPWriter writes an `OTX_META` block (`pulse_id`, `report_ids`, `pulse_name`) on a CVE an OTX pulse names (it wrote a plain comment), from which the sync groups the CVE into its pulse; the `OTX_META` row lists it.
 - 2026-10-18 — `MITRE_USES_TECHNIQUES.ind`: an OTX family's and adversary's pulse industries; `OTX_META.report_stated_zones` / `MITRE_USES_TECHNIQUES.rsz`: the sectors the later pulses of the run state.
 - 2026-10-18 — The events' MISP distribution stated as it is: 1 ("This community only", every organisation on the instance), unpublished, so neither server synchronisation nor feeds forward them; MISP is the single store the collectors write to and the graph is built from (the writer's code comment had said "This organization only"); the `EdgeGuard` tag marks the events EdgeGuard wrote.

@@ -111,6 +111,12 @@ class TestNoneTypeSlicingInErrorHandlers:
 # ===========================================================================
 
 
+# The tool and tactic branches of ``_attribute_to_stix21`` (2026-10-20: chosen by the kind
+# ``attack_values.parse_attack_value`` reads, no longer by one regular expression each).
+_TOOL_BRANCH = 'if attack.kind == "tool":'
+_TACTIC_BRANCH = 'if attack.kind == "tactic":'
+
+
 class TestStixMitreToolTacticRewrite:
     """The MITRE tool + tactic branches of ``_attribute_to_stix21`` MUST
     return valid STIX 2.1 SDOs — not Neo4j-shaped dicts — and MUST NOT
@@ -135,11 +141,11 @@ class TestStixMitreToolTacticRewrite:
         """The tool-branch return MUST include ``spec_version`` and an
         ``id`` of the form ``"tool--{attr_uuid}"`` — matching every
         other SDO branch in the function."""
-        # Find the tool_match block
-        tool_idx = source.find("if tool_match:")
+        # Find the tool block
+        tool_idx = source.find(_TOOL_BRANCH)
         assert tool_idx > 0
         # End of the block = start of the tactic block
-        tactic_idx = source.find("# Check if this is a MITRE tactic", tool_idx)
+        tactic_idx = source.find(_TACTIC_BRANCH, tool_idx)
         assert tactic_idx > tool_idx
         tool_block = source[tool_idx:tactic_idx]
         assert '"type": "tool"' in tool_block
@@ -159,7 +165,7 @@ class TestStixMitreToolTacticRewrite:
         If tactics land with type ``attack-pattern``, they get CREATED
         AS TECHNIQUES — strictly worse than the prior "silently
         dropped" state."""
-        tactic_idx = source.find("if tactic_match:")
+        tactic_idx = source.find(_TACTIC_BRANCH)
         assert tactic_idx > 0
         tactic_block = source[tactic_idx : tactic_idx + 2000]
         # Correct type + id prefix
@@ -178,8 +184,8 @@ class TestStixMitreToolTacticRewrite:
         """``uses_techniques`` is EdgeGuard-specific, not STIX-standard,
         so it MUST live under the ``x_edgeguard_*`` prefix per STIX 2.1
         §3.1.1 custom-property convention — NOT as a top-level field."""
-        tool_idx = source.find("if tool_match:")
-        tactic_idx = source.find("# Check if this is a MITRE tactic", tool_idx)
+        tool_idx = source.find(_TOOL_BRANCH)
+        tactic_idx = source.find(_TACTIC_BRANCH, tool_idx)
         tool_block = source[tool_idx:tactic_idx]
         assert "x_edgeguard_uses_techniques" in tool_block
         # And the old STIX-illegal top-level ``"uses_techniques":`` must
@@ -190,8 +196,8 @@ class TestStixMitreToolTacticRewrite:
     def test_tool_branch_does_not_leak_neo4j_fields(self, source: str) -> None:
         """Top-level ``confidence_score`` / ``zone`` / ``mitre_id`` are
         Neo4j-internal concerns and aren't valid STIX 2.1 SDO fields."""
-        tool_idx = source.find("if tool_match:")
-        tactic_idx = source.find("# Check if this is a MITRE tactic", tool_idx)
+        tool_idx = source.find(_TOOL_BRANCH)
+        tactic_idx = source.find(_TACTIC_BRANCH, tool_idx)
         tool_block = source[tool_idx:tactic_idx]
         for bad in ['"confidence_score":', '"zone":', '"mitre_id":']:
             assert bad not in tool_block, (
