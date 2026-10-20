@@ -116,9 +116,10 @@ MISP_EVENTS = Counter("edgeguard_misp_events_total", "Total MISP events created"
 
 MISP_ATTRIBUTES = Counter("edgeguard_misp_attributes_total", "Total MISP attributes created", ["type", "source"])
 
-# PR #33 round 13: dropped-attribute counter for the dedup pre-stage. Surfaces
-# silent-skip rate: any spike in a particular reason class (missing_cve_id,
-# missing_key) is a data-quality signal worth alerting on.
+# PR #33 round 13: dropped-attribute counter for the dedup pre-stage and the
+# parse. Surfaces silent-skip rate: any spike in a particular reason class
+# (missing_cve_id, missing_key, attack_id_invalid) is a data-quality signal
+# worth alerting on.
 MISP_ATTRIBUTES_DROPPED = Counter(
     "edgeguard_misp_attributes_dropped_total",
     "MISP attributes dropped during dedup/parse — by reason",

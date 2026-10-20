@@ -38,6 +38,7 @@ import urllib3
 from actor_name_hygiene import clean_actor_names
 from attack_revoked import load_revoked_ids
 from attack_software_names import split_attack_software_id
+from attack_values import AttackValue, looks_like_attack_value, parse_attack_value
 from canonical_threat_actors import (
     CanonicalReference,
     ReferenceUnavailable,
@@ -1987,6 +1988,9 @@ class MISPToNeo4jSync:
             # 2026-10: OTX pulses naming several actors, whose malware was therefore not attributed
             # to them (``_build_cross_item_relationships``).
             "reports_with_several_actors": 0,
+            # 2026-10-20: ``text`` attributes that start like an ATT&CK id but hold no valid one (a value
+            # MISP's Import Regexp rules rewrote), skipped with an [ATTACK-VALUE] warning.
+            "attack_values_skipped": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None,
@@ -3175,13 +3179,23 @@ class MISPToNeo4jSync:
             return _stamp_sdo(_with_entity_description(stix_obj))
 
         elif attr_type == "text":
-            # Check if this is a MITRE technique (format: "T1234: Name" or starts with T followed by digits)
-            import re
+            # A MITRE technique, tool or tactic: "<id> - <name>" or "<id>: <name>" (``attack_values``;
+            # 2026-10-20: the regular expressions used before read only the second form). A value with no
+            # valid ATT&CK id, or with no name, converts to nothing.
+            attack = parse_attack_value(value)
+            if attack is None or not attack.name:
+                if attack is None and looks_like_attack_value(value):
+                    logger.warning(
+                        "[ATTACK-VALUE] MISP text attribute %s: %r starts like an ATT&CK entry but holds no valid "
+                        "ATT&CK id; not converted to STIX",
+                        attr_uuid,
+                        value[:200],
+                    )
+                return None
 
-            mitre_match = re.match(r"^(T\d{4}(?:\.\d{3})?):\s*(.+)$", value)
-            if mitre_match:
-                mitre_id = mitre_match.group(1)
-                technique_name = mitre_match.group(2).strip()
+            if attack.kind == "technique":
+                mitre_id = attack.mitre_id
+                technique_name = attack.name
 
                 # Extract platforms from tags
                 platforms = []
@@ -3210,7 +3224,7 @@ class MISPToNeo4jSync:
                     stix_obj["labels"] = labels
                 return _stamp_sdo(_with_entity_description(stix_obj))
 
-            # Check if this is a MITRE tool (format: "S0001: Mimikatz")
+            # A MITRE tool ("S0002 - Mimikatz")
             #
             # PR-G1 Bug Hunter audit (HIGH): this branch and the tactic branch
             # below had three compounding defects:
@@ -3233,10 +3247,9 @@ class MISPToNeo4jSync:
             # ``x_edgeguard_*`` prefix per the STIX 2.1 custom-property
             # convention (§3.1.1 of the spec), and ``labels`` populated from
             # the zone extraction already done above (in-scope here).
-            tool_match = re.match(r"^(S\d{4}):\s*(.+)$", value)
-            if tool_match:
-                tool_id = tool_match.group(1)
-                tool_name = tool_match.group(2).strip()
+            if attack.kind == "tool":
+                tool_id = attack.mitre_id
+                tool_name = attack.name
                 raw_comment = attr.get("comment", "") or ""
                 uses_techniques = []
                 if raw_comment.strip().startswith("MITRE_USES_TECHNIQUES:"):
@@ -3275,7 +3288,7 @@ class MISPToNeo4jSync:
                     stix_obj["x_edgeguard_uses_techniques"] = uses_techniques
                 return _stamp_sdo(_with_entity_description(stix_obj))
 
-            # Check if this is a MITRE tactic (format: "TA0001: Initial Access")
+            # A MITRE tactic ("TA0001 - Initial Access")
             #
             # PR-G1 Bug Hunter audit (HIGH): same three defects as the tool
             # branch above.
@@ -3297,10 +3310,9 @@ class MISPToNeo4jSync:
             # ``x_edgeguard_mitre_kind`` marker stays as a secondary
             # disambiguator for any code that cares, but the type alone
             # is now authoritative.
-            tactic_match = re.match(r"^(TA\d{4}):\s*(.+)$", value)
-            if tactic_match:
-                tactic_id = tactic_match.group(1)
-                tactic_name = tactic_match.group(2).strip()
+            if attack.kind == "tactic":
+                tactic_id = attack.mitre_id
+                tactic_name = attack.name
                 tactic_external_refs = [
                     {
                         "source_name": "mitre-attack",
@@ -3919,6 +3931,32 @@ class MISPToNeo4jSync:
                 rel.setdefault("source_refs", list(refs))
         return item, relationships
 
+    def _skip_unreadable_attack_value(self, value: str, attr_uuid: str, event_info: Dict) -> None:
+        """Log and count a ``text`` value that starts like an ATT&CK id but holds no valid one (2026-10-20).
+
+        ``stats["attack_values_skipped"]`` and ``edgeguard_misp_attributes_dropped_total{reason=
+        "attack_id_invalid"}`` count them; the run summary repeats the count. The skip does not fail
+        the run.
+        """
+        logger.warning(
+            "[ATTACK-VALUE] Skipped MISP text attribute %s (event %s): %r starts like an ATT&CK entry but "
+            "holds no valid ATT&CK id (technique T1234 or T1234.123, tactic TA1234, software S1234, then "
+            "' - ' or ': ' and the name). A MISP Import Regexp rule may have rewritten it; no node is "
+            "created from it.",
+            attr_uuid or "?",
+            event_info.get("id", "?"),
+            value[:200],
+        )
+        stats = getattr(self, "stats", None)
+        if isinstance(stats, dict):
+            stats["attack_values_skipped"] = int(stats.get("attack_values_skipped", 0) or 0) + 1
+        try:
+            from metrics_server import record_misp_attribute_dropped
+
+            record_misp_attribute_dropped("attack_id_invalid")
+        except Exception:
+            logger.debug("Metrics recording for a skipped ATT&CK value failed", exc_info=True)
+
     def parse_attribute(self, attr: Dict, event_info: Dict) -> Tuple[Optional[Dict], List[Dict]]:
         """
         Parse a MISP attribute into an EdgeGuard-compatible item.
@@ -3979,6 +4017,18 @@ class MISPToNeo4jSync:
         # node-level misp_event_id field). Captured once for use in every
         # relationships.append below.
         _evt_id = str(event_info.get("id", "") or "")
+
+        # 2026-10-20: an ATT&CK technique, tactic or tool is a ``text`` attribute "<id> - <name>" (or the
+        # earlier "<id>: <name>"), read by ``attack_values.parse_attack_value``. A value that starts like
+        # an ATT&CK id but holds no valid one, such as a value MISP's Import Regexp rules rewrote
+        # ("T1059.00%WINDIR%\Command Shell"), is skipped: it made a Technique node with a broken
+        # ``mitre_id`` and no name, or an ``unknown`` Indicator.
+        attack_value: Optional[AttackValue] = None
+        if attr_type == "text" and looks_like_attack_value(value):
+            attack_value = parse_attack_value(value)
+            if attack_value is None:
+                self._skip_unreadable_attack_value(value, attr_misp_uuid, event_info)
+                return None, []
 
         source_id = self.extract_source_from_tags(tags)
 
@@ -4499,12 +4549,10 @@ class MISPToNeo4jSync:
                 item["report_stated_zones"] = malware_report_stated_zones
             return self._with_provenance(item, relationships)
 
-        # Handle MITRE technique (text format "T1234: Name") — exclude "TA" (tactics, handled below)
-        elif attr_type == "text" and len(value) >= 5 and value[0] == "T" and value[1:5].isdigit():
-            # MITRE technique format: T followed by 4 digits (T1059, T1059.001)
-            parts = value.split(": ", 1)
-            mitre_id = parts[0]
-            name = parts[1] if len(parts) > 1 else ""
+        # Handle MITRE technique (text "T1059.001 - PowerShell"; ``attack_values``)
+        elif attack_value is not None and attack_value.kind == "technique":
+            mitre_id = attack_value.mitre_id
+            name = attack_value.name
 
             # 2026-10: a technique ATT&CK revoked (an id the revoked-id map lists) is not a node any
             # more; the MITRE collector stopped writing it, and an attribute written before that would
@@ -4572,12 +4620,10 @@ class MISPToNeo4jSync:
             }
             return self._with_provenance(item, relationships)
 
-        # Handle MITRE tactic (text format "TA0001: Name")
-        elif attr_type == "text" and len(value) >= 6 and value.startswith("TA") and value[2:6].isdigit():
-            # MITRE tactic format: "TA0001: Initial Access" (TA + 4 digits + ": Name")
-            parts = value.split(": ", 1)
-            mitre_id = parts[0]
-            name = parts[1] if len(parts) > 1 else ""
+        # Handle MITRE tactic (text "TA0001 - Initial Access"; ``attack_values``)
+        elif attack_value is not None and attack_value.kind == "tactic":
+            mitre_id = attack_value.mitre_id
+            name = attack_value.name
 
             shortname = ""
             for tag in tags:
@@ -4613,12 +4659,10 @@ class MISPToNeo4jSync:
             }
             return self._with_provenance(item, relationships)
 
-        # Handle MITRE tool (text format "S0001: Name")
-        elif attr_type == "text" and len(value) >= 5 and value[0] == "S" and value[1:5].isdigit():
-            # MITRE tool format: "S0154: Cobalt Strike" (S + 4 digits + ": Name")
-            parts = value.split(": ", 1)
-            mitre_id = parts[0]
-            name = parts[1] if len(parts) > 1 else ""
+        # Handle MITRE tool (text "S0154 - Cobalt Strike"; ``attack_values``)
+        elif attack_value is not None and attack_value.kind == "tool":
+            mitre_id = attack_value.mitre_id
+            name = attack_value.name
 
             # Extract uses_techniques from MITRE_USES_TECHNIQUES comment
             # Format: "MITRE_USES_TECHNIQUES:{"t":["T1059","T1071"]}\nDescription..."
@@ -6418,6 +6462,14 @@ class MISPToNeo4jSync:
                     "Items not synced because no merge path accepted them: %d "
                     "(grep '[ITEM-UNROUTABLE]'; counted neither as success nor as error)",
                     items_unroutable,
+                )
+            # 2026-10-20: ATT&CK values with no valid ATT&CK id (``_skip_unreadable_attack_value``).
+            attack_values_skipped = int(self.stats.get("attack_values_skipped", 0) or 0)
+            if attack_values_skipped:
+                logger.warning(
+                    "ATT&CK values skipped because they hold no valid ATT&CK id: %d (grep '[ATTACK-VALUE]'; "
+                    "a MISP Import Regexp rule may have rewritten them; not counted as errors)",
+                    attack_values_skipped,
                 )
             # PR-N28: surface placeholder rejections separately so operators
             # can distinguish "graph corrupted by adversarial input" from

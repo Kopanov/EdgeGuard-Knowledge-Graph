@@ -296,12 +296,19 @@ clearing:
    short SHA of the checkout.
    `edgeguard doctor` must report Airflow `3.3.x` with no drift warning; the DAG list must
    load with zero parse errors.
-1. **MISP Import Regexp.** In the MISP UI open *Input Filters → Import Regexp*
-   and remove (or fix) the rule that rewrites `: Windows ` to `%WINDIR%\`. On the
-   2026-09 baseline it mangled 12 ATT&CK entries (`T1047: Windows Management
-   Instrumentation` became `T104%WINDIR%\Management Instrumentation`), so T1047,
-   T1021.006, T1543.003, T1222.001, T1546.003 and tool S0005 never reached Neo4j.
-   The acceptance script checks for them after the run.
+1. **MISP Import Regexp: keep MISP's default rules.** MISP applies the rules under
+   *Input Filters → Import Regexp* to every attribute value it stores, and a fresh MISP
+   database holds the default rules. They normalise Windows paths in
+   file-name indicators (`C:\Windows\` → `%WINDIR%\`), which is their purpose in MISP;
+   the rules for Windows, Program Files, ProgramData, Documents and Settings and Users
+   begin with any character, a colon and any character. EdgeGuard's ATT&CK values carry
+   no colon (`T1059.003 - Windows Command Shell`, `S0005 - Windows Credential Editor`;
+   [MISP_SOURCES.md](MISP_SOURCES.md#attribute-types-and-values)), so the default rules
+   leave them unchanged: nothing is removed or edited. A rule added beyond the defaults
+   applies to EdgeGuard's values too: when one leaves an ATT&CK value without a valid
+   ATT&CK id, the sync skips the value with an `[ATTACK-VALUE]` warning, and the
+   acceptance check `mangled_attack_entries_present` reports the ATT&CK entries named
+   "Windows …" that are missing from the graph.
 2. **Flags.** Decide `EDGEGUARD_ENABLE_MITRE_ICS`, `EDGEGUARD_ENABLE_CISA_ICS` and
    `EDGEGUARD_ENABLE_MALWAREBAZAAR` (all default `false`). Recommended: run the baseline
    with all three **off**, run `scripts/verify_fresh_baseline.py`, then enable them one at
@@ -482,7 +489,7 @@ It exits non-zero when any of these fail. A warning (`[WARN]`; in the JSON `ok: 
 | `match_type = 'mitre_explicit'` edges whose source node has no MITRE source | 0 |
 | `ATTRIBUTED_TO` edges without a `match_type` | 0; median actors per malware ≤ 10 |
 | NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | judged only on CVEs published > 45 days ago (NVD assigns reference tags and CPE configurations during analysis, weeks after publication — day-old CVEs have neither); thresholds 50 / 20 / 20 / 50 %; measured 2026-10-10 on the 730-day event: 93 / 57 / 58 / 91 %. Informational when fewer than 100 analysed CVEs are present (short smoke baselines) |
-| `T1047`, `T1021.006`, `T1543.003`, `T1222.001`, `T1546.003`, Tool `S0005` | present (requires the MISP Import Regexp fix before re-import) |
+| ATT&CK entries named "Windows …" (`mangled_attack_entries_present`): `T1059.003`, `T1047`, `T1021.006`, `T1543.003`, `T1222.001`, `T1546.003`, `T1555.004`, `T1686.003`, Tool `S0005` | present. A missing entry points to a value MISP stored rewritten: grep the sync log for `[ATTACK-VALUE]` and see § [6], step 1 |
 | `ThreatActor` names containing `,`, ` and ` or ` & ` | 0 |
 | `tlp` property (`tlp_on_every_node`) | on every EdgeGuard node parsed from a MISP attribute. The sync gives an attribute without a `tlp:` tag the level `EDGEGUARD_DEFAULT_TLP` and logs `[TLP] MISP attribute <uuid> has no tlp: tag`, so lost tags show in the sync log, not in this check |
 | `edgeguard_managed` | on every node EdgeGuard created and every EdgeGuard edge; a node a partner created first that EdgeGuard wrote to carries `edgeguard_enriched = true` instead |
@@ -556,10 +563,11 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-20_
 
 ## History
 
+- 2026-10-20 — § [6] step 1: MISP's default Import Regexp rules stay; EdgeGuard's ATT&CK values (`<id> - <name>`) carry no colon, so the rules leave them unchanged (the step had asked to remove the `%WINDIR%` rule by hand, which every fresh MISP database restores). The acceptance row lists the nine entries the rules rewrote on the run of 2026-10-20 (`T1059.003`, `T1555.004` and `T1686.003` added).
 - 2026-10-18 — Acceptance row for the same-report Indicator → CVE links (`indicator_cve_links_are_same_report`, `indicator_cve_report_links`).
 - 2026-10-18 — Sector evidence row: the OTX industries checks, `--require-otx-industries` and the report by evidence label.
 - 2026-10-18 — The deploy step of § [6] rebuilds every image and recreates every container (it rebuilt only the Airflow image, which left REST, GraphQL and STIX on the old code) and records the deployed commit in `.env` (`scripts/record_deployed_commit.sh` writes `EDGEGUARD_GIT_SHA`, which both `/health` responses report as `git_sha`).
