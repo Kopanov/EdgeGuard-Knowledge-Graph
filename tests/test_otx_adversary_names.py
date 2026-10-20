@@ -8,10 +8,12 @@ its decision whether the pulse names several actors, so all three see the same n
   field reads "APT37, North Korea" names one actor.
 * A name the same pulse lists both as adversary and as a malware family is an actor only when the
   canonical threat-actor reference resolves it. On the hosted graph of 2026-10-18, 181 of 859
-  ThreatActor names were also Malware names: the reference knows 34 of them (Kimsuky, Akira, Qilin,
-  Medusa, ...), which stay actors; the other 147 (Lumma Stealer, AsyncRAT, Agent Tesla, LockBit, ...)
-  are dropped for a pulse that lists them as its family, and stay the pulse's malware item. Without
-  the reference the rule cannot decide and the name is kept.
+  ThreatActor names were also Malware names. Reference 2026.10.17 knew 34 of them (Kimsuky, Akira,
+  Qilin, Medusa, ...). Reference 2026.10.20 also holds 31 ransomware operations named after their
+  ransomware (Rhysida, BlackSuit, Trigona, ...), added through reviewed overrides, so 65 stay actors.
+  The other 116 (Lumma Stealer, AsyncRAT, Agent Tesla, Mirai, Zloader, and ransomware names the review
+  left out, such as LockBit and Conti) are dropped for a pulse that lists them as its family, and stay
+  the pulse's malware item. Without the reference the rule cannot decide and the name is kept.
 
 The fixture names are names from that measurement.
 """
@@ -60,6 +62,28 @@ def reference():
     return cta.load_canonical_reference()
 
 
+# The measured names the reference knew before 2026-10-20 (reference 2026.10.17).
+KNOWN_BEFORE = (
+    "agenda", "akira", "applejeus", "beast", "black basta", "blackbyte", "carbanak", "clop",
+    "contagious interview", "dragonforce", "evilnum", "fog ransomware", "funksec", "gelsemium", "interlock",
+    "kimsuky", "kinsing", "luminousmoth", "machete", "magecart", "medusa", "moonstone sleet", "muddywater",
+    "night dragon", "play", "qilin", "ransomhub", "romcom", "rtm", "taidoor", "the gentlemen", "tradertraitor",
+    "uac-0006", "uta0388",
+)  # fmt: skip
+# Ransomware operations named after their ransomware, in the reference since 2026-10-20 (reviewed
+# overrides), written as their display name.
+RANSOMWARE_OPERATIONS = (
+    "BlackNevas", "BlackSuit", "Brain Cipher", "Cactus", "Cicada3301", "CrazyHunter", "DeadLock", "DEVMAN",
+    "ELPACO-team", "Embargo", "Everest", "Global Group", "Gunra", "HellCat", "HellDown", "HelloKitty", "Kyber",
+    "Lynx", "Makop", "Mallox", "Morpheus", "NightSpire", "Nitrogen", "Payouts King", "Rhysida", "SECP0",
+    "Termite", "Trigona", "Vect", "Warlock", "Yurei",
+)  # fmt: skip
+# Ransomware names the review left out: the galaxies name an actor the reference holds as their developer
+# or operator (Conti, LockBit, Nefilim, Aurora), or the name also names a stealer, loader, botnet,
+# banking trojan or backdoor (Aurora, Anubis, Kraken, Osiris, Chaos).
+RANSOMWARE_NAMES_LEFT_OUT = ("Conti", "LockBit", "Nefilim", "Aurora", "Anubis", "Kraken", "Osiris", "Chaos")
+
+
 class TestCountryNamesInTheAdversaryField:
     def test_a_country_beside_the_actor_leaves_one_actor_and_a_single_actor_pulse(self):
         items = _HARNESS._collect([_pulse("p-nk", ["ROKRAT"], "APT37, North Korea", ["203.0.113.20"])])
@@ -77,7 +101,9 @@ class TestCountryNamesInTheAdversaryField:
 
 class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
     @pytest.mark.parametrize(
-        "name", ["Lumma Stealer", "AsyncRAT", "Agent Tesla", "LockBit", "Snake Keylogger", "ValleyRAT"]
+        "name",
+        ["Lumma Stealer", "AsyncRAT", "Agent Tesla", "Mirai", "Zloader", "Snake Keylogger", "ValleyRAT"]
+        + list(RANSOMWARE_NAMES_LEFT_OUT),
     )
     def test_a_name_the_reference_does_not_resolve_stays_malware_only(self, reference, name):
         assert reference.canonical_for(name) is None
@@ -95,6 +121,34 @@ class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
         assert _actors(items) == [name]
         assert _malware(items) == [name]
         assert _ioc(items, "203.0.113.31")["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-known"]
+
+    @pytest.mark.parametrize("name", KNOWN_BEFORE)
+    def test_every_measured_name_the_reference_knew_before_stays_an_actor(self, reference, name):
+        assert reference.canonical_for(name) is not None
+        items = _HARNESS._collect([_pulse("p-before", [name], name, ["203.0.113.46"])])
+        assert _actors(items) == [name]
+        assert _ioc(items, "203.0.113.46")["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-before"]
+
+    @pytest.mark.parametrize("name", RANSOMWARE_OPERATIONS)
+    def test_a_ransomware_operation_named_after_its_ransomware_stays_an_actor(self, reference, name):
+        # Reference 2026.10.20: the operation is an actor of its own, keyed by its name.
+        assert reference.canonical_for(name) == cta.name_key(name)
+        items = _HARNESS._collect([_pulse("p-ransom", [name], name, ["203.0.113.47"])])
+        assert _actors(items) == [name]
+        assert _malware(items) == [name], "the pulse's malware family item is unchanged"
+        ioc = _ioc(items, "203.0.113.47")
+        assert ioc["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-ransom"], "the pulse attributes"
+
+    def test_a_ransomware_operation_beside_a_known_actor_names_two_actors(self, reference):
+        # Rhysida and Vanilla Tempest (Vice Society) are separate actors in the reference.
+        assert (reference.canonical_for("Rhysida"), reference.canonical_for("Vice Society")) == (
+            "rhysida",
+            "vanilla tempest",
+        )
+        items = _HARNESS._collect([_pulse("p-two-groups", ["Rhysida"], "Rhysida, Vice Society", ["203.0.113.48"])])
+        assert _actors(items) == ["Rhysida", "Vice Society"]
+        ioc = _ioc(items, "203.0.113.48")
+        assert ioc["pulse_malware_actor_pairs"] == [] and ioc["several_actor_pulses"] == ["p-two-groups"]
 
     def test_the_dropped_name_does_not_count_towards_several_actors(self):
         # Before 2026-10-18 "Agent Tesla" counted as a second actor: the pulse attributed nothing.

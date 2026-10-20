@@ -1154,3 +1154,26 @@ class TestCommittedReference:
         assert gen.resolve(index, "famous chollima").how == "never_merge"
         assert gen.resolve(index, "silverfox").actor == "silver fox"
         assert gen.resolve(index, "no such actor").how == "unresolved"
+
+    def test_ransomware_operations_named_after_their_ransomware_are_actors(self, gen, committed):
+        # 2026-10-20: reviewed merges create an actor for each ransomware operation an OTX report names
+        # as the adversary and the MISP ransomware galaxy lists; canonical_name gives its display name.
+        by_key = {a["key"]: a for a in committed["actors"]}
+        for key, name in (
+            ("blacksuit", "BlackSuit"),
+            ("rhysida", "Rhysida"),
+            ("trigona", "Trigona"),
+            ("hellokitty", "HelloKitty"),
+            ("payouts king", "Payouts King"),
+            ("elpaco-team", "ELPACO-team"),
+            ("global group", "Global Group"),
+        ):
+            actor = by_key[key]
+            assert (actor["name"], actor["origins"], actor["records"]) == (name, ["override"], []), key
+            assert actor["mitre_attack"] is None and actor["synonyms"] == [], key
+        index = gen.build_index(committed)
+        # Left out by the review: the galaxies name an actor the reference holds as the developer or
+        # operator (conti, lockbit, nefilim), or the name also names other malware (kraken, osiris).
+        for name in ("conti", "lockbit", "nefilim", "kraken", "osiris"):
+            assert gen.resolve(index, name).how == "unresolved", name
+        assert gen.resolve(index, "gold ulrick").actor == "wizard spider"  # Conti's operators

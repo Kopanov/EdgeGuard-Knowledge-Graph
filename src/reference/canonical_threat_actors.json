@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
- "version": "2026.10.17",
- "generated_at": "2026-10-17",
+ "version": "2026.10.20",
+ "generated_at": "2026-10-20",
  "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged.",
  "generator": "scripts/build_canonical_threat_actors.py",
  "key_normalisation": "NFC, trimmed, lower-case (node_identity.canonicalize_merge_key for ThreatActor)",
@@ -93,8 +93,8 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "23d30ce47e229cae4b33030f4a7f09383854713c20eb6dcbfeea2b875c91a80f",
-   "decisions": 40
+   "sha256": "740da7d5eeda64dba42c75af80497bdd7810f2dd90c28c8c262a0b67a65970b0",
+   "decisions": 102
   }
  ],
  "attribution": [
@@ -118,7 +118,7 @@
   "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name."
  ],
  "counts": {
-  "actors": 1138,
+  "actors": 1169,
   "attack_groups": 191,
   "synonyms": 4475,
   "ambiguous": 77
@@ -3894,6 +3894,17 @@
    }
   },
   {
+   "name": "BlackNevas",
+   "key": "blacknevas",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "BlackOasis",
    "key": "blackoasis",
    "mitre_attack": "G0063",
@@ -3916,6 +3927,17 @@
      "blackoasis team"
     ]
    }
+  },
+  {
+   "name": "BlackSuit",
+   "key": "blacksuit",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Blacktail",
@@ -4352,6 +4374,17 @@
    }
   },
   {
+   "name": "Brain Cipher",
+   "key": "brain cipher",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "BrazenBamboo",
    "key": "brazenbamboo",
    "mitre_attack": null,
@@ -4678,6 +4711,17 @@
      "bytetobreach team"
     ]
    }
+  },
+  {
+   "name": "Cactus",
+   "key": "cactus",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Cadelle",
@@ -5245,6 +5289,17 @@
      "ciberinteligenciasv team"
     ]
    }
+  },
+  {
+   "name": "Cicada3301",
+   "key": "cicada3301",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Cinnamon Tempest",
@@ -6313,6 +6368,17 @@
      "covertnetwork-1658 team"
     ]
    }
+  },
+  {
+   "name": "CrazyHunter",
+   "key": "crazyhunter",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Crescent Typhoon",
@@ -7440,6 +7506,17 @@
    }
   },
   {
+   "name": "DeadLock",
+   "key": "deadlock",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "Deep Panda",
    "key": "deep panda",
    "mitre_attack": "G0009",
@@ -7710,6 +7787,17 @@
      "dev-1028 team"
     ]
    }
+  },
+  {
+   "name": "DEVMAN",
+   "key": "devman",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "DEXTOROUS SPIDER",
@@ -8831,6 +8919,17 @@
    }
   },
   {
+   "name": "ELPACO-team",
+   "key": "elpaco-team",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "ELUSIVE COMET",
    "key": "elusive comet",
    "mitre_attack": null,
@@ -8850,6 +8949,17 @@
      "elusive comet team"
     ]
    }
+  },
+  {
+   "name": "Embargo",
+   "key": "embargo",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Ember Bear",
@@ -8956,6 +9066,17 @@
      "equation team"
     ]
    }
+  },
+  {
+   "name": "Everest",
+   "key": "everest",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Evilbyte",
@@ -10690,6 +10811,17 @@
    }
   },
   {
+   "name": "Global Group",
+   "key": "global group",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "GlobalSecretGroup",
    "key": "globalsecretgroup",
    "mitre_attack": null,
@@ -11603,6 +11735,17 @@
    }
   },
   {
+   "name": "Gunra",
+   "key": "gunra",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "GURU SPIDER",
    "key": "guru spider",
    "mitre_attack": null,
@@ -11829,6 +11972,28 @@
    }
   },
   {
+   "name": "HellCat",
+   "key": "hellcat",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
+   "name": "HellDown",
+   "key": "helldown",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "HellHounds",
    "key": "hellhounds",
    "mitre_attack": null,
@@ -11848,6 +12013,17 @@
      "hellhounds team"
     ]
    }
+  },
+  {
+   "name": "HelloKitty",
+   "key": "hellokitty",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Hellsing",
@@ -13694,6 +13870,17 @@
    }
   },
   {
+   "name": "Kyber",
+   "key": "kyber",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "LabHost",
    "key": "labhost",
    "mitre_attack": null,
@@ -14909,6 +15096,17 @@
    }
   },
   {
+   "name": "Lynx",
+   "key": "lynx",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "Machete",
    "key": "machete",
    "mitre_attack": "G0095",
@@ -15206,6 +15404,17 @@
    }
   },
   {
+   "name": "Makop",
+   "key": "makop",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "MalKamak",
    "key": "malkamak",
    "mitre_attack": null,
@@ -15250,6 +15459,17 @@
      "mallard spider team"
     ]
    }
+  },
+  {
+   "name": "Mallox",
+   "key": "mallox",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Malsmoke",
@@ -15917,6 +16137,17 @@
      "morh4x team"
     ]
    }
+  },
+  {
+   "name": "Morpheus",
+   "key": "morpheus",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Moses Staff",
@@ -16920,6 +17151,17 @@
    }
   },
   {
+   "name": "NightSpire",
+   "key": "nightspire",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "NIMBUS MANTICORE",
    "key": "nimbus manticore",
    "mitre_attack": "G1059",
@@ -16990,6 +17232,17 @@
      "nitro team"
     ]
    }
+  },
+  {
+   "name": "Nitrogen",
+   "key": "nitrogen",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "NOCTURNAL SPIDER",
@@ -18198,6 +18451,17 @@
      "patchwork team"
     ]
    }
+  },
+  {
+   "name": "Payouts King",
+   "key": "payouts king",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "PayTool",
@@ -19806,6 +20070,17 @@
    "synonym_origins": {}
   },
   {
+   "name": "Rhysida",
+   "key": "rhysida",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "RIDDLE SPIDER",
    "key": "riddle spider",
    "mitre_attack": null,
@@ -20937,6 +21212,17 @@
      "teal kurma team"
     ]
    }
+  },
+  {
+   "name": "SECP0",
+   "key": "secp0",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Sefid Flood",
@@ -25907,6 +26193,17 @@
    }
   },
   {
+   "name": "Termite",
+   "key": "termite",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "TEST PANDA",
    "key": "test panda",
    "mitre_attack": null,
@@ -26741,6 +27038,17 @@
      "tridentlocker team"
     ]
    }
+  },
+  {
+   "name": "Trigona",
+   "key": "trigona",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "TRIPLESTRENGTH",
@@ -29483,6 +29791,17 @@
    }
   },
   {
+   "name": "Vect",
+   "key": "vect",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
+  },
+  {
    "name": "Velvet Ant",
    "key": "velvet ant",
    "mitre_attack": "G1047",
@@ -30152,6 +30471,17 @@
      "wagemole team"
     ]
    }
+  },
+  {
+   "name": "Warlock",
+   "key": "warlock",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "WARP PANDA",
@@ -31345,6 +31675,17 @@
      "yulong flood team"
     ]
    }
+  },
+  {
+   "name": "Yurei",
+   "key": "yurei",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Z-Pentest Alliance",
