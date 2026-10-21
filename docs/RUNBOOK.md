@@ -992,7 +992,7 @@ SET r.sources = [s IN r.sources WHERE NOT s IN ['coreideas', 'misp_galaxy', 'cur
 REMOVE r.tlp;
 ```
 
-Only curated claims set `r.tlp`, so step 2 removes it. A link the package created and another source asserted afterwards (an OTX pulse naming the same technique, say) still carries the curated label and is deleted in step 1; the relationship build and a full sync (`NEO4J_FULL_SYNC=true`) recreate it from that source's data. To remove one package of several, delete its event, remove the layer as above and run a full sync, which writes the remaining packages' claims again. To leave the layer out of a shared dataset without removing it, filter on `r.sources`, not on `r.match_type` (`docs/KNOWLEDGE_GRAPH.md`, "Curated packages").
+Only curated claims set `r.tlp` on these five types, so step 2 removes it. Then run the enrichment jobs: `build_campaign_nodes` recomputes the campaign links' provenance and the campaign links' and campaigns' `tlp` from the links that remain, so a campaign EdgeGuard built on a claim loses the package's events and level (a `Campaign` node a partner created keeps a level EdgeGuard raised: reset it by hand). A link the package created and another source asserted afterwards (an OTX pulse naming the same technique, say) still carries the curated label and is deleted in step 1; the relationship build and a full sync (`NEO4J_FULL_SYNC=true`) recreate it from that source's data. To remove one package of several, delete its event, remove the layer as above and run a full sync, which writes the remaining packages' claims again. To leave the layer out of a shared dataset without removing it, filter on `r.sources`, not on `r.match_type` (`docs/KNOWLEDGE_GRAPH.md`, "Curated packages").
 
 A claim may name a technique id ATT&CK revoked (`T1086`): the validation accepts it, lists it under `revoked_technique_ids` with its successor and warns, the claim goes to MISP as written, and the sync links it to the successor (see "Rebuilding the ATT&CK revoked-id map" below).
 
@@ -1269,6 +1269,7 @@ _Last updated: 2026-10-20_
 
 ## History
 
+- 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-20 — Canonical threat-actor reference: the committed version and its counts, and the review of a ransomware operation named after its own ransomware before it is added as an actor (listed by the MISP ransomware galaxy, no actor the reference holds named as its developer or operator, not also a stealer, loader, RAT, botnet, banking trojan or backdoor), and the merge of an operation into the key of the actor the galaxies name as its operator (`Conti`, `LockBit`, `Nefilim`).
 - 2026-10-19 — The pulse reference "Referenced in OTX pulse: <name>" that gives a CVE no description is named as the comment of a `cve_references` attribute written without an `OTX_META` block.
 - 2026-10-18 — Acceptance: `otx_industries_only_where_otx_stated`, `otx_stated_sectors_linked_as_otx_industries` (`--require-otx-industries`) and the report `sector_links_by_evidence_label`; the per-sector reference check judges CISA ICS only.

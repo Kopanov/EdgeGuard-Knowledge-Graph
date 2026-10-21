@@ -219,7 +219,8 @@ Auth:    Configured via environment variables
   first_seen: DATETIME,     // Earliest indicator observation; never moves later
   last_seen: DATETIME,      // Latest indicator observation; never moves earlier
   zone: LIST,               // Union of the indicators' zones
-  active: BOOLEAN           // false once no indicator linked to it is active
+  active: BOOLEAN,          // false once no indicator linked to it is active
+  tlp: STRING               // most restrictive r.tlp of the links it rests on (a curated claim's level); absent when none has one
 })
 // build_campaign_nodes in src/enrichment_jobs.py; what a campaign rests on: src/campaign_evidence.py
 ```
@@ -576,8 +577,8 @@ Auth:    Configured via environment variables
 | `EXPLOITS` | ThreatActor / Malware | `CVE` | Curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 (both written when the claim creates the link), `tlp` = the package's TLP level |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`match_type='otx_attack_ids'`, `confidence_score` 0.6, written when the link is created) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |
-| `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()`; `match_type='campaign_grouping'`; rests on the actor's `ATTRIBUTED_TO` and `USES_MALWARE` links to malware (`evidence_types`); a campaign whose actor has neither link left is deleted with its links |
-| `PART_OF_CAMPAIGN` | Malware, Indicator | Campaign | `build_campaign_nodes()`; a malware with either link to the campaign's actor is a member, an indicator joins through `INDICATES` to a member (`evidence_types`) |
+| `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()`; `match_type='campaign_grouping'`; rests on the actor's `ATTRIBUTED_TO` and `USES_MALWARE` links to malware (`evidence_types`; `tlp` the most restrictive level of those links); a campaign whose actor has neither link left is deleted with its links |
+| `PART_OF_CAMPAIGN` | Malware, Indicator | Campaign | `build_campaign_nodes()`; a malware with either link to the campaign's actor is a member, an indicator joins through `INDICATES` to a member (`evidence_types`; `tlp` the most restrictive level of the links it rests on) |
 | `USES_MALWARE` | ThreatActor | Malware | `match_type='mitre_explicit'` (0.95, MITRE group → software `uses`, `build_relationships.py` Q2b); curated-package claims: see below the table |
 | `USES_TOOL` | ThreatActor | Tool | As `USES_MALWARE` (Q2c; a curated claim names the tool by its ATT&CK id) |
 | `SUBTECHNIQUE_OF` | Technique | Technique | `match_type='mitre_explicit'`, 1.0 (Q1b, from the dotted ATT&CK id) |
@@ -1017,6 +1018,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6); the alert enrichment reads it, and each CVE entry names its links (`evidence`).
 - 2026-10-18 — `TARGETS` to a sector an OTX pulse's own industries state carries `otx_industries`, 0.6 (it was `zone_classification`).
 - 2026-10-18 — `GET /health` reports the deployed commit as `git_sha` (`EDGEGUARD_GIT_SHA`).

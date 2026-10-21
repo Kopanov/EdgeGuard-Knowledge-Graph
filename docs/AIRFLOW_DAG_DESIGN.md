@@ -352,7 +352,7 @@ ThreatActor  -[:USES_MALWARE]-> Malware <-[:INDICATES]- Indicator
 
 Every campaign link carries `match_type = 'campaign_grouping'`, the confidence of the links it rests on and their relationship types (`evidence_types`). A campaign whose actor has neither link left (or whose actor name no longer exists after the actor alias merge) is deleted with its links in the same run; one with evidence whose indicators all expired stays, `active = false`. Its `uuid` comes from the actor's name, so a campaign built again keeps it.
 
-Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `indicator_count`, `malware_count`.
+Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `indicator_count`, `malware_count`, `tlp` (the most restrictive level of the links it rests on; the campaign links carry theirs the same way).
 
 ## Data Quality Targets
 
@@ -506,6 +506,7 @@ _Last updated: 2026-10-18_
 
 ## History
 
+- 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — The relationship table lists `(Indicator)-[:INDICATES]->(CVE)`, written by the sync for an indicator and a CVE named in the same OTX pulse.
 - 2026-10-18 — MITRE ATT&CK is in `OWN_RUN_CAP_SOURCES`: a scheduled run pushes the whole changed bundle (the cut at 200 kept about 140 objects and stored the new ETag, so the rest never arrived).
 - 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job and its section were removed (no current code writes the edges it rescored).

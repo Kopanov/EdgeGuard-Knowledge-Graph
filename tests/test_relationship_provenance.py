@@ -457,6 +457,47 @@ class TestEnrichment:
         )
         assert campaign_evidence.evidence_types("x") == "apoc.coll.sort(apoc.coll.toSet([_et IN x | type(_et)]))"
 
+    def test_campaigns_and_their_links_carry_the_evidence_tlp(self):
+        """2026-10: a campaign and its links are as restricted as the links they rest on. The builder
+        copied a curated claim's provenance onto RUNS / PART_OF_CAMPAIGN but not its ``r.tlp``, and the
+        STIX export marked them TLP:WHITE (run on a real Neo4j in tests/test_explainability_neo4j.py)."""
+        from neo4j_client import _tlp_most_restrictive_clause
+
+        assert (
+            enrichment_jobs._links_tlp("L")
+            == f"reduce(_t = null, _e IN L | {_tlp_most_restrictive_clause('_t', '_e.tlp')})"
+        )
+        assert '"' not in enrichment_jobs._links_tlp("L")  # it runs inside apoc.periodic.iterate's statement
+        links = enrichment_jobs._links_evidence("r_runs", "actor_evidence")
+        assert links.endswith(", r_runs.tlp = " + enrichment_jobs._links_tlp("actor_evidence"))
+        from neo4j_client import _tlp_rank_case
+
+        level = enrichment_jobs._links_tlp("actor_evidence")
+        value = (
+            f"CASE WHEN c.edgeguard_managed = true THEN {level} "
+            f"WHEN c.tlp IS NOT NULL AND {_tlp_rank_case('c.tlp')} = 0 THEN c.tlp "
+            f"ELSE {_tlp_most_restrictive_clause('c.tlp', level)} END"
+        )
+        # Replaced on EdgeGuard's campaign; on a partner's only raised, and a level outside the ladder kept.
+        assert enrichment_jobs._campaign_tlp_value("c", "actor_evidence") == value
+        assert enrichment_jobs._campaign_tlp("c", "actor_evidence") == "c.tlp = " + value
+        src = Path(enrichment_jobs.__file__).read_text()
+        body = src.split("def build_campaign_nodes")[1].split("\ndef ")[0]
+        # Step 1 and Step 2c (which also reaches campaigns without an active indicator) set the campaign's
+        # level; Step 3a the indicator link's, over every link of every path.
+        assert body.count('_campaign_tlp("c", "actor_evidence")') == 2
+        assert "r.tlp = __TLP_OF_PATHS__" in body
+        assert '_links_tlp("reduce(_flat = [], _p IN _paths | _flat + _p)")' in body
+        # Step 2c stamps a level it changes (Step 1 does not reach a campaign without an active indicator),
+        # before the items that change it.
+        settle = body.split("settle_runs = ")[1].split('"""')[1]
+        stamps = settle.index("r_runs.updated_at = CASE WHEN coalesce(r_runs.tlp, '') <>")
+        assert (
+            stamps
+            < settle.index("c.last_updated = CASE WHEN coalesce(c.tlp, '') <>")
+            < settle.index('_links_evidence("r_runs"')
+        )
+
     def test_alias_merge_keeps_lists_as_lists(self):
         node_props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
         edge_props = enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
