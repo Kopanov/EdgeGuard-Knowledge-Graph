@@ -155,6 +155,230 @@
    "reason": "Replaces the never_merge of 2026-10-15. The graph's 'medusa' node names the Medusa ransomware operation: on the graph of 2026-10-16 its only malware is the Medusa ransomware family, which ATT&CK's G1051 'Medusa Group' also carries. MedusaLocker and the Medusa Android banking trojan are malware names, not this actor, and stay malware.",
    "date": "2026-10-17",
    "status": "accepted"
+  },
+  {
+   "names": ["blacknevas"],
+   "into": "blacknevas",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'black nevas' (the same name with a space), a derivative of the Trigona family whose operators run double extortion; the groups it names, DragonForce and Embargo among them, publish its data as partners, not as its operators. On the graph of 2026-10-17 the node (18 relationships) carries the BlackNevas family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["blacksuit"],
+   "into": "blacksuit",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'black suit' (the same name with a space), an operation with multifaceted extortion and public data leak sites since May 2023; malpedia lists BlackSuit for Windows and ELF, with code overlap with Royal ransomware. No galaxy attributes it to an actor. On the graph of 2026-10-17 the node (56 relationships) carries the BlackSuit family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["brain cipher"],
+   "into": "brain cipher",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'brain cipher', a ransomware operation that emerged in June 2024 with a payload made with the leaked LockBit 3.0 builder (a builder, not an attribution). On the graph of 2026-10-17 the node (9 relationships) carries the Brain Cipher family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["cactus"],
+   "into": "cactus",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'cactus' (emerged around March 2023, ransom note cAcTuS.readme.txt) and malpedia lists Cactus. The threat-actor galaxy describes Twisted Spider deploying CACTUS in a Storm-1044 campaign, a deployment that does not name its operator. On the graph of 2026-10-17 the node (24 relationships) carries the Cactus family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["cicada3301"],
+   "into": "cicada3301",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy and malpedia list Cicada3301. On the graph of 2026-10-17 the node (11 relationships) carries the Cicada3301 family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["crazyhunter"],
+   "into": "crazyhunter",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'crazyhunter team' (the same name with ' team', which the suffix rule reads as one name) and malpedia lists CrazyHunter. On the graph of 2026-10-17 the node (32 relationships) carries the CrazyHunter family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["deadlock"],
+   "into": "deadlock",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'deadlock'. On the graph of 2026-10-17 the node (35 relationships) carries the DeadLock family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["devman"],
+   "into": "devman",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'devman'; malpedia describes DEVMAN as ransomware made from a DragonForce build with another file extension, and adds that in one of the first observed samples the ransom note still claimed to be part of the DragonForce Ransomware Cartel. DragonForce is an actor the reference holds. The decision reads a shared codebase and a note naming the cartel as a brand within the DragonForce cartel, not as DragonForce's own operation, so DEVMAN is an actor of its own; a merge into 'dragonforce' is the alternative decision. On the graph of 2026-10-17 the node (16 relationships, one OTX report) carries the DEVMAN family and, from the same report, DragonForce, BlackLock, Mamona and Conti.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["elpaco-team"],
+   "into": "elpaco-team",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'elpaco' (the same name without '-team', which the suffix rule reads as one name), a variant of Mimic ransomware that emerged around August 2023. On the graph of 2026-10-17 the node (27 relationships) carries the elpaco-team family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["embargo"],
+   "into": "embargo",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'embargo'; ATT&CK describes Embargo (S1247) as ransomware written in Rust, reportedly a Ransomware-as-a-Service. ATT&CK links Storm-0501 (G1053) to it as a user, and both galaxies describe Storm-0501 as an affiliate deploying several RaaS strains, so no galaxy names Embargo's operator. On the graph of 2026-10-17 the node (19 relationships) carries Embargo ransomware with its MDeployer loader and MS4Killer.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["everest"],
+   "into": "everest",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'Everest'. On the graph of 2026-10-17 the node (14 relationships) carries the Everest family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["global group"],
+   "into": "global group",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'global' (the same name without ' group', which the suffix rule reads as one name) and malpedia lists Global with the synonym GLOBAL GROUP, a Ransomware-as-a-Service that emerged in June 2025. The key keeps ' group': 'global' alone is a common word. On the graph of 2026-10-17 the node (29 relationships) carries the Global Group family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["gunra"],
+   "into": "gunra",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'gunra'. On the graph of 2026-10-17 the node (38 relationships) carries the Gunra family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["hellcat"],
+   "into": "hellcat",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'hellcat'; malpedia describes the Morpheus ransomware (synonym HellCat) as identical samples operated by the Morpheus and HellCat ransomware groups. Morpheus is not an actor of the reference: malpedia also gives that name to a loader ('Morpheus Loader'). On the graph of 2026-10-17 the node (13 relationships) carries the HellCat and Morpheus families.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["helldown"],
+   "into": "helldown",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'helldown' and malpedia lists HellDown as ransomware. On the graph of 2026-10-17 the node (36 relationships) carries the HellDown family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["hellokitty"],
+   "into": "hellokitty",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists HelloKitty (since November 2020, synonym FiveHands); malpedia lists it for Windows and ELF and ATT&CK as HELLOKITTY (S0617). The threat-actor galaxy describes UNC2447, an actor the reference holds, as a financially motivated actor with ties to multiple hacker groups, 'observed deploying ransomware, including FiveHands and Hello Kitty'; ATT&CK and malpedia list FIVEHANDS and HELLOKITTY as separate software. The galaxies describe UNC2447 as deploying ransomware, not as HelloKitty's developer or operator, so the operation is an actor of its own; a merge into 'unc2447' is the alternative decision. On the graph of 2026-10-17 the node (27 relationships) carries HELLOKITTY, FIVEHANDS and DEATHRANSOM.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["kyber"],
+   "into": "kyber",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'kyber'. On the graph of 2026-10-17 the node (22 relationships) carries the Kyber family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["lynx"],
+   "into": "lynx",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'lynx' and malpedia describes Lynx as ransomware active since mid-2024 that shares similarities with INC ransomware, 'indicating that they bought INC ransomware source code', and one of its references is titled as a rebrand of INC ransomware to Lynx. INC Ransom is an actor the reference holds. A bought codebase does not name Lynx's operator, so the operation is an actor of its own; a merge into 'inc ransom' is the alternative decision. The threat actors whose names contain the word (Hidden Lynx, Silent Lynx, Cosmic Lynx) are other actors. On the graph of 2026-10-17 the node (21 relationships) carries the Lynx family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["makop"],
+   "into": "makop",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists Makop as ransomware; malpedia describes it as an offshoot of Phobos that appeared in 2020. On the graph of 2026-10-17 the node (24 relationships) carries the Makop family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["mallox"],
+   "into": "mallox",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists Mallox; malpedia lists the TargetCompany ransomware with the synonym Mallox. On the graph of 2026-10-17 the node (14 relationships) carries the Mallox family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["nightspire"],
+   "into": "nightspire",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'nightspire'. On the graph of 2026-10-17 the node (31 relationships) carries the NightSpire family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["payouts king"],
+   "into": "payouts king",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'payoutsking' (the same name without the space), described as 'Payouts King Group. We are not RaaS.' On the graph of 2026-10-17 the node (40 relationships) carries the Payouts King family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["rhysida"],
+   "into": "rhysida",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy describes Rhysida as a ransomware-as-a-service group that emerged in May 2023 and uses a namesake ransomware; malpedia lists it for Windows and ELF. The threat-actor galaxy notes similarities with Vice Society (Vanilla Tempest) that suggest a possible connection, which is not an attribution. It also links TAG-124, an actor that distributes malware through a traffic distribution system, to multiple ransomware groups including Rhysida and Interlock: a distributor, not its operator. On the graph of 2026-10-17 the node (72 relationships) carries the Rhysida family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["secp0"],
+   "into": "secp0",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'secp0'. On the graph of 2026-10-17 the node (15 relationships) carries the SECP0 family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["termite"],
+   "into": "termite",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'termite' (besides an older 'Termite Ransomware' of 2018); Blue Termite in the threat-actor galaxy is another actor. Malpedia 'Termite' (win.termite) has no description; its references (reports on SectorM04, on the 'Internet of Termites' and on FIN7) concern an unrelated tool that other actors use, not this ransomware. On the graph of 2026-10-17 the node (22 relationships) carries the Termite and Babuk families.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["trigona"],
+   "into": "trigona",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'trigona' and malpedia describes Trigona as ransomware that appends the '._locked' extension. The threat-actor galaxy names Larva-26002 as distributing Trigona and Mimic, a distributor rather than its operator. On the graph of 2026-10-17 the node (57 relationships) carries the Trigona family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["vect"],
+   "into": "vect",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'vect'; ATT&CK describes TeamPCP (G1056) as partnering with ransomware actors including Vect, a partnership, not an attribution. On the graph of 2026-10-17 the node (24 relationships) carries the Vect family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["warlock"],
+   "into": "warlock",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'warlock' and malpedia WarLock. The threat-actor galaxy describes Storm-2603 deploying Warlock and LockBit ransomware, two brands, without naming it Warlock's operator. On the graph of 2026-10-17 the node (27 relationships) carries the Warlock family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["yurei"],
+   "into": "yurei",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'yurei'. On the graph of 2026-10-17 the node (24 relationships) carries the Yurei family.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["conti"],
+   "into": "wizard spider",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary. The ransomware galaxy says Conti was developed by the TrickBot group, the threat-actor galaxy describes Wizard Spider as the operator of the TrickBot malware, malpedia says Conti is thought to be led by the group known as Wizard Spider, and ATT&CK records that Wizard Spider (G0102) uses Conti (S0575); the reference already holds GOLD ULRICK, a name for Conti's operators, as a synonym of Wizard Spider. The name therefore counts as Wizard Spider, and the actor alias merge folds an OTX actor node 'Conti' into the Wizard Spider node. The reference keeps Storm-0230 ('Conti Team 1', whose record lists WIZARD SPIDER as a synonym) as an actor of its own, so 'Conti Team 1' does not resolve to Wizard Spider. On the graph of 2026-10-17 the node (27 relationships) carries Conti, Ryuk and TrickBot.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["lockbit"],
+   "into": "bitwise spider",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary. The threat-actor galaxy records that BITWISE SPIDER uses LockBit (estimated as likely) and that BITWISE SPIDER's leak site has posted the most victims each month since July 2021 through LockBit 2.0; the other actors the galaxies link to LockBit deploy or use it, and no galaxy names another developer or operator. The name therefore counts as BITWISE SPIDER; the actor alias merge folds an OTX actor node 'LockBit' into a BITWISE SPIDER node when the graph holds one, and otherwise the node keeps its name. On the graph of 2026-10-17 the node had 71 relationships.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "names": ["nefilim"],
+   "into": "gold mansard",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary. The threat-actor galaxy describes GOLD MANSARD as the group that operated the Nemty ransomware, whose operator retired Nemty in April 2020, after which Nefilim was introduced without an affiliate model; the ransomware galaxy relates Nefilim to Nemty and lists Nefilim among the later names of JSWorm, the family that became Nemty. The threat-actor galaxy names TRAVELING SPIDER, an actor the reference holds, as the developer of Nemty; it does not name Nefilim. The name therefore counts as GOLD MANSARD; the actor alias merge folds an OTX actor node 'Nefilim' into a GOLD MANSARD node when the graph holds one, and otherwise the node keeps its name. On the graph of 2026-10-17 the node had 14 relationships.",
+   "date": "2026-10-20",
+   "status": "proposed"
   }
  ],
  "never_merge": [
@@ -277,6 +501,209 @@
    "name": "DireWolf",
    "reason": "Display name of the actor created by the Dire Wolf merge, spelled like its key.",
    "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "key": "blacknevas",
+   "name": "BlackNevas",
+   "reason": "Display name of the actor created by the BlackNevas merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "blacksuit",
+   "name": "BlackSuit",
+   "reason": "Display name of the actor created by the BlackSuit merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "brain cipher",
+   "name": "Brain Cipher",
+   "reason": "Display name of the actor created by the Brain Cipher merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "cactus",
+   "name": "Cactus",
+   "reason": "Display name of the actor created by the Cactus merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "cicada3301",
+   "name": "Cicada3301",
+   "reason": "Display name of the actor created by the Cicada3301 merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "crazyhunter",
+   "name": "CrazyHunter",
+   "reason": "Display name of the actor created by the CrazyHunter merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "deadlock",
+   "name": "DeadLock",
+   "reason": "Display name of the actor created by the DeadLock merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "devman",
+   "name": "DEVMAN",
+   "reason": "Display name of the actor created by the DEVMAN merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "elpaco-team",
+   "name": "ELPACO-team",
+   "reason": "Display name of the actor created by the ELPACO-team merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "embargo",
+   "name": "Embargo",
+   "reason": "Display name of the actor created by the Embargo merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "everest",
+   "name": "Everest",
+   "reason": "Display name of the actor created by the Everest merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "global group",
+   "name": "Global Group",
+   "reason": "Display name of the actor created by the Global Group merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "gunra",
+   "name": "Gunra",
+   "reason": "Display name of the actor created by the Gunra merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "hellcat",
+   "name": "HellCat",
+   "reason": "Display name of the actor created by the HellCat merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "helldown",
+   "name": "HellDown",
+   "reason": "Display name of the actor created by the HellDown merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "hellokitty",
+   "name": "HelloKitty",
+   "reason": "Display name of the actor created by the HelloKitty merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "kyber",
+   "name": "Kyber",
+   "reason": "Display name of the actor created by the Kyber merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "lynx",
+   "name": "Lynx",
+   "reason": "Display name of the actor created by the Lynx merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "makop",
+   "name": "Makop",
+   "reason": "Display name of the actor created by the Makop merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "mallox",
+   "name": "Mallox",
+   "reason": "Display name of the actor created by the Mallox merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "nightspire",
+   "name": "NightSpire",
+   "reason": "Display name of the actor created by the NightSpire merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "payouts king",
+   "name": "Payouts King",
+   "reason": "Display name of the actor created by the Payouts King merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "rhysida",
+   "name": "Rhysida",
+   "reason": "Display name of the actor created by the Rhysida merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "secp0",
+   "name": "SECP0",
+   "reason": "Display name of the actor created by the SECP0 merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "termite",
+   "name": "Termite",
+   "reason": "Display name of the actor created by the Termite merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "trigona",
+   "name": "Trigona",
+   "reason": "Display name of the actor created by the Trigona merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "vect",
+   "name": "Vect",
+   "reason": "Display name of the actor created by the Vect merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "warlock",
+   "name": "Warlock",
+   "reason": "Display name of the actor created by the Warlock merge: the operation's own name.",
+   "date": "2026-10-20",
+   "status": "proposed"
+  },
+  {
+   "key": "yurei",
+   "name": "Yurei",
+   "reason": "Display name of the actor created by the Yurei merge: the operation's own name.",
+   "date": "2026-10-20",
    "status": "proposed"
   }
  ]

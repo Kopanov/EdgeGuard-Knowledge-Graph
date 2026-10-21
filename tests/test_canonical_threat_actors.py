@@ -1154,3 +1154,31 @@ class TestCommittedReference:
         assert gen.resolve(index, "famous chollima").how == "never_merge"
         assert gen.resolve(index, "silverfox").actor == "silver fox"
         assert gen.resolve(index, "no such actor").how == "unresolved"
+
+    def test_ransomware_operations_named_after_their_ransomware_are_actors(self, gen, committed):
+        # 2026-10-20: merges (status proposed) create an actor for each ransomware operation an OTX report
+        # names as the adversary and the MISP ransomware galaxy lists; canonical_name gives its display name.
+        by_key = {a["key"]: a for a in committed["actors"]}
+        for key, name in (
+            ("blacksuit", "BlackSuit"),
+            ("rhysida", "Rhysida"),
+            ("trigona", "Trigona"),
+            ("hellokitty", "HelloKitty"),
+            ("payouts king", "Payouts King"),
+            ("elpaco-team", "ELPACO-team"),
+            ("global group", "Global Group"),
+        ):
+            actor = by_key[key]
+            assert (actor["name"], actor["origins"], actor["records"]) == (name, ["override"], []), key
+            assert actor["mitre_attack"] is None and actor["synonyms"] == [], key
+        index = gen.build_index(committed)
+        # An operation the galaxies attribute to an actor the reference holds as its developer or operator
+        # is a name of that actor (merge into the operator's key).
+        assert gen.resolve(index, "conti").actor == "wizard spider"
+        assert gen.resolve(index, "lockbit").actor == "bitwise spider"
+        assert gen.resolve(index, "nefilim").actor == "gold mansard"
+        assert gen.resolve(index, "gold ulrick").actor == "wizard spider"  # Conti's operators
+        # Left out by the review: the name also names other malware (kraken, osiris; nitrogen and morpheus,
+        # which malpedia also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
+        for name in ("kraken", "osiris", "nitrogen", "morpheus"):
+            assert gen.resolve(index, name).how == "unresolved", name
