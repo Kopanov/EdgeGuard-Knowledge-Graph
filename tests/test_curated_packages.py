@@ -1024,11 +1024,14 @@ class TestCheckGraph:
 # --------------------------------------------------------------------------- --push
 def _fake_misp(monkeypatch, created):
     """A MISP client for ``--push`` that finds no event of the package's name and answers ``add_event``
-    with ``created``. Only ``PyMISP`` is replaced: the real ``MISPEvent`` builds the event that is sent."""
-    import pymisp
+    with ``created``. Only ``PyMISP`` is replaced: the real ``MISPEvent`` builds the event that is sent.
 
-    if isinstance(pymisp, MagicMock):
-        pytest.skip("pymisp is the MagicMock stub of tests/test_graphql_api.py: --push needs the real MISPEvent")
+    ``tests/test_graphql_api.py`` stubs ``pymisp`` with MagicMock when nothing imported it before, as in
+    the full suite. A stubbed ``from_dict`` leaves the dict as it is and the test would pass on the bug,
+    so the stubs are taken out for this test (monkeypatch puts them back afterwards)."""
+    for name in [n for n, m in sys.modules.items() if n.split(".")[0] == "pymisp" and isinstance(m, MagicMock)]:
+        monkeypatch.delitem(sys.modules, name)
+    pymisp = importlib.import_module("pymisp")
     client = MagicMock()
     client.search_index.return_value = []
     client.add_event.return_value = created
