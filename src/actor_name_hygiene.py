@@ -417,8 +417,10 @@ _TRAILING_PAREN_RE = re.compile(r"^(?P<head>.+?)\s+\((?P<inner>[^()]*[A-Za-z][^(
 
 def strip_trailing_parenthetical(fragment: str) -> str:
     """``"Name (Alias)"`` -> ``"Name"``; anything else unchanged. When the head is a country or state
-    and the parenthetical is not (rule (c)), the parenthetical is the name (2026-10-18):
-    ``"North Korea (APT37)"`` -> ``"APT37"``."""
+    (rule (c)) and the parenthetical yields a name, the parenthetical is the name (2026-10-18):
+    ``"North Korea (APT37)"`` -> ``"APT37"``. A parenthetical that yields no name, a description or a
+    placeholder, leaves the country, which rule (c) then drops (2026-10-22):
+    ``"Cuba (Ransomware)"`` -> ``"Cuba"``, ``"North Korea (unknown)"`` -> ``"North Korea"``."""
     m = _TRAILING_PAREN_RE.match(fragment)
     if not m:
         return fragment
@@ -432,6 +434,8 @@ def strip_trailing_parenthetical(fragment: str) -> str:
         len(inner) > 1
         and _is_geopolitical_name(head.strip(_EDGE_PUNCT))
         and not _is_geopolitical_name(inner.strip(_EDGE_PUNCT))
+        # The sides the and-split makes of the parenthetical, as _split_fragments makes them.
+        and any(not is_generic_actor_name(side) for side in _try_and_split(inner))
     ):
         return inner
     return head if len(head) > 1 else fragment
@@ -661,8 +665,10 @@ def dropped_geopolitical_names(name: str) -> List[str]:
     names: ``"APT37, North Korea"`` -> ``["North Korea"]``, ``"Russia"`` -> ``["Russia"]``,
     ``"Korea, North"`` -> ``["North Korea"]``. A fragment that yields a name drops nothing:
     ``"North Korea (APT37)"`` is the name ``APT37`` and ``"Lazarus Group (North Korea)"`` the name
-    ``Lazarus Group``, so both return ``[]``; a description (``"russian hackers"``) is not a country
-    name and is not returned either. Case is kept, case-insensitive duplicates are dropped and the
+    ``Lazarus Group``, so both return ``[]``. A country followed by a parenthetical that yields no name
+    is returned (``"Cuba (Ransomware)"`` -> ``["Cuba"]``, ``"North Korea (unknown)"`` ->
+    ``["North Korea"]``). A description (``"russian hackers"``) is not a country name and is not
+    returned either. Case is kept, case-insensitive duplicates are dropped and the
     order is kept. Non-string input -> ``[]``.
 
     The OTX collector logs the distinct names its adversary fields lost this way in a run, so that a

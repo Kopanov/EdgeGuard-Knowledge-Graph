@@ -121,6 +121,7 @@ class TestCountryNamesInTheAdversaryField:
                 _pulse("p-6", ["Lumma Stealer"], "Lumma Stealer", ["203.0.113.65"]),  # the family line
                 _pulse("p-7", ["ROKRAT"], "north korea, Kimsuky", ["203.0.113.66"]),
                 _pulse("p-8", ["Cuba"], "Cuba Ransomware Gang", ["203.0.113.67"]),  # a qualified name
+                _pulse("p-9", ["Cuba"], "Cuba (Ransomware)", ["203.0.113.69"]),  # no name in the parenthetical
             ]
         )
         assert sorted(set(_actors(items))) == ["APT37", "Cuba Ransomware Gang", "Kimsuky", "Lazarus Group"]
@@ -129,14 +130,14 @@ class TestCountryNamesInTheAdversaryField:
         assert len(country) == 1, "one line per run"
         line = country[0]
         assert line.startswith(
-            "[ACTOR-NAMES] OTX: 3 distinct country, state or nationality name(s) in 4 pulse(s), dropped from "
+            "[ACTOR-NAMES] OTX: 4 distinct country, state or nationality name(s) in 5 pulse(s), dropped from "
             "the adversary field by the actor-name hygiene"
         )
-        assert line.endswith(": dprk (1 pulse: p-4); north korea (2 pulses: p-1, p-7); russia (1 pulse: p-3)"), (
-            "every distinct name, alphabetically, with its pulses"
-        )
+        assert line.endswith(
+            ": cuba (1 pulse: p-9); dprk (1 pulse: p-4); north korea (2 pulses: p-1, p-7); russia (1 pulse: p-3)"
+        ), "every distinct name, alphabetically, with its pulses"
         listed = line.split("qualified name): ", 1)[1].lower()
-        for not_dropped in ("apt37", "p-2", "lazarus", "kimsuky", "russian hackers", "lumma", "cuba"):
+        for not_dropped in ("apt37", "p-2", "lazarus", "kimsuky", "russian hackers", "lumma", "gang", "p-8"):
             assert not_dropped not in listed, not_dropped
         assert [m for m in messages if m not in country] == [
             "[ACTOR-NAMES] OTX: 1 distinct adversary name(s) in 1 pulse(s), which the same pulse lists as a "

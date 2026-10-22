@@ -516,6 +516,8 @@ class TestCountryAndStateNames:
         assert clean_actor_names("DPRK (Kimsuky)") == ["Kimsuky"]
         assert clean_actor_names("Korea (Democratic People's Republic of)") == []
         assert clean_actor_names("North Korea (unknown)") == []
+        assert clean_actor_names("Cuba (Ransomware)") == []
+        assert clean_actor_names("North Korea (unknown and APT41)") == ["APT41"]
         assert clean_actor_names("apt28, Bosnia and Herzegovina") == ["apt28"]
         assert clean_actor_names("Sandworm, Russia, Russian Federation") == ["Sandworm"]
 
@@ -612,13 +614,18 @@ class TestDroppedGeopoliticalNames:
             ("North Korea (APT37)", []),
             ("DPRK (Kimsuky)", []),
             ("Lazarus Group (North Korea)", []),
+            ("North Korea (unknown and APT41)", []),  # the and-split of the parenthetical yields APT41
             ("Cuba Ransomware Gang", []),
             ("cyber army of russia reborn", []),
             ("APT37", []),
+            # A parenthetical that yields no name, a description or a placeholder, leaves the country.
+            ("North Korea (unknown)", ["North Korea"]),
+            ("Cuba (Ransomware)", ["Cuba"]),
+            ("China (APT)", ["China"]),
+            ("APT41, Cuba (ransomware group)", ["Cuba"]),
             # Descriptions and placeholders are dropped, but they are not country names.
             ("russian hackers", []),
             ("APT28, unknown", []),
-            ("North Korea (unknown)", []),
             ("", []),
         ],
     )
