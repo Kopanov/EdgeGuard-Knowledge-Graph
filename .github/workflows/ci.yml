@@ -209,6 +209,8 @@ jobs:
       # job, just surfaces the apache/airflow base image's existing debt for
       # triage.
       - name: Trivy scan — informational (continue-on-error)
+        # Also after a failed CRITICAL gate, when the report is needed for triage.
+        if: always()
         continue-on-error: true
         run: |
           echo "=== edgeguard-kg HIGH/MED/LOW ==="
