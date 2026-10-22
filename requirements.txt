@@ -20,6 +20,11 @@
 # see src/version_compatibility.py::RECOMMENDED_VERSIONS.
 neo4j~=5.27
 requests~=2.32
+# SECURITY (GHSA-6q48-6c7w-9gw2, 2026-10-20): certifi releases before 2026.10.19 bundle
+# emSign root CAs with compromised intermediate CA keys. requests and PyMISP verify TLS
+# against this bundle; the floor also invalidates a cached requirements layer, so a
+# rebuild resolves the fixed bundle.
+certifi>=2026.10.19
 pandas~=2.2
 pyyaml~=6.0
 python-dateutil~=2.9
