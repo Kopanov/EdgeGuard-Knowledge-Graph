@@ -149,7 +149,8 @@ the relationship's own `tlp`: a curated-package link carries the
 package's level, so it is never exported less restricted than the
 package, whatever its endpoints' markings. A campaign and its links
 carry the most restrictive level of the links they rest on, so a
-campaign built on a curated claim is exported at the claim's level.
+campaign built on a curated claim is exported at no less than the
+claim's level.
 
 Each SDO built from a Neo4j node with zone tags carries
 `x_edgeguard_zones: ["healthcare", "energy"]` (a node in a sector never
