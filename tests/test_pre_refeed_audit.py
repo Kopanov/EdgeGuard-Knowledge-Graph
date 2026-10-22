@@ -336,3 +336,11 @@ def test_pyproject_carries_the_fastapi_exclusion_like_the_requirements_files():
     py = (_REPO / "pyproject.toml").read_text()
     assert "fastapi>=0.115,!=0.136.3,<1.0" in py
     assert "fastapi>=0.115,!=0.136.3,<1.0" in (_REPO / "requirements.txt").read_text()
+
+
+def test_every_dependency_list_sets_the_certifi_floor():
+    # GHSA-6q48-6c7w-9gw2: certifi before 2026.10.19 bundles emSign roots whose intermediate CA keys
+    # were compromised. A requirement line, not a comment: `certifi>=...` or `"certifi>=...",`.
+    line = re.compile(r'^\s*"?certifi>=2026\.10\.19"?,?\s*(#.*)?$', re.MULTILINE)
+    for name in ("pyproject.toml", "requirements.txt", "requirements-airflow-docker.txt"):
+        assert line.search((_REPO / name).read_text()), name
