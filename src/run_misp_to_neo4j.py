@@ -983,13 +983,13 @@ def _meta_advisory_zones(meta: Dict[str, Any]) -> Dict[str, List[str]]:
 # import_curated_package.py``). Each actor / malware attribute names an existing node and
 # carries that node's claims in its comment:
 #
-#   CURATED_CLAIMS:{"c": [{"p": "uses_technique", "o": "T1566", "src": "coreideas", "id": "<id>"}]}
+#   CURATED_CLAIMS:{"c": [{"p": "uses_technique", "o": "T1566", "src": "<source id>", "id": "<id>"}]}
 #
 # ``p`` is the predicate, ``o`` the object's key (ATT&CK id, malware name, Tool S-id, CVE id),
 # ``src`` the source that asserts the claim (defaults to the package's source) and ``id`` that
 # source's record id. Every claim becomes a relationship written with MATCH on both ends: a link
-# the claim creates is labelled with the package's curated label (``coreideas_curated``, else
-# ``curated_other``) at 0.85; a link that already exists keeps its label and confidence and
+# the claim creates is labelled with the package's curated label (its source's ``curated_label``,
+# else ``curated_other``) at 0.85; a link that already exists keeps its label and confidence and
 # gains the claim's provenance. A curated attribute is not merged as a node (``sync_to_neo4j``
 # skips it): a package never creates nodes and never changes the node it names. The item still
 # carries no description, types, zones or TLP, so nothing leaks if it ever reached a merge.

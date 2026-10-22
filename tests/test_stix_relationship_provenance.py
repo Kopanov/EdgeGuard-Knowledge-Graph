@@ -3,7 +3,7 @@
 Every relationship EdgeGuard builds carries ``sources`` (who asserts it), ``source_refs``
 (``"<source>:<record id>"``), ``misp_event_ids`` and ``match_type`` (relationship provenance).
 The STIX bundles now export every relationship type that has a STIX form — curated-package
-claims (Core Ideas) included — and each SRO carries that provenance: ``confidence``,
+claims included — and each SRO carries that provenance: ``confidence``,
 ``external_references`` (with a link where the source record has a public page) and the
 ``x_edgeguard_match_type`` / ``x_edgeguard_sources`` / ``x_edgeguard_source_refs`` /
 ``x_edgeguard_misp_event_ids`` extension properties.
