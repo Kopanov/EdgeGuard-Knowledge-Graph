@@ -1019,3 +1019,60 @@ class TestCheckGraph:
         path.write_text(json.dumps(_package()))
         assert importer.main([str(path), "--check-graph"]) == 2
         assert "NEO4J_PASSWORD" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- --push
+def _fake_misp(monkeypatch, created):
+    """A MISP client for ``--push`` that finds no event of the package's name and answers ``add_event``
+    with ``created``. Only ``PyMISP`` is replaced: the real ``MISPEvent`` builds the event that is sent."""
+    import pymisp
+
+    if isinstance(pymisp, MagicMock):
+        pytest.skip("pymisp is the MagicMock stub of tests/test_graphql_api.py: --push needs the real MISPEvent")
+    client = MagicMock()
+    client.search_index.return_value = []
+    client.add_event.return_value = created
+    monkeypatch.setattr(pymisp, "PyMISP", MagicMock(return_value=client))
+    monkeypatch.setenv("MISP_URL", "https://misp.example.invalid")
+    monkeypatch.setenv("MISP_API_KEY", "test-key-curated-packages")
+    return client
+
+
+class TestPush:
+    """``--push`` (2026-10): one MISP event per package. ``MISPEvent.from_dict`` empties the dict it is
+    given, and the report after the create read that dict: the first real push created its event and
+    then exited 1 on ``KeyError: 'Attribute'``."""
+
+    def test_push_reports_the_created_event(self, importer, monkeypatch, tmp_path, capsys):
+        client = _fake_misp(monkeypatch, {"Event": {"id": "123"}})
+        path = tmp_path / "pkg.json"
+        path.write_text(json.dumps(_package()))
+        assert importer.main([str(path), "--push"]) == 0
+        out = capsys.readouterr().out
+        assert "created MISP event 123 '2026-10-20_EdgeGuard_CoreIdeas_package' with 2 attributes" in out
+        client.search_index.assert_called_once_with(eventinfo="2026-10-20_EdgeGuard_CoreIdeas_package", pythonify=False)
+        (sent,), _kwargs = client.add_event.call_args
+        assert sent.info == "2026-10-20_EdgeGuard_CoreIdeas_package"
+        assert [(a.type, a.value) for a in sent.attributes] == [("threat-actor", "apt29"), ("malware-type", "lockbit")]
+        assert [t.name for t in sent.tags] == ["EdgeGuard", "source:CoreIdeas", "tlp:amber"]
+
+    def test_a_refused_event_returns_1(self, importer, monkeypatch, tmp_path, capsys):
+        # PyMISP's answer to a 4xx response, here MISP's answer to a key without the right to add events
+        message = "You do not have permission to use this functionality."
+        refusal = {"errors": (403, {"name": message, "message": message, "url": "/events/add"})}
+        _fake_misp(monkeypatch, refusal)
+        path = tmp_path / "pkg.json"
+        path.write_text(json.dumps(_package()))
+        assert importer.main([str(path), "--push"]) == 1
+        out, err = capsys.readouterr()
+        assert "MISP refused the event" in err and message in err
+        assert "created MISP event" not in out
+
+    def test_an_event_of_the_same_name_is_not_created_again(self, importer, monkeypatch, tmp_path, capsys):
+        client = _fake_misp(monkeypatch, {"Event": {"id": "124"}})
+        client.search_index.return_value = [{"id": "123", "info": "2026-10-20_EdgeGuard_CoreIdeas_package"}]
+        path = tmp_path / "pkg.json"
+        path.write_text(json.dumps(_package()))
+        assert importer.main([str(path), "--push"]) == 1
+        assert "already exists" in capsys.readouterr().err
+        client.add_event.assert_not_called()
