@@ -25,7 +25,7 @@ import requests
 import urllib3
 
 import source_registry  # noqa: E402  — single source of truth for source→MISP-tag mapping (chip 5a)
-from attack_values import format_attack_value
+from attack_values import attack_value_key, format_attack_value
 from collectors.collector_utils import TransientServerError, retry_after_sleep_seconds, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
@@ -966,6 +966,19 @@ def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any], written_aft
     return True
 
 
+def _dedup_key(attr_type: Any, value: Any) -> Tuple[Any, Any]:
+    """``(type, value)`` key the dedup compares (2026-10-21).
+
+    A ``text`` value that reads as an ATT&CK entry is keyed in its current ``<id> - <name>`` form, so
+    an ``<id>: <name>`` value (the form MISPWriter wrote before 2026-10-20) counts as present. Any
+    other attribute keeps its exact ``(type, value)``. Not used by
+    ``_attribute_match_key``: a pushed value is confirmed against what MISP stored for it, exactly.
+    """
+    if attr_type == "text":
+        return (attr_type, attack_value_key(value))
+    return (attr_type, value)
+
+
 def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     """``(type, value)`` key used to recognise a pushed attribute in a MISP event response.
 
@@ -1642,7 +1655,7 @@ class MISPWriter:
                 v = a.get("value")
                 if t is not None and v is not None and str(v).strip():
                     key = (str(t), str(v))
-                    keys.add(key)
+                    keys.add(_dedup_key(*key))
                     if stored_copy_of is not None and key in stored_copy_of:
                         _note_stored_copy(stored_copy_of, key, a)
             if len(attrs) < page_limit:
@@ -1729,7 +1742,7 @@ class MISPWriter:
                 t = a.get("type")
                 v = a.get("value")
                 if t is not None and v is not None and str(v).strip():
-                    keys.add((str(t), str(v)))
+                    keys.add(_dedup_key(str(t), str(v)))
             if len(attrs) < page_limit:
                 break
             page += 1
@@ -3293,7 +3306,9 @@ class MISPWriter:
             if checked_first:
                 # Cross-event filter first (attrs in ANY EdgeGuard event for this source).
                 group_ct = len(unique_attrs)
-                after_cross_event = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in cross_event_keys]
+                after_cross_event = [
+                    a for a in unique_attrs if _dedup_key(a.get("type"), a.get("value")) not in cross_event_keys
+                ]
                 cross_event_skipped = group_ct - len(after_cross_event)
                 if cross_event_skipped:
                     _note_refresh_due(source_tag, unique_attrs)
@@ -3338,7 +3353,9 @@ class MISPWriter:
             per_event_keys = self._get_existing_attribute_keys(event_id)
             before_ct = len(unique_attrs)
             # Per-event filter (attrs already in THIS event)
-            after_per_event = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in per_event_keys]
+            after_per_event = [
+                a for a in unique_attrs if _dedup_key(a.get("type"), a.get("value")) not in per_event_keys
+            ]
             per_event_skipped = before_ct - len(after_per_event)
             if checked_first:
                 unique_attrs = after_per_event
@@ -3347,7 +3364,9 @@ class MISPWriter:
                 # EdgeGuard event for this source). PR-F7's value is
                 # exactly this number: duplicates that the per-event
                 # prefetch would have missed.
-                unique_attrs = [a for a in after_per_event if (a.get("type"), a.get("value")) not in cross_event_keys]
+                unique_attrs = [
+                    a for a in after_per_event if _dedup_key(a.get("type"), a.get("value")) not in cross_event_keys
+                ]
                 cross_event_skipped = len(after_per_event) - len(unique_attrs)
                 if cross_event_skipped:
                     _note_refresh_due(source_tag, after_per_event)

@@ -84,9 +84,24 @@ def looks_like_attack_value(value: Any) -> bool:
     return isinstance(value, str) and _ATTACK_LIKE_RE.match(value.strip()) is not None
 
 
+def attack_value_key(value: Any) -> Any:
+    """The one form of an ATT&CK ``text`` value that dedup compares (2026-10-21).
+
+    A value that ``parse_attack_value`` reads is returned in the current form
+    (``format_attack_value``), so MISP's ``T1059.003: Windows Command Shell`` and the
+    ``T1059.003 - Windows Command Shell`` MISPWriter writes now are one key. Any other value, a
+    mangled one (``"T1059.00%WINDIR%\\Command Shell"``) included, is returned unchanged.
+    """
+    parsed = parse_attack_value(value)
+    if parsed is None or not parsed.name:
+        return value
+    return format_attack_value(parsed.mitre_id, parsed.name)
+
+
 __all__ = [
     "ATTACK_VALUE_SEPARATOR",
     "AttackValue",
+    "attack_value_key",
     "format_attack_value",
     "looks_like_attack_value",
     "parse_attack_value",
