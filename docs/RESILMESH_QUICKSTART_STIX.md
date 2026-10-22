@@ -147,7 +147,10 @@ receives the deployment default `EDGEGUARD_DEFAULT_TLP`). Relationship
 objects carry the most restrictive marking of their two endpoints and of
 the relationship's own `tlp`: a curated-package link carries the
 package's level, so it is never exported less restricted than the
-package, whatever its endpoints' markings.
+package, whatever its endpoints' markings. A campaign and its links
+carry the most restrictive level of the links they rest on, so a
+campaign built on a curated claim is exported at no less than the
+claim's level.
 
 Each SDO built from a Neo4j node with zone tags carries
 `x_edgeguard_zones: ["healthcare", "energy"]` (a node in a sector never
@@ -560,10 +563,11 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-21_
 
 ## History
 
+- 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs the graph links to it as named in the same OTX report (`INDICATES`, `otx_pulse`; built per MISP event and OTX report, within the per-report caps).
 - 2026-10-18 — `otx_industries` (confidence 60) on a sector link the graph holds as `TARGETS`, where an OTX pulse's own industries state the sector.
 - 2026-10-18 — § 6: the smoke script runs on bash 3.2, exports identifiers a baseline graph holds (`APT28`, `T1059`, `CVE-2021-44228`, the newest indicator; flags name others) and fails a bundle without a graph object (it passed on the empty bundle of the `/stix/types` indicator example).

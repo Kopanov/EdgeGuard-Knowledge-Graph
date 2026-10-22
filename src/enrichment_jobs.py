@@ -272,10 +272,30 @@ def _campaign_evidence(rel_var: str, confidence: str, types: str, quote: str = '
     )
 
 
+def _links_tlp(links: str) -> str:
+    """Cypher: the most restrictive ``tlp`` of the links in the list ``links`` (null when none has one).
+
+    2026-10: a campaign and its links are as restricted as the links they rest on. A curated-package
+    link carries the package's level in ``r.tlp``; the campaign builder copied its provenance (the
+    package's source, claim ids and MISP event) onto RUNS and PART_OF_CAMPAIGN but not its level, so
+    the STIX export marked those links and the Campaign with the deployment default (TLP:WHITE) while
+    they cite the package. The fragment uses single quotes only, so it also runs inside the
+    double-quoted statements of ``apoc.periodic.iterate``."""
+    return f"reduce(_t = null, _e IN {links} | {_tlp_most_restrictive_clause('_t', '_e.tlp')})"
+
+
+def _campaign_tlp(campaign: str, links: str) -> str:
+    """``SET`` item: the campaign's ``tlp``, the most restrictive level of the links ``links`` it rests
+    on (null when none has one), replaced on every run, so it follows a claim that is withdrawn.
+    ``Campaign`` is EdgeGuard's own label (this builder is its only writer; ResilMesh's schema has no
+    campaign), so there is no other level on the node to keep."""
+    return f"{campaign}.tlp = {_links_tlp(links)}"
+
+
 def _links_evidence(rel_var: str, links: str, quote: str = '"') -> str:
     """``SET`` items for a campaign link resting on the list of links ``links`` (RUNS, a malware
-    member): the strongest link's confidence, their types, and their provenance, replaced on each
-    run so the link names no evidence removed or trimmed since."""
+    member): the strongest link's confidence, their types, their provenance and (2026-10) their most
+    restrictive TLP, replaced on each run so the link names no evidence removed or trimmed since."""
     return (
         _campaign_evidence(
             rel_var,
@@ -285,6 +305,7 @@ def _links_evidence(rel_var: str, links: str, quote: str = '"') -> str:
         )
         + ", "
         + aggregated_prov_set(rel_var, f"_e IN {links}", "_e", replace=True)
+        + f", {rel_var}.tlp = {_links_tlp(links)}"
     )
 
 
@@ -321,7 +342,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
     deleted with its links (Step 1b, 2026-10-16), a malware link without either link is pruned
     (Step 2b), a RUNS whose actor is not the campaign's or has no evidence is removed (Step 2c), and
     every link's provenance is replaced on each run by that of the links it currently rests on;
-    ``r.evidence_types`` names their relationship types. A campaign with evidence whose indicators
+    ``r.evidence_types`` names their relationship types. Every link and the campaign also carry the
+    most restrictive ``tlp`` of the links they rest on (2026-10: a curated-package claim carries the
+    package's level, so the campaign built on it is exported at that level, not at the default;
+    recomputed on every run, ``_campaign_tlp``). A campaign with evidence whose indicators
     all expired stays, inactive (Step 4). A re-created campaign keeps its ``uuid``: it is computed
     from the actor's name (``compute_node_uuid``), never stored elsewhere.
 
@@ -522,6 +546,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.zone             = all_zones,
                 c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
             WITH a, c, {campaign_evidence.evidence_links("a")} AS actor_evidence
+            // 2026-10: the campaign is as restricted as the links it rests on (``_campaign_tlp``).
+            SET {_campaign_tlp("c", "actor_evidence")}
             MERGE (a)-[r_runs:RUNS]->(c)
             // PR-N8 HIGH (audit Cross-Checker, 2026-04-21): stamp
             // created_at / updated_at so this edge is visible to cloud
@@ -673,8 +699,17 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, c, r_runs, actor_evidence,
                  coalesce(a.name = c.actor_name, false) AND size(actor_evidence) > 0 AS evidenced
             FOREACH (_ IN CASE WHEN evidenced THEN [] ELSE [1] END | DELETE r_runs)
+            // 2026-10: a level that changes here is stamped (``updated_at`` / ``last_updated``), because
+            // Step 1 does not reach a campaign without an active indicator and the delta exports select
+            // on those times; the stamps come first, so they compare the levels before the change.
             FOREACH (_ IN CASE WHEN evidenced THEN [1] ELSE [] END |
-                SET {_links_evidence("r_runs", "actor_evidence")})
+                SET r_runs.updated_at = CASE WHEN coalesce(r_runs.tlp, '') <>
+                                            coalesce({_links_tlp("actor_evidence")}, '')
+                                        THEN datetime() ELSE r_runs.updated_at END,
+                    c.last_updated = CASE WHEN coalesce(c.tlp, '') <>
+                                         coalesce({_links_tlp("actor_evidence")}, '')
+                                     THEN datetime() ELSE c.last_updated END,
+                    {_links_evidence("r_runs", "actor_evidence")}, {_campaign_tlp("c", "actor_evidence")})
             RETURN sum(CASE WHEN evidenced THEN 0 ELSE 1 END) AS removed
             """
             runs_record = session.run(settle_runs, timeout=NEO4J_READ_TIMEOUT).single()
@@ -763,7 +798,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                    r.updated_at = datetime(),
                    r.edgeguard_managed = true,
                    __CAMPAIGN_EVIDENCE__,
-                   __INHERITED_PROV__",
+                   __INHERITED_PROV__,
+                   r.tlp = __TLP_OF_PATHS__",
               {batchSize: 25, parallel: false, retries: 2}
             )
             YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
@@ -785,6 +821,12 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                     # indicator to the campaign's actor, replaced on each run.
                     "__INHERITED_PROV__",
                     aggregated_prov_set("r", "_p IN _paths", ["_p[0]", "_p[1]"], replace=True),
+                )
+                .replace(
+                    # 2026-10: the most restrictive TLP of every link of every path (a curated
+                    # USES_MALWARE claim carries the package's level).
+                    "__TLP_OF_PATHS__",
+                    _links_tlp("reduce(_flat = [], _p IN _paths | _flat + _p)"),
                 )
                 .replace(
                     # 2026-10 (explainability): the indicator's best path to the campaign's actor, each

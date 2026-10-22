@@ -12,6 +12,7 @@ single ``r.source_id`` (last writer wins) whose values were evidence names (``ot
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -90,6 +91,37 @@ def _render_build_steps(monkeypatch):
     monkeypatch.setattr(build_relationships, "query_pause", lambda: None)
     build_relationships.build_relationships()
     return captured
+
+
+def _render_campaign_statements(monkeypatch):
+    """Every statement ``build_campaign_nodes`` sends, rendered, without a database."""
+    statements = []
+
+    def run(query, *args, **kwargs):
+        statements.append(query)
+        result = MagicMock()
+        result.single.return_value = {
+            "campaigns": 0,
+            "backfilled": 0,
+            "deleted": 0,
+            "names": [],
+            "links": 0,
+            "removed": 0,
+            "pruned": 0,
+            "count": 0,
+        }
+        result.__iter__ = lambda _self: iter([])
+        return result
+
+    session = MagicMock()
+    session.run = run
+    session.__enter__ = lambda s: s
+    session.__exit__ = lambda *a: False
+    client = MagicMock()
+    client.driver.session.return_value = session
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    enrichment_jobs.build_campaign_nodes(client)
+    return statements
 
 
 # --------------------------------------------------------------------------- registry
@@ -456,6 +488,44 @@ class TestEnrichment:
             in links
         )
         assert campaign_evidence.evidence_types("x") == "apoc.coll.sort(apoc.coll.toSet([_et IN x | type(_et)]))"
+
+    def test_campaigns_and_their_links_carry_the_evidence_tlp(self, monkeypatch):
+        """2026-10: a campaign and its links are as restricted as the links they rest on. The builder
+        copied a curated claim's provenance onto RUNS / PART_OF_CAMPAIGN but not its ``r.tlp``, and the
+        STIX export marked them TLP:WHITE. The levels are checked on a real Neo4j
+        (tests/test_explainability_neo4j.py); here, the statements the builder sends."""
+        # The fragment also runs inside the double-quoted inner statement of apoc.periodic.iterate.
+        assert '"' not in enrichment_jobs._links_tlp("L")
+        # A campaign link's SET items carry its level with its provenance.
+        assert "r_runs.tlp = " in enrichment_jobs._links_evidence("r_runs", "actor_evidence")
+        statements = _render_campaign_statements(monkeypatch)
+
+        def one(*markers):
+            (found,) = [s for s in statements if all(m in s for m in markers)]
+            return found
+
+        create = one("MERGE (c:Campaign")  # Step 1
+        members = one("MERGE (m)-[r:PART_OF_CAMPAIGN]->(c)")  # Step 2
+        settle = one("MATCH (a:ThreatActor)-[r_runs:RUNS]->(c:Campaign)")  # Step 2c
+        indicators = one("apoc.periodic.iterate", "MERGE (i)-[r:PART_OF_CAMPAIGN]->(c)")  # Step 3a
+        # Step 1 and Step 2c (which also reaches a campaign without an active indicator) set the
+        # campaign's and the RUNS level, Step 2 a malware's link, Step 3a an indicator's.
+        for statement, items in (
+            (create, ("c.tlp = ", "r_runs.tlp = ")),
+            (settle, ("c.tlp = ", "r_runs.tlp = ")),
+            (members, ("r.tlp = ",)),
+            (indicators, ("r.tlp = ",)),
+        ):
+            for item in items:
+                assert item in statement, item
+        # Step 3a: every placeholder is filled, and the inner statement holds no double quote of its own
+        # (the call's two statements are its only double-quoted strings).
+        assert re.search(r"__[A-Z_]+__", indicators) is None
+        assert indicators.count('"') == 4
+        # Step 2c stamps a level it changes before the items that change it: the items of a SET apply in
+        # order, so the stamps compare the levels from before the run.
+        stamps = max(settle.index("r_runs.updated_at = CASE WHEN"), settle.index("c.last_updated = CASE WHEN"))
+        assert stamps < settle.index("r_runs.tlp = ") and stamps < settle.index("c.tlp = ")
 
     def test_alias_merge_keeps_lists_as_lists(self):
         node_props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS

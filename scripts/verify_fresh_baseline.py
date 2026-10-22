@@ -253,9 +253,10 @@ _REL_PROVENANCE_SCAN = (
     "ORDER BY type"
 )
 # Labels parsed from MISP attributes — the only nodes that carry ``tlp`` (the tag travels
-# with the attribute). Source/Sector/Campaign/CVSS* and the ResilMesh-model nodes written
-# on alert ingestion (Host, IP, Alert, …) are marker-stamped when EdgeGuard creates them but
-# never have a TLP, so the check is an allowlist, not a skip-list.
+# with the attribute). Source/Sector/CVSS* and the ResilMesh-model nodes written on alert
+# ingestion (Host, IP, Alert, …) are marker-stamped when EdgeGuard creates them but never have
+# a TLP, and a Campaign carries one only when a link it rests on has one (2026-10), so the
+# check is an allowlist, not a skip-list.
 _TLP_LABELS = ("Indicator", "CVE", "Vulnerability", "Malware", "ThreatActor", "Technique", "Tactic", "Tool")
 # ATT&CK entries whose names begin with "Windows": MISP's default Import Regexp rules rewrote the
 # value "<id>: Windows ..." (``T1059.003: Windows Command Shell`` → ``T1059.00%WINDIR%\Command Shell``),

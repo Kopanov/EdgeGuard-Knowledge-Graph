@@ -12,7 +12,9 @@ Campaign links (2026-10-15, 2026-10-16) state their evidence: ``campaign_groupin
 the links they rest on and the relationship types of those links (``r.evidence_types``). A campaign
 rests on ATTRIBUTED_TO or USES_MALWARE links between its actor and a malware (``campaign_evidence``);
 one without either is deleted, one with evidence whose indicators expired stays inactive, and the
-baseline postcheck and the acceptance checks read the same definition.
+baseline postcheck and the acceptance checks read the same definition. A campaign and its links
+carry the most restrictive TLP of the links they rest on (2026-10: a curated claim's level), and the
+STIX export marks them with it.
 """
 
 from __future__ import annotations
@@ -357,6 +359,168 @@ def test_an_actor_that_uses_malware_has_a_campaign_resting_on_that_link(client, 
         "without_runs": 0,
         "runs_without_evidence": 0,
     }
+
+
+# 2026-10: ``apt-amber`` rests on an amber curated "uses" claim (``curmal``, Core Ideas), on an OTX
+# attribution without a level and a white curated "uses" claim of the same malware (``otxmal``, a
+# second package: two links, so its indicator has two paths), and on an OTX attribution alone
+# (``plainmal``).
+TLP_FIXTURE = f"""
+CREATE (amber:ThreatActor:{LABEL} {{name: 'apt-amber', uuid: 'u-apt-amber', edgeguard_managed: true}})
+CREATE (curmal:Malware:{LABEL} {{name: 'curmal', uuid: 'u-curmal', edgeguard_managed: true}})
+CREATE (otxmal:Malware:{LABEL} {{name: 'otxmal', uuid: 'u-otxmal', edgeguard_managed: true}})
+CREATE (plainmal:Malware:{LABEL} {{name: 'plainmal', uuid: 'u-plainmal', edgeguard_managed: true}})
+CREATE (amber)-[:USES_MALWARE {{match_type: 'coreideas_curated', confidence_score: 0.85, sources: ['coreideas'],
+        source_refs: ['coreideas:claim:0123456789abcdef'], misp_event_ids: ['42'], tlp: 'amber',
+        edgeguard_managed: true}}]->(curmal)
+CREATE (otxmal)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        edgeguard_managed: true}}]->(amber)
+CREATE (amber)-[:USES_MALWARE {{match_type: 'curated_other', confidence_score: 0.85, sources: ['misp_galaxy'],
+        source_refs: ['misp_galaxy:claim:fedcba9876543210'], misp_event_ids: ['43'], tlp: 'white',
+        edgeguard_managed: true}}]->(otxmal)
+CREATE (plainmal)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        edgeguard_managed: true}}]->(amber)
+CREATE (ic:Indicator:{LABEL} {{indicator_type: 'domain', value: 'cur.example', uuid: 'u-ic', active: true,
+        edgeguard_managed: true, first_imported_at: datetime('2026-10-01T00:00:00Z')}})
+CREATE (io:Indicator:{LABEL} {{indicator_type: 'domain', value: 'otx.example', uuid: 'u-io', active: true,
+        edgeguard_managed: true, first_imported_at: datetime('2026-10-02T00:00:00Z')}})
+CREATE (ip:Indicator:{LABEL} {{indicator_type: 'domain', value: 'plain.example', uuid: 'u-ip', active: true,
+        edgeguard_managed: true, first_imported_at: datetime('2026-10-03T00:00:00Z')}})
+CREATE (ic)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(curmal)
+CREATE (io)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(otxmal)
+CREATE (ip)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(plainmal)
+"""
+
+
+def _tlp_levels(raw_driver) -> dict:
+    """(campaign actor, member or actor, type) -> the link's ``tlp``, and (campaign actor, 'Campaign') ->
+    the campaign's."""
+    with raw_driver.session() as session:
+        links = {
+            (r["actor"], r["from"], r["type"]): r["tlp"]
+            for r in session.run(
+                "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(c:Campaign) "
+                "RETURN c.actor_name AS actor, coalesce(n.name, n.value) AS from, type(r) AS type, r.tlp AS tlp"
+            )
+        }
+        campaigns = {
+            (r["actor"], "Campaign"): r["tlp"]
+            for r in session.run("MATCH (c:Campaign) RETURN c.actor_name AS actor, c.tlp AS tlp")
+        }
+    return {**links, **campaigns}
+
+
+def test_a_campaign_resting_on_a_curated_claim_carries_its_tlp(client, raw_driver, monkeypatch):
+    """The campaign and its RUNS take the most restrictive level of the links they rest on (amber over
+    white and none), each campaign link that of its own links (white over none on ``otxmal`` and on both
+    paths of its indicator; none where no link has one), the STIX export marks the Campaign SDO amber
+    (and so every SRO to it), and when the amber claim is withdrawn the campaign takes the level of the
+    links that remain (white, not none)."""
+    import stix2
+
+    import enrichment_jobs
+    from stix_exporter import StixExporter
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    with raw_driver.session() as session:
+        session.run(TLP_FIXTURE)
+    for _ in range(2):  # recomputed on every run: the same answer
+        _build(client, raw_driver)
+        assert _tlp_levels(raw_driver) == {
+            ("apt-amber", "Campaign"): "amber",
+            ("apt-amber", "apt-amber", "RUNS"): "amber",
+            ("apt-amber", "curmal", "PART_OF_CAMPAIGN"): "amber",
+            ("apt-amber", "otxmal", "PART_OF_CAMPAIGN"): "white",
+            ("apt-amber", "plainmal", "PART_OF_CAMPAIGN"): None,
+            ("apt-amber", "cur.example", "PART_OF_CAMPAIGN"): "amber",
+            ("apt-amber", "otx.example", "PART_OF_CAMPAIGN"): "white",
+            ("apt-amber", "plain.example", "PART_OF_CAMPAIGN"): None,
+        }
+    bundle = StixExporter(client).export_threat_actor("apt-amber")
+    (campaign,) = [o for o in bundle["objects"] if o["type"] == "campaign"]
+    assert campaign["object_marking_refs"] == [stix2.TLP_AMBER.id]
+    runs = [
+        o
+        for o in bundle["objects"]
+        if o["type"] == "relationship" and campaign["id"] in (o["source_ref"], o["target_ref"])
+    ]
+    assert runs and all(o["object_marking_refs"] == [stix2.TLP_AMBER.id] for o in runs)
+    # The amber claim is withdrawn: the campaign rests on the white claim and the two attributions, and
+    # the malware and indicator that joined through the amber claim alone leave it.
+    with raw_driver.session() as session:
+        session.run("MATCH (:ThreatActor {name: 'apt-amber'})-[r:USES_MALWARE]->(:Malware {name: 'curmal'}) DELETE r")
+    _build(client, raw_driver)
+    assert _tlp_levels(raw_driver) == {
+        ("apt-amber", "Campaign"): "white",
+        ("apt-amber", "apt-amber", "RUNS"): "white",
+        ("apt-amber", "otxmal", "PART_OF_CAMPAIGN"): "white",
+        ("apt-amber", "plainmal", "PART_OF_CAMPAIGN"): None,
+        ("apt-amber", "otx.example", "PART_OF_CAMPAIGN"): "white",
+        ("apt-amber", "plain.example", "PART_OF_CAMPAIGN"): None,
+    }
+
+
+# 2026-10: ``apt-quiet`` has a campaign whose only indicator expires before a claim arrives (Step 1 no
+# longer reaches it, Step 2c does).
+TLP_QUIET_FIXTURE = f"""
+CREATE (quiet:ThreatActor:{LABEL} {{name: 'apt-quiet', uuid: 'u-apt-quiet', edgeguard_managed: true}})
+CREATE (qmal:Malware:{LABEL} {{name: 'qmal', uuid: 'u-qmal', edgeguard_managed: true}})
+CREATE (qcur:Malware:{LABEL} {{name: 'qcur', uuid: 'u-qcur', edgeguard_managed: true}})
+CREATE (quiet)-[:USES_MALWARE {{match_type: 'mitre_explicit', confidence_score: 0.95, sources: ['mitre_attck'],
+        edgeguard_managed: true}}]->(qmal)
+CREATE (iq:Indicator:{LABEL} {{indicator_type: 'domain', value: 'quiet.example', uuid: 'u-iq', active: true,
+        edgeguard_managed: true, first_imported_at: datetime('2026-10-01T00:00:00Z')}})
+CREATE (iq)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(qmal)
+"""
+
+
+def _quiet_campaign(raw_driver) -> dict:
+    """``apt-quiet``'s campaign and RUNS: their stamps (``c.last_updated``, ``r.updated_at``), levels and
+    whether the campaign is active."""
+    return _one(
+        raw_driver,
+        "MATCH (:ThreatActor {name: 'apt-quiet'})-[r:RUNS]->(c:Campaign) "
+        "RETURN c.last_updated AS c, r.updated_at AS r, c.tlp AS tlp, r.tlp AS rtlp, c.active AS active",
+    )
+
+
+def test_a_campaign_without_an_active_indicator_takes_the_level_and_a_change_is_stamped(
+    client, raw_driver, monkeypatch
+):
+    """Step 2c sets the level of a campaign Step 1 does not reach (its indicators expired) and stamps
+    ``c.last_updated`` and the RUNS ``updated_at`` when it changes the level, up when a claim arrives and
+    down when it is withdrawn; a run that changes no level leaves both stamps as they are."""
+    import enrichment_jobs
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    with raw_driver.session() as session:
+        session.run(TLP_QUIET_FIXTURE)
+    _build(client, raw_driver)
+    first = _quiet_campaign(raw_driver)
+    assert (first["tlp"], first["rtlp"], first["active"]) == (None, None, True)
+    # apt-quiet's only indicator expires, then an amber claim arrives on a malware without indicators.
+    with raw_driver.session() as session:
+        session.run("MATCH (i:Indicator {value: 'quiet.example'}) SET i.active = false")
+        session.run(
+            "MATCH (a:ThreatActor {name: 'apt-quiet'}), (m:Malware {name: 'qcur'}) "
+            "CREATE (a)-[:USES_MALWARE {match_type: 'coreideas_curated', confidence_score: 0.85, sources: ['coreideas'], "
+            "tlp: 'amber', edgeguard_managed: true}]->(m)"
+        )
+    _build(client, raw_driver)
+    raised = _quiet_campaign(raw_driver)
+    assert (raised["tlp"], raised["rtlp"], raised["active"]) == ("amber", "amber", False)
+    assert raised["c"] > first["c"] and raised["r"] > first["r"]  # the change is stamped
+    # The claim is withdrawn: the campaign rests on MITRE's "uses" alone and has no level; the change
+    # from amber to none is stamped too.
+    with raw_driver.session() as session:
+        session.run("MATCH ()-[r:USES_MALWARE {match_type: 'coreideas_curated'}]->(:Malware) DELETE r")
+    _build(client, raw_driver)
+    lowered = _quiet_campaign(raw_driver)
+    assert (lowered["tlp"], lowered["rtlp"], lowered["active"]) == (None, None, False)
+    assert lowered["c"] > raised["c"] and lowered["r"] > raised["r"]
+    # A run that changes no level stamps nothing (the delta exports would send the campaign again).
+    _build(client, raw_driver)
+    assert _quiet_campaign(raw_driver) == lowered
 
 
 def test_a_campaign_takes_its_newest_100_indicators_once_each(client, raw_driver, monkeypatch):

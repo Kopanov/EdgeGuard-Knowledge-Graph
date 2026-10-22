@@ -577,8 +577,8 @@ class TestNoFalsePositives:
             "Tactic",
             "Tool",
         }
-        for never_tlp in ("Source", "Sector", "Campaign", "CVSSv31", "Host", "Alert", "IP"):
-            assert never_tlp not in vfb._TLP_LABELS
+        for not_required in ("Source", "Sector", "Campaign", "CVSSv31", "Host", "Alert", "IP"):
+            assert not_required not in vfb._TLP_LABELS
 
 
 class TestUsesClaimsAreMandatoryOnceMitreActorsExist:
