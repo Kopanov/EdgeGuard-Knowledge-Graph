@@ -67,7 +67,6 @@ from neo4j_client import (  # noqa: E402
     _dedup_concat_clause,
     _log_if_timed_out,
     _tlp_most_restrictive_clause,
-    _tlp_rank_case,
     apoc_iterate_failures,
 )
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
@@ -285,24 +284,12 @@ def _links_tlp(links: str) -> str:
     return f"reduce(_t = null, _e IN {links} | {_tlp_most_restrictive_clause('_t', '_e.tlp')})"
 
 
-def _campaign_tlp_value(campaign: str, links: str) -> str:
-    """Cypher: the campaign's new ``tlp``, from the links ``links`` it rests on (see ``_campaign_tlp``)."""
-    level = _links_tlp(links)
-    return (
-        f"CASE WHEN {campaign}.edgeguard_managed = true THEN {level} "
-        f"WHEN {campaign}.tlp IS NOT NULL AND {_tlp_rank_case(f'{campaign}.tlp')} = 0 THEN {campaign}.tlp "
-        f"ELSE {_tlp_most_restrictive_clause(f'{campaign}.tlp', level)} END"
-    )
-
-
 def _campaign_tlp(campaign: str, links: str) -> str:
     """``SET`` item: the campaign's ``tlp``, the most restrictive level of the links ``links`` it rests
-    on. On a campaign EdgeGuard created it is replaced on every run, so it follows a claim that is
-    withdrawn. On a partner's ``Campaign`` node it is only ever raised: EdgeGuard cannot tell the
-    partner's own level from one a claim raised, so after a withdrawal the raised level stays until it
-    is reset by hand (the error is on the restrictive side), and a level outside the TLP ladder is kept
-    as it is (the STIX export reads it as TLP:AMBER)."""
-    return f"{campaign}.tlp = {_campaign_tlp_value(campaign, links)}"
+    on (null when none has one), replaced on every run, so it follows a claim that is withdrawn.
+    ``Campaign`` is EdgeGuard's own label (this builder is its only writer; ResilMesh's schema has no
+    campaign), so there is no other level on the node to keep."""
+    return f"{campaign}.tlp = {_links_tlp(links)}"
 
 
 def _links_evidence(rel_var: str, links: str, quote: str = '"') -> str:
@@ -357,8 +344,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
     every link's provenance is replaced on each run by that of the links it currently rests on;
     ``r.evidence_types`` names their relationship types. Every link and the campaign also carry the
     most restrictive ``tlp`` of the links they rest on (2026-10: a curated-package claim carries the
-    package's level, so the campaign built on it is exported at that level, not at the default; see
-    ``_campaign_tlp`` for a partner's node). A campaign with evidence whose indicators
+    package's level, so the campaign built on it is exported at that level, not at the default;
+    recomputed on every run, ``_campaign_tlp``). A campaign with evidence whose indicators
     all expired stays, inactive (Step 4). A re-created campaign keeps its ``uuid``: it is computed
     from the actor's name (``compute_node_uuid``), never stored elsewhere.
 
@@ -720,7 +707,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                                             coalesce({_links_tlp("actor_evidence")}, '')
                                         THEN datetime() ELSE r_runs.updated_at END,
                     c.last_updated = CASE WHEN coalesce(c.tlp, '') <>
-                                         coalesce({_campaign_tlp_value("c", "actor_evidence")}, '')
+                                         coalesce({_links_tlp("actor_evidence")}, '')
                                      THEN datetime() ELSE c.last_updated END,
                     {_links_evidence("r_runs", "actor_evidence")}, {_campaign_tlp("c", "actor_evidence")})
             RETURN sum(CASE WHEN evidenced THEN 0 ELSE 1 END) AS removed

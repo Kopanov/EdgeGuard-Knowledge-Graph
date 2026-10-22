@@ -1328,7 +1328,7 @@ Open work is tracked in a single list — see *Roadmap & Status → In Progress 
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-21_
 
 ## History
 

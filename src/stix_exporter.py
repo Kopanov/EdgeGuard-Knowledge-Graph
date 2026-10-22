@@ -78,7 +78,8 @@ Export hardening (2026-10):
   ``stix2.TLP_*``) are included when referenced, and every SDO carries
   ``object_marking_refs`` derived from the node's ``tlp`` property; SROs
   carry the most restrictive marking of their two endpoints and of the
-  relationship's own ``tlp`` (curated-package links, 2026-10).
+  relationship's own ``tlp`` (curated-package links and the campaign
+  links built on them, 2026-10).
 - **Patterns.** Indicator patterns are built in this module from the
   STIX 2.1 patterning grammar: ``email-addr``, ``file:hashes`` keyed by
   the detected algorithm, ``x509-certificate:hashes`` for TLS certificate
@@ -693,9 +694,10 @@ def _most_restrictive_marking(*marking_ids: Optional[str]) -> str:
 def _relationship_marking_ref(rel: Optional[Dict[str, Any]]) -> Optional[str]:
     """The TLP marking id of a graph relationship's own ``tlp``; ``None`` when it has none (2026-10).
 
-    Curated-package links carry the package's level in ``r.tlp``: the link and the provenance on
-    it are as restricted as the package, whatever the endpoints' markings. A level outside the
-    ladder is exported as TLP:AMBER, like an unrecognised node level.
+    Curated-package links carry the package's level in ``r.tlp``, and the campaign links built on
+    them (``RUNS``, ``PART_OF_CAMPAIGN``) the most restrictive level of the links they rest on: the
+    link and the provenance on it are as restricted as the package, whatever the endpoints'
+    markings. A level outside the ladder is exported as TLP:AMBER, like an unrecognised node level.
     """
     raw = (rel or {}).get("tlp")
     level = str(raw).strip().lower() if raw is not None else ""
@@ -2293,7 +2295,8 @@ class StixExporter:
         pairs absent from the table are emitted as ``related-to`` in graph
         direction. The SRO carries ``created_by_ref`` and the most
         restrictive ``object_marking_refs`` of its two endpoints and, since
-        2026-10, of the relationship's own ``tlp`` (curated-package links).
+        2026-10, of the relationship's own ``tlp`` (curated-package links and
+        the campaign links built on them).
 
         ``rel_props`` (2026-10) are the graph relationship's properties: the SRO
         then also carries its ``confidence`` (0–100), its record ids as
