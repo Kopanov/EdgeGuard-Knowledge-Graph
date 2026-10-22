@@ -136,13 +136,6 @@
    "status": "accepted"
   },
   {
-   "names": ["agenda"],
-   "into": "qilin",
-   "reason": "Agenda is the earlier name of the Qilin ransomware operation. On the graph of 2026-10-16 both nodes carry the Agenda ransomware family; neither name is in the galaxy, so the merge creates the actor 'qilin'.",
-   "date": "2026-10-17",
-   "status": "accepted"
-  },
-  {
    "names": ["callisto"],
    "into": "star blizzard",
    "reason": "ATT&CK lists Callisto Group as an alias of Star Blizzard (G1033); the galaxy keeps Callisto as a cluster of its own, whose synonyms (TAG-53, UNC4057, Blue Callisto) name the same COLDRIVER activity. On the graph of 2026-10-16 the 'callisto' node carries LOSTKEYS, NOROBOT, YESROBOT, MAYBEROBOT and COLDCOPY, which public reporting attributes to COLDRIVER / Star Blizzard.",
@@ -208,7 +201,7 @@
   {
    "names": ["devman"],
    "into": "devman",
-   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'devman'; malpedia describes DEVMAN as ransomware made from a DragonForce build with another file extension, and adds that in one of the first observed samples the ransom note still claimed to be part of the DragonForce Ransomware Cartel. DragonForce is an actor the reference holds. The decision reads a shared codebase and a note naming the cartel as a brand within the DragonForce cartel, not as DragonForce's own operation, so DEVMAN is an actor of its own; a merge into 'dragonforce' is the alternative decision. On the graph of 2026-10-17 the node (16 relationships, one OTX report) carries the DEVMAN family and, from the same report, DragonForce, BlackLock, Mamona and Conti.",
+   "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary; the threat-actor galaxy lists no group under this name. The ransomware galaxy lists 'devman'; malpedia describes DEVMAN as ransomware made from a DragonForce build with another file extension, and adds that in one of the first observed samples the ransom note still claimed to be part of the DragonForce Ransomware Cartel. The reference's 'dragonforce' is the threat-actor galaxy's DragonForce, a hacktivist group based in Malaysia, not the operators of the DragonForce ransomware, which the ransomware galaxy describes separately; no actor of the reference is the DragonForce ransomware cartel, so no merge applies. The decision reads a shared codebase and a note naming the cartel as a brand within the DragonForce cartel, so DEVMAN is an actor of its own. On the graph of 2026-10-17 the node (16 relationships, one OTX report) carries the DEVMAN family and, from the same report, DragonForce, BlackLock, Mamona and Conti.",
    "date": "2026-10-20",
    "status": "proposed"
   },
@@ -379,6 +372,69 @@
    "reason": "A ransomware operation named after its ransomware: an OTX report names it as the adversary. The threat-actor galaxy describes GOLD MANSARD as the group that operated the Nemty ransomware, whose operator retired Nemty in April 2020, after which Nefilim was introduced without an affiliate model; the ransomware galaxy relates Nefilim to Nemty and lists Nefilim among the later names of JSWorm, the family that became Nemty. The threat-actor galaxy names TRAVELING SPIDER, an actor the reference holds, as the developer of Nemty; it does not name Nefilim. The name therefore counts as GOLD MANSARD; the actor alias merge folds an OTX actor node 'Nefilim' into a GOLD MANSARD node when the graph holds one, and otherwise the node keeps its name. On the graph of 2026-10-17 the node had 14 relationships.",
    "date": "2026-10-20",
    "status": "proposed"
+  },
+  {
+   "names": ["samba spider"],
+   "into": "sambaspider",
+   "reason": "Spelling variant of SAMBASPIDER, which the threat-actor galaxy lists as the actor associated with the Mispadu banking trojan. The OTX report on the graph's 'samba spider' node names the adversary 'SAMBA SPIDER' and reviews the Latin American banking malware of 2024, Mispadu among it. No galaxy gives either spelling to another actor. On the graph of 2026-10-22 the node has 28 relationships, among them Mispadu; the graph holds no 'sambaspider' node.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["marko polo"],
+   "into": "markopolo",
+   "reason": "Spelling variant of Markopolo, which the threat-actor galaxy describes as an actor that runs scams against cryptocurrency users through a fake application, Vortax, and uses social media to make them look legitimate. The OTX report on the graph's 'marko polo' node names the adversary 'Marko Polo', a cybercriminal group that runs scams through social media, impersonating brands of virtual-meeting and cryptocurrency software, with Stealc, Rhadamanthys and HijackLoader. No galaxy gives either spelling to another actor. On the graph of 2026-10-22 the node has 16 relationships; the graph holds no 'markopolo' node.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["ta-558"],
+   "into": "ta558",
+   "reason": "Spelling variant of TA558, which the threat-actor galaxy describes as a financially motivated actor that sends malicious e-mails with business-themed lures to distribute at least 15 different malware payloads. The OTX report on the graph's 'ta-558' node names the adversary 'TA-558' for a spearphishing campaign that delivers Snake Keylogger. No galaxy gives either spelling to another actor. On the graph of 2026-10-22 the node has 10 relationships; the graph holds no 'ta558' node.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["i-soon"],
+   "into": "houndstooth typhoon",
+   "reason": "Spelling variant of 'isoon', which the microsoft-activity-group and threat-actor galaxies list as a synonym of Houndstooth Typhoon. The OTX report on the graph's 'i-soon' node names the adversary 'I-SOON', the Chinese contractor whose leaked documents tie it to several state-sponsored groups. No galaxy gives the name to another actor. On the graph of 2026-10-22 the node has 11 relationships, ten of them techniques, and no malware; the graph holds no 'houndstooth typhoon' node.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["apt-c-13"],
+   "into": "sandworm team",
+   "reason": "APT-C-13 is the 360net-threat-actor galaxy's designation of Sandworm. Its record, the Chinese name of Sandworm with the designation (synonym SandWorm), is the only galaxy record that carries the designation, and the galaxy relates it to the threat-actor galaxy's Sandworm record and the microsoft-activity-group galaxy's Seashell Blizzard record, both joined to Sandworm Team (G0034). The build leaves the record out because its name without the designation joins no ATT&CK actor. Both OTX reports on the graph's 'apt-c-13' node state that APT-C-13 (Sandworm) is also known as FROZENBARENTS, an ATT&CK alias of G0034, and one names the adversary 'APT-C-13, Sandworm, FROZENBARENTS'. On the graph of 2026-10-22 the node has 28 relationships, 26 of them techniques, and no malware.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["apt-c-53"],
+   "into": "gamaredon group",
+   "reason": "APT-C-53 is the 360net-threat-actor galaxy's designation of Gamaredon. Its record 'Gamaredon - APT-C-53' is the only galaxy record that carries the designation. It describes a Russian state-sponsored group, active since at least 2013, that targets Ukrainian government, defence, diplomatic and media organisations, and it names Primitive Bear, Winterflounder and BlueAlpha, which the reference holds as synonyms of Gamaredon Group (G0047). The build leaves the record out because its name without the designation joins no ATT&CK actor. Both OTX reports on the graph's 'apt-c-53' node name the adversary 'APT-C-53 (Gamaredon)': one states that APT-C-53 is also known as Gamaredon, the other that it is also known as Primitive Bear, Winterflounder and BlueAlpha. No galaxy gives the designation to another actor. On the graph of 2026-10-22 the node has 22 relationships, 21 of them techniques, and no malware.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["apt-c-55"],
+   "into": "kimsuky",
+   "reason": "APT-C-55 is the 360net-threat-actor galaxy's designation of Kimsuky. Its record 'Kimsuky - APT-C-55' is the only galaxy record that carries the designation. It describes a North Korean group, first reported in 2013, that targets South Korean think tanks and government, diplomatic, media and academic organisations. The build joins the record to Kimsuky (G0094), whose synonyms include 'kimsuky - apt-c-55'. The OTX report on the graph's 'apt-c-55' node names the adversary 'APT-C-55 (Kimsuky)'. It describes a campaign against South Korea with the HappyDoor backdoor whose scripts, backdoor families and domain naming match Kimsuky's earlier activity. No galaxy gives the designation to another actor. On the graph of 2026-10-22 the node (19 relationships, one OTX report) carries HappyDoor, which another OTX report attributes to the Kimsuky node.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["ta4557/fin6"],
+   "into": "fin6",
+   "reason": "An OTX report names the adversary 'TA4557/FIN6', which the actor-name hygiene keeps as one name because it does not split on '/'. The report covers an intrusion that began with a resume lure and used More_eggs, Cobalt Strike, Pyramid C2 and Cloudflared. Both parts of the name belong to FIN6 (G0037): FIN6 is its ATT&CK name, and the threat-actor galaxy lists TA4557 among FIN6's synonyms (the reference holds 'ta4557' as a synonym of FIN6). No galaxy gives either name to another actor. The three OTX reports on the FIN6 node describe the same activity: two report resume and job-seeker lures delivering More_eggs, one reports Pyramid C2 servers, and all three list More_eggs, Terra Loader, SKID and SpicyOmelette. On the graph of 2026-10-22 the 'ta4557/fin6' node (32 relationships, one OTX report) shares More_eggs and Terra Loader with the FIN6 node.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "names": ["qilin", "agenda"],
+   "into": "water galura",
+   "reason": "Replaces the merge of 'agenda' into an actor 'qilin' of 2026-10-17. A ransomware operation named after its ransomware: OTX reports name Qilin and Agenda as the adversary. ATT&CK describes Water Galura (G1050) as the operators of the Qilin Ransomware-as-a-Service, who handle payload generation, ransom negotiations and the publication of stolen data. ATT&CK also lists Agenda as an alias of Qilin (S1242), and malpedia records that Qilin was first observed in July 2022 under the name Agenda, so Agenda is Qilin's earlier name. ATT&CK and malpedia describe Qilin as run with affiliates. The only other group ATT&CK links to it, Moonstone Sleet (G1036), uses it, and no galaxy names another developer or operator. The names therefore count as Water Galura, and the actor alias merge folds OTX actor nodes 'Qilin' and 'Agenda' into the Water Galura node. On the graph of 2026-10-22 the 'qilin' node (84 relationships, eight OTX reports, 'agenda' already folded into it) carries the Qilin and Agenda families, and the Water Galura node uses Qilin.",
+   "date": "2026-10-22",
+   "status": "accepted"
   }
  ],
  "never_merge": [
@@ -443,6 +499,13 @@
    "names": ["poseidon", "shamoon"],
    "reason": "Bare names that only the suffix rule derives, from 'Poseidon Group' (G0033) and 'Shamoon Group'; both are also malware family names (the Poseidon stealer, the Shamoon wiper used by several groups), so the bare name does not identify one actor.",
    "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["cold river", "nahr elbard", "nahr el bared"],
+   "actor": "star blizzard",
+   "reason": "Not merged: the threat-actor galaxy's record 'Cold River' (synonyms Nahr Elbard and Nahr el bared) has one reference, a report on the Agent_Drable implant, which malpedia lists as a synonym of the DNSpionage malware. The record describes an actor that uses DNS subdomain hijacking, certificate spoofing and tunnelled command-and-control traffic, and it has no galaxy relation to Star Blizzard (G1033) or to the threat-actor galaxy's Callisto record. The build joins it to Star Blizzard only because 'Cold River' is a spacing variant of COLDRIVER, an ATT&CK alias of G1033. No Star Blizzard or Callisto record in any galaxy lists the three names. The names are kept away from Star Blizzard and resolve to no actor. The decision takes the names, not the join: the record stays listed among Star Blizzard's records and gives it none of its names. COLDRIVER and COLD RELIC, which the Callisto record lists, stay synonyms of Star Blizzard. No OTX report on the graph or in MISP of 2026-10-22 names any of the three.",
+   "date": "2026-10-22",
    "status": "proposed"
   }
  ],

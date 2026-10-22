@@ -1149,7 +1149,7 @@ class TestCommittedReference:
         # 2026-10-17: medusa merged into ATT&CK's Medusa Group (was never_merge); three more reviewed merges
         assert gen.resolve(index, "medusa").actor == "medusa group"
         assert gen.resolve(index, "blindeagle").actor == "apt-c-36"
-        assert gen.resolve(index, "agenda").actor == "qilin"
+        assert gen.resolve(index, "agenda").actor == "water galura"  # 2026-10-22, was the actor 'qilin'
         assert gen.resolve(index, "callisto").actor == "star blizzard"
         assert gen.resolve(index, "famous chollima").how == "never_merge"
         assert gen.resolve(index, "silverfox").actor == "silver fox"
@@ -1182,3 +1182,54 @@ class TestCommittedReference:
         # which malpedia also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
         for name in ("kraken", "osiris", "nitrogen", "morpheus"):
             assert gen.resolve(index, name).how == "unresolved", name
+
+    def test_decisions_of_2026_10_22(self, gen, committed, committed_overrides):
+        # Taken before the fresh baseline: the OTX collector decides with the reference, at collection time,
+        # whether a pulse names one actor or several.
+        by_key = {a["key"]: a for a in committed["actors"]}
+        index = gen.build_index(committed)
+        # Spelling variants and designations of actors the reference holds.
+        for name, actor in (
+            ("samba spider", "sambaspider"),
+            ("marko polo", "markopolo"),
+            ("ta-558", "ta558"),
+            ("i-soon", "houndstooth typhoon"),
+            ("apt-c-13", "sandworm team"),
+            ("apt-c-53", "gamaredon group"),
+            ("apt-c-55", "kimsuky"),
+            ("ta4557/fin6", "fin6"),
+        ):
+            assert gen.resolve(index, name).actor == actor, name
+            assert by_key[actor]["synonym_origins"]["override"].count(name) == 1, name
+        # Qilin and its earlier name Agenda are names of Water Galura (G1050), the operators ATT&CK names;
+        # the merge replaces the actor 'qilin' that a decision of 2026-10-17 created.
+        assert "qilin" not in by_key
+        assert by_key["water galura"]["mitre_attack"] == "G1050"
+        assert {"qilin", "agenda"} <= set(by_key["water galura"]["synonym_origins"]["override"])
+        assert gen.resolve(index, "qilin").actor == gen.resolve(index, "agenda").actor == "water galura"
+        qilin = [d for d in committed_overrides["merge"] if "qilin" in d["names"] or d["into"] == "qilin"]
+        assert [(d["names"], d["into"], d["status"]) for d in qilin] == [
+            (["qilin", "agenda"], "water galura", "accepted")
+        ]
+        assert not [d for d in committed_overrides["canonical_name"] if d["key"] == "qilin"]
+        # The threat-actor galaxy's 'Cold River' record joins Star Blizzard by a spacing variant of COLDRIVER;
+        # the never_merge takes its three names away and leaves the record joined.
+        star = by_key["star blizzard"]
+        for name in ("cold river", "nahr elbard", "nahr el bared"):
+            assert name not in star["synonyms"], name
+            assert gen.resolve(index, name).how == "never_merge", name
+        assert gen.resolve(index, "coldriver").actor == "star blizzard"
+        assert gen.resolve(index, "cold relic").actor == "star blizzard"
+        assert "threat-actor/7d99d2f7-adf0-44e4-9044-d18ff6842a16" in star["records"]
+        pairs = {(p["name"], p["actor"]) for p in committed["never_merge_pairs"]}
+        assert {
+            ("cold river", "star blizzard"),
+            ("nahr elbard", "star blizzard"),
+            ("nahr el bared", "star blizzard"),
+        } <= pairs
+        # Not merged: the galaxies link the Cuba ransomware operation to two actors of the reference.
+        assert gen.resolve(index, "cuba ransomware gang").how == "unresolved"
+        assert gen.resolve(index, "tropical scorpius").how == "ambiguous"
+        # Actors created by override decisions: 29 ransomware operations (2026-10-20), 8 OTX-only actors (2026-10-15).
+        created = [a["key"] for a in committed["actors"] if a["origins"] == ["override"]]
+        assert len(created) == 37
