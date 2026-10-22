@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
- "version": "2026.10.20",
- "generated_at": "2026-10-20",
+ "version": "2026.10.22",
+ "generated_at": "2026-10-22",
  "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged.",
  "generator": "scripts/build_canonical_threat_actors.py",
  "key_normalisation": "NFC, trimmed, lower-case (node_identity.canonicalize_merge_key for ThreatActor)",
@@ -93,8 +93,8 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "d888d560c75186db24d044af133bc80b388a05a446b364fa0a33d77dc2d01837",
-   "decisions": 101
+   "sha256": "c918be0b87d624e9a920d3bf17fb9500a9173a3bb345b581b67a8eaeadead81c",
+   "decisions": 110
   }
  ],
  "attribution": [
@@ -118,10 +118,10 @@
   "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name."
  ],
  "counts": {
-  "actors": 1167,
+  "actors": 1166,
   "attack_groups": 191,
-  "synonyms": 4478,
-  "ambiguous": 77
+  "synonyms": 4484,
+  "ambiguous": 80
  },
  "actors": [
   {
@@ -9613,6 +9613,7 @@
     "skeleton spider team",
     "squid comet",
     "ta4557",
+    "ta4557/fin6",
     "taal",
     "taal group",
     "taal team",
@@ -9648,6 +9649,9 @@
      "magecart group 6",
      "skeleton spider",
      "taal"
+    ],
+    "override": [
+     "ta4557/fin6"
     ],
     "suffix_rule": [
      "camouflage tempest group",
@@ -10336,6 +10340,7 @@
     "actinium",
     "actinium group",
     "actinium team",
+    "apt-c-53",
     "aqua blizzard",
     "aqua blizzard group",
     "aqua blizzard team",
@@ -10411,6 +10416,7 @@
      "shuckworm"
     ],
     "override": [
+     "apt-c-53",
      "gamaredon"
     ],
     "suffix_rule": [
@@ -12494,6 +12500,7 @@
     "hassium",
     "houndstooth typhoon group",
     "houndstooth typhoon team",
+    "i-soon",
     "isoon"
    ],
    "synonym_origins": {
@@ -12508,6 +12515,9 @@
      "dragnet panda",
      "hassium",
      "isoon"
+    ],
+    "override": [
+     "i-soon"
     ],
     "suffix_rule": [
      "houndstooth typhoon group",
@@ -13677,6 +13687,7 @@
     "threat-actor/bcaaad6f-0597-4b89-b69b-84a6be2b7bc3"
    ],
    "synonyms": [
+    "apt-c-55",
     "apt43",
     "apt43 group",
     "apt43 team",
@@ -13762,6 +13773,9 @@
     ],
     "mitre_revoked": [
      "stolen pencil"
+    ],
+    "override": [
+     "apt-c-55"
     ],
     "suffix_rule": [
      "apt43 group",
@@ -15548,10 +15562,14 @@
     "threat-actor/c1e2121a-84c9-4fd0-99ef-917ded9cb3e1"
    ],
    "synonyms": [
+    "marko polo",
     "markopolo group",
     "markopolo team"
    ],
    "synonym_origins": {
+    "override": [
+     "marko polo"
+    ],
     "suffix_rule": [
      "markopolo group",
      "markopolo team"
@@ -19313,23 +19331,6 @@
    }
   },
   {
-   "name": "qilin",
-   "key": "qilin",
-   "mitre_attack": null,
-   "origins": [
-    "override"
-   ],
-   "records": [],
-   "synonyms": [
-    "agenda"
-   ],
-   "synonym_origins": {
-    "override": [
-     "agenda"
-    ]
-   }
-  },
-  {
    "name": "QTFY",
    "key": "qtfy",
    "mitre_attack": null,
@@ -20533,10 +20534,14 @@
     "threat-actor/0b71d2db-93fe-49b5-a9fd-7f8c94b86637"
    ],
    "synonyms": [
+    "samba spider",
     "sambaspider group",
     "sambaspider team"
    ],
    "synonym_origins": {
+    "override": [
+     "samba spider"
+    ],
     "suffix_rule": [
      "sambaspider group",
      "sambaspider team"
@@ -20650,6 +20655,7 @@
     "threat-actor/f512de42-f76b-40d2-9923-59e7dbdfec35"
    ],
    "synonyms": [
+    "apt-c-13",
     "apt44",
     "apt44 group",
     "apt44 team",
@@ -20747,6 +20753,7 @@
      "voodoo bear"
     ],
     "override": [
+     "apt-c-13",
      "sandworm"
     ],
     "suffix_rule": [
@@ -22588,14 +22595,11 @@
     "callisto group",
     "callisto team",
     "cold relic",
-    "cold river",
     "coldriver",
     "coldriver group",
     "coldriver team",
     "gossamer bear",
     "iron frontier",
-    "nahr el bared",
-    "nahr elbard",
     "reuse team",
     "seaborgium",
     "seaborgium group",
@@ -22622,11 +22626,8 @@
      "blue callisto",
      "bluecharlie",
      "cold relic",
-     "cold river",
      "gossamer bear",
      "iron frontier",
-     "nahr el bared",
-     "nahr elbard",
      "tag-53",
      "unc4057"
     ],
@@ -25368,10 +25369,14 @@
     "threat-actor/e1e70539-8916-45c2-9b01-891c1c5bd8a1"
    ],
    "synonyms": [
+    "ta-558",
     "ta558 group",
     "ta558 team"
    ],
    "synonym_origins": {
+    "override": [
+     "ta-558"
+    ],
     "suffix_rule": [
      "ta558 group",
      "ta558 team"
@@ -30611,9 +30616,11 @@
     "mitre-intrusion-set/be8847e0-9512-45db-895e-f871ab6d3820"
    ],
    "synonyms": [
+    "agenda",
     "gold feather",
     "gold feather group",
     "gold feather team",
+    "qilin",
     "water galura group",
     "water galura team"
    ],
@@ -30623,6 +30630,10 @@
     ],
     "mitre_loaded": [
      "gold feather"
+    ],
+    "override": [
+     "agenda",
+     "qilin"
     ],
     "suffix_rule": [
      "gold feather group",
@@ -32026,6 +32037,23 @@
    }
   },
   {
+   "key": "cold river",
+   "actors": [
+    "star blizzard"
+   ],
+   "origins": {
+    "star blizzard": [
+     "misp_galaxy:threat-actor"
+    ]
+   },
+   "never_merge": {
+    "reason": "Not merged: the threat-actor galaxy's record 'Cold River' (synonyms Nahr Elbard and Nahr el bared) has one reference, a report on the Agent_Drable implant, which malpedia lists as a synonym of the DNSpionage malware. The record describes an actor that uses DNS subdomain hijacking, certificate spoofing and tunnelled command-and-control traffic, and it has no galaxy relation to Star Blizzard (G1033) or to the threat-actor galaxy's Callisto record. The build joins it to Star Blizzard only because 'Cold River' is a spacing variant of COLDRIVER, an ATT&CK alias of G1033. No Star Blizzard or Callisto record in any galaxy lists the three names. The names are kept away from Star Blizzard and resolve to no actor. COLDRIVER and COLD RELIC, which the Callisto record lists, stay synonyms of Star Blizzard. No OTX report on the graph or in MISP of 2026-10-22 names any of the three.",
+    "date": "2026-10-22",
+    "status": "proposed",
+    "actor": "star blizzard"
+   }
+  },
+  {
    "key": "comment",
    "actors": [
     "apt1"
@@ -32548,6 +32576,40 @@
     "salmon typhoon": [
      "misp_galaxy:microsoft-activity-group"
     ]
+   }
+  },
+  {
+   "key": "nahr el bared",
+   "actors": [
+    "star blizzard"
+   ],
+   "origins": {
+    "star blizzard": [
+     "misp_galaxy:threat-actor"
+    ]
+   },
+   "never_merge": {
+    "reason": "Not merged: the threat-actor galaxy's record 'Cold River' (synonyms Nahr Elbard and Nahr el bared) has one reference, a report on the Agent_Drable implant, which malpedia lists as a synonym of the DNSpionage malware. The record describes an actor that uses DNS subdomain hijacking, certificate spoofing and tunnelled command-and-control traffic, and it has no galaxy relation to Star Blizzard (G1033) or to the threat-actor galaxy's Callisto record. The build joins it to Star Blizzard only because 'Cold River' is a spacing variant of COLDRIVER, an ATT&CK alias of G1033. No Star Blizzard or Callisto record in any galaxy lists the three names. The names are kept away from Star Blizzard and resolve to no actor. COLDRIVER and COLD RELIC, which the Callisto record lists, stay synonyms of Star Blizzard. No OTX report on the graph or in MISP of 2026-10-22 names any of the three.",
+    "date": "2026-10-22",
+    "status": "proposed",
+    "actor": "star blizzard"
+   }
+  },
+  {
+   "key": "nahr elbard",
+   "actors": [
+    "star blizzard"
+   ],
+   "origins": {
+    "star blizzard": [
+     "misp_galaxy:threat-actor"
+    ]
+   },
+   "never_merge": {
+    "reason": "Not merged: the threat-actor galaxy's record 'Cold River' (synonyms Nahr Elbard and Nahr el bared) has one reference, a report on the Agent_Drable implant, which malpedia lists as a synonym of the DNSpionage malware. The record describes an actor that uses DNS subdomain hijacking, certificate spoofing and tunnelled command-and-control traffic, and it has no galaxy relation to Star Blizzard (G1033) or to the threat-actor galaxy's Callisto record. The build joins it to Star Blizzard only because 'Cold River' is a spacing variant of COLDRIVER, an ATT&CK alias of G1033. No Star Blizzard or Callisto record in any galaxy lists the three names. The names are kept away from Star Blizzard and resolve to no actor. COLDRIVER and COLD RELIC, which the Callisto record lists, stay synonyms of Star Blizzard. No OTX report on the graph or in MISP of 2026-10-22 names any of the three.",
+    "date": "2026-10-22",
+    "status": "proposed",
+    "actor": "star blizzard"
    }
   },
   {
@@ -33137,10 +33199,31 @@
  ],
  "never_merge_pairs": [
   {
+   "name": "cold river",
+   "actor": "star blizzard",
+   "reason": "Not merged: the threat-actor galaxy's record 'Cold River' (synonyms Nahr Elbard and Nahr el bared) has one reference, a report on the Agent_Drable implant, which malpedia lists as a synonym of the DNSpionage malware. The record describes an actor that uses DNS subdomain hijacking, certificate spoofing and tunnelled command-and-control traffic, and it has no galaxy relation to Star Blizzard (G1033) or to the threat-actor galaxy's Callisto record. The build joins it to Star Blizzard only because 'Cold River' is a spacing variant of COLDRIVER, an ATT&CK alias of G1033. No Star Blizzard or Callisto record in any galaxy lists the three names. The names are kept away from Star Blizzard and resolve to no actor. COLDRIVER and COLD RELIC, which the Callisto record lists, stay synonyms of Star Blizzard. No OTX report on the graph or in MISP of 2026-10-22 names any of the three.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
    "name": "famous chollima",
    "actor": "wagemole",
    "reason": "Not merged: the threat-actor galaxy lists Famous Chollima as a synonym of Wagemole, a vendor equivalence that is not universally accepted (both name overlapping North Korean IT-worker and fake-interview activity). A wrong merge is worse than a missed one.",
    "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "name": "nahr el bared",
+   "actor": "star blizzard",
+   "reason": "Not merged: the threat-actor galaxy's record 'Cold River' (synonyms Nahr Elbard and Nahr el bared) has one reference, a report on the Agent_Drable implant, which malpedia lists as a synonym of the DNSpionage malware. The record describes an actor that uses DNS subdomain hijacking, certificate spoofing and tunnelled command-and-control traffic, and it has no galaxy relation to Star Blizzard (G1033) or to the threat-actor galaxy's Callisto record. The build joins it to Star Blizzard only because 'Cold River' is a spacing variant of COLDRIVER, an ATT&CK alias of G1033. No Star Blizzard or Callisto record in any galaxy lists the three names. The names are kept away from Star Blizzard and resolve to no actor. COLDRIVER and COLD RELIC, which the Callisto record lists, stay synonyms of Star Blizzard. No OTX report on the graph or in MISP of 2026-10-22 names any of the three.",
+   "date": "2026-10-22",
+   "status": "proposed"
+  },
+  {
+   "name": "nahr elbard",
+   "actor": "star blizzard",
+   "reason": "Not merged: the threat-actor galaxy's record 'Cold River' (synonyms Nahr Elbard and Nahr el bared) has one reference, a report on the Agent_Drable implant, which malpedia lists as a synonym of the DNSpionage malware. The record describes an actor that uses DNS subdomain hijacking, certificate spoofing and tunnelled command-and-control traffic, and it has no galaxy relation to Star Blizzard (G1033) or to the threat-actor galaxy's Callisto record. The build joins it to Star Blizzard only because 'Cold River' is a spacing variant of COLDRIVER, an ATT&CK alias of G1033. No Star Blizzard or Callisto record in any galaxy lists the three names. The names are kept away from Star Blizzard and resolve to no actor. COLDRIVER and COLD RELIC, which the Callisto record lists, stay synonyms of Star Blizzard. No OTX report on the graph or in MISP of 2026-10-22 names any of the three.",
+   "date": "2026-10-22",
    "status": "proposed"
   },
   {

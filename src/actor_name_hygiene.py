@@ -23,6 +23,17 @@ Names reaching the graph are later lower-cased, NFC-normalised and trimmed
 by ``node_identity.canonicalize_merge_key`` — this module therefore keeps
 the caller's case and only trims / NFC-normalises / collapses whitespace.
 
+A group whose common name is a country (the Cuba ransomware operation) is
+never kept under the bare country name: no name is taken out of the country
+lists for an actor. A source writes such a group under a qualified name that
+passes these rules (``"Cuba Ransomware Gang"``). That name counts as itself
+unless the canonical threat-actor reference gives it to an actor, through a
+galaxy synonym or a ``merge`` decision of its overrides file
+(``docs/RUNBOOK.md``, "Canonical threat-actor reference").
+:func:`dropped_geopolitical_names` returns the country and state names and
+nationality adjectives the rules drop from a name, so the OTX collector can
+log those its adversary fields carried in a run.
+
 Design rule: **prefer not splitting / not flagging over doing so wrongly**.
 A real actor name that slips through unchanged is a cosmetic problem; a real
 actor name that gets split in two or dropped is data loss. Every list below
@@ -33,6 +44,7 @@ Public API
 ``split_composite_actor_name(name) -> list[str]``
 ``is_generic_actor_name(name) -> bool``
 ``clean_actor_names(name) -> list[str]``
+``dropped_geopolitical_names(name) -> list[str]``
 ``strip_trailing_parenthetical(name) -> str``
 """
 
@@ -259,8 +271,11 @@ def _names(text: str) -> frozenset:
 # ``"us"``, ``"n. korea"`` = ``"n korea"``, ``"north-korea"`` = ``"north korea"``), ``&`` as ``and`` and a
 # leading ``"the "`` ignored (``"the netherlands"``). No entry of either list is a name the canonical
 # threat-actor reference resolves (tests/test_actor_name_hygiene.py checks it). Rule (c) does not
-# consult the reference: an actor whose whole name is a country or state (a group named ``"cuba"``) is
-# kept by taking that name out of these lists, not by adding it to the reference.
+# consult the reference, and no name is taken out of these lists for an actor: a group whose common
+# name is a country or state is written under a qualified name (``"Cuba Ransomware Gang"``, not
+# ``"cuba"``), which counts as itself unless the reference gives it to an actor (a galaxy synonym or a
+# merge decision of its overrides file). A bare country name is dropped; ``dropped_geopolitical_names``
+# lists the names dropped this way.
 #
 # COUNTRY_AND_STATE_NAMES: the ISO 3166-1 short names (natural word order; accented names also
 # without accents), the long and short forms of states, constituent countries, disputed and occupied
@@ -470,6 +485,54 @@ def _try_and_split(fragment: str) -> List[str]:
     return sides
 
 
+def _split_fragments(name: str) -> List[str]:
+    """Steps 1-5 of :func:`split_composite_actor_name`: the fragments of ``name``, before generic
+    fragments and duplicates are dropped. :func:`clean_actor_names` and
+    :func:`dropped_geopolitical_names` both start from these fragments, so they cannot disagree on
+    what a fragment is."""
+    if not isinstance(name, str):
+        return []
+    normalised = _normalise(name)
+    if not normalised:
+        return []
+    # 2026-10-18: the inverted "Korea, North" is one country name, not "Korea" and "North".
+    normalised = _KOREA_INVERTED_RE.sub(lambda m: f"{m.group('side')} {m.group('korea')}", normalised)
+
+    fragments: List[str] = []
+    for raw in _LIST_SEPARATOR_RE.split(normalised):
+        frag = _LEADING_CONJUNCTION_RE.sub("", raw.strip())
+        frag = _TRAILING_CONJUNCTION_RE.sub("", frag).strip()
+        if not frag:
+            continue
+        # Strip BEFORE the and-split (so "mois (ministry of intelligence and security)" is never
+        # split inside the parenthesis) and AGAIN on every side after it (PR #144:
+        # "apt28 (fancy bear) and apt29 (cozy bear)" kept both parentheticals).
+        frag = strip_trailing_parenthetical(frag)
+        fragments.extend(strip_trailing_parenthetical(side) for side in _try_and_split(frag))
+
+    return [f for f in (f.strip() for f in fragments) if len(f) > 1]
+
+
+def _dedupe_casefold(names: List[str]) -> List[str]:
+    """Drop case-insensitive duplicates, keeping the first spelling and the order."""
+    seen: set = set()
+    out: List[str] = []
+    for name in names:
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _is_country_or_state_name(name: str) -> bool:
+    """Rule (c) of :func:`is_generic_actor_name`: the whole name is a country or state, or a
+    nationality adjective (edge punctuation ignored)."""
+    canonical = _normalise(name).lower()
+    return _is_geopolitical_name(canonical) or _is_geopolitical_name(canonical.strip(_EDGE_PUNCT))
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -502,40 +565,10 @@ def split_composite_actor_name(name: str) -> List[str]:
 
     Case is preserved — ``canonicalize_merge_key`` lower-cases at MERGE time.
     """
-    if not isinstance(name, str):
-        return []
-    normalised = _normalise(name)
-    if not normalised:
-        return []
-    # 2026-10-18: the inverted "Korea, North" is one country name, not "Korea" and "North".
-    normalised = _KOREA_INVERTED_RE.sub(lambda m: f"{m.group('side')} {m.group('korea')}", normalised)
-
-    fragments: List[str] = []
-    for raw in _LIST_SEPARATOR_RE.split(normalised):
-        frag = _LEADING_CONJUNCTION_RE.sub("", raw.strip())
-        frag = _TRAILING_CONJUNCTION_RE.sub("", frag).strip()
-        if not frag:
-            continue
-        # Strip BEFORE the and-split (so "mois (ministry of intelligence and security)" is never
-        # split inside the parenthesis) and AGAIN on every side after it (Bugbot on PR #144:
-        # "apt28 (fancy bear) and apt29 (cozy bear)" kept both parentheticals).
-        frag = strip_trailing_parenthetical(frag)
-        fragments.extend(strip_trailing_parenthetical(side) for side in _try_and_split(frag))
-
-    fragments = [f for f in (f.strip() for f in fragments) if len(f) > 1]
-
+    fragments = _split_fragments(name)
     if len(fragments) > 1:
         fragments = [f for f in fragments if not is_generic_actor_name(f)]
-
-    seen: set = set()
-    out: List[str] = []
-    for frag in fragments:
-        key = frag.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(frag)
-    return out
+    return _dedupe_casefold(fragments)
 
 
 def is_generic_actor_name(name: str) -> bool:
@@ -587,7 +620,7 @@ def is_generic_actor_name(name: str) -> bool:
     if core in GENERIC_ACTOR_PHRASES or is_placeholder_name(core):
         return True
     # (c) a country or state, or a nationality adjective, as the whole name.
-    if _is_geopolitical_name(canonical) or _is_geopolitical_name(core):
+    if _is_country_or_state_name(canonical):
         return True
     space_words = core.split(" ")
 
@@ -620,6 +653,27 @@ def clean_actor_names(name: str) -> List[str]:
     return [n for n in split_composite_actor_name(name) if not is_generic_actor_name(n)]
 
 
+def dropped_geopolitical_names(name: str) -> List[str]:
+    """The fragments of ``name`` that :func:`clean_actor_names` drops because they are, as the whole
+    fragment, a country or state or a nationality adjective (rule (c) of :func:`is_generic_actor_name`).
+
+    Computed from the same fragments as :func:`clean_actor_names`, so no returned name is one of its
+    names: ``"APT37, North Korea"`` -> ``["North Korea"]``, ``"Russia"`` -> ``["Russia"]``,
+    ``"Korea, North"`` -> ``["North Korea"]``. A fragment that yields a name drops nothing:
+    ``"North Korea (APT37)"`` is the name ``APT37`` and ``"Lazarus Group (North Korea)"`` the name
+    ``Lazarus Group``, so both return ``[]``; a description (``"russian hackers"``) is not a country
+    name and is not returned either. Case is kept, case-insensitive duplicates are dropped and the
+    order is kept. Non-string input -> ``[]``.
+
+    The OTX collector logs the distinct names its adversary fields lost this way in a run, so that a
+    group whose common name is a country can be noticed (``docs/RUNBOOK.md``, "Canonical threat-actor
+    reference").
+    """
+    return _dedupe_casefold(
+        [f for f in _split_fragments(name) if is_generic_actor_name(f) and _is_country_or_state_name(f)]
+    )
+
+
 __all__ = [
     "AND_SPLIT_MIN_SIDE_LEN",
     "AND_SPLIT_PROTECTED_PREFIXES",
@@ -632,6 +686,7 @@ __all__ = [
     "GENERIC_SIGNAL_PATTERNS",
     "NATIONALITY_ADJECTIVES",
     "clean_actor_names",
+    "dropped_geopolitical_names",
     "is_generic_actor_name",
     "split_composite_actor_name",
     "strip_trailing_parenthetical",

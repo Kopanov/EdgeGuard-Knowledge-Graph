@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import requests
 
 # Import MISP writer
-from actor_name_hygiene import clean_actor_names, strip_trailing_parenthetical
+from actor_name_hygiene import clean_actor_names, dropped_geopolitical_names, strip_trailing_parenthetical
 from attack_software_names import split_attack_software_id
 
 # Import baseline checkpoint (incremental cursor only — no page-based checkpointing)
@@ -227,6 +227,18 @@ def _adversaries_not_named_as_pulse_families(
         else:
             kept.append(name)
     return kept, dropped
+
+
+_MAX_LOGGED_PULSES_PER_NAME = 3
+
+
+def _dropped_name_with_pulses(name: str, pulse_ids: List[str]) -> str:
+    """``"north korea (2 pulses: p1, p2)"``: a name of the ``[ACTOR-NAMES]`` country line with the number
+    of pulses that carried it and the first ``_MAX_LOGGED_PULSES_PER_NAME`` of their ids (2026-10-22)."""
+    shown = ", ".join(pulse_ids[:_MAX_LOGGED_PULSES_PER_NAME])
+    more = ", …" if len(pulse_ids) > _MAX_LOGGED_PULSES_PER_NAME else ""
+    noun = "pulse" if len(pulse_ids) == 1 else "pulses"
+    return f"{name} ({len(pulse_ids)} {noun}: {shown}{more})"
 
 
 def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> None:
@@ -665,6 +677,12 @@ class OTXCollector:
             # number of pulses that left one out.
             adversaries_named_as_family: Set[str] = set()
             pulses_naming_an_adversary_as_family = 0
+            # 2026-10-22: country and state names and nationality adjectives the name hygiene dropped
+            # from adversary fields (rule (c), ``dropped_geopolitical_names``), per run: name -> the
+            # pulses that carried it, and the number of such pulses. Logged once, below, so that a group
+            # whose common name is a country can be noticed and written under a qualified name.
+            geopolitical_adversary_names: Dict[str, List[str]] = {}
+            pulses_with_a_geopolitical_adversary_name = 0
 
             to_process = pulses if limit is None else pulses[:limit]
             for pulse in to_process:
@@ -770,6 +788,11 @@ class OTXCollector:
                 if _named_as_family:
                     adversaries_named_as_family.update(n.lower() for n in _named_as_family)
                     pulses_naming_an_adversary_as_family += 1
+                _geopolitical_names = dropped_geopolitical_names(pulse_adversary or "")
+                if _geopolitical_names:
+                    pulses_with_a_geopolitical_adversary_name += 1
+                    for _dropped in {n.lower() for n in _geopolitical_names}:
+                        geopolitical_adversary_names.setdefault(_dropped, []).append(str(pulse.get("id") or "?"))
                 pulse_several_actors = len(actor_identities(pulse_all_actor_names, actor_reference)) > 1
                 pulse_mark = [str(pulse.get("id"))] if pulse_several_actors and pulse.get("id") else []
                 pulse_actor_names = pulse_all_actor_names[:_MAX_PULSE_ADVERSARIES]
@@ -938,6 +961,18 @@ class OTXCollector:
                     len(adversaries_named_as_family),
                     pulses_naming_an_adversary_as_family,
                     ", ".join(sorted(adversaries_named_as_family)),
+                )
+            if geopolitical_adversary_names:
+                logger.info(
+                    "[ACTOR-NAMES] OTX: %d distinct country, state or nationality name(s) in %d pulse(s), dropped "
+                    "from the adversary field by the actor-name hygiene (never actor names; a group named after a "
+                    "country needs a qualified name): %s",
+                    len(geopolitical_adversary_names),
+                    pulses_with_a_geopolitical_adversary_name,
+                    "; ".join(
+                        _dropped_name_with_pulses(name, geopolitical_adversary_names[name])
+                        for name in sorted(geopolitical_adversary_names)
+                    ),
                 )
             if non_file_hashes:
                 logger.info(

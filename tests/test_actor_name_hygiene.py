@@ -1,7 +1,7 @@
 """Tests for ``src/actor_name_hygiene.py`` — pure threat-actor name hygiene.
 
-Covers the three public helpers (``split_composite_actor_name``,
-``is_generic_actor_name``, ``clean_actor_names``) against the junk observed
+Covers the public helpers (``split_composite_actor_name``,
+``is_generic_actor_name``, ``clean_actor_names``, ``dropped_geopolitical_names``) against the junk observed
 in the deployed graph (composite OTX adversary strings, generic descriptions)
 plus a regression table of real-looking names that must pass through
 unchanged — the module's design rule is "prefer not splitting / not
@@ -10,6 +10,7 @@ flagging over doing so wrongly".
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ from actor_name_hygiene import (  # noqa: E402
     AND_SPLIT_MIN_SIDE_LEN,
     GENERIC_LAST_WORDS,
     clean_actor_names,
+    dropped_geopolitical_names,
     is_generic_actor_name,
     split_composite_actor_name,
 )
@@ -377,6 +379,86 @@ def test_real_names_pass_through_unchanged(name):
 # ===========================================================================
 
 
+# Country and state names and nationality adjectives on their own (rule (c)).
+COUNTRY_STATE_AND_NATIONALITY_NAMES = (
+    # ISO 3166 short names, any case, edge punctuation tolerated.
+    "north korea",
+    "North Korea",
+    "russia",
+    "China",
+    "iran",
+    "Israel.",
+    "(china)",
+    "viet nam",
+    "türkiye",
+    "turkey",
+    "côte d'ivoire",
+    "united states of america",
+    "guinea-bissau",
+    # Long and short state forms.
+    "dprk",
+    "DPRK",
+    "prc",
+    "roc",
+    "usa",
+    "us",
+    "U.S.",
+    "U.S.A.",
+    "uk",
+    "U.K.",
+    "uae",
+    "ussr",
+    "russian federation",
+    "people's republic of china",
+    "people’s republic of china",  # typographic apostrophe
+    "democratic people's republic of korea",
+    "islamic republic of iran",
+    "republic of korea",
+    "south korea",
+    "korea",
+    "taiwan",
+    "palestine",
+    "gaza",
+    "crimea",
+    "kosovo",
+    "great britain",
+    "soviet union",
+    # Names with " and " are not split into two halves.
+    "bosnia and herzegovina",
+    "Trinidad and Tobago",
+    # A nationality adjective on its own.
+    "russian",
+    "Chinese",
+    "iranian",
+    "north korean",
+    "korean",
+    "israeli",
+    "ukrainian",
+    "belarusian",
+    # Spellings compared without apostrophes, dots or hyphens.
+    "peoples republic of china",
+    "people\u02bcs republic of china",  # modifier-letter apostrophe
+    "democratic peoples republic of korea",
+    "N. Korea",
+    "N.Korea",
+    "North-Korea",
+    "u. s.",
+    # Long state forms and adjectives.
+    "state of israel",
+    "kingdom of saudi arabia",
+    "republic of türkiye",
+    "republic of turkey",
+    "socialist republic of vietnam",
+    "republic of ireland",
+    "Lao PDR",
+    "persia",
+    "persian",
+    "kurdish",
+    "azeri",
+    "belarussian",
+)
+
+
 class TestCountryAndStateNames:
     """A country or state, or a nationality adjective on its own, says where an actor is said to be
     from, never which actor it is: OTX adversary fields list "APT37, North Korea"."""
@@ -398,86 +480,7 @@ class TestCountryAndStateNames:
     def test_country_names_inside_composites_never_leave_fragments(self, raw, expected):
         assert clean_actor_names(raw) == expected
 
-    @pytest.mark.parametrize(
-        "name",
-        [
-            # ISO 3166 short names, any case, edge punctuation tolerated.
-            "north korea",
-            "North Korea",
-            "russia",
-            "China",
-            "iran",
-            "Israel.",
-            "(china)",
-            "viet nam",
-            "türkiye",
-            "turkey",
-            "côte d'ivoire",
-            "united states of america",
-            "guinea-bissau",
-            # Long and short state forms.
-            "dprk",
-            "DPRK",
-            "prc",
-            "roc",
-            "usa",
-            "us",
-            "U.S.",
-            "U.S.A.",
-            "uk",
-            "U.K.",
-            "uae",
-            "ussr",
-            "russian federation",
-            "people's republic of china",
-            "people’s republic of china",  # typographic apostrophe
-            "democratic people's republic of korea",
-            "islamic republic of iran",
-            "republic of korea",
-            "south korea",
-            "korea",
-            "taiwan",
-            "palestine",
-            "gaza",
-            "crimea",
-            "kosovo",
-            "great britain",
-            "soviet union",
-            # Names with " and " are not split into two halves.
-            "bosnia and herzegovina",
-            "Trinidad and Tobago",
-            # A nationality adjective on its own.
-            "russian",
-            "Chinese",
-            "iranian",
-            "north korean",
-            "korean",
-            "israeli",
-            "ukrainian",
-            "belarusian",
-            # Spellings compared without apostrophes, dots or hyphens.
-            "peoples republic of china",
-            "people\u02bcs republic of china",  # modifier-letter apostrophe
-            "democratic peoples republic of korea",
-            "N. Korea",
-            "N.Korea",
-            "North-Korea",
-            "u. s.",
-            # Long state forms and adjectives.
-            "state of israel",
-            "kingdom of saudi arabia",
-            "republic of türkiye",
-            "republic of turkey",
-            "socialist republic of vietnam",
-            "republic of ireland",
-            "Lao PDR",
-            "persia",
-            "persian",
-            "kurdish",
-            "azeri",
-            "belarussian",
-        ],
-    )
+    @pytest.mark.parametrize("name", COUNTRY_STATE_AND_NATIONALITY_NAMES)
     def test_generic(self, name):
         assert is_generic_actor_name(name) is True, name
         assert clean_actor_names(name) == [], name
@@ -573,3 +576,119 @@ class TestTheCanonicalReferenceIsNeverGeneric:
 
         for name in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES:
             assert name == " ".join(name.lower().split()), name
+
+
+# ===========================================================================
+# dropped_geopolitical_names (2026-10-22)
+# ===========================================================================
+
+
+class TestDroppedGeopoliticalNames:
+    """The country and state names and nationality adjectives that ``clean_actor_names`` drops from a
+    name (rule (c)); the OTX collector logs those of its adversary fields."""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # A country beside the actor.
+            ("APT37, North Korea", ["North Korea"]),
+            ("Lazarus Group; DPRK", ["DPRK"]),
+            ("Kimsuky and North Korea", ["North Korea"]),
+            ("Sandworm, Russia, Russian Federation", ["Russia", "Russian Federation"]),
+            ("apt28, Bosnia and Herzegovina", ["Bosnia and Herzegovina"]),
+            ("APT28 and Bosnia and Herzegovina", ["Bosnia and Herzegovina"]),
+            ("Trinidad & Tobago and APT41", ["Trinidad and Tobago"]),  # rejoined from the "&"-split sides
+            # A country on its own, as the adversary of a group whose common name is that country.
+            ("Russia", ["Russia"]),
+            ("Cuba", ["Cuba"]),
+            ("russian", ["russian"]),
+            ("Falkland Islands (Malvinas)", ["Falkland Islands (Malvinas)"]),
+            # The inverted form is one name.
+            ("Korea, North", ["North Korea"]),
+            ("APT37, Korea, North", ["North Korea"]),
+            # Case-insensitive duplicates once, first spelling and order kept.
+            ("DPRK, dprk, North Korea", ["DPRK", "North Korea"]),
+            # A fragment that yields a name drops nothing.
+            ("North Korea (APT37)", []),
+            ("DPRK (Kimsuky)", []),
+            ("Lazarus Group (North Korea)", []),
+            ("Cuba Ransomware Gang", []),
+            ("cyber army of russia reborn", []),
+            ("APT37", []),
+            # Descriptions and placeholders are dropped, but they are not country names.
+            ("russian hackers", []),
+            ("APT28, unknown", []),
+            ("North Korea (unknown)", []),
+            ("", []),
+        ],
+    )
+    def test_returns_the_country_names_clean_actor_names_drops(self, raw, expected):
+        assert dropped_geopolitical_names(raw) == expected
+
+    def test_non_string_input(self):
+        assert dropped_geopolitical_names(None) == []  # type: ignore[arg-type]
+        assert dropped_geopolitical_names(42) == []  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("name", COUNTRY_STATE_AND_NATIONALITY_NAMES)
+    def test_a_country_name_on_its_own_is_returned_whole(self, name):
+        assert dropped_geopolitical_names(name) == [" ".join(name.split())]
+
+
+def _fixture_inputs() -> list:
+    """Every string this module passes to a hygiene helper: the first argument of each call written
+    with a string literal, every entry of a ``parametrize`` list (the first item of a tuple entry, or
+    the module constant the list names), and ``REAL_ACTOR_NAMES``."""
+    helpers = {
+        "clean_actor_names",
+        "dropped_geopolitical_names",
+        "is_generic_actor_name",
+        "split_composite_actor_name",
+    }
+    found = set(REAL_ACTOR_NAMES)
+
+    def add(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found.add(node.value)
+
+    for node in ast.walk(ast.parse(Path(__file__).read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+        if name in helpers and node.args:
+            add(node.args[0])
+        elif name == "parametrize" and len(node.args) >= 2:
+            values = node.args[1]
+            if isinstance(values, ast.Name):  # a module constant (not FIXTURE_INPUTS, built from this)
+                found.update(v for v in globals().get(values.id, ()) if isinstance(v, str))
+                continue
+            for entry in getattr(values, "elts", []):
+                add(entry.elts[0] if isinstance(entry, ast.Tuple) and entry.elts else entry)
+    return sorted(found)
+
+
+FIXTURE_INPUTS = _fixture_inputs()
+
+
+def test_every_fixture_of_this_module_is_checked():
+    assert len(FIXTURE_INPUTS) > 250
+    for sample in ("APT37, North Korea", "North Korea (APT37)", "russian hackers", "Mustang Panda", "u. s."):
+        assert sample in FIXTURE_INPUTS, sample
+
+
+@pytest.mark.parametrize("raw", FIXTURE_INPUTS)
+def test_dropped_geopolitical_names_agrees_with_clean_actor_names(raw):
+    """On every fixture of this module: no dropped name is a name ``clean_actor_names`` keeps, every
+    dropped name is a country, state or nationality name that ``clean_actor_names`` drops on its own,
+    the dropped names together yield no name and drop the same names again, and no kept name drops
+    anything."""
+    names = clean_actor_names(raw)
+    dropped = dropped_geopolitical_names(raw)
+    assert not {n.casefold() for n in names} & {d.casefold() for d in dropped}, (names, dropped)
+    for name in dropped:
+        assert is_generic_actor_name(name) is True, name
+        assert clean_actor_names(name) == [], name
+        assert dropped_geopolitical_names(name) == [name], name
+    assert clean_actor_names("; ".join(dropped)) == []
+    assert dropped_geopolitical_names("; ".join(dropped)) == dropped
+    assert all(dropped_geopolitical_names(name) == [] for name in names), "a kept name is no country name"
