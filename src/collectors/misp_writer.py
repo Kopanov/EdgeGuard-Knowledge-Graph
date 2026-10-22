@@ -970,8 +970,8 @@ def _dedup_key(attr_type: Any, value: Any) -> Tuple[Any, Any]:
     """``(type, value)`` key the dedup compares (2026-10-21).
 
     A ``text`` value that reads as an ATT&CK entry is keyed in its current ``<id> - <name>`` form, so
-    the ``<id>: <name>`` values every MISP holds from before the change of 2026-10-20 count as
-    present. Any other attribute keeps its exact ``(type, value)``. Not used by
+    an ``<id>: <name>`` value (the form MISPWriter wrote before 2026-10-20) counts as present. Any
+    other attribute keeps its exact ``(type, value)``. Not used by
     ``_attribute_match_key``: a pushed value is confirmed against what MISP stored for it, exactly.
     """
     if attr_type == "text":
