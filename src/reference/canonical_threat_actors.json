@@ -93,7 +93,7 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "8f3f4102c2e68adf2415f3d469d79dff26fdd579164b8241175b0cb6d366d2cb",
+   "sha256": "d924141f268f77f656bd5bc3dab10b4770d0387fde45264432b1b68e50ba4029",
    "decisions": 110
   }
  ],
