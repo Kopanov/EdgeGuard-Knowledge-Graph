@@ -81,5 +81,17 @@ USER airflow
 COPY requirements-airflow-docker.txt /tmp/requirements-airflow-docker.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-airflow-docker.txt
 
+# 2026-10: Trivy CRITICAL GHSA-6q48-6c7w-9gw2 (certifi bundles emSign root CAs with compromised
+# intermediate CA keys) and GHSA-hq85-5cpj-mr62 (uv's bundled CA store trusts an emSign root), both
+# in packages of the apache/airflow:3.3.2 base, which has no newer 3.3.x tag. Same upgrade-in-place
+# pattern as openssl above:
+# - the prek hook runner (with its own uv) serves Airflow development only and is removed;
+# - pip 26.2.2 vendors certifi 2026.10.19 (pip 26.2.1 vendored 2026.6.17);
+# - certifi and uv in the airflow user's site-packages are upgraded to the fixed releases.
+# The requests and PyMISP calls of the tasks verify TLS against this certifi bundle.
+RUN uv tool uninstall prek \
+ && pip install --no-cache-dir --upgrade "pip>=26.2.2" \
+ && pip install --no-cache-dir --upgrade "certifi>=2026.10.19" "uv>=0.13.4"
+
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["airflow", "standalone"]

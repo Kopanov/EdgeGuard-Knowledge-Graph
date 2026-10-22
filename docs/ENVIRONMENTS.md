@@ -50,8 +50,10 @@ To keep dependencies clean and reproducible, use a dedicated environment per pro
 | Apache Airflow | `Dockerfile.airflow` `FROM apache/airflow:` | `3.3.2-python3.12` | `edgeguard doctor` |
 | PyMISP | `requirements.txt`, `requirements-airflow-docker.txt` | `~=2.4` | `edgeguard doctor` |
 | MISP server | (operator-controlled deploy) | `2.4.x` | `edgeguard doctor` |
+| CA bundle `certifi` | `requirements.txt`, `requirements-airflow-docker.txt`, `pyproject.toml`, `Dockerfile.airflow` | `>=2026.10.19` (earlier releases bundle emSign roots whose intermediate CA keys were compromised, GHSA-6q48-6c7w-9gw2) | `tests/test_pre_refeed_audit.py::test_every_dependency_list_sets_the_certifi_floor`; CI image scan (Trivy) |
+| `pip`, `uv` in the Airflow image | `Dockerfile.airflow` (upgraded on top of the base; the base's `prek` hook runner is removed) | `pip>=26.2.2` (it vendors certifi 2026.10.19, GHSA-6q48-6c7w-9gw2), `uv>=0.13.4` (its bundled CA store, GHSA-hq85-5cpj-mr62) | CI image scan (Trivy) |
 
-The single source of truth for the comparison logic is `src/version_compatibility.py::RECOMMENDED_VERSIONS`. `edgeguard doctor` and `edgeguard validate` capture the actual running versions and warn on drift. A regression test (`tests/test_version_compatibility.py::test_recommended_*_matches_*_pin`) fails CI when a pin file and the recommended-versions table disagree.
+The single source of truth for the comparison logic is `src/version_compatibility.py::RECOMMENDED_VERSIONS`. `edgeguard doctor` and `edgeguard validate` capture the actual running versions and warn on drift. A regression test (`tests/test_version_compatibility.py::test_recommended_*_matches_*_pin`) fails CI when a pin file and the recommended-versions table disagree. The last two rows are not in `RECOMMENDED_VERSIONS`: their test and the CI image scan check them.
 
 ### 2.1 Create a conda environment (recommended)
 
@@ -177,10 +179,11 @@ references the baseline lock.
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-22_
 
 ## History
 
+- 2026-10-22 — Pinned versions list the CA bundle `certifi` (`>=2026.10.19`) and the Airflow image's `pip` and `uv`, upgraded past the emSign CA advisories.
 - 2026-10-17 — Main text describes current behaviour only; version history moved here; heading levels start at the title.
 - 2026-10-17 — Corrected against the code: `EDGEGUARD_ENV` is the fail-closed production gate (`config.is_production_env`: unset, empty, `stage`, `edge` and any value outside dev / development / local / staging / test are production, so the APIs require `EDGEGUARD_API_KEY`); the edge recipe sets the key; suggested values `dev` / `staging` / `prod`; MISP push batch default 500; the baseline lock is held by the `edgeguard_baseline` DAG run (or `run_pipeline.py --baseline`) and makes the scheduled collectors and sync writes skip, max age 172800 s (48 h); Airflow 3.3.2.
 - 2026-10 — Airflow image 3.2.0 → 3.3.2 (security update).

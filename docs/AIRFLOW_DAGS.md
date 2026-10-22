@@ -27,6 +27,8 @@
 
 **Why the 3.3 line:** CI scans the image with `trivy image --severity CRITICAL`, and `CVE-2026-33264` in `apache-airflow` (code execution via unsafe serialized-DAG deserialization) is fixed only from 3.3.0. The 3.3.2 constraints ship PyJWT 2.14.0, anyio 4.15.1, the SFTP provider 6.0.1, snowflake-connector 4.7.3 and `apache-airflow-providers-fab` 3.9.0, which allows Flask 3: the image runs **Flask 3.1.3**, which clears CVE-2026-27205. `requirements.txt` lists only `apache-airflow[postgres]` and `apache-airflow-providers-standard`, neither of which pulls the FAB provider. `pip install -r requirements.txt` therefore installs no Flask, and `pip-audit -r requirements.txt` does not see it. The Docker image bundles FAB (and with it Flask), because the upstream `apache/airflow` image ships the FAB auth manager. The API server is bound to loopback only (`127.0.0.1:8082`), so the web attack surface is not reachable from the network on a production host.
 
+**Packages upgraded on top of the base image.** `Dockerfile.airflow` upgrades in place what the `apache/airflow:3.3.2-python3.12` base ships with a CRITICAL advisory that has a fixed release: the Debian packages `openssl`, `libssl3`, `libgnutls30` and `perl`, and, after the requirements install, `pip` (26.2.2 or later), `certifi` (2026.10.19 or later) and `uv` (0.13.4 or later), whose bundled CA stores trusted the emSign roots of GHSA-6q48-6c7w-9gw2 and GHSA-hq85-5cpj-mr62. It removes the `prek` hook runner, which serves Airflow development only. The tasks' `requests` and PyMISP calls verify TLS against this `certifi` bundle. `requirements.txt`, `requirements-airflow-docker.txt` and `pyproject.toml` also set `certifi>=2026.10.19`, so the `edgeguard-kg` image (REST, GraphQL) and a pip install resolve the fixed bundle as well, and a plain `docker compose build` rebuilds a cached requirements layer that holds an earlier one.
+
 **pandas:** pandas 3 changes how DataFrame XComs are stored (Airflow 3.3.1 release note). The image pins `pandas~=2.2` and no EdgeGuard task stores a DataFrame XCom, so this matters only for a new task that returns a DataFrame.
 
 **JWT secret.** The Airflow 3.x API server fails to start with `The value api_auth/jwt_secret must be set!` when the secret is missing, whatever the auth manager (it signs the `POST /auth/token` and execution-API tokens; this stack uses the Simple auth manager). Generate it once:
@@ -543,7 +545,7 @@ If preflight still fails, fix **reachability** from the Airflow container to **`
 - **`EDGEGUARD_MISP_HTTP_HOST`** sets the HTTP `Host` header when the TLS/SNI name must differ from the URL host (vhost). If you need `Host: localhost` for SSL but redirects break cross-container access, you must fix **redirect targets** in Apache; there is no safe “header only” workaround for bad `Location:` URLs.
 - On **MISP 2.4.124**, `/servers/healthCheck` may be **missing (404)** or **redirect to login (302)**. EdgeGuard’s API probe uses **`allow_redirects=False`** on that URL and then tries **`/servers/getWorkers`** and **`/events/index`** so preflight matches what works with the API key.
 
-**Self-signed MISP HTTPS (`certificate verify failed`):** EdgeGuard defaults to **verifying** TLS (**`EDGEGUARD_SSL_VERIFY`** defaults to **`true`**). For a **dev/lab** MISP with a self-signed cert, set **`EDGEGUARD_SSL_VERIFY=false`** on the **Airflow worker and scheduler** (same as other MISP env vars), then restart/recreate containers. Prefer installing your CA in the image over disabling verify in production. The env name **`SSL_CERT_VERIFY`** is **not** read; optional alias: **`SSL_VERIFY=false`** only if **`EDGEGUARD_SSL_VERIFY`** is unset or empty.
+**Self-signed MISP HTTPS (`certificate verify failed`):** EdgeGuard defaults to **verifying** TLS (**`EDGEGUARD_SSL_VERIFY`** defaults to **`true`**). For a **dev/lab** MISP with a self-signed cert, set **`EDGEGUARD_SSL_VERIFY=false`** on the **Airflow worker and scheduler** (same as other MISP env vars), then restart/recreate containers. In production, serve MISP with a certificate from a public CA: `requests` and PyMISP trust the `certifi` bundle, not the system store, so a CA installed in the image's system store is not used, and `docker-compose.yml` does not forward `REQUESTS_CA_BUNDLE`. The env name **`SSL_CERT_VERIFY`** is **not** read; optional alias: **`SSL_VERIFY=false`** only if **`EDGEGUARD_SSL_VERIFY`** is unset or empty.
 
 ### MISP → Neo4j sync logs **“No events”** while MISP has EdgeGuard events
 
@@ -712,10 +714,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-22_
 
 ## History
 
+- 2026-10-22 — The Airflow image upgrades `pip`, `certifi` and `uv` past the emSign CA advisories (GHSA-6q48-6c7w-9gw2, GHSA-hq85-5cpj-mr62) and removes the `prek` hook runner of the base image; every dependency list sets `certifi>=2026.10.19`; the MISP certificate troubleshooting names the trust store `requests` reads.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1: a sync window without EdgeGuard events fails `run_neo4j_sync` (it was an empty success that moved the sync cursor); `0` disables the guard.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to the current system: change history moved to this section, upgrade procedures to the appendix.

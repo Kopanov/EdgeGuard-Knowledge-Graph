@@ -20,6 +20,7 @@ dependencies = [
     # Core
     "neo4j~=5.27",
     "requests~=2.32",
+    "certifi>=2026.10.19",  # GHSA-6q48-6c7w-9gw2 — same floor as requirements*.txt
     "pandas~=2.2",
     "pyyaml~=6.0",
     "python-dateutil~=2.9",

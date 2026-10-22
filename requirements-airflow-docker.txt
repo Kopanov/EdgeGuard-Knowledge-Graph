@@ -18,6 +18,11 @@ apache-airflow-providers-standard~=1.5
 
 neo4j~=5.27
 requests~=2.32
+# SECURITY (GHSA-6q48-6c7w-9gw2, 2026-10-20): certifi releases before 2026.10.19 bundle
+# emSign root CAs with compromised intermediate CA keys. requests and PyMISP verify TLS
+# against this bundle; the floor also invalidates a cached requirements layer, so a
+# rebuild resolves the fixed bundle.
+certifi>=2026.10.19
 # The apache/airflow:3.3.2 base ships pandas 3.0.5; this pin deliberately
 # brings the image back to the 2.x line that requirements.txt and the test
 # suite use (the DAGs store no DataFrame XComs, so the 3.3.1 pandas-3 XCom

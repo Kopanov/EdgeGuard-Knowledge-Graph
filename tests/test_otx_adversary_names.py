@@ -5,14 +5,17 @@ its decision whether the pulse names several actors, so all three see the same n
 
 * A country or state name, or a nationality adjective on its own, is never an actor name
   (``actor_name_hygiene``, rule (c) of ``is_generic_actor_name``): a pulse on APT37 whose adversary
-  field reads "APT37, North Korea" names one actor.
+  field reads "APT37, North Korea" names one actor. The run logs the distinct names dropped this way
+  (2026-10-22), so that a group whose common name is a country can be noticed.
 * A name the same pulse lists both as adversary and as a malware family is an actor only when the
   canonical threat-actor reference resolves it. On the hosted graph of 2026-10-18, 181 of 859
   ThreatActor names were also Malware names. Reference 2026.10.17 knew 34 of them (Kimsuky, Akira,
   Qilin, Medusa, ...). Reference 2026.10.20 also holds, through override decisions, 29 ransomware
   operations named after their ransomware (Rhysida, BlackSuit, Trigona, ...) as actors of their own,
   and Conti, LockBit and Nefilim as names of the actor the galaxies name as their developer or operator
-  (Wizard Spider, BITWISE SPIDER, GOLD MANSARD), so 66 stay actors. The other 115 (Lumma Stealer,
+  (Wizard Spider, BITWISE SPIDER, GOLD MANSARD), so 66 stay actors. Reference 2026.10.22 counts Qilin
+  and its earlier name Agenda as Water Galura (G1050), which ATT&CK names as Qilin's operators; they
+  still resolve, so the count is unchanged. The other 115 (Lumma Stealer,
   AsyncRAT, Agent Tesla, Mirai, Zloader, and ransomware names the review left out, such as Nitrogen and
   Kraken) are dropped for a pulse that lists them as its family, and stay the pulse's malware item.
   Without the reference the rule cannot decide and the name is kept.
@@ -106,6 +109,51 @@ class TestCountryNamesInTheAdversaryField:
         assert _actors(items) == []
         assert _ioc(items, "203.0.113.21")["pulse_malware_actor_pairs"] == []
 
+    def test_the_run_logs_the_dropped_country_names_and_only_them(self, caplog):
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        items = _HARNESS._collect(
+            [
+                _pulse("p-1", ["ROKRAT"], "APT37, North Korea", ["203.0.113.60"]),
+                _pulse("p-2", ["ROKRAT"], "North Korea (APT37)", ["203.0.113.61"]),  # the name APT37: no drop
+                _pulse("p-3", ["Industroyer2"], "Russia", ["203.0.113.62"]),
+                _pulse("p-4", ["BLINDINGCAN"], "Lazarus Group; DPRK", ["203.0.113.63"]),
+                _pulse("p-5", ["Agent Tesla"], "russian hackers", ["203.0.113.64"]),  # a description
+                _pulse("p-6", ["Lumma Stealer"], "Lumma Stealer", ["203.0.113.65"]),  # the family line
+                _pulse("p-7", ["ROKRAT"], "north korea, Kimsuky", ["203.0.113.66"]),
+                _pulse("p-8", ["Cuba"], "Cuba Ransomware Gang", ["203.0.113.67"]),  # a qualified name
+                _pulse("p-9", ["Cuba"], "Cuba (Ransomware)", ["203.0.113.69"]),  # no name in the parenthetical
+            ]
+        )
+        assert sorted(set(_actors(items))) == ["APT37", "Cuba Ransomware Gang", "Kimsuky", "Lazarus Group"]
+        messages = [r.getMessage() for r in caplog.records if "[ACTOR-NAMES]" in r.getMessage()]
+        country = [m for m in messages if "country, state or nationality" in m]
+        assert len(country) == 1, "one line per run"
+        line = country[0]
+        assert line.startswith(
+            "[ACTOR-NAMES] OTX: 4 distinct country, state or nationality name(s) in 5 pulse(s), dropped from "
+            "the adversary field by the actor-name hygiene"
+        )
+        assert line.endswith(
+            ": cuba (1 pulse: p-9); dprk (1 pulse: p-4); north korea (2 pulses: p-1, p-7); russia (1 pulse: p-3)"
+        ), "every distinct name, alphabetically, with its pulses"
+        listed = line.split("qualified name): ", 1)[1].lower()
+        for not_dropped in ("apt37", "p-2", "lazarus", "kimsuky", "russian hackers", "lumma", "gang", "p-8"):
+            assert not_dropped not in listed, not_dropped
+        assert [m for m in messages if m not in country] == [
+            "[ACTOR-NAMES] OTX: 1 distinct adversary name(s) in 1 pulse(s), which the same pulse lists as a "
+            "malware family and the canonical threat-actor reference does not know, not taken as actors (they "
+            "stay malware): lumma stealer"
+        ]
+
+    def test_a_run_without_country_names_logs_no_country_line(self, caplog):
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        _HARNESS._collect([_pulse("p-1", ["ROKRAT"], "North Korea (APT37)", ["203.0.113.68"])])
+        assert "country, state or nationality" not in caplog.text
+
+    def test_a_name_lists_at_most_three_pulse_ids(self):
+        assert oc._dropped_name_with_pulses("dprk", ["a", "b", "c", "d"]) == "dprk (4 pulses: a, b, c, …)"
+        assert oc._dropped_name_with_pulses("dprk", ["a"]) == "dprk (1 pulse: a)"
+
 
 class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
     @pytest.mark.parametrize(
@@ -158,6 +206,33 @@ class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
         assert _actors(items) == [name]
         assert _malware(items) == [name], "the pulse's malware family item is unchanged"
         assert _ioc(items, "203.0.113.49")["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-operated"]
+
+    def test_qilin_and_its_earlier_name_agenda_count_as_water_galura(self, reference):
+        # Reference 2026.10.22 (decision of 2026-10-22, accepted): ATT&CK describes Water Galura (G1050) as
+        # the operators of the Qilin Ransomware-as-a-Service and lists Agenda as an alias of Qilin (S1242).
+        assert {reference.canonical_for(n) for n in ("Qilin", "Agenda", "Water Galura")} == {"water galura"}
+        items = _HARNESS._collect([_pulse("p-qilin", ["Qilin", "Agenda"], "Qilin, Agenda", ["203.0.113.52"])])
+        assert _actors(items) == ["Qilin", "Agenda"], "both stay actors; the alias merge folds them"
+        ioc = _ioc(items, "203.0.113.52")
+        assert ioc["several_actor_pulses"] == [], "one actor: the pulse attributes"
+        assert sorted(ioc["pulse_malware_actor_pairs"]) == sorted(
+            f"{family}::{actor}::p-qilin" for family in ("Qilin", "Agenda") for actor in ("Qilin", "Agenda")
+        )
+
+    def test_a_designation_beside_the_group_names_one_actor(self, reference):
+        # Reference 2026.10.22: APT-C-13 is a name of Sandworm Team (360net-threat-actor galaxy); before, the
+        # pulse "APT-C-13, Sandworm, FROZENBARENTS" counted two actors and attributed nothing.
+        assert reference.canonical_for("APT-C-13") == "sandworm team"
+        items = _HARNESS._collect(
+            [_pulse("p-c13", ["Industroyer2"], "APT-C-13, Sandworm, FROZENBARENTS", ["203.0.113.53"])]
+        )
+        ioc = _ioc(items, "203.0.113.53")
+        assert ioc["several_actor_pulses"] == []
+        assert ioc["pulse_malware_actor_pairs"] == [
+            "Industroyer2::APT-C-13::p-c13",
+            "Industroyer2::Sandworm::p-c13",
+            "Industroyer2::FROZENBARENTS::p-c13",
+        ]
 
     def test_an_operation_beside_its_operator_names_one_actor(self):
         # Conti and Wizard Spider are one actor: the pulse attributes instead of counting two actors.

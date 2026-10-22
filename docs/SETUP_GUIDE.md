@@ -266,7 +266,7 @@ docker compose up -d
 | Compose fails on **`NEO4J_PASSWORD is required`** | Set **`NEO4J_PASSWORD`** in **`.env`** |
 | Airflow tasks: **MISP connection** / DNS errors | **`MISP_URL`** must resolve **inside** the Airflow container (compose default **`misp.local`** often fails); use the MISP service URL on a **shared Docker network** — see **`.env.example`** / **[MISP_SOURCES.md](MISP_SOURCES.md)** |
 | **Long task or sync failed for missing heartbeats** | The scheduler fails a task whose last heartbeat is older than **`AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT`** (Airflow default **300 s**; **`docker-compose.yml`** sets **3600 s**). Check the value with `docker compose exec airflow airflow config get-value scheduler task_instance_heartbeat_timeout`; after a change in `.env`, recreate the container with `docker compose up -d airflow`. See **[HEARTBEAT.md](HEARTBEAT.md)** |
-| **SSL certificate verify failed** (MISP) | Corporate CA → trust store; dev self-signed → **`EDGEGUARD_SSL_VERIFY=false`** + restart |
+| **SSL certificate verify failed** (MISP) | `requests` and PyMISP trust the `certifi` bundle only, not the system store: corporate CA → a bundle named by **`REQUESTS_CA_BUNDLE`** (pip install; `docker-compose.yml` does not forward it); dev self-signed → **`EDGEGUARD_SSL_VERIFY=false`** + restart |
 | Sync **0 events** | MISP has `EdgeGuard-…` event titles? Deployed **`run_misp_to_neo4j.py`** matches the repo? **`EDGEGUARD_MISP_EVENT_SEARCH`** |
 | **`Unknown function 'apoc.coll.toSet'`** | Enable APOC on Neo4j |
 | **`ModuleNotFoundError: neo4j` / `pymisp` in Airflow** | Rebuild Airflow image: **`docker compose build airflow`** — deps come from **`Dockerfile.airflow`**, not manual pip in the container |
@@ -297,10 +297,11 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-22_
 
 ## History
 
+- 2026-10-22 — `certificate verify failed` (MISP): `requests` and PyMISP trust the `certifi` bundle only; a corporate CA goes into a bundle named by `REQUESTS_CA_BUNDLE`.
 - 2026-10-19 — `install.sh` waits for the services after `docker compose up -d` and names those that are not healthy instead of always reporting success; it recognises the `MISP_API_KEY` placeholders, and after a failed `docker compose up -d` prints the summary and keeps that command's exit status.
 - 2026-10-19 — `install.sh` generates a blank `EDGEGUARD_API_KEY`, `AIRFLOW_API_AUTH_JWT_SECRET` or `AIRFLOW_FERNET_KEY` on every run (a `.env` prepared before the first run kept them blank and the stack did not start), rewrites `.env` in place so a symlinked `.env` stays a symlink, creates it with mode 600 (also `make .env`), and replaces `NEO4J_PASSWORD=changeme` before Neo4j's first start (the first start locked the template password in, and the documented edit afterwards left the stack waiting on an unhealthy Neo4j). A value set on any line of `.env` or exported in the shell (also `NEO4J_PASSWORD`) is never replaced; the Neo4j check also treats an existing `edgeguard_neo4j` container as started and reads the project name without python3; `EDGEGUARD_ENV` is compared without regard to case, as in `is_production_env`; generated secrets reach awk through the environment, not its command line; the installer warns when other users can read `.env`; the commented template lines are matched with `grep -E`, because BSD grep (macOS) never matched the earlier pattern.
 - 2026-10-18 — The tarball update recreates every container (`docker compose up -d --force-recreate`) after rebuilding every image; the deployed commit is recorded in `.env` as `EDGEGUARD_GIT_SHA` (`./install.sh --update` runs `scripts/record_deployed_commit.sh`; a tarball deploy passes the commit to it).
