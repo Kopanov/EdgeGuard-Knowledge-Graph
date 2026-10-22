@@ -27,6 +27,8 @@
 
 **Why the 3.3 line:** CI scans the image with `trivy image --severity CRITICAL`, and `CVE-2026-33264` in `apache-airflow` (code execution via unsafe serialized-DAG deserialization) is fixed only from 3.3.0. The 3.3.2 constraints ship PyJWT 2.14.0, anyio 4.15.1, the SFTP provider 6.0.1, snowflake-connector 4.7.3 and `apache-airflow-providers-fab` 3.9.0, which allows Flask 3: the image runs **Flask 3.1.3**, which clears CVE-2026-27205. `requirements.txt` lists only `apache-airflow[postgres]` and `apache-airflow-providers-standard`, neither of which pulls the FAB provider. `pip install -r requirements.txt` therefore installs no Flask, and `pip-audit -r requirements.txt` does not see it. The Docker image bundles FAB (and with it Flask), because the upstream `apache/airflow` image ships the FAB auth manager. The API server is bound to loopback only (`127.0.0.1:8082`), so the web attack surface is not reachable from the network on a production host.
 
+**Packages upgraded on top of the base image.** `Dockerfile.airflow` upgrades in place what the `apache/airflow:3.3.2-python3.12` base ships with a CRITICAL advisory that has a fixed release: the Debian packages `openssl`, `libssl3`, `libgnutls30` and `perl`, and, after the requirements install, `pip` (26.2.2 or later), `certifi` (2026.10.19 or later) and `uv` (0.13.4 or later), whose bundled CA stores trusted the emSign roots of GHSA-6q48-6c7w-9gw2 and GHSA-hq85-5cpj-mr62. It removes the `prek` hook runner, which serves Airflow development only. The tasks' `requests` and PyMISP calls verify TLS against this `certifi` bundle. Build both images without the layer cache after such a change (`docker compose build --no-cache --pull`): a cached requirements layer keeps the `certifi` it resolved before.
+
 **pandas:** pandas 3 changes how DataFrame XComs are stored (Airflow 3.3.1 release note). The image pins `pandas~=2.2` and no EdgeGuard task stores a DataFrame XCom, so this matters only for a new task that returns a DataFrame.
 
 **JWT secret.** The Airflow 3.x API server fails to start with `The value api_auth/jwt_secret must be set!` when the secret is missing, whatever the auth manager (it signs the `POST /auth/token` and execution-API tokens; this stack uses the Simple auth manager). Generate it once:
@@ -712,10 +714,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-22_
 
 ## History
 
+- 2026-10-22 — The Airflow image upgrades `pip`, `certifi` and `uv` past the emSign CA advisories (GHSA-6q48-6c7w-9gw2, GHSA-hq85-5cpj-mr62) and removes the `prek` hook runner of the base image; rebuild without the layer cache.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1: a sync window without EdgeGuard events fails `run_neo4j_sync` (it was an empty success that moved the sync cursor); `0` disables the guard.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to the current system: change history moved to this section, upgrade procedures to the appendix.
