@@ -2,10 +2,10 @@
 """Import a curated package into MISP as one EdgeGuard event (2026-10).
 
 A curated package is a JSON file of claims about entities that already exist in the graph,
-for example ``2026-10-20_EdgeGuard_curated_package.json``::
+for example ``YYYY-MM-DD_EdgeGuard_curated_package.json``::
 
     {
-      "name": "2026-10-20_EdgeGuard_curated_package",
+      "name": "YYYY-MM-DD_EdgeGuard_curated_package",
       "source": "<curated source id>",
       "tlp": "amber",
       "entities": [

@@ -958,7 +958,7 @@ the links into `Technique {attack_domain: 'ics'}` (actors and software carry no 
 
 ## Importing a curated package
 
-A curated package (JSON, e.g. `2026-10-20_EdgeGuard_curated_package.json`) adds claims about existing actors and malware as one MISP event; the next MISP→Neo4j sync turns them into relationships (see `docs/KNOWLEDGE_GRAPH.md`, "Curated packages"). Import it after the baseline, since its claims attach only to nodes that exist.
+A curated package (JSON, e.g. `YYYY-MM-DD_EdgeGuard_curated_package.json`) adds claims about existing actors and malware as one MISP event; the next MISP→Neo4j sync turns them into relationships (see `docs/KNOWLEDGE_GRAPH.md`, "Curated packages"). Import it after the baseline, since its claims attach only to nodes that exist.
 
 ```bash
 python scripts/import_curated_package.py PACKAGE.json                 # validate: summary, warnings, errors
