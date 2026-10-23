@@ -4,8 +4,13 @@ EdgeGuard may share its Neo4j database with ResilMesh. Every code path that dele
 the full wipe (``clear_all``), the edgeguard-only wipe (``clear_edgeguard_managed``) and the
 CVSS de-duplication that runs with ``create_constraints`` — records one JSON line here and
 increments the Prometheus counter ``edgeguard_destructive_ops_total{operation,target}``. The
-trail answers "what did EdgeGuard delete, when, and how much" for the operator of a shared
-database without reading application logs.
+fresh-baseline clean, ``edgeguard clear neo4j`` and ``scripts/clear_neo4j.py`` reach the first two.
+A wipe attempt that fails after deleting something also records a line, with what it deleted and
+``details.outcome = "failed"``; a retried wipe writes one line per attempt.
+The trail answers "who deleted what, when, and how much" for the operator of a shared database
+without reading application logs: each line names the process that ran the delete (``actor``:
+operating-system user, host and program; for an Airflow task that is the worker, not the person
+who triggered the run).
 
 Path: ``EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH`` (default ``logs/destructive_ops.jsonl`` under
 the working directory). Recording never raises: a failed write is logged and the operation
@@ -15,9 +20,12 @@ still increments).
 
 from __future__ import annotations
 
+import getpass
 import json
 import logging
 import os
+import socket
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -44,6 +52,36 @@ def audit_path() -> Optional[Path]:
     return Path(raw) if raw else None
 
 
+def _actor() -> Dict[str, str]:
+    """The process that runs the delete: operating-system user, host and program name.
+
+    Each part is left out when it cannot be read (a container user without a password-database
+    entry has no name), so the audit line is still written.
+    """
+    actor: Dict[str, str] = {}
+    try:
+        actor["user"] = getpass.getuser()
+    except (KeyError, OSError, ImportError) as exc:
+        # No user name: a container user without a password-database entry (KeyError on older
+        # Pythons, OSError from 3.13) or a platform without the pwd module. The line is still written.
+        logger.debug("destructive-ops audit: operating-system user name unavailable (%s)", type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 — recording never raises (the delete has already run)
+        logger.warning(
+            "destructive-ops audit: reading the operating-system user name failed (%s: %s); "
+            "the line is written without it",
+            type(exc).__name__,
+            exc,
+        )
+    try:
+        actor["host"] = socket.gethostname()
+    except OSError:
+        pass
+    program = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if program:
+        actor["program"] = program
+    return actor
+
+
 def record_destructive_op(
     operation: str,
     *,
@@ -56,13 +94,14 @@ def record_destructive_op(
 
     ``operation`` names the code path (``clear_all``, ``clear_edgeguard_managed``, ``cvss_dedup``),
     ``target`` the store (``neo4j``), ``affected`` the number of nodes removed, ``scope`` the
-    Cypher-level selection the operation used.
+    Cypher-level selection the operation used; ``actor`` (added here) the process that ran it.
     """
     record: Dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "operation": operation,
         "target": target,
         "affected": int(affected),
+        "actor": _actor(),
     }
     if scope:
         record["scope"] = scope

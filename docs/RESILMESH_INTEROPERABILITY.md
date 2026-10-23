@@ -268,7 +268,7 @@ A consumer reading this sees that the source first reported the indicator in 202
 
 ### 3.4 Node Identity Marking (`edgeguard_managed`, `edgeguard_enriched`)
 
-The marker also bounds EdgeGuard's destructive operations: `edgeguard fresh-baseline` and the `baseline_clean` DAG step delete only `edgeguard_managed` nodes by default (`clear_edgeguard_managed`); deleting every node requires the explicit `--wipe-all` flag / `wipe_scope: "all"`.
+The marker also bounds EdgeGuard's destructive operations: `edgeguard fresh-baseline`, the `baseline_clean` DAG step and `scripts/clear_neo4j.py` delete only `edgeguard_managed` nodes by default (`clear_edgeguard_managed`); deleting every node requires the explicit `--wipe-all` flag / `wipe_scope: "all"` / `--full-wipe` (the script asks for a typed confirmation).
 
 Every node EdgeGuard **creates** carries a constant property:
 
@@ -791,6 +791,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `scripts/clear_neo4j.py` is listed among the destructive operations bounded by the `edgeguard_managed` marker, with `--full-wipe` as its explicit whole-database flag.
 - 2026-10-23 — The STIX flow of the `run_pipeline.py` CLI is always on there (the page called it opt-in); the health reference points to TECHNICAL_SPEC.md, which replaced the README's health table; the planned SoftwareVersion bridge (§ 4.4), the access-control options (§ 8.5) and the to-do list (§ 8.6) give way to the current state and a pointer to ROADMAP.md, which lists the planned work, with the topology links of § 3.2; § 8.1 states the loopback publication of the Bolt port (it named a hosted firewall rule the repository does not hold).
 - 2026-10-22 — The STIX coverage paragraph is written for any registered curated source.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.

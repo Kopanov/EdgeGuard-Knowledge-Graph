@@ -169,8 +169,11 @@ class TestMarkerOnCreatePathOnly:
 
     def test_clear_edgeguard_managed_deletes_created_nodes_only(self):
         src = inspect.getsource(nc.Neo4jClient.clear_edgeguard_managed)
-        assert "MATCH (n) WHERE n.edgeguard_managed = true WITH n LIMIT" in src
-        assert "edgeguard_enriched = true" in src, "enriched nodes are counted, not deleted"
+        assert "MATCH {node} WHERE n.edgeguard_managed = true WITH n LIMIT" in src
+        assert "node = _clear_scope_pattern(label)" in src
+        assert nc._clear_scope_pattern(None) == "(n)" and nc._clear_scope_pattern("Indicator") == "(n:Indicator)"
+        counts_src = inspect.getsource(nc.Neo4jClient._count_clear_scope)
+        assert "edgeguard_enriched = true" in counts_src, "enriched nodes are counted, not deleted"
         delete_stmt = [ln for ln in src.splitlines() if "DETACH DELETE n" in ln]
         assert delete_stmt and all("enriched" not in ln for ln in delete_stmt)
 

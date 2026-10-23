@@ -166,7 +166,7 @@ Run them from the repository root with the settings exported.
 | `scripts/verify_fresh_baseline.py` | Acceptance checks of a loaded graph |
 | `scripts/import_curated_package.py` | Validate and push a curated package to MISP |
 | `scripts/record_deployed_commit.sh` | Write the deployed commit into `.env` |
-| `scripts/clear_neo4j.py` | Delete every node of the EdgeGuard labels |
+| `scripts/clear_neo4j.py` | Delete the nodes EdgeGuard created |
 | `scripts/clear_misp.py` | Delete EdgeGuard MISP events |
 | `scripts/deployment_wiring_check.sh` | `preflight_ci.sh`, then optional live probes |
 | `scripts/preflight_ci.sh` | Compile, unit tests, DAG parse (see below) |
@@ -188,7 +188,7 @@ Run them from the repository root with the settings exported.
   ```
 
 - **`import_curated_package.py <package.json>`** validates the package; `--check-graph` reports which claims would attach to existing nodes, and `--push` creates the MISP event ([RUNBOOK.md § Importing a curated package](RUNBOOK.md#importing-a-curated-package)).
-- **`clear_neo4j.py`** deletes every node that carries one of the EdgeGuard labels, `Vulnerability` and `CVE` included, whoever created it, and records no destructive-operations entry; `--full-wipe` deletes every node, `--label` the nodes of one label, and `--no-recreate` leaves out the `Source` nodes it otherwise recreates. On a database shared with ResilMesh use `edgeguard clear neo4j --edgeguard-only` instead.
+- **`clear_neo4j.py`** deletes, with `--force`, the nodes EdgeGuard created (`edgeguard_managed = true`) and their relationships, through the wipe of the fresh baseline; nodes another system created, such as a partner's `Vulnerability` and `CVE` nodes, stay, also where EdgeGuard enriched them. `--label` deletes only the EdgeGuard-created nodes of one label (no `--force` needed; the label must be one the graph client allows). `--full-wipe` deletes every node in the database, partner data included: it prints how many nodes EdgeGuard did not create and asks to type `FULL-WIPE`, also with `--force`; it cannot be combined with `--label`. `--dry-run` prints the scope and the nodes kept, and deletes nothing. After a delete the script recreates the `Source` nodes (`--no-recreate` leaves them out; never with `--label`) and clears the collector checkpoints. Every delete writes a line to the destructive-operations audit trail ([BACKUP.md](BACKUP.md#audit-trail-and-what-this-procedure-does-not-cover)), also a delete that fails part-way: that line has `details.outcome = "failed"` and counts the nodes and relationships deleted before the failure. Exit 0: done or dry run; 1: no action given, refused, aborted or failed; 2: `--label` with `--full-wipe`.
 - **`clear_misp.py`** deletes the EdgeGuard MISP events; `clear_misp.py --old DAYS` deletes the events older than that. Both scripts take `--dry-run` and `--force`.
 - **`preflight_ci.sh`** compiles `dags/` and `src/collectors/`, runs the unit tests and loads the DAGs with `DagBag(include_examples=False)`. On Airflow 3.3, whose `DagBag` has no `include_examples` argument, that step stops with a `TypeError`; check the DAG parse with `docker compose exec airflow airflow dags list-import-errors` instead.
 - **`deployment_wiring_check.sh`** runs `preflight_ci.sh` first and stops when it fails, so on Airflow 3.3 it, and `make deploy-check`, stop at the DAG parse step. With `EDGEGUARD_DEPLOY_CHECK_LIVE=1` it then runs `src/health_check.py` and the REST and GraphQL health probes (`EDGEGUARD_REST_HEALTH_URL`, `EDGEGUARD_GRAPHQL_HEALTH_URL`; `EDGEGUARD_SKIP_HTTP_HEALTH=1` skips them).
@@ -220,6 +220,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `scripts/clear_neo4j.py` deletes the nodes EdgeGuard created through the wipe of the fresh baseline, `--label` narrows that scope, `--full-wipe` asks for a typed confirmation, also with `--force`, and every delete writes a destructive-operations audit line, also one that fails part-way; it deleted every node of the EdgeGuard labels, partner `Vulnerability` and `CVE` nodes included, and recorded nothing.
 - 2026-10-23 — `heal` removes the MISP writer's event-creation lock only when no process holds it, reports the pipeline and baseline locks without removing them and counts the kept lock files in its summary, and no longer removes other `*.lock` files in the repository root or the temporary directory.
 - 2026-10-23 — `validate` reports an `EDGEGUARD_SSL_VERIFY` value it does not recognise; verification then stays on.
 - 2026-10-23 — Created from the README's command reference, `make` targets and standalone commands, with the Docker form of every command, the host-shell settings, the `--json` output, the `preflight` breaker check, `heal`, `monitor`, `setup`, the `make install` and `make ci` behaviour, the operator scripts and the always-on STIX flow of `run_pipeline.py` stated as the code behaves.
