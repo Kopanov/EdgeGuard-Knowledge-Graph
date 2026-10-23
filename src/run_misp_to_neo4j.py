@@ -657,7 +657,7 @@ def _parse_neo4j_sync_chunk_size(raw: Optional[str], n_items: int) -> Tuple[int,
         ``explicit_single_pass`` is True when the operator set ``0`` or ``all`` (not merely
         "one chunk because item count is small").
 
-    Semantics (documented in README / AIRFLOW_DAGS.md):
+    Semantics (documented in docs/CONFIGURATION.md / AIRFLOW_DAGS.md):
 
     - **Unset / empty:** ``500`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
     - **``0`` or ``all``** (case-insensitive, stripped): one Python chunk for the entire sorted

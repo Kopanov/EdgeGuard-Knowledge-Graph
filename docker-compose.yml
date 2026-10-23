@@ -129,7 +129,7 @@ x-common-env: &common-env
   EDGEGUARD_NVD_MAX_PER_RUN: ${EDGEGUARD_NVD_MAX_PER_RUN:-5000}
   EDGEGUARD_NVD_UPDATE_EXISTING: ${EDGEGUARD_NVD_UPDATE_EXISTING:-true}
   # 2026-10: known-exploited CVEs outside the baseline window (whole KEV catalogue, NVD KEV sweep,
-  # CVE ids fetched by id) — see README "Environment Variables" (EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE,
+  # CVE ids fetched by id) — see docs/CONFIGURATION.md (EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE,
   # EDGEGUARD_NVD_BASELINE_KEV_SWEEP, EDGEGUARD_NVD_EXTRA_CVE_IDS).
   EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE: ${EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE:-true}
   # CISA KEV revisions (2026-10): every KEV run compares the whole catalogue with the stored MISP

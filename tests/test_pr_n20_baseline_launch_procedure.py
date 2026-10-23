@@ -447,7 +447,7 @@ class TestFix5ReadmeLaunchProcedure:
         ``fresh-baseline``, so colleagues can make the right launch-path
         choice."""
         rd = self._readme()
-        section = rd.split("### Why the launch path matters", 1)[1].split("\n### ", 1)[0]
+        section = rd.split("### How the baseline lock protects the run", 1)[1].split("\n### ", 1)[0]
         assert "baseline_acquire_lock" in section and "baseline_release_lock" in section, (
             "README must explain that the baseline DAG acquires and releases the baseline lock itself"
         )
@@ -469,19 +469,19 @@ class TestFix5ReadmeLaunchProcedure:
         """The user's original question conflated n.uuid with the MISP
         back-pointer. Pin the clarifying note at the README level."""
         rd = self._readme()
-        assert "n.uuid" in rd and "NOT" in rd, (
+        assert "`n.uuid` is not a MISP key: it is a deterministic UUIDv5" in rd, (
             "README must clarify n.uuid is a deterministic UUIDv5 for cross-env identity, NOT a foreign key into MISP"
         )
 
-    def test_airflow_section_warns_about_launch_path(self):
-        """The existing 'Airflow DAG-based workflow' section must point
-        readers at the launch-path decision before they hit the
-        `airflow dags trigger edgeguard_baseline` button."""
+    def test_quick_start_points_to_the_baseline_procedure(self):
+        """The Quick start must point readers at the baseline procedure
+        before they hit the `airflow dags trigger edgeguard_baseline`
+        button: its last step links the section by its anchor."""
         rd = self._readme()
-        # Look for a warning in the Airflow section that references the
-        # new launch-path decision section.
-        assert "Running the 730-day baseline" in rd and "IMPORTANT" in rd, (
-            "Existing Airflow DAG section must warn readers to consult the baseline launch procedure before triggering"
+        assert "\n## Running the 730-day baseline\n" in rd, "README must keep the baseline section heading"
+        quick_start = rd.split("\n## Quick start\n", 1)[1].split("\n## ", 1)[0]
+        assert "(#running-the-730-day-baseline)" in quick_start, (
+            "The Quick start must link the baseline procedure before readers trigger the baseline"
         )
 
 

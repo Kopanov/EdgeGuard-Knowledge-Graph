@@ -80,7 +80,7 @@ Collectors → MISP → [per MISP event] parse_attribute() → dedupe → cross-
 
 No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Report-scoped** relationships produced during sync are built from **one event’s item list only**, and inside it only between items that share the same OTX `pulse_id`: `Indicator → INDICATES → Malware`, `Indicator → INDICATES → CVE` (at most 50 CVEs per pulse; the `CVE` node is matched, never created) and `Malware → ATTRIBUTED_TO → ThreatActor` (the latter only when the pulse's actors are one actor; the aliases of one actor count as one, and the OTX collector marks a pulse naming several actors on every item of it, `several_actor_pulses`, or `several_actor_pulses_by_name` when it judged without the canonical reference: only the former is stored on `Indicator` nodes), `match_type='otx_pulse'`, confidence 0.6, `r.sources = ['alienvault_otx']`, the pulse in `r.source_refs[]` (`alienvault_otx:<pulse id>`). Items without a pulse id are never paired, and nothing is paired across the whole per-source, per-day event (see the `_build_cross_item_relationships` docstring in `run_misp_to_neo4j.py`). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
 
-**CLI / `run_pipeline.py` (optional)** — with `use_stix_flow=True` (default for **`python src/run_pipeline.py`** step 3 when STIX is available):
+**CLI / `run_pipeline.py` (optional)** — step 3 of **`python src/run_pipeline.py`** always takes the STIX flow (`--stix-flow` is on by default and cannot be turned off; without the STIX library the run fails):
 
 ```
 MISP → convert_to_stix21() / PyMISP to_stix2 → load_stix21_to_neo4j() → Neo4j
@@ -134,7 +134,7 @@ All zone values are validated against `VALID_ZONES` in `config.py` before any wr
 
 ### MISP → Neo4j sync chunking (worker memory)
 
-`sync_to_neo4j()` merges parsed items in **Python-side chunks** to limit RAM on huge attribute counts. Env **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**: default **`500`**; **`0`** or **`all`** (case-insensitive) forces a **single pass** (all parsed items merged at once, **OOM risk** on tens of thousands of items — expert/debug only). `Neo4jClient.merge_*_batch` still UNWINDs in sub-batches. Relationship creation uses **`EDGEGUARD_REL_BATCH_SIZE`** and **`Neo4jClient.create_misp_relationships_batch`** (per-query error handling; partial success possible — see module docstring). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [HEARTBEAT.md](HEARTBEAT.md) for worker OOM vs Airflow “task failed” symptoms.
+`sync_to_neo4j()` merges parsed items in **Python-side chunks** to limit RAM on huge attribute counts. Env **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**: default **`500`**; **`0`** or **`all`** (case-insensitive) forces a **single pass** (all parsed items merged at once, **OOM risk** on tens of thousands of items — expert/debug only). `Neo4jClient.merge_*_batch` still UNWINDs in sub-batches. Relationship creation uses **`EDGEGUARD_REL_BATCH_SIZE`** and **`Neo4jClient.create_misp_relationships_batch`** (per-query error handling; partial success possible — see module docstring). See [CONFIGURATION.md](CONFIGURATION.md#misp--neo4j-sync), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [HEARTBEAT.md](HEARTBEAT.md) for worker OOM vs Airflow “task failed” symptoms.
 
 ### ThreatActor / Malware / Tool → Technique Relationship Sources
 
@@ -381,7 +381,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 
 | File | Purpose |
 |------|---------|
-| `src/config.py` | Configuration, zone detection functions |
+| `src/config.py` | Settings, sector keywords and detection, per-source collection limits (`get_effective_limit`) |
 | `src/collectors/misp_writer.py` | MISP tagging with `_get_zones_to_tag()` |
 | `src/collectors/otx_collector.py` | AlienVault OTX collector |
 | `src/collectors/nvd_collector.py` | NVD CVE collector |
@@ -396,12 +396,12 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/source_key_check.py` | Live check of the source API keys (preflight, baseline task `source_key_check`) |
 | `src/collectors/healthcare_feed_collector.py` | Healthcare placeholder |
 | `src/collectors/energy_feed_collector.py` | Energy placeholder |
-| `src/collectors/misp_collector.py` | Fetch/normalize events from MISP API (ingest) — **not** used in default baseline collector tier |
-| `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j**: `fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`, optional STIX helpers for CLI/export |
-| `src/run_pipeline.py` | CLI orchestration; optional **STIX flow** to Neo4j; collector steps to MISP |
+| `src/collectors/misp_collector.py` | Reads existing MISP events — library code; no DAG or CLI step runs it |
+| `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j**: `fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`; its own CLI takes `--full` and `--sector`; also the MISP → STIX 2.1 converter of the `run_pipeline.py` CLI |
+| `src/run_pipeline.py` | CLI orchestration: collectors → MISP, then MISP → STIX 2.1 → Neo4j (the STIX flow is always on) |
 | `src/enrichment_jobs.py` | Post-sync enrichment: Vulnerability↔CVE `REFERS_TO` bridge, actor alias merge, Malware ATT&CK-id twin merge (`cobalt strike - s0154` into `cobalt strike`), indicator aging (the rule in `src/indicator_aging.py`), campaigns, FIRST EPSS |
 | `src/cve_feed_enrichment.py` | FIRST EPSS on existing `CVE` nodes: bounded download, parse, batched `SET`, removal for CVEs that left the feed; the one source written to Neo4j without MISP |
-| `src/build_relationships.py` | Graph relationship builder (exact / MITRE-ID / scoped co-occurrence — **no `CONTAINS`**) |
+| `src/build_relationships.py` | Post-sync graph links (ATT&CK technique, tactic, malware and tool links, attribution, `EXPLOITS`, `INDICATES`, sector `TARGETS` / `AFFECTS`), each with `match_type` and confidence; exact keys, no `CONTAINS`, no event co-occurrence |
 | `src/indicator_aging.py` | The one Indicator aging rule (basis, tiers, retirement, `aging_evaluated_at`) |
 | `src/campaign_evidence.py` | What a campaign rests on (`ATTRIBUTED_TO` / `USES_MALWARE`) |
 | `src/sector_evidence.py` | Evidence label and confidence of links to `Sector` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9) and the zones a record states |
@@ -411,22 +411,32 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/vulnerability_update.py` | CISA KEV whole-catalogue compare; in-place edits of the stored MISP copies |
 | `dags/edgeguard_pipeline.py` | Six primary DAGs (collection + baseline + sync + enrichment tasks) |
 | `dags/edgeguard_metrics_server.py` | Optional long-running Prometheus metrics DAG(s) |
-| `src/query_api.py` | FastAPI REST API — threat queries, indicator search, zone filtering (port 8000) |
-| `src/graphql_api.py` | **GraphQL API** — Strawberry/FastAPI endpoint on port 4001, mirroring ISIM GraphQL |
-| `src/graphql_schema.py` | Strawberry type definitions for all node types (CVE, Vulnerability, Indicator, etc.) |
+| `src/query_api.py` | FastAPI REST API — queries, indicator search, actor summaries, STIX 2.1 export, Wazuh CDB export, graph-explorer data (port 8000) |
+| `src/graphql_api.py` | **GraphQL API** — Strawberry/FastAPI endpoint on port 4001, the port ISIM uses |
+| `src/graphql_schema.py` | Strawberry type definitions (CVE and its CVSS types, Vulnerability, Indicator, ThreatActor, Malware, Tool, Technique, Tactic, Campaign) |
+| `src/neo4j_client.py` | Graph writes: node merges, CVSS sub-nodes, relationship batches, sector labels, identifier validators |
+| `src/stix_exporter.py` | Graph → STIX 2.1 bundles (deterministic UUIDv5 ids) |
+| `src/edgeguard.py` | CLI: preflight, baseline / fresh-baseline, stats, dag, checkpoint, clear, doctor / heal / validate / monitor, source, setup, update, version ([CLI.md](CLI.md)) |
+| `src/airflow_client.py` | Airflow REST API client of the CLI and the baseline lock |
+| `src/health_check.py` | MISP and Neo4j connectivity check |
+| `src/resilience.py` | Circuit breakers and retry helpers |
+| `src/metrics_server.py`, `src/metrics_exporter.py` | Prometheus metrics; the exporter of the Compose `metrics` service |
+| `src/source_registry.py` | Registered sources, their MISP tags and curated sources |
+| `src/nats_client.py`, `src/alert_processor.py` | NATS client and ResilMesh alert enrichment — library code; no service runs a consumer |
+| `plugins/edgeguard_dag_run_state.py` | Airflow listener plugin: marks each DAG run in progress for Prometheus |
 
 ---
 
 ## GraphQL API (Port 4001)
 
-EdgeGuard exposes a GraphQL endpoint that mirrors the ISIM GraphQL convention used by ResilMesh (port 4001), making it queryable in exactly the same way as ISIM.
+EdgeGuard exposes a GraphQL endpoint on port 4001, the port of ResilMesh's ISIM GraphQL service. Its CVE and CVSS types follow the ISIM data model, but the schema is EdgeGuard's own (camelCase fields, `filter` inputs), so a client written for ISIM's schema adapts its queries ([RESILMESH_INTEROPERABILITY.md § 8.2](RESILMESH_INTEROPERABILITY.md#82-preferred-access-method--isim-graphql)).
 
 ### Endpoint
 
 ```
 POST http://localhost:4001/graphql     # queries and mutations
-GET  http://localhost:4001/graphql     # GraphiQL only if EDGEGUARD_GRAPHQL_PLAYGROUND=true (default false — see README)
-GET  http://localhost:4001/health      # liveness: HTTP 200 if Neo4j ping+APOC OK, else 503 (REST /health on :8000 behaves the same — see README)
+GET  http://localhost:4001/graphql     # GraphiQL only if EDGEGUARD_GRAPHQL_PLAYGROUND=true (default false; docs/CONFIGURATION.md)
+GET  http://localhost:4001/health      # liveness: HTTP 200 if Neo4j ping+APOC OK, else 503 (REST /health on :8000 behaves the same; docs/TECHNICAL_SPEC.md)
 ```
 
 ### Example queries
@@ -493,14 +503,16 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 - [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — Airflow CLI, env vars, troubleshooting
 - [HEARTBEAT.md](HEARTBEAT.md) — Heartbeats, zombies, SIGKILL/OOM vs successful graph writes
 - [DATA_SOURCES_RATE_LIMITS.md](DATA_SOURCES_RATE_LIMITS.md) — API rate limits and cost reference
-- [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) — Historical record of doc ↔ code verification passes; reading order: [README.md](../README.md#-recommended-reading-order-new-operators)
+- [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) — Historical record of doc ↔ code verification passes; reading order: [SETUP_GUIDE.md § Start here](SETUP_GUIDE.md#start-here--then-read-these-next-operator-path)
+- [README.md](README.md) — Index of every document
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — Key Files takes the module notes of the README's project tree, corrected: `run_pipeline.py` always takes the STIX flow, no step runs `MISPCollector`, `query_api.py` also serves the STIX and Wazuh exports and the explorer data, the GraphQL types are named as they are (`ThreatActor`); the GraphQL API runs on ISIM's port with its own schema (the page said it is queried exactly as ISIM); the README pointers name CONFIGURATION.md, TECHNICAL_SPEC.md, SETUP_GUIDE.md and docs/README.md.
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6), written by the sync.
 - 2026-10-18 — `TARGETS` carries `otx_industries` (0.6) where an OTX pulse's own industries state the sector.

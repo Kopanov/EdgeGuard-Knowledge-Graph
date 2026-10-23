@@ -915,14 +915,14 @@ class TestBugbotRound2Fixes:
     def test_runbook_covers_both_misp_images(self):
         """Round-2 doc fix (post-commit, addressing colleague note):
         the runbook must call out BOTH ``harvarditsecurity/misp`` (the
-        currently-deployed Apache mod_php image) and
+        Apache mod_php image) and
         ``coolacid/misp-docker`` (the reference php-fpm image). Pre-fix
         the runbook only mentioned a generic Apache path, leaving
         operators of the harvarditsecurity image unsure where to apply
         settings vs operators of the coolacid image who needed the
         ``conf.d/`` mount."""
         d = self._docs()
-        assert "harvarditsecurity" in d, "doc fix: must call out the harvarditsecurity/misp image (currently deployed)"
+        assert "harvarditsecurity" in d, "doc fix: must call out the harvarditsecurity/misp image (Apache mod_php)"
         assert "coolacid" in d, "doc fix: must call out the coolacid/misp-docker image (reference compose)"
         assert "Apache mod_php" in d or "apache2" in d, "doc fix: must distinguish Apache vs php-fpm config paths"
         assert "php-fpm" in d.lower() or "fpm/conf.d" in d, "doc fix: must distinguish Apache vs php-fpm config paths"

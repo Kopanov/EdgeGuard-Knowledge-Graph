@@ -230,7 +230,7 @@ Unpause the scheduled DAGs (`edgeguard_pipeline`, `edgeguard_medium_freq`, etc.)
 
 ## Incremental Collection Limit
 
-Regular cron DAGs (every 30 min / 4 h / 8 h / daily) read what changed since each collector's cursor or its feed's current window ([README § Two operating modes](../README.md)); a per-source item cap keeps each run fast and prevents accidental re-ingestion of bulk historical data.
+Regular cron DAGs (every 30 min / 4 h / 8 h / daily) read what changed since each collector's cursor or its feed's current window ([COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)); a per-source item cap keeps each run fast and prevents accidental re-ingestion of bulk historical data.
 
 ### Configuration
 
@@ -284,7 +284,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
 
 After every MISP→Neo4j sync (`edgeguard_neo4j_sync`) the following jobs run automatically in sequence.
 
-**Worker memory:** The sync task calls `run_misp_to_neo4j.sync_to_neo4j()`, which chunks merges by **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**). **`0`** or **`all`** = single Python-side pass (**OOM risk** on huge backfills). See [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) and [README.md](../README.md).
+**Worker memory:** The sync task calls `run_misp_to_neo4j.sync_to_neo4j()`, which chunks merges by **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**). **`0`** or **`all`** = single Python-side pass (**OOM risk** on huge backfills). See [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) and [CONFIGURATION.md](CONFIGURATION.md#misp--neo4j-sync).
 
 ### 1. build_relationships
 
@@ -502,10 +502,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-21_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The per-source run rules point to COLLECTION_AND_SYNC_LIMITS.md and the chunk setting to CONFIGURATION.md; the README sections they named were moved there.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — The relationship table lists `(Indicator)-[:INDICATES]->(CVE)`, written by the sync for an indicator and a CVE named in the same OTX pulse.
 - 2026-10-18 — MITRE ATT&CK is in `OWN_RUN_CAP_SOURCES`: a scheduled run pushes the whole changed bundle (the cut at 200 kept about 140 objects and stored the new ETag, so the rest never arrived).

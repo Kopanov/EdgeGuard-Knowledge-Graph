@@ -280,14 +280,16 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 | First-time concepts and health URLs | [SETUP_GUIDE.md](SETUP_GUIDE.md) |
 | DAG names, restart, task failures | [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
 | Safe first baseline | [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) |
-| Full doc index | Documentation section of [README.md](../README.md) |
+| Every setting | [CONFIGURATION.md](CONFIGURATION.md) |
+| Full doc index | [docs/README.md](README.md) |
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — § 7 points to CONFIGURATION.md and to the documentation index docs/README.md, which replaced the README's documentation section.
 - 2026-10-18 — § 4 builds every image and recreates every container (`docker compose build`, then `docker compose up -d --force-recreate`; the start command built only the Airflow image) and records the deployed commit in `.env` (`scripts/record_deployed_commit.sh` writes `EDGEGUARD_GIT_SHA`, which both `/health` responses report as `git_sha`).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; the collector pool upgrade for a running stack moved to the appendix; § 6 renamed to "Checklist of common setup ideas".

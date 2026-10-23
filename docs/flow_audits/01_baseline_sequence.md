@@ -1,6 +1,6 @@
 # Flow Audit §1 — Baseline Sequence
 
-> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
 
 **Date:** 2026-04-20
 **Commit audited:** `8e39f88` (post PR-F9/G1/I/J merge)
@@ -162,3 +162,11 @@ The `pages` list is ONLY used by `get_baseline_status()` (line 249) to report `l
 - **`reset_baseline_data` settle-verify-poll loop** with derived timeout — handles 350K-node case correctly (baseline_clean:665-675, 744-767)
 - **PR-F5 baseline DAG conf typo validation** — exactly right UX for preventing `{"days": 730}` silent-additive trap
 - **Retry decorator exception-typed** (`collector_utils.py:86-106`) — `TransientServerError` base class approach is clean
+
+---
+
+_Last updated: 2026-10-23_
+
+## History
+
+- 2026-10-23 — The opening note links the README section by its new anchor (the README headings carry no emoji).

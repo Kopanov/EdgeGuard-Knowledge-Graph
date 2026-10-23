@@ -259,10 +259,12 @@ class TestDeploymentContract:
         assert env["AIRFLOW_API_USER"] == "${AIRFLOW_API_USER:-admin}"
         assert "AIRFLOW_API_VERSION" in env
 
-    def test_env_example_and_readme_document_the_v2_credentials(self):
+    def test_env_example_and_settings_reference_document_the_v2_credentials(self):
         env_example = (_ROOT / ".env.example").read_text()
         for name in ("AIRFLOW_API_USER", "AIRFLOW_API_PASSWORD", "AIRFLOW_API_VERSION", "AIRFLOW_WEBSERVER_URL"):
             assert re.search(rf"^# ?{name}=", env_example, re.M), name
-        readme = (_ROOT / "README.md").read_text()
-        assert "/auth/token" in readme and "AIRFLOW_API_VERSION" in readme
-        assert "basic-auth credentials" not in readme
+        # The settings reference moved from the README to docs/CONFIGURATION.md.
+        configuration = (_ROOT / "docs" / "CONFIGURATION.md").read_text()
+        assert "/auth/token" in configuration and "AIRFLOW_API_VERSION" in configuration
+        for rel in ("README.md", "docs/CONFIGURATION.md"):
+            assert "basic-auth credentials" not in (_ROOT / rel).read_text(), rel

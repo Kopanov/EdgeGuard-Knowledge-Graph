@@ -41,11 +41,11 @@ References: [preflight_ci.sh](../scripts/preflight_ci.sh), [.github/workflows/ci
 | Done | Check | How | Pass |
 |------|--------|-----|------|
 | [ ] | Required variables | `.env` / secrets; [ENVIRONMENTS.md](ENVIRONMENTS.md), [credentials/config.example.yaml](../credentials/config.example.yaml) | `NEO4J_PASSWORD`, `MISP_URL`, MISP API key, `NEO4J_URI` valid for target runtime |
-| [ ] | SSL verify consistency | **`EDGEGUARD_SSL_VERIFY`** (or **`SSL_VERIFY`** if `EDGEGUARD_SSL_VERIFY` unset) on scheduler, workers, API, sync tasks | Same policy everywhere; **`SSL_CERT_VERIFY`** is not read (see README, SETUP_GUIDE) |
+| [ ] | SSL verify consistency | **`EDGEGUARD_SSL_VERIFY`** (or **`SSL_VERIFY`** if `EDGEGUARD_SSL_VERIFY` unset) on scheduler, workers, API, sync tasks | Same policy everywhere; **`SSL_CERT_VERIFY`** is not read (see [CONFIGURATION.md](CONFIGURATION.md#tls-and-trust), SETUP_GUIDE) |
 | [ ] | Optional API keys | [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — optional keys / `skip_reason_class` | Missing keys → **skipped** tasks (success), not hard failure — unless you require that feed |
 | [ ] | Collector allowlist | `EDGEGUARD_COLLECT_SOURCES` — [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), [.env.example](../.env.example) | If set: only listed sources run; others skip (`collector_disabled_by_config`); `none`/`-` disables all external collectors |
 | [ ] | Baseline limits (before first baseline) | [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) | `BASELINE_DAYS` / `BASELINE_COLLECTION_LIMIT` or env overrides understood |
-| [ ] | MISP→Neo4j sync memory (huge attribute counts) | `.env` / worker env: **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**; **`0`** / **`all`** = single pass, expert-only); [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | Lower if worker OOMs during Neo4j merge after parse |
+| [ ] | MISP→Neo4j sync memory (huge attribute counts) | `.env` / worker env: **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**; **`0`** / **`all`** = single pass, expert-only); [CONFIGURATION.md](CONFIGURATION.md#misp--neo4j-sync), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | Lower if worker OOMs during Neo4j merge after parse |
 
 Optional: `python src/edgeguard.py validate` — [SETUP_GUIDE.md](SETUP_GUIDE.md).
 
@@ -59,7 +59,7 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 |------|--------|---------|------|
 | [ ] | Preflight (recommended) | `python src/edgeguard.py preflight` | All checks pass (env vars, APIs, Neo4j, MISP, Airflow, disk, breakers; the number of checks varies by configuration, so rely on the green/red signal). Section 1 asks each provider whether it accepts the configured source API key: no `key REJECTED` line |
 | [ ] | MISP + Neo4j | `python src/health_check.py` or `make health` | `overall_healthy`; APOC noted for Neo4j ([ENVIRONMENTS.md](ENVIRONMENTS.md)) |
-| [ ] | REST API health | `curl -sf http://<api-host>:8000/health` (or your URL) | **HTTP 200** with JSON `status: ok` and `neo4j_connected: true` when Neo4j ping + APOC pass; **503** with `status: degraded` otherwise (`curl -f` fails on 503) ([README.md](../README.md) § Health) |
+| [ ] | REST API health | `curl -sf http://<api-host>:8000/health` (or your URL) | **HTTP 200** with JSON `status: ok` and `neo4j_connected: true` when Neo4j ping + APOC pass; **503** with `status: degraded` otherwise (`curl -f` fails on 503) ([TECHNICAL_SPEC.md § API Endpoints](TECHNICAL_SPEC.md#api-endpoints)) |
 | [ ] | GraphQL health | `curl -sf http://<api-host>:4001/health` | **HTTP 200** when Neo4j is healthy; **503** if no driver or Neo4j/APOC unhealthy (`curl -f` fails on 503 — intended for “must be up” checks) |
 | [ ] | Airflow | Scheduler up; DAGs not paused; optional: [runtime_smoke_checklist.sh](../scripts/runtime_smoke_checklist.sh) | UI / health reachable |
 | [ ] | MISP from worker | Resolve `MISP_URL` from worker container | No mistaken `localhost` for remote MISP ([MISP_SOURCES.md](MISP_SOURCES.md)) |
@@ -121,10 +121,11 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The settings and health references point to CONFIGURATION.md and TECHNICAL_SPEC.md, which hold what the README's settings and health sections held.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restated as a guide to the current behaviour: change history moved here, the Airflow upgrade and pre-2026-04 graph steps moved to the appendix.
 - 2026-10-17 — The repository runs Airflow 3.3.2 (it said 3.2); the Neo4j sync gate is `check_sync_needed` in `edgeguard_neo4j_sync`; no Cypher migration scripts exist (the named `specialize_uses_technique` migration does not).

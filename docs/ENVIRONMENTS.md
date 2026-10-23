@@ -1,6 +1,6 @@
 # EdgeGuard Environments and Recommended Setup
 
-EdgeGuard is designed to run in multiple environments (local dev, staging, production, edge devices). This document explains how to use the `EDGEGUARD_ENV` flag and how to set up a clean Python/conda environment for best practice deployments.
+EdgeGuard is designed to run in multiple environments (local dev, staging, production, edge devices). This document explains how to use the `EDGEGUARD_ENV` flag and how to set up a clean Python/conda environment for best practice deployments. Every setting, with its default, is listed in [CONFIGURATION.md](CONFIGURATION.md).
 
 ---
 
@@ -77,6 +77,14 @@ pip install .[api,monitoring,airflow]
 
 This keeps your EdgeGuard dependencies isolated from your system Python and other projects.
 
+MISP and Neo4j (with APOC) run outside this environment, as system services, containers or remote instances. The code reads its settings from the environment only, so export `.env` before a command, point `MISP_URL` and `NEO4J_URI` at your instances, and check the setup:
+
+```bash
+cp .env.example .env              # set NEO4J_URI (bolt://localhost:7687 for a local Neo4j), NEO4J_PASSWORD, MISP_URL, MISP_API_KEY
+set -a; . ./.env; set +a
+python src/edgeguard.py doctor
+```
+
 ### 2.2 Using virtualenv instead of conda
 
 If you prefer `venv`:
@@ -88,6 +96,23 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install --upgrade pip
 pip install .[api,monitoring]
 ```
+
+### 2.3 Activating the environment with direnv
+
+[direnv](https://direnv.net) activates a virtualenv and loads `.env` whenever you `cd` into the project, and deactivates them when you leave. The repository's `.envrc` runs `layout python python3`, which creates and activates direnv's own virtualenv under `.direnv/python-3.x` (not the `.venv` of `./install.sh --python`), loads `.env` with `dotenv` and puts `src/` on `PYTHONPATH`. That virtualenv starts empty, so install the dependencies into it once (for example `pip install ".[api,graphql,monitoring]"`).
+
+```bash
+# One-time setup on your machine
+brew install direnv                              # macOS; or: apt install direnv
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc     # or bash / fish
+source ~/.zshrc
+
+# Once inside the project
+cd EdgeGuard-Knowledge-Graph
+direnv allow
+```
+
+Afterwards `python` is `.direnv/python-3.x/bin/python` in every new shell in the project, with the `.env` variables exported.
 
 ---
 
@@ -138,6 +163,7 @@ EdgeGuard does **not** require Docker. The same Python code paths read **`NEO4J_
 **Robustness**
 
 - **No hardcoded Docker hostnames** in `src/` for Neo4j/MISP — defaults are `localhost` for dev only; production should always set env vars.
+- **No `.env` loading.** The code reads `os.environ` only; outside Docker Compose, export the settings (`set -a; . ./.env; set +a`) before every command. The MISP calls use `requests` and PyMISP, and the graph uses the `neo4j` driver.
 - **TLS for MISP/feeds**: controlled by **`EDGEGUARD_SSL_VERIFY`** (keep `true` in production). Fallback: **`SSL_VERIFY`** if `EDGEGUARD_SSL_VERIFY` is unset/empty. **`SSL_CERT_VERIFY`** is not used.
 - **Neo4j multi-database**: **`NEO4J_DATABASE`**.
 - **Neo4j APOC**: required for sync regardless of Docker — install/allow APOC on whatever runs Neo4j (see `docs/SETUP_GUIDE.md`).
@@ -179,10 +205,11 @@ references the baseline lock.
 
 ---
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The conda setup exports `.env` and checks the setup with `edgeguard doctor`; new § 2.3 on direnv (`layout python` creates `.direnv/python-3.x`, not `.venv`); § 4 states that the code loads no `.env`; link to CONFIGURATION.md. The conda, multi-environment and direnv text came from the README.
 - 2026-10-22 — Pinned versions list the CA bundle `certifi` (`>=2026.10.19`) and the Airflow image's `pip` and `uv`, upgraded past the emSign CA advisories.
 - 2026-10-17 — Main text describes current behaviour only; version history moved here; heading levels start at the title.
 - 2026-10-17 — Corrected against the code: `EDGEGUARD_ENV` is the fail-closed production gate (`config.is_production_env`: unset, empty, `stage`, `edge` and any value outside dev / development / local / staging / test are production, so the APIs require `EDGEGUARD_API_KEY`); the edge recipe sets the key; suggested values `dev` / `staging` / `prod`; MISP push batch default 500; the baseline lock is held by the `edgeguard_baseline` DAG run (or `run_pipeline.py --baseline`) and makes the scheduled collectors and sync writes skip, max age 172800 s (48 h); Airflow 3.3.2.

@@ -25,6 +25,28 @@ cache 8G and transaction memory 8G in a 32G container (the
 baseline-capable profile of [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md),
 listed commented out in `.env.example`).
 
+## 730-day baseline profile
+
+A full 730-day baseline needs larger values than the quick reference above. Set them in `.env` and recreate the services (`docker compose up -d`):
+
+| Setting | Value | Where |
+|---|---|---|
+| `NEO4J_HEAP_INITIAL`, `NEO4J_HEAP_MAX` | `12g` each | `.env` |
+| `NEO4J_PAGECACHE` | `8g` | `.env` |
+| `NEO4J_TX_MEMORY_MAX` | `8g` | `.env` |
+| `NEO4J_CONTAINER_MEMORY_LIMIT` | `32g` | `.env` |
+| `AIRFLOW_MEMORY_LIMIT` | `12g` (the default) | `.env` |
+| MISP PHP `memory_limit` | `4096M` | MISP server ([MISP_TUNING.md](MISP_TUNING.md)) |
+| MISP Apache `MaxRequestWorkers` | `25` | MISP server |
+| MISP Apache `MaxConnectionsPerChild` | `500` | MISP server |
+| Host RAM | about 48 GB | Host (more when MISP shares it) |
+
+- The Neo4j values are the baseline-capable profile of [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles), which also derives the typical resident size (about 25 GB) and the headroom of the 32g limit. `NEO4J_TX_MEMORY_MAX` caps transaction memory inside that budget; it is not added to heap and page cache.
+- `AIRFLOW_MEMORY_LIMIT` covers the MISP → Neo4j sync, which needs 8-12 GB for events with 100,000 or more attributes.
+- The two Apache settings bound the memory of MISP's worker processes on large events ([DOCKER_SETUP_GUIDE.md § 5](DOCKER_SETUP_GUIDE.md#misp-performance-tuning-large-baselines)).
+- When the sync dies during the Neo4j writes with exit code -9, the Docker memory limit was hit: raise `AIRFLOW_MEMORY_LIMIT` or lower `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` / `EDGEGUARD_REL_BATCH_SIZE` ([HEARTBEAT.md](HEARTBEAT.md), [CONFIGURATION.md](CONFIGURATION.md#misp--neo4j-sync)).
+- Check the values in effect with `edgeguard doctor --memory` before the baseline.
+
 ## Why these numbers
 
 The values come from failures observed under baseline load, not from
@@ -263,10 +285,11 @@ references this document.
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — New section "730-day baseline profile" with the Neo4j, Airflow, MISP and host values the README listed, without the README's hardware claim, which conflicted with the about 48 GB of host RAM derived here.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
 - 2026-10-17 — The sample doctor output gives the doctor's page-cache rationale (4G recommended, 8G for a 730-day baseline).
 - 2026-10-17 — Quick reference names the Neo4j env vars (`NEO4J_server_memory_heap_max__size`, `NEO4J_dbms_memory_transaction_total_max`) set through the `.env` wrapper names, and states the compose defaults (heap 2g, page cache 1g, tx 4g, container 8g) in place of a commented preset that does not exist.

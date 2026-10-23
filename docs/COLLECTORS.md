@@ -843,7 +843,7 @@ zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
 Placeholder for healthcare-specific threat feed collection.
 
 ### Decision
-No healthcare member-only feed collector is planned: HC3 and Health-ISAC (H-ISAC) require memberships that are not budgeted. Public healthcare advisories are covered by the CISA KEV and CISA ICS Advisories collectors. The placeholder stays so the slot is visible on the skip dashboard.
+No healthcare-specific feed is collected: Health-ISAC (H-ISAC) requires a membership that is not budgeted, and HC3, a public source of the US Department of Health and Human Services, is not collected. The `healthcare` sector comes from keyword detection in every collector, from the industries an OTX pulse names and, with `EDGEGUARD_ENABLE_CISA_ICS=true`, from the sectors CISA names in its ICS advisories. No DAG task calls this module.
 
 ### Current State
 Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
@@ -869,7 +869,7 @@ Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
 Placeholder for energy/ICS-specific threat feed collection.
 
 ### Decision
-No energy member-only feed collector is planned: EE-ISAC (European Energy ISAC) membership is not budgeted. CISA ICS-CERT energy sector advisories are collected by the flag-guarded CISA ICS Advisories collector (`cisa_ics`); MITRE ATT&CK for ICS is available through the MITRE collector flag. The placeholder stays so the slot is visible on the skip dashboard.
+No energy member-only feed collector is planned: EE-ISAC (European Energy ISAC) membership is not budgeted. CISA ICS-CERT energy sector advisories are collected by the flag-guarded CISA ICS Advisories collector (`cisa_ics`); MITRE ATT&CK for ICS is available through the MITRE collector flag. No DAG task calls this module.
 
 ### Current State
 Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
@@ -1169,18 +1169,18 @@ upper bound for a single baseline run.
 | Collector | Current ceiling | Upstream API constraint | Notes & planned follow-ups |
 |-----------|-----------------|-------------------------|----------------------------|
 | **NVD** | Full windowed collection (no artificial run-level cap on baseline) | `resultsPerPage <= 2000`; `pubStartDate..pubEndDate` must span `<= 120` days per request | Iterates 120-day windows via `iter_nvd_published_windows`. A run-level `limit` present in a baseline (an incremental-style setting) is ignored with a WARNING, because it would silently truncate ~99% of the windowed collection |
-| **OTX** | `max_pages = 200` × `50/page` ≈ 10k pulses (~7 min runtime, 2 s between pages) | No publicly documented pulse cap; effective throttle ≈ 30 req/min on the free tier | Current settings produce **~100k nodes + relationships** on a 730-day run. `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (default 200, forwarded by `docker-compose.yml`) sets the ceiling; a baseline that stops at it with a full last page logs a warning |
+| **OTX** | `max_pages = 200` × `50/page` ≈ 10k pulses (~7 min runtime, 2 s between pages) | No publicly documented pulse cap; effective throttle ≈ 30 req/min on the free tier | `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (default 200, forwarded by `docker-compose.yml`) sets the ceiling; a baseline that stops at it with a full last page logs a warning |
 | **CISA KEV** | Full KEV snapshot per run, compared with EdgeGuard's MISP copies in every run | Public JSON, no auth, no rate limit; no per-entry modification date | Revised entries edited in place, at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) per run ([§ 3](#revisions-every-run-compares-the-catalogue-with-misp)); `notes`, `cwes` and `forensicTriage` are not stored in MISP (`cwes` and `notes` are read onto the item but not written to `NVD_META`) |
 | **MITRE ATT&CK** | Full STIX 2.1 bundle per run | Public GitHub raw file, no rate limit | No change planned |
-| **MISP (local)** | Full MISP server content matching the filter | Bounded by local MISP; no external quota | No change planned |
+| **MISP (local)** | Not collected: `MISPCollector` is library code that no DAG or CLI step runs | Bounded by local MISP; no external quota | The graph is built from MISP by the MISP → Neo4j sync instead |
 | **AbuseIPDB** | At most one blacklist request per run, of at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (10,000) addresses, baseline and daily (the incremental default of 200 does not apply) | Free plan: at most 10,000 addresses per blacklist request; 5 blacklist requests per UTC day; `check` quota 1,000 per day (the source key check) | A fetched blacklist is reused for the rest of its UTC day, and a 429 fails the task ([§ 5](#5-abuseipdb-collector)); a plan that returns more per request needs `AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST` raised; the number of requests stays at most one per run, none when the answer is reused |
 | **VirusTotal** | `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` lookups per run (default 60), `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` per UTC day (default 400); not in the baseline DAG | Free tier: **4 req/min**, **500 req/day**; lookups only (`GET /files/{hash}`), no feed or search endpoints | Enrichment of hashes already in MISP (see [§ 6](#6-virustotal-lookup-enrichment)); the ledger in `./state` carries the daily counter across runs and remembers looked-up hashes. A premium key raises the two knobs |
 | **Finance (Feodo / SSLBL)** | Feodo: full C2 history on baselines (`ipblocklist_aggressive.csv`: 7,980 rows merged to 7,607 servers on 2026-10-12), 30-day list on regular runs, at most `EDGEGUARD_FEODO_MAX_PER_RUN` (15,000) servers per run; SSLBL: full feed, at most `EDGEGUARD_SSLBL_MAX_PER_RUN` (20,000) per run (baseline and daily, the newest kept when a cap is reached, the incremental default of 200 does not apply) | Public CSV/text feeds, no rate limit | Feodo Tracker has not been updated by abuse.ch since 2026-03-04: a baseline loads history, daily runs add nothing until the feed moves again |
 | **Global (URLhaus / ThreatFox)** | **ThreatFox: last 7 days via API** (the `days` parameter clamped to 7), at most `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) IOCs per run; URLhaus `csv_recent` (last 30 days), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000) URLs per run (baseline and daily, the newest kept when a cap is reached, the incremental default of 200 does not apply) | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
-| **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | No member-only feed (EE-ISAC) is planned. Surfaces on the skip dashboard as a placeholder (not a silent zero count). The ICS-CERT part is a collector: [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
+| **Energy (sector)** | Placeholder module (returns `skipped=True`, `skip_reason_class="placeholder"`); no DAG task calls it | — | No member-only feed (EE-ISAC) is planned. The ICS-CERT part is a collector: [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
 | **CISA ICS Advisories** | `min(index entries in window, CISA_ICS_MAX_ADVISORIES_PER_RUN=1200)` advisory files (~900 on a 730-day run), one item per CVE (baseline and daily; the incremental default of 200 does not apply) | Public GitHub raw files, no auth; polite sequential fetch ≤ 4 req/s | Flag-guarded, default **off**. Baseline sanity floor `CISA_ICS_MIN_EXPECTED_ADVISORIES=50` → transient skip + alert instead of a thin dataset |
 | **MalwareBazaar** | `min(samples in the recent export ≈ 1,000, MALWAREBAZAAR_MAX_PER_RUN=500)` sha256 indicators per run (baseline and daily; the incremental default of 200 does not apply), labelled samples first | The key-free export covers the last 48 hours only; the full export is the whole history and is not used | Flag-guarded, default **off**. A baseline loads the same window as a daily run; the history builds up over daily runs |
-| **Healthcare (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | No member-only feed (HC3, Health-ISAC) is planned. Same skip-dashboard behaviour as Energy |
+| **Healthcare (sector)** | Placeholder module (returns `skipped=True`, `skip_reason_class="placeholder"`); no DAG task calls it | — | No member-only feed (Health-ISAC) is planned, and HC3, a public US HHS source, is not collected |
 
 ### Planned improvements
 
@@ -1299,10 +1299,11 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The energy and healthcare placeholders are modules no DAG task calls (the page said they show on the skip dashboard); HC3 named as a public source that is not collected; the unsupported OTX node estimate removed; the MISP row states that no DAG or CLI step runs `MISPCollector`. These were the README's collector-limit notes.
 - 2026-10-22 — MITRE: MISPWriter's dedup reads an ATT&CK `text` value as `<id> - <name>` or `<id>: <name>` (`attack_values.attack_value_key`), so an entry a MISP holds in the colon form is not written again in the hyphen form.
 - 2026-10-22 — OTX adversaries: the run logs the country, state and nationality names the actor-name hygiene dropped from adversary fields (`[ACTOR-NAMES]`, with the pulses of each name), also a country followed by a parenthetical that yields no name; `Qilin` and `Agenda` count as Water Galura in the canonical threat-actor reference.
 - 2026-10-20 — OTX adversaries the same pulse lists as a malware family: ransomware operations named after their own ransomware (`Rhysida`, `BlackSuit`, `Trigona`) stay actors, as the canonical threat-actor reference holds them through override decisions, either as actors of their own or as names of their operator (`Conti`, `LockBit`).

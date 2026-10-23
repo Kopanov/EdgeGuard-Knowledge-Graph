@@ -4,7 +4,7 @@
 **DAG Python files:** repository `dags/` directory.
 **Airflow version:** Apache Airflow 3.3.x — base image `apache/airflow:3.3.2-python3.12` (see [Airflow version and image](#airflow-version-and-image)).
 
-**Where you are in the docs:** Step **2** of the operator path — read after **[SETUP_GUIDE.md](SETUP_GUIDE.md)**. **Next →** **[BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)** for a safe first **`edgeguard_baseline`**. Full order: [README.md § Recommended reading order](../README.md#-recommended-reading-order-new-operators).
+**Where you are in the docs:** Step **2** of the operator path — read after **[SETUP_GUIDE.md](SETUP_GUIDE.md)**. **Next →** **[BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)** for a safe first **`edgeguard_baseline`**. Full order: [SETUP_GUIDE.md § Start here](SETUP_GUIDE.md#start-here--then-read-these-next-operator-path).
 
 ---
 
@@ -234,7 +234,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | Collector | Source File | Notes |
 |-----------|-------------|-------|
 | Energy | `energy_feed_collector.py` | Placeholder; member-only feeds (EE-ISAC) not planned, no membership budgeted |
-| Healthcare | `healthcare_feed_collector.py` | Placeholder; member-only feeds (Health-ISAC, HC3) not planned, no membership budgeted |
+| Healthcare | `healthcare_feed_collector.py` | Placeholder; member-only feeds (Health-ISAC) not planned, no membership budgeted; HC3, a public US HHS source, is not collected |
 
 ---
 
@@ -714,10 +714,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The reading order points to SETUP_GUIDE.md (the README section it named was removed); HC3 is a public source, not a member-only feed.
 - 2026-10-22 — The Airflow image upgrades `pip`, `certifi` and `uv` past the emSign CA advisories (GHSA-6q48-6c7w-9gw2, GHSA-hq85-5cpj-mr62) and removes the `prek` hook runner of the base image; every dependency list sets `certifi>=2026.10.19`; the MISP certificate troubleshooting names the trust store `requests` reads.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1: a sync window without EdgeGuard events fails `run_neo4j_sync` (it was an empty success that moved the sync cursor); `0` disables the guard.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

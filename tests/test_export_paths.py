@@ -526,6 +526,12 @@ query {
 
 
 class TestGraphqlVulnerabilities:
+    def test_the_readme_shows_this_query(self):
+        """The query run below is the README's GraphQL example, so the example stays a working query."""
+        readme = (ROOT / "README.md").read_text()
+        example = readme.split("### GraphQL example", 1)[1].split("```graphql\n", 1)[1].split("```", 1)[0]
+        assert _README_QUERY.strip() in example
+
     def test_readme_example_reads_the_cve_nodes(self, monkeypatch):
         session = _Session([("MATCH (n:CVE)", _Result([{"n": _CVE}]))])
         monkeypatch.setattr(graphql_api, "_client", _ConnectedClient(session))
@@ -913,6 +919,8 @@ class TestDocumentation:
             "docs/ARCHITECTURE.md",
             "docs/DEPLOYMENT_READINESS_CHECKLIST.md",
             "docs/RESILMESH_INTEROPERABILITY.md",
+            "docs/CLI.md",
+            "docs/CONFIGURATION.md",
         ):
             text = (ROOT / rel).read_text()
             for phrase in ("Always **HTTP 200**", "**HTTP 200** always", "always 200", "always returns **200**"):
@@ -954,9 +962,10 @@ class TestDocumentation:
         assert "WHERE type(r) IN ['INDICATES', 'DROPS']" not in guide
         readme = (ROOT / "README.md").read_text()
         assert "open docs/visualization.html in browser" not in readme
-        explorer_line = next(line for line in readme.splitlines() if line.startswith("Graph Explorer       →"))
-        assert "http://localhost:3000/visualization.html" in explorer_line
-        assert "python3 -m http.server 3000 --bind 127.0.0.1 --directory docs" in explorer_line
+        explorer = readme.split("\n### Graph Explorer\n", 1)[1].split("\n## ", 1)[0]
+        assert "http://localhost:3000/visualization.html" in explorer
+        assert "python3 -m http.server 3000 --bind 127.0.0.1 --directory docs" in explorer
+        assert "EDGEGUARD_CORS_ORIGINS" in explorer and "a file opened from disk is refused" in explorer
         demo = (ROOT / "docs" / "demo.html").read_text()
         assert "a page opened from disk is refused" in demo and "EDGEGUARD_CORS_ORIGINS" in demo
 
@@ -970,8 +979,9 @@ class TestDocumentation:
         assert "EDGEGUARD_CORS_ORIGINS=http://localhost,http://localhost:3000,http://localhost:3001" in guide
         assert "http://localhost:3001/visualization.html" in guide
         readme = (ROOT / "README.md").read_text()
-        assert "python3 -m http.server 3001 --bind 127.0.0.1 --directory docs" in readme
-        assert "append `http://localhost:3001` to `EDGEGUARD_CORS_ORIGINS`" in readme
+        explorer = readme.split("\n### Graph Explorer\n", 1)[1].split("\n## ", 1)[0]
+        assert "python3 -m http.server 3001 --bind 127.0.0.1 --directory docs" in explorer
+        assert "append `http://localhost:3001` to `EDGEGUARD_CORS_ORIGINS`" in explorer
         assert "http://localhost:3001" in (ROOT / ".env.example").read_text()
 
     def test_the_guide_says_limit_caps_rows_not_nodes(self):

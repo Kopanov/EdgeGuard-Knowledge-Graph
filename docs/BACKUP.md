@@ -302,14 +302,15 @@ update into a wrapper.
 
 - [docs/AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — `edgeguard_baseline` task chain (additive vs destructive modes)
 - [docs/DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md) — Neo4j memory + storage sizing (relevant for dump sizing)
-- [README.md § Roadmap & Status](../README.md#%EF%B8%8F-roadmap--status) — current production-ready vs in-progress scope
+- [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) — component readiness and the controls in place
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The readiness cross-reference points to PRODUCTION_READINESS.md; the README section it named was removed.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
 - 2026-10-17 — The 350K-node row of the restore times names the April 2026 baseline on which they were measured.
 - 2026-10-17 — The Neo4j dump runs offline, because Community Edition refuses to dump a database in use, and needs a backup mount (`./backups/neo4j:/backups`) on the `neo4j` service, which `docker-compose.yml` does not have.

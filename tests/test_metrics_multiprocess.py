@@ -165,7 +165,8 @@ class TestTestMetricsHelper:
         assert out["returned"] is True and out["stamp"], "recorded in the process's own registry"
 
     def test_the_docs_state_the_limit(self):
-        for doc in ("README.md", "docs/AIRFLOW_DAGS.md"):
+        # The README no longer describes the metrics DAGs; docs/AIRFLOW_DAGS.md does.
+        for doc in ("docs/AIRFLOW_DAGS.md",):
             text = (_ROOT / doc).read_text()
             assert "single-process (bare-metal) metrics server" in text, doc
 

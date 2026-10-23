@@ -1,6 +1,6 @@
 # Flow Audits — Consolidated Findings Index
 
-> **Historical record** of the 2026-04-20/21 flow audits, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#-running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
+> **Historical record** of the 2026-04-20/21 flow audits, not maintained; the current baseline procedure is in [README § Running the 730-day baseline](../../README.md#running-the-730-day-baseline) and [RUNBOOK.md](../RUNBOOK.md).
 
 > This index and reports 01–09 describe the code and the
 > plan as of those dates. Most Tier-A items were later addressed (PR-M1, PR-M2, PR-M3a–d and
@@ -143,3 +143,11 @@ Deliberately out of scope for this pass; separate audit tracks:
 - Observability + alerting (queued PR-H)
 
 These get audited after the main pipeline is bug-fixed and the 730d run exposes what remains.
+
+---
+
+_Last updated: 2026-10-23_
+
+## History
+
+- 2026-10-23 — The opening note links the README section by its new anchor (the README headings carry no emoji).

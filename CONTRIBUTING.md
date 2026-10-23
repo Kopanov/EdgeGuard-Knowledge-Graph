@@ -23,6 +23,8 @@ Every document in the repository follows one convention:
 - **Main text: current behavior, present tense.** The body of a document is a guide to how the system works today: settings, defaults, limits, commands, procedures, known limits, and the rationale for them ("because …"). It carries no pull request or issue numbers, no change dates, and no before/after narration.
 - **Dates that are data stay.** A measurement stated with the dataset it came from, an external version (for example Airflow 3.3.2 or MISP 2.4.177), and a reference-data version are part of the main text.
 - **Changes go to History.** Each change is recorded as a dated entry, newest first, one line each (`- YYYY-MM-DD — <what changed and why>`), in the document's `## History` section at the end, directly below a single `_Last updated: YYYY-MM-DD_` line. An entry whose day is not known carries `YYYY-MM` and follows the dated entries of that month.
+- **The README has no History.** `README.md` ends with its single `_Last updated: YYYY-MM-DD_` line and carries no `## History` section; every other document keeps its History.
+- **Planned work lives in `docs/ROADMAP.md`.** Other documents describe the current behavior and state its limits; the roadmap is the one document whose main text may link the open GitHub issue that tracks an item.
 - **No procedures for data written by earlier versions.** After larger changes the project wipes MISP and Neo4j and runs a fresh baseline, so the documents describe a fresh deployment only: repairs and one-off migrations of data kept across an upgrade are not documented (git history keeps earlier procedures). A change that a reader needs in order to understand the current system is recorded as one dated History line.
 - **Historical records keep their text.** `docs/flow_audits/`, `migrations/*.md` and `docs/DOCUMENTATION_AUDIT.md` record a past state; each opens with a one-line note that points to the current document. A design proposal is not kept once it is implemented: what stays true moves into the current document and git history keeps the proposal.
 
@@ -38,10 +40,11 @@ If you run Airflow on the host (not only via repo `docker-compose.yml`), **do no
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `README.md` carries only its `_Last updated` line, without a History section; planned work lives in `docs/ROADMAP.md`, which may link the issue tracking an item.
 - 2026-10-18 — The STIX exporter design proposal left the historical records: its current content moved into docs/RESILMESH_QUICKSTART_STIX.md and the proposal was deleted; an implemented proposal is not kept.
 - 2026-10-18 — Documents no longer keep procedures for data written by earlier versions; the project re-baselines after larger changes.
 - 2026-10-18 — A History entry whose day is not known carries `YYYY-MM`.

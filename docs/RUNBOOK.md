@@ -623,7 +623,7 @@ that dies silently.
 
 ### Memory ceilings (reconcile BEFORE kickoff)
 
-For the 730-day baseline (README § Recommended Memory Settings):
+For the 730-day baseline ([MEMORY_TUNING.md § 730-day baseline profile](MEMORY_TUNING.md#730-day-baseline-profile)):
 
 | Knob | Value | Why |
 |---|---|---|
@@ -725,14 +725,16 @@ source by its tag (`alienvault_otx`, `threatfox`, …).
 
 ## Baseline-day protocol
 
-### ⚠️ Baseline launch path — PICK ONE (CLI or DAG+pause)
+### ⚠️ Baseline launch path and the baseline lock
 
 The 730-day baseline runs for ~32h (matches the baseline DAG's
 `dagrun_timeout`). Over that window the 5 scheduled DAGs check the
 `checkpoints/baseline_in_progress.lock` sentinel at task start and skip
 while the `edgeguard_baseline` DAG holds it (`baseline_acquire_lock`,
 taken before the destructive `baseline_clean` step; released by
-`baseline_release_lock` after a successful run). In `edgeguard_neo4j_sync`
+`baseline_release_lock` after a successful run); a collector task skipped
+this way succeeds with `skipped: true` (a green task, reason
+`baseline_in_progress`). In `edgeguard_neo4j_sync`
 every task that writes checks it, not only the first task
 `check_sync_needed`: `run_neo4j_sync` (and its retries), `build_relationships`
 and `run_enrichment_jobs` skip at their start too. The
@@ -741,8 +743,10 @@ by the lock of their own run; a log line
 `[BASELINE] <SOURCE> NOT collected — the baseline lock is held by another
 run` means a second baseline was started. A failed run keeps the
 lock so that clearing the failed task resumes under the mutex, except
-after a refusal of `baseline_clean` before the wipe, which releases it
-(§ 7a); an
+after a refusal of `baseline_clean` before the wipe (a misspelt
+`fresh_baseline` key, an invalid `wipe_scope`, the backup gate), which
+releases it so that the corrected trigger is not refused (§ 7a). The
+sentinel is reaped once the holder's run state is `success`; an
 abandoned run's sentinel is reaped at the age cap, or remove it by hand:
 `docker compose exec airflow rm /opt/airflow/checkpoints/baseline_in_progress.lock`.
 A collector, `full_neo4j_sync`, `build_relationships` or
@@ -762,7 +766,10 @@ DAG-side acquisition. A scheduled task that is already running when the
 lock is taken completes its current write, so pausing the scheduled DAGs
 before a destructive `fresh-baseline` remains recommended.
 
-**Pick one of the two launch paths below.**
+**Every launch path takes the lock:** the DAG, whether it is triggered from
+the Airflow UI, the API or the CLI wrappers, and the in-process
+`python src/run_pipeline.py --baseline`. Pausing the scheduled DAGs first
+only guarantees that none of them is mid-write when the lock is taken.
 
 > **Note:** the `baseline_in_progress.lock` sentinel is written by the
 > baseline DAG itself (`baseline_acquire_lock`) and by the legacy
@@ -1207,15 +1214,29 @@ attribute (its properties minus the node's key, as a JSON string) in
 need the source's record without a round-trip to MISP. On a `CVE` the
 edge holds the source's latest record, replaced on every write from a MISP
 attribute; on other labels, the record that created the edge. The
-opt-in STIX import (`run_pipeline --stix-flow`) writes a reduced record under
-the MISP event's source id only when it creates the edge, never over the
-record the sync wrote.
+STIX import of the `run_pipeline.py` CLI (always on there; the Airflow DAGs
+do not use it) writes a reduced record under the MISP event's source id only
+when it creates the edge, never over the record the sync wrote.
 
 ```cypher
 MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'})
 WHERE i.value = '203.0.113.5'
 RETURN r.raw_data, r.misp_event_ids, r.source_refs LIMIT 1;
 ```
+
+### Who asserts a link, what the source said, and an indicator's age
+
+| Question | Field | Where to read it |
+|---|---|---|
+| Who asserts a relationship | `r.sources[]`, `r.source_refs[]`, `r.misp_event_ids[]` | Every relationship built from the sources |
+| What the source cited | `r.cited_ids[]`, `n.merged_from[]`, `r.evidence_types[]` | Technique links, merged nodes, campaign links |
+| Why an indicator has its age | `n.last_reported_at`, `n.last_reported_ref`, `n.aging_basis` | `Indicator` nodes |
+| Ready-made MISP links | `mispAttributeUrls[]`, `mispEventUrls[]` | GraphQL `Indicator` |
+
+- `r.sources[]` names the asserting sources (`mitre_attck`, `alienvault_otx`, `threatfox`, …), `r.source_refs[]` their own record ids (`alienvault_otx:<pulse id>`, `threatfox:<IOC id>`, `mitre_attck:G0016`) and `r.misp_event_ids[]` the MISP events ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Relationship provenance").
+- `r.cited_ids[]` holds the ATT&CK ids a source cited before ATT&CK revoked them into the link's technique (`["T1562"]` on a link to `T1685`); `n.merged_from[]` the duplicate actor nodes folded into a canonical one (`["cl0p"]` on `clop`) or the ATT&CK-id twins folded into a malware node (`["cobalt strike - s0154"]` on `cobalt strike`); `r.evidence_types[]` the relationship types a campaign link rests on (`["ATTRIBUTED_TO", "USES_MALWARE"]`).
+- An indicator ages from its latest report: `n.last_reported_at`, `n.last_reported_source` and `n.last_reported_ref`, the MISP attribute uuid of that report (`GET /attributes/<uuid>` shows the source's record and its `last_seen`). `n.last_reported_basis` (`source_date` or `misp_recorded`) gives the kind of date and derives `n.aging_basis`; `n.aging_tier`, `n.source_confidence` and `n.aging_evaluated_at`, the time the aging values were last written, complete the record ([KNOWLEDGE_GRAPH.md § Indicator aging](KNOWLEDGE_GRAPH.md#indicator-aging)). REST, GraphQL (`lastReportedRef` …) and STIX (`x_edgeguard_last_reported_ref` …) expose the same fields.
+- `<MISP_URL>/attributes/view/<uuid>` names the one attribute behind the indicator, and `<MISP_URL>/events/view/<id>` opens the whole source event (100,000 or more attributes for OTX or NVD). A client sending a MISP API key gets the attribute as JSON; a browser needs a MISP login. The links are built from the API container's `MISP_URL`, so that address must be one the reader can reach; they are null when it is unset.
 
 ### Whose text a description is, and every source's text
 
@@ -1267,10 +1288,11 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The baseline launch path section is titled for the lock that every launch path takes (it offered a choice of paths); it names the green `skipped: true` collector task, the refusals that release the lock and its reaping. Raw MISP data: a section on who asserts a link, what the source cited, an indicator's age and the GraphQL MISP links, which the README carried. The STIX import of `run_pipeline.py` is always on in that CLI; the memory pointer names MEMORY_TUNING.md.
 - 2026-10-22 — "Importing a curated package" is written for any registered curated source; the removal queries keep the registered sources and labels.
 - 2026-10-22 — Canonical threat-actor reference: version `2026.10.22` and its counts (merges of spelling variants and designations, `Qilin` and `Agenda` into Water Galura, the never_merge of `Cold River` with Star Blizzard); a group named after a country is written under a qualified name, which counts as itself until the reference gives it to an actor, and a bare country name, also one followed by a parenthetical that yields no name, is dropped and listed by the new `[ACTOR-NAMES]` country line of the OTX collector, whose pulses name no actor for it; a never_merge with an actor leaves the record joined.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event. Removing the curated layer is followed by an enrichment run, which rebuilds the campaign links and levels.

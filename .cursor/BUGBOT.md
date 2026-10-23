@@ -235,7 +235,7 @@ Flag new embedded JSON sentinels added on one side without the other, or truncat
 
 ### `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (`sync_to_neo4j`)
 
-Default **`500`** (Python-side chunk size). **`0`** or **`all`** (case-insensitive) = **single pass** over the sorted item list — same peak-memory shape as unchunked sync (**OOM risk** on large backfills). Flag changes to **`_parse_neo4j_sync_chunk_size`** / **`sync_to_neo4j`** without updates to **`.env.example`**, **`README.md`**, **`docs/AIRFLOW_DAGS.md`**, and related ops docs.
+Default **`500`** (Python-side chunk size). **`0`** or **`all`** (case-insensitive) = **single pass** over the sorted item list — same peak-memory shape as unchunked sync (**OOM risk** on large backfills). Flag changes to **`_parse_neo4j_sync_chunk_size`** / **`sync_to_neo4j`** without updates to **`.env.example`**, **`docs/CONFIGURATION.md`**, **`docs/AIRFLOW_DAGS.md`**, and related ops docs.
 
 ### STIX 2.1: never put `labels` on Cyber-observable Objects (SCOs)
 
@@ -656,8 +656,8 @@ If a new collector file is added, flag if `docs/COLLECTORS.md` does not appear t
 ### docs/DATA_SOURCES_RATE_LIMITS.md not updated for new source
 If a new data source or rate limit value is added, flag if `docs/DATA_SOURCES_RATE_LIMITS.md` is not updated.
 
-### README not updated for new env variable
-If a new required environment variable is added (no default in `os.getenv`), flag if `README.md` and `.env.example` are not updated.
+### Settings reference not updated for new env variable
+If a new required environment variable is added (no default in `os.getenv`), flag if `docs/CONFIGURATION.md` and `.env.example` are not updated.
 
 ### Public function missing docstring
 New public functions (not prefixed with `_`) in `src/` should have a docstring explaining purpose, parameters, and return value.
@@ -879,8 +879,8 @@ Flag any `.envrc` that contains `export API_KEY=...` or similar assignments with
 Dependencies in `pyproject.toml` `[project.optional-dependencies]` should use `~=` (compatible release) or `>=X,<Y` version constraints, not bare package names.
 Flag any optional dependency with no version constraint — this breaks reproducible installs.
 
-### New `make` target not in README
-If a new `Makefile` target is added, flag if it is not mentioned in `README.md` under the "Quick Start" or "Development" section so developers can discover it.
+### New `make` target not in the command reference
+If a new `Makefile` target is added, flag if it is not listed in `docs/CLI.md` ("make targets") so developers can discover it.
 
 ---
 
@@ -1044,7 +1044,7 @@ All collector dicts must use `"source": [tag]` (singular key, list value). Neo4j
 
 ### Changes must be reflected in documentation
 
-When code changes affect user-visible behavior (CLI commands, env vars, DAG settings, API responses), the corresponding documentation must be updated. Check: `README.md` (CLI table, env vars), `docs/AIRFLOW_DAGS.md` (DAG settings, CLI section), `docs/DEPLOYMENT_READINESS_CHECKLIST.md` (preflight steps), `docs/PRODUCTION_READINESS.md` (component status). Flag code changes without matching doc updates.
+When code changes affect user-visible behavior (CLI commands, env vars, DAG settings, API responses), the corresponding documentation must be updated. Check: `docs/CLI.md` (commands), `docs/CONFIGURATION.md` (env vars), `README.md` (quick start, baseline procedure, interfaces), `docs/AIRFLOW_DAGS.md` (DAG settings, CLI section), `docs/DEPLOYMENT_READINESS_CHECKLIST.md` (preflight steps), `docs/PRODUCTION_READINESS.md` (component status). Flag code changes without matching doc updates.
 
 ---
 
