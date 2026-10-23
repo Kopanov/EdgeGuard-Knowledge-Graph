@@ -29,13 +29,19 @@ Env (address, credentials and User-Agent from ``src/neo4j_http_endpoint.py``, sh
   NEO4J_HTTP_USER_AGENT  User-Agent (default: a browser's)
   CATALOG_OUTPUT_DIR  default output dir (overridden by --out)
 
-Usage:
-  set -a; source .env.edgeguard; set +a
+Usage, the Compose Neo4j (http://127.0.0.1:7474) with the credentials of .env:
+  set -a; . ./.env; set +a
   python scripts/run_cypher_catalog_http.py                       # print only
   python scripts/run_cypher_catalog_http.py --out "../Sprint 2"   # + write files
 
-Exit code 0 = the catalog ran; 2 = NEO4J_HTTP_URL / NEO4J_HTTP is not an http(s) URL (a query
-that fails is reported in the output and leaves the exit code unchanged).
+Another instance: source its credentials and name its address on the same line:
+  set -a; . ./.env.edgeguard; set +a
+  NEO4J_HTTP_URL=<instance HTTP address> python scripts/run_cypher_catalog_http.py --out "../Sprint 2"
+
+Exit code 0 = the catalog ran; 2 = NEO4J_HTTP_URL / NEO4J_HTTP is not a valid http(s) URL, or
+Neo4j does not answer a first ``RETURN 1`` (not reachable, credentials refused): then no catalog
+query runs and nothing is written to the output directory. A catalog query that fails is
+reported in the output and leaves the exit code unchanged.
 """
 
 import json
@@ -160,6 +166,13 @@ def main():
         url = neo4j_http_endpoint.query_api_url()
     except neo4j_http_endpoint.Neo4jHttpEndpointError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    # One probe before the catalog: a Neo4j that does not answer (not running, wrong address,
+    # credentials refused) stops the run here, before an all-failed report replaces the results
+    # in --out.
+    _, _, probe_err = _post("RETURN 1", {})
+    if probe_err:
+        print(f"ERROR: cannot query {url}: {probe_err}", file=sys.stderr)
         return 2
 
     print(f"HTTP Query API : {url}")

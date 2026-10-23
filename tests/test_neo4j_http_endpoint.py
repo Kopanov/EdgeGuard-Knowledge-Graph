@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import io
 import json
 import re
 import runpy
@@ -141,11 +142,33 @@ class TestHelper:
         assert endpoint.base_url({"NEO4J_HTTP": "http://other.example.test:7474/"}) == "http://other.example.test:7474"
 
     @pytest.mark.parametrize(
-        "value", ["neo4j.example.test:7474", "graph.example.test", "ftp://graph.example.test", "http://"]
+        "value",
+        [
+            "neo4j.example.test:7474",
+            "graph.example.test",
+            "ftp://graph.example.test",
+            "http://",
+            "http://graph.example.test:74x4",
+            "https://graph.example.test:99999",
+            "http://graph.example.test/a b",
+        ],
     )
     def test_a_value_that_is_no_http_url_is_refused(self, endpoint, value):
         with pytest.raises(endpoint.Neo4jHttpEndpointError, match="NEO4J_HTTP_URL"):
             endpoint.base_url({"NEO4J_HTTP_URL": value})
+
+    @pytest.mark.parametrize("value", ["http://graph.example.test:74x4", "http://graph.example.test/a b"])
+    def test_a_value_urlopen_would_reject_is_refused_before_a_request(self, endpoint, value):
+        """``urllib`` raises ``http.client.InvalidURL`` (no ``OSError``) for these only when it
+        connects; the helper refuses them first, so the scripts exit 2 instead of a traceback."""
+        with pytest.raises(endpoint.Neo4jHttpEndpointError):
+            endpoint.query_request(b"{}", {"NEO4J_HTTP": value})
+
+    def test_a_valid_port_and_an_ipv6_host_are_accepted(self, endpoint):
+        assert endpoint.base_url({"NEO4J_HTTP_URL": "https://graph.example.test:7473"}) == (
+            "https://graph.example.test:7473"
+        )
+        assert endpoint.base_url({"NEO4J_HTTP_URL": "http://[::1]:7474/"}) == "http://[::1]:7474"
 
     def test_database_in_the_path(self, endpoint):
         assert endpoint.query_api_url({"NEO4J_DATABASE": "edgeguard"}) == f"{LOCAL}/db/edgeguard/query/v2"
@@ -236,8 +259,9 @@ class TestVerifyFreshBaselineMain:
         assert LOCAL_QUERY_URL in err
         assert REMOTE_MARK not in err
 
-    def test_invalid_address_exits_2_before_any_request(self, clean_env, sent, monkeypatch, capsys):
-        clean_env.setenv("NEO4J_HTTP_URL", "neo4j.example.test:7474")
+    @pytest.mark.parametrize("value", ["neo4j.example.test:7474", "https://graph.example.test:74x4"])
+    def test_invalid_address_exits_2_before_any_request(self, clean_env, sent, monkeypatch, capsys, value):
+        clean_env.setenv("NEO4J_HTTP_URL", value)
         monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py"])
         rc = _load("verify_fresh_baseline", clean_env).main()
         assert rc == 2
@@ -255,13 +279,57 @@ class TestCypherCatalogMain:
         assert meta["endpoint"] == LOCAL_QUERY_URL
         assert LOCAL_QUERY_URL in capsys.readouterr().out
 
-    def test_invalid_address_exits_2_before_any_request(self, clean_env, sent, monkeypatch, capsys):
-        clean_env.setenv("NEO4J_HTTP", "graph.example.test")
+    @pytest.mark.parametrize("value", ["graph.example.test", "http://graph.example.test:74x4"])
+    def test_invalid_address_exits_2_before_any_request(self, clean_env, sent, monkeypatch, capsys, value):
+        clean_env.setenv("NEO4J_HTTP", value)
         monkeypatch.setattr(sys, "argv", ["run_cypher_catalog_http.py"])
         rc = _load("run_cypher_catalog_http", clean_env).main()
         assert rc == 2
         assert sent == []
         assert "NEO4J_HTTP" in capsys.readouterr().err
+
+    def test_the_first_request_is_a_probe(self, clean_env, sent, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["run_cypher_catalog_http.py"])
+        assert _load("run_cypher_catalog_http", clean_env).main() == 0
+        assert json.loads(sent[0].data)["statement"] == "RETURN 1"
+        assert len(sent) > 1  # the catalog ran after it
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            urllib.error.URLError("connection refused"),
+            urllib.error.HTTPError(
+                LOCAL_QUERY_URL,
+                401,
+                "Unauthorized",
+                None,  # type: ignore[arg-type]
+                io.BytesIO(b'{"errors": [{"message": "authentication failure"}]}'),
+            ),
+        ],
+        ids=["unreachable", "credentials-refused"],
+    )
+    def test_no_answer_exits_2_without_running_or_writing(self, clean_env, monkeypatch, tmp_path, capsys, failure):
+        """Neo4j that does not answer ``RETURN 1`` (not running, wrong credentials) stops the run
+        before the catalog: no all-failed report replaces the results in ``--out``."""
+        calls: List[urllib.request.Request] = []
+
+        def failing(req, timeout=None):  # noqa: ARG001
+            calls.append(req)
+            raise failure
+
+        monkeypatch.setattr(urllib.request, "urlopen", failing)
+        out = tmp_path / "out"
+        out.mkdir()
+        previous = out / "cypher_catalog_results.json"
+        previous.write_text('{"kept": true}')
+        monkeypatch.setattr(sys, "argv", ["run_cypher_catalog_http.py", "--out", str(out)])
+        rc = _load("run_cypher_catalog_http", clean_env).main()
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert len(calls) == 1
+        assert sorted(p.name for p in out.iterdir()) == ["cypher_catalog_results.json"]
+        assert previous.read_text() == '{"kept": true}'
+        assert f"cannot query {LOCAL_QUERY_URL}" in err
 
 
 class TestActorExportMain:
@@ -272,8 +340,9 @@ class TestActorExportMain:
         assert _only_request(sent).full_url == LOCAL_QUERY_URL
         assert json.loads(out.read_text())["url"] == LOCAL_QUERY_URL
 
-    def test_invalid_address_exits_2_before_any_request(self, clean_env, sent, tmp_path, capsys):
-        clean_env.setenv("NEO4J_HTTP_URL", "ftp://graph.example.test")
+    @pytest.mark.parametrize("value", ["ftp://graph.example.test", "https://graph.example.test:74x4"])
+    def test_invalid_address_exits_2_before_any_request(self, clean_env, sent, tmp_path, capsys, value):
+        clean_env.setenv("NEO4J_HTTP_URL", value)
         out = tmp_path / "graph_threat_actors.json"
         rc = _load("build_canonical_threat_actors", clean_env).main(["--export-graph-actors", str(out)])
         assert rc == 2

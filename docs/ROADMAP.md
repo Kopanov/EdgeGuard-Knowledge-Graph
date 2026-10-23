@@ -230,5 +230,5 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — Known defects: removed the host scripts that sent the Neo4j credentials to a built-in remote address without `NEO4J_HTTP_URL`; they read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` or `NEO4J_HTTP` is set ([CONFIGURATION.md](CONFIGURATION.md#neo4j-connection-and-memory)).
+- 2026-10-23 — Known defects: the entry for the host scripts that sent the Neo4j credentials to a built-in remote address is removed; they read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` or `NEO4J_HTTP` is set ([CONFIGURATION.md](CONFIGURATION.md#neo4j-connection-and-memory)).
 - 2026-10-23 — Created as the list of planned work: the planned items of the README, of PRODUCTION_READINESS.md, of COLLECTORS.md, of MISP_TUNING.md and of RESILMESH_INTEROPERABILITY.md with their current state (the README's timestamp model, sector placeholder decision and task-label clamp left out as done or decided), the ATT&CK for ICS sectors, the zone threat subjects on NATS, the links to the topology layer, the sector classifiers that METHODOLOGY.md sketches, the MISP trust Tier 3 pointer, the follow-ups after the next fresh baseline, the operational guardrails, the known code defects and the open issues whose work is implemented; the documents whose planned sections it replaces point here.

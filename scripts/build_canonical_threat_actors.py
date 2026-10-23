@@ -121,7 +121,7 @@ Usage::
         --graph-actors /tmp/graph_threat_actors.json --unresolved-out /tmp/unresolved_actors.json
 
 Exit code 0 = built (or exported); 1 = invalid input or override; 2 = Neo4j unreachable, or
-``NEO4J_HTTP_URL`` / ``NEO4J_HTTP`` is not an http(s) URL.
+``NEO4J_HTTP_URL`` / ``NEO4J_HTTP`` is not a valid http(s) URL.
 """
 
 from __future__ import annotations

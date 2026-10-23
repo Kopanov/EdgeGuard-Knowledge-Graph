@@ -57,16 +57,20 @@ Env (``src/neo4j_http_endpoint.py``):
   NEO4J_PASSWORD   basic-auth password
   NEO4J_HTTP_USER_AGENT  User-Agent (default: a browser's)
 
-Usage:
-  set -a; source .env.edgeguard; set +a
+Usage, the Compose Neo4j (http://127.0.0.1:7474) with the credentials of .env:
+  set -a; . ./.env; set +a
   python scripts/verify_fresh_baseline.py                 # human-readable
   python scripts/verify_fresh_baseline.py --json          # machine-readable
   python scripts/verify_fresh_baseline.py --require-ics --require-cisa-ics
   python scripts/verify_fresh_baseline.py --require-otx-industries   # after a baseline with OTX
   python scripts/verify_fresh_baseline.py --require-malwarebazaar   # after enabling that source
 
+Another instance: source its credentials and name its address on the same line:
+  set -a; . ./.env.edgeguard; set +a
+  NEO4J_HTTP_URL=<instance HTTP address> python scripts/verify_fresh_baseline.py
+
 Exit code 0 = every mandatory check passed; 1 = at least one failed; 2 = could
-not reach Neo4j, or NEO4J_HTTP_URL / NEO4J_HTTP is not an http(s) URL. A warning
+not reach Neo4j, or NEO4J_HTTP_URL / NEO4J_HTTP is not a valid http(s) URL. A warning
 (``[WARN]``; ``ok: false`` with ``mandatory: false`` in the JSON) is reported and leaves
 the exit code unchanged.
 """
