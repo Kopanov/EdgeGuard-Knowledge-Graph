@@ -8,7 +8,7 @@
 
 ## Overall Status: GREEN — READY FOR PRODUCTION TEST
 
-The core pipeline is functional, well-documented, and CI-verified. All CI jobs pass (lint, type-check, unit tests, security scan, Docker build). The main remaining work is Phase 3 (Query Engine) and ResilMesh integration.
+The core pipeline is functional, well-documented, and CI-verified. All CI jobs pass (lint, type-check, unit tests, security scan, Docker build). Planned work is listed in [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -49,12 +49,9 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 - **CLI.** `preflight`, `doctor`, `stats`, `dag`, `checkpoint`, the baseline triggers, `clear` and the install commands ([CLI.md](CLI.md)).
 - **CI/CD pipeline.** Ruff, Mypy, unit tests with a 30% coverage floor, the Neo4j integration tests, both Docker image builds with Trivy scans, and `pip-audit`.
 
-### ⏳ NOT STARTED - Future Phases
+### Planned work
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| **Query Engine** | ⏳ Not Started | Phase 3 - LLM integration |
-| **ResilMesh Integration** | ⏳ Partial | GraphQL (port 4001), schema alignment — see `docs/RESILMESH_*.md`; full NATS/TLP/RBAC varies by deployment |
+Planned work, with its dependencies and the issues that track it, is listed in [ROADMAP.md](ROADMAP.md): among others the ResilMesh integration (NATS alert loop, ISIM schema extension, Neo4j role separation), partner access to the APIs, a verified alert channel and the query engine.
 
 ---
 
@@ -137,15 +134,6 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 
 **Docker Compose (full stack):** root `docker-compose.yml` runs Airflow with **PostgreSQL** metadata (`airflow_postgres`). See `docs/AIRFLOW_DAGS.md` if DAG runs appear stuck.
 
-### Future Enhancements
-
-| Item | Priority | Effort |
-|------|----------|--------|
-| Increase test coverage beyond the 30% gate (unit tests per collector as they stabilise) | Medium | Ongoing |
-| Query Engine (LLM) | Low | 1-2 weeks |
-| ResilMesh Integration (NATS, TLP, RBAC) | Low | 1-2 weeks |
-| Premium feeds (VT, AbuseIPDB) | Low | Ongoing |
-
 ---
 
 ## Quick Start
@@ -181,13 +169,11 @@ Airflow 3 has no `airflow webserver` command (its web UI is served by
 
 ## Conclusion
 
-**The project is production-ready for its core function** (threat intel ingestion → MISP → Neo4j).
+**The core function (threat intel ingestion → MISP → Neo4j) is ready for a production test.**
 
 All 5 CI checks pass cleanly. The security and code-quality controls above cover security, architecture, data quality, Airflow DAG design, dependency management, and monitoring.
 
-**What's left:**
-- Phase 3: Query Engine (LLM integration)
-- ResilMesh Integration (NATS, TLP, RBAC)
+Planned work: [ROADMAP.md](ROADMAP.md).
 
 For the **launch-day pre-flight pass** that the operator must walk through before triggering a 730-day baseline, see [`BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md). It complements this doc — `PRODUCTION_READINESS.md` is the broader pre-deploy posture; `BASELINE_LAUNCH_CHECKLIST.md` is the focused operator pass right before kickoff. Cross-link in [`DEPLOYMENT_READINESS_CHECKLIST.md`](DEPLOYMENT_READINESS_CHECKLIST.md) for the full deployment workflow.
 
@@ -197,7 +183,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — The component table takes the README's lists of available and implemented capabilities, de-duplicated, with the details below it: the collectors counted as 10 by default and 3 opt-in, the scheduled DAGs created paused, the circuit breakers limited to the feed fetches and the sync's checks; the deployment steps no longer require `credentials/config.yaml`, which the Docker path does not read, and trigger the baseline in the `airflow` container.
+- 2026-10-23 — The component table takes the README's lists of available and implemented capabilities, de-duplicated, with the details below it: the collectors counted as 10 by default and 3 opt-in, the scheduled DAGs created paused, the circuit breakers limited to the feed fetches and the sync's checks; the deployment steps no longer require `credentials/config.yaml`, which the Docker path does not read, and trigger the baseline in the `airflow` container; the future-phase and enhancement tables and the "what's left" list are replaced by a pointer to ROADMAP.md, the one list of planned work, and the conclusion says "ready for a production test" as the status does.
 - 2026-10-17 — Restated as a guide to the current state: the dated fix history condensed here, the controls it established listed as current controls, the coverage gate located in CI and `make test`.
 - 2026-10-17 — 15 top-level CLI commands (it said 16); the launch-day pre-flight runs with `--launch-path=dag`; the MISP health check is the `misp_health_check` PythonOperator (the sensor was replaced); the documentation table names `docs/AIRFLOW_DAG_DESIGN.md` and `docs/AIRFLOW_DAGS.md`; the collector count names the two flag-guarded collectors.
 - 2026-10-15 — Monitoring stack started with both compose files so that Prometheus scrapes `metrics:8001` over `edgeguard_net`; Alertmanager loads without secrets and delivers to Slack through `prometheus/secrets/slack_api_url`; automated code review described without naming the tool.

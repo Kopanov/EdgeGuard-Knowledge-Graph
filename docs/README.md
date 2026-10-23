@@ -92,6 +92,7 @@ Every document of the repository, by topic. The [README](../README.md) at the re
 | Document | Description |
 |---|---|
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Pull-request checklist, CI, documentation convention |
+| [ROADMAP.md](ROADMAP.md) | Planned work, its dependencies and the issues that track it |
 | [CONTRIBUTING.md (docs stub)](CONTRIBUTING.md) | Pointer to the root guide |
 
 ## Historical records
@@ -109,4 +110,4 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — Created as the full documentation index, taken from the README's documentation section and completed with the documents it did not list (RUNBOOK, BACKUP, MEMORY_TUNING, MISP_TUNING, BASELINE_LAUNCH_CHECKLIST, TIMESTAMPS, SECURITY_ROADMAP, CLOUD_SYNC, AIRFLOW_DAG_DESIGN, ARCHITECTURE_FLOW, ADDING_A_NODE_LABEL, CONFIGURATION, CLI); the SETUP_GUIDE, MIGRATIONS, RESILIENCE_CONFIG and DATA_SOURCES descriptions state what those documents cover.
+- 2026-10-23 — Created as the full documentation index, taken from the README's documentation section and completed with the documents it did not list (RUNBOOK, BACKUP, MEMORY_TUNING, MISP_TUNING, BASELINE_LAUNCH_CHECKLIST, TIMESTAMPS, SECURITY_ROADMAP, CLOUD_SYNC, AIRFLOW_DAG_DESIGN, ARCHITECTURE_FLOW, ADDING_A_NODE_LABEL, CONFIGURATION, CLI, ROADMAP); the SETUP_GUIDE, MIGRATIONS, RESILIENCE_CONFIG and DATA_SOURCES descriptions state what those documents cover.

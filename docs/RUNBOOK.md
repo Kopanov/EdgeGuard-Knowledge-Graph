@@ -126,8 +126,8 @@ Each entry: symptom → detection signal → remediation.
 
 ### 2. MISP sustained backoff (flap vs overload)
 
-- **Symptom.** Ingest stalling in 5-minute waves; nightly incremental
-  runs exceeding 1-hour SLO.
+- **Symptom.** Ingest stalling in 5-minute waves; incremental runs
+  taking longer than usual (`EdgeGuardPipelineDurationHigh`).
 - **Prom alert.** `EdgeGuardMispSustainedBackoff` — warning.
 - **Log probe.** `docker logs edgeguard_airflow 2>&1 | grep -E '\[PUSH\] [0-9]+ consecutive 5xx failures' | tail -20`
 - **Root cause.** MISP backend is sustained-degraded (not a transient
@@ -1292,7 +1292,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — The baseline launch path section is titled for the lock that every launch path takes (it offered a choice of paths); it names the green `skipped: true` collector task, the refusals that release the lock and its reaping. Raw MISP data: a section on who asserts a link, what the source cited, an indicator's age and the GraphQL MISP links, which the README carried. The STIX import of `run_pipeline.py` is always on in that CLI; the memory pointer names MEMORY_TUNING.md.
+- 2026-10-23 — The baseline launch path section is titled for the lock that every launch path takes (it offered a choice of paths); it names the green `skipped: true` collector task, the refusals that release the lock and its reaping. Raw MISP data: a section on who asserts a link, what the source cited, an indicator's age and the GraphQL MISP links, which the README carried. The STIX import of `run_pipeline.py` is always on in that CLI; the memory pointer names MEMORY_TUNING.md; the MISP backoff symptom no longer cites a one-hour service-level objective, which is defined nowhere.
 - 2026-10-22 — "Importing a curated package" is written for any registered curated source; the removal queries keep the registered sources and labels.
 - 2026-10-22 — Canonical threat-actor reference: version `2026.10.22` and its counts (merges of spelling variants and designations, `Qilin` and `Agenda` into Water Galura, the never_merge of `Cold River` with Star Blizzard); a group named after a country is written under a qualified name, which counts as itself until the reference gives it to an actor, and a bare country name, also one followed by a parenthetical that yields no name, is dropped and listed by the new `[ACTOR-NAMES]` country line of the OTX collector, whose pulses name no actor for it; a never_merge with an actor leaves the record joined.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event. Removing the curated layer is followed by an enrichment run, which rebuilds the campaign links and levels.

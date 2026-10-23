@@ -1,6 +1,6 @@
 # Flow Audit §7 — Per-collector Baseline Correctness
 
-> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [COLLECTORS.md § Baseline collection limits](../COLLECTORS.md#baseline-collection-limits--current--planned).
+> **Historical record** of the 2026-04-20 flow audit, not maintained; the current behaviour is described in [COLLECTORS.md § Baseline collection limits](../COLLECTORS.md#baseline-collection-limits).
 
 **Date:** 2026-04-20 afternoon
 **Scope:** Each of 12 collectors + 4 sector feeds on baseline=True path
@@ -207,3 +207,11 @@ Fresh in-memory set per `collect()` invocation. Crash at window 7/12 resumes wit
 - **Redirect-follow disabled by default** — prevents SSRF via redirect abuse
 
 **Top priority before real 730d run: H1, H3, H6, H7, H8** — all cause silent >90% data loss.
+
+---
+
+_Last updated: 2026-10-23_
+
+## History
+
+- 2026-10-23 — The opening note links the COLLECTORS section by its new anchor (its title no longer says "current & planned").
