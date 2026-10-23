@@ -538,7 +538,7 @@ Set a flag in `.env` and run `docker compose up -d airflow`. On an existing grap
 - **Cypher injection.** Every Cypher value is a parameter; labels, relationship types and property names, which Cypher cannot parameterise, pass the allowlist validators `_validate_label`, `_validate_rel_type` and `_validate_prop_name`.
 - **TLS verification** is on by default for MISP and every HTTPS source; the CA bundle is `certifi`.
 - **MISP trust boundary.** Source-stated timestamps are accepted only from the MISP organisations in `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` or `EDGEGUARD_TRUSTED_MISP_ORG_NAMES`; while both are empty, a startup warning and the gauge `edgeguard_misp_tag_impersonation_defense_disabled` report it ([docs/SECURITY_ROADMAP.md](docs/SECURITY_ROADMAP.md)).
-- **Destructive operations.** A fresh baseline passes the backup gate, and the Neo4j wipes of a fresh baseline and of `edgeguard clear` are recorded in `logs/destructive_ops.jsonl` and the counter `edgeguard_destructive_ops_total`.
+- **Destructive operations.** A fresh baseline passes the backup gate, and the Neo4j wipes of a fresh baseline, of `edgeguard clear` and of `scripts/clear_neo4j.py` are recorded in `logs/destructive_ops.jsonl` and the counter `edgeguard_destructive_ops_total`.
 - **Request limits.** Per-address rate limits (REST 60 per minute, admin queries 10, GraphQL 120), a request-body cap, and GraphQL depth and alias limits.
 - **Secrets** live in the environment and `.env` (ignored by git); the images contain none.
 

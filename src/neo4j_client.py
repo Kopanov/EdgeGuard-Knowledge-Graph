@@ -597,6 +597,12 @@ def _validate_label(label: str) -> str:
     return label
 
 
+def _clear_scope_pattern(label: Optional[str]) -> str:
+    """Node pattern of the edgeguard-only clear (2026-10): ``(n)``, or ``(n:<label>)`` when one
+    allow-listed label narrows it (``scripts/clear_neo4j.py --label``); raises ValueError otherwise."""
+    return "(n)" if label is None else f"(n:{_validate_label(label)})"
+
+
 # The threat-intelligence labels EdgeGuard writes, counted by ``get_stats`` (one count each) and,
 # with ``Source``, by ``count_nodes_by_label`` for the ``edgeguard_neo4j_nodes`` gauge (2026-10).
 # The ResilMesh topology labels in _ALLOWED_NODE_LABELS belong to the shared graph and are not
@@ -1945,8 +1951,42 @@ class Neo4jClient:
             logger.error(f"Error clearing Neo4j: {e}")
             return False
 
+    @staticmethod
+    def _count_clear_scope(session: Any, node: str) -> Dict[str, int]:
+        """Counts of the edgeguard-only clear for the node pattern ``node`` (``_clear_scope_pattern``):
+        ``managed`` — the nodes it deletes (``edgeguard_managed = true``); ``others`` — the nodes it
+        keeps; ``enriched`` — the kept nodes EdgeGuard wrote to (``edgeguard_enriched = true``)."""
+        managed = session.run(
+            f"MATCH {node} WHERE n.edgeguard_managed = true RETURN count(n) AS count",
+            timeout=NEO4J_READ_TIMEOUT,
+        ).single()["count"]
+        others = session.run(
+            f"MATCH {node} WHERE coalesce(n.edgeguard_managed, false) <> true RETURN count(n) AS count",
+            timeout=NEO4J_READ_TIMEOUT,
+        ).single()["count"]
+        enriched = session.run(
+            f"MATCH {node} WHERE coalesce(n.edgeguard_managed, false) <> true AND n.edgeguard_enriched = true "
+            "RETURN count(n) AS count",
+            timeout=NEO4J_READ_TIMEOUT,
+        ).single()["count"]
+        return {"managed": managed, "others": others, "enriched": enriched}
+
+    def count_edgeguard_managed(self, label: Optional[str] = None) -> Dict[str, int]:
+        """What ``clear_edgeguard_managed(label)`` would delete and keep, without deleting (2026-10).
+
+        Returns ``{"managed", "others", "enriched"}`` (see ``_count_clear_scope``); ``managed +
+        others`` is every node in the scope's label, or in the database without a label. Used by
+        ``scripts/clear_neo4j.py`` for its preview. Raises ValueError for a label outside the
+        allow-list (before any statement) and the driver's error when Neo4j cannot answer.
+        """
+        node = _clear_scope_pattern(label)
+        if not self.driver:
+            raise RuntimeError("Cannot count: no connection to Neo4j")
+        with self.driver.session() as session:
+            return self._count_clear_scope(session, node)
+
     @retry_with_backoff(max_retries=3)
-    def clear_edgeguard_managed(self) -> bool:
+    def clear_edgeguard_managed(self, label: Optional[str] = None) -> bool:
         """Delete only the nodes EdgeGuard created (2026-10, fresh-baseline PR).
 
         Scoped by the ownership marker ``n.edgeguard_managed = true``, which every
@@ -1956,31 +1996,24 @@ class Neo4jClient:
         database — are left in place, EdgeGuard's properties on them included.
         ``DETACH DELETE`` also removes every relationship attached to a deleted node,
         including any a partner drew to it; that is unavoidable when the node goes.
+        ``label`` narrows the delete, and the counts, to that one label
+        (``scripts/clear_neo4j.py --label``); a label outside the allow-list raises
+        ValueError before any statement runs.
 
         Returns:
             True if successful, False otherwise
         """
+        node = _clear_scope_pattern(label)
+        what = "EdgeGuard-managed nodes" if label is None else f"EdgeGuard-managed {label} nodes"
         if not self.driver:
             logger.error("Cannot clear: no connection to Neo4j")
             return False
 
         try:
-            logger.warning("Clearing EdgeGuard-managed nodes (edgeguard_managed = true) from Neo4j...")
+            logger.warning("Clearing %s (edgeguard_managed = true) from Neo4j...", what)
             with self.driver.session() as session:
-                counts = session.run(
-                    "MATCH (n) WHERE n.edgeguard_managed = true RETURN count(n) AS count",
-                    timeout=NEO4J_READ_TIMEOUT,
-                )
-                node_count = counts.single()["count"]
-                others = session.run(
-                    "MATCH (n) WHERE coalesce(n.edgeguard_managed, false) <> true RETURN count(n) AS count",
-                    timeout=NEO4J_READ_TIMEOUT,
-                ).single()["count"]
-                enriched = session.run(
-                    "MATCH (n) WHERE coalesce(n.edgeguard_managed, false) <> true AND n.edgeguard_enriched = true "
-                    "RETURN count(n) AS count",
-                    timeout=NEO4J_READ_TIMEOUT,
-                ).single()["count"]
+                counts = self._count_clear_scope(session, node)
+                node_count, others, enriched = counts["managed"], counts["others"], counts["enriched"]
                 logger.info(
                     "EdgeGuard-created nodes: %s; nodes left untouched: %s (of which EdgeGuard-enriched: %s)",
                     node_count,
@@ -1991,14 +2024,14 @@ class Neo4jClient:
                 # Relationships touching a marked node first, in bounded batches (same heap
                 # reason as clear_all); a relationship on a node that goes, goes with it.
                 rels_deleted = self._delete_relationships_batched(
-                    session, "MATCH (n)-[r]-() WHERE n.edgeguard_managed = true"
+                    session, f"MATCH {node}-[r]-() WHERE n.edgeguard_managed = true"
                 )
 
                 batch_size = 10000
                 deleted = 0
                 while deleted < node_count:
                     result = session.run(
-                        f"MATCH (n) WHERE n.edgeguard_managed = true WITH n LIMIT {batch_size} "
+                        f"MATCH {node} WHERE n.edgeguard_managed = true WITH n LIMIT {batch_size} "
                         "DETACH DELETE n RETURN count(n) AS deleted",
                         timeout=NEO4J_READ_TIMEOUT,
                     )
@@ -2008,13 +2041,16 @@ class Neo4jClient:
                     deleted += batch_deleted
                     logger.debug(f"Deleted batch of {batch_deleted} EdgeGuard-managed nodes")
 
-            logger.info(f"Cleared {deleted} EdgeGuard-managed nodes and {rels_deleted} relationships")
+            logger.info(f"Cleared {deleted} {what} and {rels_deleted} relationships")
+            details: Dict[str, Any] = {"left_untouched": others, "enriched_kept": enriched}
+            if label is not None:
+                details["label"] = label
             record_destructive_op(
                 "clear_edgeguard_managed",
                 target="neo4j",
                 affected=deleted,
-                scope="edgeguard_managed = true",
-                details={"left_untouched": others, "enriched_kept": enriched},
+                scope="edgeguard_managed = true" if label is None else f"edgeguard_managed = true AND n:{label}",
+                details=details,
             )
             return True
 

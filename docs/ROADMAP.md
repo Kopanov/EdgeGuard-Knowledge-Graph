@@ -208,7 +208,6 @@ Defects found in the code; each is fixed in its own change.
 - `Makefile` (`lint`, `type-check`, `test`, `ci`): run `python3` from `PATH`, so `make ci` after `./install.sh --python --dev` uses the system interpreter unless `.venv` is activated.
 - `scripts/preflight_ci.sh`: `DagBag(include_examples=...)` raises `TypeError` on Airflow 3.3, so the script, `scripts/deployment_wiring_check.sh` and `make deploy-check` stop at the DAG parse step.
 - `scripts/preflight_baseline.sh` (check `[11]`, part c): runs `.venv/bin/python`; without the repository's `.venv` it reports the three critical-chain tasks as missing `retries=0`.
-- `scripts/clear_neo4j.py`: deletes nodes by label, ResilMesh's `Vulnerability` and partner `CVE` nodes included, and records no destructive-operations audit entry.
 - `scripts/verify_fresh_baseline.py`, `scripts/run_cypher_catalog_http.py` and `scripts/build_canonical_threat_actors.py`: without `NEO4J_HTTP_URL` (and, for the first and the last, `NEO4J_HTTP`) they send the Neo4j credentials to a built-in remote address instead of failing.
 - `dags/edgeguard_pipeline.py`: `run_virustotal_enrichment_collection` is wired to no task, while the module docstring lists `virustotal_collector.py` as a daily collector and the energy and healthcare placeholders as collectors.
 - `src/collectors/energy_feed_collector.py` and `src/collectors/healthcare_feed_collector.py`: the module docstrings call public sources "already working" and "actively collected", and the skip reasons say the sector advisories are collected by `cisa_collector`; CISA's ICS advisories come from the opt-in `cisa_ics` collector.
@@ -231,4 +230,5 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — Removed the known defect of `scripts/clear_neo4j.py` (deleted nodes by label, partner `Vulnerability` and `CVE` nodes included, without an audit line): the script deletes the nodes EdgeGuard created through the wipe of the fresh baseline and records every delete.
 - 2026-10-23 — Created as the list of planned work: the planned items of the README, of PRODUCTION_READINESS.md, of COLLECTORS.md, of MISP_TUNING.md and of RESILMESH_INTEROPERABILITY.md with their current state (the README's timestamp model, sector placeholder decision and task-label clamp left out as done or decided), the ATT&CK for ICS sectors, the zone threat subjects on NATS, the links to the topology layer, the sector classifiers that METHODOLOGY.md sketches, the MISP trust Tier 3 pointer, the follow-ups after the next fresh baseline, the operational guardrails, the known code defects and the open issues whose work is implemented; the documents whose planned sections it replaces point here.

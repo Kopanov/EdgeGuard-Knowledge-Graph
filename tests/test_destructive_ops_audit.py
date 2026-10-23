@@ -98,3 +98,27 @@ def test_clear_edgeguard_managed_records_counts(monkeypatch):
             },
         )
     ]
+
+
+def test_every_line_names_the_process_that_ran_the_delete(tmp_path, monkeypatch):
+    """Who ran it (2026-10): the operating-system user, the host and the program of the process."""
+    path = tmp_path / "trail.jsonl"
+    monkeypatch.setenv(audit.AUDIT_PATH_ENV, str(path))
+    monkeypatch.setattr(audit.getpass, "getuser", lambda: "operator1")
+    monkeypatch.setattr(audit.socket, "gethostname", lambda: "edge-01")
+    monkeypatch.setattr(sys, "argv", ["/opt/edgeguard/scripts/clear_neo4j.py", "--force"])
+    rec = audit.record_destructive_op("clear_edgeguard_managed", target="neo4j", affected=3)
+    assert rec is not None
+    assert rec["actor"] == {"user": "operator1", "host": "edge-01", "program": "clear_neo4j.py"}
+    assert json.loads(path.read_text())["actor"] == rec["actor"]
+
+
+def test_an_unknown_user_does_not_stop_the_line(tmp_path, monkeypatch):
+    monkeypatch.setenv(audit.AUDIT_PATH_ENV, str(tmp_path / "trail.jsonl"))
+
+    def no_user() -> str:
+        raise KeyError("getpwuid(): uid not found: 50000")
+
+    monkeypatch.setattr(audit.getpass, "getuser", no_user)
+    rec = audit.record_destructive_op("clear_all", target="neo4j", affected=1)
+    assert rec is not None and "user" not in rec["actor"] and rec["actor"]["host"]

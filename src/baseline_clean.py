@@ -537,23 +537,26 @@ WIPE_SCOPE_ALL = "all"
 VALID_WIPE_SCOPES = frozenset({WIPE_SCOPE_EDGEGUARD, WIPE_SCOPE_ALL})
 
 
-def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD) -> None:
-    """Step 2: wipe Neo4j graph data.
+def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD, *, label: Optional[str] = None) -> None:
+    """Step 2: wipe Neo4j graph data. Also the delete of ``scripts/clear_neo4j.py``.
 
     ``scope="edgeguard"`` (default) calls ``Neo4jClient.clear_edgeguard_managed()`` — only the
-    nodes EdgeGuard created, so partner data on a shared database is kept; ``scope="all"`` calls
-    ``Neo4jClient.clear_all()``. Constraints and indexes are preserved by both. Caller is
-    responsible for the open connection.
+    nodes EdgeGuard created, so partner data on a shared database is kept; ``label`` narrows it to
+    the EdgeGuard-created nodes of one label. ``scope="all"`` calls ``Neo4jClient.clear_all()`` and
+    takes no label. Constraints and indexes are preserved by both, and both write the
+    destructive-operations audit line. Caller is responsible for the open connection.
     """
     if scope not in VALID_WIPE_SCOPES:
         raise ValueError(f"wipe scope must be one of {sorted(VALID_WIPE_SCOPES)}, got {scope!r}")
+    if label is not None and scope == WIPE_SCOPE_ALL:
+        raise ValueError("a label narrows the EdgeGuard-managed wipe only; the 'all' scope deletes every node")
     if not client.driver:
         raise RuntimeError("Neo4jClient is not connected — cannot wipe")
     if scope == WIPE_SCOPE_ALL:
         if not client.clear_all():
             raise RuntimeError("Neo4jClient.clear_all() returned False")
         return
-    if not client.clear_edgeguard_managed():
+    if not client.clear_edgeguard_managed(label=label):
         raise RuntimeError("Neo4jClient.clear_edgeguard_managed() returned False")
 
 
