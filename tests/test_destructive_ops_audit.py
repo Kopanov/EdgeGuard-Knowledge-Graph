@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
 import re
 import sys
 from unittest.mock import MagicMock
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
@@ -98,3 +101,50 @@ def test_clear_edgeguard_managed_records_counts(monkeypatch):
             },
         )
     ]
+
+
+def test_every_line_names_the_process_that_ran_the_delete(tmp_path, monkeypatch):
+    """Who ran it (2026-10): the operating-system user, the host and the program of the process."""
+    path = tmp_path / "trail.jsonl"
+    monkeypatch.setenv(audit.AUDIT_PATH_ENV, str(path))
+    monkeypatch.setattr(audit.getpass, "getuser", lambda: "operator1")
+    monkeypatch.setattr(audit.socket, "gethostname", lambda: "edge-01")
+    monkeypatch.setattr(sys, "argv", ["/opt/edgeguard/scripts/clear_neo4j.py", "--force"])
+    rec = audit.record_destructive_op("clear_edgeguard_managed", target="neo4j", affected=3)
+    assert rec is not None
+    assert rec["actor"] == {"user": "operator1", "host": "edge-01", "program": "clear_neo4j.py"}
+    assert json.loads(path.read_text())["actor"] == rec["actor"]
+
+
+@pytest.mark.parametrize("error", [KeyError("getpwuid(): uid not found: 50000"), OSError("No username set")])
+def test_an_unknown_user_does_not_stop_the_line(tmp_path, monkeypatch, caplog, error):
+    # A container user without a password-database entry: an expected case, logged at debug level.
+    monkeypatch.setenv(audit.AUDIT_PATH_ENV, str(tmp_path / "trail.jsonl"))
+
+    def no_user() -> str:
+        raise error
+
+    monkeypatch.setattr(audit.getpass, "getuser", no_user)
+    with caplog.at_level(logging.DEBUG, logger=audit.logger.name):
+        rec = audit.record_destructive_op("clear_all", target="neo4j", affected=1)
+    assert rec is not None and "user" not in rec["actor"] and rec["actor"]["host"]
+    debug = [r for r in caplog.records if "user name unavailable" in r.getMessage()]
+    assert [r.levelno for r in debug] == [logging.DEBUG]
+    assert type(error).__name__ in debug[0].getMessage()
+
+
+def test_an_unexpected_error_reading_the_user_is_logged_and_the_line_still_written(tmp_path, monkeypatch, caplog):
+    # Recording never raises (the delete has already run), but an unexpected failure is not silent.
+    path = tmp_path / "trail.jsonl"
+    monkeypatch.setenv(audit.AUDIT_PATH_ENV, str(path))
+
+    def broken() -> str:
+        raise RuntimeError("password database unreadable")
+
+    monkeypatch.setattr(audit.getpass, "getuser", broken)
+    with caplog.at_level(logging.WARNING, logger=audit.logger.name):
+        rec = audit.record_destructive_op("clear_all", target="neo4j", affected=2)
+    assert rec is not None and "user" not in rec["actor"]
+    assert json.loads(path.read_text())["affected"] == 2
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "user name failed" in r.getMessage()]
+    assert len(warnings) == 1 and "RuntimeError" in warnings[0].getMessage()

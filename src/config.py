@@ -459,34 +459,22 @@ def misp_http_headers_for_pymisp() -> Optional[Dict[str, str]]:
 
 # SSL/TLS Verification
 # -------------------
-# When SSL_VERIFY = True:
-#   - Validates the MISP server's SSL certificate
+# When SSL_VERIFY = True (the default):
+#   - Validates the server certificates of MISP and the HTTPS feeds
 #   - Prevents man-in-the-middle attacks
-#   - Requires valid (not self-signed) certificate
+#   - Requires a certificate the trust bundle accepts (not self-signed)
 #
-# When SSL_VERIFY = False (current dev setting):
+# When SSL_VERIFY = False:
 #   - Accepts self-signed certificates
-#   - OK for local development
-#   - INSECURE for production
+#   - For a development MISP only; INSECURE for production
 #
-# Production: verify TLS (default).
-# Development: internal MISP with self-signed cert → EDGEGUARD_SSL_VERIFY=false
-# (or SSL_VERIFY=false — alias read only when EDGEGUARD_SSL_VERIFY is unset/empty).
+# Set via environment: EDGEGUARD_SSL_VERIFY (alias SSL_VERIFY, read only when
+# EDGEGUARD_SSL_VERIFY is unset or blank). Surrounding ASCII whitespace ignored,
+# case-insensitive: true/1/yes/on verify, false/0/no/off do not, unset or blank
+# verifies, and any other value verifies with one WARNING (fail-closed). The rule lives in
+# ``tls_verify``, which the scripts that do not load this module use as well.
 # ``SSL_CERT_VERIFY`` is not read by EdgeGuard.
-#
-# Set via environment: export EDGEGUARD_SSL_VERIFY=true|false
-def edgeguard_ssl_verify_from_env() -> bool:
-    """True = verify TLS for HTTPS (MISP, collectors). Default True (secure)."""
-    for key in ("EDGEGUARD_SSL_VERIFY", "SSL_VERIFY"):
-        raw = os.getenv(key)
-        if raw is None:
-            continue
-        stripped = str(raw).strip()
-        if not stripped:
-            continue
-        return stripped.lower() == "true"
-    return True
-
+from tls_verify import edgeguard_ssl_verify_from_env  # noqa: E402
 
 SSL_VERIFY = edgeguard_ssl_verify_from_env()
 

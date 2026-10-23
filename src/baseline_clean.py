@@ -480,12 +480,10 @@ def probe_baseline_state(client: Any = None) -> BaselineState:
         # MISP config — lazy-import to avoid hard dep when only Neo4j matters
         misp_url = os.getenv("MISP_URL", "https://localhost:8443")
         misp_api_key = os.getenv("MISP_API_KEY", "")
-        try:
-            from config import edgeguard_ssl_verify_from_env
+        # The one rule for EDGEGUARD_SSL_VERIFY / SSL_VERIFY (fail-closed); ``tls_verify`` needs no config.
+        from tls_verify import edgeguard_ssl_verify_from_env
 
-            ssl_verify = edgeguard_ssl_verify_from_env()
-        except ImportError:
-            ssl_verify = os.getenv("EDGEGUARD_SSL_VERIFY", os.getenv("SSL_VERIFY", "true")).strip().lower() == "true"
+        ssl_verify = edgeguard_ssl_verify_from_env()
         m_count, m_err = _probe_misp(misp_url, misp_api_key, ssl_verify)
 
         c_count, c_err = _probe_checkpoint()
@@ -537,23 +535,26 @@ WIPE_SCOPE_ALL = "all"
 VALID_WIPE_SCOPES = frozenset({WIPE_SCOPE_EDGEGUARD, WIPE_SCOPE_ALL})
 
 
-def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD) -> None:
-    """Step 2: wipe Neo4j graph data.
+def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD, *, label: Optional[str] = None) -> None:
+    """Step 2: wipe Neo4j graph data. Also the delete of ``scripts/clear_neo4j.py``.
 
     ``scope="edgeguard"`` (default) calls ``Neo4jClient.clear_edgeguard_managed()`` — only the
-    nodes EdgeGuard created, so partner data on a shared database is kept; ``scope="all"`` calls
-    ``Neo4jClient.clear_all()``. Constraints and indexes are preserved by both. Caller is
-    responsible for the open connection.
+    nodes EdgeGuard created, so partner data on a shared database is kept; ``label`` narrows it to
+    the EdgeGuard-created nodes of one label. ``scope="all"`` calls ``Neo4jClient.clear_all()`` and
+    takes no label. Constraints and indexes are preserved by both, and both write the
+    destructive-operations audit line. Caller is responsible for the open connection.
     """
     if scope not in VALID_WIPE_SCOPES:
         raise ValueError(f"wipe scope must be one of {sorted(VALID_WIPE_SCOPES)}, got {scope!r}")
+    if label is not None and scope == WIPE_SCOPE_ALL:
+        raise ValueError("a label narrows the EdgeGuard-managed wipe only; the 'all' scope deletes every node")
     if not client.driver:
         raise RuntimeError("Neo4jClient is not connected — cannot wipe")
     if scope == WIPE_SCOPE_ALL:
         if not client.clear_all():
             raise RuntimeError("Neo4jClient.clear_all() returned False")
         return
-    if not client.clear_edgeguard_managed():
+    if not client.clear_edgeguard_managed(label=label):
         raise RuntimeError("Neo4jClient.clear_edgeguard_managed() returned False")
 
 
@@ -899,12 +900,10 @@ def reset_baseline_data(
         logger.info("Step 3/3: wiping MISP EdgeGuard events…")
         misp_url = os.getenv("MISP_URL", "https://localhost:8443")
         misp_api_key = os.getenv("MISP_API_KEY", "")
-        try:
-            from config import edgeguard_ssl_verify_from_env
+        # The one rule for EDGEGUARD_SSL_VERIFY / SSL_VERIFY (fail-closed); ``tls_verify`` needs no config.
+        from tls_verify import edgeguard_ssl_verify_from_env
 
-            ssl_verify = edgeguard_ssl_verify_from_env()
-        except ImportError:
-            ssl_verify = os.getenv("EDGEGUARD_SSL_VERIFY", os.getenv("SSL_VERIFY", "true")).strip().lower() == "true"
+        ssl_verify = edgeguard_ssl_verify_from_env()
         try:
             deleted = _wipe_misp_events(misp_url, misp_api_key, ssl_verify, max_pages=misp_max_pages)
         except Exception as e:

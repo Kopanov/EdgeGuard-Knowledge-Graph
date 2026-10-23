@@ -172,7 +172,7 @@ If Apache **`ServerName`** differs from the URL host, set **`EDGEGUARD_MISP_HTTP
 
 ### Self-signed MISP / **`certificate verify failed`** (preflight, sync, collectors)
 
-EdgeGuard verifies HTTPS by default. For **dev/lab** MISP with a self-signed cert, set **`EDGEGUARD_SSL_VERIFY=false`** on every runtime that calls MISP (**Airflow worker + scheduler**, API containers, etc.). Optional alias: **`SSL_VERIFY=false`** only when **`EDGEGUARD_SSL_VERIFY`** is unset or empty. **`SSL_CERT_VERIFY`** has no effect. See **[AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)** § *misp_health_check* (self-signed + Apache redirect notes).
+EdgeGuard verifies HTTPS by default. For **dev/lab** MISP with a self-signed cert, set **`EDGEGUARD_SSL_VERIFY=false`** on every runtime that calls MISP (**Airflow worker + scheduler**, API containers, etc.). Optional alias: **`SSL_VERIFY=false`** only when **`EDGEGUARD_SSL_VERIFY`** is unset or blank. Only `false`, `0`, `no` or `off` (any case) turns verification off; any other value keeps it on and is logged as a warning ([CONFIGURATION.md § TLS and trust](CONFIGURATION.md#tls-and-trust)). **`SSL_CERT_VERIFY`** has no effect. See **[AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)** § *misp_health_check* (self-signed + Apache redirect notes).
 
 ### MITRE collector: HTTP **400** on attribute add
 
@@ -184,6 +184,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — Self-signed MISP: only `false`, `0`, `no` or `off` turns TLS verification off; any other value of `EDGEGUARD_SSL_VERIFY` keeps it on with a warning.
 - 2026-10-23 — The settings reference points to CONFIGURATION.md, which holds the README's settings tables.
 - 2026-10-20 — ATT&CK techniques, tactics and tools are written as `<id> - <name>`, which MISP's default Import Regexp rules leave unchanged (as `<id>: <name>`, the rules rewrote the nine entries named "Windows …" on the run of 2026-10-20); the sync reads both forms and skips a value with no valid ATT&CK id with an `[ATTACK-VALUE]` warning; new section on the attribute types and values.
 - 2026-10-19 — MISPWriter writes an `OTX_META` block (`pulse_id`, `report_ids`, `pulse_name`) on a CVE an OTX pulse names (it wrote a plain comment), from which the sync groups the CVE into its pulse; the `OTX_META` row lists it.

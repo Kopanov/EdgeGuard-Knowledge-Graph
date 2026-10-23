@@ -64,8 +64,9 @@ canonical fix is:
 # Leave edgeguard_baseline unpaused: a run triggered on a paused DAG stays queued.
 # While the baseline runs, its lock keeps the scheduled DAGs from writing.
 
-# 2. Wipe the graph (dev/test only — never production): deletes the nodes of the
-#    EdgeGuard labels (add --full-wipe for every node) and clears the collector checkpoints
+# 2. Wipe the graph (dev/test only — never production): deletes the nodes EdgeGuard
+#    created (edgeguard_managed = true; --full-wipe deletes every node after a typed
+#    confirmation) and clears the collector checkpoints
 python scripts/clear_neo4j.py --force
 
 # 3. Rebuild from the collectors
@@ -87,6 +88,7 @@ _Last updated: 2026-10-23_
 ## History
 
 - 2026-10-23 — `scripts/verify_fresh_baseline.py` checks the Compose Neo4j at `http://127.0.0.1:7474` when neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` is set (it checked a built-in remote instance); the heal path's verify step runs without `NEO4J_HTTP_URL`.
+- 2026-10-23 — The heal path states that `scripts/clear_neo4j.py --force` deletes the nodes EdgeGuard created (`edgeguard_managed = true`) and that `--full-wipe` asks for a typed confirmation.
 - 2026-10-18 — Removed `scripts/backfill_cve_dates_from_nvd_meta.py`, `scripts/backfill_edge_misp_event_ids.py` with its runbook in `migrations/`, and the read-only audit `scripts/audit_legacy_unicode_bypass_nodes.py`: they repaired or inspected data written by earlier versions, which a fresh baseline rebuilds.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — The heal path pauses the five scheduled DAGs and leaves `edgeguard_baseline` unpaused (its lock holds the scheduled writers off), wipes with `scripts/clear_neo4j.py --force` (the script has no `--yes`), and verifies with the read-only `scripts/verify_fresh_baseline.py`; the main text describes current behavior only, and the runbooks and the fix-up and audit scripts for earlier-version graphs moved to the appendix.

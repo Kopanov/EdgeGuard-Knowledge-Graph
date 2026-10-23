@@ -720,7 +720,7 @@ rebaseline.
 
 ```bash
 # Dev / test only — never on a graph anyone else is reading.
-python scripts/clear_neo4j.py --force   # deletes the nodes with EdgeGuard labels, recreates the Source nodes, clears the collector checkpoints
+python scripts/clear_neo4j.py --force   # deletes the nodes EdgeGuard created (edgeguard_managed = true), recreates the Source nodes, clears the collector checkpoints
 edgeguard baseline   # or trigger the edgeguard_baseline DAG
 ```
 
@@ -785,10 +785,11 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The re-stamp recipe states that `clear_neo4j.py --force` deletes the nodes EdgeGuard created (`edgeguard_managed = true`), not every node of the EdgeGuard labels.
 - 2026-10-19 — Recipe 2 seeds on the `CVE` node and takes both links from an indicator, `INDICATES` (named in the same OTX report) and `EXPLOITS` (the indicator's own CVE tag), kept apart by the edge type; it seeded on the `Vulnerability` twin and took `EXPLOITS` only.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the notes for graphs written by earlier builds to the appendix (the revert of the uuid deploy is no longer a rollback recipe, so the uuid cleanup and re-stamp recipes are Rollback B and C).
