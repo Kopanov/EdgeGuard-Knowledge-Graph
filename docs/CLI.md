@@ -37,13 +37,16 @@ Every command accepts `--help`. `edgeguard --update` is a synonym of `edgeguard 
 | `doctor` | Connectivity, schema and configuration diagnosis |
 | `validate` | Configuration check |
 | `monitor` | One-shot health snapshot |
-| `heal` | Reset breakers, remove lock files, trigger the pipeline DAG |
+| `heal` | Reset breakers, remove lock files no process holds, trigger the pipeline DAG |
 
 - **`preflight`** runs seven check groups: the required settings and a live check of each source API key, Neo4j and APOC, MISP, Airflow, disk space, checkpoints, and the circuit breakers of the CLI process itself (the pipeline's breakers live in each Airflow task and are not visible to it). It exits 0 when ready and 1 when a check fails; `--strict` also fails on warnings. `--json` prints JSON after the text report on standard output.
 - **`doctor`** checks MISP and its PyMISP compatibility, Neo4j and its constraints, Airflow and the paused or active DAGs, the baseline window, NATS (only when `NATS_URL` is set), the memory settings, the API keys, disk space, the last sync, the configured sources and version compatibility. `doctor --memory` compares Neo4j's heap, page cache and transaction memory and the host RAM with the recommended values ([MEMORY_TUNING.md](MEMORY_TUNING.md)); it reads the `neo4j` container's settings through `docker compose exec`, so run it with the pip-installed CLI on the Compose host, from the repository directory. Inside the `airflow` container, which has no Docker CLI and receives none of the Neo4j memory variables, it reports the Neo4j rows as unknown.
 - **`validate`** checks rate limits, passwords, the Neo4j schema and production issues, among them disabled TLS verification, an `EDGEGUARD_SSL_VERIFY` value it does not recognise (verification then stays on) and a default Neo4j password.
 - **`monitor`** prints one snapshot (MISP, Neo4j and its counts, the last sync, the circuit-breaker file, Prometheus) and exits 1 when MISP reports an error or Neo4j is down.
-- **`heal`** resets the circuit breakers of its own CLI process, removes every `edgeguard_*.lock` in the temporary directory and every `*.lock` in the repository root, removes the circuit-breaker state file, and triggers the `edgeguard_pipeline` DAG. It does not check whether a process holds a lock file: inside the `airflow` container the pattern matches the event-creation lock of the MISP writer, so run it only while no collector runs. The baseline lock in `checkpoints/` is not touched.
+- **`heal`** resets the circuit breakers of its own CLI process, checks EdgeGuard's lock files, removes the circuit-breaker state file, and triggers the `edgeguard_pipeline` DAG. It looks only at EdgeGuard's own lock files, by name, and prints each one it removed or kept. Its closing summary counts the lock files it removed and those it kept, an event-creation lock that a running collector holds aside, and says EdgeGuard is healthy only when there was nothing to repair or keep:
+  - The event-creation lock of the MISP writer (`EDGEGUARD_MISP_EVENT_LOCK_PATH`, default `/tmp/edgeguard_misp_get_or_create_event.lock`) is a file that a collector locks with `flock`. Heal removes it only while it holds that lock itself and keeps it while a running process holds it, so `heal` is safe while collectors run; a collector that was waiting on the removed file takes the lock again on the file the path names now.
+  - `checkpoints/pipeline.lock` (the PID of an in-process `run_pipeline.py` run) and the baseline lock `checkpoints/baseline_in_progress.lock` are reported with their holder and never removed: `run_pipeline.py` replaces a pipeline lock whose process is gone, and the baseline lock is released by a successful baseline or reaped by its liveness check and age cap ([RUNBOOK.md § Baseline-day protocol](RUNBOOK.md#baseline-day-protocol), which also gives the manual removal).
+  - No other file is touched: other `*.lock` files in the repository root or the temporary directory stay.
 
 ---
 
@@ -217,5 +220,6 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `heal` removes the MISP writer's event-creation lock only when no process holds it, reports the pipeline and baseline locks without removing them and counts the kept lock files in its summary, and no longer removes other `*.lock` files in the repository root or the temporary directory.
 - 2026-10-23 — `validate` reports an `EDGEGUARD_SSL_VERIFY` value it does not recognise; verification then stays on.
 - 2026-10-23 — Created from the README's command reference, `make` targets and standalone commands, with the Docker form of every command, the host-shell settings, the `--json` output, the `preflight` breaker check, `heal`, `monitor`, `setup`, the `make install` and `make ci` behaviour, the operator scripts and the always-on STIX flow of `run_pipeline.py` stated as the code behaves.

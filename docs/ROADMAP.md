@@ -197,7 +197,6 @@ A run fails on collector errors, on a MISP push success rate below its threshold
 
 Defects found in the code; each is fixed in its own change.
 
-- `src/edgeguard.py` (`clear_lock_files`, run by `edgeguard heal`): removes every `edgeguard_*.lock` in the temporary directory and every `*.lock` in the repository root without checking whether a process holds it, the lock file `MISPWriter` uses for event creation included.
 - `Makefile` (`install`): creates `.env` before it runs `./install.sh`, which then skips generating `GRAFANA_ADMIN_PASSWORD`, so the template value `changeme` stays.
 - `src/edgeguard.py` (`main`): `edgeguard setup` loads the configuration first, so it fails without exported settings (`NEO4J_PASSWORD`), unlike `version` and `update`.
 - `src/edgeguard.py`: with `--json`, `stats`, `checkpoint status`, `dag status` and `preflight` print a text banner to stdout before the JSON, and `preflight` its report too.
@@ -230,5 +229,6 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — Removed the `clear_lock_files` defect from Known defects: `edgeguard heal` removes the MISP writer's event-creation lock only when no process holds it and removes no other lock file.
 - 2026-10-23 — Removed the known defect of `EDGEGUARD_SSL_VERIFY` turning TLS verification off for any value other than `true` (it fails closed now, one rule in `src/tls_verify.py`); the MISP session helper item names the shared TLS setting.
 - 2026-10-23 — Created as the list of planned work: the planned items of the README, of PRODUCTION_READINESS.md, of COLLECTORS.md, of MISP_TUNING.md and of RESILMESH_INTEROPERABILITY.md with their current state (the README's timestamp model, sector placeholder decision and task-label clamp left out as done or decided), the ATT&CK for ICS sectors, the zone threat subjects on NATS, the links to the topology layer, the sector classifiers that METHODOLOGY.md sketches, the MISP trust Tier 3 pointer, the follow-ups after the next fresh baseline, the operational guardrails, the known code defects and the open issues whose work is implemented; the documents whose planned sections it replaces point here.
