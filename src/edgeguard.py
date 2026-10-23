@@ -924,7 +924,8 @@ def _baseline_lock_detail(path: str) -> str:
         data = None
     holder = describe_holder(data) if isinstance(data, dict) else "unreadable holder"
     return (
-        f"the baseline lock ({holder}); heal never removes it, the baseline releases it "
+        f"the baseline lock ({holder}); heal never removes it; a successful baseline releases it, "
+        "the lock's liveness check or age cap reaps a stale one, or remove it by hand "
         "(docs/RUNBOOK.md, Baseline-day protocol)"
     )
 
@@ -1044,7 +1045,7 @@ def cmd_heal(args):
     if not any(locks.values()):
         ok("No lock files found")
     if locks["removed"]:
-        healed_items.append(f"{len(locks['removed'])} lock file(s) no process held removed")
+        healed_items.append(f"removed {len(locks['removed'])} lock file(s) that no process held")
 
     # Retry pending collections
     info("Checking for pending collections...")
@@ -1064,9 +1065,14 @@ def cmd_heal(args):
             pass
 
     section("Heal Complete")
+    kept = len(locks["kept"])
     if healed_items:
         ok(f"EdgeGuard healed: {', '.join(healed_items)}")
+        if kept:
+            warn(f"{kept} lock file(s) kept (see above)")
         info("Note: Some changes may require restarting the pipeline")
+    elif kept:
+        warn(f"Nothing repaired; {kept} lock file(s) kept (see above)")
     else:
         ok("No issues found — EdgeGuard is healthy")
     return 0

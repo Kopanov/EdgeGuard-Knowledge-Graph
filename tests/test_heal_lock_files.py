@@ -326,3 +326,57 @@ def test_cmd_heal_prints_the_presence_locks_it_kept(env, monkeypatch, capsys):
 def test_cmd_heal_without_lock_files(env, monkeypatch, capsys):
     out = _heal(monkeypatch, env, capsys)
     assert "No lock files found" in out
+
+
+def test_cmd_heal_does_not_call_edgeguard_healthy_while_it_kept_a_lock(env, monkeypatch, capsys):
+    pipeline = env["root"] / "checkpoints" / "pipeline.lock"
+    pipeline.write_text(str(_dead_pid()))
+    assert baseline_lock.acquire_baseline_lock({"dag_id": "edgeguard_baseline", "run_id": "manual__r1"})
+    summary = _heal(monkeypatch, env, capsys).split("Heal Complete")[1]
+    assert "healthy" not in summary
+    assert "No issues found" not in summary
+    assert "Nothing repaired; 2 lock file(s) kept (see above)" in summary
+
+
+def test_cmd_heal_summary_counts_the_removed_and_the_kept_lock_files(env, monkeypatch, capsys):
+    env["event_lock"].touch()
+    (env["root"] / "checkpoints" / "pipeline.lock").write_text("12345")
+    summary = _heal(monkeypatch, env, capsys).split("Heal Complete")[1]
+    assert "EdgeGuard healed: removed 1 lock file(s) that no process held" in summary
+    assert "1 lock file(s) kept (see above)" in summary
+    assert "Nothing repaired" not in summary
+    assert "healthy" not in summary
+
+
+def test_cmd_heal_with_only_a_held_event_lock_reports_healthy(env, monkeypatch, capsys):
+    # A collector holding the event lock is normal operation, not something heal left unrepaired.
+    entered, release = threading.Event(), threading.Event()
+    thread = _hold_in_thread(entered, release)
+    try:
+        summary = _heal(monkeypatch, env, capsys).split("Heal Complete")[1]
+    finally:
+        release.set()
+        thread.join(WAIT_SEC)
+    assert "No issues found — EdgeGuard is healthy" in summary
+    assert "kept" not in summary
+
+
+@pytest.mark.parametrize("holder", ["dag_run", "dead_process"])
+def test_the_baseline_lock_detail_does_not_say_the_baseline_releases_a_stale_lock(env, holder):
+    path = baseline_lock.baseline_lock_path()
+    if holder == "dag_run":
+        assert baseline_lock.acquire_baseline_lock({"dag_id": "edgeguard_baseline", "run_id": "manual__r1"})
+    else:
+        sentinel = {
+            "pid": _dead_pid(),
+            "host": socket.gethostname(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(path, "w") as fh:
+            json.dump(sentinel, fh)
+    detail = edgeguard.clear_lock_files()["kept"][0][1]
+    assert "the baseline releases it" not in detail
+    assert "a successful baseline releases it" in detail
+    assert "liveness check" in detail and "age cap" in detail
+    assert "remove it by hand" in detail
+    assert "docs/RUNBOOK.md, Baseline-day protocol" in detail
