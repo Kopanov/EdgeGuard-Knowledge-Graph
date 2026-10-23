@@ -902,29 +902,66 @@ def reset_circuit_breakers():
     return True, "No circuit breakers to reset"
 
 
-def clear_lock_files():
-    """Clear any stale lock files."""
-    cleared = []
+def _pipeline_lock_detail(path: str) -> str:
+    try:
+        with open(path) as fh:
+            pid = fh.read().strip()
+    except OSError as exc:
+        return f"the pipeline lock, unreadable ({exc}); heal never removes it"
+    return (
+        f"the pipeline lock of PID {pid or '(none recorded)'}; heal never removes it, "
+        "run_pipeline.py replaces it once that process is gone"
+    )
 
-    # Common lock file locations
-    lock_patterns = [
-        os.path.join(tempfile.gettempdir(), "edgeguard_*.lock"),
-        os.path.join(os.path.dirname(SCRIPT_DIR), "*.lock"),
-    ]
 
-    for pattern in lock_patterns:
-        import glob
+def _baseline_lock_detail(path: str) -> str:
+    from baseline_lock import describe_holder
 
-        for lock_file in glob.glob(pattern):
-            try:
-                os.remove(lock_file)
-                cleared.append(lock_file)
-            except Exception:
-                pass
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = None
+    holder = describe_holder(data) if isinstance(data, dict) else "unreadable holder"
+    return (
+        f"the baseline lock ({holder}); heal never removes it, the baseline releases it "
+        "(docs/RUNBOOK.md, Baseline-day protocol)"
+    )
 
-    if cleared:
-        return True, f"Cleared {len(cleared)} lock file(s)"
-    return True, "No lock files found"
+
+def clear_lock_files() -> dict[str, list[tuple[str, str]]]:
+    """Remove EdgeGuard's flock-style lock files that no process holds; report the lock files kept.
+
+    Only EdgeGuard's own lock files are looked at, by name. The event-creation lock of the MISP
+    writer (``EDGEGUARD_MISP_EVENT_LOCK_PATH``) is removed only while heal holds its lock
+    (``lock_files.remove_if_unheld``); a file a running process holds is kept. The presence-based
+    locks, ``checkpoints/pipeline.lock`` and the baseline lock, are reported and never removed: each
+    has its own release. Returns ``{"removed": [...], "held": [...], "kept": [...]}`` with
+    ``(path, detail)`` entries.
+    """
+    from baseline_lock import baseline_lock_path
+    from lock_files import HELD, REMOVED, misp_event_lock_path, remove_if_unheld
+
+    report: dict[str, list[tuple[str, str]]] = {"removed": [], "held": [], "kept": []}
+
+    event_lock = misp_event_lock_path()
+    status, detail = remove_if_unheld(event_lock)
+    if status == REMOVED:
+        report["removed"].append((event_lock, f"the MISP event-creation lock; {detail}"))
+    elif status == HELD:
+        report["held"].append((event_lock, f"the MISP event-creation lock; {detail}"))
+    elif detail:
+        report["kept"].append((event_lock, f"the MISP event-creation lock; {detail}"))
+
+    pipeline_lock = os.path.join(os.path.dirname(SCRIPT_DIR), "checkpoints", "pipeline.lock")
+    if os.path.exists(pipeline_lock):
+        report["kept"].append((pipeline_lock, _pipeline_lock_detail(pipeline_lock)))
+
+    baseline_path = baseline_lock_path()
+    if os.path.exists(baseline_path):
+        report["kept"].append((baseline_path, _baseline_lock_detail(baseline_path)))
+
+    return report
 
 
 def retry_pending_collections():
@@ -995,12 +1032,19 @@ def cmd_heal(args):
     if ok_flag and "Reset" in msg:
         healed_items.append("circuit breakers reset")
 
-    # Clear lock files
-    info("Clearing lock files...")
-    ok_flag, msg = clear_lock_files()
-    ok(msg)
-    if "Cleared" in msg:
-        healed_items.append("lock files cleared")
+    # Lock files: only those no process holds go
+    info("Checking lock files...")
+    locks = clear_lock_files()
+    for path, detail in locks["removed"]:
+        ok(f"Removed {path}: {detail}")
+    for path, detail in locks["held"]:
+        info(f"Kept {path}: {detail}")
+    for path, detail in locks["kept"]:
+        warn(f"Kept {path}: {detail}")
+    if not any(locks.values()):
+        ok("No lock files found")
+    if locks["removed"]:
+        healed_items.append(f"{len(locks['removed'])} lock file(s) no process held removed")
 
     # Retry pending collections
     info("Checking for pending collections...")

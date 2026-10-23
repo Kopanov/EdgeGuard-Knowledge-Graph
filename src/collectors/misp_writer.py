@@ -41,6 +41,7 @@ from config import (
     otx_industry_zones,
 )
 from cvss_selection import cvss_rating_tag, normalize_attack_vector
+from lock_files import exclusive_flock, misp_event_lock_path
 from sector_evidence import report_zone_entry, report_zone_pairs
 
 # PR-N4: Prometheus metrics for permanent-failure counter + adaptive-
@@ -1218,28 +1219,12 @@ def _cross_process_event_creation_lock():
     Serialize MISP event creation across processes (e.g. Airflow LocalExecutor workers).
 
     Without this, two collectors can both see "no event" and create duplicates — or worse, rely on
-    ambiguous restSearch hits. Uses ``fcntl`` (Unix). On platforms without ``fcntl``, the context is a no-op.
+    ambiguous restSearch hits. The lock is an ``flock`` on ``EDGEGUARD_MISP_EVENT_LOCK_PATH``
+    (``lock_files.exclusive_flock``): a collector that waited on a file ``edgeguard heal`` removed takes
+    the lock again on the current file. On platforms without ``fcntl``, the context is a no-op.
     """
-    try:
-        import fcntl
-    except ImportError:
+    with exclusive_flock(misp_event_lock_path()):
         yield
-        return
-
-    path = os.environ.get(
-        "EDGEGUARD_MISP_EVENT_LOCK_PATH",
-        "/tmp/edgeguard_misp_get_or_create_event.lock",
-    )
-    lock_f = open(path, "a+", encoding="utf-8")
-    try:
-        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        lock_f.close()
 
 
 def sanitize_value(value: str, max_length: int = 255) -> str:
