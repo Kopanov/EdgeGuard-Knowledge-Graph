@@ -107,10 +107,11 @@ The build prints the counts, the rule effects and every override decision. With
 in read mode: name, aliases, sources, relationship count, pulse count and malware names. For an
 ATT&CK node it also reads the record MITRE delivered (its SOURCED_FROM edge to the ATT&CK source):
 the delivered aliases (``attack_aliases``) and the ATT&CK group id the delivered description links
-to (else the id the node's own description links to). It uses the same settings as
-``scripts/verify_fresh_baseline.py``: ``NEO4J_HTTP_URL`` or ``NEO4J_HTTP``, ``NEO4J_DATABASE``,
-``NEO4J_USER``, ``NEO4J_PASSWORD``. Graph-derived files must be written outside the
-repository; the script refuses a path inside it.
+to (else the id the node's own description links to). It builds the request with
+``src/neo4j_http_endpoint.py``, like ``scripts/verify_fresh_baseline.py``: ``NEO4J_HTTP_URL``, then
+``NEO4J_HTTP`` (neither set: the local Compose Neo4j ``http://127.0.0.1:7474``; there is no remote
+default), ``NEO4J_DATABASE``, ``NEO4J_USER``, ``NEO4J_PASSWORD``. Graph-derived files must be written
+outside the repository; the script refuses a path inside it.
 
 Usage::
 
@@ -119,17 +120,16 @@ Usage::
         --attack-galaxy-raw misp_galaxy_mitre-intrusion-set_20261013.json \\
         --graph-actors /tmp/graph_threat_actors.json --unresolved-out /tmp/unresolved_actors.json
 
-Exit code 0 = built (or exported); 1 = invalid input or override; 2 = Neo4j unreachable.
+Exit code 0 = built (or exported); 1 = invalid input or override; 2 = Neo4j unreachable, or
+``NEO4J_HTTP_URL`` / ``NEO4J_HTTP`` is not a valid http(s) URL.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import datetime as _dt
 import hashlib
 import json
-import os
 import re
 import sys
 import urllib.error
@@ -145,6 +145,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import canonical_threat_actors as reference_lookup  # noqa: E402
+import neo4j_http_endpoint  # noqa: E402
 from actor_name_hygiene import clean_actor_names  # noqa: E402
 from node_identity import canonicalize_merge_key, is_placeholder_name  # noqa: E402
 
@@ -1930,30 +1931,16 @@ ORDER BY name
 def _http_query(
     statement: str, parameters: Optional[Mapping[str, Any]] = None, timeout: int = 300
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    base = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
-    url = f"{base}/db/{os.getenv('NEO4J_DATABASE', 'neo4j')}/query/v2"
-    auth = f"{os.getenv('NEO4J_USER', 'neo4j')}:{os.getenv('NEO4J_PASSWORD', '')}"
     body = json.dumps({"statement": statement, "parameters": dict(parameters or {}), "accessMode": "Read"}).encode()
-    req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Authorization", "Basic " + base64.b64encode(auth.encode()).decode())
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    # The Cloudflare proxy in front of the hosted instance rejects urllib's default agent
-    # (same workaround as scripts/verify_fresh_baseline.py).
-    req.add_header(
-        "User-Agent",
-        os.getenv(
-            "NEO4J_HTTP_USER_AGENT",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0 Safari/537.36",
-        ),
-    )
+    # Address, credentials and User-Agent from the shared helper (as scripts/verify_fresh_baseline.py):
+    # NEO4J_HTTP_URL, then NEO4J_HTTP, else the local Compose Neo4j; never a built-in remote host.
+    req = neo4j_http_endpoint.query_request(body)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode())
     if payload.get("errors"):
         raise RuntimeError(payload["errors"])
     data = payload["data"]
-    return url, [dict(zip(data["fields"], row, strict=True)) for row in data["values"]]
+    return req.full_url, [dict(zip(data["fields"], row, strict=True)) for row in data["values"]]
 
 
 def attack_delivery(raw_data: Any) -> Tuple[Optional[List[str]], str]:
@@ -2064,6 +2051,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.export_graph_actors is not None:
         try:
             n = export_graph_actors(args.export_graph_actors)
+        except neo4j_http_endpoint.Neo4jHttpEndpointError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         except (urllib.error.URLError, OSError, RuntimeError) as exc:
             print(f"ERROR: cannot read ThreatActor nodes from Neo4j: {exc}", file=sys.stderr)
             return 2

@@ -38,8 +38,10 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `NEO4J_USER` | `neo4j` | Neo4j user |
 | `NEO4J_PASSWORD` | required | Neo4j password |
 | `NEO4J_DATABASE` | unset | Database of every session (multi-database servers) |
-| `NEO4J_HTTP` | `http://neo4j:7474` on Compose | Neo4j HTTP API of the DAG diagnostics |
-| `NEO4J_HTTP_URL` | a remote address | Neo4j HTTP API of the host scripts |
+| `NEO4J_HTTP` | `http://neo4j:7474` on Compose | Neo4j HTTP API of the DAG diagnostics; of the host scripts when `NEO4J_HTTP_URL` is unset |
+| `NEO4J_HTTP_URL` | `http://127.0.0.1:7474` | Neo4j HTTP API of the host scripts |
+| `NEO4J_HTTP_USER_AGENT` | a browser's | User-Agent of the host scripts' HTTP requests |
+| `NEO4J_WSS_HOST` | unset | Host of the Bolt-over-WebSocket bridge: `scripts/neo4j_wss_bridge.py` run on its own exits 2 without it; `tests/test_cypher_query_catalog.py` uses the bridge when it is set |
 | `NEO4J_HEAP_INITIAL` | `512m` | JVM initial heap of the `neo4j` service |
 | `NEO4J_HEAP_MAX` | `2g` | JVM maximum heap |
 | `NEO4J_PAGECACHE` | `1g` | Page cache |
@@ -51,7 +53,9 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 - `NEO4J_DATABASE` unset or empty uses the server's default database.
 - The five memory variables are set in the `neo4j` service of `docker-compose.yml`; the values above are the Compose defaults. `NEO4J_TX_MEMORY_MAX` limits transaction memory inside the heap and off-heap budget and is not added to it; the 8g container default covers the default heap, page cache and off-heap overhead.
 - A 730-day baseline needs the baseline-capable profile: heap 12g (initial = maximum), page cache 8g, transaction memory 8g, container 32g ([MEMORY_TUNING.md](MEMORY_TUNING.md), [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles)). `edgeguard doctor --memory`, run on the Compose host, compares the values in effect with the recommended ones ([CLI.md](CLI.md#readiness-and-diagnosis)).
-- `scripts/verify_fresh_baseline.py` and `scripts/build_canonical_threat_actors.py` read `NEO4J_HTTP_URL`, then `NEO4J_HTTP`; `scripts/run_cypher_catalog_http.py` reads `NEO4J_HTTP_URL` only. With neither set they use a built-in remote address and send `NEO4J_USER` and `NEO4J_PASSWORD` there, so on the host always set `NEO4J_HTTP_URL=http://localhost:7474`. `.env.example` lists `NEO4J_HTTP` commented out.
+- `scripts/verify_fresh_baseline.py`, `scripts/run_cypher_catalog_http.py` and `scripts/build_canonical_threat_actors.py` build their requests with `src/neo4j_http_endpoint.py`: they read `NEO4J_HTTP_URL`, then `NEO4J_HTTP`, and with neither set (or both empty) use `http://127.0.0.1:7474`, the HTTP port the `neo4j` service of `docker-compose.yml` publishes on host loopback. They send `NEO4J_USER` and `NEO4J_PASSWORD` to that address only; there is no remote default. A set value must be an `http://` or `https://` URL with a host, a numeric port from 0 to 65535 when it names one, and no space or control character: another value stops the script with exit code 2 before any request. `NEO4J_DATABASE` unset or empty is `neo4j` in their request path. `.env.example` lists `NEO4J_HTTP` commented out.
+- `NEO4J_HTTP_USER_AGENT` unset or empty, the three scripts send a browser's User-Agent: a Cloudflare proxy in front of a hosted instance rejects urllib's default agent (HTTP 403, error 1010).
+- `scripts/neo4j_wss_bridge.py` run on its own sends `NEO4J_USER` and `NEO4J_PASSWORD` to `wss://<NEO4J_WSS_HOST>`; unset or empty, it exits with code 2 before it connects.
 
 ---
 
@@ -449,5 +453,6 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The host scripts that query Neo4j over HTTP have no remote default: with neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` set they use the Compose Neo4j at `http://127.0.0.1:7474` (they sent the credentials to a built-in remote address), `scripts/run_cypher_catalog_http.py` also reads `NEO4J_HTTP`, a value that is not a valid http(s) URL (scheme, host, port) stops them, and `scripts/neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`; rows for `NEO4J_HTTP_USER_AGENT` and `NEO4J_WSS_HOST`.
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY` and `SSL_VERIFY` fail closed: `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off` are recognised, any other value keeps verification on with a warning, and every reader uses the one rule in `src/tls_verify.py`; only ASCII whitespace around the value is ignored, and `scripts/preflight_baseline.sh` applies the rule in the C locale.
 - 2026-10-23 — Created from the README's settings tables, split by area, with the rows that were missing (`EDGEGUARD_API_KEY`, `EDGEGUARD_CORS_ORIGINS`, the MISP push thresholds and back-off, `EDGEGUARD_SYNC_INTERVAL_DAYS`, `EDGEGUARD_EARLIEST_IOC_DATE`, the paths and operator tools) and the behaviour stated as the code has it: `NEO4J_URI`, the API ports and the metrics bind fixed on Compose, the Fernet, JWT and Grafana names Compose maps, the memory variables on the `neo4j` service, `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` skipping longer values, `EDGEGUARD_SSL_VERIFY` turning verification off for any value other than `true`, `MITRE_FORCE_REFETCH` for scheduled runs, `EDGEGUARD_INCREMENTAL_LIMIT` applying to OTX and VirusTotal, and `EDGEGUARD_VERSION` on bare-metal metrics only.

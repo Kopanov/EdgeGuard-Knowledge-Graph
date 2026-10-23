@@ -1,10 +1,10 @@
 """
 Read-only acceptance check for a fresh EdgeGuard baseline (2026-10 PR).
 
-Runs over the Neo4j **HTTP Query API v2** (same env vars as
-``scripts/run_cypher_catalog_http.py``) so it works wherever plain HTTPS reaches
-the database, including a Cloudflare-proxied endpoint that only speaks
-Bolt-over-WebSocket. Nothing is written.
+Runs over the Neo4j **HTTP Query API v2** (the address and requests of
+``src/neo4j_http_endpoint.py``, shared with ``scripts/run_cypher_catalog_http.py``) so it works
+wherever plain HTTP(S) reaches the database, including a Cloudflare-proxied endpoint that only
+speaks Bolt-over-WebSocket. Nothing is written.
 
 What it verifies (see docs/BASELINE_LAUNCH_CHECKLIST.md § "Fresh-baseline
 acceptance"): the whole-event co-occurrence edges are gone, every technique edge
@@ -49,31 +49,36 @@ when a ranked description names no source (``description_source``) or an Indicat
 indicators are linked to a CVE named in the same OTX report (``Indicator -[:INDICATES]-> CVE``) and fails
 when such a link is not labelled ``otx_pulse`` or cites no OTX report (``alienvault_otx:<pulse id>``).
 
-Env:
-  NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
+Env (``src/neo4j_http_endpoint.py``):
+  NEO4J_HTTP_URL   base URL, then NEO4J_HTTP; neither set: the local Compose Neo4j
+                   http://127.0.0.1:7474 (no remote default)
   NEO4J_DATABASE   database name (default: neo4j)
   NEO4J_USER       basic-auth user (default: neo4j)
   NEO4J_PASSWORD   basic-auth password
+  NEO4J_HTTP_USER_AGENT  User-Agent (default: a browser's)
 
-Usage:
-  set -a; source .env.edgeguard; set +a
+Usage, the Compose Neo4j (http://127.0.0.1:7474) with the credentials of .env:
+  set -a; . ./.env; set +a
   python scripts/verify_fresh_baseline.py                 # human-readable
   python scripts/verify_fresh_baseline.py --json          # machine-readable
   python scripts/verify_fresh_baseline.py --require-ics --require-cisa-ics
   python scripts/verify_fresh_baseline.py --require-otx-industries   # after a baseline with OTX
   python scripts/verify_fresh_baseline.py --require-malwarebazaar   # after enabling that source
 
+Another instance: source its credentials and name its address on the same line:
+  set -a; . ./.env.edgeguard; set +a
+  NEO4J_HTTP_URL=<instance HTTP address> python scripts/verify_fresh_baseline.py
+
 Exit code 0 = every mandatory check passed; 1 = at least one failed; 2 = could
-not reach Neo4j. A warning (``[WARN]``; ``ok: false`` with ``mandatory: false`` in the
-JSON) is reported and leaves the exit code unchanged.
+not reach Neo4j, or NEO4J_HTTP_URL / NEO4J_HTTP is not a valid http(s) URL. A warning
+(``[WARN]``; ``ok: false`` with ``mandatory: false`` in the JSON) is reported and leaves
+the exit code unchanged.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -84,6 +89,9 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+# The Neo4j address, credentials and User-Agent of every request (no remote default).
+import neo4j_http_endpoint  # noqa: E402
 
 # Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b, the ATT&CK
 # software ids in malware family names of checks 10a4 / 10a5, and (2026-10-16) the campaign evidence
@@ -127,20 +135,6 @@ from sector_evidence import (  # noqa: E402
     STATING_FEEDS,
 )
 from source_registry import SOURCE_REF_SEPARATOR  # noqa: E402
-
-# NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
-BASE = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
-DB = os.getenv("NEO4J_DATABASE", "neo4j")
-USER = os.getenv("NEO4J_USER", "neo4j")
-PWD = os.getenv("NEO4J_PASSWORD", "")
-URL = f"{BASE}/db/{DB}/query/v2"
-_AUTH = "Basic " + base64.b64encode(f"{USER}:{PWD}".encode()).decode()
-# Cloudflare in front of the hosted Neo4j rejects urllib's default agent (HTTP 403); same
-# workaround as scripts/run_cypher_catalog_http.py.
-_UA = os.getenv(
-    "NEO4J_HTTP_USER_AGENT",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-)
 
 # Labels and relationship types EdgeGuard writes. Anything else on a shared
 # database belongs to ResilMesh and is reported, never failed on.
@@ -313,11 +307,9 @@ FLAG_GUARDED_SOURCES = ("cisa_ics", "malwarebazaar")
 
 def _post(statement: str, params: Optional[Dict[str, Any]] = None, timeout: int = 180) -> List[Dict[str, Any]]:
     body = json.dumps({"statement": statement, "parameters": params or {}, "accessMode": "Read"}).encode()
-    req = urllib.request.Request(URL, data=body, method="POST")
-    req.add_header("Authorization", _AUTH)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", _UA)
+    # Address, credentials and User-Agent from the shared helper: NEO4J_HTTP_URL, then NEO4J_HTTP,
+    # else the local Compose Neo4j; never a built-in remote host.
+    req = neo4j_http_endpoint.query_request(body)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode())
     if payload.get("errors"):
@@ -1304,16 +1296,21 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
+        url = neo4j_http_endpoint.query_api_url()
+    except neo4j_http_endpoint.Neo4jHttpEndpointError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    try:
         rep = run_checks(
             args.require_ics, args.require_cisa_ics, args.require_malwarebazaar, args.require_otx_industries
         )
     except (urllib.error.URLError, OSError, RuntimeError) as exc:
-        print(f"ERROR: cannot query {URL}: {exc}", file=sys.stderr)
+        print(f"ERROR: cannot query {url}: {exc}", file=sys.stderr)
         return 2
 
     result = {
         "checked_at": datetime.now(timezone.utc).isoformat(),
-        "url": URL,
+        "url": url,
         "passed": not rep.failed,
         "checks": rep.checks,
     }
