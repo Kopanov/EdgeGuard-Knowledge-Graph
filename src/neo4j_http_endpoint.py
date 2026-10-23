@@ -61,8 +61,13 @@ def base_url(environ: Optional[Mapping[str, str]] = None) -> str:
         if not value:
             continue
         unset_note = f"(unset, the scripts use the local Compose Neo4j {LOCAL_COMPOSE_HTTP_URL})"
-        parts = urllib.parse.urlsplit(value)
-        if parts.scheme not in ("http", "https") or not parts.hostname or _DISALLOWED_URL_CHAR.search(value):
+        try:
+            # urlsplit and .hostname raise ValueError for a malformed bracketed (IPv6) host.
+            parts = urllib.parse.urlsplit(value)
+            hostname = parts.hostname
+        except ValueError as exc:
+            raise Neo4jHttpEndpointError(f"{name}={value!r} has an invalid host: {exc} {unset_note}") from None
+        if parts.scheme not in ("http", "https") or not hostname or _DISALLOWED_URL_CHAR.search(value):
             raise Neo4jHttpEndpointError(
                 f"{name}={value!r} is not an http:// or https:// URL with a host and no space {unset_note}"
             )

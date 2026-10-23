@@ -151,6 +151,8 @@ class TestHelper:
             "http://graph.example.test:74x4",
             "https://graph.example.test:99999",
             "http://graph.example.test/a b",
+            "http://[::1",
+            "http://[zz]:7474",
         ],
     )
     def test_a_value_that_is_no_http_url_is_refused(self, endpoint, value):
