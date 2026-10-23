@@ -52,11 +52,12 @@ Usage::
     python scripts/import_curated_package.py PACKAGE.json --check-graph   # + which claims would attach
     python scripts/import_curated_package.py PACKAGE.json --push          # create the MISP event
 
-``--push`` reads ``MISP_URL`` / ``MISP_API_KEY`` (and ``EDGEGUARD_SSL_VERIFY``) like the
-collectors, and refuses to create a second event with the same name. ``--check-graph`` reads
-``NEO4J_URI`` / ``NEO4J_USER`` / ``NEO4J_PASSWORD`` (and ``NEO4J_DATABASE``) and only reads the
-graph: per predicate, it reports the valid claims whose subject or object is not there by the
-exact name or id the sync matches on (such a claim attaches to nothing).
+``--push`` reads ``MISP_URL`` / ``MISP_API_KEY`` (and ``EDGEGUARD_SSL_VERIFY`` / ``SSL_VERIFY`` by the
+rule of ``src/tls_verify.py``) like the collectors, and refuses to create a second event with the
+same name. ``--check-graph`` reads ``NEO4J_URI`` / ``NEO4J_USER`` / ``NEO4J_PASSWORD`` (and
+``NEO4J_DATABASE``) and only reads the graph: per predicate, it reports the valid claims whose
+subject or object is not there by the exact name or id the sync matches on (such a claim attaches
+to nothing).
 """
 
 from __future__ import annotations
@@ -85,6 +86,7 @@ from source_registry import (  # noqa: E402
     get_source,
     is_curated_source,
 )
+from tls_verify import edgeguard_ssl_verify_from_env  # noqa: E402
 
 KINDS = {"threat_actor": ("ThreatActor", "threat-actor"), "malware": ("Malware", "malware-type")}
 TLP_LEVELS = ("clear", "white", "green", "amber", "amber+strict", "red")
@@ -419,8 +421,7 @@ def _push(event: Dict[str, Any]) -> int:
     if not url or not key:
         print("MISP_URL and MISP_API_KEY must be set for --push", file=sys.stderr)
         return 2
-    verify = os.environ.get("EDGEGUARD_SSL_VERIFY", "true").strip().lower() not in ("0", "false", "no", "off")
-    misp = PyMISP(url, key, ssl=verify)
+    misp = PyMISP(url, key, ssl=edgeguard_ssl_verify_from_env())
     info = event["Event"]["info"]
     existing = misp.search_index(eventinfo=info, pythonify=False)
     if info in _index_infos(existing):

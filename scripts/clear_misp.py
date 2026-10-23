@@ -20,15 +20,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import argparse
 import logging
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 import urllib3
 
 from baseline_clean import misp_delete_read_timeout_sec
-from config import MISP_API_KEY, MISP_URL, apply_misp_http_host_header
+from config import MISP_API_KEY, MISP_URL, SSL_VERIFY, apply_misp_http_host_header
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+if not SSL_VERIFY:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -43,10 +44,11 @@ class MISPClearer:
     - Preserves taxonomies, orgs, and other system data
     """
 
-    def __init__(self, url: str = None, api_key: str = None, verify_ssl: bool = False):
+    def __init__(self, url: str = None, api_key: str = None, verify_ssl: Optional[bool] = None):
         self.url = url or MISP_URL
         self.api_key = api_key or MISP_API_KEY
-        self.verify_ssl = verify_ssl
+        # EDGEGUARD_SSL_VERIFY / SSL_VERIFY, as every other MISP client reads it (config.SSL_VERIFY).
+        self.verify_ssl = SSL_VERIFY if verify_ssl is None else verify_ssl
         self.session = requests.Session()
         self.session.headers.update(
             {"Authorization": self.api_key, "Accept": "application/json", "Content-Type": "application/json"}
