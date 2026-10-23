@@ -603,6 +603,27 @@ def _clear_scope_pattern(label: Optional[str]) -> str:
     return "(n)" if label is None else f"(n:{_validate_label(label)})"
 
 
+class _ClearProgress:
+    """What one attempt of ``clear_all`` / ``clear_edgeguard_managed`` has deleted so far, counted
+    batch by batch, so the audit line of an attempt that fails part-way names it (2026-10-23)."""
+
+    __slots__ = ("nodes", "relationships")
+
+    def __init__(self) -> None:
+        self.nodes = 0
+        self.relationships = 0
+
+
+# The errors on which the two clears re-raise to ``@retry_with_backoff``; any other error makes them
+# return False.
+_CLEAR_RETRYABLE_ERRORS: Tuple[type, ...] = (
+    neo4j_exceptions.ServiceUnavailable,
+    neo4j_exceptions.TransientError,
+    ConnectionError,
+    TimeoutError,
+)
+
+
 # The threat-intelligence labels EdgeGuard writes, counted by ``get_stats`` (one count each) and,
 # with ``Source``, by ``count_nodes_by_label`` for the ``edgeguard_neo4j_nodes`` gauge (2026-10).
 # The ResilMesh topology labels in _ALLOWED_NODE_LABELS belong to the shared graph and are not
@@ -1873,10 +1894,17 @@ class Neo4jClient:
             logger.error(f"Neo4j database error (terminal): {type(e).__name__}: {e}")
             return []
 
+    # Node batch of ``clear_all`` and ``clear_edgeguard_managed``; their relationships go first, in
+    # batches of 50,000 (``_delete_relationships_batched``).
+    _CLEAR_NODE_BATCH = 10_000
+
     @staticmethod
-    def _delete_relationships_batched(session, match_clause: str, batch_size: int = 50_000) -> int:
+    def _delete_relationships_batched(
+        session, match_clause: str, batch_size: int = 50_000, progress: Optional[_ClearProgress] = None
+    ) -> int:
         """Delete the relationships selected by ``match_clause`` (which binds ``r``) in
-        batches of ``batch_size`` until a batch deletes nothing. Returns the total.
+        batches of ``batch_size`` until a batch deletes nothing. Returns the total; ``progress``
+        counts each batch as it commits, so a clear that fails later still knows what went.
 
         Deleting relationships ahead of the node batches keeps each transaction's
         working set bounded by ``batch_size`` edges instead of by the degree of
@@ -1895,7 +1923,40 @@ class Neo4jClient:
             if not batch_deleted:
                 return total
             total += batch_deleted
+            if progress is not None:
+                progress.relationships += batch_deleted
             logger.debug(f"Deleted batch of {batch_deleted} relationships")
+
+    @staticmethod
+    def _record_failed_clear(
+        operation: str,
+        scope: str,
+        progress: _ClearProgress,
+        exc: BaseException,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Audit line of a clear attempt that failed after deleting something (2026-10-23).
+
+        ``affected`` is the nodes this attempt deleted before ``exc``; ``details`` adds the
+        relationships it deleted, ``outcome = "failed"`` and the error's type. An attempt that
+        deleted nothing writes no line. ``@retry_with_backoff`` runs a clear again after a
+        transient error and each attempt writes its own line, so the lines of one run add up to
+        what it deleted.
+        """
+        if not (progress.nodes or progress.relationships):
+            return
+        record_destructive_op(
+            operation,
+            target="neo4j",
+            affected=progress.nodes,
+            scope=scope,
+            details={
+                **(details or {}),
+                "relationships_deleted": progress.relationships,
+                "outcome": "failed",
+                "error": type(exc).__name__,
+            },
+        )
 
     @retry_with_backoff(max_retries=3)
     def clear_all(self) -> bool:
@@ -1909,6 +1970,7 @@ class Neo4jClient:
             logger.error("Cannot clear: no connection to Neo4j")
             return False
 
+        progress = _ClearProgress()
         try:
             logger.warning("Clearing all nodes and relationships from Neo4j...")
             with self.driver.session() as session:
@@ -1917,37 +1979,33 @@ class Neo4jClient:
                 node_count = counts.single()["count"]
 
                 # Relationships first, in bounded batches (see _delete_relationships_batched).
-                rels_deleted = self._delete_relationships_batched(session, "MATCH ()-[r]->()")
+                self._delete_relationships_batched(session, "MATCH ()-[r]->()", progress=progress)
 
                 # Clear in batches to avoid memory issues
-                batch_size = 10000
-                deleted = 0
-                while deleted < node_count:
+                while progress.nodes < node_count:
                     result = session.run(
-                        f"MATCH (n) WITH n LIMIT {batch_size} DETACH DELETE n RETURN count(n) as deleted",
+                        f"MATCH (n) WITH n LIMIT {self._CLEAR_NODE_BATCH} DETACH DELETE n RETURN count(n) as deleted",
                         timeout=NEO4J_READ_TIMEOUT,
                     )
                     batch_deleted = result.single()["deleted"]
                     if batch_deleted == 0:
                         break
-                    deleted += batch_deleted
+                    progress.nodes += batch_deleted
                     logger.debug(f"Deleted batch of {batch_deleted} nodes")
 
                 # Clear Source nodes
                 session.run("MATCH (s:Source) DETACH DELETE s", timeout=NEO4J_READ_TIMEOUT).consume()
 
-            logger.info(f"Cleared {deleted} nodes and {rels_deleted} relationships")
-            record_destructive_op("clear_all", target="neo4j", affected=deleted, scope="every node")
+            logger.info(f"Cleared {progress.nodes} nodes and {progress.relationships} relationships")
+            record_destructive_op("clear_all", target="neo4j", affected=progress.nodes, scope="every node")
             return True
 
-        except (
-            neo4j_exceptions.ServiceUnavailable,
-            neo4j_exceptions.TransientError,
-            ConnectionError,
-            TimeoutError,
-        ):
-            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
+            # A delete that fails part-way is recorded with what it deleted, before a retry or the
+            # False return.
+            self._record_failed_clear("clear_all", "every node", progress, e)
+            if isinstance(e, _CLEAR_RETRYABLE_ERRORS):
+                raise  # let @retry_with_backoff handle transient errors
             logger.error(f"Error clearing Neo4j: {e}")
             return False
 
@@ -2005,10 +2063,13 @@ class Neo4jClient:
         """
         node = _clear_scope_pattern(label)
         what = "EdgeGuard-managed nodes" if label is None else f"EdgeGuard-managed {label} nodes"
+        scope = "edgeguard_managed = true" if label is None else f"edgeguard_managed = true AND n:{label}"
         if not self.driver:
             logger.error("Cannot clear: no connection to Neo4j")
             return False
 
+        progress = _ClearProgress()
+        details: Dict[str, Any] = {}
         try:
             logger.warning("Clearing %s (edgeguard_managed = true) from Neo4j...", what)
             with self.driver.session() as session:
@@ -2020,48 +2081,43 @@ class Neo4jClient:
                     others,
                     enriched,
                 )
+                details = {"left_untouched": others, "enriched_kept": enriched}
+                if label is not None:
+                    details["label"] = label
 
                 # Relationships touching a marked node first, in bounded batches (same heap
                 # reason as clear_all); a relationship on a node that goes, goes with it.
-                rels_deleted = self._delete_relationships_batched(
-                    session, f"MATCH {node}-[r]-() WHERE n.edgeguard_managed = true"
+                self._delete_relationships_batched(
+                    session, f"MATCH {node}-[r]-() WHERE n.edgeguard_managed = true", progress=progress
                 )
 
-                batch_size = 10000
-                deleted = 0
-                while deleted < node_count:
+                while progress.nodes < node_count:
                     result = session.run(
-                        f"MATCH {node} WHERE n.edgeguard_managed = true WITH n LIMIT {batch_size} "
+                        f"MATCH {node} WHERE n.edgeguard_managed = true WITH n LIMIT {self._CLEAR_NODE_BATCH} "
                         "DETACH DELETE n RETURN count(n) AS deleted",
                         timeout=NEO4J_READ_TIMEOUT,
                     )
                     batch_deleted = result.single()["deleted"]
                     if batch_deleted == 0:
                         break
-                    deleted += batch_deleted
+                    progress.nodes += batch_deleted
                     logger.debug(f"Deleted batch of {batch_deleted} EdgeGuard-managed nodes")
 
-            logger.info(f"Cleared {deleted} {what} and {rels_deleted} relationships")
-            details: Dict[str, Any] = {"left_untouched": others, "enriched_kept": enriched}
-            if label is not None:
-                details["label"] = label
+            logger.info(f"Cleared {progress.nodes} {what} and {progress.relationships} relationships")
             record_destructive_op(
                 "clear_edgeguard_managed",
                 target="neo4j",
-                affected=deleted,
-                scope="edgeguard_managed = true" if label is None else f"edgeguard_managed = true AND n:{label}",
+                affected=progress.nodes,
+                scope=scope,
                 details=details,
             )
             return True
 
-        except (
-            neo4j_exceptions.ServiceUnavailable,
-            neo4j_exceptions.TransientError,
-            ConnectionError,
-            TimeoutError,
-        ):
-            raise
         except Exception as e:
+            # Recorded with what this attempt deleted, before a retry or the False return.
+            self._record_failed_clear("clear_edgeguard_managed", scope, progress, e, details)
+            if isinstance(e, _CLEAR_RETRYABLE_ERRORS):
+                raise  # let @retry_with_backoff handle transient errors
             logger.error(f"Error clearing EdgeGuard-managed data from Neo4j: {e}")
             return False
 

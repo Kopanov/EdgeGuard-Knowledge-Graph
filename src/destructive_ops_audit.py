@@ -5,6 +5,8 @@ the full wipe (``clear_all``), the edgeguard-only wipe (``clear_edgeguard_manage
 CVSS de-duplication that runs with ``create_constraints`` — records one JSON line here and
 increments the Prometheus counter ``edgeguard_destructive_ops_total{operation,target}``. The
 fresh-baseline clean, ``edgeguard clear neo4j`` and ``scripts/clear_neo4j.py`` reach the first two.
+A wipe attempt that fails after deleting something also records a line, with what it deleted and
+``details.outcome = "failed"``; a retried wipe writes one line per attempt.
 The trail answers "who deleted what, when, and how much" for the operator of a shared database
 without reading application logs: each line names the process that ran the delete (``actor``:
 operating-system user, host and program; for an Airflow task that is the worker, not the person

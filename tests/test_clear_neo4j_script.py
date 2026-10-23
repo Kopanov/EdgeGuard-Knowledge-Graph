@@ -4,7 +4,8 @@ The script deleted every node of a list of labels, ``Vulnerability`` and ``CVE``
 created them, and wrote no destructive-operations audit line. It now deletes the nodes EdgeGuard
 created (``edgeguard_managed = true``) through the wipe of the fresh baseline
 (``baseline_clean._wipe_neo4j`` and ``Neo4jClient.clear_edgeguard_managed``), deletes every node only
-with ``--full-wipe`` after a warning and a typed confirmation, and every delete appends one audit line.
+with ``--full-wipe`` after a warning and a typed confirmation (also with ``--force``), and every delete appends
+an audit line, also a delete that fails part-way.
 
 The tests run the real ``Neo4jClient`` statements against ``_Graph``, an in-memory graph that executes
 the statement shapes the clear paths send and records any other statement as unknown, so a statement
@@ -20,7 +21,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -34,6 +35,7 @@ import clear_neo4j  # noqa: E402
 
 import baseline_checkpoint  # noqa: E402
 import destructive_ops_audit  # noqa: E402
+import neo4j_client  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # In-memory graph that executes the statements of the clear paths
@@ -90,6 +92,9 @@ class _Graph:
         self.statements: List[str] = []
         self.unknown: List[str] = []
         self.fail_on: Optional[str] = None
+        # (substring, n, error): the n-th statement that contains the substring raises the error, once.
+        self.fail_nth: Optional[Tuple[str, int, BaseException]] = None
+        self._fail_seen = 0
         self._next = 0
 
     # -- building ----------------------------------------------------------------
@@ -130,6 +135,10 @@ class _Graph:
         self.statements.append(q)
         if self.fail_on and self.fail_on in q:
             raise RuntimeError(f"injected failure on: {q}")
+        if self.fail_nth and self.fail_nth[0] in q:
+            self._fail_seen += 1
+            if self._fail_seen == self.fail_nth[1]:
+                raise self.fail_nth[2]
         if q.startswith(_SOURCE_MERGE):
             return self._merge_source(params)
         m = _COUNT.match(q)
@@ -217,8 +226,6 @@ class _Driver:
 
 def _client(graph: _Graph):
     """A real ``Neo4jClient`` whose driver is the in-memory graph."""
-    import neo4j_client
-
     client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
     client.driver = _Driver(graph)
     client._connection_healthy = True
@@ -270,6 +277,26 @@ def audit_file(tmp_path, monkeypatch):
     path = tmp_path / "destructive_ops.jsonl"
     monkeypatch.setenv(destructive_ops_audit.AUDIT_PATH_ENV, str(path))
     return path
+
+
+@pytest.fixture
+def confirm_full_wipe(monkeypatch):
+    """Answers every prompt with the typed full-wipe confirmation; returns the prompts asked."""
+    prompts: List[str] = []
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return clear_neo4j.FULL_WIPE_CONFIRMATION
+
+    monkeypatch.setattr("builtins.input", answer)
+    return prompts
+
+
+@pytest.fixture
+def small_batches(monkeypatch):
+    """Node batches of 2 and no retry sleep, so a failure can fall between two batches of one clear."""
+    monkeypatch.setattr(neo4j_client.Neo4jClient, "_CLEAR_NODE_BATCH", 2)
+    monkeypatch.setattr(neo4j_client.time, "sleep", lambda _s: None)
 
 
 @pytest.fixture
@@ -329,8 +356,6 @@ def test_default_scope_never_selects_a_node_without_the_marker(monkeypatch, shar
 
 
 def test_default_run_recreates_the_source_nodes(monkeypatch, shared, audit_file, checkpoint_calls):
-    import neo4j_client
-
     rc = _run_script(monkeypatch, shared.graph, "--force")
 
     assert rc == 0
@@ -426,26 +451,49 @@ def test_full_wipe_aborts_when_stdin_is_closed(monkeypatch, shared, audit_file, 
     assert len(shared.graph.nodes) == 10 and not _deleting_statements(shared.graph)
 
 
-def test_full_wipe_with_the_typed_confirmation_deletes_every_node(monkeypatch, shared, audit_file, checkpoint_calls):
-    monkeypatch.setattr("builtins.input", lambda _prompt: clear_neo4j.FULL_WIPE_CONFIRMATION)
+def test_full_wipe_with_force_still_asks_and_aborts_on_a_wrong_answer(
+    monkeypatch, shared, audit_file, checkpoint_calls
+):
+    """``--force`` selects the default delete; it does not answer the whole-database confirmation."""
+    prompts: List[str] = []
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return "yes"
+
+    monkeypatch.setattr("builtins.input", answer)
+    rc = _run_script(monkeypatch, shared.graph, "--full-wipe", "--force")
+
+    assert rc == 1
+    assert len(prompts) == 1 and clear_neo4j.FULL_WIPE_CONFIRMATION in prompts[0]
+    assert len(shared.graph.nodes) == 10 and not _deleting_statements(shared.graph)
+    assert _audit_lines(audit_file) == [] and checkpoint_calls == []
+
+
+def test_full_wipe_with_the_typed_confirmation_deletes_every_node(
+    monkeypatch, shared, audit_file, checkpoint_calls, confirm_full_wipe
+):
     rc = _run_script(monkeypatch, shared.graph, "--full-wipe", "--no-recreate")
 
     assert rc == 0
+    assert len(confirm_full_wipe) == 1
     assert shared.graph.nodes == {} and shared.graph.rels == {}
     assert not shared.graph.unknown
     assert checkpoint_calls == [{"include_incremental": True}]
 
 
-def test_only_full_wipe_sends_an_unscoped_delete(monkeypatch, audit_file, checkpoint_calls):
+def test_only_full_wipe_sends_an_unscoped_delete(monkeypatch, audit_file, checkpoint_calls, confirm_full_wipe):
     """The whole-database statements of ``clear_all`` appear with ``--full-wipe`` and in no other mode."""
     unscoped = re.compile(r"^MATCH (\(\)-\[r\]->\(\)|\(n\) WITH n LIMIT)")
     for argv in (("--force",), ("--label", "Indicator"), ("--force", "--no-recreate")):
         shared = _Shared()
         _run_script(monkeypatch, shared.graph, *argv)
         assert not any(unscoped.match(q) for q in shared.graph.statements), argv
+    assert confirm_full_wipe == [], "only --full-wipe asks"
     shared = _Shared()
     _run_script(monkeypatch, shared.graph, "--full-wipe", "--force")
     assert any(unscoped.match(q) for q in shared.graph.statements)
+    assert len(confirm_full_wipe) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -470,12 +518,12 @@ def test_only_full_wipe_sends_an_unscoped_delete(monkeypatch, audit_file, checkp
             "edgeguard_managed = true AND n:Vulnerability",
             {"left_untouched": 1, "enriched_kept": 0, "label": "Vulnerability"},
         ),
-        (("--full-wipe", "--force"), "clear_all", 10, "every node", None),
+        (("--full-wipe",), "clear_all", 10, "every node", None),
     ],
     ids=["default", "label", "full-wipe"],
 )
 def test_every_deleting_mode_writes_one_audit_line(
-    monkeypatch, audit_file, checkpoint_calls, argv, operation, affected, scope, details
+    monkeypatch, audit_file, checkpoint_calls, confirm_full_wipe, argv, operation, affected, scope, details
 ):
     shared = _Shared()
     rc = _run_script(monkeypatch, shared.graph, *argv)
@@ -502,14 +550,164 @@ def test_a_run_with_nothing_in_scope_still_writes_its_audit_line(monkeypatch, au
     assert (line["operation"], line["affected"]) == ("clear_edgeguard_managed", 0)
 
 
-def test_a_failed_delete_exits_1_and_keeps_the_checkpoints(monkeypatch, shared, audit_file, checkpoint_calls):
+def test_a_failed_delete_exits_1_keeps_the_checkpoints_and_records_what_it_deleted(
+    monkeypatch, shared, audit_file, checkpoint_calls
+):
+    """The node batches fail after the relationship batches deleted the 4 relationships of EdgeGuard's nodes."""
     shared.graph.fail_on = "DETACH DELETE"
 
     rc = _run_script(monkeypatch, shared.graph, "--force")
 
     assert rc == 1
     assert checkpoint_calls == []
+    assert len(shared.graph.rels) == 2 and len(shared.graph.nodes) == 10
+    [line] = _audit_lines(audit_file)
+    assert (line["operation"], line["affected"], line["scope"]) == (
+        "clear_edgeguard_managed",
+        0,
+        "edgeguard_managed = true",
+    )
+    assert line["details"] == {
+        "left_untouched": 5,
+        "enriched_kept": 1,
+        "relationships_deleted": 4,
+        "outcome": "failed",
+        "error": "RuntimeError",
+    }
+
+
+def test_a_delete_that_fails_before_deleting_anything_records_nothing(
+    monkeypatch, shared, audit_file, checkpoint_calls
+):
+    shared.graph.fail_on = "DELETE r"
+
+    rc = _run_script(monkeypatch, shared.graph, "--force")
+
+    assert rc == 1
+    assert len(shared.graph.rels) == 6 and len(shared.graph.nodes) == 10
     assert _audit_lines(audit_file) == []
+
+
+def _run_edgeguard_clear(edgeguard_only: bool):
+    def run(monkeypatch, graph: _Graph) -> int:
+        import edgeguard
+
+        client = _client(graph)
+        monkeypatch.setattr("neo4j_client.Neo4jClient", lambda *a, **kw: client)
+        return edgeguard.cmd_clear_neo4j(argparse.Namespace(force=True, edgeguard_only=edgeguard_only))
+
+    return run
+
+
+def _run_fresh_baseline_clean(monkeypatch, graph: _Graph) -> int:
+    import baseline_clean
+
+    client = _client(graph)
+    monkeypatch.setattr("neo4j_client.Neo4jClient", lambda *a, **kw: client)
+    monkeypatch.setattr(baseline_clean, "_probe_misp", lambda *a, **kw: (0, None))
+    monkeypatch.setattr(baseline_clean, "_probe_checkpoint", lambda: (0, None))
+    monkeypatch.setattr(baseline_clean, "_wipe_checkpoints", lambda: None)
+    monkeypatch.setattr(baseline_clean, "_wipe_misp_events", lambda *a, **kw: 0)
+    monkeypatch.setattr(baseline_clean.time, "sleep", lambda _s: None)
+    try:
+        baseline_clean.reset_baseline_data(settle_seconds=0.0, verify_timeout_seconds=5.0)
+    except baseline_clean.BaselineCleanError:
+        return 1
+    return 0
+
+
+def _run_script_with(*argv: str):
+    def run(monkeypatch, graph: _Graph) -> int:
+        return _run_script(monkeypatch, graph, *argv)
+
+    return run
+
+
+@pytest.mark.parametrize(
+    ("runner", "operation", "relationships_deleted", "nodes_left"),
+    [
+        (_run_script_with("--force"), "clear_edgeguard_managed", 4, 10),
+        (_run_script_with("--label", "Vulnerability"), "clear_edgeguard_managed", 1, 10),
+        (_run_script_with("--full-wipe"), "clear_all", 6, 10),
+        (_run_edgeguard_clear(edgeguard_only=True), "clear_edgeguard_managed", 4, 10),
+        (_run_edgeguard_clear(edgeguard_only=False), "clear_all", 6, 10),
+        (_run_fresh_baseline_clean, "clear_edgeguard_managed", 4, 10),
+    ],
+    ids=[
+        "clear_neo4j.py",
+        "clear_neo4j.py --label",
+        "clear_neo4j.py --full-wipe",
+        "edgeguard clear neo4j --edgeguard-only",
+        "edgeguard clear neo4j",
+        "fresh-baseline clean",
+    ],
+)
+def test_every_caller_records_a_delete_that_fails_part_way(
+    monkeypatch,
+    shared,
+    audit_file,
+    checkpoint_calls,
+    confirm_full_wipe,
+    runner,
+    operation,
+    relationships_deleted,
+    nodes_left,
+):
+    """A clear that fails after its relationship batches writes one line with what it deleted, for each caller."""
+    shared.graph.fail_on = "DETACH DELETE"
+
+    rc = runner(monkeypatch, shared.graph)
+
+    assert rc == 1
+    assert len(shared.graph.nodes) == nodes_left
+    assert len(shared.graph.rels) == 6 - relationships_deleted
+    [line] = _audit_lines(audit_file)
+    assert (line["operation"], line["target"], line["affected"]) == (operation, "neo4j", 0)
+    assert line["details"]["outcome"] == "failed"
+    assert line["details"]["relationships_deleted"] == relationships_deleted
+    assert line["details"]["error"] == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    ("argv", "operation", "nodes_left", "first_attempt", "second_attempt"),
+    [
+        (("--force", "--no-recreate"), "clear_edgeguard_managed", 5, (2, 4), 3),
+        (("--full-wipe", "--no-recreate"), "clear_all", 0, (2, 6), 8),
+    ],
+    ids=["default", "full-wipe"],
+)
+def test_a_retried_delete_records_every_node_it_deleted(
+    monkeypatch,
+    shared,
+    audit_file,
+    checkpoint_calls,
+    confirm_full_wipe,
+    small_batches,
+    argv,
+    operation,
+    nodes_left,
+    first_attempt,
+    second_attempt,
+):
+    """A transient error on the second node batch: the retry deletes the rest, and the two attempts' lines add up."""
+    before = len(shared.graph.nodes)
+    shared.graph.fail_nth = (
+        "DETACH DELETE",
+        2,
+        neo4j_client.neo4j_exceptions.TransientError("Neo.TransientError.General.OutOfMemoryError"),
+    )
+
+    rc = _run_script(monkeypatch, shared.graph, *argv)
+
+    assert rc == 0
+    assert len(shared.graph.nodes) == nodes_left
+    failed, completed = _audit_lines(audit_file)
+    assert failed["operation"] == completed["operation"] == operation
+    assert (failed["affected"], failed["details"]["relationships_deleted"]) == first_attempt
+    assert (failed["details"]["outcome"], failed["details"]["error"]) == ("failed", "TransientError")
+    assert completed["affected"] == second_attempt
+    assert "outcome" not in (completed.get("details") or {})
+    assert failed["affected"] + completed["affected"] == before - nodes_left
 
 
 def test_no_action_prints_help_and_exits_1(monkeypatch, shared, audit_file, checkpoint_calls, capsys):

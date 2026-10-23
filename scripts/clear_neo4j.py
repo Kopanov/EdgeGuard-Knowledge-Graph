@@ -10,9 +10,10 @@ relationships attached to them, through the wipe of the fresh baseline
 created on a shared database (ResilMesh topology, a scanner's ``Vulnerability`` and ``CVE`` nodes)
 stay, also where EdgeGuard enriched them. ``--label`` narrows the delete to the EdgeGuard-created
 nodes of one label. ``--full-wipe`` deletes every node in the database (``Neo4jClient.clear_all``)
-after a warning that counts the nodes EdgeGuard did not create and a typed confirmation, which
-``--force`` skips. Every delete appends one line to the destructive-operations audit trail
-(``src/destructive_ops_audit.py``); a successful delete also clears the collector checkpoints.
+after a warning that counts the nodes EdgeGuard did not create and a typed confirmation, also with
+``--force``. Every delete appends a line to the destructive-operations audit trail
+(``src/destructive_ops_audit.py``), also a delete that fails part-way (``details.outcome =
+"failed"``, with what it deleted); a successful delete also clears the collector checkpoints.
 
 Usage:
     python3 scripts/clear_neo4j.py --dry-run               # preview the scope, delete nothing
@@ -35,7 +36,7 @@ from neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
 
-# Typed answer that confirms a whole-database delete (--full-wipe without --force).
+# Typed answer that confirms a whole-database delete (--full-wipe, with or without --force).
 FULL_WIPE_CONFIRMATION = "FULL-WIPE"
 
 
@@ -59,7 +60,7 @@ Examples:
         "--force",
         "-f",
         action="store_true",
-        help="Delete the EdgeGuard-created nodes; with --full-wipe, skip the typed confirmation",
+        help="Delete the EdgeGuard-created nodes",
     )
     parser.add_argument(
         "--label", "-l", type=str, help="Delete only the EdgeGuard-created nodes of this label (no --force needed)"
@@ -70,7 +71,7 @@ Examples:
         action="store_true",
         help=(
             "Delete EVERY node and relationship in the database, including the nodes other systems created on a "
-            f"shared database; asks to type {FULL_WIPE_CONFIRMATION} unless --force is given"
+            f"shared database; asks to type {FULL_WIPE_CONFIRMATION}, also with --force"
         ),
     )
     return parser
@@ -108,7 +109,6 @@ def clear(
     full_wipe: bool = False,
     label: Optional[str] = None,
     recreate_sources: bool = True,
-    force: bool = False,
 ) -> int:
     """Preview, confirm and delete; returns the exit code. ``client`` must be connected."""
     try:
@@ -127,12 +127,9 @@ def clear(
         print("Dry run: nothing was deleted.")
         return 0
 
-    if full_wipe:
-        if force:
-            print("--force given: deleting every node without the typed confirmation.")
-        elif not _confirm_full_wipe():
-            print("Aborted: the confirmation did not match. Nothing was deleted.")
-            return 1
+    if full_wipe and not _confirm_full_wipe():
+        print("Aborted: the confirmation did not match. Nothing was deleted.")
+        return 1
 
     scope = baseline_clean.WIPE_SCOPE_ALL if full_wipe else baseline_clean.WIPE_SCOPE_EDGEGUARD
     try:
@@ -190,7 +187,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             full_wipe=args.full_wipe,
             label=args.label,
             recreate_sources=not args.no_recreate,
-            force=args.force,
         )
     finally:
         client.close()

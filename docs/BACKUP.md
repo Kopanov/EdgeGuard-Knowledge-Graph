@@ -289,6 +289,11 @@ The Neo4j wipes are those of the fresh baseline, of `edgeguard clear neo4j`
 and of `scripts/clear_neo4j.py`. Each line names the operation, the store,
 the selection (`scope`), the number of nodes deleted (`affected`) and the
 process that ran the delete (`actor`: operating-system user, host, program).
+A Neo4j wipe that fails after deleting something also writes a line: `affected`
+and `details.relationships_deleted` count what it deleted before the failure,
+`details.outcome` is `failed` and `details.error` names the error. The graph
+client retries a wipe after a transient Neo4j error, and each attempt writes
+its own line, so the lines of one run add up to what it deleted.
 For the `baseline_clean` DAG task that process is the Airflow worker, so the
 line does not say who triggered the run or with which run conf.
 
@@ -315,6 +320,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — A Neo4j wipe that fails part-way writes an audit line with what it deleted (`details.outcome = "failed"`), one per attempt when the graph client retries; before, only a wipe that completed wrote a line, and a retried wipe recorded only the nodes of its last attempt.
 - 2026-10-23 — Each audit line names the process that ran the delete (`actor`); the wipes of `edgeguard clear neo4j` and `scripts/clear_neo4j.py` are listed with that of the fresh baseline.
 - 2026-10-23 — The readiness cross-reference points to PRODUCTION_READINESS.md; the README section it named was removed.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
