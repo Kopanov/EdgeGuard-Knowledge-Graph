@@ -1117,9 +1117,15 @@ def check_production_issues():
     """Warn about production issues."""
     warnings = []
 
-    # SSL verification disabled
+    # SSL verification disabled, or an EDGEGUARD_SSL_VERIFY / SSL_VERIFY value outside the rule
+    # (verification then stays on; the value is reported so the typo gets fixed)
+    from tls_verify import read_ssl_verify_setting, unrecognised_value_message
+
+    tls_setting = read_ssl_verify_setting()
     if not SSL_VERIFY:
         warnings.append("SSL verification is DISABLED - not safe for production!")
+    elif not tls_setting.recognised:
+        warnings.append(unrecognised_value_message(tls_setting))
 
     # Default Neo4j password
     if NEO4J_PASSWORD in ("neo4j", "edgeguard123", "changeme"):

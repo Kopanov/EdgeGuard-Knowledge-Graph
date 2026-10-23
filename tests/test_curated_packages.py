@@ -1071,6 +1071,32 @@ class TestPush:
         assert "MISP refused the event" in err and message in err
         assert "created MISP event" not in out
 
+    @pytest.mark.parametrize(
+        "edgeguard, alias, expected",
+        [
+            (None, "false", False),  # the alias, read when EDGEGUARD_SSL_VERIFY is unset or blank
+            ("", "0", False),
+            ("off", None, False),
+            ("1", None, True),
+            ("ture", None, True),  # unrecognised: verification stays on
+            ("false ", None, True),  # a non-breaking space is not trimmed: unrecognised
+            (None, None, True),
+        ],
+    )
+    def test_push_reads_tls_verification_by_the_shared_rule(
+        self, importer, monkeypatch, tmp_path, edgeguard, alias, expected
+    ):
+        _fake_misp(monkeypatch, {"Event": {"id": "125"}})
+        for name, value in (("EDGEGUARD_SSL_VERIFY", edgeguard), ("SSL_VERIFY", alias)):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        path = tmp_path / "pkg.json"
+        path.write_text(json.dumps(_package()))
+        assert importer.main([str(path), "--push"]) == 0
+        assert importlib.import_module("pymisp").PyMISP.call_args.kwargs["ssl"] is expected
+
     def test_an_event_of_the_same_name_is_not_created_again(self, importer, monkeypatch, tmp_path, capsys):
         client = _fake_misp(monkeypatch, {"Event": {"id": "124"}})
         client.search_index.return_value = [{"id": "123", "info": "2026-10-20_EdgeGuard_CoreIdeas_package"}]
