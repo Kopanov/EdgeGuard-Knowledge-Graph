@@ -517,7 +517,7 @@ All settings are environment variables. Docker Compose reads `.env` and forwards
 
 Set a flag in `.env` and run `docker compose up -d airflow`. On an existing graph, CISA ICS and ATT&CK for ICS load their history with an additive baseline (for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works); MalwareBazaar builds up over the daily runs. `EDGEGUARD_COLLECT_SOURCES` limits collection to a comma-separated list of collectors.
 
-**TLS.** `EDGEGUARD_SSL_VERIFY` (default `true`) controls certificate verification for MISP and the HTTPS feeds; set it to `false` only for a development MISP with a self-signed certificate. Use exactly `true` or `false`: any other set value turns verification off, which `edgeguard validate` and the baseline preflight report. Neo4j TLS is chosen by the `NEO4J_URI` scheme (`bolt+s://`, `bolt+ssc://`). A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it.
+**TLS.** `EDGEGUARD_SSL_VERIFY` (default `true`) controls certificate verification for MISP and the HTTPS feeds; set it to `false` only for a development MISP with a self-signed certificate. `true`, `1`, `yes` and `on` verify, `false`, `0`, `no` and `off` do not (case-insensitive); any other value keeps verification on and is reported in the log, by `edgeguard validate` and by the baseline preflight. Neo4j TLS is chosen by the `NEO4J_URI` scheme (`bolt+s://`, `bolt+ssc://`). A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it.
 
 | Topic | Document |
 |---|---|
@@ -536,7 +536,7 @@ Set a flag in `.env` and run `docker compose up -d airflow`. On an existing grap
 - **API keys.** In production the REST and GraphQL APIs refuse to start without `EDGEGUARD_API_KEY`, which `./install.sh` generates; GraphQL introspection is then blocked, `/docs` and `/redoc` are off, and `/openapi.json` needs the key.
 - **Loopback ports.** Every published port is bound to 127.0.0.1; external access goes through a TLS reverse proxy you provide.
 - **Cypher injection.** Every Cypher value is a parameter; labels, relationship types and property names, which Cypher cannot parameterise, pass the allowlist validators `_validate_label`, `_validate_rel_type` and `_validate_prop_name`.
-- **TLS verification** is on by default for MISP and every HTTPS source; the CA bundle is `certifi`.
+- **TLS verification** is on by default for MISP and every HTTPS source, and only a recognised "off" value of `EDGEGUARD_SSL_VERIFY` turns it off: a typo keeps it on. The CA bundle is `certifi`.
 - **MISP trust boundary.** Source-stated timestamps are accepted only from the MISP organisations in `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` or `EDGEGUARD_TRUSTED_MISP_ORG_NAMES`; while both are empty, a startup warning and the gauge `edgeguard_misp_tag_impersonation_defense_disabled` report it ([docs/SECURITY_ROADMAP.md](docs/SECURITY_ROADMAP.md)).
 - **Destructive operations.** A fresh baseline passes the backup gate, and the Neo4j wipes of a fresh baseline and of `edgeguard clear` are recorded in `logs/destructive_ops.jsonl` and the counter `edgeguard_destructive_ops_total`.
 - **Request limits.** Per-address rate limits (REST 60 per minute, admin queries 10, GraphQL 120), a request-body cap, and GraphQL depth and alias limits.

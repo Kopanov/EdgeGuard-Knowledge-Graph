@@ -243,9 +243,10 @@ class TestFix2PreflightScript:
         unverified TLS connection even when EDGEGUARD_SSL_VERIFY=true was
         set project-wide. MitM risk for credential interception.
 
-        Fix: read EDGEGUARD_SSL_VERIFY / SSL_VERIFY, match project
-        semantics (only literal "true" enables verification; anything
-        else disables with a WARN), and only add ``-k`` when disabled."""
+        Fix: read EDGEGUARD_SSL_VERIFY / SSL_VERIFY by the project rule
+        (``src/tls_verify.py``; fail-closed since 2026-10-23, behaviour in
+        ``tests/test_ssl_verify_setting.py``), and only add ``-k`` when
+        verification is off."""
         src = self._script()
         # Positive: script must reference the canonical env var.
         assert "EDGEGUARD_SSL_VERIFY" in src, (

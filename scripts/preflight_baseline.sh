@@ -155,35 +155,51 @@ fi
 # -----------------------------------------------------------------------------
 hdr "[3] MISP API reachability"
 
-# NOTE (Bugbot round 2, Medium): honor EDGEGUARD_SSL_VERIFY / SSL_VERIFY so
-# the preflight TLS posture matches the rest of the stack. Pre-fix, ``curl
-# -k`` unconditionally disabled verification and sent MISP_API_KEY over an
-# unverified TLS connection — MitM risk even when SSL_VERIFY=true was set
-# project-wide. Semantics match src/config.py: only the literal string
-# "true" (case-insensitive, stripped) enables verification; anything else
-# disables (strict allow-list — typos default to disabled).
-SSL_VERIFY_RAW="${EDGEGUARD_SSL_VERIFY:-${SSL_VERIFY:-}}"
-SSL_VERIFY_NORM="$(printf '%s' "${SSL_VERIFY_RAW}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "")"
-# Bugbot round 3 (PR #104, Low): pre-fix used
-# ``CURL_TLS_FLAG=()`` (empty bash array) + ``"${CURL_TLS_FLAG[@]}"``
-# expansion. Under bash < 4.4 with ``set -u`` active, expanding an
-# EMPTY array via ``"${arr[@]}"`` raises "unbound variable" and aborts
-# the script. This affects macOS's default bash 3.2 — a common
-# operator workstation. The bug fired on the RECOMMENDED production
-# path (``EDGEGUARD_SSL_VERIFY=true``), causing the script to abort
-# with an unhelpful error instead of completing the MISP probe.
+# TLS verification for the MISP probe, judged by the rule of src/tls_verify.py, which the
+# services read through config.SSL_VERIFY: the first of EDGEGUARD_SSL_VERIFY and SSL_VERIFY that
+# is set and not blank decides; trimmed and case-insensitive, true/1/yes/on verify and
+# false/0/no/off do not; unset verifies; any other value verifies, with a warning (fail-closed).
+# tests/test_ssl_verify_setting.py runs this block against the Python rule.
 #
-# Fix: use a plain string ``CURL_TLS_FLAG_STR`` (always set; empty
-# string when verification enabled, ``-k`` when disabled), then
-# expand unquoted so an empty value contributes nothing to argv.
-# Safe across bash 3.2+ and POSIX sh.
-if [[ "$SSL_VERIFY_NORM" == "true" ]]; then
-  CURL_TLS_FLAG_STR=""
-  pass "TLS verification enabled (EDGEGUARD_SSL_VERIFY=true)"
-else
-  CURL_TLS_FLAG_STR="-k"
-  warn "TLS verification DISABLED (EDGEGUARD_SSL_VERIFY='${SSL_VERIFY_RAW:-unset}'); MISP_API_KEY will be sent over unverified TLS. Set EDGEGUARD_SSL_VERIFY=true for production."
-fi
+# CURL_TLS_FLAG_STR is a plain string (empty when verifying, -k when not), expanded unquoted so
+# an empty value adds nothing to argv: an empty bash array expanded under `set -u` aborts
+# bash < 4.4, the macOS default.
+_tls_trim() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  printf '%s' "$v"
+}
+SSL_VERIFY_NAME=""
+SSL_VERIFY_VALUE=""
+for _tls_name in EDGEGUARD_SSL_VERIFY SSL_VERIFY; do
+  _tls_value="$(_tls_trim "${!_tls_name:-}")"
+  if [[ -n "$_tls_value" ]]; then
+    SSL_VERIFY_NAME="$_tls_name"
+    SSL_VERIFY_VALUE="$_tls_value"
+    break
+  fi
+done
+SSL_VERIFY_NORM="$(printf '%s' "$SSL_VERIFY_VALUE" | tr '[:upper:]' '[:lower:]')"
+case "$SSL_VERIFY_NORM" in
+  false|0|no|off)
+    CURL_TLS_FLAG_STR="-k"
+    warn "TLS verification DISABLED (${SSL_VERIFY_NAME}='${SSL_VERIFY_VALUE}'); MISP_API_KEY will be sent over unverified TLS. Set EDGEGUARD_SSL_VERIFY=true for production."
+    ;;
+  "")
+    CURL_TLS_FLAG_STR=""
+    pass "TLS verification enabled (EDGEGUARD_SSL_VERIFY and SSL_VERIFY unset: the default)"
+    ;;
+  true|1|yes|on)
+    CURL_TLS_FLAG_STR=""
+    pass "TLS verification enabled (${SSL_VERIFY_NAME}=${SSL_VERIFY_VALUE})"
+    ;;
+  *)
+    CURL_TLS_FLAG_STR=""
+    warn "${SSL_VERIFY_NAME}='${SSL_VERIFY_VALUE}' is not a recognised value (true, 1, yes, on / false, 0, no, off); TLS verification stays on"
+    pass "TLS verification enabled (unrecognised value read as true)"
+    ;;
+esac
 
 if [[ -n "${MISP_URL:-}" ]] && [[ -n "${MISP_API_KEY:-}" ]]; then
   # shellcheck disable=SC2086  # intentional unquoted: empty string must expand to nothing

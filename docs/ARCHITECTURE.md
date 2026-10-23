@@ -382,6 +382,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | File | Purpose |
 |------|---------|
 | `src/config.py` | Settings, sector keywords and detection, per-source collection limits (`get_effective_limit`) |
+| `src/tls_verify.py` | The one rule for `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY` (fail-closed; `config.SSL_VERIFY` and the scripts read it) |
 | `src/collectors/misp_writer.py` | MISP tagging with `_get_zones_to_tag()` |
 | `src/collectors/otx_collector.py` | AlienVault OTX collector |
 | `src/collectors/nvd_collector.py` | NVD CVE collector |
@@ -513,6 +514,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — Key Files lists `src/tls_verify.py`, the one rule for `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY`.
 - 2026-10-23 — Key Files takes the module notes of the README's project tree, corrected: `run_pipeline.py` always takes the STIX flow, no step runs `MISPCollector`, `query_api.py` also serves the STIX and Wazuh exports and the explorer data; the GraphQL API runs on ISIM's port with its own schema (the page said it is queried exactly as ISIM); the README pointers name CONFIGURATION.md, TECHNICAL_SPEC.md, SETUP_GUIDE.md and docs/README.md; Key Files lists `abuseipdb_collector.py` and keeps one short clause per file.
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6), written by the sync.

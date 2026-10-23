@@ -387,13 +387,14 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `EDGEGUARD_SSL_VERIFY` | `true` | Verify HTTPS certificates (MISP and the feeds) |
-| `SSL_VERIFY` | unset | Read only when `EDGEGUARD_SSL_VERIFY` is unset or empty |
+| `EDGEGUARD_SSL_VERIFY` | `true` | Verify HTTPS certificates (MISP and the feeds): `true`, `1`, `yes`, `on` verify; `false`, `0`, `no`, `off` do not |
+| `SSL_VERIFY` | unset | The same values; read only when `EDGEGUARD_SSL_VERIFY` is unset or blank |
 | `REQUESTS_CA_BUNDLE` | unset | CA bundle of `requests` (pip installs) |
 | `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` | unset | MISP organisations trusted for source-stated timestamps |
 | `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | unset | The same by organisation name |
 
-- Unset or empty means `true`. A set value enables verification only when it is `true` (case-insensitive): any other value, a typo included, turns it off, and `edgeguard validate` and `scripts/preflight_baseline.sh` report it; the services do not. Use exactly `true` or `false`; `false` is for a development MISP with a self-signed certificate.
+- The value is trimmed and read case-insensitively. Unset or blank means `true`. Any other value, a typo included, keeps verification on: each process that reads it logs one warning naming the variable and the value, and `edgeguard validate` and `scripts/preflight_baseline.sh` report it. Turning verification off (`false`) is for a development MISP with a self-signed certificate; `edgeguard validate` and the preflight report that as well.
+- One rule (`src/tls_verify.py`) reads it for every caller: `config.SSL_VERIFY`, which the collectors, the MISP clients, the sync and the health checks take, the fresh-baseline probe and wipe, `scripts/clear_misp.py`, `scripts/import_curated_package.py --push`, and `scripts/preflight_baseline.sh`, which applies the same rule in the shell.
 - On Compose, `EDGEGUARD_SSL_VERIFY` is always set (default `true`) and reaches every service; `SSL_VERIFY` is not forwarded. Without Compose, set it in the environment of every Airflow process that runs tasks. `SSL_CERT_VERIFY` is not read.
 - `requests` and PyMISP verify against the `certifi` bundle (`certifi>=2026.10.19` in every dependency list), not the system store. A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it. The Neo4j driver's `+s` schemes use the system CAs ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)).
 - The trust allowlists name the creator organisations whose source-stated timestamps are accepted; names are compared case-insensitively after Unicode normalisation. The UUID is checked first and the name next, so a creator whose UUID is not in the UUID list is still trusted when its name is listed: leave the name list empty when only UUIDs should match. While both are empty, every claim is accepted, a startup warning is logged and the gauge `edgeguard_misp_tag_impersonation_defense_disabled` reports it ([SECURITY_ROADMAP.md](SECURITY_ROADMAP.md)).
@@ -448,4 +449,5 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `EDGEGUARD_SSL_VERIFY` and `SSL_VERIFY` fail closed: `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off` are recognised, any other value keeps verification on with a warning, and every reader uses the one rule in `src/tls_verify.py`.
 - 2026-10-23 — Created from the README's settings tables, split by area, with the rows that were missing (`EDGEGUARD_API_KEY`, `EDGEGUARD_CORS_ORIGINS`, the MISP push thresholds and back-off, `EDGEGUARD_SYNC_INTERVAL_DAYS`, `EDGEGUARD_EARLIEST_IOC_DATE`, the paths and operator tools) and the behaviour stated as the code has it: `NEO4J_URI`, the API ports and the metrics bind fixed on Compose, the Fernet, JWT and Grafana names Compose maps, the memory variables on the `neo4j` service, `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` skipping longer values, `EDGEGUARD_SSL_VERIFY` turning verification off for any value other than `true`, `MITRE_FORCE_REFETCH` for scheduled runs, `EDGEGUARD_INCREMENTAL_LIMIT` applying to OTX and VirusTotal, and `EDGEGUARD_VERSION` on bare-metal metrics only.

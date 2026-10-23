@@ -37,7 +37,7 @@ export EDGEGUARD_SSL_VERIFY=true                 # default; set false ONLY for l
 
 - `MISP_API_KEY` and `NEO4J_PASSWORD` are **required**; EdgeGuard will fail fast if they are missing.
 - `EDGEGUARD_SSL_VERIFY` defaults to `true` in code to ensure secure production behavior.
-- If `EDGEGUARD_SSL_VERIFY` is unset or empty, `SSL_VERIFY` is read the same way (`true`/`false`). `SSL_CERT_VERIFY` is **not** read — use `EDGEGUARD_SSL_VERIFY` (see `src/config.py`, `.env.example`).
+- `true`, `1`, `yes` and `on` verify, `false`, `0`, `no` and `off` do not (trimmed, any case); any other value keeps verification on and is logged as a warning. If `EDGEGUARD_SSL_VERIFY` is unset or blank, `SSL_VERIFY` is read by the same rule. `SSL_CERT_VERIFY` is **not** read — use `EDGEGUARD_SSL_VERIFY` (see `src/tls_verify.py`, `.env.example`).
 
 You can store these in a `.env` file and load it via a process manager (systemd, Docker, etc.) but **never commit `.env` to git**.
 
@@ -138,10 +138,11 @@ Generate strong values for all of these except the `PROMETHEUS_ADMIN_PASSWORD` p
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY`: the recognised values (`true`/`1`/`yes`/`on`, `false`/`0`/`no`/`off`); any other value keeps TLS verification on with a warning.
 - 2026-10-17 — Corrected the `credentials/api_keys.yaml` format (`KEY=value` lines, read only when `VIRUSTOTAL_API_KEY` is not set in the environment), the production rule for `EDGEGUARD_API_KEY`, the Airflow 3 option behind `AIRFLOW_API_AUTH_JWT_SECRET` and the unread `PROMETHEUS_ADMIN_PASSWORD`; the main text describes current behavior only and the change history is kept here.
 - 2026-04-26 — Added § 5.1 on the API, Airflow and monitoring secrets required in production (including the creator-org allow-list of the MISP tag-impersonation defense) and aligned the § 6 checklist; the `credentials/api_keys.yaml` example was rewritten as a YAML mapping, which the 2026-10-17 entry reverts.
 - 2026-03-17 — Earlier revision of the guide; no change details recorded.
