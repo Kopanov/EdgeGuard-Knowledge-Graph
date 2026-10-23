@@ -1,9 +1,10 @@
 """``EDGEGUARD_SSL_VERIFY`` and its ``SSL_VERIFY`` alias: one fail-closed rule for every reader (2026-10-23).
 
 The rule: the first of ``EDGEGUARD_SSL_VERIFY`` and ``SSL_VERIFY`` that is set and not blank
-decides. Its value, trimmed and case-insensitive, verifies for ``true`` / ``1`` / ``yes`` / ``on``
-and does not for ``false`` / ``0`` / ``no`` / ``off``; neither variable set (or both blank) verifies;
-any other value verifies and logs one WARNING naming the variable and the value.
+decides. Its value, with surrounding ASCII whitespace ignored and case-insensitive, verifies for
+``true`` / ``1`` / ``yes`` / ``on`` and does not for ``false`` / ``0`` / ``no`` / ``off``; neither
+variable set (or both blank) verifies; any other value, one carrying another character such as a
+non-breaking space included, verifies and logs one WARNING naming the variable and the value.
 
 Each reader is run with the variable set: the parser, ``config.SSL_VERIFY`` and the modules that
 take it (MISP health check, health check, MISP writer and collector, MISP-to-Neo4j sync, source key
@@ -34,9 +35,15 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 NAMES = ("EDGEGUARD_SSL_VERIFY", "SSL_VERIFY")
-VERIFY = ["true", "TRUE", " True ", "1", "yes", "YES", "on", " On\t"]
-NO_VERIFY = ["false", "FALSE", " False ", "0", "no", "NO", "off", "Off\n"]
+VERIFY = ["true", "TRUE", " True ", "1", "yes", "YES", "on", " On\t", "\ryes\x0b"]
+NO_VERIFY = ["false", "FALSE", " False ", "0", "no", "NO", "off", "Off\n", "\x0bOFF\x0c"]
 UNRECOGNISED = ["ture", "flase", "2", "-1", "enabled", "disable", "y", "n", "t", "true1"]
+# Only ASCII whitespace (space, tab, newline, carriage return, form feed, vertical tab) is ignored
+# around the value, the characters the shell preflight trims in the C locale. Any other character
+# (a non-breaking space pasted from a web page, other Unicode spaces, the separators Python counts as
+# whitespace) or a byte that is not UTF-8 (``\udcff``: os.environ's escape for the byte 0xff) leaves
+# the value unrecognised: verification stays on.
+NOT_ASCII_TRIMMED = ["false\u00a0", "\u00a0true", "\u2003off", "no\u3000", "false\x1f", "\x1c0", "off\x85", "no\udcff"]
 
 
 @pytest.fixture
@@ -67,11 +74,23 @@ def _parse() -> bool:
 @pytest.mark.parametrize("name", NAMES)
 @pytest.mark.parametrize(
     "value, expected",
-    [(v, True) for v in VERIFY] + [(v, False) for v in NO_VERIFY] + [(v, True) for v in UNRECOGNISED],
+    [(v, True) for v in VERIFY]
+    + [(v, False) for v in NO_VERIFY]
+    + [(v, True) for v in UNRECOGNISED + NOT_ASCII_TRIMMED],
 )
 def test_each_variable_is_read_by_the_rule(ssl_env, name, value, expected):
     ssl_env.setenv(name, value)
     assert _parse() is expected
+
+
+@pytest.mark.parametrize("value", NOT_ASCII_TRIMMED)
+def test_only_ascii_whitespace_is_ignored_and_any_other_character_leaves_the_value_unrecognised(value):
+    from tls_verify import read_ssl_verify_setting, unrecognised_value_message
+
+    setting = read_ssl_verify_setting({"EDGEGUARD_SSL_VERIFY": value})
+    assert setting == (True, "EDGEGUARD_SSL_VERIFY", value, False)
+    # The warning shows the character that kept the value from being recognised.
+    assert repr(value) in unrecognised_value_message(setting)
 
 
 @pytest.mark.parametrize("edgeguard, alias", [(None, None), ("", None), ("   ", None), (None, ""), ("", " \t ")])
@@ -91,6 +110,9 @@ def test_unset_or_blank_verifies(ssl_env, edgeguard, alias):
         (None, "1", True),
         # A set, unrecognised EDGEGUARD_SSL_VERIFY decides: it does not fall through to the alias.
         ("ture", "false", True),
+        # A non-breaking space is not blank: EDGEGUARD_SSL_VERIFY decides, and it is unrecognised.
+        ("\u00a0", "false", True),
+        ("\x0b\x0c", "false", False),
     ],
 )
 def test_edgeguard_ssl_verify_comes_first_and_the_alias_is_read_only_when_it_is_unset_or_blank(
@@ -180,7 +202,14 @@ seen["clear_misp"] = verify_kwargs.pop()
 print("SEEN|" + json.dumps(seen))
 """
 
-_READER_CASES: Dict[str, Optional[bool]] = {"1": True, "on": True, "off": False, "ture": True, "": True}
+_READER_CASES: Dict[str, Optional[bool]] = {
+    "1": True,
+    "on": True,
+    "off": False,
+    "ture": True,
+    "": True,
+    "off\u00a0": True,
+}
 
 
 @pytest.fixture(scope="module")
@@ -273,6 +302,7 @@ def _state(n: int = 0):
 
 _BASELINE_CASES = [("EDGEGUARD_SSL_VERIFY", "1", True), ("EDGEGUARD_SSL_VERIFY", "ture", True)]
 _BASELINE_CASES += [("EDGEGUARD_SSL_VERIFY", "off", False), ("SSL_VERIFY", "no", False), ("SSL_VERIFY", "yes", True)]
+_BASELINE_CASES += [("EDGEGUARD_SSL_VERIFY", "false\u00a0", True), ("SSL_VERIFY", "\u2003no", True)]
 
 
 @pytest.mark.parametrize("name, value, expected", _BASELINE_CASES)
@@ -331,7 +361,23 @@ def _shells():
     return shells
 
 
-def _preflight(shell: str, edgeguard: Optional[str], alias: Optional[str]):
+def _locales():
+    """The default (C) locale and the UTF-8 locales an operator workstation runs the preflight in."""
+    try:
+        listed = subprocess.run(["locale", "-a"], capture_output=True, text=True, timeout=30).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        listed = []
+    installed = {name.lower().replace("-", "") for name in listed}
+    params = [pytest.param(None, id="default-locale")]
+    for loc in ("en_US.UTF-8", "C.UTF-8"):
+        missing = loc.lower().replace("-", "") not in installed
+        params.append(
+            pytest.param(loc, id=loc, marks=pytest.mark.skipif(missing, reason=f"locale {loc} not installed"))
+        )
+    return params
+
+
+def _preflight(shell: str, edgeguard: Optional[str], alias: Optional[str], lc_all: Optional[str] = None):
     harness = (
         "set -uo pipefail\n"
         'pass() { echo "PASS|$*"; }\nwarn() { echo "WARN|$*"; }\nfail() { echo "FAIL|$*"; }\nhdr() { :; }\n'
@@ -339,10 +385,19 @@ def _preflight(shell: str, edgeguard: Optional[str], alias: Optional[str]):
         + 'echo "FLAG|${CURL_TLS_FLAG_STR}"\n'
     )
     env = {"PATH": os.environ.get("PATH", "")}
+    if lc_all is not None:
+        env["LC_ALL"] = lc_all
     for name, value in zip(NAMES, (edgeguard, alias), strict=True):
         if value is not None:
             env[name] = value
-    done = subprocess.run([shell, "-c", harness], env=env, capture_output=True, text=True, timeout=30)
+    done = subprocess.run(
+        [shell, "-c", harness],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="surrogateescape",  # the value is echoed back and may hold a byte that is not UTF-8
+        timeout=30,
+    )
     assert done.returncode == 0, done.stderr
     lines = done.stdout.splitlines()
     (flag,) = [ln[len("FLAG|") :] for ln in lines if ln.startswith("FLAG|")]
@@ -351,22 +406,27 @@ def _preflight(shell: str, edgeguard: Optional[str], alias: Optional[str]):
 
 
 _PREFLIGHT_CASES = (
-    [(v, None, True) for v in VERIFY + UNRECOGNISED]
+    [(v, None, True) for v in VERIFY + UNRECOGNISED + NOT_ASCII_TRIMMED]
     + [(v, None, False) for v in NO_VERIFY]
     + [(None, v, False) for v in ["false", "0", "off"]]
     + [(None, v, True) for v in ["1", "on", "ture"]]
     + [(None, None, True), ("", None, True), ("  ", "false", False), ("", "no", False)]
     + [("true", "false", True), ("false", "true", False), ("ture", "false", True)]
+    + [(None, v, True) for v in ["false\u00a0", "\u3000off", "no\udcff"]]
+    + [("\u00a0", "false", True), ("\x0b\x0c", "false", False)]
 )
 
 
+@pytest.mark.parametrize("lc_all", _locales())
 @pytest.mark.parametrize("shell", _shells())
 @pytest.mark.parametrize("edgeguard, alias, expected", _PREFLIGHT_CASES)
-def test_the_preflight_judges_tls_verification_as_the_services_do(ssl_env, shell, edgeguard, alias, expected):
+def test_the_preflight_judges_tls_verification_as_the_services_do(ssl_env, shell, lc_all, edgeguard, alias, expected):
     _set(ssl_env, edgeguard, alias)
     assert _parse() is expected
-    verify, lines, stderr = _preflight(shell, edgeguard, alias)
+    verify, lines, stderr = _preflight(shell, edgeguard, alias, lc_all)
     assert verify is expected, (edgeguard, alias, lines, stderr)
+    # In a UTF-8 locale a byte that is not UTF-8 must not make a tool fail and drop part of the value.
+    assert stderr == ""
     if verify:
         assert any(ln.startswith("PASS|TLS verification enabled") for ln in lines), lines
     else:
@@ -374,14 +434,22 @@ def test_the_preflight_judges_tls_verification_as_the_services_do(ssl_env, shell
         assert any(ln.startswith("WARN|TLS verification DISABLED") for ln in lines), lines
 
 
+@pytest.mark.parametrize("lc_all", _locales())
 @pytest.mark.parametrize("shell", _shells())
 @pytest.mark.parametrize(
-    "edgeguard, alias, name, shown", [("ture", None, "EDGEGUARD_SSL_VERIFY", "ture"), (None, " 2 ", "SSL_VERIFY", "2")]
+    "edgeguard, alias, name, shown",
+    [
+        ("ture", None, "EDGEGUARD_SSL_VERIFY", "ture"),
+        (None, " 2 ", "SSL_VERIFY", "2"),
+        ("false\u00a0", None, "EDGEGUARD_SSL_VERIFY", "false\u00a0"),
+        (None, " \u3000off", "SSL_VERIFY", "\u3000off"),
+        ("no\udcff", None, "EDGEGUARD_SSL_VERIFY", "no\udcff"),
+    ],
 )
 def test_the_preflight_warns_about_an_unrecognised_value_and_keeps_verification_on(
-    shell, edgeguard, alias, name, shown
+    shell, lc_all, edgeguard, alias, name, shown
 ):
-    verify, lines, _stderr = _preflight(shell, edgeguard, alias)
+    verify, lines, _stderr = _preflight(shell, edgeguard, alias, lc_all)
     assert verify is True
     warnings = [ln for ln in lines if ln.startswith("WARN|")]
     assert len(warnings) == 1, lines
@@ -395,4 +463,13 @@ def test_the_preflight_does_not_warn_when_verification_is_on_by_a_recognised_val
 ):
     verify, lines, _stderr = _preflight(shell, edgeguard, alias)
     assert verify is True
+    assert not [ln for ln in lines if ln.startswith("WARN|")], lines
+
+
+@pytest.mark.parametrize("shell", _shells())
+@pytest.mark.parametrize("edgeguard, alias", [(None, None), ("  ", None), ("", "\t"), (None, " "), ("\x0b", "\n")])
+def test_the_preflight_names_the_default_for_unset_or_blank_variables(shell, edgeguard, alias):
+    verify, lines, _stderr = _preflight(shell, edgeguard, alias)
+    assert verify is True
+    assert "PASS|TLS verification enabled (EDGEGUARD_SSL_VERIFY and SSL_VERIFY unset or blank: the default)" in lines
     assert not [ln for ln in lines if ln.startswith("WARN|")], lines

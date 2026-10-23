@@ -4,13 +4,17 @@ The rule is fail-closed:
 
 - The first of ``EDGEGUARD_SSL_VERIFY`` and ``SSL_VERIFY`` that is set and not blank decides;
   ``SSL_VERIFY`` is therefore read only when ``EDGEGUARD_SSL_VERIFY`` is unset or blank.
-- Its value, trimmed and case-insensitive, verifies for ``true``, ``1``, ``yes`` and ``on``, and does
-  not verify for ``false``, ``0``, ``no`` and ``off``.
+- Its value, with surrounding ASCII whitespace (space, tab, newline, carriage return, form feed,
+  vertical tab) ignored and case-insensitive, verifies for ``true``, ``1``, ``yes`` and ``on``, and
+  does not verify for ``false``, ``0``, ``no`` and ``off``.
 - Neither variable set (or both blank): verify.
-- Any other value: verify, and log one WARNING naming the variable and the value.
+- Any other value: verify, and log one WARNING naming the variable and the value. A value carrying
+  another character around it (a non-breaking space pasted from a web page, another Unicode space)
+  or a byte that is not UTF-8 is such a value.
 
 ``config.SSL_VERIFY`` is this rule applied once, at import; the services take that value.
-``scripts/preflight_baseline.sh`` applies the same rule in the shell. The module imports nothing
+``scripts/preflight_baseline.sh`` applies the same rule in the shell, byte-wise in the C locale, so
+it judges a value as the services do whatever the operator's locale. The module imports nothing
 outside the standard library, so a reader that must not load ``config`` (which requires
 ``NEO4J_PASSWORD`` and ``MISP_API_KEY``) reads the setting the same way.
 """
@@ -26,6 +30,9 @@ logger = logging.getLogger(__name__)
 SSL_VERIFY_ENV_NAMES: Tuple[str, str] = ("EDGEGUARD_SSL_VERIFY", "SSL_VERIFY")
 VERIFY_VALUES = frozenset({"true", "1", "yes", "on"})
 NO_VERIFY_VALUES = frozenset({"false", "0", "no", "off"})
+# What the preflight's [:space:] matches in the C locale. str.strip() without an argument would also
+# remove Unicode spaces and the separators \x1c-\x1f, which the shell keeps.
+ASCII_WHITESPACE = " \t\n\r\f\v"
 
 
 class SslVerifySetting(NamedTuple):
@@ -44,7 +51,7 @@ def read_ssl_verify_setting(environ: Optional[Mapping[str, str]] = None) -> SslV
         raw = env.get(name)
         if raw is None:
             continue
-        value = str(raw).strip()
+        value = str(raw).strip(ASCII_WHITESPACE)
         if not value:
             continue
         lowered = value.lower()

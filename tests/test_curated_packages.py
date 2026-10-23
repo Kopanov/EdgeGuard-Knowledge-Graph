@@ -1079,6 +1079,7 @@ class TestPush:
             ("off", None, False),
             ("1", None, True),
             ("ture", None, True),  # unrecognised: verification stays on
+            ("false ", None, True),  # a non-breaking space is not trimmed: unrecognised
             (None, None, True),
         ],
     )

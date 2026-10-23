@@ -157,14 +157,19 @@ hdr "[3] MISP API reachability"
 
 # TLS verification for the MISP probe, judged by the rule of src/tls_verify.py, which the
 # services read through config.SSL_VERIFY: the first of EDGEGUARD_SSL_VERIFY and SSL_VERIFY that
-# is set and not blank decides; trimmed and case-insensitive, true/1/yes/on verify and
-# false/0/no/off do not; unset verifies; any other value verifies, with a warning (fail-closed).
-# tests/test_ssl_verify_setting.py runs this block against the Python rule.
+# is set and not blank decides; with surrounding ASCII whitespace ignored and case-insensitive,
+# true/1/yes/on verify and false/0/no/off do not; unset or blank verifies; any other value
+# verifies, with a warning (fail-closed). Trimming and lower-casing run in the C locale, byte-wise
+# as the Python rule: in a UTF-8 locale [:space:] would also match a non-breaking space, and tr
+# would stop at a byte that is not UTF-8 and drop the rest of the value.
+# tests/test_ssl_verify_setting.py runs this block against the Python rule, in the default and in
+# UTF-8 locales.
 #
 # CURL_TLS_FLAG_STR is a plain string (empty when verifying, -k when not), expanded unquoted so
 # an empty value adds nothing to argv: an empty bash array expanded under `set -u` aborts
 # bash < 4.4, the macOS default.
 _tls_trim() {
+  local LC_ALL=C
   local v="$1"
   v="${v#"${v%%[![:space:]]*}"}"
   v="${v%"${v##*[![:space:]]}"}"
@@ -180,7 +185,7 @@ for _tls_name in EDGEGUARD_SSL_VERIFY SSL_VERIFY; do
     break
   fi
 done
-SSL_VERIFY_NORM="$(printf '%s' "$SSL_VERIFY_VALUE" | tr '[:upper:]' '[:lower:]')"
+SSL_VERIFY_NORM="$(printf '%s' "$SSL_VERIFY_VALUE" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
 case "$SSL_VERIFY_NORM" in
   false|0|no|off)
     CURL_TLS_FLAG_STR="-k"
@@ -188,7 +193,7 @@ case "$SSL_VERIFY_NORM" in
     ;;
   "")
     CURL_TLS_FLAG_STR=""
-    pass "TLS verification enabled (EDGEGUARD_SSL_VERIFY and SSL_VERIFY unset: the default)"
+    pass "TLS verification enabled (EDGEGUARD_SSL_VERIFY and SSL_VERIFY unset or blank: the default)"
     ;;
   true|1|yes|on)
     CURL_TLS_FLAG_STR=""

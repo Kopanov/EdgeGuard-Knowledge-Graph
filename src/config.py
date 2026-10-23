@@ -469,9 +469,9 @@ def misp_http_headers_for_pymisp() -> Optional[Dict[str, str]]:
 #   - For a development MISP only; INSECURE for production
 #
 # Set via environment: EDGEGUARD_SSL_VERIFY (alias SSL_VERIFY, read only when
-# EDGEGUARD_SSL_VERIFY is unset or blank). Trimmed, case-insensitive:
-# true/1/yes/on verify, false/0/no/off do not, unset verifies, and any other
-# value verifies with one WARNING (fail-closed). The rule lives in
+# EDGEGUARD_SSL_VERIFY is unset or blank). Surrounding ASCII whitespace ignored,
+# case-insensitive: true/1/yes/on verify, false/0/no/off do not, unset or blank
+# verifies, and any other value verifies with one WARNING (fail-closed). The rule lives in
 # ``tls_verify``, which the scripts that do not load this module use as well.
 # ``SSL_CERT_VERIFY`` is not read by EdgeGuard.
 from tls_verify import edgeguard_ssl_verify_from_env  # noqa: E402
