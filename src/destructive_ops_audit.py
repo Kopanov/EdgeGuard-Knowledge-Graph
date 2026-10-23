@@ -61,8 +61,17 @@ def _actor() -> Dict[str, str]:
     actor: Dict[str, str] = {}
     try:
         actor["user"] = getpass.getuser()
-    except Exception:  # noqa: BLE001 — KeyError / OSError from the password database; never block the line
-        pass
+    except (KeyError, OSError, ImportError) as exc:
+        # No user name: a container user without a password-database entry (KeyError on older
+        # Pythons, OSError from 3.13) or a platform without the pwd module. The line is still written.
+        logger.debug("destructive-ops audit: operating-system user name unavailable (%s)", type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 — recording never raises (the delete has already run)
+        logger.warning(
+            "destructive-ops audit: reading the operating-system user name failed (%s: %s); "
+            "the line is written without it",
+            type(exc).__name__,
+            exc,
+        )
     try:
         actor["host"] = socket.gethostname()
     except OSError:
