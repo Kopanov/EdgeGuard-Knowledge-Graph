@@ -308,17 +308,12 @@ host.
 
 ---
 
-## Long-term: event sharding (planned)
+## Event size
 
-Adaptive batching makes the current single-large-event design SURVIVE
-big pushes. The structural fix — **one MISP event capped at ~25K
-attributes**, auto-sharded into `EdgeGuard-{source}-{date}-shard-{N}`
-— is planned and not implemented. With shards, no single event ever
-crosses the threshold where MISP starts to struggle, and the adaptive
-downscaling becomes belt-and-suspenders.
-
-Until shards land, the settings above and the adaptive scaling are
-the recommended posture.
+A baseline writes one MISP event per source, and adaptive batching with
+the settings above lets the writer push such large events. Partitioning
+large baseline events is planned work:
+[ROADMAP.md § Collection depth and scale](ROADMAP.md#collection-depth-and-scale).
 
 ---
 
@@ -337,7 +332,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — The page names no deployed MISP image: it said `harvarditsecurity/misp:latest` is deployed, which the repository cannot verify; the README points here for the MISP server settings.
+- 2026-10-23 — The page names no deployed MISP image: it said `harvarditsecurity/misp:latest` is deployed, which the repository cannot verify; the README points here for the MISP server settings; the planned event sharding (a shard per 25K attributes) gave way to a pointer to ROADMAP.md, which lists the partitioning of large baseline events by date range.
 - 2026-10-17 — The reference `php-overrides.ini` for `coolacid` documented with its larger values (8G, 512M, 3600 s; for hosts with 16 GB or more), where the page said the values were identical for both images; `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` also paces the CISA KEV in-place edits and the `last_seen` refresh; `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` described as the master switch of the per-event and cross-event duplicate checks; the alert rules shown as shipped in `prometheus/alerts.yml` (the documented backoff rule `rate(...) > 1` never fired); `docker-compose.yml` forwards `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` and the four threshold and back-off settings (a value set in `.env` for those five had not reached the container, so the code defaults applied); main text limited to current behaviour, with the change history in this section.
 - 2026-10-15 — NVD incremental runs sleep `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` after every 50 attribute edits.
 - 2026-04-21 — First version, with adaptive batch size and throttle per event, the extended back-off and the two push metrics (the failure metric without an `event_id` label), after the 730-day baseline of 2026-04-21 in which the default MISP container answered HTTP 500 to most batch pushes above about 50K attributes per event and about 11,500 OTX and NVD attributes were lost (triage in `docs/flow_audits/09_comprehensive_audit.md`).

@@ -134,8 +134,6 @@ Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules)
 
 ---
 
-_Last updated: 2026-10-23 — the opening note names docs/README.md as the documentation map, which replaced the README's documentation section. Prior: 2026-10-18 — the STIX exporter design proposal is deleted (its content is in RESILMESH_QUICKSTART_STIX.md, "Design decisions" and "Open points"): its row is removed and the pass summaries name it without a link. Prior: 2026-10-17 — documentation audit: a note under the title says each Verified date is the date of that row's last check and that pass summaries quote values of their pass (`AIRFLOW_MEMORY_LIMIT` 4g then, 12g now); rows that contradicted this file's own PR entries are corrected (CONTRIBUTING: `docs/CONTRIBUTING.md` is the PR-N37 stub; ARCHITECTURE_DIAGRAMS verified by PR-N34; ARCHITECTURE_FLOW: the pin-test shipped in PR-J1); the STIX quickstart row names the real `/stix/types` and `/stix/export/...` routes; the citation hint names `resolve_baseline_days` instead of `SECTOR_TIME_RANGES`, which no collector reads. Prior: 2026-10-16 — DEMO row: the read-only alert enrichment demo and the workflow demonstration commands, verified against the code (the row named a mock publisher, since removed); it also covers the demo's exit codes for a failed enrichment query or an alert the processor raises on, and `docs/demo.html`, whose relationship table and enrichment example now state what the code writes and returns. Prior: 2026-10-15 — wording only: the PR #126 entry states the documentation rule instead of naming a review tool's rule file. Prior: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
-
 The PR-N26 → PR-N32 train added significant capabilities that earlier
 versions of this index did not cover. Added rows for: TIMESTAMPS,
 RUNBOOK, BACKUP, BASELINE_LAUNCH_CHECKLIST (PR-N32), BASELINE_SMOKE_TEST,
@@ -229,5 +227,17 @@ broken doc references on every PR. Tier-1-style deep verification is
 only needed after major code-shape changes (DAG renames, container
 renames, CLI changes). Tier-2/Tier-3 sweeps quarterly are sufficient.
 
-Prior: 2026-04-18 PR #41 cleanup pass — historical PR #32 "Backfill
-migration" reference marked as deleted; PR #33 deferred items closed.
+---
+
+_Last updated: 2026-10-23_
+
+## History
+
+- 2026-10-23 — The opening note names docs/README.md as the documentation map, which replaced the README's documentation section; the change notes of the former `_Last updated_` line moved into this History section.
+- 2026-10-18 — The STIX exporter design proposal is deleted (its content is in RESILMESH_QUICKSTART_STIX.md, "Design decisions" and "Open points"): its row is removed and the pass summaries name it without a link.
+- 2026-10-17 — Documentation audit: a note under the title says each Verified date is the date of that row's last check and that pass summaries quote values of their pass (`AIRFLOW_MEMORY_LIMIT` 4g then, 12g now); rows that contradicted this file's own PR entries are corrected (CONTRIBUTING: `docs/CONTRIBUTING.md` is the PR-N37 stub; ARCHITECTURE_DIAGRAMS verified by PR-N34; ARCHITECTURE_FLOW: the pin-test shipped in PR-J1); the STIX quickstart row names the real `/stix/types` and `/stix/export/...` routes; the citation hint names `resolve_baseline_days` instead of `SECTOR_TIME_RANGES`, which no collector reads.
+- 2026-10-16 — DEMO row: the read-only alert enrichment demo and the workflow demonstration commands, verified against the code (the row named a mock publisher, since removed); it also covers the demo's exit codes for a failed enrichment query or an alert the processor raises on, and `docs/demo.html`, whose relationship table and enrichment example now state what the code writes and returns.
+- 2026-10-15 — Wording only: the PR #126 entry states the documentation rule instead of naming a review tool's rule file.
+- 2026-06-11 — Added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section above).
+- 2026-04-26 — PR-N33 docs audit (6-agent fan-out).
+- 2026-04-18 — PR #41 cleanup pass: the historical PR #32 "Backfill migration" reference marked as deleted; PR #33 deferred items closed.

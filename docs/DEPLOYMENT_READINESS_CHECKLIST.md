@@ -2,7 +2,7 @@
 
 Use this runbook **in order** before a deployment or production test. Deep dives stay in linked docs; this page is the single ordered gate.
 
-**Quick automation:** from repo root, `./scripts/deployment_wiring_check.sh` (Layer 1 always; Layer 3 + optional HTTP health if `EDGEGUARD_DEPLOY_CHECK_LIVE=1`). Or `make deploy-check`.
+**Quick automation:** from repo root, `./scripts/deployment_wiring_check.sh` or `make deploy-check` (Layer 1 always; Layer 3 + optional HTTP health if `EDGEGUARD_DEPLOY_CHECK_LIVE=1`). Both run `scripts/preflight_ci.sh` first, which currently stops at its DagBag step on Airflow 3.3 (`TypeError`: Airflow 3.3's `DagBag` has no `include_examples` argument), so they stop there as well.
 
 **Canonical assessment:** [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md)
 
@@ -24,7 +24,8 @@ Sign off on the **same git commit** you will deploy.
 
 | Done | Check | Command / source | Pass |
 |------|--------|------------------|------|
-| [ ] | Syntax + collectors compile + pytest + DagBag | `./scripts/preflight_ci.sh` | Exit 0 |
+| [ ] | Syntax + collectors compile + pytest | `./scripts/preflight_ci.sh` | Passes up to its DagBag step |
+| [ ] | DAG parse | `airflow dags list-import-errors` (below) | Empty |
 | [ ] | Lint + format + mypy (matches CI) | `make lint` and `make type-check` | Clean |
 | [ ] | Full CI parity (optional) | `make ci` | Exit 0 |
 
@@ -32,7 +33,7 @@ References: [preflight_ci.sh](../scripts/preflight_ci.sh), [.github/workflows/ci
 
 **Python:** Use **3.12+** for local `make ci` / `preflight_ci.sh` parity with CI ([`pyproject.toml`](../pyproject.toml) `requires-python`). The repository runs Apache Airflow **3.3.2** (base image `apache/airflow:3.3.2-python3.12`), which supports Python **3.10–3.14** upstream; this repository standardizes on **3.12**.
 
-`preflight_ci.sh` sets a dummy `NEO4J_PASSWORD` for DagBag import — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting.
+`preflight_ci.sh` sets a dummy `NEO4J_PASSWORD` for DagBag import — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting. Its DagBag step currently fails on Airflow 3.3, so check the DAG parse with `docker compose exec airflow airflow dags list-import-errors` on the stack, or with `airflow dags list-import-errors` after `airflow db migrate` in a local Airflow.
 
 ---
 
@@ -125,7 +126,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — The settings and health references point to CONFIGURATION.md and TECHNICAL_SPEC.md, which hold what the README's settings and health sections held.
+- 2026-10-23 — The settings and health references point to CONFIGURATION.md and TECHNICAL_SPEC.md, which hold what the README's settings and health sections held; `preflight_ci.sh`, `deployment_wiring_check.sh` and `make deploy-check` are stated to stop at the DagBag step on Airflow 3.3, and the DAG parse is checked with `airflow dags list-import-errors` (the gate asked for exit 0, which the script cannot reach).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restated as a guide to the current behaviour: change history moved here, the Airflow upgrade and pre-2026-04 graph steps moved to the appendix.
 - 2026-10-17 — The repository runs Airflow 3.3.2 (it said 3.2); the Neo4j sync gate is `check_sync_needed` in `edgeguard_neo4j_sync`; no Cypher migration scripts exist (the named `specialize_uses_technique` migration does not).

@@ -387,6 +387,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/nvd_collector.py` | NVD CVE collector |
 | `src/collectors/cisa_collector.py` | CISA KEV collector |
 | `src/collectors/mitre_collector.py` | MITRE ATT&CK collector |
+| `src/collectors/abuseipdb_collector.py` | AbuseIPDB blacklist collector (one request per run, daily cache) |
 | `src/collectors/vt_collector.py` | VirusTotal — primary `VTCollector` used by medium-freq DAG |
 | `src/collectors/virustotal_collector.py` | VirusTotal — `VirusTotalCollector`, CLI / on-demand enrichment (not scheduled) |
 | `src/collectors/finance_feed_collector.py` | Feodo, SSL Blacklist collectors |
@@ -397,11 +398,11 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/healthcare_feed_collector.py` | Healthcare placeholder |
 | `src/collectors/energy_feed_collector.py` | Energy placeholder |
 | `src/collectors/misp_collector.py` | Reads existing MISP events — library code; no DAG or CLI step runs it |
-| `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j**: `fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`; its own CLI takes `--full` and `--sector`; also the MISP → STIX 2.1 converter of the `run_pipeline.py` CLI |
+| `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j** sync (`fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`) and the STIX converter of `run_pipeline.py` |
 | `src/run_pipeline.py` | CLI orchestration: collectors → MISP, then MISP → STIX 2.1 → Neo4j (the STIX flow is always on) |
-| `src/enrichment_jobs.py` | Post-sync enrichment: Vulnerability↔CVE `REFERS_TO` bridge, actor alias merge, Malware ATT&CK-id twin merge (`cobalt strike - s0154` into `cobalt strike`), indicator aging (the rule in `src/indicator_aging.py`), campaigns, FIRST EPSS |
-| `src/cve_feed_enrichment.py` | FIRST EPSS on existing `CVE` nodes: bounded download, parse, batched `SET`, removal for CVEs that left the feed; the one source written to Neo4j without MISP |
-| `src/build_relationships.py` | Post-sync graph links (ATT&CK technique, tactic, malware and tool links, attribution, `EXPLOITS`, `INDICATES`, sector `TARGETS` / `AFFECTS`), each with `match_type` and confidence; exact keys, no `CONTAINS`, no event co-occurrence |
+| `src/enrichment_jobs.py` | The six post-sync enrichment jobs ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)) |
+| `src/cve_feed_enrichment.py` | FIRST EPSS scores on existing `CVE` nodes, written without MISP |
+| `src/build_relationships.py` | Post-sync graph links on exact keys, each with `match_type` and confidence |
 | `src/indicator_aging.py` | The one Indicator aging rule (basis, tiers, retirement, `aging_evaluated_at`) |
 | `src/campaign_evidence.py` | What a campaign rests on (`ATTRIBUTED_TO` / `USES_MALWARE`) |
 | `src/sector_evidence.py` | Evidence label and confidence of links to `Sector` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9) and the zones a record states |
@@ -411,12 +412,12 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/vulnerability_update.py` | CISA KEV whole-catalogue compare; in-place edits of the stored MISP copies |
 | `dags/edgeguard_pipeline.py` | Six primary DAGs (collection + baseline + sync + enrichment tasks) |
 | `dags/edgeguard_metrics_server.py` | Optional long-running Prometheus metrics DAG(s) |
-| `src/query_api.py` | FastAPI REST API — queries, indicator search, actor summaries, STIX 2.1 export, Wazuh CDB export, graph-explorer data (port 8000) |
+| `src/query_api.py` | REST API on port 8000: queries, STIX 2.1 and Wazuh CDB exports, explorer data |
 | `src/graphql_api.py` | **GraphQL API** — Strawberry/FastAPI endpoint on port 4001, the port ISIM uses |
-| `src/graphql_schema.py` | Strawberry type definitions (CVE and its CVSS types, Vulnerability, Indicator, ThreatActor, Malware, Tool, Technique, Tactic, Campaign) |
-| `src/neo4j_client.py` | Graph writes: node merges, CVSS sub-nodes, relationship batches, sector labels, identifier validators |
+| `src/graphql_schema.py` | Strawberry type definitions of the GraphQL API |
+| `src/neo4j_client.py` | Graph writes, schema setup and identifier validators |
 | `src/stix_exporter.py` | Graph → STIX 2.1 bundles (deterministic UUIDv5 ids) |
-| `src/edgeguard.py` | CLI: preflight, baseline / fresh-baseline, stats, dag, checkpoint, clear, doctor / heal / validate / monitor, source, setup, update, version ([CLI.md](CLI.md)) |
+| `src/edgeguard.py` | The `edgeguard` CLI ([CLI.md](CLI.md)) |
 | `src/airflow_client.py` | Airflow REST API client of the CLI and the baseline lock |
 | `src/health_check.py` | MISP and Neo4j connectivity check |
 | `src/resilience.py` | Circuit breakers and retry helpers |
@@ -504,7 +505,7 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 - [HEARTBEAT.md](HEARTBEAT.md) — Heartbeats, zombies, SIGKILL/OOM vs successful graph writes
 - [DATA_SOURCES_RATE_LIMITS.md](DATA_SOURCES_RATE_LIMITS.md) — API rate limits and cost reference
 - [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) — Historical record of doc ↔ code verification passes; reading order: [SETUP_GUIDE.md § Start here](SETUP_GUIDE.md#start-here--then-read-these-next-operator-path)
-- [README.md](README.md) — Index of every document
+- [docs/README.md](README.md) — Index of every document
 
 ---
 
@@ -512,7 +513,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — Key Files takes the module notes of the README's project tree, corrected: `run_pipeline.py` always takes the STIX flow, no step runs `MISPCollector`, `query_api.py` also serves the STIX and Wazuh exports and the explorer data, the GraphQL types are named as they are (`ThreatActor`); the GraphQL API runs on ISIM's port with its own schema (the page said it is queried exactly as ISIM); the README pointers name CONFIGURATION.md, TECHNICAL_SPEC.md, SETUP_GUIDE.md and docs/README.md.
+- 2026-10-23 — Key Files takes the module notes of the README's project tree, corrected: `run_pipeline.py` always takes the STIX flow, no step runs `MISPCollector`, `query_api.py` also serves the STIX and Wazuh exports and the explorer data; the GraphQL API runs on ISIM's port with its own schema (the page said it is queried exactly as ISIM); the README pointers name CONFIGURATION.md, TECHNICAL_SPEC.md, SETUP_GUIDE.md and docs/README.md; Key Files lists `abuseipdb_collector.py` and keeps one short clause per file.
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6), written by the sync.
 - 2026-10-18 — `TARGETS` carries `otx_industries` (0.6) where an OTX pulse's own industries state the sector.

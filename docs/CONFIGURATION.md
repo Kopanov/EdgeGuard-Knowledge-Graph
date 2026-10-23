@@ -38,7 +38,8 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `NEO4J_USER` | `neo4j` | Neo4j user |
 | `NEO4J_PASSWORD` | required | Neo4j password |
 | `NEO4J_DATABASE` | unset | Database of every session (multi-database servers) |
-| `NEO4J_HTTP` | `http://neo4j:7474` on Compose | Neo4j HTTP API for DAG diagnostics and scripts |
+| `NEO4J_HTTP` | `http://neo4j:7474` on Compose | Neo4j HTTP API of the DAG diagnostics |
+| `NEO4J_HTTP_URL` | a remote address | Neo4j HTTP API of the host scripts |
 | `NEO4J_HEAP_INITIAL` | `512m` | JVM initial heap of the `neo4j` service |
 | `NEO4J_HEAP_MAX` | `2g` | JVM maximum heap |
 | `NEO4J_PAGECACHE` | `1g` | Page cache |
@@ -49,8 +50,8 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 - Neo4j applies `NEO4J_PASSWORD` when it creates its data volume and keeps that password afterwards.
 - `NEO4J_DATABASE` unset or empty uses the server's default database.
 - The five memory variables are set in the `neo4j` service of `docker-compose.yml`; the values above are the Compose defaults. `NEO4J_TX_MEMORY_MAX` limits transaction memory inside the heap and off-heap budget and is not added to it; the 8g container default covers the default heap, page cache and off-heap overhead.
-- A 730-day baseline needs the baseline-capable profile: heap 12g (initial = maximum), page cache 8g, transaction memory 8g, container 32g ([MEMORY_TUNING.md](MEMORY_TUNING.md), [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles)). `edgeguard doctor --memory` compares the values in effect with the recommended ones.
-- `scripts/verify_fresh_baseline.py` and the catalog script read `NEO4J_HTTP_URL` before `NEO4J_HTTP`; from the host, set `NEO4J_HTTP_URL=http://localhost:7474`.
+- A 730-day baseline needs the baseline-capable profile: heap 12g (initial = maximum), page cache 8g, transaction memory 8g, container 32g ([MEMORY_TUNING.md](MEMORY_TUNING.md), [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles)). `edgeguard doctor --memory`, run on the Compose host, compares the values in effect with the recommended ones ([CLI.md](CLI.md#readiness-and-diagnosis)).
+- `scripts/verify_fresh_baseline.py` and `scripts/build_canonical_threat_actors.py` read `NEO4J_HTTP_URL`, then `NEO4J_HTTP`; `scripts/run_cypher_catalog_http.py` reads `NEO4J_HTTP_URL` only. With neither set they use a built-in remote address and send `NEO4J_USER` and `NEO4J_PASSWORD` there, so on the host always set `NEO4J_HTTP_URL=http://localhost:7474`. `.env.example` lists `NEO4J_HTTP` commented out.
 
 ---
 
@@ -322,7 +323,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 |---|---|---|
 | `AIRFLOW_API_AUTH_JWT_SECRET` | required | Signing secret of the Airflow API server |
 | `AIRFLOW_FERNET_KEY` | required in production | Encryption key of Airflow's stored secrets |
-| `AIRFLOW_API_USER` | `admin` | User of the CLI's Airflow REST calls |
+| `AIRFLOW_API_USER` | `admin` | User of the Airflow REST calls (CLI and tasks) |
 | `AIRFLOW_API_PASSWORD` | unset | Its password (required on the host) |
 | `AIRFLOW_API_VERSION` | `v2` | `v2` (Airflow 3) or `v1` (Airflow 2) |
 | `AIRFLOW_WEBSERVER_URL` | `http://localhost:8082` | Airflow API base URL for the CLI and tasks |
@@ -334,7 +335,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `EDGEGUARD_COLLECTOR_POOL_SLOTS` | `4` | Slots of the collector pool across all DAGs |
 
 - Compose passes `AIRFLOW_API_AUTH_JWT_SECRET` to Airflow as `AIRFLOW__API_AUTH__JWT_SECRET` and `AIRFLOW_FERNET_KEY` as `AIRFLOW__CORE__FERNET_KEY`; set the short names in `.env`. With an empty JWT secret the API server does not start; keep both values stable, because a new Fernet key makes the stored connections and variables unreadable. `./install.sh` generates both when they are blank.
-- The CLI exchanges `AIRFLOW_API_USER` and `AIRFLOW_API_PASSWORD` for a token at `POST /auth/token` (`AIRFLOW_API_VERSION=v2`). With the password unset, a process inside the Airflow container reads the password file the Simple auth manager generates; on the host the password is required.
+- The CLI, the scheduled DAGs' check of the baseline lock's holder and the baseline collectors' liveness check exchange `AIRFLOW_API_USER` and `AIRFLOW_API_PASSWORD` for a token at `POST /auth/token` (`AIRFLOW_API_VERSION=v2`); Compose forwards both to the `airflow` service. With the password unset, a process inside the Airflow container reads the password file the Simple auth manager generates; on the host the password is required. A wrong password in `.env` also reaches the tasks: the lock check then falls back to the lock file's age, and the liveness check cannot tell whether the DAG run has ended.
 - The password of `AIRFLOW_POSTGRES_PASSWORD` must stay URL-safe (no `@`, `#`, `/`, `?`), because it goes into the SQLAlchemy URI.
 - Every collector task of every DAG runs in the pool `edgeguard_collectors`; the Compose `airflow` service creates or resizes it at every start, so apply a change with `docker compose up -d airflow`. Without Compose, create it once after `airflow db migrate`:
 
@@ -377,7 +378,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 - `EDGEGUARD_VERSION` applies only to a bare-metal single-process metrics server; in the multi-process mode of Compose the info metric is not exported. The APIs and logs take the version from `pyproject.toml`.
 - `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` and `GRAFANA_ROOT_URL` are passed to Grafana as `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD` and `GF_SERVER_ROOT_URL`; a `GF_*` value in `.env` is not read. Grafana keeps the admin password of its first start. `docker-compose.monitoring.yml` fixes `GF_USERS_ALLOW_SIGN_UP=false`, the plugin list and the home dashboard.
 - `AIRFLOW__SLACK__WEBHOOK_URL` is read like `SLACK_WEBHOOK_URL`.
-- Alertmanager reads its Slack webhook from `prometheus/secrets/slack_api_url`; its e-mail and PagerDuty receivers are placeholders in `prometheus/alertmanager.yml` ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md)).
+- Alertmanager reads its Slack webhook from `prometheus/secrets/slack_api_url`. Slack receives the critical alerts and the collector alerts, PagerDuty the circuit-breaker alerts, and the default e-mail receiver every other alert; the e-mail and PagerDuty receivers are placeholders in `prometheus/alertmanager.yml` ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#alertmanager-notifications)).
 - `NATS_URL` is read only by `edgeguard doctor`; the NATS client library takes its servers as an argument.
 
 ---
@@ -390,12 +391,12 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `SSL_VERIFY` | unset | Read only when `EDGEGUARD_SSL_VERIFY` is unset or empty |
 | `REQUESTS_CA_BUNDLE` | unset | CA bundle of `requests` (pip installs) |
 | `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` | unset | MISP organisations trusted for source-stated timestamps |
-| `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | unset | The same by name (used when no UUID is set) |
+| `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | unset | The same by organisation name |
 
-- Unset or empty means `true`. A set value enables verification only when it is `true` (case-insensitive): any other value, a typo included, turns it off, and `edgeguard validate` reports it. Use exactly `true` or `false`; `false` is for a development MISP with a self-signed certificate.
+- Unset or empty means `true`. A set value enables verification only when it is `true` (case-insensitive): any other value, a typo included, turns it off, and `edgeguard validate` and `scripts/preflight_baseline.sh` report it; the services do not. Use exactly `true` or `false`; `false` is for a development MISP with a self-signed certificate.
 - On Compose, `EDGEGUARD_SSL_VERIFY` is always set (default `true`) and reaches every service; `SSL_VERIFY` is not forwarded. Without Compose, set it in the environment of every Airflow process that runs tasks. `SSL_CERT_VERIFY` is not read.
 - `requests` and PyMISP verify against the `certifi` bundle (`certifi>=2026.10.19` in every dependency list), not the system store. A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it. The Neo4j driver's `+s` schemes use the system CAs ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)).
-- The trust allowlists name the creator organisations whose source-stated timestamps are accepted; names are compared case-insensitively after Unicode normalisation. While both are empty, every claim is accepted, a startup warning is logged and the gauge `edgeguard_misp_tag_impersonation_defense_disabled` reports it ([SECURITY_ROADMAP.md](SECURITY_ROADMAP.md)).
+- The trust allowlists name the creator organisations whose source-stated timestamps are accepted; names are compared case-insensitively after Unicode normalisation. The UUID is checked first and the name next, so a creator whose UUID is not in the UUID list is still trusted when its name is listed: leave the name list empty when only UUIDs should match. While both are empty, every claim is accepted, a startup warning is logged and the gauge `edgeguard_misp_tag_impersonation_defense_disabled` reports it ([SECURITY_ROADMAP.md](SECURITY_ROADMAP.md)).
 
 ---
 

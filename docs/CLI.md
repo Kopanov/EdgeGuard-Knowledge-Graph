@@ -22,7 +22,7 @@ The CLI reads its settings from the environment only; it does not read `.env`.
   export NEO4J_URI=bolt://localhost:7687
   ```
 
-  `MISP_URL` must also be reachable from the host. The Airflow commands (`dag`, the DAG list of `preflight` and `doctor`) need `AIRFLOW_API_PASSWORD` on the host; inside the container the CLI reads the password file the Simple auth manager generates. Without it, `preflight` warns "Could not query DAG list".
+  `MISP_URL` must also be reachable from the host. The Airflow commands (`dag`, the DAG list of `preflight` and `doctor`) need `AIRFLOW_API_PASSWORD` on the host; inside the container the CLI reads the password file the Simple auth manager generates. Without it, `preflight` warns "Could not query DAG list". The same warning appears while Airflow has registered no EdgeGuard DAG yet; `doctor` names that case ("No EdgeGuard DAGs found in Airflow").
 - **Compose host only.** `baseline` and `fresh-baseline` trigger the DAG through `docker compose exec`, so they run on the Compose host, from the repository directory, with the settings exported.
 
 Every command accepts `--help`. `edgeguard --update` is a synonym of `edgeguard update`.
@@ -40,7 +40,7 @@ Every command accepts `--help`. `edgeguard --update` is a synonym of `edgeguard 
 | `heal` | Reset breakers, remove lock files, trigger the pipeline DAG |
 
 - **`preflight`** runs seven check groups: the required settings and a live check of each source API key, Neo4j and APOC, MISP, Airflow, disk space, checkpoints, and the circuit breakers of the CLI process itself (the pipeline's breakers live in each Airflow task and are not visible to it). It exits 0 when ready and 1 when a check fails; `--strict` also fails on warnings. `--json` prints JSON after the text report on standard output.
-- **`doctor`** checks MISP and its PyMISP compatibility, Neo4j and its constraints, Airflow and the paused or active DAGs, the baseline window, NATS (only when `NATS_URL` is set), the memory settings, the API keys, disk space, the last sync, the configured sources and version compatibility. `doctor --memory` compares Neo4j's heap, page cache and transaction memory and the host RAM with the recommended values ([MEMORY_TUNING.md](MEMORY_TUNING.md)).
+- **`doctor`** checks MISP and its PyMISP compatibility, Neo4j and its constraints, Airflow and the paused or active DAGs, the baseline window, NATS (only when `NATS_URL` is set), the memory settings, the API keys, disk space, the last sync, the configured sources and version compatibility. `doctor --memory` compares Neo4j's heap, page cache and transaction memory and the host RAM with the recommended values ([MEMORY_TUNING.md](MEMORY_TUNING.md)); it reads the `neo4j` container's settings through `docker compose exec`, so run it with the pip-installed CLI on the Compose host, from the repository directory. Inside the `airflow` container, which has no Docker CLI and receives none of the Neo4j memory variables, it reports the Neo4j rows as unknown.
 - **`validate`** checks rate limits, passwords, the Neo4j schema and production issues, among them disabled TLS verification and a default Neo4j password.
 - **`monitor`** prints one snapshot (MISP, Neo4j and its counts, the last sync, the circuit-breaker file, Prometheus) and exits 1 when MISP reports an error or Neo4j is down.
 - **`heal`** resets the circuit breakers of its own CLI process, removes every `edgeguard_*.lock` in the temporary directory and every `*.lock` in the repository root, removes the circuit-breaker state file, and triggers the `edgeguard_pipeline` DAG. It does not check whether a process holds a lock file: inside the `airflow` container the pattern matches the event-creation lock of the MISP writer, so run it only while no collector runs. The baseline lock in `checkpoints/` is not touched.
@@ -98,12 +98,12 @@ The run configuration keys are listed in [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md); the
 
 | Command | Purpose |
 |---|---|
-| `update` | `git pull`, then `./install.sh --update` |
+| `update` | Runs `./install.sh --update` |
 | `version` | Release version and commit |
 | `setup` | Prints the install steps |
 | `source list`, `add`, `remove` | Edit the local source registry file |
 
-- **`update`** uses Docker Compose when it is available and the pip path otherwise; `--docker` or `--python` forces one.
+- **`update`** runs `./install.sh --update`, which pulls the branch (fast-forward only) and then takes the Docker path when Docker Compose is available and the pip path otherwise; `--docker` or `--python` forces one.
 - **`version`** prints the CalVer version from `pyproject.toml` and the short commit; `--no-git` prints the version only. `version` and `update` need no settings.
 - **`setup`** prints the install steps; it is not an interactive wizard, and like the data commands it stops with an error while `NEO4J_PASSWORD` is not set in the environment.
 - **`source`** edits `credentials/sources.yaml`, which no collector or DAG reads; collectors are selected with `EDGEGUARD_COLLECT_SOURCES` and the `EDGEGUARD_ENABLE_*` flags.
@@ -143,7 +143,7 @@ The run configuration keys are listed in [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md); the
 | `make monitoring` | Prometheus and Grafana with the stack |
 | `make lint`, `fmt`, `type-check`, `test`, `ci` | Ruff, Mypy and pytest |
 | `make health`, `doctor` | `src/health_check.py`, `edgeguard doctor` |
-| `make deploy-check` | `scripts/deployment_wiring_check.sh` |
+| `make deploy-check` | `scripts/deployment_wiring_check.sh` (see below) |
 | `make clean` | Removes `.venv` and the caches |
 
 - `make install` creates `.env` before `./install.sh` runs, so the installer does not generate `GRAFANA_ADMIN_PASSWORD`, which keeps the template value `changeme`; set it in `.env`. `./install.sh` run directly generates it.
@@ -163,10 +163,10 @@ Run them from the repository root with the settings exported.
 | `scripts/verify_fresh_baseline.py` | Acceptance checks of a loaded graph |
 | `scripts/import_curated_package.py` | Validate and push a curated package to MISP |
 | `scripts/record_deployed_commit.sh` | Write the deployed commit into `.env` |
-| `scripts/clear_neo4j.py` | Delete EdgeGuard graph data |
+| `scripts/clear_neo4j.py` | Delete every node of the EdgeGuard labels |
 | `scripts/clear_misp.py` | Delete EdgeGuard MISP events |
-| `scripts/deployment_wiring_check.sh` | Static deployment checks, optional live probes |
-| `scripts/preflight_ci.sh` | Compile, unit tests and DAG parse |
+| `scripts/deployment_wiring_check.sh` | `preflight_ci.sh`, then optional live probes |
+| `scripts/preflight_ci.sh` | Compile, unit tests, DAG parse (see below) |
 | `scripts/resilmesh_stix_smoke.sh` | Export one STIX bundle of every type |
 | `scripts/build_canonical_threat_actors.py` | Rebuild the canonical threat-actor reference |
 | `scripts/build_attack_revoked_ids.py` | Rebuild the revoked ATT&CK id map |
@@ -176,15 +176,20 @@ Run them from the repository root with the settings exported.
 | `scripts/neo4j_wss_bridge.py` | Local Bolt bridge to a WebSocket-only Neo4j |
 
 - **`preflight_baseline.sh`**: `--launch-path=dag` also checks the pause state of the five scheduled DAGs; `--launch-path=cli` is for the in-process `python src/run_pipeline.py --baseline` and has no DAG pause-state check. `--strict` (or `EDGEGUARD_PREFLIGHT_STRICT=1`) turns every warning into a failure. Exit 0 means ready.
-- **`verify_fresh_baseline.py`** reads Neo4j through its HTTP API (`NEO4J_HTTP_URL` or `NEO4J_HTTP`, with `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`). `--json` prints the report as JSON; `--require-cisa-ics`, `--require-ics`, `--require-otx-industries` and `--require-malwarebazaar` fail when that source left no data. Exit 0: every mandatory check passed; 1: a check failed; 2: Neo4j not reachable.
+  - Checks `[10]` to `[12]` use the repository's `.venv` (`./install.sh --python` creates it). Without it, check `[11]` reports `full_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` as missing `retries=0`, check `[10]` is skipped and check `[12]` runs with the system `python3`.
+  - With the shipped `prometheus/alertmanager.yml`, check `[7b]` fails until the PagerDuty `service_key` is rendered or that receiver is removed ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#alertmanager-notifications)).
+- **`verify_fresh_baseline.py`** reads Neo4j through its HTTP API (`NEO4J_HTTP_URL`, then `NEO4J_HTTP`, with `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`); with neither set it uses a built-in remote address, so always set `NEO4J_HTTP_URL` (from the host `http://localhost:7474`). `--json` prints the report as JSON; `--require-cisa-ics`, `--require-ics`, `--require-otx-industries` and `--require-malwarebazaar` fail when that source left no data. Exit 0: every mandatory check passed; 1: a check failed; 2: Neo4j not reachable.
 
   ```bash
   NEO4J_HTTP_URL=http://localhost:7474 python3 scripts/verify_fresh_baseline.py
   ```
 
 - **`import_curated_package.py <package.json>`** validates the package; `--check-graph` reports which claims would attach to existing nodes, and `--push` creates the MISP event ([RUNBOOK.md § Importing a curated package](RUNBOOK.md#importing-a-curated-package)).
-- **`clear_neo4j.py`** and **`clear_misp.py`** take `--dry-run` and `--force`; `clear_neo4j.py --label` deletes one label, and `clear_misp.py --old DAYS` deletes events older than that.
-- **`deployment_wiring_check.sh`** with `EDGEGUARD_DEPLOY_CHECK_LIVE=1` also runs `src/health_check.py` and the REST and GraphQL health probes (`EDGEGUARD_REST_HEALTH_URL`, `EDGEGUARD_GRAPHQL_HEALTH_URL`; `EDGEGUARD_SKIP_HTTP_HEALTH=1` skips them).
+- **`clear_neo4j.py`** deletes every node that carries one of the EdgeGuard labels, `Vulnerability` and `CVE` included, whoever created it, and records no destructive-operations entry; `--full-wipe` deletes every node, `--label` the nodes of one label, and `--no-recreate` leaves out the `Source` nodes it otherwise recreates. On a database shared with ResilMesh use `edgeguard clear neo4j --edgeguard-only` instead.
+- **`clear_misp.py`** deletes the EdgeGuard MISP events; `clear_misp.py --old DAYS` deletes the events older than that. Both scripts take `--dry-run` and `--force`.
+- **`preflight_ci.sh`** compiles `dags/` and `src/collectors/`, runs the unit tests and loads the DAGs with `DagBag(include_examples=False)`. On Airflow 3.3, whose `DagBag` has no `include_examples` argument, that step stops with a `TypeError`; check the DAG parse with `docker compose exec airflow airflow dags list-import-errors` instead.
+- **`deployment_wiring_check.sh`** runs `preflight_ci.sh` first and stops when it fails, so on Airflow 3.3 it, and `make deploy-check`, stop at the DAG parse step. With `EDGEGUARD_DEPLOY_CHECK_LIVE=1` it then runs `src/health_check.py` and the REST and GraphQL health probes (`EDGEGUARD_REST_HEALTH_URL`, `EDGEGUARD_GRAPHQL_HEALTH_URL`; `EDGEGUARD_SKIP_HTTP_HEALTH=1` skips them).
+- **`run_cypher_catalog_http.py`** reads `NEO4J_HTTP_URL` only (not `NEO4J_HTTP`); unset, it uses a built-in remote address, so set `NEO4J_HTTP_URL` before running it.
 - **`resilmesh_stix_smoke.sh`** reads `EDGEGUARD_API_BASE` (default `http://127.0.0.1:8000`) and `EDGEGUARD_API_KEY` ([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
 
 ---

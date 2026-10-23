@@ -1,6 +1,6 @@
 # EdgeGuard roadmap
 
-This page is the one list of planned work on EdgeGuard. Each item states what the code does today, what is missing, what the work depends on and, where one exists, the open GitHub issue that tracks it. Every other document describes the current behaviour and its limits ([CONTRIBUTING.md § Documentation](../CONTRIBUTING.md#documentation)).
+This page is the list of planned work on EdgeGuard. Each item states what the code does today, what is missing, what the work depends on and, where one exists, the open GitHub issue that tracks it. The other documents describe the current behaviour and its limits ([CONTRIBUTING.md § Documentation](../CONTRIBUTING.md#documentation)); where an item's design needs more room, the item links the document that holds the design.
 
 The dependency of an item is one of:
 
@@ -19,15 +19,25 @@ The dependency of an item is one of:
 | Indicator type in alert enrichment | none | [#127](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/127) |
 | ISIM GraphQL schema extension | partner | — |
 | SoftwareVersion bridge | partner | — |
+| Links to the topology layer | partner | — |
 | Neo4j role separation | licence or partner | — |
 
-- **NATS alert loop.** `src/alert_processor.py` records an alert as an `Alert` node with its enrichment and rejects a payload without a non-empty `alert_id` or whose `threat` is not an object; `src/nats_client.py` connects over TLS and reconnects without limit. Missing: a deployed consumer (no process subscribes to `resilmesh.alerts.zone.*`), publishing the enriched response (the client's message handler discards the callback's return value), NATS authentication and queue groups, validation against a payload schema agreed with ResilMesh, and running the blocking enrichment outside the event loop. The subjects, the schema and the hosting are ResilMesh's ([RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md)).
+- **NATS alert loop.** `src/alert_processor.py` records an alert as an `Alert` node with its enrichment and rejects a payload without a non-empty `alert_id` or whose `threat` is not an object; `src/nats_client.py` connects over TLS and reconnects without limit. Missing:
+  - a deployed consumer (no process subscribes to `resilmesh.alerts.zone.*`);
+  - publishing the enriched response (the client's message handler discards the callback's return value);
+  - publishing threat intelligence per zone on `resilmesh.threats.zone.<zone>` and across zones on `resilmesh.threats.cross_zone` (`publish_threat` in `src/nats_client.py` has no caller), and the other subjects [TECHNICAL_SPEC.md § NATS Topics](TECHNICAL_SPEC.md#nats-topics) marks as planned;
+  - NATS authentication and queue groups, validation against a payload schema agreed with ResilMesh, and running the blocking enrichment outside the event loop.
+
+  The subjects, the schema and the hosting are ResilMesh's ([RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md)).
 - **Indicator type in alert enrichment.** One value may be stored under several indicator types. `/search/indicator` answers with the node of the resolved type; the five queries of `AlertProcessor._enrich_indicator` match on the value alone. Missing: the same type preference in those queries, with a test for a value stored under two types.
 - **ISIM GraphQL schema extension.** The GraphQL API on port 4001 serves `CVE` with its CVSS sub-nodes, `Vulnerability` (read from the `CVE` nodes), `Indicator`, `ThreatActor`, `Malware`, `Tool`, `Technique`, `Tactic` and `Campaign` in EdgeGuard's own schema: camelCase fields, relationship traversal only to the CVSS sub-nodes. ISIM's schema has no threat-intelligence types. Missing: the schema extension agreed with ResilMesh (proposed types: [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 8.4). A committed SDL file with a drift test would give ResilMesh a concrete schema to review.
 - **SoftwareVersion bridge** `(Vulnerability)-[:IN]->(SoftwareVersion)-[:ON]->(Host)`. For each CVE the NVD collector stores up to ten CPE match strings (`affected_products`), their CPE parts (`cpe_type`) and up to ten version ranges (`version_constraints`); no job maps them to `SoftwareVersion` nodes, and the `IN` and `ON` helpers in `src/neo4j_client.py` have no caller in the pipeline. Missing:
   - complete CPE configurations from NVD: the collector keeps ten, drops `versionStartExcluding` and does not record whether the end bound is inclusive;
   - a matcher on the exact CPE vendor and product with a version-range check, and a normaliser for the version strings ResilMesh's scanners write;
   - the `SoftwareVersion` and `Host` nodes those scanners write, and ResilMesh's decision on who writes `Vulnerability` and `IN`.
+
+  The chain and the attack-surface query it enables: [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 4.4.
+- **Links to the topology layer.** No EdgeGuard threat-intelligence node links to a node of ResilMesh's topology layer (`IP`, `Host`): there is no `(Indicator)-[:INDICATOR_RESOLVES_TO]->(IP)` (no helper exists in `src/neo4j_client.py`; the name avoids ISIM's `(IP)-[:RESOLVES_TO]->(DomainName)`) and no `(Malware)-[:TARGETS]->(Host)`. Missing: the data each link would rest on (DNS resolutions for the indicator link), ResilMesh's `IP` and `Host` nodes with the keys `IP.address` and `Host.hostname`, and the matching rule for each link ([RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 3.2).
 - **Neo4j role separation.** Every service and ResilMesh use one Neo4j user (`NEO4J_USER` / `NEO4J_PASSWORD`), and the Community edition that `docker-compose.yml` runs has no role-based access control. Missing: Neo4j Enterprise roles (licence), or ResilMesh reading through the GraphQL or REST layer instead of Bolt (partner). Opening the GraphQL resolvers' sessions in read mode would add a safeguard, not a separation.
 
 ---
@@ -40,7 +50,7 @@ The dependency of an item is one of:
 | Alert delivery | partner | — |
 
 - **External access to the APIs.** Docker Compose publishes REST (8000) and GraphQL (4001) on host loopback only, and the repository ships no TLS endpoint or reverse proxy. The APIs accept one shared `EDGEGUARD_API_KEY` and apply a CORS allowlist and per-address rate limits; they do not take the client address from a proxy's forwarding headers, so behind a proxy every client shares one rate limit. Missing: a TLS reverse proxy with an IP allowlist and a hostname, which belong to the deployment; per-partner API keys with rotation and per-key limits; rate limits by the client address a trusted proxy forwards.
-- **Alert delivery.** `prometheus/alertmanager.yml` reads the Slack webhook from `prometheus/secrets/slack_api_url`. Its e-mail receivers (`edgeguard.local` addresses, `localhost:587`) and its PagerDuty `service_key` (an unrendered template, which Alertmanager reads literally) are placeholders, and the preflight check `[7b]` fails until the file is rendered. Missing: a receiver the operator chooses and a test alert that reaches a person; reading the PagerDuty key and the SMTP password from files, which Alertmanager supports, would remove the template. The watchdog rule is listed under [Operational guardrails](#operational-guardrails).
+- **Alert delivery.** `prometheus/alertmanager.yml` reads the Slack webhook from `prometheus/secrets/slack_api_url` and routes the critical and the collector alerts to Slack, the circuit-breaker alerts to PagerDuty and every other alert to the default e-mail receiver. Its e-mail receivers (`edgeguard.local` addresses, `localhost:587`) and its PagerDuty `service_key` (an unrendered template, which Alertmanager reads literally) are placeholders, and the preflight check `[7b]` fails until the file is rendered. Missing: a receiver the operator chooses and a test alert that reaches a person; reading the PagerDuty key and the SMTP password from files, which Alertmanager supports, would remove the template. The watchdog rule is listed under [Operational guardrails](#operational-guardrails).
 
 ---
 
@@ -66,6 +76,8 @@ The dependency of an item is one of:
 | MISP push success-rate gauge | none | [#62](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/62) |
 | ThreatFox history | none | — |
 | Deeper VirusTotal and AbuseIPDB data | licence | — |
+| ATT&CK for ICS sectors | none | — |
+| Sector classification beyond keywords | none | — |
 
 - **MISP event partitioning.** `MISPWriter.push_items` groups attributes by source and run date, so a baseline writes one MISP event per source. The NVD and OTX events grow past 50,000 attributes, which needs raised PHP and MySQL limits on the MISP server ([MISP_TUNING.md](MISP_TUNING.md)) and makes the writer slow its batches as the event grows. Missing: partitioning large baseline events by date range.
 - **Bounded memory for large MISP events.** The MISP → Neo4j sync pages the event index and writes a large event to Neo4j in chunks of 5,000 attributes, but fetches each event whole (`fetch_event_details` in `src/run_misp_to_neo4j.py`) before chunking. `MISPWriter` pages its reads of existing attributes, but parses the full event MISP returns after each batch push, which it uses to confirm the batch. Missing: fetching the attributes of a large event page by page (`/attributes/restSearch`), and confirming a pushed batch without the full-event answer. Partitioning (above) also reduces the size of each event.
@@ -73,6 +85,8 @@ The dependency of an item is one of:
 - **MISP push success-rate gauge.** A collector run that pushes to MISP logs a `COLLECTOR_SUMMARY` line with its push counts and fails when its MISP push success rate is below `EDGEGUARD_MISP_MIN_SUCCESS_RATE` (default 0.95), and `edgeguard_misp_push_permanent_failure_total{source}` counts the batches lost after the retries. Missing: the per-source success-rate gauge and its Grafana panel, the parts of the issue not yet built.
 - **ThreatFox history.** The ThreatFox API returns at most the last 7 days, so `ThreatFoxCollector.collect` clamps `days` to 7 and a baseline holds the ThreatFox indicators of the last 7 days only. Missing: an import of the [ThreatFox export](https://threatfox.abuse.ch/export/) for older indicators, with its window, de-duplication and TLP rules, the MISP push and the DAG wiring.
 - **Deeper VirusTotal and AbuseIPDB data.** On the free plans EdgeGuard looks up hashes already in MISP on VirusTotal, within a daily budget of 400 lookups and 60 per run, and reads one AbuseIPDB blacklist of at most 10,000 addresses per run. Bulk VirusTotal data and larger AbuseIPDB blacklists need paid plans ([COLLECTORS.md](COLLECTORS.md)).
+- **ATT&CK for ICS sectors.** With `EDGEGUARD_ENABLE_MITRE_ICS=true` the ATT&CK for ICS items are zoned by keyword detection on their descriptions only; the sectors and assets ATT&CK for ICS names (`x_mitre_sectors`, `x-mitre-asset`) are not read. Missing: a mapping of those sectors to `energy` and the other EdgeGuard sectors, with its evidence label ([COLLECTORS.md § 4](COLLECTORS.md#4-mitre-collector)).
+- **Sector classification beyond keywords.** Sector labels come from keyword scores (`SECTOR_KEYWORDS` in `src/config.py`), the industries an OTX pulse names and the sectors CISA names in its ICS advisories. [METHODOLOGY.md](METHODOLOGY.md) § 3.7 and § 6 sketch a language-model classifier and an embedding classifier; no code for either exists. Missing: the classifier, labelled samples to evaluate it on, and an evidence label of its own for the sector links it would write.
 
 ---
 
@@ -89,7 +103,7 @@ The dependency of an item is one of:
 - **MISP wipe on the event tag.** `_wipe_misp_events` in `src/baseline_clean.py` searches MISP for `EdgeGuard`, keeps the events whose `info` contains it and pages with a loop that advances on an empty round and restarts after deletions. Missing: selecting the events by the `EdgeGuard` event tag, which `MISPWriter` and the curated-package importer set, or collecting the event ids before deleting, with the destructive-path tests rewritten. How the event index filters on tags has to be checked on the MISP version in use first.
 - **Native Cypher list functions.** APOC deprecates `apoc.coll.toSet` and `apoc.coll.sort` under Cypher 25 in favour of `coll.distinct()` and `coll.sort()`; the driver does not log deprecation notices. The list-accumulator writes build their expression through `_dedup_concat_clause` and `_dedup_concat_optional_clause` in `src/neo4j_client.py`; `src/relationship_provenance.py`, `src/enrichment_jobs.py`, `src/campaign_evidence.py`, `src/attack_software_names.py`, `src/build_relationships.py` and `src/query_api.py` call the APOC functions directly, and `Neo4jClient.health_check` probes APOC with `apoc.coll.toSet`. Missing:
   - Cypher 25 as the default language of every EdgeGuard database, which the deployment's `neo4j.conf` sets;
-  - Neo4j integration tests of the element order and the null handling the writes rely on;
+  - Neo4j integration tests of the element order and the null handling the writes rely on; `tests/test_dedup_clause_helpers.py` already pins, without a database, the contract the replacement must keep (deduplication, order, the null guard);
   - a health-check probe on an APOC procedure that stays in use (`apoc.periodic.iterate`, `apoc.create.addLabels`).
 - **Architecture flow diagrams.** [ARCHITECTURE_FLOW.md](ARCHITECTURE_FLOW.md) scopes eight end-to-end diagrams (baseline sequence, checkpoint state machine, collector → MISP → Neo4j data flow, MISP ↔ Neo4j traceability, incremental sync, deployment topology, STIX export, sector detection), each still a placeholder; [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md) already covers the system overview, the data pipeline, the DAG schedule and the sync chain. Missing: the diagrams, each checked against the code, and the documentation pin test extended to them.
 
@@ -183,7 +197,7 @@ A run fails on collector errors, on a MISP push success rate below its threshold
 
 Defects found in the code; each is fixed in its own change.
 
-- `src/config.py` (`edgeguard_ssl_verify_from_env`): any set value of `EDGEGUARD_SSL_VERIFY` other than `true`, a typo or `1` included, turns TLS verification off; only `edgeguard validate` reports it.
+- `src/config.py` (`edgeguard_ssl_verify_from_env`): any set value of `EDGEGUARD_SSL_VERIFY` other than `true`, a typo or `1` included, turns TLS verification off; `edgeguard validate` and `scripts/preflight_baseline.sh` warn, the services do not.
 - `src/edgeguard.py` (`clear_lock_files`, run by `edgeguard heal`): removes every `edgeguard_*.lock` in the temporary directory and every `*.lock` in the repository root without checking whether a process holds it, the lock file `MISPWriter` uses for event creation included.
 - `Makefile` (`install`): creates `.env` before it runs `./install.sh`, which then skips generating `GRAFANA_ADMIN_PASSWORD`, so the template value `changeme` stays.
 - `src/edgeguard.py` (`main`): `edgeguard setup` loads the configuration first, so it fails without exported settings (`NEO4J_PASSWORD`), unlike `version` and `update`.
@@ -193,6 +207,9 @@ Defects found in the code; each is fixed in its own change.
 - `install.sh`: the hint for the pip path prints `apache-airflow[postgres]~=3.2` (the pin is `~=3.3`) and a pull-request number.
 - `Makefile` (`lint`, `type-check`, `test`, `ci`): run `python3` from `PATH`, so `make ci` after `./install.sh --python --dev` uses the system interpreter unless `.venv` is activated.
 - `scripts/preflight_ci.sh`: `DagBag(include_examples=...)` raises `TypeError` on Airflow 3.3, so the script, `scripts/deployment_wiring_check.sh` and `make deploy-check` stop at the DAG parse step.
+- `scripts/preflight_baseline.sh` (check `[11]`, part c): runs `.venv/bin/python`; without the repository's `.venv` it reports the three critical-chain tasks as missing `retries=0`.
+- `scripts/clear_neo4j.py`: deletes nodes by label, ResilMesh's `Vulnerability` and partner `CVE` nodes included, and records no destructive-operations audit entry.
+- `scripts/verify_fresh_baseline.py`, `scripts/run_cypher_catalog_http.py` and `scripts/build_canonical_threat_actors.py`: without `NEO4J_HTTP_URL` (and, for the first and the last, `NEO4J_HTTP`) they send the Neo4j credentials to a built-in remote address instead of failing.
 - `dags/edgeguard_pipeline.py`: `run_virustotal_enrichment_collection` is wired to no task, while the module docstring lists `virustotal_collector.py` as a daily collector and the energy and healthcare placeholders as collectors.
 - `src/collectors/energy_feed_collector.py` and `src/collectors/healthcare_feed_collector.py`: the module docstrings call public sources "already working" and "actively collected", and the skip reasons say the sector advisories are collected by `cisa_collector`; CISA's ICS advisories come from the opt-in `cisa_ics` collector.
 - `src/metrics.py` (`PipelineMetrics`): nothing records a run, so `edgeguard stats` shows no pipeline summary and `src/health_check.py` always reports the last pipeline run as "Never".
@@ -214,4 +231,4 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — Created as the one list of planned work: the README's former planned items with their current state (the timestamp model, the sector placeholder decision and the task-label clamp left out as done or decided), the MISP trust Tier 3 pointer, the follow-ups after the next fresh baseline, the operational guardrails, the known code defects and the open issues whose work is implemented; PRODUCTION_READINESS.md and COLLECTORS.md point here.
+- 2026-10-23 — Created as the list of planned work: the planned items of the README, of PRODUCTION_READINESS.md, of COLLECTORS.md, of MISP_TUNING.md and of RESILMESH_INTEROPERABILITY.md with their current state (the README's timestamp model, sector placeholder decision and task-label clamp left out as done or decided), the ATT&CK for ICS sectors, the zone threat subjects on NATS, the links to the topology layer, the sector classifiers that METHODOLOGY.md sketches, the MISP trust Tier 3 pointer, the follow-ups after the next fresh baseline, the operational guardrails, the known code defects and the open issues whose work is implemented; the documents whose planned sections it replaces point here.

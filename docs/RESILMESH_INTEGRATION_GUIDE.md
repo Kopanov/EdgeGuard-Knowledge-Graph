@@ -700,7 +700,7 @@ EdgeGuard's ResilMesh integration today:
 - ✅ **Schema-compatible helpers** for the ResilMesh topology / identity / mission labels and their relationships (the tables above) — available to an alert or import path; the scheduled pipeline does not write them.
 - ✅ **Vulnerability ↔ CVE bridge job** (`REFERS_TO`, both directions) for any `Vulnerability` node carrying `cve_id`.
 - ✅ **Inbound alert enrichment** — `resilmesh.alerts.zone.*` → `Alert` node, `Indicator`, `INVOLVES`, enrichment chain.
-- ⚠️ **Not implemented:** publishing the enriched response back over NATS, a deployable NATS consumer service, validation against a payload schema agreed with ResilMesh (the processor checks only `alert_id` and `threat`), the `SoftwareVersion` bridge (`IN` / `ON`), `INDICATOR_RESOLVES_TO`, `Malware → Host`. See [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 4.4 and § 8.6 for what each needs, and [ROADMAP.md](ROADMAP.md) for the planned work.
+- ⚠️ **Not implemented:** publishing the enriched response back over NATS, a deployable NATS consumer service, validation against a payload schema agreed with ResilMesh (the processor checks only `alert_id` and `threat`), the `SoftwareVersion` bridge (`IN` / `ON`), `INDICATOR_RESOLVES_TO`, `Malware → Host`. What each needs is listed in [ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration).
 
 The integration enables **context-aware threat detection** that combines:
 - External threat intelligence (CVE, MITRE, IOCs)
@@ -719,7 +719,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — The summary no longer lists inbound payload validation as missing: the alert processor rejects a payload without an `alert_id` or whose `threat` is not an object; what is missing is a schema agreed with ResilMesh. It links ROADMAP.md.
+- 2026-10-23 — The summary no longer lists inbound payload validation as missing: the alert processor rejects a payload without an `alert_id` or whose `threat` is not an object; what is missing is a schema agreed with ResilMesh. What each missing part needs is in ROADMAP.md, which lists `INDICATOR_RESOLVES_TO` and `Malware → Host` with the other planned work.
 - 2026-10-18 — The alert enrichment also reads `(Indicator)-[:INDICATES]->(CVE)`, a CVE named in the same OTX report.
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: 22 relationship types; the relationship examples call the helpers with their real arguments (no `tag`); `merge_cve` takes a data dict and runs its CVSS sub-writes in transactions of their own; the test examples count nodes and `ON` edges directly; the manual Cypher selects and cleans up the test nodes by key and follows `INDICATES` / `EXPLOITS` to `CVE`; `SOURCED_FROM.imported_at` is set on create only; `zone` is a list.
 - 2026-10-16 — `merge_resilmesh_cve` / `merge_resilmesh_vulnerability` write the description with `description_source` `resilmesh`, below every registered feed; the alert flow and its code example state what the alert path writes and reads (the example called a stub that returned sample data).

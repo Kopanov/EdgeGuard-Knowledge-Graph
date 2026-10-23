@@ -364,8 +364,8 @@ Device, NetworkService, SoftwareVersion, Application, Role and User carry **no**
   `dags/edgeguard_pipeline.py` (search `retries=0`) for the sites and the
   comments that explain them.
 - Execution timeouts on all tasks (prevents hung workers)
-- `dagrun_timeout` on all DAGs (prevents entire DAG runs from hanging indefinitely)
-- `max_active_runs=1` on all DAGs (prevents concurrent run pile-up)
+- `dagrun_timeout` on the baseline and the five scheduled DAGs (prevents entire DAG runs from hanging indefinitely); the metrics DAGs of `dags/edgeguard_metrics_server.py` have none
+- `max_active_runs=1` on the baseline, the five scheduled DAGs and the two metrics-server DAGs (prevents concurrent run pile-up)
 - `on_failure_callback` / `on_success_callback` for alerting and metrics; the listener plugin `plugins/edgeguard_dag_run_state.py` marks the DAG run in progress
 - `ShortCircuitOperator` gates the Neo4j sync: it skips while a baseline holds the baseline lock or within 24 h of the last sync start, and runs on a corrupted state file
 - Pipeline lock file (`checkpoints/pipeline.lock`) for CLI runs to prevent concurrent `run_pipeline.py` invocations
@@ -617,7 +617,7 @@ After Tier1 succeeds, remove env overrides or restore Variables for production.
 ### DAG Not Running
 1. Check Airflow scheduler is running: `airflow scheduler`
 2. Verify DAG file is in `$AIRFLOW_HOME/dags/`
-3. **CI / local parse check:** from repo root run [`scripts/preflight_ci.sh`](../scripts/preflight_ci.sh) (`compileall`, `pytest`, Airflow `DagBag` load with `NEO4J_PASSWORD` set). Airflow 3.x has no `airflow dags validate` subcommand; use `airflow dags list-import-errors` after `airflow db migrate` if you use the full CLI.
+3. **Parse check:** `docker compose exec airflow airflow dags list-import-errors` on the stack, or `airflow dags list-import-errors` after `airflow db migrate` in a local Airflow; Airflow 3.x has no `airflow dags validate` subcommand. [`scripts/preflight_ci.sh`](../scripts/preflight_ci.sh) (`compileall`, `pytest`, an Airflow `DagBag` load with `NEO4J_PASSWORD` set) currently stops at its `DagBag` step on Airflow 3.3, whose `DagBag` has no `include_examples` argument.
 
 ### Collector Failures
 1. Check API key configuration
@@ -718,7 +718,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — The reading order points to SETUP_GUIDE.md (the README section it named was removed); HC3 is a public source, not a member-only feed.
+- 2026-10-23 — The reading order points to SETUP_GUIDE.md (the README section it named was removed); HC3 is a public source, not a member-only feed; `dagrun_timeout` and `max_active_runs=1` are named for the DAGs that have them (the page said all DAGs); the parse check is `airflow dags list-import-errors`, because `preflight_ci.sh` stops at its `DagBag` step on Airflow 3.3.
 - 2026-10-22 — The Airflow image upgrades `pip`, `certifi` and `uv` past the emSign CA advisories (GHSA-6q48-6c7w-9gw2, GHSA-hq85-5cpj-mr62) and removes the `prek` hook runner of the base image; every dependency list sets `certifi>=2026.10.19`; the MISP certificate troubleshooting names the trust store `requests` reads.
 - 2026-10-18 — `EDGEGUARD_SYNC_MIN_EVENTS` defaults to 1: a sync window without EdgeGuard events fails `run_neo4j_sync` (it was an empty success that moved the sync cursor); `0` disables the guard.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

@@ -791,8 +791,8 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 > **Publishing the enriched response back is not wired:** the handler
 > returns the response to its caller and the only `publish` in the code is the
 > `NATSClient.publish` method itself. Subject, response schema and delivery guarantees
-> are pending agreement with ResilMesh — see
-> [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 8.6.
+> are pending agreement with ResilMesh; the planned work is listed in
+> [ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration).
 
 ---
 
@@ -1018,7 +1018,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
-- 2026-10-23 — The GraphQL `/health` behaviour and body and the REST routes' connection check are described here; the page pointed to a README table, which this page replaces.
+- 2026-10-23 — The GraphQL `/health` behaviour and body and the REST routes' connection check are described here; the page pointed to a README table, which this page replaces; the note on the NATS response points to ROADMAP.md, which lists the planned work (it pointed to a to-do list in RESILMESH_INTEROPERABILITY.md § 8.6).
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6); the alert enrichment reads it, and each CVE entry names its links (`evidence`).
 - 2026-10-18 — `TARGETS` to a sector an OTX pulse's own industries state carries `otx_industries`, 0.6 (it was `zone_classification`).

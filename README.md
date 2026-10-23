@@ -33,7 +33,7 @@
 
 ## Overview
 
-EdgeGuard Knowledge Graph collects public threat intelligence (ten sources by default, three more opt-in), stores every collected record in MISP as the single source of truth, and builds from it a Neo4j knowledge graph that links CVEs, indicators, threat actors, malware, tools, ATT&CK techniques and campaigns, labelled by sector (healthcare, energy, finance, global). Every node and relationship built from a source names the sources and MISP events behind it, and every linking relationship carries its match type and confidence. The graph is served through a REST API with STIX 2.1 and Wazuh CDB exports and a GraphQL API on port 4001, and its CVE and CVSS nodes follow the ResilMesh/CRUSOE data model. It is the first module of the EdgeGuard framework for graph-augmented explainable AI on edge infrastructure.
+EdgeGuard Knowledge Graph collects public threat intelligence (ten sources by default and three opt-in, plus FIRST EPSS scores), stores every collected record in MISP as the single source of truth, and builds from it a Neo4j knowledge graph that links CVEs, indicators, threat actors, malware, tools, ATT&CK techniques and campaigns, labelled by sector (healthcare, energy, finance, global). Every node and relationship built from a source names the sources and MISP events behind it, and every linking relationship carries its match type and confidence. The graph is served through a REST API with STIX 2.1 and Wazuh CDB exports and a GraphQL API on port 4001, and its CVE and CVSS nodes follow the ResilMesh/CRUSOE data model. It is the first module of the EdgeGuard framework for graph-augmented explainable AI on edge infrastructure.
 
 ### What it does
 
@@ -128,10 +128,10 @@ Component detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the diagrams 
 - **Keys.** A source marked "key" is skipped while its key is missing (`OTX_API_KEY`, `THREATFOX_API_KEY`, `ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY`). NVD works without `NVD_API_KEY` at a lower request rate. `edgeguard preflight` and the baseline ask each provider whether it accepts the configured key. How to obtain each key: [docs/API_KEYS_SETUP.md](docs/API_KEYS_SETUP.md).
 - **History per source.** A baseline reaches back 730 days wherever the source's API does. ThreatFox's API returns at most the last 7 days, URLhaus serves the last 30 days, MalwareBazaar's export the last 48 hours and AbuseIPDB its current blacklist; ATT&CK has no time window.
 - **VirusTotal.** The free tier allows lookups only (4 per minute, 500 per day). EdgeGuard looks up the hashes already in MISP within a daily budget of 400 lookups and 60 per run; it scans and uploads nothing.
-- **Feodo Tracker.** abuse.ch has not updated the feed since 2026-03-04, so a baseline loads its history and the daily runs add nothing new until the feed moves again.
+- **Feodo Tracker.** A baseline loads the complete C2 history; the daily runs read the list of the last 30 days, and the collector logs a warning when the feed's own header is older than 7 days ([docs/COLLECTORS.md § 7](docs/COLLECTORS.md#7-finance-feed-collector)).
 - **Placeholders.** The energy and healthcare sector modules are placeholders that no DAG task runs; member-only ISAC feeds are not collected. Sector labels come from keyword detection in every collector, from the industries an OTX pulse names and, with CISA ICS enabled, from the sectors CISA names.
 - **FIRST EPSS** is not collected into MISP: the last enrichment job writes the day's scores to the `CVE` nodes that exist.
-- **Curated packages** are imported once through MISP with `scripts/import_curated_package.py` and attach claims to nodes that already exist ([docs/RUNBOOK.md § Importing a curated package](docs/RUNBOOK.md#importing-a-curated-package)).
+- **Curated packages** are imported through MISP with `scripts/import_curated_package.py` after the baseline, and again after every fresh baseline, whose wipe deletes their MISP event; their claims attach to nodes that already exist ([docs/RUNBOOK.md § Importing a curated package](docs/RUNBOOK.md#importing-a-curated-package)).
 - **Opt-in sources** are switched on with flags ([Configuration](#configuration)).
 
 Per-source detail: [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) and [docs/COLLECTORS.md](docs/COLLECTORS.md).
@@ -243,7 +243,8 @@ Open `http://localhost:3000/visualization.html`, enter the API URL (`http://loca
 
 - **A reachable MISP instance and its API key.** EdgeGuard does not ship MISP; the containers must reach `MISP_URL`. Large baselines need raised PHP and MySQL limits on the MISP server ([docs/MISP_TUNING.md](docs/MISP_TUNING.md)).
 - **Docker with Compose v2** (`docker compose`). The stack runs Neo4j with APOC, Airflow with its PostgreSQL, the metrics service, the REST API and the GraphQL API.
-- **Host memory.** About 8 GB is enough for a short smoke test. A 730-day baseline needs the baseline-capable Neo4j profile and about 48 GB of host RAM, more when MISP runs on the same host ([docs/MEMORY_TUNING.md](docs/MEMORY_TUNING.md)).
+- **Host memory.** 16 GB is enough only for a short smoke test with lowered memory limits. A 730-day baseline needs the 730-day memory profile ([Steps](#steps), step 1) and about 48 GB of host RAM, more when MISP runs on the same host ([docs/MEMORY_TUNING.md](docs/MEMORY_TUNING.md)).
+- **Host-side tools.** `scripts/preflight_baseline.sh`, `edgeguard baseline`, `edgeguard fresh-baseline` and `edgeguard doctor --memory` run on the Compose host and need Python 3.12 or later with the project installed in the repository's `.venv`. `./install.sh --python` creates it; it starts no container and leaves the running stack as it is.
 
 Without Docker, Python 3.12 or later with Neo4j and APOC works too: [docs/SETUP_GUIDE.md § 4](docs/SETUP_GUIDE.md#4-path-b--python--venv-no-docker); conda and edge devices: [docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md).
 
@@ -255,7 +256,7 @@ cd EdgeGuard-Knowledge-Graph
 ./install.sh
 ```
 
-`./install.sh` checks Docker and Compose v2, creates `.env` from `.env.example` (mode 600), generates the secrets that are blank, records the deployed commit, builds the images, runs `docker compose up -d` and waits for the services to become healthy. The REST and GraphQL services do not start until `MISP_URL` and `MISP_API_KEY` are set.
+`./install.sh` checks Docker and Compose v2, creates `.env` from `.env.example` (mode 600), generates the secrets that are blank, records the deployed commit, builds the images, runs `docker compose up -d` and waits for the services to become healthy. The REST and GraphQL services exit at start while `MISP_API_KEY` is empty or the template placeholder: set it, and `MISP_URL` to an address the containers reach, then run `docker compose up -d`.
 
 ### Configure
 
@@ -290,7 +291,7 @@ docker compose exec airflow python /opt/airflow/src/edgeguard.py doctor
 curl -s http://localhost:8000/health
 ```
 
-`preflight` checks the settings and source keys, Neo4j and APOC, MISP, Airflow, disk space and checkpoints, and exits 1 when a check fails; `doctor` diagnoses connectivity, the Neo4j schema, the memory settings and version compatibility. From a host shell, export the settings first and use the published ports:
+`preflight` checks the settings and source keys, Neo4j and APOC, MISP, Airflow, disk space and checkpoints, and exits 1 when a check fails; `doctor` diagnoses connectivity, the Neo4j schema and version compatibility; the memory check runs on the host ([Backup and sizing](#backup-and-sizing)). From a host shell, export the settings first and use the published ports:
 
 ```bash
 set -a; . ./.env; set +a
@@ -371,10 +372,23 @@ Full lock semantics: [docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#
 - A fresh baseline deletes the EdgeGuard-managed nodes in Neo4j (every node with `--wipe-all`), the EdgeGuard events in MISP and the collector checkpoints. Nodes a partner created stay, so a database shared with ResilMesh keeps its data.
 - The backup gate refuses a wipe of non-empty stores unless `EDGEGUARD_LAST_BACKUP_AT` records a backup within `EDGEGUARD_BACKUP_MAX_AGE_HOURS` (240 hours by default). Its bypasses are explicit and logged (`--skip-backup-check`, or `skip_backup_check: true` in the DAG run configuration); an empty Neo4j and MISP need no backup. Backup and restore: [docs/BACKUP.md](docs/BACKUP.md).
 - `edgeguard baseline --days N` and `edgeguard fresh-baseline --days N` trigger the same DAG from the Compose host; `fresh-baseline` shows what it would delete, asks for a typed confirmation and runs the backup gate first.
+- Before a fresh baseline, deploy the current commit, keep MISP's default Import Regexp rules, take a snapshot, and start with the opt-in sources off, enabling them one at a time afterwards: [docs/BASELINE_LAUNCH_CHECKLIST.md § 6](docs/BASELINE_LAUNCH_CHECKLIST.md#6-fresh-baseline-deploy-misp-import-rule-flags-re-feed).
 
 ### Steps
 
-**1. Preflight.** From a host shell with the settings exported:
+**1. Size the stack.** Set the 730-day memory profile in `.env`:
+
+```bash
+NEO4J_HEAP_INITIAL=12g
+NEO4J_HEAP_MAX=12g
+NEO4J_PAGECACHE=8g
+NEO4J_TX_MEMORY_MAX=8g
+NEO4J_CONTAINER_MEMORY_LIMIT=32g
+```
+
+Run `docker compose up -d` to recreate the services with these values, apply the MISP server settings for large events ([docs/MISP_TUNING.md](docs/MISP_TUNING.md)), and start the monitoring stack with `make monitoring` ([Monitoring](#monitoring)), so Prometheus watches the run. The reasoning behind each value: [docs/MEMORY_TUNING.md § 730-day baseline profile](docs/MEMORY_TUNING.md#730-day-baseline-profile).
+
+**2. Preflight.** From a host shell in the repository directory, with the settings exported:
 
 ```bash
 set -a; . ./.env; set +a
@@ -383,7 +397,10 @@ set -a; . ./.env; set +a
 
 It runs checks `[1]` to `[12]`: settings, Neo4j and APOC, MISP, the pause state of the scheduled DAGs, worker memory, the alert rules and the Alertmanager wiring, a leftover lock, the operations-only switches, the test collection, the baseline invariants in the code, and whether each provider accepts its source key. Exit 0 means ready; on exit 1, fix the items marked ✗. Check by check: [docs/BASELINE_LAUNCH_CHECKLIST.md](docs/BASELINE_LAUNCH_CHECKLIST.md).
 
-**2. Launch.** Optionally pause the five scheduled DAGs, trigger the baseline, and unpause them once its `baseline_complete` task has succeeded:
+- Checks `[10]` to `[12]` use the repository's `.venv` ([Prerequisites](#prerequisites)). Without it, check `[11]` reports the three critical-chain tasks as missing `retries=0`, the test-collection check `[10]` is skipped, and the source-key check `[12]` falls back to the system `python3`.
+- With the shipped `prometheus/alertmanager.yml`, check `[7b]` fails until its PagerDuty `service_key` is rendered with a real key or the PagerDuty receiver is removed ([docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md#alertmanager-notifications)).
+
+**3. Launch.** After a smoke test, remove `EDGEGUARD_BASELINE_DAYS` and `EDGEGUARD_BASELINE_COLLECTION_LIMIT` from `.env` and run `docker compose up -d airflow` first: a trigger without a run configuration takes the window and the item limit from them. Optionally pause the five scheduled DAGs, trigger the baseline, and unpause them once its `baseline_complete` task has succeeded:
 
 ```bash
 # 1. Pause the five scheduled DAGs (optional; recommended before a fresh baseline)
@@ -404,7 +421,7 @@ done
 
 For a fresh baseline triggered this way, set `EDGEGUARD_LAST_BACKUP_AT` in `.env` and run `docker compose up -d airflow` first, unless Neo4j and MISP are empty. The run configuration also takes `baseline_days` and `wipe_scope` ([docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md)).
 
-**3. Monitor.** Watch the `edgeguard` alert groups in Prometheus (39 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume. Logs:
+**4. Monitor.** Watch the `edgeguard` alert groups in Prometheus at `http://localhost:9090` (39 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume. Logs:
 
 ```bash
 docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'
@@ -412,7 +429,7 @@ docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'
 
 The log tokens of silent failures (`[MERGE-REJECT]`, `[BATCH-PERMANENT-FAILURE]`, `[MISP-FETCH-FALLBACK-ACTIVE]` and others) are explained in [docs/RUNBOOK.md § Top 8 failure modes](docs/RUNBOOK.md#top-8-failure-modes).
 
-**4. Validate.** Run the post-run Cypher queries of [docs/RUNBOOK.md § After the run](docs/RUNBOOK.md#after-the-run), then the acceptance script against Neo4j's HTTP API:
+**5. Validate.** Run the post-run Cypher queries of [docs/RUNBOOK.md § After the run](docs/RUNBOOK.md#after-the-run), then the acceptance script against Neo4j's HTTP API:
 
 ```bash
 set -a; . ./.env; set +a
@@ -475,12 +492,12 @@ This starts Prometheus (`http://localhost:9090`) and Grafana (`http://localhost:
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml --profile alerts up -d
 ```
 
-The alert rules in `prometheus/alerts.yml` cover staleness and stuck runs per DAG, MISP and Neo4j write failures and the sync's MISP fetch. Alertmanager delivers to Slack once `prometheus/secrets/slack_api_url` holds a webhook URL; its e-mail and PagerDuty receivers are placeholders, so no alert reaches an operator until a channel is configured. Setup and the metric list: [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md).
+The alert rules in `prometheus/alerts.yml` cover staleness and stuck runs per DAG, MISP and Neo4j write failures and the sync's MISP fetch. Once `prometheus/secrets/slack_api_url` holds a webhook URL, Slack receives the critical alerts and the collector alerts, PagerDuty the circuit-breaker alerts, and the default e-mail receiver every other alert. The e-mail and PagerDuty receivers are placeholders, so the alerts routed only to them reach no one until they are configured. Setup and the metric list: [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md).
 
 ### Backup and sizing
 
 - Backup and restore of Neo4j and MISP, and the backup gate: [docs/BACKUP.md](docs/BACKUP.md).
-- Neo4j, Airflow and host memory, checked with `edgeguard doctor --memory`: [docs/MEMORY_TUNING.md](docs/MEMORY_TUNING.md).
+- Neo4j and host memory are checked with `edgeguard doctor --memory`, run with the pip-installed CLI on the Compose host from the repository directory: it reads the `neo4j` container's settings through `docker compose exec`, which the `airflow` container cannot run. The Airflow limit and the sizing: [docs/MEMORY_TUNING.md](docs/MEMORY_TUNING.md).
 - MISP server settings for events with more than 50,000 attributes: [docs/MISP_TUNING.md](docs/MISP_TUNING.md).
 
 ---
@@ -500,7 +517,7 @@ All settings are environment variables. Docker Compose reads `.env` and forwards
 
 Set a flag in `.env` and run `docker compose up -d airflow`. On an existing graph, CISA ICS and ATT&CK for ICS load their history with an additive baseline (for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works); MalwareBazaar builds up over the daily runs. `EDGEGUARD_COLLECT_SOURCES` limits collection to a comma-separated list of collectors.
 
-**TLS.** `EDGEGUARD_SSL_VERIFY` (default `true`) controls certificate verification for MISP and the HTTPS feeds; set it to `false` only for a development MISP with a self-signed certificate. Use exactly `true` or `false`: any other set value turns verification off, which `edgeguard validate` reports. Neo4j TLS is chosen by the `NEO4J_URI` scheme (`bolt+s://`, `bolt+ssc://`). A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it.
+**TLS.** `EDGEGUARD_SSL_VERIFY` (default `true`) controls certificate verification for MISP and the HTTPS feeds; set it to `false` only for a development MISP with a self-signed certificate. Use exactly `true` or `false`: any other set value turns verification off, which `edgeguard validate` and the baseline preflight report. Neo4j TLS is chosen by the `NEO4J_URI` scheme (`bolt+s://`, `bolt+ssc://`). A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it.
 
 | Topic | Document |
 |---|---|
@@ -528,7 +545,7 @@ Set a flag in `.env` and run `docker compose up -d airflow`. On an existing grap
 ### Quality
 
 - **CI** (GitHub Actions) runs Ruff lint and format checks, Mypy on `src/` and `scripts/`, the unit tests with a 30% coverage floor, the Neo4j integration tests, both Docker image builds with Trivy scans, and `pip-audit`.
-- **Documentation is pinned to the code** by tests: every environment variable, `src/` path and container name a document names must exist, and the README's launch commands and GraphQL example are checked by the test suite.
+- **Documentation is pinned to the code** by tests: every `EDGEGUARD_*` variable, `src/*.py` path and container name in a `docker` command that the README, CONTRIBUTING or a page directly under `docs/` names must exist ([docs/ARCHITECTURE_FLOW.md](docs/ARCHITECTURE_FLOW.md)), and the README's launch commands and GraphQL example are checked by the test suite.
 - **Acceptance.** `scripts/verify_fresh_baseline.py` checks a loaded graph: provenance on every source-built relationship, the sector evidence, the description sources and the indicator aging properties.
 - **Resilience.** Circuit breakers guard the feed fetches and the sync's MISP and Neo4j connection checks; VirusTotal, AbuseIPDB, FIRST EPSS and the collectors' MISP writes have none ([docs/RESILIENCE_CONFIG.md](docs/RESILIENCE_CONFIG.md)). MISP pushes retry with backoff and adapt their batch size to large events.
 - **Versions** are calendar versions (`YYYY.M.D`, [docs/VERSIONING.md](docs/VERSIONING.md)).
