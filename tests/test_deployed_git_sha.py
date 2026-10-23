@@ -145,6 +145,8 @@ class TestDeployInstructionsRebuildEveryImage:
             "docs/DOCKER_SETUP_GUIDE.md",
             "README.md",
             "docs/SETUP_GUIDE.md",
+            "docs/CONFIGURATION.md",
+            "docs/CLI.md",
             "docker-compose.yml",
             ".env.example",
             "src/package_meta.py",

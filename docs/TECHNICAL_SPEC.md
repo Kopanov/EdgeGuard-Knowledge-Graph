@@ -751,7 +751,7 @@ Topics* below).
 | GET | `/export/wazuh/cdb` | Sector IOC/CVE intelligence as a **Wazuh CDB list** (text/plain `key:value` lines; active entries only; url/ipv6 keys skipped — CDB keys cannot contain `:`). At most 50,000 entries, newest first (entries without the time last), ties by key, so the cap keeps the most recent entries: indicators by their latest report (`coalesce(last_reported_at, first_imported_at)`), CVEs by `last_updated`; `X-EdgeGuard-Truncated: true` (and a log warning) says the list was cut. `X-EdgeGuard-Entries` / `X-EdgeGuard-Skipped` count the lines written and skipped. The `indicator_type` filter follows `/indicators` (md5 / sha1 / sha256 / sha512 → `hash` of that length). | `list` (`indicators`\|`cves`), `zone`, `indicator_type`, `min_confidence` |
 | POST | `/admin/query` | Raw read-only Cypher (admin-gated: `X-Admin-Token` + admin rate limit; write keywords rejected, read-only session) | `cypher`, `parameters` (body; at most 20 parameters) |
 
-**GraphQL service (default port 4001):** `GET /health` returns **HTTP 200** when Neo4j `health_check()` passes, else **503** — see [README.md](../README.md) § *HTTP APIs*.
+**GraphQL service (default port 4001):** `GET /health` returns **HTTP 200** only when Neo4j is healthy (the same `Neo4jClient.health_check()`: ping + APOC) and **503** when the driver is missing or the check fails, which suits strict load-balancer and Kubernetes probes. The body holds `status`, `neo4j_connected` and `git_sha`, as on the REST API. The other REST routes check only that the driver is connected (`Neo4jClient.is_connected()`, a fast check) before they query, and answer 503 while it is not.
 
 ### Example Queries
 
@@ -791,8 +791,8 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 > **Publishing the enriched response back is not wired:** the handler
 > returns the response to its caller and the only `publish` in the code is the
 > `NATSClient.publish` method itself. Subject, response schema and delivery guarantees
-> are pending agreement with ResilMesh — see
-> [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 8.6.
+> are pending agreement with ResilMesh; the planned work is listed in
+> [ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration).
 
 ---
 
@@ -1014,10 +1014,11 @@ other type is compared as given.
 
 ---
 
-_Last updated: 2026-10-21_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The GraphQL `/health` behaviour and body and the REST routes' connection check are described here; the page pointed to a README table, which this page replaces; the note on the NATS response points to ROADMAP.md, which lists the planned work (it pointed to a to-do list in RESILMESH_INTEROPERABILITY.md § 8.6).
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6); the alert enrichment reads it, and each CVE entry names its links (`evidence`).
 - 2026-10-18 — `TARGETS` to a sector an OTX pulse's own industries state carries `otx_industries`, 0.6 (it was `zone_classification`).

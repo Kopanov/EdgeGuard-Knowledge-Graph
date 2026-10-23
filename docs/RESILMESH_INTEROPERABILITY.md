@@ -141,10 +141,12 @@ Vulnerability↔CVE bridging is already listed above (**`REFERS_TO`**, enrichmen
 
 | Relationship | From → To | Status |
 |---|---|---|
-| `TARGETS` | `Malware` → `Host` | ⚠️ Not implemented in scheduled pipeline |
-| `INDICATOR_RESOLVES_TO` | `Indicator` → `IP` | ⚠️ Planned — **not** in `neo4j_client.py` (no `create_indicator_resolves_to_ip`) |
+| `TARGETS` | `Malware` → `Host` | Not written |
+| `INDICATOR_RESOLVES_TO` | `Indicator` → `IP` | Not written; no helper in `neo4j_client.py` |
 
-> **Note on naming:** ISIM uses `(IP)-[:RESOLVES_TO]->(DomainName)` for DNS. EdgeGuard’s planned Indicator→IP bridge is **`INDICATOR_RESOLVES_TO`** to avoid colliding with that semantics.
+Both links are planned work ([ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration)).
+
+> **Note on naming:** ISIM uses `(IP)-[:RESOLVES_TO]->(DomainName)` for DNS. The name of an EdgeGuard Indicator→IP link is **`INDICATOR_RESOLVES_TO`**, which avoids colliding with that semantics.
 
 > **`Neo4jClient` helpers:** `create_indicator_vulnerability_relationship()` creates **`INDICATES`** to `Vulnerability`/`CVE` without an evidence label (0.5) when called from custom code; no pipeline path calls it. In production, **`EXPLOITS`** links an indicator to the CVE its own CVE tag names (`build_relationships.py`), and **`INDICATES`** links an indicator to a `Malware` (family label or same OTX pulse) or to a `CVE` named in the same OTX pulse (the sync, `create_misp_relationships_batch`, `otx_pulse`).
 
@@ -354,9 +356,7 @@ These relationship types should only be written by ResilMesh's own pipeline:
 
 `IS_A`, `HAS_IDENTITY`, `PART_OF` (IP→Subnet, Subnet→OrgUnit), `FOR` (Mission→OrgUnit), `SUPPORTS` (Mission↔Component), `PROVIDED_BY` (Component→Host), `IS_CONNECTED_TO` (Node↔Node with `{start, end}`), `TO`/`FROM` (MissionDependency), `RAISES` (DetectionSystem→SecurityEvent), `RELATES_TO` (SecurityEvent→Incident).
 
-### 4.4 Planned: SoftwareVersion Bridge ⚠️ Work in Progress
-
-> **Status: Not yet implemented.** This section documents the planned design.
+### 4.4 SoftwareVersion bridge
 
 The ResilMesh schema defines the chain:
 
@@ -364,28 +364,9 @@ The ResilMesh schema defines the chain:
 (CVE)<-[:REFERS_TO]-(Vulnerability)-[:IN]->(SoftwareVersion)-[:ON]->(Host)
 ```
 
-This chain enables the query: *"Which of our hosts is vulnerable to this CVE?"* — the most operationally valuable query in attack surface management. Currently EdgeGuard writes `CVE` (+ `CVSSv*`) nodes only; `Vulnerability`, `SoftwareVersion`, `Host` and the `REFERS_TO` / `IN` / `ON` relationships are ResilMesh's scanner data (0 `Vulnerability` nodes live on 2026-10-11).
+This chain answers *"Which of our hosts is vulnerable to this CVE?"*, the central query of attack surface management. EdgeGuard writes `CVE` (and `CVSSv*`) nodes only; `Vulnerability`, `SoftwareVersion`, `Host` and the `IN` / `ON` relationships are ResilMesh's scanner data, and EdgeGuard's post-sync job writes `REFERS_TO` for every `Vulnerability` that carries a `cve_id`. For each CVE the NVD collector stores up to ten CPE match strings (`affected_products`), their CPE parts (`cpe_type`) and up to ten version ranges (`version_constraints`); no job maps them to `SoftwareVersion` nodes. What the bridge needs is listed in [ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration).
 
-**What's needed to implement this:**
-
-1. **CPE-to-SoftwareVersion mapping** — NVD CVE records include CPE strings (e.g. `cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*`). These need to be parsed and matched against the `SoftwareVersion.version` values that ResilMesh writes from its Nmap/scanner inventory.
-
-2. **New enrichment job** — A `bridge_cve_to_softwareversion()` job in `enrichment_jobs.py` that:
-   ```cypher
-   MATCH (cve:CVE), (sv:SoftwareVersion)
-   WHERE cve.cpe_type IS NOT NULL
-     AND any(cpe IN cve.cpe_type WHERE sv.version CONTAINS cpe)
-   // via ResilMesh's Vulnerability node: (cve)<-[:REFERS_TO]-(v)-[:IN]->(sv)
-   MERGE (v:Vulnerability {cve_id: cve.cve_id})-[:IN]->(sv)
-   MERGE (v)-[:REFERS_TO]->(cve)
-   ```
-   The CPE matching logic is non-trivial (version ranges, wildcards) and requires a dedicated parser.
-
-3. **ResilMesh must write SoftwareVersion nodes first** — EdgeGuard cannot create this bridge until ResilMesh's network scanner has populated `SoftwareVersion` and `Host` nodes in the shared Neo4j. This is a coordination dependency.
-
-**Why this matters:**
-
-Once implemented, the full attack surface query becomes:
+With ResilMesh's chain in the shared graph, the attack surface query is:
 ```cypher
 MATCH (cve:CVE {cve_id: 'CVE-2021-44228'})  // Log4Shell
      <-[:REFERS_TO]-(:Vulnerability)-[:IN]->(sv:SoftwareVersion)
@@ -395,7 +376,7 @@ MATCH (cve:CVE {cve_id: 'CVE-2021-44228'})  // Log4Shell
 RETURN host.hostname, comp.name, mission.name, mission.criticality
 ORDER BY mission.criticality DESC
 ```
-This answers: *"Log4Shell affects which of our hosts, and what missions depend on those hosts?"*
+This answers: *"Log4Shell affects which of our hosts, and what missions depend on those hosts?"* It returns rows once ResilMesh has written the `Vulnerability`, `SoftwareVersion`, `Host`, `Component` and `Mission` nodes and their links.
 
 ---
 
@@ -417,7 +398,7 @@ This answers: *"Log4Shell affects which of our hosts, and what missions depend o
 | `status` | — (on `Vulnerability`: LIST OF STRING) | ✅ `status` (`["active"]` / `["rejected"]`, NVD's record status) | EdgeGuard extension |
 | `attack_vector` | — (on `CVSSv31`: `attack_vector`, on `CVSSv2`: `access_vector`) | ✅ `attack_vector` (`NETWORK` / `ADJACENT_NETWORK` / `LOCAL` / `PHYSICAL`, null without CVSS) | EdgeGuard extension |
 
-> **`published`, `last_modified`** are set by NVD's record and only filled, where the node has none, by a record from any other source (CISA KEV, CISA ICS, OTX, a STIX import, `merge_resilmesh_cve`); a write without them leaves them in place. Of the other records only CISA ICS gives dates (the advisory's release dates), from one attribute per CVE in MISP. **`description`** follows a fixed source ranking, NVD > CISA KEV > CISA ICS > any other source (inside "any other source" the higher registry reliability, then the source id; an unregistered source such as a STIX import or `merge_resilmesh_cve`, named `resilmesh`, below every registered one), and `description_source` names the source of the text: a record sets it when its source ranks at least as high as the stored text's source, so the same source's revised record replaces its own text and the result does not depend on the order in which the records are merged. Neither a MISP metadata block such as `OTX_META:{...}` nor an OTX pulse reference is ever a description, so a CVE that only OTX and the KEV name shows CISA's KEV text. `merge_resilmesh_cve` keeps `cwe`, `ref_tags`, `cpe_type` and `result_impacts` when a call does not carry them. In the opt-in STIX flow (`run_pipeline --stix-flow`) a `vulnerability` object carries the source of its event, so the description is the one the attribute flow gives; the dates come from the attribute flow only. Every source's own text stays in MISP, reached from the node's `SOURCED_FROM` edges ([RUNBOOK.md § Retrieving raw MISP data from a Neo4j node](RUNBOOK.md#retrieving-raw-misp-data-from-a-neo4j-node)).
+> **`published`, `last_modified`** are set by NVD's record and only filled, where the node has none, by a record from any other source (CISA KEV, CISA ICS, OTX, a STIX import, `merge_resilmesh_cve`); a write without them leaves them in place. Of the other records only CISA ICS gives dates (the advisory's release dates), from one attribute per CVE in MISP. **`description`** follows a fixed source ranking, NVD > CISA KEV > CISA ICS > any other source (inside "any other source" the higher registry reliability, then the source id; an unregistered source such as a STIX import or `merge_resilmesh_cve`, named `resilmesh`, below every registered one), and `description_source` names the source of the text: a record sets it when its source ranks at least as high as the stored text's source, so the same source's revised record replaces its own text and the result does not depend on the order in which the records are merged. Neither a MISP metadata block such as `OTX_META:{...}` nor an OTX pulse reference is ever a description, so a CVE that only OTX and the KEV name shows CISA's KEV text. `merge_resilmesh_cve` keeps `cwe`, `ref_tags`, `cpe_type` and `result_impacts` when a call does not carry them. In the STIX flow of the `run_pipeline.py` CLI (always on in that CLI; the Airflow DAGs do not use it) a `vulnerability` object carries the source of its event, so the description is the one the attribute flow gives; the dates come from the attribute flow only. Every source's own text stays in MISP, reached from the node's `SOURCED_FROM` edges ([RUNBOOK.md § Retrieving raw MISP data from a Neo4j node](RUNBOOK.md#retrieving-raw-misp-data-from-a-neo4j-node)).
 >
 > **`cwe`, `ref_tags`, `cpe_type` and `result_impacts`** (plus `reference_urls`, `affected_products`) are written on the `CVE` node by `merge_cve` whenever NVD provides them, so a ResilMesh consumer reads them as `c.cwe` and so on, not only inside `SOURCED_FROM.raw_data`. NVD's record sets them and a record from any other source (only CISA ICS gives them: product names, the advisory's URL, CISA's CWE) fills them only where the node has none. The exception is `merge_resilmesh_cve`: a call that carries `cwe`, `ref_tags`, `cpe_type` or `result_impacts` overwrites NVD's lists until NVD's next record. Among the feed records, a CVE NVD describes therefore shows NVD's lists whatever their order.
 >
@@ -481,9 +462,9 @@ For the complete cross-layer graph traversal to work, ResilMesh must:
 
 1. **Write topology nodes first** — `Host`, `IP`, `Subnet`, `Device`, `Node`, `Component`, `Mission` must exist in the shared Neo4j before EdgeGuard bridge relationships can be created.
 
-2. **Use the same property names** as EdgeGuard expects for bridge relationships:
-   - `IP.address` (EdgeGuard matches on this for `INDICATOR_RESOLVES_TO`)
-   - `Host.hostname` (EdgeGuard matches on this for `TARGETS`)
+2. **Use the keys of the topology nodes** that a link from EdgeGuard's nodes would match on (no such link is written yet, [ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration)):
+   - `IP.address` for `INDICATOR_RESOLVES_TO`
+   - `Host.hostname` for `(Malware)-[:TARGETS]->(Host)`
 
 3. **Use the same Neo4j instance** — EdgeGuard and ResilMesh must point to the same database for the shared graph to work. Connection is configured via `NEO4J_URI` in `.env`.
 
@@ -537,13 +518,13 @@ Despite running on separate hardware, we intentionally choose ports that do not 
 
 ---
 
-## 8. Authorization — Who Can Access EdgeGuard Data ⚠️ Work in Progress
+## 8. Authorization — Who Can Access EdgeGuard Data
 
-> **Status: Partially implemented.** Neo4j authentication is in place. Role-based access control and the preferred read interface are not yet configured. This section records what needs to be done.
+Neo4j authenticates every client, and every client uses the same Neo4j user. This section describes the access paths and their protection; role separation and the ISIM schema extension are planned work ([ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration)).
 
 ### 8.1 Current State
 
-Neo4j is protected by username/password authentication (`NEO4J_USER` / `NEO4J_PASSWORD` from `.env`). The Bolt port (7687) is restricted to `my_ips` at the AWS Security Group level — it is never publicly exposed.
+Neo4j is protected by username/password authentication (`NEO4J_USER` / `NEO4J_PASSWORD` from `.env`). Docker Compose publishes the Bolt port (7687) on host loopback (127.0.0.1) only; a client on another host needs a network path that the deployment provides.
 
 However, **there is currently no role separation**. Any service with the Neo4j credentials has full read *and* write access to the shared database. EdgeGuard, on its own edge server (§7), and ResilMesh use the same database user.
 
@@ -566,9 +547,9 @@ ResilMesh exposes two query interfaces:
 
 **ISIM GraphQL is available at:** `http://<host>:4001/graphql`
 
-**EdgeGuard GraphQL** (`src/graphql_api.py`, Strawberry + FastAPI) also listens on **4001** by default (`EDGEGUARD_GRAPHQL_PORT`). **Auth:** when `EDGEGUARD_API_KEY` is set in the environment, requests must include header **`X-Api-Key`**. **GraphiQL** is off unless `EDGEGUARD_GRAPHQL_PLAYGROUND=true`. **Rate limiting:** **120 requests/minute** per client address by default (`slowapi`), set with `EDGEGUARD_RATE_LIMIT_GRAPHQL` (for example `600/minute`); behind a reverse proxy every client shares the proxy's address and so one limit, so raise it before an integration. **Health:** `GET /health` — **HTTP 200** only when Neo4j is healthy (ping + APOC); **503** otherwise. (The REST API on port 8000 answers the same way: **200** while healthy, **503** while degraded, with `status` and `neo4j_connected` in the JSON body — see [README.md](../README.md) § *HTTP APIs*.)
+**EdgeGuard GraphQL** (`src/graphql_api.py`, Strawberry + FastAPI) also listens on **4001** by default (`EDGEGUARD_GRAPHQL_PORT`). **Auth:** when `EDGEGUARD_API_KEY` is set in the environment, requests must include header **`X-Api-Key`**. **GraphiQL** is off unless `EDGEGUARD_GRAPHQL_PLAYGROUND=true`. **Rate limiting:** **120 requests/minute** per client address by default (`slowapi`), set with `EDGEGUARD_RATE_LIMIT_GRAPHQL` (for example `600/minute`); behind a reverse proxy every client shares the proxy's address and so one limit, so raise it before an integration. **Health:** `GET /health` — **HTTP 200** only when Neo4j is healthy (ping + APOC); **503** otherwise. (The REST API on port 8000 answers the same way: **200** while healthy, **503** while degraded, with `status` and `neo4j_connected` in the JSON body — see [TECHNICAL_SPEC.md § API Endpoints](TECHNICAL_SPEC.md#api-endpoints).)
 
-**Shape of EdgeGuard's GraphQL:** field names are camelCase (Strawberry's default — `cveId`, `cvssV31`, `lastUpdated`), the schema is flat apart from a CVE's CVSS sub-objects (`cvssV40`, `cvssV31`, `cvssV30`, `cvssV2`, read through `HAS_CVSS_*`): node types have scalar and list fields and no other relationship-traversal fields yet, and no SDL file is committed; introspection is disabled in prod. The ISIM examples in this section are snake_case with traversal. "ISIM-compatible" today means the **data model** matches (labels, keys, property names) — not that the two GraphQL schemas are interchangeable. Aligning case and traversal needs ISIM's real SDL (§8.6). `Indicator` carries MISP back-links: `mispEventUrls` (the whole source event) and `mispAttributeUrls` (`<MISP_URL>/attributes/view/<uuid>`, the one MISP attribute behind the indicator; a client with a MISP key receives it as JSON). Every node type carries `tlp` (the node's TLP level, §3.3; null when it has none), and `vulnerabilities` lists the `CVE` nodes EdgeGuard created or enriched.
+**Shape of EdgeGuard's GraphQL:** field names are camelCase (Strawberry's default — `cveId`, `cvssV31`, `lastUpdated`), the schema is flat apart from a CVE's CVSS sub-objects (`cvssV40`, `cvssV31`, `cvssV30`, `cvssV2`, read through `HAS_CVSS_*`): node types have scalar and list fields and no other relationship-traversal fields yet, and no SDL file is committed; introspection is disabled in prod. The ISIM examples in this section are snake_case with traversal. "ISIM-compatible" today means the **data model** matches (labels, keys, property names) — not that the two GraphQL schemas are interchangeable. Aligning case and traversal needs ISIM's real SDL ([ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration)). `Indicator` carries MISP back-links: `mispEventUrls` (the whole source event) and `mispAttributeUrls` (`<MISP_URL>/attributes/view/<uuid>`, the one MISP attribute behind the indicator; a client with a MISP key receives it as JSON). Every node type carries `tlp` (the node's TLP level, §3.3; null when it has none), and `vulnerabilities` lists the `CVE` nodes EdgeGuard created or enriched.
 
 **SOC-analyst REST endpoints (port 8000):** `GET /actors/{name}/summary` resolves a threat actor by canonical name **or alias** (case-insensitive; `resolved_by` reports which) and returns an aggregated profile — attributed malware, the malware the actor uses (`malware_used`, `USES_MALWARE`; a campaign rests on either link, so a campaign of an actor with only `USES_MALWARE` links names its malware there), employed techniques, campaigns, with counts — backing analyst "tell me about this actor" queries. Analyst-supplied IOC/CVE/technique inputs at the REST and GraphQL boundaries are refanged + canonicalized to graph form via `src/ioc_normalize.py` (write-side parity), so defanged paste (`1.2.3[.]4`, `hxxp://`), uppercase hashes, and en-dash CVE ids resolve to the stored nodes.
 
@@ -627,9 +608,9 @@ query VulnerableHosts {
 | `Technique` / `Tactic` | ❌ Not in ISIM schema | ❌ Not via ISIM GraphQL |
 | `Campaign` | ❌ Not in ISIM schema | ❌ Not via ISIM GraphQL |
 
-**Impact:** EdgeGuard's MITRE ATT&CK and threat actor data cannot currently be queried through ISIM GraphQL. Querying those types requires either direct Neo4j Bolt access or an extension to the ISIM schema. See section 8.5.
+**Impact:** EdgeGuard's MITRE ATT&CK and threat actor data cannot currently be queried through ISIM GraphQL. Querying those types requires EdgeGuard's own GraphQL or REST API, direct Neo4j Bolt access, or an extension to the ISIM schema (§ 8.4, § 8.5).
 
-### 8.4 ISIM Schema Extension — EdgeGuard Threat Intelligence Types ⚠️ Work in Progress
+### 8.4 ISIM Schema Extension — EdgeGuard Threat Intelligence Types
 
 > **ResilMesh status:** ISIM currently covers assets and their vulnerabilities. Threat intelligence events, alerts, and ATT&CK data are not yet modelled in ISIM, but the data model is architected for this extension. ResilMesh is open to co-developing this layer.
 
@@ -671,25 +652,23 @@ type Technique {
 }
 ```
 
-- [ ] Coordinate with ResilMesh team to add EdgeGuard threat intelligence types to the ISIM GraphQL schema
-- [ ] Reference ISIM GitHub: [resilmesh2/ISIM](https://github.com/resilmesh2/ISIM) — schema is in `isim_graphql/src/schema.graphql`
+ISIM's schema is `isim_graphql/src/schema.graphql` in [resilmesh2/ISIM](https://github.com/resilmesh2/ISIM). The extension is planned work agreed with ResilMesh ([ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration)).
 
-### 8.5 Planned Access Control Options
+### 8.5 Access paths
 
-| Option | Effort | Protection | Recommended for |
-|---|---|---|---|
-| **iSIM GraphQL** (port 4001) — route CVE/Vulnerability queries through iSIM today | Low — works today for CVE/Vuln data | Strong — no direct database exposure | **All production CVE/Vuln integrations** |
-| **Extend ISIM schema** — add Indicator/ThreatActor/Technique types (ResilMesh team can assist) | Medium — schema PR to ISIM repo | Strong — full threat intel queryable via API | **Full threat intelligence access** |
-| **Neo4j Enterprise roles** — `resilmesh_read` user for direct Bolt access | Low if license available | Strong — database-enforced | If direct Bolt access is operationally required |
+| Path | Data | Protection |
+|---|---|---|
+| ISIM GraphQL | CVE and Vulnerability | No direct database access |
+| EdgeGuard GraphQL and REST | Every EdgeGuard type | API key, rate limits |
+| Direct Neo4j Bolt | The whole graph | One shared user, read and write |
 
-### 8.6 What Needs to Be Done
+- **ISIM GraphQL** is ResilMesh's interface and the preferred one for CVE and `Vulnerability` data, whose schema EdgeGuard follows (§ 8.2, § 8.3).
+- **EdgeGuard's GraphQL (4001) and REST (8000) APIs** serve the threat-intelligence types in EdgeGuard's own schema, with the `X-API-Key` header; Docker Compose publishes them on host loopback, so access from another host goes through a TLS reverse proxy the deployment provides.
+- **Direct Bolt** gives full read and write access with the shared `NEO4J_USER`; the Community edition that `docker-compose.yml` runs has no role-based access control.
 
-- [x] Confirm GraphQL is the preferred interface — ✅ confirmed per ResilMesh documentation and ISIM README
-- [x] Confirm EdgeGuard CVE/Vulnerability schema alignment with ISIM — ✅ fully aligned
-- [ ] Coordinate with ResilMesh team on ISIM schema extension for Indicator/ThreatActor/Technique/Tactic/Campaign
-- [ ] Once schema is extended: test EdgeGuard data is queryable via `http://<host>:4001/graphql`
-- [ ] Ensure metrics endpoint (`/metrics`, port 8001) stays on loopback — already defaulted in `.env.example`
-- [ ] Update `docs/ARCHITECTURE.md` with final access method once ISIM extension is agreed
+### 8.6 Planned work
+
+The ISIM schema extension, Neo4j role separation, the NATS response to an enriched alert and the links to the topology layer are listed in [ROADMAP.md § ResilMesh integration](ROADMAP.md#resilmesh-integration).
 
 ---
 
@@ -808,10 +787,11 @@ RETURN h.hostname AS host, c.cve_id AS cve,
 
 ---
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The STIX flow of the `run_pipeline.py` CLI is always on there (the page called it opt-in); the health reference points to TECHNICAL_SPEC.md, which replaced the README's health table; the planned SoftwareVersion bridge (§ 4.4), the access-control options (§ 8.5) and the to-do list (§ 8.6) give way to the current state and a pointer to ROADMAP.md, which lists the planned work, with the topology links of § 3.2; § 8.1 states the loopback publication of the Bolt port (it named a hosted firewall rule the repository does not hold).
 - 2026-10-22 — The STIX coverage paragraph is written for any registered curated source.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.

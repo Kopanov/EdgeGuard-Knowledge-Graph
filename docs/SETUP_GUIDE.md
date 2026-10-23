@@ -25,9 +25,9 @@ This document is for people **setting up EdgeGuard for the first time** without 
 | Per-feed keys & behavior | [DATA_SOURCES.md](DATA_SOURCES.md), [COLLECTORS.md](COLLECTORS.md), [API_KEYS_SETUP.md](API_KEYS_SETUP.md) |
 | ResilMesh shared Neo4j / ISIM | [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) |
 
-Full doc map: the Documentation section of [README.md](../README.md).
+Full doc map: [docs/README.md](README.md). Every setting: [CONFIGURATION.md](CONFIGURATION.md); every command: [CLI.md](CLI.md).
 
-**One-page skim before step 1:** [README.md](../README.md) (quick start, ports, env table).
+**One-page skim before step 1:** [README.md](../README.md) (quick start, ports, the 730-day baseline).
 
 ---
 
@@ -161,6 +161,8 @@ python src/health_check.py
 
 You want **MISP** and **Neo4j** checks to pass. **`MISP_URL`** must also be reachable from the host for this check (a name that resolves only inside the Docker network fails here). If MISP fails with SSL errors, align **`EDGEGUARD_SSL_VERIFY`** with your cert policy and restart services.
 
+The same applies to the `edgeguard` CLI on the host. Its Airflow commands (`dag`, and the DAG list of `preflight` and `doctor`) also need **`AIRFLOW_API_PASSWORD`**: inside the `airflow` container the CLI reads the password file the Simple auth manager generates, while on the host `preflight` warns "Could not query DAG list" without it. The same warning appears while Airflow has registered no EdgeGuard DAG yet; `doctor` names that case ("No EdgeGuard DAGs found in Airflow"). `doctor`'s NATS and memory-setting lines read variables Compose does not forward to `airflow`, so check those from the host. Without a host Python environment, run the CLI in the container instead: `docker compose exec airflow python /opt/airflow/src/edgeguard.py preflight` ([CLI.md](CLI.md)).
+
 Optional: **`edgeguard doctor`** / **`edgeguard validate`** after `pip install -e ".[api]"` or from a venv that has the project on `PYTHONPATH` (see § 4).
 
 ### 3.7 Run the pipeline in Airflow (first time)
@@ -257,6 +259,8 @@ docker compose up -d
 
 **Neo4j check helper:** `src/check_neo4j.sh` expects Docker container **`edgeguard_neo4j`** and reads **`NEO4J_PASSWORD`** from **`.env`** in the repo root (or your environment). Prefer **`python src/health_check.py`** for a full MISP+Neo4j check.
 
+The `edgeguard` commands, the `make` targets and the operator scripts: [CLI.md](CLI.md).
+
 ---
 
 ## 9. Troubleshooting (quick)
@@ -297,10 +301,11 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The documentation map is docs/README.md, with links to CONFIGURATION.md and CLI.md; § 3.6 names the Airflow API password a host shell needs, which the README carried, and the second cause of the "Could not query DAG list" warning (no EdgeGuard DAG registered yet).
 - 2026-10-22 — `certificate verify failed` (MISP): `requests` and PyMISP trust the `certifi` bundle only; a corporate CA goes into a bundle named by `REQUESTS_CA_BUNDLE`.
 - 2026-10-19 — `install.sh` waits for the services after `docker compose up -d` and names those that are not healthy instead of always reporting success; it recognises the `MISP_API_KEY` placeholders, and after a failed `docker compose up -d` prints the summary and keeps that command's exit status.
 - 2026-10-19 — `install.sh` generates a blank `EDGEGUARD_API_KEY`, `AIRFLOW_API_AUTH_JWT_SECRET` or `AIRFLOW_FERNET_KEY` on every run (a `.env` prepared before the first run kept them blank and the stack did not start), rewrites `.env` in place so a symlinked `.env` stays a symlink, creates it with mode 600 (also `make .env`), and replaces `NEO4J_PASSWORD=changeme` before Neo4j's first start (the first start locked the template password in, and the documented edit afterwards left the stack waiting on an unhealthy Neo4j). A value set on any line of `.env` or exported in the shell (also `NEO4J_PASSWORD`) is never replaced; the Neo4j check also treats an existing `edgeguard_neo4j` container as started and reads the project name without python3; `EDGEGUARD_ENV` is compared without regard to case, as in `is_production_env`; generated secrets reach awk through the environment, not its command line; the installer warns when other users can read `.env`; the commented template lines are matched with `grep -E`, because BSD grep (macOS) never matched the earlier pattern.

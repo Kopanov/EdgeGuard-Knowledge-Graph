@@ -10,7 +10,7 @@ When merging threat intelligence from multiple sources, quality management is cr
 
 **Code reference:** `src/neo4j_client.py` implements `MERGE` semantics, `Source` nodes, and **`SOURCED_FROM`** edges with per-source metadata — see `merge_node_with_source` (the canonical entry point; the per-label helpers such as `merge_indicator` funnel through it).
 
-**MISP→Neo4j ingest path:** **Per MISP event** — dedupe within the event, same-event cross-item edges, then batched UNWIND node merges plus optional Python-side chunking via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**; **`0`** / **`all`** = single pass, OOM risk). Relationship writes are batched separately (**`EDGEGUARD_REL_BATCH_SIZE`**). Does not change merge semantics — only peak RAM / transaction size. See [README.md](../README.md) and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
+**MISP→Neo4j ingest path:** **Per MISP event** — dedupe within the event, same-event cross-item edges, then batched UNWIND node merges plus optional Python-side chunking via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**; **`0`** / **`all`** = single pass, OOM risk). Relationship writes are batched separately (**`EDGEGUARD_REL_BATCH_SIZE`**). Does not change merge semantics — only peak RAM / transaction size. See [CONFIGURATION.md](CONFIGURATION.md#misp--neo4j-sync) and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
 
 ## Merge Strategy
 
@@ -123,10 +123,11 @@ At the end of a run, `build_relationships.py` reports the count and the average 
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The chunking reference points to CONFIGURATION.md, which holds the settings the README listed.
 - 2026-10-18 — `otx_pulse` also labels `INDICATES` from an indicator to a CVE named in the same OTX pulse.
 - 2026-10-18 — `otx_industries` (0.6): the sectors an OTX pulse's own industries name, on `TARGETS` (they were `zone_classification`, 0.5).
 - 2026-10-18 — `otx_attack_ids` (`USES_TECHNIQUE` from an OTX pulse's ATT&CK ids) is 0.6, the confidence of every other link from those ids (it was 0.85).

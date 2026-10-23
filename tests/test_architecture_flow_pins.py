@@ -154,12 +154,6 @@ _ENV_VAR_DOC_ONLY_ALLOWLIST: dict[str, str] = {
     "EDGEGUARD_NEO4J_RECOVERY_TIMEOUT": (
         "Fork-only example in RESILIENCE_CONFIG.md § 4. Overriding circuit breaker settings"
     ),
-    # Planned future knob — documented as "future knob" / "planned" in
-    # COLLECTORS.md. Adding a real env var would be a code change; the doc
-    # is honest that it's not implemented yet.
-    "EDGEGUARD_OTX_BASELINE_MAX_PAGES": (
-        "Documented as 'future knob' in COLLECTORS.md — planned but not implemented at HEAD"
-    ),
 }
 
 

@@ -196,7 +196,7 @@ class ThreatFoxCollector:
         #   * if a baseline with >7d was requested, emit an INFO log
         #     pointing the operator at the documented bulk-export path
         #   * a bulk-import collector for the ThreatFox JSON/CSV export
-        #     is planned (see docs/COLLECTORS.md "Planned improvements")
+        #     is planned (see docs/ROADMAP.md, "ThreatFox history")
         if baseline:
             days = baseline_days
         days_requested = days

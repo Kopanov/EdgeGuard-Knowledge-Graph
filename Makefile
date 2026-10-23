@@ -4,7 +4,7 @@
 # Common shortcuts for development, testing, and deployment.
 # Airflow (docker compose): metadata DB is PostgreSQL (airflow_postgres), not SQLite.
 # MISP→Neo4j: per-event sync + Python chunk EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE + rel batch EDGEGUARD_REL_BATCH_SIZE
-# (defaults in code; 0/all on chunk size = single pass, OOM risk — see README / COLLECTION_AND_SYNC_LIMITS.md).
+# (defaults in code; 0/all on chunk size = single pass, OOM risk — see docs/CONFIGURATION.md / COLLECTION_AND_SYNC_LIMITS.md).
 #
 # Usage:
 #   make help          — list all targets

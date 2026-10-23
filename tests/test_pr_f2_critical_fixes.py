@@ -231,8 +231,8 @@ class TestBackupDocsExist:
         assert "Worked example" in content
 
     def test_readme_references_backup_md(self):
-        """README's In-Progress section must link BACKUP.md so operators
-        find it from the entry-point doc."""
+        """The README must link BACKUP.md (from its baseline procedure) so
+        operators find it from the entry-point doc."""
         with open("README.md") as fh:
             content = fh.read()
         assert "docs/BACKUP.md" in content, "README must link to docs/BACKUP.md"

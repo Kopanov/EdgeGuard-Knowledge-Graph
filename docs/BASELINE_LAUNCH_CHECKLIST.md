@@ -233,8 +233,8 @@ docker compose exec neo4j neo4j-admin server memory-recommendation
   WAL + index rebuilds during heavy MERGE)
 * Heap (`NEO4J_HEAP_MAX`, passed as `server.memory.heap.max_size`)
   ≥ 12 GB and page cache (`NEO4J_PAGECACHE`, `server.memory.pagecache.size`)
-  ≥ 8 GB for a ~2.7M-relationship baseline (README § Recommended Memory
-  Settings); on a host with less than 32 GB for the Neo4j container,
+  ≥ 8 GB for a ~2.7M-relationship baseline ([MEMORY_TUNING.md § 730-day
+  baseline profile](MEMORY_TUNING.md#730-day-baseline-profile)); on a host with less than 32 GB for the Neo4j container,
   docs/DOCKER_SETUP_GUIDE.md allows an 8 GB heap or a 4 GB page cache
 * `NEO4J_TX_MEMORY_MAX` ≥ 8 GB (the compose default is 4 GB, at which
   `build_relationships` runs out of transaction memory on a 730-day
@@ -563,10 +563,11 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-20_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The memory pass criteria point to MEMORY_TUNING.md, which now holds the 730-day profile the README listed.
 - 2026-10-20 — § [6] step 1: MISP's default Import Regexp rules stay; EdgeGuard's ATT&CK values (`<id> - <name>`) carry no colon, so the rules leave them unchanged (the step had asked to remove the `%WINDIR%` rule by hand, which every fresh MISP database restores). The acceptance row lists the nine entries the rules rewrote on the run of 2026-10-20 (`T1059.003`, `T1555.004` and `T1686.003` added).
 - 2026-10-18 — Acceptance row for the same-report Indicator → CVE links (`indicator_cve_links_are_same_report`, `indicator_cve_report_links`).
 - 2026-10-18 — Sector evidence row: the OTX industries checks, `--require-otx-industries` and the report by evidence label.

@@ -25,6 +25,28 @@ cache 8G and transaction memory 8G in a 32G container (the
 baseline-capable profile of [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md),
 listed commented out in `.env.example`).
 
+## 730-day baseline profile
+
+A full 730-day baseline needs larger values than the quick reference above. Set them in `.env` and recreate the services (`docker compose up -d`):
+
+| Setting | Value | Where |
+|---|---|---|
+| `NEO4J_HEAP_INITIAL`, `NEO4J_HEAP_MAX` | `12g` each | `.env` |
+| `NEO4J_PAGECACHE` | `8g` | `.env` |
+| `NEO4J_TX_MEMORY_MAX` | `8g` | `.env` |
+| `NEO4J_CONTAINER_MEMORY_LIMIT` | `32g` | `.env` |
+| `AIRFLOW_MEMORY_LIMIT` | `12g` (the default) | `.env` |
+| MISP PHP `memory_limit` | `4096M` | MISP server ([MISP_TUNING.md](MISP_TUNING.md)) |
+| MISP Apache `MaxRequestWorkers` | `25` | MISP server |
+| MISP Apache `MaxConnectionsPerChild` | `500` | MISP server |
+| Host RAM | about 48 GB | Host (more when MISP shares it) |
+
+- The Neo4j values are the baseline-capable profile of [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles), which also derives the typical resident size (about 25 GB) and the headroom of the 32g limit. `NEO4J_TX_MEMORY_MAX` caps transaction memory inside that budget; it is not added to heap and page cache.
+- `AIRFLOW_MEMORY_LIMIT` covers the MISP → Neo4j sync, which needs 8-12 GB for events with 100,000 or more attributes.
+- The two Apache settings bound the memory of MISP's worker processes on large events ([DOCKER_SETUP_GUIDE.md § 5](DOCKER_SETUP_GUIDE.md#misp-performance-tuning-large-baselines)).
+- When the sync dies during the Neo4j writes with exit code -9, the Docker memory limit was hit: raise `AIRFLOW_MEMORY_LIMIT` or lower `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` / `EDGEGUARD_REL_BATCH_SIZE` ([HEARTBEAT.md](HEARTBEAT.md), [CONFIGURATION.md](CONFIGURATION.md#misp--neo4j-sync)).
+- Check the values in effect with `edgeguard doctor --memory` before the baseline.
+
 ## Why these numbers
 
 The values come from failures observed under baseline load, not from
@@ -263,10 +285,11 @@ references this document.
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — New section "730-day baseline profile" with the Neo4j, Airflow, MISP and host values the README listed, without the README's hardware claim, which conflicted with the about 48 GB of host RAM derived here; the 2026-04-20 entry links the planned event partitioning in ROADMAP.md, since MISP_TUNING.md no longer has a planned section.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
 - 2026-10-17 — The sample doctor output gives the doctor's page-cache rationale (4G recommended, 8G for a 730-day baseline).
 - 2026-10-17 — Quick reference names the Neo4j env vars (`NEO4J_server_memory_heap_max__size`, `NEO4J_dbms_memory_transaction_total_max`) set through the `.env` wrapper names, and states the compose defaults (heap 2g, page cache 1g, tx 4g, container 8g) in place of a commented preset that does not exist.
@@ -274,4 +297,4 @@ _Last updated: 2026-10-17_
 - 2026-10-17 — Host RAM derived from the compose memory limits (40G, about 48G for a 730-day baseline); MISP `memory_limit` 4096M as in MISP_TUNING.md, with the MISP commands run in the MISP deployment, not in EdgeGuard's compose project.
 - 2026-10-17 — build_relationships described as 20 linking steps with `apoc.periodic.iterate`, the graph size taken from the 730-day baseline of 2026-10-16, and the doctor hint line shown as printed.
 - 2026-04-20 — `edgeguard doctor --memory` probes the Neo4j-internal env-var names that `docker-compose.yml` sets as well as the `.env` wrapper names (`NEO4J_HEAP_MAX`, `NEO4J_PAGECACHE`, `NEO4J_TX_MEMORY_MAX`); the `.env` recipe uses the wrapper names, and the mapping convention (`__` for a literal underscore, `dbms.` vs `server.` namespaces) is explained here.
-- 2026-04-20 — Document created for the `edgeguard doctor --memory` diagnostic; the MISP PHP thresholds come from the analysis of the 2026-04-19 baseline incident, which also made the tier-1 collectors sequential, and MISP event partitioning, the architectural fix for the per-event size problem, is planned ([MISP_TUNING.md](MISP_TUNING.md#long-term-event-sharding-planned)); the Neo4j transaction-memory recommendation of 8G (raised from 4G after the 2026-04-18 `build_relationships` failure, in which one batch transaction exceeded the 4G cap and left the graph half-linked) dates from the same version.
+- 2026-04-20 — Document created for the `edgeguard doctor --memory` diagnostic; the MISP PHP thresholds come from the analysis of the 2026-04-19 baseline incident, which also made the tier-1 collectors sequential, and MISP event partitioning, the architectural fix for the per-event size problem, is planned ([ROADMAP.md](ROADMAP.md#collection-depth-and-scale)); the Neo4j transaction-memory recommendation of 8G (raised from 4G after the 2026-04-18 `build_relationships` failure, in which one batch transaction exceeded the 4G cap and left the graph half-linked) dates from the same version.

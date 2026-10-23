@@ -2,7 +2,7 @@
 
 Use a **short** history window and optional **item cap** before running a full 1–2 year baseline.
 
-**Where you are in the docs:** Step **3** of the operator path — after **[SETUP_GUIDE.md](SETUP_GUIDE.md)** and **[AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)**. Full order: [README.md § Recommended reading order](../README.md#-recommended-reading-order-new-operators).
+**Where you are in the docs:** Step **3** of the operator path — after **[SETUP_GUIDE.md](SETUP_GUIDE.md)** and **[AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)**. Full order: [SETUP_GUIDE.md § Start here](SETUP_GUIDE.md#start-here--then-read-these-next-operator-path).
 
 ---
 
@@ -84,10 +84,11 @@ Requires MISP/Neo4j (and API keys) as for a normal run.
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The reading order points to SETUP_GUIDE.md; the README section it named was removed.
 - 2026-10-17 — Restated as a guide to the current behaviour, with the change history moved here.
 - 2026-10-17 — Option A: the MISP → Neo4j step lists events through the paginated MISP event index (`EDGEGUARD_MISP_PAGE_SIZE`, `EDGEGUARD_MISP_MAX_PAGES`) instead of a hardcoded page size of 1000; `source_key_check` named as the baseline's second task; the reading order points to README.md.
 - 2026-10-16 — A MISP listing cut at the page cap fails the sync.
