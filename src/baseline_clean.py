@@ -480,12 +480,10 @@ def probe_baseline_state(client: Any = None) -> BaselineState:
         # MISP config — lazy-import to avoid hard dep when only Neo4j matters
         misp_url = os.getenv("MISP_URL", "https://localhost:8443")
         misp_api_key = os.getenv("MISP_API_KEY", "")
-        try:
-            from config import edgeguard_ssl_verify_from_env
+        # The one rule for EDGEGUARD_SSL_VERIFY / SSL_VERIFY (fail-closed); ``tls_verify`` needs no config.
+        from tls_verify import edgeguard_ssl_verify_from_env
 
-            ssl_verify = edgeguard_ssl_verify_from_env()
-        except ImportError:
-            ssl_verify = os.getenv("EDGEGUARD_SSL_VERIFY", os.getenv("SSL_VERIFY", "true")).strip().lower() == "true"
+        ssl_verify = edgeguard_ssl_verify_from_env()
         m_count, m_err = _probe_misp(misp_url, misp_api_key, ssl_verify)
 
         c_count, c_err = _probe_checkpoint()
@@ -899,12 +897,10 @@ def reset_baseline_data(
         logger.info("Step 3/3: wiping MISP EdgeGuard events…")
         misp_url = os.getenv("MISP_URL", "https://localhost:8443")
         misp_api_key = os.getenv("MISP_API_KEY", "")
-        try:
-            from config import edgeguard_ssl_verify_from_env
+        # The one rule for EDGEGUARD_SSL_VERIFY / SSL_VERIFY (fail-closed); ``tls_verify`` needs no config.
+        from tls_verify import edgeguard_ssl_verify_from_env
 
-            ssl_verify = edgeguard_ssl_verify_from_env()
-        except ImportError:
-            ssl_verify = os.getenv("EDGEGUARD_SSL_VERIFY", os.getenv("SSL_VERIFY", "true")).strip().lower() == "true"
+        ssl_verify = edgeguard_ssl_verify_from_env()
         try:
             deleted = _wipe_misp_events(misp_url, misp_api_key, ssl_verify, max_pages=misp_max_pages)
         except Exception as e:

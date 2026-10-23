@@ -98,7 +98,7 @@ Edit **`.env`** before the first start: Neo4j takes its password from **`NEO4J_P
 |----------|------|
 | **`AIRFLOW_FERNET_KEY`** | Before relying on Airflow Connections / encrypted fields. Generate: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | **`AIRFLOW_POSTGRES_PASSWORD`** | Non-default password for metadata DB in production (must stay URL-safe for the SQLAlchemy URI — avoid `@`, `#`, `/`, `?` in the password) |
-| **`EDGEGUARD_SSL_VERIFY=false`** | Only if MISP uses a **private CA** / self-signed cert **and** you accept the risk in dev. **`SSL_VERIFY=false`** works only as a **fallback** when **`EDGEGUARD_SSL_VERIFY`** is unset/empty. **`SSL_CERT_VERIFY`** is ignored by EdgeGuard. On the Compose stack **`EDGEGUARD_SSL_VERIFY`** is always set (default `true`), so only **`EDGEGUARD_SSL_VERIFY`** takes effect there. |
+| **`EDGEGUARD_SSL_VERIFY=false`** | Only if MISP uses a **private CA** / self-signed cert **and** you accept the risk in dev. **`SSL_VERIFY=false`** works only as a **fallback** when **`EDGEGUARD_SSL_VERIFY`** is unset/blank. Only `false`, `0`, `no` or `off` (any case) turns verification off; any other value keeps it on, with a warning. **`SSL_CERT_VERIFY`** is ignored by EdgeGuard. On the Compose stack **`EDGEGUARD_SSL_VERIFY`** is always set (default `true`), so only **`EDGEGUARD_SSL_VERIFY`** takes effect there. |
 
 **MISP in Docker on another compose network?**  
 Airflow and collectors resolve **`MISP_URL`** from **inside** containers. `localhost` on the host ≠ MISP inside another stack. Use a **shared Docker network** or hostname both stacks know. Details: [MISP_SOURCES.md](MISP_SOURCES.md) § *MISP not reachable*, [ENVIRONMENTS.md](ENVIRONMENTS.md).
@@ -270,7 +270,7 @@ The `edgeguard` commands, the `make` targets and the operator scripts: [CLI.md](
 | Compose fails on **`NEO4J_PASSWORD is required`** | Set **`NEO4J_PASSWORD`** in **`.env`** |
 | Airflow tasks: **MISP connection** / DNS errors | **`MISP_URL`** must resolve **inside** the Airflow container (compose default **`misp.local`** often fails); use the MISP service URL on a **shared Docker network** — see **`.env.example`** / **[MISP_SOURCES.md](MISP_SOURCES.md)** |
 | **Long task or sync failed for missing heartbeats** | The scheduler fails a task whose last heartbeat is older than **`AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT`** (Airflow default **300 s**; **`docker-compose.yml`** sets **3600 s**). Check the value with `docker compose exec airflow airflow config get-value scheduler task_instance_heartbeat_timeout`; after a change in `.env`, recreate the container with `docker compose up -d airflow`. See **[HEARTBEAT.md](HEARTBEAT.md)** |
-| **SSL certificate verify failed** (MISP) | `requests` and PyMISP trust the `certifi` bundle only, not the system store: corporate CA → a bundle named by **`REQUESTS_CA_BUNDLE`** (pip install; `docker-compose.yml` does not forward it); dev self-signed → **`EDGEGUARD_SSL_VERIFY=false`** + restart |
+| **SSL certificate verify failed** (MISP) | `requests` and PyMISP trust the `certifi` bundle only, not the system store: corporate CA → a bundle named by **`REQUESTS_CA_BUNDLE`** (pip install; `docker-compose.yml` does not forward it); dev self-signed → **`EDGEGUARD_SSL_VERIFY=false`** + restart (only `false`, `0`, `no` or `off` turns verification off: a warning naming **`EDGEGUARD_SSL_VERIFY`** and its value means the value was not recognised and verification stayed on) |
 | Sync **0 events** | MISP has `EdgeGuard-…` event titles? Deployed **`run_misp_to_neo4j.py`** matches the repo? **`EDGEGUARD_MISP_EVENT_SEARCH`** |
 | **`Unknown function 'apoc.coll.toSet'`** | Enable APOC on Neo4j |
 | **`ModuleNotFoundError: neo4j` / `pymisp` in Airflow** | Rebuild Airflow image: **`docker compose build airflow`** — deps come from **`Dockerfile.airflow`**, not manual pip in the container |
@@ -305,6 +305,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `EDGEGUARD_SSL_VERIFY`: only `false`, `0`, `no` or `off` turns TLS verification off; any other value keeps it on with a warning (minimum-variables table and troubleshooting).
 - 2026-10-23 — The documentation map is docs/README.md, with links to CONFIGURATION.md and CLI.md; § 3.6 names the Airflow API password a host shell needs, which the README carried, and the second cause of the "Could not query DAG list" warning (no EdgeGuard DAG registered yet).
 - 2026-10-22 — `certificate verify failed` (MISP): `requests` and PyMISP trust the `certifi` bundle only; a corporate CA goes into a bundle named by `REQUESTS_CA_BUNDLE`.
 - 2026-10-19 — `install.sh` waits for the services after `docker compose up -d` and names those that are not healthy instead of always reporting success; it recognises the `MISP_API_KEY` placeholders, and after a failed `docker compose up -d` prints the summary and keeps that command's exit status.
