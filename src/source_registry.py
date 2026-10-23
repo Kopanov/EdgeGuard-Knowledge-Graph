@@ -160,7 +160,7 @@ class Source:
     cli_default_enabled: bool = True
     cli_description: str = ""
     # Curated sources (2026-10): the evidence label (``r.match_type``) of the claims a package
-    # curated by this source carries, e.g. ``coreideas_curated``. ``None`` for feeds; a curated
+    # curated by this source carries. ``None`` for feeds; a curated
     # package from a source without one gets ``CURATED_OTHER_LABEL``.
     curated_label: Optional[str] = None
     # Optional override for the CLI listing's "name" column. Defaults
@@ -720,7 +720,7 @@ CURATED_OTHER_LABEL = "curated_other"
 def curated_label_for(source: Optional[str]) -> str:
     """The ``r.match_type`` of claims in a curated package from ``source`` (2026-10).
 
-    The registered source's ``curated_label`` (``coreideas`` → ``coreideas_curated``), else
+    The registered source's ``curated_label``, else
     ``curated_other`` — the label list stays closed whatever package arrives.
     """
     src = get_source(source) if source else None

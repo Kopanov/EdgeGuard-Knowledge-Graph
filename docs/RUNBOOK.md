@@ -958,7 +958,7 @@ the links into `Technique {attack_domain: 'ics'}` (actors and software carry no 
 
 ## Importing a curated package
 
-A curated package (JSON, e.g. `2026-10-20_EdgeGuard_CoreIdeas_package.json`) adds claims about existing actors and malware as one MISP event; the next MISP→Neo4j sync turns them into relationships (see `docs/KNOWLEDGE_GRAPH.md`, "Curated packages"). Import it after the baseline, since its claims attach only to nodes that exist.
+A curated package (JSON, e.g. `YYYY-MM-DD_EdgeGuard_curated_package.json`) adds claims about existing actors and malware as one MISP event; the next MISP→Neo4j sync turns them into relationships (see `docs/KNOWLEDGE_GRAPH.md`, "Curated packages"). Import it after the baseline, since its claims attach only to nodes that exist.
 
 ```bash
 python scripts/import_curated_package.py PACKAGE.json                 # validate: summary, warnings, errors
@@ -966,13 +966,13 @@ python scripts/import_curated_package.py PACKAGE.json --check-graph   # + per pr
 python scripts/import_curated_package.py PACKAGE.json --push          # create the MISP event (MISP_URL / MISP_API_KEY)
 ```
 
-The validation refuses the package (errors block `--push`) when its `source` is not a registered curated source (`coreideas`, `misp_galaxy`; `source_type="curated"` in `src/source_registry.py`) or when it has no `tlp`. It rejects a single claim — listed as a warning, counted under `claims_skipped_by_reason` in the summary, never written to MISP — when the claim's source is not a registered curated source, its object id is malformed (technique `T1234` / `T1234.123`, tool `S1234`, CVE `CVE-YYYY-NNNN`), its predicate does not fit its subject, or it has no object. The package's TLP level is tagged on the event and on every attribute; it marks each claim's link (`r.tlp`) and the STIX relationship exported from it.
+The validation refuses the package (errors block `--push`) when its `source` is not a registered curated source (`source_type="curated"` in `src/source_registry.py`) or when it has no `tlp`. It rejects a single claim — listed as a warning, counted under `claims_skipped_by_reason` in the summary, never written to MISP — when the claim's source is not a registered curated source, its object id is malformed (technique `T1234` / `T1234.123`, tool `S1234`, CVE `CVE-YYYY-NNNN`), its predicate does not fit its subject, or it has no object. The package's TLP level is tagged on the event and on every attribute; it marks each claim's link (`r.tlp`) and the STIX relationship exported from it.
 
 `--check-graph` only reads Neo4j (`NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD`, optionally `NEO4J_DATABASE`). For each predicate it reports how many valid claims find both ends by the exact name or id the sync matches on, how many lack their subject or their object, and a sample of the missing names, so the package can be aligned with the graph before `--push`.
 
 The event is unpublished and visible to the creating organisation only. A fresh baseline removes it with the other EdgeGuard events: import it again afterwards.
 
-**After the sync.** A claim attaches only when both its subject and its object exist by exact canonical name or id. A link the claim creates gets the package's curated label (`coreideas_curated`) at 0.85; a link that already exists keeps its label and confidence and gains the claim's provenance. Each write logs `[CURATED] <attached> of <sent> curated claim(s) attached` (WARNING, with a sample of the missing names, when some did not attach), and the run summary adds `Curated package claims: <n> attached, <m> not attached`. Claims that did not attach are not errors and are not counted as relationships created.
+**After the sync.** A claim attaches only when both its subject and its object exist by exact canonical name or id. A link the claim creates gets the package's curated label (`curated_other` for a source without one) at 0.85; a link that already exists keeps its label and confidence and gains the claim's provenance. Each write logs `[CURATED] <attached> of <sent> curated claim(s) attached` (WARNING, with a sample of the missing names, when some did not attach), and the run summary adds `Curated package claims: <n> attached, <m> not attached`. Claims that did not attach are not errors and are not counted as relationships created.
 
 **Removing the layer without a re-feed.** Delete the package's event in MISP, then run on Neo4j (replace `<event id>` with the package's MISP event id, printed by `--push`):
 
@@ -1271,6 +1271,7 @@ _Last updated: 2026-10-22_
 
 ## History
 
+- 2026-10-22 — "Importing a curated package" is written for any registered curated source; the removal queries keep the registered sources and labels.
 - 2026-10-22 — Canonical threat-actor reference: version `2026.10.22` and its counts (merges of spelling variants and designations, `Qilin` and `Agenda` into Water Galura, the never_merge of `Cold River` with Star Blizzard); a group named after a country is written under a qualified name, which counts as itself until the reference gives it to an actor, and a bare country name, also one followed by a parenthetical that yields no name, is dropped and listed by the new `[ACTOR-NAMES]` country line of the OTX collector, whose pulses name no actor for it; a never_merge with an actor leaves the record joined.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event. Removing the curated layer is followed by an enrichment run, which rebuilds the campaign links and levels.
 - 2026-10-20 — Canonical threat-actor reference: the committed version and its counts, and the review of a ransomware operation named after its own ransomware before it is added as an actor (listed by the MISP ransomware galaxy, no actor the reference holds named as its developer or operator, not also a stealer, loader, RAT, botnet, banking trojan or backdoor), and the merge of an operation into the key of the actor the galaxies name as its operator (`Conti`, `LockBit`, `Nefilim`).

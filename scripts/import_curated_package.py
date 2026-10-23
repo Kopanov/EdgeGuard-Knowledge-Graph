@@ -2,15 +2,15 @@
 """Import a curated package into MISP as one EdgeGuard event (2026-10).
 
 A curated package is a JSON file of claims about entities that already exist in the graph,
-for example ``2026-10-20_EdgeGuard_CoreIdeas_package.json``::
+for example ``YYYY-MM-DD_EdgeGuard_curated_package.json``::
 
     {
-      "name": "2026-10-20_EdgeGuard_CoreIdeas_package",
-      "source": "coreideas",
+      "name": "YYYY-MM-DD_EdgeGuard_curated_package",
+      "source": "<curated source id>",
       "tlp": "amber",
       "entities": [
         {"kind": "threat_actor", "name": "apt29",
-         "claims": [{"p": "uses_technique", "o": "T1566", "src": "coreideas", "id": "<record id>"}]},
+         "claims": [{"p": "uses_technique", "o": "T1566", "id": "<record id>"}]},
         {"kind": "malware", "name": "emotet",
          "claims": [{"p": "exploits", "o": "CVE-2017-11882", "src": "misp_galaxy", "id": "<cluster uuid>"}]}
       ]
@@ -18,13 +18,13 @@ for example ``2026-10-20_EdgeGuard_CoreIdeas_package.json``::
 
 ``name`` must contain "EdgeGuard" (the MISP→Neo4j sync discovers EdgeGuard events by title).
 ``source`` is the package's source and must be a registered curated source
-(``source_type="curated"`` in ``src/source_registry.py``: ``coreideas``, ``misp_galaxy``); its
-``curated_label`` labels the links the claims create (``coreideas_curated``; ``curated_other``
-for a source without one). ``tlp`` is required: the package's TLP level marks the link of every
-claim (``r.tlp``) and the STIX relationship exported from it. ``name`` of an entity is the
-canonical name of the existing node (the package builder aligns names). Each claim's ``src`` is
-the source that asserts it (defaults to the package's source) and ``id`` that source's record
-id. Predicates per subject: see ``relationship_provenance.CURATED_PREDICATES``.
+(``source_type="curated"`` in ``src/source_registry.py``); its ``curated_label`` labels the
+links the claims create (``curated_other`` for a source without one). ``tlp`` is required: the
+package's TLP level marks the link of every claim (``r.tlp``) and the STIX relationship exported
+from it. ``name`` of an entity is the canonical name of the existing node (align the names with
+the graph first: ``--check-graph`` reports the claims whose names it does not find). Each
+claim's ``src`` is the source that asserts it (defaults to the package's source) and ``id`` that
+source's record id. Predicates per subject: see ``relationship_provenance.CURATED_PREDICATES``.
 
 A claim is rejected (reported, not imported) when its predicate does not fit its subject, it
 has no object, its object id is malformed (technique ``T1234`` / ``T1234.123``, tool ``S1234``,

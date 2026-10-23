@@ -1,10 +1,10 @@
 """Curated packages (2026-10): claims about existing entities, imported once through MISP.
 
-A package (e.g. ``YYYY-MM-DD_EdgeGuard_CoreIdeas_package``) becomes one MISP event; each
+A package (e.g. ``YYYY-MM-DD_EdgeGuard_curated_package``) becomes one MISP event; each
 actor / malware attribute names an existing node and carries its claims in a
 ``CURATED_CLAIMS:`` comment. The sync turns every claim into a relationship, MATCHing both
 ends — a package never creates nodes and never changes the node it names. A link the claim
-creates gets the package's curated label (``coreideas_curated``, else ``curated_other``) at
+creates gets the package's curated label (its source's, else ``curated_other``) at
 0.85; a link that already exists keeps its label and confidence. Either way the claim's own
 source goes into ``r.sources`` and its record id into ``r.source_refs``.
 """
