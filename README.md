@@ -429,11 +429,11 @@ docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'
 
 The log tokens of silent failures (`[MERGE-REJECT]`, `[BATCH-PERMANENT-FAILURE]`, `[MISP-FETCH-FALLBACK-ACTIVE]` and others) are explained in [docs/RUNBOOK.md § Top 8 failure modes](docs/RUNBOOK.md#top-8-failure-modes).
 
-**5. Validate.** Run the post-run Cypher queries of [docs/RUNBOOK.md § After the run](docs/RUNBOOK.md#after-the-run), then the acceptance script against Neo4j's HTTP API:
+**5. Validate.** Run the post-run Cypher queries of [docs/RUNBOOK.md § After the run](docs/RUNBOOK.md#after-the-run), then the acceptance script against Neo4j's HTTP API. It reads the Compose Neo4j at `http://127.0.0.1:7474`; for another instance set `NEO4J_HTTP_URL` ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#neo4j-connection-and-memory)):
 
 ```bash
 set -a; . ./.env; set +a
-NEO4J_HTTP_URL=http://localhost:7474 python3 scripts/verify_fresh_baseline.py
+python3 scripts/verify_fresh_baseline.py
 ```
 
 Exit 0 means every mandatory check passed. After a baseline with CISA ICS enabled add `--require-cisa-ics`, and after one that collected OTX add `--require-otx-industries`.

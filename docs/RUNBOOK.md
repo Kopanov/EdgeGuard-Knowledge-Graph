@@ -930,9 +930,13 @@ Any non-zero on #1–#3 = regression; file issue.
 
 Then run the acceptance script, `python scripts/verify_fresh_baseline.py`
 ([BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § "Fresh-baseline
-acceptance"). Among its checks, it fails when a relationship built from the
-sources names no source (`relationships_name_their_source`) or when a
-provenance list is stored as a plain string (`provenance_lists_are_lists`).
+acceptance"). It reads the Compose Neo4j at `http://127.0.0.1:7474` with
+`NEO4J_USER` and `NEO4J_PASSWORD`; for another instance set `NEO4J_HTTP_URL`
+(or `NEO4J_HTTP`) to its HTTP address
+([CONFIGURATION.md](CONFIGURATION.md#neo4j-connection-and-memory)). Among its
+checks, it fails when a relationship built from the sources names no source
+(`relationships_name_their_source`) or when a provenance list is stored as a
+plain string (`provenance_lists_are_lists`).
 
 It also checks the sector evidence, the description sources and the indicator aging properties:
 
@@ -1042,6 +1046,8 @@ A name that fails only the second check is merged into the key of the actor the 
 - the raw mitre-intrusion-set galaxy dump it was built from (ATT&CK revocations);
 - an export of the graph's `ThreatActor` nodes, which is read-only and is kept outside the repository. Its ATT&CK-sourced nodes are the ATT&CK version EdgeGuard loaded. Their aliases are read from the record MITRE delivered (the node's `SOURCED_FROM` edge to the ATT&CK source), not from the node: the node's `aliases` also hold every name the merge folded in, which are no ATT&CK claims. An export that lacks these aliases is refused;
 - `src/reference/canonical_threat_actor_overrides.json`.
+
+The export reads the graph over the HTTP API like the acceptance script: the Compose Neo4j at `http://127.0.0.1:7474`, or the instance `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) names, with `NEO4J_USER` and `NEO4J_PASSWORD`.
 
 ```bash
 python scripts/build_canonical_threat_actors.py --export-graph-actors /tmp/graph_threat_actors.json
@@ -1292,6 +1298,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The acceptance script and the graph export of the threat-actor rebuild read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) names another instance; they no longer fall back to a built-in remote address.
 - 2026-10-23 — The baseline launch path section is titled for the lock that every launch path takes (it offered a choice of paths); it names the green `skipped: true` collector task, the refusals that release the lock and its reaping. Raw MISP data: a section on who asserts a link, what the source cited, an indicator's age and the GraphQL MISP links, which the README carried. The STIX import of `run_pipeline.py` is always on in that CLI; the memory pointer names MEMORY_TUNING.md; the MISP backoff symptom no longer cites a one-hour service-level objective, which is defined nowhere.
 - 2026-10-22 — "Importing a curated package" is written for any registered curated source; the removal queries keep the registered sources and labels.
 - 2026-10-22 — Canonical threat-actor reference: version `2026.10.22` and its counts (merges of spelling variants and designations, `Qilin` and `Agenda` into Water Galura, the never_merge of `Cold River` with Star Blizzard); a group named after a country is written under a qualified name, which counts as itself until the reference gives it to an actor, and a bare country name, also one followed by a parenthetical that yields no name, is dropped and listed by the new `[ACTOR-NAMES]` country line of the OTX collector, whose pulses name no actor for it; a never_merge with an actor leaves the record joined.

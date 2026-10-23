@@ -19,20 +19,25 @@ that directory — meant for a deliverables folder like ``Sprint 2/``:
   * cypher_catalog_results.md   — readable report (summary + sample rows)
 The runtime stays in the repo; only the collected DATA lands in <dir>.
 
-Env:
-  NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
+Env (address, credentials and User-Agent from ``src/neo4j_http_endpoint.py``, shared with
+``scripts/verify_fresh_baseline.py``):
+  NEO4J_HTTP_URL   base URL, then NEO4J_HTTP; neither set: the local Compose Neo4j
+                   http://127.0.0.1:7474 (no remote default)
   NEO4J_DATABASE   database name (default: neo4j)
-  NEO4J_USER       basic-auth user
+  NEO4J_USER       basic-auth user (default: neo4j)
   NEO4J_PASSWORD   basic-auth password
+  NEO4J_HTTP_USER_AGENT  User-Agent (default: a browser's)
   CATALOG_OUTPUT_DIR  default output dir (overridden by --out)
 
 Usage:
   set -a; source .env.edgeguard; set +a
   python scripts/run_cypher_catalog_http.py                       # print only
   python scripts/run_cypher_catalog_http.py --out "../Sprint 2"   # + write files
+
+Exit code 0 = the catalog ran; 2 = NEO4J_HTTP_URL / NEO4J_HTTP is not an http(s) URL (a query
+that fails is reported in the output and leaves the exit code unchanged).
 """
 
-import base64
 import json
 import os
 import sys
@@ -42,21 +47,12 @@ from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tests"))
+sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
 from test_cypher_query_catalog import QUERY_CATALOG  # noqa: E402
 
-BASE = os.getenv("NEO4J_HTTP_URL", "https://neo4j.edgeguard.org").rstrip("/")
-DB = os.getenv("NEO4J_DATABASE", "neo4j")
-USER = os.getenv("NEO4J_USER", "neo4j")
-PWD = os.getenv("NEO4J_PASSWORD", "")
-URL = f"{BASE}/db/{DB}/query/v2"
-_AUTH = "Basic " + base64.b64encode(f"{USER}:{PWD}".encode()).decode()
-# Cloudflare fronts this endpoint and its bot rule 403s the default
-# "Python-urllib/x.y" User-Agent (Error 1010). A normal browser UA passes.
-_UA = os.getenv(
-    "NEO4J_HTTP_USER_AGENT",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-)
+import neo4j_http_endpoint  # noqa: E402
+
 _MD_SAMPLE_ROWS = 5  # rows shown per query in the .md report (full set is in the .json)
 
 
@@ -66,11 +62,9 @@ def _post(statement, params):
     Returns (fields, values, error_message). On success error_message is None.
     """
     body = json.dumps({"statement": statement, "parameters": params or {}}).encode()
-    req = urllib.request.Request(URL, data=body, method="POST")
-    req.add_header("Authorization", _AUTH)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", _UA)
+    # Address, credentials and User-Agent from the shared helper: NEO4J_HTTP_URL, then NEO4J_HTTP,
+    # else the local Compose Neo4j; never a built-in remote host. main() checks the address first.
+    req = neo4j_http_endpoint.query_request(body)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             payload = json.loads(resp.read().decode())
@@ -96,12 +90,13 @@ def _md_cell(v):
     return s if len(s) <= 60 else s[:57] + "..."
 
 
-def _write_outputs(out_dir, results, summary):
+def _write_outputs(out_dir, results, summary, url):
     os.makedirs(out_dir, exist_ok=True)
+    user, db = neo4j_http_endpoint.user(), neo4j_http_endpoint.database()
     meta = {
-        "endpoint": URL,
-        "user": USER,
-        "database": DB,
+        "endpoint": url,
+        "user": user,
+        "database": db,
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **summary,
     }
@@ -112,7 +107,7 @@ def _write_outputs(out_dir, results, summary):
     lines = [
         "# EdgeGuard — Cypher catalog results",
         "",
-        f"- Endpoint: `{URL}` (db `{DB}`, user `{USER}`)",
+        f"- Endpoint: `{url}` (db `{db}`, user `{user}`)",
         f"- Generated: {meta['generated_utc']}",
         f"- {summary['query_count']} queries — **{summary['valid']} valid**, "
         f"{summary['invalid']} invalid, {summary['empty']} valid-but-empty",
@@ -161,9 +156,14 @@ def _write_outputs(out_dir, results, summary):
 def main():
     args = sys.argv[1:]
     out_dir = args[args.index("--out") + 1] if "--out" in args else os.getenv("CATALOG_OUTPUT_DIR")
+    try:
+        url = neo4j_http_endpoint.query_api_url()
+    except neo4j_http_endpoint.Neo4jHttpEndpointError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
-    print(f"HTTP Query API : {URL}")
-    print(f"User           : {USER}")
+    print(f"HTTP Query API : {url}")
+    print(f"User           : {neo4j_http_endpoint.user()}")
     print(f"Queries        : {len(QUERY_CATALOG)}\n")
     print(f"{'id':34} {'layer':12} {'valid':5} {'rows':>6}  title")
     print("-" * 108)
@@ -211,9 +211,10 @@ def main():
 
     if out_dir:
         summary = {"query_count": len(results), "valid": n_valid, "invalid": n_invalid, "empty": len(empties)}
-        jp, mp = _write_outputs(out_dir, results, summary)
+        jp, mp = _write_outputs(out_dir, results, summary, url)
         print(f"\nWrote results to:\n  {jp}\n  {mp}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -338,10 +338,12 @@ clearing:
    EdgeGuard wrote to them. The command then runs the backup gate
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
-   finishes, run `python scripts/verify_fresh_baseline.py` (needs `NEO4J_HTTP_URL` or
-   `NEO4J_HTTP`, `NEO4J_USER`, `NEO4J_PASSWORD` of the instance under test in the
-   environment) — every mandatory check must pass before the instance is handed to the
-   partners or the demo. `uses_malware_complete` / `uses_tool_complete` are mandatory as soon
+   finishes, run `python scripts/verify_fresh_baseline.py` with `NEO4J_USER` and
+   `NEO4J_PASSWORD` of the instance under test in the environment. It reads the Compose
+   Neo4j at `http://127.0.0.1:7474`; when the instance under test is another one, set
+   `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) to its HTTP address. Every mandatory check must
+   pass before the instance is handed to the partners or the demo.
+   `uses_malware_complete` / `uses_tool_complete` are mandatory as soon
    as a MITRE actor exists: zero claims then means the `m` / `s` lists were lost in transit,
    not "collector not run yet". With OTX collected, add `--require-otx-industries`: it fails
    when the OTX records give sectors and none states one (the pulses' industries lost on the
@@ -474,7 +476,9 @@ queries, sector-stats reconciliation, alert mute window cleanup.
 
 After `build_relationships` and the enrichment jobs have run, execute the
 read-only acceptance script against the new graph and keep its JSON with
-the baseline record:
+the baseline record. It reads the Compose Neo4j at `http://127.0.0.1:7474`
+with `NEO4J_USER` and `NEO4J_PASSWORD`; for another instance set
+`NEO4J_HTTP_URL` (or `NEO4J_HTTP`) to its HTTP address:
 
 ```bash
 python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json
@@ -567,6 +571,7 @@ _Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — The acceptance script reads the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) names the instance under test; it no longer falls back to a built-in remote address.
 - 2026-10-23 — The memory pass criteria point to MEMORY_TUNING.md, which now holds the 730-day profile the README listed.
 - 2026-10-20 — § [6] step 1: MISP's default Import Regexp rules stay; EdgeGuard's ATT&CK values (`<id> - <name>`) carry no colon, so the rules leave them unchanged (the step had asked to remove the `%WINDIR%` rule by hand, which every fresh MISP database restores). The acceptance row lists the nine entries the rules rewrote on the run of 2026-10-20 (`T1059.003`, `T1555.004` and `T1686.003` added).
 - 2026-10-18 — Acceptance row for the same-report Indicator → CVE links (`indicator_cve_links_are_same_report`, `indicator_cve_report_links`).

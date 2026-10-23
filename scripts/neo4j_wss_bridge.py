@@ -12,13 +12,15 @@ bytes between that socket and `wss://<hostname>` as binary WebSocket frames.
 Requires: websocket-client  (pip install websocket-client)
 
 Standalone connectivity test:
-  set -a; source .env.edgeguard; set +a; python scripts/neo4j_wss_bridge.py
-(reads NEO4J_USER / NEO4J_PASSWORD; host defaults to neo4j-bolt.edgeguard.org,
-override with NEO4J_WSS_HOST)
+  set -a; source .env.edgeguard; set +a
+  NEO4J_WSS_HOST=<bolt-over-websocket host> python scripts/neo4j_wss_bridge.py
+(reads NEO4J_USER / NEO4J_PASSWORD and sends them to that host. NEO4J_WSS_HOST has no
+default: unset or empty, the script exits with code 2 before it connects.)
 """
 
 import os
 import socket
+import sys
 import threading
 
 import websocket
@@ -97,8 +99,15 @@ class Neo4jWssBridge:
         ).start()
 
 
-if __name__ == "__main__":
-    host = os.getenv("NEO4J_WSS_HOST", "neo4j-bolt.edgeguard.org")
+def main():
+    host = (os.getenv("NEO4J_WSS_HOST") or "").strip()
+    if not host:
+        print(
+            "ERROR: NEO4J_WSS_HOST is not set: name the host of the Bolt-over-WebSocket endpoint "
+            "(the bridge sends NEO4J_USER and NEO4J_PASSWORD there; there is no default)",
+            file=sys.stderr,
+        )
+        return 2
     auth = (os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD", ""))
     db = os.getenv("NEO4J_DATABASE", "neo4j")
     print(f"Bridging Bolt driver -> wss://{host}  (user={auth[0]}, db={db})")
@@ -110,3 +119,8 @@ if __name__ == "__main__":
         )
         for r in records:
             print(f"  {r['l']:16} {r['c']:>9,}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

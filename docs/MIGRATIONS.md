@@ -46,7 +46,7 @@ the pipeline.
 
 | Script | Mode | What it does |
 |--------|------|--------------|
-| [`scripts/verify_fresh_baseline.py`](../scripts/verify_fresh_baseline.py) | **Read-only** (HTTP Query API v2) | Fresh-baseline acceptance check: provenance properties, campaign and sector evidence, CVE scores, revoked ATT&CK ids, the ResilMesh-facing schema (see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § Fresh-baseline acceptance). Reads `NEO4J_HTTP_URL` (or `NEO4J_HTTP`), not `NEO4J_URI`; without either it checks the hosted instance `https://neo4j.edgeguard.org`, so point it at your graph. |
+| [`scripts/verify_fresh_baseline.py`](../scripts/verify_fresh_baseline.py) | **Read-only** (HTTP Query API v2) | Fresh-baseline acceptance check: provenance properties, campaign and sector evidence, CVE scores, revoked ATT&CK ids, the ResilMesh-facing schema (see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § Fresh-baseline acceptance). Reads `NEO4J_HTTP_URL` (or `NEO4J_HTTP`), not `NEO4J_URI`; without either it checks the Compose Neo4j at `http://127.0.0.1:7474`. |
 
 ---
 
@@ -71,9 +71,9 @@ python scripts/clear_neo4j.py --force
 # 3. Rebuild from the collectors
 edgeguard baseline   # or: trigger the edgeguard_baseline DAG
 
-# 4. Verify: read-only acceptance check (without NEO4J_HTTP_URL it checks the
-#    hosted instance)
-NEO4J_HTTP_URL=http://localhost:7474 python scripts/verify_fresh_baseline.py
+# 4. Verify: read-only acceptance check of the Compose Neo4j at http://127.0.0.1:7474
+#    (set NEO4J_HTTP_URL for another instance)
+python scripts/verify_fresh_baseline.py
 ```
 
 This works because every MERGE site in the codebase writes the target
@@ -82,10 +82,11 @@ run from a clean slate".
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-23_
 
 ## History
 
+- 2026-10-23 — `scripts/verify_fresh_baseline.py` checks the Compose Neo4j at `http://127.0.0.1:7474` when neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` is set (it checked a built-in remote instance); the heal path's verify step runs without `NEO4J_HTTP_URL`.
 - 2026-10-18 — Removed `scripts/backfill_cve_dates_from_nvd_meta.py`, `scripts/backfill_edge_misp_event_ids.py` with its runbook in `migrations/`, and the read-only audit `scripts/audit_legacy_unicode_bypass_nodes.py`: they repaired or inspected data written by earlier versions, which a fresh baseline rebuilds.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — The heal path pauses the five scheduled DAGs and leaves `edgeguard_baseline` unpaused (its lock holds the scheduled writers off), wipes with `scripts/clear_neo4j.py --force` (the script has no `--yes`), and verifies with the read-only `scripts/verify_fresh_baseline.py`; the main text describes current behavior only, and the runbooks and the fix-up and audit scripts for earlier-version graphs moved to the appendix.
