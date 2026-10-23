@@ -62,6 +62,7 @@ exact name or id the sync matches on (such a claim attaches to nothing).
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -426,7 +427,9 @@ def _push(event: Dict[str, Any]) -> int:
         print(f"an event named {info!r} already exists — delete it first or rename the package", file=sys.stderr)
         return 1
     misp_event = MISPEvent()
-    misp_event.from_dict(**event)
+    # 2026-10: ``from_dict`` pops every key out of the dict it is given; a copy keeps ``event`` whole
+    # for the report below (counting its attributes raised KeyError after the event was created).
+    misp_event.from_dict(**copy.deepcopy(event))
     created = misp.add_event(misp_event, pythonify=False)
     if not isinstance(created, dict) or "errors" in created:
         print(f"MISP refused the event: {json.dumps(created)[:500]}", file=sys.stderr)
