@@ -72,7 +72,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_SOURCE_KEY_CHECK` | `true` | Ask each provider whether it accepts the key |
 | `EDGEGUARD_BASELINE_REQUIRED_SOURCES` | empty | Keyed sources a baseline must not start without |
 
-- `THREATFOX_API_KEY` is also sent as the abuse.ch `Auth-Key` to MalwareBazaar, which needs no key.
+- `THREATFOX_API_KEY` is also the key of the URLhaus and MalwareBazaar exports (2026-10: part of the export URL path); without it both are skipped.
 - The key check runs in `edgeguard preflight`, `scripts/preflight_baseline.sh` and the baseline task `source_key_check`, one authenticated request per keyed source; `false` reports configured keys as unverified.
 - `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `otx`, `nvd`, `virustotal`, `threatfox` and `abuseipdb`. A listed source without a key, with a rejected key or switched off fails `source_key_check`, before the lock and the wipe.
 - How to obtain each key: [API_KEYS_SETUP.md](API_KEYS_SETUP.md).
@@ -90,7 +90,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 
 - CISA ICS maps CISA's sectors to `energy`, `healthcare` and `finance`; its `AFFECTS` links carry `advisory_sector` at 0.9. It runs as an isolated daily task and in the baseline.
 - ATT&CK for ICS items carry `attack_domain = ics`; a failed ICS fetch never affects the Enterprise ingest.
-- MalwareBazaar reads the public export of the last 48 hours; its samples link to `Malware` nodes by `INDICATES`.
+- MalwareBazaar reads the export of the last 48 hours (abuse.ch Auth-Key required); its samples link to `Malware` nodes by `INDICATES`.
 - EPSS runs after every Neo4j sync and the baseline; a feed outage is logged and skipped.
 - On an existing graph, an additive baseline loads the history of CISA ICS and ATT&CK for ICS; for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works.
 

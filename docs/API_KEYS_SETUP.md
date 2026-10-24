@@ -84,7 +84,7 @@ This guide explains how to obtain API keys for all the threat intelligence sourc
    export THREATFOX_API_KEY="your-abuse-ch-auth-key"
    ```
 
-**Note:** Without the key the ThreatFox collector is skipped (optional source). MalwareBazaar needs no key; when `THREATFOX_API_KEY` is set, it sends the same key as `Auth-Key`.
+**Note:** Without the key the ThreatFox, URLhaus and MalwareBazaar collectors are skipped (optional sources). Since 2026-10 the URLhaus and MalwareBazaar exports need the same key, which goes into the export URL path (never logged).
 
 ---
 
@@ -141,7 +141,7 @@ services:
 | `OTX_API_KEY` | AlienVault OTX API key | *(optional)* |
 | `NVD_API_KEY` | NVD API key | *(optional)* |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB API key (used by `src/collectors/abuseipdb_collector.py`) | *(optional)* |
-| `THREATFOX_API_KEY` | abuse.ch Auth-Key (ThreatFox; also sent by MalwareBazaar when set; used by `src/collectors/global_feed_collector.py`) | *(optional)* |
+| `THREATFOX_API_KEY` | abuse.ch Auth-Key (ThreatFox, URLhaus and MalwareBazaar exports; used by `src/collectors/global_feed_collector.py`) | *(optional)* |
 | `VIRUSTOTAL_API_KEY` | VirusTotal API key | *(optional)* |
 | `NEO4J_URI` | Neo4j connection URI | `bolt://localhost:7687` |
 | `NEO4J_USER` | Neo4j username | `neo4j` |
