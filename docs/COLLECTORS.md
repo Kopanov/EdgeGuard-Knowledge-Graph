@@ -769,11 +769,11 @@ Collects universal threat feeds that apply to all zones, including:
 
 ### Sources
 - **ThreatFox:** `https://threatfox-api.abuse.ch/api/v1/`
-- **URLhaus:** `https://urlhaus.abuse.ch/downloads/csv_recent/`. When it cannot be read, the run falls back to `https://urlhaus.abuse.ch/downloads/csv_top10k/`, and the task fails only when both fail
+- **URLhaus:** `https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` (about 16 MB, regenerated every 5 minutes). 2026-10: the keyless `downloads/csv_recent/` and `csv_top10k/` answer HTTP 410 and `csv_top10k` has no v2 equivalent, so there is one URL and the task fails when it cannot be read. The abuse.ch Auth-Key (`THREATFOX_API_KEY`) is part of the path and is redacted from every log line and error; without a key the task is skipped (`missing_abusech_key`), and HTTP 401/403 skips it (`urlhaus_auth_denied`)
 
 ### Per-run caps
 
-Neither feed has a cursor: each run reads a window, ThreatFox `get_iocs` the IOCs of the last 7 days (7,398 on the 730-day baseline of 2026-10-13; about 1,050–1,140 new per day) and URLhaus `csv_recent` the URLs of the last 30 days (34,003 on the same baseline; about 1,130 new per day). Each source has its own cap, sized to the whole window with headroom so that no day's entries leave the window uncollected, and the generic incremental default does not apply (`threatfox` and `urlhaus` are in `config.OWN_RUN_CAP_SOURCES`, like MalwareBazaar and NVD):
+Neither feed has a cursor: each run reads a window, ThreatFox `get_iocs` the IOCs of the last 7 days (7,398 on the 730-day baseline of 2026-10-13; about 1,050–1,140 new per day) and URLhaus `recent.csv` the URLs of the last 30 days (34,003 on the same baseline; about 1,130 new per day). Each source has its own cap, sized to the whole window with headroom so that no day's entries leave the window uncollected, and the generic incremental default does not apply (`threatfox` and `urlhaus` are in `config.OWN_RUN_CAP_SOURCES`, like MalwareBazaar and NVD):
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -1065,9 +1065,9 @@ The settings are defined in the CISA ICS advisories section of `src/config.py`; 
 Collects the sha256 hashes of recent malware samples from [MalwareBazaar](https://bazaar.abuse.ch/) (abuse.ch) and emits **one `sha256` indicator per sample**. The `signature` column is the malware family: it becomes `malware_family` on the item, travels to MISP inside the `TF_META` comment exactly like the ThreatFox family, is rehydrated as `Indicator.malware_family` by `run_misp_to_neo4j.parse_attribute`, and `build_relationships` step 9 links it to `Malware` nodes (`INDICATES`, `match_type = malware_family`). Samples whose `signature` is `n/a` are pushed without a family.
 
 ### Source
-- **Export URL:** `https://bazaar.abuse.ch/export/csv/recent/` — the samples of the last 48 hours (about 1,000 rows; 1,027 on 2026-10-12, of which 458 Mirai and 265 `n/a`). No API key is required. The **full export** (`/export/csv/full/`) is the complete history and is deliberately **not** used: baseline and regular runs both read the recent export, so the history in MISP / Neo4j builds up over successive daily runs.
+- **Export URL:** `https://mb-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` — the samples of the last 48 hours (about 1,000 rows; 1,027 on 2026-10-12, of which 458 Mirai and 265 `n/a`; about 830 on 2026-10-24). 2026-10: the keyless `/export/csv/recent/` answers HTTP 410; the abuse.ch Auth-Key is required and sits in the URL path, where it is redacted from every log line and error. Without a key the task is skipped (`missing_abusech_key`). The **full export** (`/export/csv/full/`) is the complete history and is deliberately **not** used: baseline and regular runs both read the recent export, so the history in MISP / Neo4j builds up over successive daily runs.
 - **Columns:** `first_seen_utc, sha256_hash, md5_hash, sha1_hash, reporter, file_name, file_type_guess, mime_type, signature, clamav, vtpercent, imphash, ssdeep, tlsh` (quoted, `", "` separated; the header is a `#` comment line and is read by name, so a reordered export still parses).
-- **Auth:** when `THREATFOX_API_KEY` (the abuse.ch Auth-Key, shared by all abuse.ch platforms) is configured it is sent as the `Auth-Key` header; placeholders (`demo`, `YOUR_THREATFOX_API_KEY_HERE`) are treated as unset.
+- **Auth:** `THREATFOX_API_KEY` (the abuse.ch Auth-Key, shared by all abuse.ch platforms) is part of the export URL path; placeholders (`demo`, `YOUR_THREATFOX_API_KEY_HERE`) are treated as unset and the source is skipped.
 - **Terms:** MalwareBazaar data is free of charge for commercial and non-commercial use ([Terms of Use](https://bazaar.abuse.ch/faq/#tos)).
 
 ### Flags & knobs
@@ -1176,7 +1176,7 @@ What each collector pulls on a 730-day baseline, and the upstream limit behind i
 | ThreatFox | Last 7 days, 10,000 IOCs | API returns 7 days |
 | URLhaus | Last 30 days, 50,000 URLs | `csv_recent` holds 30 days |
 | CISA ICS | Advisories in the window, at most 1,200 | None |
-| MalwareBazaar | Last 48 hours, 500 samples | Key-free export |
+| MalwareBazaar | Last 48 hours, 500 samples | Export of the last 48 hours (Auth-Key required) |
 | Energy, Healthcare | Placeholders, no DAG task | — |
 
 - **NVD.** The baseline iterates 120-day windows (`iter_nvd_published_windows`); NVD allows `resultsPerPage` up to 2,000 and a `pubStartDate`..`pubEndDate` span of at most 120 days. A run-level `limit` present in a baseline (an incremental-style setting) is ignored with a warning, because it would cut almost the whole windowed collection.
@@ -1189,7 +1189,7 @@ What each collector pulls on a 730-day baseline, and the upstream limit behind i
 - **Feodo Tracker and SSL Blacklist.** Public CSV and text feeds without a rate limit. Feodo Tracker: the complete C2 history (`ipblocklist_aggressive.csv`) on baselines, the 30-day list on regular runs, at most `EDGEGUARD_FEODO_MAX_PER_RUN` (15,000) servers per run; the state of the feed itself is in [§ 7](#7-finance-feed-collector). SSL Blacklist: the whole feed, at most `EDGEGUARD_SSLBL_MAX_PER_RUN` (20,000) per run. Both apply their caps in the baseline and the daily runs, keep the newest entries when a cap is reached, and ignore the incremental default of 200.
 - **ThreatFox and URLhaus.** ThreatFox's `get_iocs` takes `days` from 1 to 7 ([ThreatFox API](https://threatfox.abuse.ch/api/)), so the collector clamps it to 7; older IOCs are only in the [ThreatFox export](https://threatfox.abuse.ch/export/), which EdgeGuard does not read ([ROADMAP.md](ROADMAP.md#collection-depth-and-scale)). URLhaus reads `csv_recent`, the last 30 days. The caps `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) and `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000) apply in the baseline and the daily runs, keep the newest entries, and replace the incremental default of 200.
 - **CISA ICS Advisories.** Flag-guarded, default off. The advisory files of the index entries in the window, at most `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200), about 900 on a 730-day run, one item per CVE; public GitHub raw files without authentication, fetched sequentially at no more than 4 requests per second. A baseline that parses fewer than `EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES` (50) is skipped with an alert instead of loading a thin dataset.
-- **MalwareBazaar.** Flag-guarded, default off. The key-free export covers the last 48 hours (about 1,000 samples); at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) SHA-256 indicators per run, labelled samples first. The full export, the whole history, is not used, so a baseline loads the same window as a daily run and the history builds up over the daily runs.
+- **MalwareBazaar.** Flag-guarded, default off. The export (abuse.ch Auth-Key required) covers the last 48 hours (about 1,000 samples); at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) SHA-256 indicators per run, labelled samples first. The full export, the whole history, is not used, so a baseline loads the same window as a daily run and the history builds up over the daily runs.
 - **Energy and Healthcare.** Placeholder modules that return `skipped=True` (`skip_reason_class="placeholder"`) and that no DAG task calls. No member-only feed (EE-ISAC, Health-ISAC) is collected, and HC3, a public US HHS source, is not collected either. CISA's ICS advisories ([§ 12](#12-cisa-ics-advisories-collector), `EDGEGUARD_ENABLE_CISA_ICS`) give `energy`, `healthcare` and `finance` from CISA's own sector statement.
 
 Planned work on collection depth (an import of the ThreatFox export, paid VirusTotal and AbuseIPDB plans) is listed in [ROADMAP.md](ROADMAP.md#collection-depth-and-scale).

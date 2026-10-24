@@ -81,13 +81,13 @@
 ---
 
 ### 3. URLhaus
-**Items:** the URLs added in the last 30 days (`csv_recent`; 34,003 on the 730-day baseline of 2026-10-13, about 1,130 new per day), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000) per run | **Zone Distribution:** Global 100%
+**Items:** the URLs added in the last 30 days (`recent.csv`; 34,003 on the 730-day baseline of 2026-10-13, about 1,130 new per day), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000) per run | **Zone Distribution:** Global 100%
 
 | Attribute | Value |
 |-----------|-------|
-| URL | https://urlhaus.abuse.ch/downloads/csv_recent/ |
+| URL | `https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` (2026-10: the keyless `downloads/csv_recent/` and `csv_top10k/` answer HTTP 410) |
 | Format | CSV |
-| Auth | None (public) |
+| Auth | The abuse.ch Auth-Key (`THREATFOX_API_KEY`, https://auth.abuse.ch/) in the URL path; without it the task is skipped (`missing_abusech_key`), HTTP 401/403 → skipped (`urlhaus_auth_denied`). The key is redacted in every log line and error |
 | Update | Daily |
 | Classification | ✅ `detect_zones_from_text()` on threat names and tags |
 
@@ -163,9 +163,9 @@
 
 | Attribute | Value |
 |-----------|-------|
-| URL | `https://bazaar.abuse.ch/export/csv/recent/` — per `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`). The full export (`/export/csv/full/`) is the complete history and is not used |
+| URL | `https://mb-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` (2026-10: the keyless `/export/csv/recent/` answers HTTP 410) — per `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`). The full export (`/export/csv/full/`) is the complete history and is not used |
 | Format | CSV with `#` comment lines; columns `first_seen_utc, sha256_hash, md5_hash, sha1_hash, reporter, file_name, file_type_guess, mime_type, signature, clamav, vtpercent, imphash, ssdeep, tlsh` |
-| Auth | None required; a configured `THREATFOX_API_KEY` (the abuse.ch Auth-Key) is sent as `Auth-Key` |
+| Auth | The abuse.ch Auth-Key (`THREATFOX_API_KEY`) in the URL path; required since 2026-10 (without it the task is skipped, `missing_abusech_key`) |
 | Update | Daily (`edgeguard_daily` → `collect_malwarebazaar`) and baseline tier 2, only when `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`; both read the recent export, so the history builds up over the daily runs |
 | Classification | ✅ `detect_zones_from_text()` on `signature` |
 | Terms | Free of charge for commercial and non-commercial use (https://bazaar.abuse.ch/faq/#tos) |
@@ -178,7 +178,7 @@
 
 **Selection:** labelled samples are kept before unlabelled ones, then the list is cut at the per-run cap (and at the regular collection limit when that is lower).
 
-**Safety:** own circuit breaker + rate limiter; flag off → skipped status without an HTTP request; 401/403 → skipped (`malwarebazaar_auth_denied`); 429 after the Retry-After retries, 5xx and timeouts → transient error → task skipped + alert. See [COLLECTORS.md §13](COLLECTORS.md#13-malwarebazaar-collector).
+**Safety:** own circuit breaker + rate limiter; flag off or no `THREATFOX_API_KEY` → skipped status without an HTTP request; 401/403 → skipped (`malwarebazaar_auth_denied`); 429 after the Retry-After retries, 5xx and timeouts → transient error → task skipped + alert. See [COLLECTORS.md §13](COLLECTORS.md#13-malwarebazaar-collector).
 
 ---
 

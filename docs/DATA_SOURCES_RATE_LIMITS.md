@@ -14,10 +14,10 @@
 | MITRE ATT&CK | ❌ No | No limit (STIX download) | Free | STIX 2.1 |
 | VirusTotal | ✅ Yes | 4 requests/min, 500/day (free) | Free tier used; paid plans from $50/month | JSON |
 | AbuseIPDB | ✅ Yes | 1,000 `check` requests/day, 5 `blacklist` requests per UTC day (free) | $50+/month | JSON |
-| URLhaus | ❌ No | No limit (CSV) | Free | CSV |
+| URLhaus | ✅ Yes (abuse.ch Auth-Key) | No limit (CSV) | Free | CSV |
 | Feodo Tracker | ❌ No | No limit (CSV) | Free | CSV |
 | SSL Blacklist | ❌ No | No limit (CSV) | Free | CSV |
-| MalwareBazaar (flag-guarded) | ❌ No (export) | One export download per run (about 450 KB) | Free | CSV |
+| MalwareBazaar (flag-guarded) | ✅ Yes (abuse.ch Auth-Key, export) | One export download per run (about 450 KB) | Free | CSV |
 | CISA ICS advisories (flag-guarded) | ❌ No | GitHub raw files (`cisagov/CSAF`) | Free | CSAF 2.0 JSON |
 | ThreatFox | ✅ Yes | Varies by key | Free tier | JSON |
 | MISP | ✅ Yes | Varies (self-hosted) | Free (self-hosted) | JSON |
@@ -191,8 +191,8 @@
 | **Update Frequency** | Hourly |
 
 **Download URLs:**
-- Recent: https://urlhaus.abuse.ch/downloads/csv_recent/
-- Full: https://urlhaus.abuse.ch/downloads/csv_all/
+- Recent (2026-10, Auth-Key in the path; the old `downloads/csv_recent/` answers HTTP 410): https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv
+- Full: https://urlhaus.abuse.ch/downloads/csv_all/ (not used)
 - API: https://urlhaus.abuse.ch/api/
 
 **Pricing:** Free
@@ -277,7 +277,7 @@
 | NVD | `NVD_API_KEY` | https://nvd.nist.gov/developers |
 | VirusTotal | `VIRUSTOTAL_API_KEY` | https://www.virustotal.com |
 | AbuseIPDB | `ABUSEIPDB_API_KEY` | https://www.abuseipdb.com |
-| ThreatFox (also sent by MalwareBazaar when set) | `THREATFOX_API_KEY` | https://auth.abuse.ch/ |
+| ThreatFox (also used by URLhaus and MalwareBazaar) | `THREATFOX_API_KEY` | https://auth.abuse.ch/ |
 
 ### Optional (Recommended for Production)
 
