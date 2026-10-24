@@ -181,6 +181,31 @@ def test_alertmanager_slack_configs_load_without_a_secret_in_the_file():
     assert {name for name, _ in _slack_url_sources(broken)} >= set(receivers_with_slack)
 
 
+def test_alertmanager_email_configs_use_only_alertmanager_fields():
+    """2026-10: `subject:` / `body:` in email_configs made Alertmanager v0.28 refuse the file."""
+    # EmailConfig fields of Alertmanager v0.28 (config/notifiers.go).
+    known = {
+        "send_resolved",
+        "to",
+        "from",
+        "smarthost",
+        "hello",
+        "auth_username",
+        "auth_password",
+        "auth_password_file",
+        "auth_secret",
+        "auth_identity",
+        "headers",
+        "html",
+        "text",
+        "require_tls",
+        "tls_config",
+    }
+    emails = [(r["name"], e) for r in _ALERTMANAGER["receivers"] for e in r.get("email_configs") or []]
+    assert emails, "the check below must have email configs to inspect"
+    assert [(name, sorted(set(e) - known)) for name, e in emails if set(e) - known] == []
+
+
 def test_alertmanager_secret_file_is_mounted_and_never_committed():
     path = _ALERTMANAGER["global"]["slack_api_url_file"]
     mounts = _MON_COMPOSE["services"]["alertmanager"]["volumes"]

@@ -57,11 +57,15 @@ inhibit_rules:
 
 # Receivers define notification channels
 receivers:
+  # 2026-10: an email_configs entry sets the subject as headers.Subject and the plain-text body as
+  # text. The former `subject:` and `body:` keys are not Alertmanager fields: v0.28 refused the
+  # whole file ("field subject not found in type config.plain") and restarted in a loop.
   - name: 'default'
     email_configs:
       - to: 'admin@edgeguard.local'
-        subject: 'EdgeGuard Alert: {{ .GroupLabels.alertname }}'
-        body: |
+        headers:
+          Subject: 'EdgeGuard Alert: {{ .GroupLabels.alertname }}'
+        text: |
           {{ range .Alerts }}
           Alert: {{ .Annotations.summary }}
           Description: {{ .Annotations.description }}
@@ -71,7 +75,8 @@ receivers:
   - name: 'critical'
     email_configs:
       - to: 'oncall@edgeguard.local'
-        subject: '🚨 CRITICAL: EdgeGuard Alert - {{ .GroupLabels.alertname }}'
+        headers:
+          Subject: '🚨 CRITICAL: EdgeGuard Alert - {{ .GroupLabels.alertname }}'
     slack_configs:
       - channel: '#edgeguard-alerts'
         title: '🚨 EdgeGuard Critical Alert'
