@@ -245,6 +245,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_MISP_MAX_PAGES` | `100` | Index pages per sync run |
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | `2.0` | Pause between event fetches |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Larger events are deferred to the end (`0` = off) |
+| `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` | `20000` | Larger events are fetched in pages (`/attributes/restSearch`) instead of one `/events/view` (`0` = off; a whole-event fetch that keeps answering 5xx falls back to pages either way) |
 | `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` | `4096` | Largest attribute value the sync accepts |
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Pause before retrying events that failed |
 | `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | `500` | Parsed items merged per chunk |
