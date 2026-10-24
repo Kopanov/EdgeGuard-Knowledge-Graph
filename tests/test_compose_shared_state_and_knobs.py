@@ -71,6 +71,7 @@ AIRFLOW_KNOBS = [
     ("EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC", None),
     ("EDGEGUARD_MISP_EVENT_LOCK_PATH", "/tmp/edgeguard_misp_get_or_create_event.lock"),
     ("EDGEGUARD_MAX_EVENT_ATTRIBUTES", "50000"),
+    ("EDGEGUARD_MISP_PAGED_FETCH_ABOVE", "20000"),
     ("EDGEGUARD_MISP_PAGE_SIZE", "500"),
     ("EDGEGUARD_MISP_MAX_PAGES", "100"),
     ("EDGEGUARD_MISP_RETRY_COOLDOWN_SEC", "15.0"),
@@ -129,6 +130,7 @@ class TestKnobForwarding:
         env = _compose()["services"]["airflow"]["environment"]
         for name, caster in (
             ("EDGEGUARD_MAX_EVENT_ATTRIBUTES", "int"),
+            ("EDGEGUARD_MISP_PAGED_FETCH_ABOVE", "int"),
             ("EDGEGUARD_MISP_PAGE_SIZE", "int"),
             ("EDGEGUARD_MISP_MAX_PAGES", "int"),
             ("EDGEGUARD_MISP_RETRY_COOLDOWN_SEC", "float"),

@@ -190,6 +190,20 @@ logger = logging.getLogger(__name__)
 
 # Retry / circuit breaker (MISP timeouts live above for PyMISP + requests)
 MAX_RETRIES = 4
+
+
+# 2026-10: events with more attributes than this (MISP index ``attribute_count``) are read in pages
+# (``/events/restSearch`` metadata, then ``/attributes/restSearch``) instead of one ``/events/view``.
+# Prod MISP answered HTTP 500 to every ``/events/view`` of a 145k-attribute NVD event (about 550 MB
+# of JSON), so each sync that saw it changed failed. ``0`` turns the threshold off; a whole-event
+# fetch that still answers 5xx after its retries falls back to pages either way.
+def _paged_fetch_above() -> int:
+    try:
+        return int(os.environ.get("EDGEGUARD_MISP_PAGED_FETCH_ABOVE", "20000"))
+    except (ValueError, TypeError):
+        return 20000
+
+
 RETRY_DELAY_BASE = 10  # seconds — MISP needs time to free memory under load
 
 # Circuit breakers for MISP and Neo4j
@@ -2625,6 +2639,62 @@ class MISPToNeo4jSync:
         except Exception as e:
             logger.error(f"Error fetching event {event_id}: {type(e).__name__}: {e}")
             return None
+
+    @retry_with_backoff(max_retries=MAX_RETRIES)
+    def _misp_post_json(self, path: str, body: Dict) -> Any:
+        """POST a JSON body to MISP; 5xx is raised as transient (retried), 4xx as permanent."""
+        response = self.session.post(
+            f"{self.misp_url}{path}",
+            json=body,
+            verify=SSL_VERIFY,
+            timeout=(MISP_CONNECT_TIMEOUT, MISP_REQUEST_TIMEOUT),
+        )
+        if response.status_code >= 500:
+            raise MispTransientServerError(f"MISP {response.status_code} on {path}", response=response)
+        response.raise_for_status()
+        return response.json()
+
+    def fetch_event_details_paged(self, event_id: str) -> Optional[Dict]:
+        """Fetch an event as ``fetch_event_details`` does, without one ``/events/view`` (2026-10).
+
+        The event fields and tags come from ``/events/restSearch`` with ``metadata``, the attributes
+        from ``/attributes/restSearch`` in pages of ``_ATTR_PAGE_SIZE``. Only top-level attributes
+        are kept (``object_id`` 0), which is what ``/events/view`` lists under ``Attribute``; the
+        sync reads only those. Returns None when MISP lists no such event.
+        """
+        body = self._misp_post_json(
+            "/events/restSearch", {"eventid": event_id, "metadata": True, "returnFormat": "json"}
+        )
+        rows = (body.get("response") or []) if isinstance(body, dict) else []
+        event = misp_event_object_to_event_dict(rows[0]) if rows else None
+        if event is None:
+            logger.error("Event %s: /events/restSearch metadata returned no event", event_id)
+            return None
+        attributes: List[Dict] = []
+        seen: set = set()
+        page = 1
+        while True:
+            body = self._misp_post_json(
+                "/attributes/restSearch",
+                {"eventid": event_id, "page": page, "limit": self._ATTR_PAGE_SIZE, "returnFormat": "json"},
+            )
+            response = body.get("response") if isinstance(body, dict) else None
+            page_rows = coerce_misp_attribute_list((response or {}).get("Attribute"))
+            new = [a for a in page_rows if a.get("uuid") not in seen]
+            for attr in new:
+                seen.add(attr.get("uuid"))
+                if str(attr.get("object_id") or "0") == "0":
+                    attr.pop("Event", None)  # restSearch adds the parent event; /events/view does not
+                    attributes.append(attr)
+            # A short page ends the listing; a page with nothing new means MISP ignored ``page``.
+            if len(page_rows) < self._ATTR_PAGE_SIZE or not new:
+                break
+            page += 1
+        event["Attribute"] = attributes
+        logger.info(
+            "Event %s: fetched %s attributes in %s page(s) of %s", event_id, len(attributes), page, self._ATTR_PAGE_SIZE
+        )
+        return event
 
     # Distinct unmapped ``source:*`` tag names that receive their own
     # Prometheus label value; later names collapse to ``<other>`` so a
@@ -5591,13 +5661,13 @@ class MISPToNeo4jSync:
     # Attribute page size for streaming large events (prevents OOM on 100K+ attribute events).
     _ATTR_PAGE_SIZE = 5000
 
-    def _process_single_event(self, event_id: str, event_info: str) -> Tuple[int, int, int]:
+    def _process_single_event(self, event_id: str, event_info: str, attribute_count: int = 0) -> Tuple[int, int, int]:
         """Process one MISP event: fetch → parse → merge → relationships.
 
-        For events exceeding ``_ATTR_PAGE_SIZE`` attributes, attributes are
-        fetched in pages via ``/attributes/restSearch`` and each page is
-        synced to Neo4j before the next page is fetched.  This keeps memory
-        bounded regardless of event size.
+        Events over ``EDGEGUARD_MISP_PAGED_FETCH_ABOVE`` attributes (``attribute_count``, from the
+        MISP index) are fetched in pages via ``/attributes/restSearch``
+        (``fetch_event_details_paged``). For events exceeding ``_ATTR_PAGE_SIZE`` attributes,
+        each page of attributes is synced to Neo4j before the next is parsed.
 
         Returns:
             (parsed_items_count, cross_rels_count, error_count)
@@ -5606,8 +5676,17 @@ class MISPToNeo4jSync:
         """
         logger.info(f"Processing event {event_id}: {event_info[:50]}...")
 
-        # First, try to get the event metadata (without full attribute list for large events)
-        full_event = self.fetch_event_details(event_id)
+        paged_above = _paged_fetch_above()
+        if paged_above > 0 and attribute_count > paged_above:
+            full_event = self.fetch_event_details_paged(event_id)
+        else:
+            try:
+                full_event = self.fetch_event_details(event_id)
+            except MispTransientServerError as exc:
+                logger.warning(
+                    "Event %s: whole-event fetch failed after retries (%s) — fetching in pages", event_id, exc
+                )
+                full_event = self.fetch_event_details_paged(event_id)
         if not full_event:
             # ``fetch_event_details`` returns None only after its retries are exhausted or on
             # a permanent (4xx / unparsable) failure. Count the event as failed so the
@@ -6140,7 +6219,7 @@ class MISPToNeo4jSync:
                     time.sleep(event_fetch_throttle)
 
                 try:
-                    ep, ecr, ee = self._process_single_event(str(event_id), event_info)
+                    ep, ecr, ee = self._process_single_event(str(event_id), event_info, _event_sort_key(event))
                     total_parsed_items += ep
                     total_cross_rels_built += ecr
                     total_errors += ee
@@ -6250,7 +6329,7 @@ class MISPToNeo4jSync:
                     if event_fetch_throttle > 0:
                         time.sleep(event_fetch_throttle)
                     try:
-                        ep, ecr, ee = self._process_single_event(str(event_id), event_info)
+                        ep, ecr, ee = self._process_single_event(str(event_id), event_info, _event_sort_key(event))
                         total_parsed_items += ep
                         total_cross_rels_built += ecr
                         total_errors += ee
@@ -6352,7 +6431,7 @@ class MISPToNeo4jSync:
                     if event_fetch_throttle > 0:
                         time.sleep(event_fetch_throttle)
                     try:
-                        ep, ecr, ee = self._process_single_event(str(event_id), event_info)
+                        ep, ecr, ee = self._process_single_event(str(event_id), event_info, _event_sort_key(event))
                         total_parsed_items += ep
                         total_cross_rels_built += ecr
                         total_errors += ee

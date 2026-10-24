@@ -126,7 +126,7 @@ def _sync(monkeypatch, session) -> tuple:
     monkeypatch.setattr(sync, "connect", lambda: True)
     processed: list = []
 
-    def _process(event_id, info):
+    def _process(event_id, info, attribute_count=0):
         processed.append(event_id)
         sync.stats["events_processed"] += 1
         return 0, 0, 0
@@ -451,7 +451,7 @@ class TestEventAccounting:
         events = [{"id": str(i), "info": f"EdgeGuard-x-{i}"} for i in range(1, 7)]
         attempted: list = []
 
-        def _refused(event_id, info):
+        def _refused(event_id, info, attribute_count=0):
             attempted.append(event_id)
             raise ConnectionError("Connection refused")
 
@@ -465,7 +465,7 @@ class TestEventAccounting:
         assert "6 event(s) failed or were skipped after retries" in sync._last_sync_failure_reason
 
     def test_a_failed_event_is_not_reported_as_a_merge_error(self, monkeypatch):
-        def _unavailable(event_id, info):
+        def _unavailable(event_id, info, attribute_count=0):
             raise rm.MispTransientServerError("MISP 503 fetching event 1")
 
         sync = _sync_with_events(monkeypatch, [{"id": "1", "info": "EdgeGuard-nvd-2026-10-01"}], _unavailable)
@@ -475,7 +475,7 @@ class TestEventAccounting:
         assert "merge/load" not in reason, f"no item was merged, yet the reason says: {reason!r}"
 
     def test_merge_errors_are_counted_apart_from_failed_events(self, monkeypatch):
-        def _process(event_id, info):
+        def _process(event_id, info, attribute_count=0):
             if event_id == "1":
                 sync.stats["events_processed"] += 1
                 return 2, 0, 1  # one item merge returned False
@@ -554,7 +554,7 @@ def dag_env(tmp_path, monkeypatch, dag_module):
         def connect(self):
             return True
 
-        def _process_single_event(self, event_id, event_info):
+        def _process_single_event(self, event_id, event_info, attribute_count=0):
             processed.append(event_id)
             self.stats["events_processed"] += 1
             return 1, 0, 0
