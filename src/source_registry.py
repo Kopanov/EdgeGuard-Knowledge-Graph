@@ -109,9 +109,10 @@ class Source:
         Human-readable name shown in CLI / docs / Neo4j ``:Source.name``.
     source_type : str
         One of ``threat_intel`` / ``advisory`` / ``framework`` /
-        ``vulnerability_db`` / ``curated``. Drives Neo4j ``:Source.type``.
+        ``vulnerability_db`` / ``curated`` / ``import``. Drives Neo4j ``:Source.type``.
         ``curated`` marks a curated package imported once into MISP rather
-        than a feed polled by a collector.
+        than a feed polled by a collector; ``import`` marks records loaded
+        from outside the pipeline (``stix_import``: an external STIX bundle).
     reliability : float
         ``[0.0, 1.0]`` confidence base used by the merge layer for
         corroboration scoring. Drives Neo4j ``:Source.reliability``.
@@ -145,6 +146,15 @@ class Source:
         pulse-publish-date, MISP-only pipeline metadata) —
         extractor returns
         ``(None, None)`` and the value never reaches the edge.
+    ranked_for_descriptions : bool
+        ``True`` (default) ⇒ the description ranking
+        (``description_ranking.py``) ranks this source among the registered
+        ones, by group and ``reliability``. ``False`` ⇒ it ranks the source
+        as one the registry does not know: below every registered source,
+        ordered against other such sources by id. ``stix_import`` is
+        registered for its ``Source`` node and ``SOURCED_FROM`` edges; the
+        text of an external STIX bundle, whose producer EdgeGuard cannot
+        judge, keeps the rank it had before the source was registered.
     """
 
     canonical_id: str
@@ -170,6 +180,7 @@ class Source:
     # was just "NVD" (acronym fits dashboard widths). Refactor
     # preserves both.
     cli_display_name: Optional[str] = None
+    ranked_for_descriptions: bool = True
 
     def __post_init__(self) -> None:
         """Validate Source invariants at construction time.
@@ -442,6 +453,24 @@ _REGISTRY: Tuple[Source, ...] = (
         cli_description="MISP galaxy clusters (community knowledge base)",
         misp_tag="source:MISP-Galaxy",
         reliable_first_seen=False,
+    ),
+    # 2026-10-25: the objects of an external STIX bundle that name no EdgeGuard source
+    # (``run_pipeline.STIX_IMPORT_SOURCE_ID``, the in-process STIX loader). Registered so their
+    # records reach a ``Source`` node through a ``SOURCED_FROM`` edge. Not a feed: no collector, no
+    # CLI entry, no MISP event (the loader writes to Neo4j directly; the tag only completes the
+    # record). The producer is unknown, hence the lowest reliability, no first-seen claims (an
+    # object's ``created`` is when its producer made it, not an observation) and the description
+    # rank of an unregistered source.
+    Source(
+        canonical_id="stix_import",
+        display_name="STIX import",
+        source_type="import",
+        reliability=0.5,
+        cli_default_enabled=False,
+        cli_description="Objects of an external STIX 2.1 bundle that name no EdgeGuard source",
+        misp_tag="source:STIX-Import",
+        reliable_first_seen=False,
+        ranked_for_descriptions=False,
     ),
 )
 

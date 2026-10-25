@@ -73,7 +73,8 @@ class TestRanks:
     def test_cve_ranking_is_nvd_kev_ics_then_the_rest(self):
         order = sorted(CVE.ranks, key=CVE.ranks.get, reverse=True)
         assert order[:3] == ["nvd", "cisa_kev", "cisa_ics"]
-        assert CVE.top_source == "nvd" and CVE.top_rank == len(source_registry.all_sources())
+        ranked = [s for s in source_registry.all_sources() if s.ranked_for_descriptions]
+        assert CVE.top_source == "nvd" and CVE.top_rank == len(ranked)
 
     def test_entity_ranking_is_mitre_then_curated_then_the_rest(self):
         order = sorted(ENTITY.ranks, key=ENTITY.ranks.get, reverse=True)
@@ -84,16 +85,32 @@ class TestRanks:
 
     @pytest.mark.parametrize("ranking", [CVE, ENTITY], ids=["cve", "entity"])
     def test_every_registered_source_has_its_own_rank_and_an_unknown_one_ranks_0(self, ranking):
-        ids = {src.canonical_id for src in source_registry.all_sources()}
+        ids = {src.canonical_id for src in source_registry.all_sources() if src.ranked_for_descriptions}
         assert set(ranking.ranks) == ids
         assert sorted(ranking.ranks.values()) == list(range(1, len(ids) + 1)), "distinct: no two sources tie"
         for unknown in ("stix_import", "resilmesh", "Some Vendor"):
             assert ranking.rank(unknown) == 0
 
     @pytest.mark.parametrize("ranking", [CVE, ENTITY], ids=["cve", "entity"])
+    def test_stix_import_is_registered_but_keeps_the_rank_of_an_unregistered_source(self, ranking):
+        """2026-10-25: ``stix_import`` is registered for its ``Source`` node; an external bundle's text
+        still ranks below every ranked source and, by id, below ``resilmesh``."""
+        src = source_registry.get_source("stix_import")
+        assert src is not None and src.ranked_for_descriptions is False
+        unranked = {s.canonical_id for s in source_registry.all_sources() if not s.ranked_for_descriptions}
+        assert unranked == {"stix_import"}
+        assert ranking.rank("stix_import") == 0
+        assert ranking.replaces("bundle text", "stix_import", ranking.record("partner text", "resilmesh"))
+        assert not ranking.replaces("partner text", "resilmesh", ranking.record("bundle text", "stix_import"))
+
+    @pytest.mark.parametrize("ranking", [CVE, ENTITY], ids=["cve", "entity"])
     def test_inside_a_group_reliability_then_id(self, ranking):
         grouped = {sid for group in ranking.groups for sid in group}
-        rest = [src for src in source_registry.all_sources() if src.canonical_id not in grouped]
+        rest = [
+            src
+            for src in source_registry.all_sources()
+            if src.canonical_id not in grouped and src.ranked_for_descriptions
+        ]
         expected = [src.canonical_id for src in sorted(rest, key=lambda s: (-s.reliability, s.canonical_id))]
         assert sorted((s.canonical_id for s in rest), key=ranking.ranks.get, reverse=True) == expected
         # Core Ideas (0.85) ranks above MISP Galaxy (0.8) among the curated sources.

@@ -95,7 +95,7 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
    # by the MISP → Neo4j sync, sets them). description follows the sync's source ranking
    # with description_source "resilmesh", below every registered feed: it fills a CVE without a
    # description and never replaces a feed's text (NVD's, the KEV's, ...); it can replace the text of
-   # another unregistered source whose id sorts after it, such as stix_import's. cwe, ref_tags,
+   # another source of an unregistered source's rank whose id sorts after it, such as stix_import's. cwe, ref_tags,
    # cpe_type and result_impacts are kept when omitted.
 
    # Example: create the bridge between a ResilMesh Vulnerability (keyed on cve_id) and the CVE.

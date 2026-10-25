@@ -214,6 +214,44 @@ def _statement_strings(path: Path):
             yield node.lineno, node.value
 
 
+class TestStixImport:
+    """2026-10-25: the objects of an external STIX bundle that name no EdgeGuard source are attributed
+    to ``stix_import``, now a registered source: ``ensure_sources`` creates its node, so the loader's
+    records get their ``SOURCED_FROM`` edge (until then the edge's MATCH found no node)."""
+
+    def test_stix_import_is_a_registered_source_with_a_node(self):
+        from run_pipeline import STIX_IMPORT_SOURCE_ID
+
+        src = source_registry.get_source(STIX_IMPORT_SOURCE_ID)
+        assert src is not None and src.canonical_id == STIX_IMPORT_SOURCE_ID == "stix_import"
+        assert src.source_type == "import" and src.cli_id is None and src.reliable_first_seen is False
+        client = _client()
+        assert client.ensure_sources() is True
+        merged = {p["source_id"]: p["source_uuid"] for q, p in client.driver.runs if "MERGE (s:Source" in q}
+        assert merged["stix_import"] == _source_uuid("stix_import")
+
+    def test_the_loader_writes_an_external_bundles_records_to_the_stix_import_node(self):
+        """End to end: ``EdgeGuardPipeline.load_stix21_to_neo4j`` with a real ``Neo4jClient`` whose
+        driver records each statement."""
+        from run_pipeline import EdgeGuardPipeline
+
+        pipeline = EdgeGuardPipeline()
+        pipeline.neo4j = _client()
+        bundle = {
+            "type": "bundle",
+            "objects": [
+                {"type": "indicator", "id": "indicator--1", "pattern": "[ipv4-addr:value = '203.0.113.21']"},
+                {"type": "malware", "id": "malware--1", "name": "ExampleRAT"},
+            ],
+        }
+        pipeline.load_stix21_to_neo4j(bundle)
+        upserts = [p for q, p in pipeline.neo4j.driver.runs if "MERGE (n)-[r:SOURCED_FROM]->(s)" in q]
+        assert len(upserts) == 2, "one SOURCED_FROM edge per imported object"
+        assert {p["source_id"] for p in upserts} == {"stix_import"}
+        assert {p["trg_uuid"] for p in upserts} == {_source_uuid("stix_import")}
+        assert "stix_import" in nc.SOURCES, "ensure_sources creates the node the edges MATCH"
+
+
 def test_no_writer_creates_a_source_node():
     """Only ``ensure_sources`` creates ``Source`` nodes; every other statement MATCHes them, so an id
     the registry does not know can never become a node."""

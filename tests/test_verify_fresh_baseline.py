@@ -1117,7 +1117,7 @@ class TestSourceNodesCanonical:
         assert [x["source_id"] for x in detail["alias_source_nodes"]] == aliases
         assert detail["unregistered_source_nodes"] == []
 
-    @pytest.mark.parametrize("unregistered", ["partner_feed", "stix_import"])
+    @pytest.mark.parametrize("unregistered", ["partner_feed", "resilmesh"])
     def test_an_unregistered_source_node_is_reported_not_failed(self, vfb, monkeypatch, unregistered):
         rep = _run(vfb, monkeypatch, override=self._with_source_rows([{"source_id": unregistered, "sourced_from": 3}]))
         c = _check(rep, "source_nodes_canonical")
