@@ -245,6 +245,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_MISP_MAX_PAGES` | `100` | Index pages per sync run |
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | `2.0` | Pause between event fetches |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Larger events are deferred to the end (`0` = off) |
+| `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` | `20000` | Larger events are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 instead of one `/events/view` (`0` = off; a whole-event fetch that keeps answering 5xx falls back to pages either way) |
 | `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` | `4096` | Largest attribute value the sync accepts |
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Pause before retrying events that failed |
 | `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | `500` | Parsed items merged per chunk |
@@ -449,10 +450,11 @@ When to set it, and when to lower `EDGEGUARD_EARLIEST_IOC_DATE` for historical c
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Row for `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000): larger MISP events are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 instead of one `/events/view`, which the hosted MISP answered with HTTP 500 for a 145k-attribute event on 2026-10-24.
 - 2026-10-23 — The host scripts that query Neo4j over HTTP have no remote default: with neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` set they use the Compose Neo4j at `http://127.0.0.1:7474` (they sent the credentials to a built-in remote address), `scripts/run_cypher_catalog_http.py` also reads `NEO4J_HTTP`, a value that is not a valid http(s) URL (scheme, host, port) stops them, and `scripts/neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`; rows for `NEO4J_HTTP_USER_AGENT` and `NEO4J_WSS_HOST`.
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY` and `SSL_VERIFY` fail closed: `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off` are recognised, any other value keeps verification on with a warning, and every reader uses the one rule in `src/tls_verify.py`; only ASCII whitespace around the value is ignored, and `scripts/preflight_baseline.sh` applies the rule in the C locale.
 - 2026-10-23 — Created from the README's settings tables, split by area, with the rows that were missing (`EDGEGUARD_API_KEY`, `EDGEGUARD_CORS_ORIGINS`, the MISP push thresholds and back-off, `EDGEGUARD_SYNC_INTERVAL_DAYS`, `EDGEGUARD_EARLIEST_IOC_DATE`, the paths and operator tools) and the behaviour stated as the code has it: `NEO4J_URI`, the API ports and the metrics bind fixed on Compose, the Fernet, JWT and Grafana names Compose maps, the memory variables on the `neo4j` service, `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` skipping longer values, `EDGEGUARD_SSL_VERIFY` turning verification off for any value other than `true`, `MITRE_FORCE_REFETCH` for scheduled runs, `EDGEGUARD_INCREMENTAL_LIMIT` applying to OTX and VirusTotal, and `EDGEGUARD_VERSION` on bare-metal metrics only.

@@ -80,7 +80,7 @@ The dependency of an item is one of:
 | Sector classification beyond keywords | none | — |
 
 - **MISP event partitioning.** `MISPWriter.push_items` groups attributes by source and run date, so a baseline writes one MISP event per source. The NVD and OTX events grow past 50,000 attributes, which needs raised PHP and MySQL limits on the MISP server ([MISP_TUNING.md](MISP_TUNING.md)) and makes the writer slow its batches as the event grows. Missing: partitioning large baseline events by date range.
-- **Bounded memory for large MISP events.** The MISP → Neo4j sync pages the event index and writes a large event to Neo4j in chunks of 5,000 attributes, but fetches each event whole (`fetch_event_details` in `src/run_misp_to_neo4j.py`) before chunking. `MISPWriter` pages its reads of existing attributes, but parses the full event MISP returns after each batch push, which it uses to confirm the batch. Missing: fetching the attributes of a large event page by page (`/attributes/restSearch`), and confirming a pushed batch without the full-event answer. Partitioning (above) also reduces the size of each event.
+- **Bounded memory for large MISP events.** The MISP → Neo4j sync fetches an event with more than `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` attributes (default 20,000) as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5,000 (`fetch_event_details_paged` in `src/run_misp_to_neo4j.py`), but joins the pages into one attribute list before it parses the event and writes it to Neo4j in chunks of 5,000 attributes, so memory still grows with the size of the event. `MISPWriter` pages its reads of existing attributes, but parses the full event MISP returns after each batch push, which it uses to confirm the batch. Missing: processing each fetched page before fetching the next (the incremental split into changed and context attributes and the event order that the report-scoped caps follow read the whole event today), and confirming a batch `MISPWriter` pushed without the full-event answer. Partitioning (above) also reduces the size of each event.
 - **Resumable NVD baseline.** The NVD baseline pushes its records to MISP after the last 120-day window, so an attempt that stops part-way has pushed nothing and its retry reads every window again; the checkpoint keeps the window the attempt stopped at. Missing: pushing each window once it is read, so that a retry resumes at the window where the attempt stopped.
 - **MISP push success-rate gauge.** A collector run that pushes to MISP logs a `COLLECTOR_SUMMARY` line with its push counts and fails when its MISP push success rate is below `EDGEGUARD_MISP_MIN_SUCCESS_RATE` (default 0.95), and `edgeguard_misp_push_permanent_failure_total{source}` counts the batches lost after the retries. Missing: the per-source success-rate gauge and its Grafana panel, the parts of the issue not yet built.
 - **ThreatFox history.** The ThreatFox API returns at most the last 7 days, so `ThreatFoxCollector.collect` clamps `days` to 7 and a baseline holds the ThreatFox indicators of the last 7 days only. Missing: an import of the [ThreatFox export](https://threatfox.abuse.ch/export/) for older indicators, with its window, de-duplication and TLP rules, the MISP push and the DAG wiring.
@@ -211,7 +211,6 @@ Defects found in the code; each is fixed in its own change.
 - `src/metrics.py` (`PipelineMetrics`): nothing records a run, so `edgeguard stats` shows no pipeline summary and `src/health_check.py` always reports the last pipeline run as "Never".
 - `src/neo4j_client.py` (`scrape_list_dedup_sizes`): no task calls it, so the histogram `edgeguard_neo4j_list_dedup_size` holds no data.
 - `src/opentelemetry_config.py` (`init_tracing`): nothing calls it, so `EDGEGUARD_DEV_MODE` and the `OTEL_EXPORTER_OTLP_*` settings have no effect.
-- `src/run_misp_to_neo4j.py` (`_process_single_event`): the docstring and a comment say a large event's attributes are fetched page by page from `/attributes/restSearch`; the event is fetched whole.
 - `.env.example`: describes `NATS_URL` as real-time alert publishing; only `edgeguard doctor` reads it.
 - `.envrc`: the header comment says direnv creates and activates `.venv`, while its `layout python` line creates `.direnv/python-3.x`.
 
@@ -223,10 +222,11 @@ Defects found in the code; each is fixed in its own change.
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Known defects: the entry for the `_process_single_event` docstring is removed, since events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20,000) attributes are now fetched page by page from `/attributes/restSearch` as it says. Bounded memory for large MISP events: rewritten, as the pages are joined into one attribute list before the Neo4j chunks; still missing are processing each page before fetching the next and confirming a pushed `MISPWriter` batch without the full-event answer.
 - 2026-10-23 — Known defects: the entry for the host scripts that sent the Neo4j credentials to a built-in remote address is removed; they read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` or `NEO4J_HTTP` is set ([CONFIGURATION.md](CONFIGURATION.md#neo4j-connection-and-memory)).
 - 2026-10-23 — Removed the known defect of `scripts/clear_neo4j.py` (deleted nodes by label, partner `Vulnerability` and `CVE` nodes included, without an audit line): the script deletes the nodes EdgeGuard created through the wipe of the fresh baseline and records every delete.
 - 2026-10-23 — Removed the `clear_lock_files` defect from Known defects: `edgeguard heal` removes the MISP writer's event-creation lock only when no process holds it and removes no other lock file.
