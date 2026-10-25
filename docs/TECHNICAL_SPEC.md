@@ -1018,7 +1018,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
-- 2026-10-25 — Campaign `first_seen` / `last_seen`: the seen dates of its indicators (a source's claim, else its latest report), not the import time for indicators without a claim.
+- 2026-10-25 — Campaign `first_seen` / `last_seen` and the alert enrichment's `first_seen` / `last_updated`: the seen dates of the indicators (a source's claim, else its latest report; the first seen never after the first import), not EdgeGuard's import and update times for indicators without a claim.
 - 2026-10-23 — The GraphQL `/health` behaviour and body and the REST routes' connection check are described here; the page pointed to a README table, which this page replaces; the note on the NATS response points to ROADMAP.md, which lists the planned work (it pointed to a to-do list in RESILMESH_INTEROPERABILITY.md § 8.6).
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — `INDICATES` from an Indicator to a `CVE` named in the same OTX pulse (`otx_pulse`, 0.6); the alert enrichment reads it, and each CVE entry names its links (`evidence`).
