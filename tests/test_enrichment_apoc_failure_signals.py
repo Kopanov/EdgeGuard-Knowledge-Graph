@@ -21,10 +21,6 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-for _mod in ("enrichment_jobs", "neo4j_client"):
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
 import enrichment_jobs  # noqa: E402
 from neo4j_client import APOC_ITERATE_YIELD, apoc_iterate_failures  # noqa: E402
 

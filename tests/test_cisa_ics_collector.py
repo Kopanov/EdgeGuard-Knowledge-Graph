@@ -25,6 +25,7 @@ from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
+from stub_cleanup import dag_module_import
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
@@ -812,10 +813,8 @@ def _import_dag_module():
 
 
 def test_dag_wrapper_flag_off_returns_skipped_without_running_collector(monkeypatch):
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        pytest.skip("Airflow not installed in this test env")
     import config
 
     monkeypatch.setattr(config, "ENABLE_CISA_ICS", False)
@@ -827,10 +826,8 @@ def test_dag_wrapper_flag_off_returns_skipped_without_running_collector(monkeypa
 
 
 def test_dag_wrapper_flag_on_goes_through_run_collector_with_metrics(monkeypatch):
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        pytest.skip("Airflow not installed in this test env")
     import config
 
     monkeypatch.setattr(config, "ENABLE_CISA_ICS", True)

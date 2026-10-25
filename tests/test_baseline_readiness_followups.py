@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+from stub_cleanup import dag_module_import
 
 _DAGS = os.path.join(os.path.dirname(__file__), "..", "dags")
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
@@ -27,10 +28,8 @@ def _dag():
             del sys.modules[key]
     import importlib
 
-    try:
+    with dag_module_import():
         return importlib.import_module("edgeguard_pipeline")
-    except Exception:
-        pytest.skip("Airflow not installed in this test env")
 
 
 class _TaskSdkVariable:

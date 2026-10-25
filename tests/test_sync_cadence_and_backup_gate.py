@@ -48,9 +48,9 @@ import sys
 import time as _time
 from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
+from stub_cleanup import dag_module_import
 
 sys.path.insert(0, "src")
 sys.path.insert(0, "dags")
@@ -67,28 +67,12 @@ def _read(path: str) -> str:
 
 def _load_dag_module():
     """Load the DAG file as an isolated module (same pattern as
-    test_pr_f5_dag_conf_validation.py). Skips when Airflow isn't available.
-
-    ``tests/test_graphql_api.py`` registers MagicMock placeholders for ``airflow.*`` and
-    ``opentelemetry.*`` when it is imported first; those are dropped (only then) so the real Airflow
-    is imported. In reverse file order no other file has dropped them before this one runs."""
-    if isinstance(sys.modules.get("airflow"), MagicMock):
-        for key in list(sys.modules):
-            # Airflow itself, not sibling modules such as ``airflow_client`` that other test modules
-            # patch by object identity.
-            if key in ("airflow", "opentelemetry") or key.startswith(("airflow.", "opentelemetry.")):
-                del sys.modules[key]
+    test_pr_f5_dag_conf_validation.py). Skips only where Airflow is not installed."""
     spec = importlib.util.spec_from_file_location("_dag_module_cadence_test", DAG_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    try:
+    with dag_module_import():
         spec.loader.exec_module(module)
-    except Exception as e:  # pragma: no cover - environment-dependent
-        # Skip only where Airflow is not installed: with Airflow present an import error is a
-        # failure, so a stub left by another test cannot turn every DAG test here into a skip.
-        if importlib.util.find_spec("airflow") is not None:
-            raise
-        pytest.skip(f"DAG module not importable in this environment: {e}")
     return module
 
 

@@ -12,11 +12,6 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-if "neo4j_client" in sys.modules:
-    del sys.modules["neo4j_client"]
-if "run_misp_to_neo4j" in sys.modules:
-    del sys.modules["run_misp_to_neo4j"]
-
 from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
 
 

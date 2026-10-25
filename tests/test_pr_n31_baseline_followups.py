@@ -46,6 +46,8 @@ import os
 import sys
 from pathlib import Path
 
+from stub_cleanup import drop_modules_for_test
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
 DAGS = REPO_ROOT / "dags"
@@ -626,16 +628,15 @@ class TestPRN31BuildCampaignNodesHappyPath:
         client.driver.session.return_value = sess
         return client, sess, captured_queries
 
-    def _import_fresh_enrichment_jobs(self):
-        if "enrichment_jobs" in sys.modules:
-            del sys.modules["enrichment_jobs"]
+    def _import_fresh_enrichment_jobs(self, monkeypatch):
+        drop_modules_for_test(monkeypatch, "enrichment_jobs")
         return importlib.import_module("enrichment_jobs")
 
-    def test_happy_path_returns_populated_results(self):
+    def test_happy_path_returns_populated_results(self, monkeypatch):
         """The function must return a non-empty `results` dict reflecting
         what was actually done. Pre-N21 a swallower silently returned
         {} on errors; this test pins the happy-path counterexample."""
-        ej = self._import_fresh_enrichment_jobs()
+        ej = self._import_fresh_enrichment_jobs(monkeypatch)
         client, sess, _captured = self._build_fake_session()
 
         # Speed up time.sleep(3) calls between steps
@@ -653,7 +654,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
             f"results dict must include campaign accounting; got keys: {sorted(results.keys())}"
         )
 
-    def test_happy_path_issues_all_13_queries(self):
+    def test_happy_path_issues_all_13_queries(self, monkeypatch):
         """The function must issue all 13 expected session.run() calls (2026-10: the database's
         clock, Step 2b, the malware membership prune, and Step 2c, which settles RUNS; 2026-10-16:
         Step 1b, which deletes the campaigns without evidence).
@@ -661,7 +662,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
         pattern PR-N21 fixed); more means a step duplicated or a new
         step was added without updating this pin (intentional break-
         the-build for review)."""
-        ej = self._import_fresh_enrichment_jobs()
+        ej = self._import_fresh_enrichment_jobs(monkeypatch)
         client, sess, captured = self._build_fake_session()
 
         original_sleep = ej.time.sleep
@@ -677,11 +678,11 @@ class TestPRN31BuildCampaignNodesHappyPath:
             f"If you added a step, update this pin AND the fake-session fixture."
         )
 
-    def test_happy_path_query_order(self):
+    def test_happy_path_query_order(self, monkeypatch):
         """The 13 queries must fire in a specific order (pre-fetch FIRST,
         Campaign create SECOND, etc). A reorder could break the
         backfill-after-create invariant the post-PR-#33 audit caught."""
-        ej = self._import_fresh_enrichment_jobs()
+        ej = self._import_fresh_enrichment_jobs(monkeypatch)
         client, sess, captured = self._build_fake_session()
 
         original_sleep = ej.time.sleep
@@ -719,13 +720,13 @@ class TestPRN31BuildCampaignNodesHappyPath:
                 f"query #{i + 1} must contain '{substr}'; got query starting with: {captured[i][:200]}..."
             )
 
-    def test_happy_path_passes_campaign_uuids_dict(self):
+    def test_happy_path_passes_campaign_uuids_dict(self, monkeypatch):
         """The post-PR-#33 audit (round 21) caught that the create_cypher
         MERGE relies on a precomputed `$campaign_uuids` dict to set
         c.uuid deterministically. The fake session must verify this
         param is passed; otherwise a refactor could regress the
         cross-environment traceability contract silently."""
-        ej = self._import_fresh_enrichment_jobs()
+        ej = self._import_fresh_enrichment_jobs(monkeypatch)
         client, sess, _captured = self._build_fake_session(actor_name="APT-Trace")
 
         original_sleep = ej.time.sleep
@@ -754,8 +755,8 @@ class TestPRN31BuildCampaignNodesHappyPath:
             "from compute_node_uuid('Campaign', {'name': '<actor> Campaign'})"
         )
 
-    def _run_capturing(self, deleted=None):
-        ej = self._import_fresh_enrichment_jobs()
+    def _run_capturing(self, monkeypatch, deleted=None):
+        ej = self._import_fresh_enrichment_jobs(monkeypatch)
         client, sess, captured = self._build_fake_session(deleted=deleted)
         original_sleep = ej.time.sleep
         ej.time.sleep = lambda *_a: None
@@ -765,7 +766,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
             ej.time.sleep = original_sleep
         return ej, sess, captured, results
 
-    def test_campaigns_without_evidence_are_deleted_counted_and_logged(self, caplog):
+    def test_campaigns_without_evidence_are_deleted_counted_and_logged(self, caplog, monkeypatch):
         """2026-10-16: Step 1b deletes the campaigns EdgeGuard built whose actor has neither an
         ATTRIBUTED_TO nor a USES_MALWARE link left (or no actor of that name remains), with all their
         links, in the same run; the run reports how many and names them."""
@@ -773,7 +774,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
 
         deleted = {"deleted": 2, "runs_removed": 2, "members_removed": 7, "names": ["snake campaign", "unc1 campaign"]}
         with caplog.at_level(logging.INFO, logger="enrichment_jobs"):
-            _ej, _sess, captured, results = self._run_capturing(deleted=deleted)
+            _ej, _sess, captured, results = self._run_capturing(monkeypatch, deleted=deleted)
         assert results["campaigns_deleted"] == 2
         assert (
             "[CAMPAIGN] deleted 2 campaigns whose actor has no ATTRIBUTED_TO or USES_MALWARE link left" in caplog.text
@@ -785,17 +786,17 @@ class TestPRN31BuildCampaignNodesHappyPath:
         # Ordered by name before the sample is taken, so the logged names do not depend on row order.
         assert statement.index("ORDER BY name") < statement.index("collect(name)[0..20]")
 
-    def test_no_deletion_is_reported_as_zero(self):
-        _ej, _sess, _captured, results = self._run_capturing()
+    def test_no_deletion_is_reported_as_zero(self, monkeypatch):
+        _ej, _sess, _captured, results = self._run_capturing(monkeypatch)
         assert results["campaigns_deleted"] == 0
 
-    def test_step5_counts_the_campaigns_stamped_since_the_run_started(self):
+    def test_step5_counts_the_campaigns_stamped_since_the_run_started(self, monkeypatch):
         """2026-10-16: Step 5 counts the active campaigns whose ``last_updated`` is at or after the run's
         start, read from the database's clock that Step 1 stamps with. It compared
         ``duration.between(c.last_updated, datetime()).minutes`` with 5, and ``.minutes`` is a component
         of the duration, not its length (a campaign stamped two days earlier has 0 minutes). The
         statement's semantics on Neo4j: ``tests/test_explainability_neo4j.py``."""
-        _ej, sess, captured, _results = self._run_capturing()
+        _ej, sess, captured, _results = self._run_capturing(monkeypatch)
         step5 = sess.run.call_args_list[-1]
         assert "MATCH (c:Campaign)" in captured[-1] and "count(c)" in captured[-1]
         assert "duration.between" not in captured[-1], "a duration component is not an elapsed time"
@@ -803,13 +804,13 @@ class TestPRN31BuildCampaignNodesHappyPath:
         assert step5.kwargs.get("run_start_at") == "2026-10-15T12:00:00Z", "the database's clock, read at the start"
         assert captured[-1] is _ej._CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, "the statement the Neo4j case runs"
 
-    def test_every_step_reads_the_same_evidence_definition(self):
+    def test_every_step_reads_the_same_evidence_definition(self, monkeypatch):
         """2026-10-16: an actor qualifies, a campaign survives, a malware is a member and an indicator
         joins by one definition (``campaign_evidence``): ATTRIBUTED_TO (malware → actor) or
         USES_MALWARE (actor → malware). Before, every step read ATTRIBUTED_TO only."""
         import campaign_evidence as ce
 
-        _ej, _sess, captured, _results = self._run_capturing()
+        _ej, _sess, captured, _results = self._run_capturing(monkeypatch)
         prefetch, create, _backfill, delete, link_malware, prune_malware, settle_runs, link_indicators = captured[1:9]
         assert ce.has_evidence("a") in prefetch
         assert ce.has_evidence("a") in create and ce.member_malware("a") in create
@@ -824,10 +825,10 @@ class TestPRN31BuildCampaignNodesHappyPath:
         for statement in (create, link_malware, settle_runs, link_indicators):
             assert "evidence_types = apoc.coll.sort(apoc.coll.toSet(" in statement
 
-    def test_malware_membership_prune_judges_the_evidence_not_the_clock(self):
+    def test_malware_membership_prune_judges_the_evidence_not_the_clock(self, monkeypatch):
         """2026-10-16: Step 2b removes a malware's membership when the campaign's actor has no link
         to it, the definition Step 2 links by, whatever the time Step 2 last touched the link."""
-        _ej, sess, captured, _results = self._run_capturing()
+        _ej, sess, captured, _results = self._run_capturing(monkeypatch)
         prune_call = sess.run.call_args_list[6]
         assert "MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign)" in captured[6]
         assert "run_start_at" not in prune_call.kwargs and "$run_start_at" not in captured[6]

@@ -42,6 +42,8 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from stub_cleanup import drop_modules_for_test  # noqa: E402
+
 os.environ.setdefault("NEO4J_PASSWORD", "test-pw-pr-n8")
 os.environ.setdefault("MISP_API_KEY", "test-key-pr-n8")
 
@@ -173,13 +175,12 @@ class TestFix3NarrowExceptionCatch:
         # Must have a bare `raise` — using a sentinel that's less likely to false-match
         assert "            raise\n" in body, "Fix #3: must have a bare `raise` to propagate transients"
 
-    def test_behaviour_transient_exception_reraised(self):
+    def test_behaviour_transient_exception_reraised(self, monkeypatch):
         """Given a mocked client.run that raises ServiceUnavailable,
         _safe_run_batched must re-raise (not silently count+continue)."""
         import importlib
 
-        if "build_relationships" in sys.modules:
-            del sys.modules["build_relationships"]
+        drop_modules_for_test(monkeypatch, "build_relationships")
         build_relationships = importlib.import_module("build_relationships")
 
         try:
@@ -208,13 +209,12 @@ class TestFix3NarrowExceptionCatch:
                 "k",
             )
 
-    def test_behaviour_non_transient_caught_and_continued(self):
+    def test_behaviour_non_transient_caught_and_continued(self, monkeypatch):
         """Non-transient ``ValueError`` (stand-in for ClientError/
         SyntaxError) must be caught+logged+returns False, NOT raised."""
         import importlib
 
-        if "build_relationships" in sys.modules:
-            del sys.modules["build_relationships"]
+        drop_modules_for_test(monkeypatch, "build_relationships")
         build_relationships = importlib.import_module("build_relationships")
 
         client = MagicMock()

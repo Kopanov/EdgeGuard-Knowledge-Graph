@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from stub_cleanup import dag_module_import
 
 from collector_failure_alerts import is_transient_external_error
 
@@ -175,10 +176,8 @@ def _import_dag_module():
 
 def test_upstream_outage_leaves_the_airflow_task_green_and_skipped(feed) -> None:
     name, collector, _calls, box, _breaker, _mod = feed
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        pytest.skip("Airflow not installed in this test env")
     box["answer"] = Resp(503, "down")
     with (
         patch.object(ep, "ensure_metrics_server", lambda: None),

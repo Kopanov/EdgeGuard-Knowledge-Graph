@@ -7,13 +7,9 @@ import sys
 
 import pytest
 
-# test_graphql_api.py registers a MagicMock as sys.modules["neo4j_client"] (import order).
-# Drop it so this module always binds to the real neo4j_client guards.
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
-if "neo4j_client" in sys.modules:
-    del sys.modules["neo4j_client"]
 
 from neo4j_client import (
     _ALLOWED_NODE_LABELS,
