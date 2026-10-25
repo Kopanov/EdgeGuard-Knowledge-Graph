@@ -235,8 +235,9 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 ### MISP Sync Event Accounting
 
 These gauges enforce the invariant `events_index_total == events_processed + events_failed`
-for every sync run — the `EdgeGuardSyncCoverageGap` alert fires when it breaks. Every run sets
-all four, on every exit path.
+for every sync run — the `EdgeGuardSyncCoverageGap` alert fires when it breaks. Every run that
+passes the service check and connects to MISP and Neo4j sets all four, on every exit path after
+that; a run that stops earlier fails and keeps the previous values.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -587,7 +588,7 @@ What the sync-integrity, build_relationships and MISP-fallback alerts catch:
 - **`MispEventAttributesTruncated`** — surfaces events the CLI pipeline's `MISPCollector` sliced to 500 attributes.
 - **`MispFetchFallbackActive` / `MispFetchFallbackHardError`** — see § "MISP fetch fallback" in [`docs/RUNBOOK.md`](RUNBOOK.md) § 8 for triage.
 
-The invariant the `EdgeGuardSyncCoverageGap` alert guards and the count `EdgeGuardSyncPagedFetchIncomplete` reads are set by `record_sync_event_accounting` (`src/metrics_server.py`), which `MISPToNeo4jSync.run` calls on every exit path (see *MISP Sync Event Accounting* above).
+The invariant the `EdgeGuardSyncCoverageGap` alert guards and the count `EdgeGuardSyncPagedFetchIncomplete` reads are set by `record_sync_event_accounting` (`src/metrics_server.py`), which `MISPToNeo4jSync.run` calls on every exit path once it has connected (see *MISP Sync Event Accounting* above).
 
 ### Alertmanager notifications
 
@@ -769,6 +770,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Sync accounting gauges: set by every run that passes the service check and connects; a run that stops earlier keeps the previous values.
 - 2026-10-25 — Gauge `edgeguard_sync_events_paged_incomplete` and warning `EdgeGuardSyncPagedFetchIncomplete` for events fetched in pages with fewer attribute rows than the MISP index lists (40 alert rules); gauge `edgeguard_neo4j_sync_task_limit_seconds`; a change that replaces `prometheus/alerts.yml` (a pull, a checkout) needs a restart of the prometheus container, because the file is mounted on its own and `/-/reload` reloads the previous rules.
 - 2026-10-25 — "Source label values": the two namings of the `source` label (collector and job metrics: the CLI name; writer metrics: the canonical id) and the test that keeps every collector and staleness-rule name a registered source; `edgeguard_merge_reject_placeholder_total` resolves a variant to the canonical id like the other writer metrics.
 - 2026-10-25 — `EdgeGuardNeo4jSyncStale`: the 8-hour limit of the three `run_neo4j_sync` attempts is the default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), and the threshold follows the configured limit through the gauge `edgeguard_neo4j_sync_task_limit_seconds`, which each attempt sets when it starts.

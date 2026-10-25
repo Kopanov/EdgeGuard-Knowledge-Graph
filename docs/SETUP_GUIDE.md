@@ -243,7 +243,7 @@ On the venv path, **`--update`** pulls and re-installs the package; Airflow runs
 
 On a Compose stack, **`--update`** writes the pulled commit into **`.env`** as **`EDGEGUARD_GIT_SHA`** (**`scripts/record_deployed_commit.sh`**) before it rebuilds; both `/health` responses report it as `git_sha`. Run the update only when no **`edgeguard_baseline`** run is in progress: it recreates the containers, which kills the running tasks, and if the rebuild fails after the pull, the old container keeps running and re-parses the new **`./dags`**.
 
-Without git (tarball): replace files manually, record the release's commit with **`scripts/record_deployed_commit.sh <commit>`** (when it is unknown, delete the `EDGEGUARD_GIT_SHA=` line of `.env`, so `/health` reports `null` instead of an earlier commit), then **`docker compose build && docker compose up -d --force-recreate`**, which rebuilds every image (the `api` and `graphql` images contain `src/`) and recreates every container (or **`./install.sh --python`**).
+Without git (tarball): replace files manually, record the release's commit with **`scripts/record_deployed_commit.sh <commit>`** (when it is unknown, delete the `EDGEGUARD_GIT_SHA=` line of `.env`, so `/health` reports `null` instead of an earlier commit), then **`docker compose build && docker compose up -d --force-recreate`**, which rebuilds every image (the `api` and `graphql` images contain `src/`) and recreates every container of `docker-compose.yml` (or **`./install.sh --python`**). With the monitoring stack running, restart Prometheus after an update that changes **`prometheus/alerts.yml`**: **`docker compose -f docker-compose.yml -f docker-compose.monitoring.yml restart prometheus`**; the file is mounted on its own, so neither the recreate nor `/-/reload` loads the new rules ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md)).
 
 ---
 
@@ -305,6 +305,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Updates: restart Prometheus after an update that changes `prometheus/alerts.yml` (the file is mounted on its own, so a recreate of `docker-compose.yml` or `/-/reload` keeps the old rules).
 - 2026-10-25 — MISP event names: the `-part2`, `-part3`, ... events past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (OTX events are not split).
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY`: only `false`, `0`, `no` or `off` turns TLS verification off; any other value keeps it on with a warning (minimum-variables table and troubleshooting).
 - 2026-10-23 — The documentation map is docs/README.md, with links to CONFIGURATION.md and CLI.md; § 3.6 names the Airflow API password a host shell needs, which the README carried, and the second cause of the "Could not query DAG list" warning (no EdgeGuard DAG registered yet).

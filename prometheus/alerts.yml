@@ -521,8 +521,8 @@ groups:
         # processed and the run stays green, because MISP itself can leave rows out or the event can
         # change after the index was read. An incremental sync does not read the missed rows again, so
         # this warning is the only signal besides the [PAGED-FETCH-INCOMPLETE] log lines. The gauge is
-        # set at the end of every run (src/run_misp_to_neo4j.py, record_sync_event_accounting), so the
-        # alert clears with the next sync that fetches every event completely.
+        # set by every sync run that connects (src/run_misp_to_neo4j.py, record_sync_event_accounting),
+        # so the next one clears the alert; the missed rows stay out of Neo4j until a full sync.
         expr: edgeguard_sync_events_paged_incomplete > 0
         for: 10m
         labels:

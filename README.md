@@ -326,13 +326,15 @@ The Graph Explorer is served by hand ([Graph Explorer](#graph-explorer)), and th
 ./install.sh --update
 ```
 
-It pulls the branch (fast-forward only), records the commit in `.env` as `EDGEGUARD_GIT_SHA` with `scripts/record_deployed_commit.sh`, rebuilds the images and starts the stack; both `/health` responses report the commit as `git_sha`. Run it only while no baseline runs, because recreating the `airflow` container stops its tasks. The manual equivalent, which rebuilds every image and recreates every container:
+It pulls the branch (fast-forward only), records the commit in `.env` as `EDGEGUARD_GIT_SHA` with `scripts/record_deployed_commit.sh`, rebuilds the images and starts the stack; both `/health` responses report the commit as `git_sha`. Run it only while no baseline runs, because recreating the `airflow` container stops its tasks. The manual equivalent, which rebuilds every image and recreates every container of `docker-compose.yml`:
 
 ```bash
 git pull --ff-only
 scripts/record_deployed_commit.sh
 docker compose build && docker compose up -d --force-recreate
 ```
+
+With the monitoring stack running, restart Prometheus after an update that changes `prometheus/alerts.yml`: `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml restart prometheus`. The file is mounted on its own, so neither the recreate above nor `/-/reload` loads the new rules ([docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md)).
 
 Rebuilding only the Airflow image leaves REST, GraphQL and STIX on the old code, because the `api` and `graphql` images contain `src/`.
 

@@ -52,13 +52,13 @@ EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path=dag
 
 **Pass criteria:** exit code 0, all 12 checks green. Without
 `--launch-path=dag` the script assumes the in-process CLI path, warns (which
-fails under STRICT=1) and skips check [5]. Specifically:
+fails under STRICT=1) and checks only for running runs in check [5]. Specifically:
 
 * `[1] required env vars present` — NEO4J_PASSWORD, MISP_API_KEY, MISP_URL
 * `[2] Neo4j reachable + APOC + indexes` — through `docker compose exec neo4j cypher-shell` when the Compose neo4j service runs, else `cypher-shell -a $NEO4J_URL` (default bolt://localhost:7687; the script reads NEO4J_URL, not NEO4J_URI, and logs in as user `neo4j`)
 * `[3] MISP API reachable + auth valid`
 * `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; `--launch-path=cli` refers only to the in-process `run_pipeline.py --baseline` path)
-* `[5] IF DAG path: 5 scheduled DAGs PAUSED, none with a running run` (an unpaused DAG is a warning, a failure under STRICT=1: the baseline lock makes scheduled tasks skip when they start, and pausing stops new tasks and retries. A running run of one of the 5 DAGs is a failure: pausing does not stop a task that is already running, and a `run_neo4j_sync` attempt can last up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Running runs that cannot be queried are a warning)
+* `[5] DAG path: 5 scheduled DAGs PAUSED, none with a running run; CLI path: none with a running run` (an unpaused DAG is a warning, a failure under STRICT=1: the baseline lock makes scheduled tasks skip when they start, and pausing stops new tasks and retries. A running run of one of the 5 DAGs is a failure: pausing does not stop a task that is already running, and a `run_neo4j_sync` attempt can last up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Running runs that cannot be queried are a warning)
 * `[6] Airflow worker RAM ≥ 4 GB`
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
 * `[7b] alertmanager.yml has no placeholder / un-rendered ${...} pager key`
@@ -277,6 +277,7 @@ clearing:
    scripts/record_deployed_commit.sh      # writes EDGEGUARD_GIT_SHA=<commit> into .env
    docker compose build && docker compose up -d --force-recreate
    ```
+   With the monitoring stack running, restart Prometheus after an update that changes `prometheus/alerts.yml`: `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml restart prometheus`. The file is mounted on its own, so neither the recreate above nor `/-/reload` loads the new rules ([docs/PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md)).
    The `api` and `graphql` images contain `src/` (the `Dockerfile` copies it at build
    time), so rebuilding only the Airflow image (built on `apache/airflow:3.3.2-python3.12`)
    would leave REST, GraphQL and STIX serving the old code. `EDGEGUARD_GIT_SHA` stays in
@@ -485,8 +486,10 @@ retries, and step 1 marks the runs still listed as running failed.
   neither processed nor counted as failed (`events_index_total` ≠
   `events_processed` + `events_failed`). It counts events, not
   attributes: an event fetched in pages that brings fewer attribute rows
-  than the MISP index lists counts as processed and raises no alert;
-  grep the `full_neo4j_sync` log for `[PAGED-FETCH-INCOMPLETE]`
+  than the MISP index lists counts as processed and raises no coverage-gap
+  alert; the warning `EdgeGuardSyncPagedFetchIncomplete`
+  (`edgeguard_sync_events_paged_incomplete`) reports it; grep the
+  `full_neo4j_sync` log for `[PAGED-FETCH-INCOMPLETE]`
   ([RUNBOOK.md](RUNBOOK.md)).
 
 ## After the run
@@ -594,6 +597,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — During the run: `EdgeGuardSyncPagedFetchIncomplete` reports an event fetched in pages with fewer rows than the MISP index lists; step 0: restart Prometheus after an update that changes `prometheus/alerts.yml` (the file is mounted on its own).
 - 2026-10-25 — Check `[5]` and the launch decision: pausing the scheduled DAGs stops new tasks and retries only, and a task that is already running keeps running (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); check `[5]` fails while one of the 5 DAGs has a running run, and step 1 waits until `airflow dags list-runs <dag> --state running -o json` prints `[]` for each.
 - 2026-10-25 — Acceptance check `source_nodes_canonical`: one `Source` node per registered source, none keyed by an alias.
 - 2026-10-25 — Check `[12]`: `THREATFOX_API_KEY` is the key of ThreatFox, URLhaus and MalwareBazaar, and a source named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES` that cannot deliver fails the check; step 6 states that MalwareBazaar needs the key; `EdgeGuardSyncCoverageGap` compares event counts (the page said attribute counts), and an event fetched in pages with fewer attribute rows than the MISP index lists is found with `[PAGED-FETCH-INCOMPLETE]`.

@@ -3657,9 +3657,10 @@ class MISPWriter:
             if split_above <= 0:
                 push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
                 continue
-            if not walk_complete and not checked_first:
+            if not walk_complete and not cross_event_complete.get(source_tag):
                 # A later part the walk could not look up may hold some of these attributes, and without a
-                # complete cross-event listing nothing else names them: nothing of the group is written.
+                # complete cross-event listing (the writer's own, or the caller's ``known_source_keys``)
+                # nothing else names them: nothing of the group is written.
                 logger.error(
                     "MISP push %s (%s): the lookup of a later part failed and there is no complete cross-event "
                     "listing — %d attribute(s) counted as failed, nothing written",

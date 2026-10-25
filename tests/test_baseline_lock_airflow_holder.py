@@ -268,7 +268,7 @@ exit 2
         "edgeguard_neo4j_sync",
     )
 
-    def _run_check(self, tmp_path):
+    def _run_check(self, tmp_path, launch_path="dag"):
         import subprocess
 
         script = (_ROOT / "scripts" / "preflight_baseline.sh").read_text()
@@ -278,7 +278,7 @@ exit 2
         docker.write_text(self._DOCKER)
         docker.chmod(0o755)
         harness = (
-            "set -uo pipefail\nLAUNCH_PATH=dag\n"
+            f"set -uo pipefail\nLAUNCH_PATH={launch_path}\n"
             'pass() { echo "PASS|$*"; }\nwarn() { echo "WARN|$*"; }\nfail() { echo "FAIL|$*"; }\nhdr() { :; }\n' + block
         )
         env = {"PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"}
@@ -307,6 +307,16 @@ exit 2
         assert "PASS|DAG edgeguard_daily has no running run" in out
         for dag in self._DAGS:
             assert f"compose exec -T airflow airflow dags list-runs {dag} --state running -o json" in calls
+
+    def test_the_cli_launch_path_checks_running_runs_too(self, tmp_path):
+        # The in-process baseline wipes as well, and a task already running keeps writing whatever the path.
+        out, calls = self._run_check(tmp_path, launch_path="cli")
+        assert not [c for c in calls if " details " in f" {c} "], "the CLI path does not read the pause state"
+        for dag in self._DAGS:
+            assert f"compose exec -T airflow airflow dags list-runs {dag} --state running -o json" in calls
+        (failure,) = [line for line in out if line.startswith("FAIL|")]
+        assert "edgeguard_neo4j_sync has 1 running run(s)" in failure
+        assert "PASS|DAG edgeguard_daily has no running run" in out
 
     def test_the_docs_no_longer_say_pausing_stops_a_running_write(self):
         runbook = (_ROOT / "docs" / "RUNBOOK.md").read_text()

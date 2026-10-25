@@ -178,7 +178,7 @@ Run them from the repository root with the settings exported.
 | `scripts/debug_zone_check.py` | Standalone check of the sector logic |
 | `scripts/neo4j_wss_bridge.py` | Local Bolt bridge to a WebSocket-only Neo4j |
 
-- **`preflight_baseline.sh`**: `--launch-path=dag` also checks the pause state of the five scheduled DAGs; `--launch-path=cli` is for the in-process `python src/run_pipeline.py --baseline` and has no DAG pause-state check. `--strict` (or `EDGEGUARD_PREFLIGHT_STRICT=1`) turns every warning into a failure. Exit 0 means ready.
+- **`preflight_baseline.sh`**: `--launch-path=dag` also checks the pause state of the five scheduled DAGs; `--launch-path=cli` is for the in-process `python src/run_pipeline.py --baseline` and has no DAG pause-state check. Both fail while one of the five has a running run. `--strict` (or `EDGEGUARD_PREFLIGHT_STRICT=1`) turns every warning into a failure. Exit 0 means ready.
   - Checks `[10]` to `[12]` use the repository's `.venv` (`./install.sh --python` creates it). Without it, check `[11]` reports `full_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` as missing `retries=0`, check `[10]` is skipped and check `[12]` runs with the system `python3`.
   - With the shipped `prometheus/alertmanager.yml`, check `[7b]` fails until the PagerDuty `service_key` is rendered or that receiver is removed ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#alertmanager-notifications)).
 - **`verify_fresh_baseline.py`**, **`run_cypher_catalog_http.py`** and **`build_canonical_threat_actors.py --export-graph-actors`** read Neo4j through its HTTP API at `NEO4J_HTTP_URL`, then `NEO4J_HTTP`, with `NEO4J_USER`, `NEO4J_PASSWORD` and `NEO4J_DATABASE`. With neither set they read the Compose Neo4j at `http://127.0.0.1:7474` and send the credentials nowhere else; for another instance set `NEO4J_HTTP_URL` ([CONFIGURATION.md](CONFIGURATION.md#neo4j-connection-and-memory)). A set value that is not an `http://` or `https://` URL with a host, a numeric port (when it names one) and no space stops them with exit code 2 before any request.
@@ -224,6 +224,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `preflight_baseline.sh`: both launch paths fail while a scheduled DAG has a running run.
 - 2026-10-25 — `run_pipeline.py`: the STIX flow names an event's source from its `source:*` tag, else its name, and skips a curated package's event.
 - 2026-10-23 — `verify_fresh_baseline.py`, `run_cypher_catalog_http.py` and the graph export of `build_canonical_threat_actors.py` read the Compose Neo4j at `http://127.0.0.1:7474` when neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` is set (they used a built-in remote address) and stop with exit code 2 on an address that is not a valid http(s) URL; `run_cypher_catalog_http.py` also reads `NEO4J_HTTP` and exits 2 without writing its results when Neo4j does not answer a first `RETURN 1`; `neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`.
 - 2026-10-23 — `scripts/clear_neo4j.py` deletes the nodes EdgeGuard created through the wipe of the fresh baseline, `--label` narrows that scope, `--full-wipe` asks for a typed confirmation, also with `--force`, and every delete writes a destructive-operations audit line, also one that fails part-way; it deleted every node of the EdgeGuard labels, partner `Vulnerability` and `CVE` nodes included, and recorded nothing.

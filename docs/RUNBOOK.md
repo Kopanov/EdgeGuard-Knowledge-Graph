@@ -523,7 +523,7 @@ Each entry: symptom → detection signal → remediation.
 ## Large MISP events fetched in pages (`[PAGED-FETCH-INCOMPLETE]`)
 
 - **What applies.** The sync fetches an event whose MISP index `attribute_count` is above `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000; `0` = off) as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 in attribute id order, instead of one `/events/view`. An event whose whole-event fetch still answers HTTP 5xx after its retries is fetched the same way, with the warning `Event <id>: whole-event fetch failed after retries (…) — fetching in pages`. Paging stops at an empty page or at a page that brings no attribute not already received ([COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)).
-- **Symptom.** Per event: `[PAGED-FETCH-INCOMPLETE] Event <id>: /attributes/restSearch returned <n> attribute rows (top-level and object), the MISP index lists <m>.` In the run summary: `Events fetched in pages with fewer attributes than the MISP index lists: <k>`. The rows received are synced, the event counts as processed and the task stays green. The run sets the gauge `edgeguard_sync_events_paged_incomplete` to the number of such events, and `EdgeGuardSyncPagedFetchIncomplete` (warning) fires while it is above 0 for 10 minutes; the next sync that fetches every event completely sets it back to 0.
+- **Symptom.** Per event: `[PAGED-FETCH-INCOMPLETE] Event <id>: /attributes/restSearch returned <n> attribute rows (top-level and object), the MISP index lists <m>.` In the run summary: `Events fetched in pages with fewer attributes than the MISP index lists: <k>`. The rows received are synced, the event counts as processed and the task stays green. The run sets the gauge `edgeguard_sync_events_paged_incomplete` to the number of such events, and `EdgeGuardSyncPagedFetchIncomplete` (warning) fires while it is above 0 for 10 minutes; every later sync run that connects sets it again, so the next one clears the alert; the rows it missed stay out of Neo4j until a full sync.
 - **Log probe.**
   ```bash
   docker logs edgeguard_airflow 2>&1 | grep "\[PAGED-FETCH-INCOMPLETE\]" | tail -20
@@ -781,7 +781,8 @@ DAG-side acquisition. The lock is read when a task starts: a scheduled
 task that is already running when the lock is taken keeps running to its
 end, and a `run_neo4j_sync` attempt can last up to
 `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Before a destructive `fresh-baseline`,
-pause the scheduled DAGs and wait until none of them has a running run
+pause the scheduled DAGs and mark each run they still have failed (Airflow UI
+or `edgeguard dag kill --dag-id <dag>`) until none of them has a running run
 (Option A).
 
 **Every launch path takes the lock:** the DAG, whether it is triggered from
@@ -873,7 +874,8 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    `edgeguard_baseline` DAG (`airflow dags trigger edgeguard_baseline`, the
    Airflow UI, or the `edgeguard baseline` / `edgeguard fresh-baseline`
    wrappers, which trigger the same DAG), preferably after pausing the 5
-   scheduled DAGs and waiting until none of them has a running run.
+   scheduled DAGs and marking their remaining runs failed until none of them
+   has a running run.
 2. **Preflight green.** `./scripts/preflight_baseline.sh --launch-path=dag` returns exit 0
    (add `--strict` to make an unpaused DAG, like every other warning, a failure).
    Check `[5]` fails while one of the 5 scheduled DAGs has a running run.
@@ -1339,6 +1341,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Baseline-day protocol: the short procedures mark the runs of the paused DAGs failed too; the paged-fetch gauge is set again by every later sync run that connects (the missed rows need a full sync).
 - 2026-10-25 — Baseline-day protocol: pausing the scheduled DAGs stops new tasks and retries only, and a task that is already running keeps running (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); before a fresh baseline, wait until `airflow dags list-runs <dag> --state running -o json` prints `[]` for each of the 5 DAGs, and preflight check `[5]` fails while one has a running run.
 - 2026-10-25 — Fresh-baseline wipe: the OTX event of a 730-day baseline is the one of about 150,000 attributes; other sources' events hold at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (20,000) each (the text said the NVD event too).
 - 2026-10-25 — MISP → Neo4j sync schedule and Requesting a full MISP → Neo4j sync: the limit of `run_neo4j_sync` is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8 hours, at most 22; raised in `.env` with a recreate of the airflow container), the 68-hour DAG-run limit is sized for the default, the threshold of `EdgeGuardNeo4jSyncStale` (122 hours at the default) follows the limit through `edgeguard_neo4j_sync_task_limit_seconds`, which each attempt sets when it starts, so a larger limit needs no change of `prometheus/alerts.yml`, and the mode line of the task log ends with the limit of the attempt.

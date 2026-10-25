@@ -471,6 +471,29 @@ class TestFailures:
         assert writer.last_push_unstored_items == list(range(20, 30))
         assert sizes(misp) == {BASE: 100, f"{BASE}-part2": 100, f"{BASE}-part3": 40}
 
+    @pytest.mark.parametrize("dedup", [False, True])
+    def test_a_caller_with_a_complete_listing_still_writes_after_a_failed_part_lookup(self, monkeypatch, dedup):
+        # The CISA KEV and NVD incremental pushes give the complete listing themselves (known_source_keys):
+        # with it, a failed lookup of part 3 does not stop the writes to the parts found, whatever the dedup
+        # setting, and nothing part 3 holds is added again.
+        monkeypatch.setattr(misp_writer, "MISP_CROSS_EVENT_DEDUP", dedup)
+        stored = existing(80, "200") + existing(100, "201", offset=500) + existing(40, "202", offset=900)
+        misp = FakeMisp(stored, event_info=BASE)
+        misp.events.update({"201": f"{BASE}-part2", "202": f"{BASE}-part3"})
+        fail_when(
+            misp,
+            lambda p, b: p == "/events/restSearch" and str(b.get("eventinfo", "")).endswith("-part3"),
+            Response(500, {"errors": "x"}),
+        )
+        writer = writer_for(misp)
+        known = {writer.SOURCE_TAGS.get("urlhaus"): {(a["type"], a["value"]) for a in stored}}
+        held_by_part3 = [
+            {"indicator_type": "ipv4", "value": a["value"], "tag": "urlhaus", "zone": ["global"]}
+            for a in existing(10, "202", 900)
+        ]
+        assert writer.push_items(held_by_part3 + items(10, offset=5000), known_source_keys=known) == (10, 0)
+        assert no_duplicates(misp)
+
     def test_failed_part_creation_fails_its_later_parts_too(self):
         misp = FakeMisp([], event_info=BASE)
         fail_when(
