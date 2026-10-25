@@ -242,20 +242,29 @@ definition of when an indicator was first and last reported (`src/indicator_seen
 | First seen | `coalesce(r.source_reported_first_at, r.last_reported_at)` | The earliest, and never later than `n.first_imported_at` (EdgeGuard has had the indicator since then, from a source or an alert; the edge keeps only the latest report, which a later report moves past the import) | `n.first_imported_at` |
 | Last seen | `coalesce(r.source_reported_last_at, r.last_reported_at)` | The latest | `n.last_updated` (an indicator no source reported, such as one an alert created) |
 
-The node's `n.last_reported_at` is no fallback: every write that sets it records the same report on
-that source's edge in the same statement.
+The node's `n.last_reported_at` is no fallback: every writer records the same report on that
+source's edge (the sync's batch write in the same statement), so it is the latest of its edges'
+reports.
 
 - **Campaign** (`build_campaign_nodes`): `first_seen` is the earliest first seen of its active
   indicators, `last_seen` the latest last seen. `first_seen` only moves earlier and `last_seen`
-  only later, so a stored `last_seen` later than every source date stays; a graph built from empty
-  has none.
-- **Alert enrichment** (`alert_processor`): `first_seen` and `last_updated` of the indicator.
+  only later, so a campaign keeps the widest span a build computed, also after the indicators that
+  gave it expire.
+- **Alert enrichment** (`alert_processor`): `first_seen` and `last_updated` of the indicator,
+  computed for each alert: once a source reports an indicator again after its import, its first
+  seen is the import time. An alert is no report: once a source dates an indicator, its last seen
+  is the source's, even when an alert saw it later.
 
 An edge keeps only a source's latest report, so the first seen of an indicator only OTX reported is
-the date of its latest report: MISP keeps OTX's `created` as the attribute's `first_seen`, and the sync drops OTX's
-claims. The STIX export does not use the seen dates: its `x_edgeguard_*_seen_at_source` properties
-are concepts 1 and 2 only, and an indicator's `valid_from` would move later whenever a source
-reported it again. The latest report is exported as `x_edgeguard_last_reported_at`.
+its latest report, or its first import when that is earlier: MISP keeps OTX's `created` as the
+attribute's `first_seen`, and the sync drops OTX's claims.
+
+The STIX export does not use the seen dates for indicators: an indicator's
+`x_edgeguard_*_seen_at_source` properties are concepts 1 and 2 only, its `valid_from` without a
+first-seen claim is `first_imported_at` (inferred), and its latest report is exported as
+`x_edgeguard_last_reported_at`. A Campaign SDO's `x_edgeguard_*_seen_at_source` are the campaign's
+`first_seen` / `last_seen`, so for a campaign whose indicators only OTX reported, the campaign's
+first seen precedes its indicators' `valid_from`.
 
 ### Layer 4 — STIX 2.1 export
 
@@ -465,10 +474,10 @@ created` on every object and `valid_until > valid_from`;
 
 `tests/test_indicator_seen_dates.py` checks the statements that read the
 seen dates; `tests/test_campaign_seen_dates_neo4j.py` the dates a campaign
-and the alert enrichment get on a real Neo4j, from indicators written
-through the sync's write path (an OTX-only campaign, a claim and a report on
-one indicator, a report after the first import, a stored campaign, an
-indicator no source dated).
+and the alert enrichment get on a real Neo4j (indicators written through
+the sync's write path, and the alert path for one no source dated): an
+OTX-only campaign, a claim and a report on one indicator, a report after
+the first import, a stored campaign, an indicator no source dated.
 
 ---
 
@@ -489,7 +498,6 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — Seen dates of an indicator for the campaign build and the alert enrichment: per edge the source's claim, else its latest report (`r.last_reported_at`); the first seen date never later than the first import. Both had read the claims alone, so an indicator without one (one only OTX reported) was dated by EdgeGuard's import time, and a campaign whose indicators all came from OTX had the import time as its first and last seen.
-
 - 2026-10-18 — STIX export times only from the graph: SDO `created` falls back to `created_at` (Campaign, Sector) and `modified` is never before `created`; relationships take `created_at` / `imported_at` / `updated_at` (they had the export time); the primary `valid_from` chain ends at the SDO's `created` instead of `now()`; the Indicator's `confidence` and `valid_until` (the retirement time of the aging rule); the Indicator no longer carries `x_edgeguard_last_updated`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text describes current behaviour only; the change notes of the timestamp model and its backwards-compatibility guide moved to History and the appendix.

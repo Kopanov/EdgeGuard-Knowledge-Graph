@@ -3,8 +3,7 @@
 An indicator's ``SOURCED_FROM`` edges carry the sources' own first-seen / last-seen claims only for
 the sources on the reliable first-seen allowlist (never OTX), and every source's latest report
 (``r.last_reported_at``). The campaign build read the claims alone, so a campaign whose indicators
-all came from OTX took EdgeGuard's import time as its first and last seen (296 of 539 campaigns on
-the hosted graph, 2026-10-25). The seen dates take per edge the claim, else the latest report; the
+all came from OTX took EdgeGuard's import time as its first and last seen. The seen dates take per edge the claim, else the latest report; the
 first seen date is never later than the indicator's first import; the indicator's own times only
 when no edge dates it. The campaign build and the alert enrichment read the one definition.
 

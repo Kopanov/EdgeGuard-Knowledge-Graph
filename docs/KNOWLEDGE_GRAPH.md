@@ -575,7 +575,6 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — A campaign's `first_seen` / `last_seen` come from the seen dates of its indicators: per source the claim, else the source's latest report (`r.last_reported_at`). The build had read the claims alone, so a campaign whose indicators all came from OTX had EdgeGuard's import time as its first and last seen; the alert enrichment reads the same dates.
-
 - 2026-10-23 — The STIX flow of the `run_pipeline.py` CLI is always on there (`--stix-flow` cannot turn it off; the page called it opt-in); the sync settings point to CONFIGURATION.md.
 - 2026-10-22 — "Curated packages" is written for any registered curated source; the filter for leaving the layer out keeps the registered sources.
 - 2026-10-22 — Threat-actor names: a group whose common name is a country is written under a qualified name, which counts as itself until the canonical threat-actor reference gives it to an actor (this replaces taking the name out of `COUNTRY_AND_STATE_NAMES`); the OTX collector logs the country, state and nationality names it dropped from adversary fields; a parenthetical behind a country is the name only when it yields one; reference 2026.10.22 counts `qilin` and `agenda` as `water galura`.

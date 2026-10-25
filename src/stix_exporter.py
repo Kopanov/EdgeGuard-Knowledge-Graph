@@ -1658,7 +1658,7 @@ class StixExporter:
         place than other entity types.
 
         2026-10-25: the other labels keep the sources' claims only. An
-        indicator without a first-seen claim (one only OTX reported) gets no
+        indicator only OTX reported gets neither
         ``x_edgeguard_*_seen_at_source``: its latest report is exported as
         ``x_edgeguard_last_reported_at``, and ``valid_from`` takes its
         first import (``_indicator_sdo``).
@@ -1960,8 +1960,8 @@ class StixExporter:
         # reads the clock: re-exporting the same node gives the same value.
         # 2026-10-25: a source's latest report (``r.last_reported_at``) is no branch, though the
         # campaign build reads it (``indicator_seen_dates``): an edge keeps only the latest report,
-        # so ``valid_from`` would move later whenever the source reports the indicator again,
-        # whereas the campaign keeps the earliest date it computed.
+        # so ``valid_from`` would move later, to the import time, once a source reports the
+        # indicator again after its import, whereas the campaign keeps the earliest date it computed.
         created_modified = _indicator_created_modified(props)
         source_truthful = _iso_str(props.get("first_seen_at_source"))
         if source_truthful:

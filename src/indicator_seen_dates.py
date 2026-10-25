@@ -21,15 +21,15 @@ every edge:
   edges; ``last_updated`` only when no edge dates the indicator (one no source reported, such as an
   indicator an alert created).
 
-The indicator's own ``last_reported_at`` is not a fallback: every write that sets it records the
-same report on that source's edge in the same statement, so it is the latest of its edges' reports,
-and an indicator without a dated edge has none.
+The indicator's own ``last_reported_at`` is not a fallback: every writer records the same report on
+that source's edge (the sync's batch write in the same statement), so it is the latest of its edges'
+reports, and an indicator without a dated edge has none.
 
 The campaign build (``enrichment_jobs.build_campaign_nodes``) and the alert enrichment
 (``alert_processor``) read the definition from this module, so they cannot use different ones. The
-STIX export does not: its ``x_edgeguard_*_seen_at_source`` properties are the sources' claims only,
-and an indicator's ``valid_from`` without a first-seen claim stays ``first_imported_at``
-(``stix_exporter``).
+STIX export does not for indicators: their ``x_edgeguard_*_seen_at_source`` properties are the
+sources' claims only, and ``valid_from`` without a first-seen claim stays ``first_imported_at``; a
+Campaign SDO carries the campaign's dates (``stix_exporter``).
 
 Standard library only; the fragments contain no quotes.
 """

@@ -193,8 +193,8 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       "assets": [],
       "users": [],
       "confidence": "<the indicator's confidence_score>",
-      "first_seen": "<earliest first seen a source claims, else its latest report; never after the first import>",
-      "last_updated": "<latest last seen a source claims, else its latest report; the last update when no source dated it>",
+      "first_seen": "<per source its first-seen claim, else its latest report: the earliest, never after the first import>",
+      "last_updated": "<per source its last-seen claim, else its latest report: the latest; the last update when no source dated it>",
       "sectors_affected": ["<zone>"],
       "cross_zone_detected": "<true when more than one zone>",
       "recommendations": ["<generated from the fields above, e.g. Block IP <indicator> at perimeter firewall>"]
@@ -342,7 +342,6 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — `first_seen` and `last_updated` of the alert enrichment are the indicator's seen dates: per source the claim, else the source's latest report (an indicator only OTX reported, which has no claim, had shown its import time and its last write).
-
 - 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide states when an alert shows them (the indicator has the link; per-event build and per-pulse caps) and how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles (those the graph links as named in the same OTX report, if any).
 - 2026-10-18 — Step 1 says that `stats` warns when it reads no sync state file on the host (none there, or unreadable).
 - 2026-10-18 — The alert enrichment shows no CVE from the graph (an indicator links to a CVE only through its own CVE tag, which the collectors do not write), so the output shape shows `cves: []` and the workflow takes `<CVE id>` from the GraphQL step instead of the alert output; the demo commands discard the configuration warning on stderr (`2>/dev/null`); the STIX example URL-encodes the indicator and adds a CVE bundle.

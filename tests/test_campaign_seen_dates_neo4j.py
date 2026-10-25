@@ -3,8 +3,7 @@
 An OTX indicator's ``SOURCED_FROM`` edge carries no first-seen / last-seen claim (OTX is not on the
 reliable first-seen allowlist), but the source's latest report, ``r.last_reported_at``. The campaign
 build read the claims alone, so a campaign whose indicators all came from OTX took EdgeGuard's import
-time as its first and last seen (296 of 539 campaigns on the hosted graph, 2026-10-25). The build and
-the alert enrichment now read the seen dates of ``indicator_seen_dates``: per edge the claim, else the
+time as its first and last seen. The build and the alert enrichment now read the seen dates of ``indicator_seen_dates``: per edge the claim, else the
 latest report; the first seen date never later than the first import; the indicator's own times only
 when no edge dates it.
 
@@ -200,9 +199,12 @@ def _build(client, raw_driver) -> dict:
     """The campaign's dates after ``build_campaign_nodes`` as the enrichment run calls it."""
     import enrichment_jobs
 
-    enrichment_jobs.build_campaign_nodes(client)
+    try:
+        enrichment_jobs.build_campaign_nodes(client)
+    finally:
+        with raw_driver.session() as session:
+            session.run(f"MATCH (c:Campaign) WHERE NOT c:{LABEL} SET c:{LABEL}")
     with raw_driver.session() as session:
-        session.run(f"MATCH (c:Campaign) WHERE NOT c:{LABEL} SET c:{LABEL}")
         row = session.run(
             "MATCH (c:Campaign {name: $name}) RETURN c.first_seen AS first, c.last_seen AS last, "
             "c.indicator_count AS indicators",
@@ -234,13 +236,11 @@ def _alert_dates(client, value: str) -> tuple:
 
 
 def _parse(text: str) -> datetime:
-    """An ISO-8601 time as the payload gives it (Neo4j's nanoseconds cut to microseconds)."""
-    head, sep, rest = text.partition(".")
-    if sep:
-        digits = "".join(ch for ch in rest if ch.isdigit())
-        rest = digits[:6] + rest[len(digits) :]
-        text = f"{head}.{rest}"
-    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    """A time of the payload (``iso_str``: the driver value's native ``isoformat()``, microseconds at
+    most), as an aware datetime."""
+    parsed = datetime.fromisoformat(text)
+    assert parsed.tzinfo is not None, f"the payload time {text!r} has no offset"
+    return parsed
 
 
 def test_an_otx_only_campaign_is_dated_by_the_reports_not_by_the_import(client, raw_driver):

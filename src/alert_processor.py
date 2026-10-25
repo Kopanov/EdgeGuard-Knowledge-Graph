@@ -521,7 +521,8 @@ class AlertProcessor:
                 # 2026-10-25: the seen dates of ``indicator_seen_dates`` (shared with the campaign
                 # build): per edge the source's claim, else the source's latest report, so an indicator
                 # only OTX reported (no claims) is dated by its reports, not EdgeGuard's import time;
-                # ``first_imported_at`` / ``last_updated`` only when no edge dates it.
+                # the first seen never later than the first import; ``first_imported_at`` /
+                # ``last_updated`` when no edge dates it.
                 indicator_result = session.run(
                     f"""
                     MATCH (i:Indicator {{value: $indicator}})

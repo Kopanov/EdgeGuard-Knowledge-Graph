@@ -1311,7 +1311,6 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — Feodo Tracker: a Campaign's `last_seen` for an indicator without a last-seen claim is the edge's latest report (`last_reported_at`), not the import time.
-
 - 2026-10-23 — The energy and healthcare placeholders are modules no DAG task calls (the page said they show on the skip dashboard); HC3 named as a public source that is not collected; the unsupported OTX node estimate removed; the MISP row states that no DAG or CLI step runs `MISPCollector`. These were the README's collector-limit notes. The baseline-limits section keeps the current limits only (its title no longer says "planned"), as a three-column table with the notes in a list below it (the Feodo Tracker feed state is left to § 7); the ThreatFox import, the paid VirusTotal path and the ATT&CK for ICS sector mapping are listed in ROADMAP.md.
 - 2026-10-22 — MITRE: MISPWriter's dedup reads an ATT&CK `text` value as `<id> - <name>` or `<id>: <name>` (`attack_values.attack_value_key`), so an entry a MISP holds in the colon form is not written again in the hyphen form.
 - 2026-10-22 — OTX adversaries: the run logs the country, state and nationality names the actor-name hygiene dropped from adversary fields (`[ACTOR-NAMES]`, with the pulses of each name), also a country followed by a parenthetical that yields no name; `Qilin` and `Agenda` count as Water Galura in the canonical threat-actor reference.
