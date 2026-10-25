@@ -72,6 +72,9 @@ def test_scheduled_dags_and_other_runs_still_skip(lock_path, running) -> None:
         baseline_lock.baseline_skip_reason(own_holder={"dag_id": "edgeguard_daily", "run_id": RUN["run_id"]})
         is not None
     )
+    # The holder's state came from the fake Airflow lookup, not from a fallback that never reaches it
+    # (a test that replaced ``airflow_client`` in ``sys.modules`` once made it unreachable, 2026-10-25).
+    assert (RUN["dag_id"], RUN["run_id"]) in running
 
 
 def test_a_process_held_lock_is_never_own_for_a_dag_task(lock_path) -> None:

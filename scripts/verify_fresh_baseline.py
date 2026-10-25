@@ -311,22 +311,34 @@ _CVE_BEST_CVSS = (
 # write has touched since that build count (``r.updated_at`` at or before the member link and the
 # campaign's ``last_updated``), so a sync after the build cannot fail the check. The node's
 # ``last_updated`` (the date of an indicator no edge dates) changes with every write and is not read.
+# A missing or incomparable stored date (a String: Neo4j compares a String and a DateTime as null) fails
+# too, since a build always stores both dates of a campaign with members: first_seen whenever the
+# campaign has a member (every member has a first import), last_seen while an edge gives one of its
+# members a last date. ``edge_dated_members`` counts the members an edge dates: a member none of whose
+# edges is left dates only by its first import, which a build that stored the import time also covers,
+# so the check passes only when some member is dated by an edge; ``campaigns_without_edge_dated_member``
+# counts (and names up to five of) the campaigns the import-time comparison therefore did not reach.
 CAMPAIGN_SEEN_DATES_CHECK_QUERY = (
-    "MATCH (c:Campaign) WHERE c.edgeguard_managed = true AND c.first_seen IS NOT NULL AND c.last_seen IS NOT NULL "
+    "MATCH (c:Campaign) WHERE c.edgeguard_managed = true "
     "MATCH (i:Indicator)-[m:PART_OF_CAMPAIGN]->(c) "
     "OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source) "
     "WHERE r.updated_at <= m.updated_at AND r.updated_at <= c.last_updated "
-    "WITH c, i, "
-    "[d IN collect(coalesce(r.source_reported_first_at, r.last_reported_at)) + [i.first_imported_at] "
-    "WHERE d IS NOT NULL] AS firsts, "
+    "WITH c, i, collect(coalesce(r.source_reported_first_at, r.last_reported_at)) AS edge_firsts, "
     "max(coalesce(r.source_reported_last_at, r.last_reported_at)) AS member_last "
-    "WITH c, i, member_last, reduce(e = head(firsts), d IN tail(firsts) | CASE WHEN d < e THEN d ELSE e END) "
-    "AS member_first "
-    "WITH c, count(i) AS members, min(member_first) AS earliest, max(member_last) AS latest "
-    "WITH c, members, earliest, latest, coalesce(c.first_seen > earliest, false) AS first_late, "
-    "coalesce(c.last_seen < latest, false) AS last_early "
+    "WITH c, i, member_last, size(edge_firsts) > 0 OR member_last IS NOT NULL AS edge_dated, "
+    "[d IN edge_firsts + [i.first_imported_at] WHERE d IS NOT NULL] AS firsts "
+    "WITH c, i, member_last, edge_dated, "
+    "reduce(e = head(firsts), d IN tail(firsts) | CASE WHEN d < e THEN d ELSE e END) AS member_first "
+    "WITH c, count(i) AS members, sum(CASE WHEN edge_dated THEN 1 ELSE 0 END) AS edge_dated_members, "
+    "min(member_first) AS earliest, max(member_last) AS latest "
+    "WITH c, members, edge_dated_members, earliest, latest, "
+    "earliest IS NOT NULL AND NOT coalesce(c.first_seen <= earliest, false) AS first_late, "
+    "latest IS NOT NULL AND NOT coalesce(c.last_seen >= latest, false) AS last_early "
     "ORDER BY c.name "
-    "RETURN count(c) AS campaigns, sum(members) AS members, "
+    "RETURN count(c) AS campaigns, sum(members) AS members, sum(edge_dated_members) AS edge_dated_members, "
+    "sum(CASE WHEN edge_dated_members = 0 THEN 1 ELSE 0 END) AS campaigns_without_edge_dated_member, "
+    "[x IN collect(CASE WHEN edge_dated_members = 0 THEN c.name END) WHERE x IS NOT NULL][0..5] "
+    "AS campaigns_without_edge_dated_member_names, "
     "sum(CASE WHEN first_late THEN 1 ELSE 0 END) AS first_seen_after_members, "
     "sum(CASE WHEN last_early THEN 1 ELSE 0 END) AS last_seen_before_members, "
     "[x IN collect(CASE WHEN first_late OR last_early THEN {campaign: c.name, "
@@ -1289,11 +1301,15 @@ def run_checks(
     # 13e. Campaign seen dates (2026-10-25): no campaign EdgeGuard built is first seen later than an
     #      indicator member's first date or last seen earlier than a member's latest dated report
     #      (``CAMPAIGN_SEEN_DATES_CHECK_QUERY``). A build that dates an indicator without a first-seen
-    #      claim (every OTX indicator) by EdgeGuard's import time fails here. Informational while no
-    #      campaign has an indicator member.
+    #      claim (every OTX indicator) by EdgeGuard's import time fails here, and so does a campaign
+    #      with members and no comparable stored first_seen, or no comparable last_seen while an edge
+    #      gives one of its members a last date. Informational without a defect while no member is dated
+    #      by an edge: no member at all, every member edge written after the build, or no member edge
+    #      with a report date and an update time (after a baseline, a writer defect).
     r = _one(CAMPAIGN_SEEN_DATES_CHECK_QUERY)
-    seen_dates_ok = r.get("first_seen_after_members") == 0 and r.get("last_seen_before_members") == 0
-    rep.add("campaign_seen_dates_cover_members", seen_dates_ok if r.get("members") else None, r)
+    seen_dates_clean = r.get("first_seen_after_members") == 0 and r.get("last_seen_before_members") == 0
+    seen_dates_ok = (True if r.get("edge_dated_members") else None) if seen_dates_clean else False
+    rep.add("campaign_seen_dates_cover_members", seen_dates_ok, r)
 
     # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from
     #     its CVSS sub-nodes (``_CVSS_SELECTION_ORDER``): with a valid sub-node, the score and

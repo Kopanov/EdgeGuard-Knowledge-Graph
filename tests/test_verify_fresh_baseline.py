@@ -188,10 +188,13 @@ _MARKED_PULSES = ["68cd617b3eb5b1212d11643d", "6a4fdf500b5e6dffde939998"]
 # ATTRIBUTED_TO or USES_MALWARE links and has the actor's RUNS.
 _CAMPAIGN_EVIDENCE_ROW = {"campaigns": 210, "without_evidence": 0, "without_runs": 0, "runs_without_evidence": 0}
 # 2026-10-25: check 13e on a correct graph: no campaign is first seen after an indicator member's first
-# date or last seen before a member's latest dated report.
+# date or last seen before a member's latest dated report; most members are dated by an edge.
 _CAMPAIGN_SEEN_DATES_ROW = {
     "campaigns": 210,
     "members": 18400,
+    "edge_dated_members": 18350,
+    "campaigns_without_edge_dated_member": 0,
+    "campaigns_without_edge_dated_member_names": [],
     "first_seen_after_members": 0,
     "last_seen_before_members": 0,
     "examples": [],
@@ -1476,7 +1479,8 @@ class TestCampaignSeenDates:
     (per edge the source's first-seen claim, else its latest report; never after the member's first
     import) or last seen earlier than a member's latest dated report. A build that dates indicators
     without a first-seen claim by EdgeGuard's import time fails; tests/test_campaign_seen_dates_neo4j.py
-    runs the statement on campaigns ``build_campaign_nodes`` built. Informational without members."""
+    runs the statement on campaigns ``build_campaign_nodes`` built. Informational without a defect while
+    no member is dated by an edge."""
 
     def test_a_correct_graph_passes(self, vfb, monkeypatch):
         c = _check(_run(vfb, monkeypatch), "campaign_seen_dates_cover_members")
@@ -1501,9 +1505,23 @@ class TestCampaignSeenDates:
         assert _check(rep, "campaign_seen_dates_cover_members")["detail"]["examples"] == [example]
 
     def test_informational_without_members(self, vfb, monkeypatch):
-        empty = dict(_CAMPAIGN_SEEN_DATES_ROW, campaigns=0, members=0)
+        empty = dict(_CAMPAIGN_SEEN_DATES_ROW, campaigns=0, members=0, edge_dated_members=0)
         rep = _run(vfb, monkeypatch, override=lambda st, rows: [empty] if "AS first_seen_after_members" in st else rows)
         assert _check(rep, "campaign_seen_dates_cover_members")["ok"] is None and rep.failed == []
+
+    def test_informational_while_no_member_is_dated_by_an_edge(self, vfb, monkeypatch):
+        # Every member edge written after the build: a member dates only by its first import, which a
+        # campaign dated by the import time also covers, so no defect is no pass either.
+        undated = dict(_CAMPAIGN_SEEN_DATES_ROW, edge_dated_members=0)
+        rep = _run(
+            vfb, monkeypatch, override=lambda st, rows: [undated] if "AS first_seen_after_members" in st else rows
+        )
+        assert _check(rep, "campaign_seen_dates_cover_members")["ok"] is None and rep.failed == []
+
+    def test_a_defect_fails_while_no_member_is_dated_by_an_edge(self, vfb, monkeypatch):
+        row = dict(_CAMPAIGN_SEEN_DATES_ROW, edge_dated_members=0, first_seen_after_members=1)
+        rep = _run(vfb, monkeypatch, override=lambda st, rows: [row] if "AS first_seen_after_members" in st else rows)
+        assert [c["check"] for c in rep.failed] == ["campaign_seen_dates_cover_members"]
 
     def test_query_shape(self, vfb, monkeypatch):
         seen = {}
@@ -1527,6 +1545,16 @@ class TestCampaignSeenDates:
         assert "max(coalesce(r.source_reported_last_at, r.last_reported_at)) AS member_last" in st
         # The node's last write moves with every write, so the check does not read it.
         assert "i.last_updated" not in st
+        # A campaign with members and no stored date, or one that does not compare (a String), is a
+        # defect, not left out or passed.
+        assert "c.first_seen IS NOT NULL" not in st and "c.last_seen IS NOT NULL" not in st
+        assert "earliest IS NOT NULL AND NOT coalesce(c.first_seen <= earliest, false) AS first_late" in st
+        assert "latest IS NOT NULL AND NOT coalesce(c.last_seen >= latest, false) AS last_early" in st
+        # The members an edge dates: without one the check cannot tell a correct build from an import-time one.
+        assert "size(edge_firsts) > 0 OR member_last IS NOT NULL AS edge_dated" in st
+        assert "sum(edge_dated_members) AS edge_dated_members" in st
+        # Per campaign: the campaigns the import-time comparison does not reach are counted and named.
+        assert "sum(CASE WHEN edge_dated_members = 0 THEN 1 ELSE 0 END) AS campaigns_without_edge_dated_member" in st
         # The script states the definition itself instead of importing the one the build reads
         # (``indicator_seen_dates``), so a change to that definition fails the check.
         script = Path(_SCRIPT).read_text(encoding="utf-8")

@@ -6,11 +6,15 @@ without needing an installed package.
 import contextlib
 import os
 import sys
+import types
 import uuid
+from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Set before any test module imports `collectors.*` (config.py requires these at import).
 if not os.getenv("NEO4J_PASSWORD"):
@@ -84,6 +88,8 @@ def _baseline_checkpoint_outside_the_repo(monkeypatch, tmp_path_factory):
     so the variable cannot point at a temporary directory; the module's paths are set instead. Each
     test gets its own empty directory under the session's temporary directory, so no test sees a
     checkpoint another test wrote. The value is that directory; an empty one is removed afterwards.
+    A test that reloads the module or calls ``monkeypatch.undo()`` puts the paths back into the
+    checkout for the rest of the test; the teardown fails such a test.
     """
     import baseline_checkpoint
 
@@ -92,6 +98,18 @@ def _baseline_checkpoint_outside_the_repo(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(baseline_checkpoint, "CHECKPOINT_DIR", directory)
     monkeypatch.setattr(baseline_checkpoint, "CHECKPOINT_FILE", directory / "baseline_checkpoint.json")
     yield directory
+    basetemp = tmp_path_factory.getbasetemp().resolve()  # inside the checkout with ``--basetemp=<dir>``
+    current = sys.modules.get("baseline_checkpoint")
+    # Real modules only: a stub (a spec'd mock, a module without the paths) has no path to judge.
+    for module in {id(m): m for m in (baseline_checkpoint, current) if type(m) is types.ModuleType}.values():
+        value = getattr(module, "CHECKPOINT_FILE", None)
+        if not isinstance(value, (str, os.PathLike)):
+            continue
+        path = Path(value).resolve()
+        assert path.is_relative_to(basetemp) or not path.is_relative_to(_REPO_ROOT), (
+            "the test reset the baseline_checkpoint paths into the checkout (a reload or monkeypatch.undo()) "
+            "and may have read or written a checkpoint there"
+        )
     with contextlib.suppress(OSError):
         directory.rmdir()
 

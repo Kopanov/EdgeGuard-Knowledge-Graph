@@ -7,7 +7,10 @@ time as its first and last seen. The build and the alert enrichment now read the
 ``indicator_seen_dates``: per edge the claim, else the latest report; the first seen date never later
 than the first import; the indicator's own times only when no edge dates it. The acceptance script's
 check of the seen dates (``scripts/verify_fresh_baseline.py``, check 13e) runs on the campaigns built
-here: they pass it, a sync after the build leaves it passing, and import-time dates fail it.
+here: they pass it, a sync after the build leaves it passing, and import-time dates fail it, as do a
+missing stored date and one that does not compare (a String). With every member edge written after the
+build no member is dated by an edge, and an import-time date is no longer caught (``edge_dated_members``
+is then 0, which the script reports as informational).
 
 The indicators are written as production writes them: an item shaped as the collector emits it, the
 attribute ``MISPWriter`` builds from it with the fields MISP adds when it stores it (the key set of a
@@ -420,7 +423,8 @@ def test_the_acceptance_check_passes_after_a_build_and_a_later_sync_leaves_it_pa
     _build(client, raw_driver)
 
     r = _acceptance(raw_driver)
-    assert (r["campaigns"], r["members"]) == (1, 2)
+    assert (r["campaigns"], r["members"], r["edge_dated_members"]) == (1, 2, 2)
+    assert (r["campaigns_without_edge_dated_member"], r["campaigns_without_edge_dated_member_names"]) == (0, [])
     assert (r["first_seen_after_members"], r["last_seen_before_members"], r["examples"]) == (0, 0, [])
 
     claim = now - timedelta(days=400)
@@ -469,3 +473,71 @@ def test_the_acceptance_check_fails_on_dates_a_build_without_the_reports_stored(
         )
     r = _acceptance(raw_driver)
     assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (0, 1)
+
+
+def test_the_acceptance_check_fails_on_a_missing_or_incomparable_stored_date(client, raw_driver):
+    """A campaign whose members the edges date (first and last) always has both dates after a build: a
+    missing one, or one stored as a String (Neo4j compares a String and a DateTime as null), fails check
+    13e instead of being left out or passing."""
+    now = _now()
+    reports = {"it-seen-i.example": now - timedelta(days=200), "it-seen-j.example": now - timedelta(days=120)}
+    attrs = [
+        _stored(_otx_item(value, report - timedelta(days=10), report), 40 + n, now - timedelta(days=2))
+        for n, (value, report) in enumerate(reports.items())
+    ]
+    _merge(client, raw_driver, "alienvault_otx", attrs)
+    _indicates(raw_driver, *reports)
+    built = _build(client, raw_driver)
+    assert _acceptance(raw_driver)["first_seen_after_members"] == 0
+
+    for change, expected in (
+        ("SET c.first_seen = null", (1, 0)),
+        ("SET c.first_seen = toString(c.first_seen)", (1, 0)),
+        ("SET c.last_seen = null", (0, 1)),
+        ("SET c.last_seen = toString(c.last_seen)", (0, 1)),
+    ):
+        with raw_driver.session() as session:
+            session.run(f"MATCH (c:Campaign {{name: $name}}) {change}", name=CAMPAIGN)
+        r = _acceptance(raw_driver)
+        assert (r["campaigns"], r["members"]) == (1, 2), change
+        assert (r["first_seen_after_members"], r["last_seen_before_members"]) == expected, change
+        # Restored by hand: a build keeps a String date (it compares as null with the new one).
+        with raw_driver.session() as session:
+            session.run(
+                "MATCH (c:Campaign {name: $name}) SET c.first_seen = datetime($first), c.last_seen = datetime($last)",
+                name=CAMPAIGN,
+                first=built["first"].isoformat(),
+                last=built["last"].isoformat(),
+            )
+        r = _acceptance(raw_driver)
+        assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (0, 0), change
+
+
+def test_with_every_member_edge_written_after_the_build_no_member_is_dated_by_an_edge(client, raw_driver):
+    """Once a sync has written every member edge after the build, the cutoff leaves each member only its
+    first import, which an import-time first seen also covers: the statement finds no defect in such a
+    campaign, and ``edge_dated_members`` is 0, so the script reports the check as informational, not as
+    passed."""
+    now = _now()
+    reports = {"it-seen-k.example": now - timedelta(days=200), "it-seen-l.example": now - timedelta(days=120)}
+    attrs = [
+        _stored(_otx_item(value, report - timedelta(days=10), report), 50 + n, now - timedelta(days=2))
+        for n, (value, report) in enumerate(reports.items())
+    ]
+    _merge(client, raw_driver, "alienvault_otx", attrs)
+    _indicates(raw_driver, *reports)
+    _build(client, raw_driver)
+    with raw_driver.session() as session:
+        session.run(
+            "MATCH (c:Campaign {name: $name}) MATCH (i:Indicator)-[:PART_OF_CAMPAIGN]->(c) "
+            "WITH c, min(i.first_imported_at) AS imported SET c.first_seen = imported",
+            name=CAMPAIGN,
+        )
+    r = _acceptance(raw_driver)
+    assert (r["edge_dated_members"], r["first_seen_after_members"]) == (2, 1), "the edges date the members"
+
+    _merge(client, raw_driver, "alienvault_otx", attrs)  # the next sync writes both member edges again
+    r = _acceptance(raw_driver)
+    assert (r["members"], r["edge_dated_members"]) == (2, 0)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (0, 0), "not caught without an edge"
+    assert (r["campaigns_without_edge_dated_member"], r["campaigns_without_edge_dated_member_names"]) == (1, [CAMPAIGN])
