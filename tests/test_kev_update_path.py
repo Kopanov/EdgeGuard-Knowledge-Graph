@@ -31,6 +31,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from misp_fakes import FakeMisp  # noqa: E402
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# tests/test_graphql_api.py replaces neo4j_client (and neo4j, pymisp) with MagicMocks when it is collected first.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j_client" or k.startswith("neo4j")):
+    clear_graphql_api_magicmock_stubs()
 
 import config  # noqa: E402
 from collectors import misp_writer, vulnerability_update  # noqa: E402
@@ -235,6 +240,35 @@ class TestRevisions:
         misp.posts.clear()
         run(misp, catalogue("2026-10-16", "CVE-2025-21042"))
         assert misp.writes() == []
+
+
+# --------------------------------------------------------------------------- event parts
+class TestEventParts:
+    """The event split (``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE``) on the KEV update path: the run's listing reaches
+    ``push_items`` as ``known_source_keys``, and a copy held in a ``-partN`` event is EdgeGuard's own copy."""
+
+    def test_a_copy_held_in_part2_is_edited_and_the_additions_open_new_parts(self, env):
+        env.setenv("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE", "1")
+        env.setattr(misp_writer, "_EVENT_SPLIT_MIN", 1)  # a limit of 1 puts each stored copy in its own part
+        misp = stored_after(catalogue("2026-09-16"), Clock())
+        base = f"EdgeGuard-cisa_kev-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        held_in = {a["value"]: misp.events[a["event_id"]] for a in misp.attributes}
+        assert sorted(held_in.values()) == sorted([base] + [f"{base}-part{n}" for n in range(2, 6)])
+        assert held_in[FLIP] == f"{base}-part2"
+
+        status = run(misp, catalogue("2026-10-16"))
+        edits = edits_by_cve(misp)
+        assert set(edits) == {FLIP, DUE}
+        assert edits[FLIP]["Tag"] == [{"name": "ransomware:known"}]
+        assert misp.events[misp.by_value(FLIP)["event_id"]] == f"{base}-part2"
+        assert "ransomware:known" in tags(misp.by_value(FLIP))
+        assert sorted(misp.added_values()) == sorted(NEW)
+        created = [body["Event"]["info"] for p, body in misp.posts if p == "/events"]
+        assert sorted(created) == [f"{base}-part6", f"{base}-part7"]
+        assert sorted(misp.events[misp.by_value(c)["event_id"]] for c in NEW) == sorted(created)
+        assert len(misp.listings()) == 1, "push_items reuses the run's listing"
+        update = status["kev_update"]
+        assert (update["added"], update["updated"], update["foreign_only"], update["failed"]) == (2, 2, 0, 0)
 
 
 # --------------------------------------------------------------------------- what is not written

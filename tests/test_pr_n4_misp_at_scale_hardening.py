@@ -281,6 +281,8 @@ class TestAdaptiveBackoffBehavioural:
         }
         w.CONNECT_TIMEOUT = 30
         w.READ_TIMEOUT = 60
+        # No later part of the day exists (the event split looks them up; the session is a mock).
+        w._find_event_id = lambda *_a, **_k: None
         return w
 
     def test_extended_cooldown_fires_after_threshold(self, monkeypatch):
@@ -534,6 +536,8 @@ class TestAdaptiveBatchSizing:
         }
         w.CONNECT_TIMEOUT = 30
         w.READ_TIMEOUT = 60
+        # No later part of the day exists (the event split looks them up; the session is a mock).
+        w._find_event_id = lambda *_a, **_k: None
         return w
 
     def test_huge_event_uses_50_batch_size(self, monkeypatch):
@@ -733,6 +737,8 @@ class TestBugbotRound2Fixes:
         }
         w.CONNECT_TIMEOUT = 30
         w.READ_TIMEOUT = 60
+        # No later part of the day exists (the event split looks them up; the session is a mock).
+        w._find_event_id = lambda *_a, **_k: None
 
         monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-1")
         monkeypatch.setattr(w, "_get_existing_attribute_keys", lambda *a, **k: set())
@@ -977,6 +983,8 @@ class TestBugbotRound2Behavioural:
         }
         w.CONNECT_TIMEOUT = 30
         w.READ_TIMEOUT = 60
+        # No later part of the day exists (the event split looks them up; the session is a mock).
+        w._find_event_id = lambda *_a, **_k: None
         return w
 
     def test_failure_counter_persists_across_push_items_calls(self, monkeypatch):

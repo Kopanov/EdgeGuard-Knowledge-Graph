@@ -121,6 +121,7 @@ def _push(writer: MISPWriter, push) -> List[Dict[str, Any]]:
     """The attributes ``push`` (a callable that pushes through ``writer``) sends to MISP."""
     with (
         patch.object(writer, "_get_or_create_event", return_value="42"),
+        patch.object(writer, "_find_event_id", return_value=None),  # no later part of the day (event split)
         patch.object(writer, "_push_batch", side_effect=lambda _eid, attrs: (len(attrs), 0)) as batch,
         patch.object(mw, "MISP_PREFETCH_EXISTING_ATTRS", False),
     ):

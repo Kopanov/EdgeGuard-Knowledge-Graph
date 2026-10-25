@@ -3657,6 +3657,20 @@ class MISPWriter:
             if split_above <= 0:
                 push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
                 continue
+            if not walk_complete and not checked_first:
+                # A later part the walk could not look up may hold some of these attributes, and without a
+                # complete cross-event listing nothing else names them: nothing of the group is written.
+                logger.error(
+                    "MISP push %s (%s): the lookup of a later part failed and the cross-event listing is "
+                    "incomplete — %d attribute(s) counted as failed, nothing written",
+                    source,
+                    date,
+                    len(unique_attrs),
+                )
+                self.stats["errors"] += 1
+                total_failed += len(unique_attrs)
+                _note_unstored(unique_attrs)
+                continue
             # 2026-10: the part found above takes attributes up to ``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE``, the later
             # parts that exist take what fits them, and the rest goes to new parts of at most the limit each.
             # A new part is created by the push loop when its first batch is about to be written

@@ -24,6 +24,14 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# tests/test_graphql_api.py replaces neo4j_client (and neo4j) with MagicMocks when it is collected first;
+# enrichment_jobs and alert_processor, which bind names of both at import, are then imported afresh.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j_client" or k.startswith("neo4j")):
+    clear_graphql_api_magicmock_stubs()
+    sys.modules.pop("enrichment_jobs", None)
+
 import indicator_seen_dates  # noqa: E402
 
 FIRST_CLAIM = "coalesce(r.source_reported_first_at, r.last_reported_at)"
@@ -153,7 +161,11 @@ class TestAlertEnrichment:
         ) in flat
         assert "coalesce(edges_last, i.last_updated) AS last_seen" in flat
         assert not re.search(r"\b(CREATE|MERGE|SET|DELETE|REMOVE)\b", query), "the enrichment only reads"
-        assert session_kwargs and all(kw.get("default_access_mode") == "READ" for kw in session_kwargs)
+        import alert_processor
+
+        assert session_kwargs and all(
+            kw.get("default_access_mode") == alert_processor.READ_ACCESS for kw in session_kwargs
+        )
 
     def test_the_payload_carries_the_statement_dates_not_the_node_times(self):
         """The statement does the fallback; the payload takes its values as they are (an OTX indicator
