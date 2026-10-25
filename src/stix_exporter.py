@@ -1651,10 +1651,17 @@ class StixExporter:
         SOURCED_FROM edges don't carry source claims (Campaign is a
         derived aggregate built by enrichment_jobs). We instead read
         the campaign's own ``first_seen`` / ``last_seen`` properties —
-        which the campaign builder already aggregates correctly across
-        the campaign's indicators. So Campaign SDOs DO get the
+        which the campaign builder aggregates across the seen dates of
+        the campaign's indicators (``indicator_seen_dates``: a source's
+        claim, else its latest report). So Campaign SDOs DO get the
         ``x_edgeguard_*`` extensions, just sourced from a different
         place than other entity types.
+
+        2026-10-25: the other labels keep the sources' claims only. An
+        indicator only OTX reported gets neither
+        ``x_edgeguard_*_seen_at_source``: its latest report is exported as
+        ``x_edgeguard_last_reported_at``, and ``valid_from`` takes its
+        first import (``_indicator_sdo``).
 
         The aggregates are read from the bundle-scoped cache populated by
         ``_prefetch_source_aggregates`` (one query per label and bundle).
@@ -1951,6 +1958,10 @@ class StixExporter:
         # source-truthful evidence. Each candidate goes through ``_iso_str`` so a
         # ``neo4j.time.DateTime`` becomes a plain ISO-8601 string before stix2 sees it. No branch
         # reads the clock: re-exporting the same node gives the same value.
+        # 2026-10-25: a source's latest report (``r.last_reported_at``) is no branch, though the
+        # campaign build reads it (``indicator_seen_dates``): an edge keeps only the latest report,
+        # so ``valid_from`` would move later, to the import time, once a source reports the
+        # indicator again after its import, whereas the campaign keeps the earliest date it computed.
         created_modified = _indicator_created_modified(props)
         source_truthful = _iso_str(props.get("first_seen_at_source"))
         if source_truthful:

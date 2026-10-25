@@ -227,8 +227,8 @@ The full timestamp model is documented in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md).
 | `created` | When the SDO was created in EdgeGuard's graph (our import time, the node's `first_imported_at`), for every SDO type including `vulnerability`. NVD's publication date of a CVE is `x_edgeguard_published`. |
 | `modified` | When EdgeGuard last refreshed its record. An indicator's: the latest of `created`, `last_recorded_at` (the latest MISP record of a report) and `aging_since` (when its aging state last changed), never earlier than `created` and unmoved by a re-sync of the same data |
 | `valid_from` (Indicator only) | The source's first-observation claim if available; falls back to EdgeGuard's import time and sets `x_edgeguard_first_seen_inferred=true` so consumers can filter for source-truthful evidence |
-| `x_edgeguard_first_seen_at_source` | Verbatim source claim (concept 1). Absent if no source provided one |
-| `x_edgeguard_last_seen_at_source` | Verbatim source claim (concept 2). Absent if no source provided one |
+| `x_edgeguard_first_seen_at_source` | Verbatim source claim (concept 1), the earliest of the sources'. Absent if no source provided one (an indicator only OTX reported: its latest report is `x_edgeguard_last_reported_at`). On a `campaign`, the campaign's `first_seen`: the earliest first seen of its indicators (per source the claim, else its latest report; EdgeGuard's first import of an indicator when that is earlier, or when no source dated it) |
+| `x_edgeguard_last_seen_at_source` | Verbatim source claim (concept 2), the latest of the sources'. Absent if no source provided one. On a `campaign`, the campaign's `last_seen`: the latest last seen of its indicators (per source the claim, else its latest report; the last write of an indicator no source dated) |
 | `x_edgeguard_first_imported_at` | EdgeGuard's import wall-clock (concept 3) |
 | `x_edgeguard_last_updated` | EdgeGuard's last-touch wall-clock (concept 4); not on an indicator, whose `modified` does not follow it |
 | `x_edgeguard_first_seen_inferred` | `true` iff `valid_from` came from the fallback chain. Use this to filter for source-truthful indicators only when building correlation pipelines |
@@ -787,10 +787,11 @@ RETURN h.hostname AS host, c.cve_id AS cve,
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `x_edgeguard_first_seen_at_source` / `_last_seen_at_source` on a Campaign SDO are the campaign's `first_seen` / `last_seen`, the seen dates of its indicators (a source's claim, else its latest report); an indicator's stay the sources' claims.
 - 2026-10-23 — `scripts/clear_neo4j.py` is listed among the destructive operations bounded by the `edgeguard_managed` marker, with `--full-wipe` as its explicit whole-database flag.
 - 2026-10-23 — The STIX flow of the `run_pipeline.py` CLI is always on there (the page called it opt-in); the health reference points to TECHNICAL_SPEC.md, which replaced the README's health table; the planned SoftwareVersion bridge (§ 4.4), the access-control options (§ 8.5) and the to-do list (§ 8.6) give way to the current state and a pointer to ROADMAP.md, which lists the planned work, with the topology links of § 3.2; § 8.1 states the loopback publication of the Bolt port (it named a hosted firewall rule the repository does not hold).
 - 2026-10-22 — The STIX coverage paragraph is written for any registered curated source.

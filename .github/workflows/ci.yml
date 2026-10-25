@@ -86,7 +86,8 @@ jobs:
   # equal values as one string), nor run the Cypher that records r.cited_ids, the EPSS / SSVC writes,
   # the attribution cleanup of build_relationships step 2d, (2026-10) the Malware ATT&CK-id twin
   # merge with the family look-ups of build_relationships 9b / 2d or the merge of an indicator whose
-  # MISP last_seen was refreshed. This job runs them on a throwaway Neo4j with APOC, from the image
+  # MISP last_seen was refreshed, or (2026-10-25) a campaign's first / last seen from its indicators'
+  # report dates. This job runs them on a throwaway Neo4j with APOC, from the image
   # docker-compose.yml deploys. The password exists only inside this job's container.
   neo4j-integration:
     name: Neo4j integration
@@ -129,7 +130,7 @@ jobs:
           EDGEGUARD_IT_NEO4J_USER: neo4j
           EDGEGUARD_IT_NEO4J_PASSWORD: edgeguard-ci-only
           EDGEGUARD_IT_NEO4J_REQUIRED: "1"
-        run: pytest tests/test_actor_alias_merge_neo4j.py tests/test_explainability_neo4j.py tests/test_cve_epss_ssvc_neo4j.py tests/test_attribution_single_actor_reports_neo4j.py tests/test_export_paths_neo4j.py tests/test_malware_twin_merge_neo4j.py tests/test_reobserved_indicator_neo4j.py tests/test_node_counts_neo4j.py tests/test_entity_description_neo4j.py tests/test_description_ranking_neo4j.py tests/test_indicator_aging_neo4j.py tests/test_sector_evidence_neo4j.py tests/test_technique_flag_and_family_credit_neo4j.py tests/test_kev_update_neo4j.py tests/test_write_results_neo4j.py tests/test_cve_nvd_precedence_neo4j.py tests/test_indicator_cve_report_links_neo4j.py tests/test_clear_neo4j_script_neo4j.py -v -rs
+        run: pytest tests/test_actor_alias_merge_neo4j.py tests/test_explainability_neo4j.py tests/test_cve_epss_ssvc_neo4j.py tests/test_attribution_single_actor_reports_neo4j.py tests/test_export_paths_neo4j.py tests/test_malware_twin_merge_neo4j.py tests/test_reobserved_indicator_neo4j.py tests/test_node_counts_neo4j.py tests/test_entity_description_neo4j.py tests/test_description_ranking_neo4j.py tests/test_indicator_aging_neo4j.py tests/test_sector_evidence_neo4j.py tests/test_technique_flag_and_family_credit_neo4j.py tests/test_kev_update_neo4j.py tests/test_write_results_neo4j.py tests/test_cve_nvd_precedence_neo4j.py tests/test_indicator_cve_report_links_neo4j.py tests/test_clear_neo4j_script_neo4j.py tests/test_campaign_seen_dates_neo4j.py -v -rs
 
   # ── Docker build + image vulnerability scan ───────────────────────────────
   docker:
