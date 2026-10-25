@@ -195,10 +195,10 @@ class Source:
     @property
     def all_keys(self) -> Tuple[str, ...]:
         """``(canonical_id,) + aliases`` — every key under which this
-        source can be looked up. Used by the derivation helpers to
-        build the legacy alias-keyed dicts (every Cypher MERGE on
-        ``:Source {source_id: $X}`` needs an entry per alias because
-        the merge query itself doesn't know about aliases).
+        source can be looked up: ``get_source`` / ``canonical_source_id``,
+        the reliable first-seen allowlist, the MISP tag map and the
+        metrics label bound. The Neo4j ``Source`` node is keyed by
+        ``canonical_id`` alone (``to_neo4j_sources_dict``).
         """
         return (self.canonical_id,) + self.aliases
 
@@ -520,27 +520,22 @@ _validate_no_alias_collisions()
 
 
 def to_neo4j_sources_dict() -> Dict[str, Dict[str, object]]:
-    """Re-creates the legacy ``neo4j_client.SOURCES`` dict shape.
+    """The ``neo4j_client.SOURCES`` dict: ``{canonical_id: {"name": str, "type": str, "reliability": float}}``.
 
-    Schema: ``{source_id: {"name": str, "type": str, "reliability": float}}``
-
-    One entry per ALIAS so the existing Cypher
-    ``MERGE (:Source {source_id: $sid})`` calls (which don't know
-    about aliases) keep working for every legacy id.
-
-    Insertion order matches the legacy hand-maintained dict so a
-    parity test can assert byte-for-byte equality.
+    One entry per registered source, keyed by its canonical id, in registry order.
+    ``ensure_sources`` creates one ``Source`` node per entry, so the graph holds one node per
+    source. An alias (``otx``, ``cisa``, ``vt``, ...) is a lookup key and never a node: every
+    ``SOURCED_FROM`` writer resolves the id it is given with ``canonical_source_id`` before it
+    matches the ``Source`` node.
     """
-    out: Dict[str, Dict[str, object]] = {}
-    for src in _REGISTRY:
-        payload = {
+    return {
+        src.canonical_id: {
             "name": src.display_name,
             "type": src.source_type,
             "reliability": src.reliability,
         }
-        for key in src.all_keys:
-            out[key] = dict(payload)
-    return out
+        for src in _REGISTRY
+    }
 
 
 # PR #43 audit-2 (LOW — bugbot): the legacy `edgeguard.DEFAULT_SOURCES`

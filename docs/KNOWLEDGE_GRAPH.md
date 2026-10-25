@@ -75,6 +75,8 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 
 ### SOURCED_FROM edge schema
 
+**`Source` nodes.** One per registered source (`src/source_registry.py`), keyed by its canonical id (`alienvault_otx`, `nvd`, `cisa_kev`, `mitre_attck`, `virustotal`, `abuseipdb`, `urlhaus`, `threatfox`, `feodo_tracker`, `ssl_blacklist`, `cisa_ics`, `malwarebazaar`, `misp`, and the curated sources `coreideas` and `misp_galaxy`), with `name`, `type` and `reliability` from the registry. `ensure_sources` creates them; no other statement does. An alias of a source (`otx`, `cisa`, `vt`, `feodo`, `sslbl`, …) is a lookup key, never a node: every `SOURCED_FROM` writer resolves the id it is given to the canonical id before it matches the node, and the batch writers refuse an id the registry does not know. The acceptance check `source_nodes_canonical` fails on a `Source` node keyed by an alias.
+
 Every threat-intel node (Indicator, CVE, Vulnerability, Malware, ThreatActor, Technique, Tactic, Tool) carries one `(:Node)-[r:SOURCED_FROM]->(:Source)` edge per reporting source. The edge holds both DB-local facts (when EdgeGuard saw this source report this entity) AND the source's own claim (when the source itself says it first/last recorded the entity). Per-source attribution preserves full provenance for multi-source IOCs.
 
 | Property | Semantic | Type | Write rule | Source |
@@ -574,6 +576,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — One `Source` node per registered source, keyed by its canonical id; until then `ensure_sources` also created a node for every alias (26 nodes on the 730-day baseline of 2026-10-22, of which 10 held `SOURCED_FROM` edges and no alias node held one). The `SOURCED_FROM` writers resolve an alias to the canonical id.
 - 2026-10-25 — A campaign's `first_seen` / `last_seen` come from the seen dates of its indicators: per source the claim, else the source's latest report (`r.last_reported_at`). The build had read the claims alone, so a campaign whose indicators all came from OTX had EdgeGuard's import time as its first and last seen; the alert enrichment reads the same dates.
 - 2026-10-23 — The STIX flow of the `run_pipeline.py` CLI is always on there (`--stix-flow` cannot turn it off; the page called it opt-in); the sync settings point to CONFIGURATION.md.
 - 2026-10-22 — "Curated packages" is written for any registered curated source; the filter for leaving the layer out keeps the registered sources.

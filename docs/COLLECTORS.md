@@ -1237,7 +1237,9 @@ Append one record to the `_REGISTRY` tuple. Required fields:
 ``canonical_id``, ``display_name``, ``source_type``, ``reliability``,
 ``misp_tag``, ``reliable_first_seen``. Optional but recommended:
 ``aliases`` (covers other short names so collector lookups by
-either spelling resolve identically), ``cli_id`` / ``api_key_env`` /
+either spelling resolve identically; an alias is never a ``Source``
+node: the graph has one per ``canonical_id``, and the ``SOURCED_FROM``
+writers resolve an alias to it), ``cli_id`` / ``api_key_env`` /
 ``rate_limit`` / ``cli_default_enabled`` / ``cli_description`` (the
 ``edgeguard sources`` CLI listing), ``cli_display_name`` (only needed
 when the CLI label differs from the Neo4j ``Source.name`` — currently
@@ -1311,6 +1313,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — A source's aliases are lookup keys only: the graph has one `Source` node per canonical id (until then also one per alias).
 - 2026-10-25 — Cost in the sync: the URLhaus baseline event (its whole `recent.csv` export, about 63,000 URLs on 2026-10-24) is among the events the incremental sync re-reads once refreshes begin.
 - 2026-10-25 — URLhaus and MalwareBazaar read the abuse.ch v2 `recent.csv` exports with the Auth-Key (`THREATFOX_API_KEY`) in the URL path, because the keyless downloads (`downloads/csv_recent/`, `csv_top10k/`, `/export/csv/recent/`) answer HTTP 410 since 2026-10 (`csv_top10k` has no v2 equivalent); the key is redacted from logs, errors and the HTTP library's DEBUG records, the source key check reports it for all three abuse.ch sources, and `EDGEGUARD_URLHAUS_MAX_PER_RUN` is 100,000 (was 50,000), above the about 63,000 URLs the export listed on 2026-10-24 (the keyless 30-day file held 34,003 on 2026-10-13).
 - 2026-10-25 — Cost in the sync: events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20,000) attributes, among them the OTX and NVD baseline events, are downloaded as metadata plus `/attributes/restSearch` pages of 5,000, not with `get_event`.

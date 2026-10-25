@@ -21,7 +21,8 @@ A. **Parity** — every legacy entry produces the SAME shape after the
    unchanged.)
 
 B. **Invariants** that link the five registries:
-   - Every reliable_first_seen=True source is also in SOURCES (else
+   - Every reliable_first_seen=True source resolves to an entry of
+     SOURCES, which holds the canonical ids only since 2026-10-25 (else
      the SOURCED_FROM stamp would silently fail).
    - Every CLI-id has a corresponding canonical-id in SOURCES.
    - Every alias resolves to the same Source record as its canonical id.
@@ -214,12 +215,30 @@ _LEGACY_MISP_WRITER_SOURCE_TAGS = {
 
 def test_neo4j_sources_dict_preserves_every_legacy_entry_byte_for_byte():
     """For every legacy SOURCES key, the registry-derived dict produces
-    the SAME value (name + type + reliability)."""
+    the SAME value (name + type + reliability) under the key's canonical
+    id. Since 2026-10-25 ``SOURCES`` is keyed by canonical ids only (one
+    ``Source`` node per source); a legacy alias key (``cisa``, ``feodo``,
+    ``sslbl``, ``abusech_ssl``) resolves to its canonical entry."""
     from neo4j_client import SOURCES
+    from source_registry import canonical_source_id
 
     for key, expected in _LEGACY_NEO4J_SOURCES.items():
-        assert key in SOURCES, f"Legacy SOURCES key '{key}' is missing from registry-derived dict"
-        assert SOURCES[key] == expected, f"SOURCES['{key}'] value drift: expected {expected}, got {SOURCES[key]}"
+        canonical = canonical_source_id(key)
+        assert canonical in SOURCES, f"Legacy SOURCES key '{key}' resolves to no registry-derived entry"
+        assert SOURCES[canonical] == expected, (
+            f"SOURCES['{canonical}'] (legacy key '{key}') value drift: expected {expected}, got {SOURCES[canonical]}"
+        )
+
+
+def test_neo4j_sources_dict_is_keyed_by_canonical_ids_only():
+    """2026-10-25: one ``Source`` node per registered source. An alias is a lookup key, never a
+    ``SOURCES`` entry, so ``ensure_sources`` creates no node for it."""
+    from neo4j_client import SOURCES
+    from source_registry import all_sources
+
+    assert list(SOURCES) == [s.canonical_id for s in all_sources()]
+    aliases = {alias for s in all_sources() for alias in s.aliases}
+    assert not aliases & set(SOURCES)
 
 
 def test_default_sources_dict_preserves_every_legacy_entry_byte_for_byte():
@@ -319,16 +338,18 @@ def test_every_reliable_first_seen_source_is_also_in_neo4j_sources():
     regression class.
     """
     from neo4j_client import SOURCES
+    from source_registry import canonical_source_id
     from source_truthful_timestamps import _RELIABLE_FIRST_SEEN_SOURCES
 
-    missing = _RELIABLE_FIRST_SEEN_SOURCES - set(SOURCES.keys())
+    # The writers resolve an alias to its canonical id before they MATCH the Source node
+    # (2026-10-25), so every allowlist key must resolve to a SOURCES entry.
+    missing = {key for key in _RELIABLE_FIRST_SEEN_SOURCES if canonical_source_id(key) not in SOURCES}
     assert not missing, (
-        f"INVARIANT VIOLATION: reliable_first_seen sources {missing} are not in "
+        f"INVARIANT VIOLATION: reliable_first_seen sources {missing} resolve to no entry of "
         "neo4j_client.SOURCES. Their SOURCED_FROM edge MERGEs would silently "
         "fail because ensure_sources never created the :Source node. "
-        "Add them to source_registry.py with reliable_first_seen=True AND "
-        "make sure their canonical_id + aliases are picked up by the "
-        "to_neo4j_sources_dict() derivation."
+        "Add them to source_registry.py with reliable_first_seen=True so the "
+        "to_neo4j_sources_dict() derivation picks up their canonical_id."
     )
 
 
@@ -521,9 +542,9 @@ def test_adding_a_new_source_propagates_to_all_five_derivations(monkeypatch):
     reliable = reliable_first_seen_aliases()
     misp = source_to_misp_tag_map()
 
-    # 1. Neo4j SOURCES picks it up via canonical id AND alias
+    # 1. Neo4j SOURCES picks it up via its canonical id; the alias is no Source node (2026-10-25)
     assert "testsrc_canonical_id_12345" in neo4j_dict
-    assert "testsrc_alias_67890" in neo4j_dict
+    assert "testsrc_alias_67890" not in neo4j_dict
     assert neo4j_dict["testsrc_canonical_id_12345"]["name"] == "Test Source"
 
     # 2. CLI DEFAULT_SOURCES picks it up via cli_id

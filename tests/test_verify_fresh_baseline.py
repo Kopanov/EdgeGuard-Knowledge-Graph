@@ -87,7 +87,6 @@ def _healthy_scan() -> List[Dict[str, Any]]:
 _SOURCE_ROWS = [
     {"source_id": "abuseipdb", "sourced_from": 10000},
     {"source_id": "alienvault_otx", "sourced_from": 149000},
-    {"source_id": "cisa", "sourced_from": 0},
     {"source_id": "cisa_ics", "sourced_from": 0},
     {"source_id": "cisa_kev", "sourced_from": 1500},
     {"source_id": "feodo_tracker", "sourced_from": 7600},
@@ -95,7 +94,6 @@ _SOURCE_ROWS = [
     {"source_id": "misp", "sourced_from": 0},
     {"source_id": "mitre_attck", "sourced_from": 1900},
     {"source_id": "nvd", "sourced_from": 140000},
-    {"source_id": "otx", "sourced_from": 0},
     {"source_id": "ssl_blacklist", "sourced_from": 11000},
     {"source_id": "threatfox", "sourced_from": 7400},
     {"source_id": "urlhaus", "sourced_from": 34000},
@@ -1034,6 +1032,59 @@ class TestContractIsWhatTheWritersWrite:
         ]
         assert len(rows) >= 12
         assert all("match_type" in keys for keys in rows)
+
+
+class TestSourceNodesCanonical:
+    """2026-10-25: one ``Source`` node per registered source, keyed by its canonical id; an alias of a
+    registered source fails the check, an id the registry does not know is reported."""
+
+    @staticmethod
+    def _with_source_rows(extra):
+        return lambda st, rows: rows + extra if "AS sourced_from" in st else rows
+
+    def test_correct_graph_passes(self, vfb, monkeypatch):
+        c = _check(_run(vfb, monkeypatch), "source_nodes_canonical")
+        assert c["ok"] is True and c["mandatory"] is True
+        assert c["detail"] == {
+            "alias_source_nodes": [],
+            "unregistered_source_nodes": [],
+            "canonical_source_nodes": len(_SOURCE_ROWS),
+        }
+
+    @pytest.mark.parametrize(
+        "alias,canonical",
+        [
+            ("otx", "alienvault_otx"),
+            ("cisa", "cisa_kev"),
+            ("vt", "virustotal"),
+            ("cisa-ics", "cisa_ics"),
+            ("mb", "malwarebazaar"),
+        ],
+    )
+    def test_an_alias_node_fails(self, vfb, monkeypatch, alias, canonical):
+        rep = _run(vfb, monkeypatch, override=self._with_source_rows([{"source_id": alias, "sourced_from": 0}]))
+        assert [c["check"] for c in rep.failed] == ["source_nodes_canonical"]
+        assert _check(rep, "source_nodes_canonical")["detail"]["alias_source_nodes"] == [
+            {"source_id": alias, "sourced_from": 0, "canonical_id": canonical}
+        ]
+
+    def test_every_registered_alias_is_recognised(self, vfb, monkeypatch):
+        from source_registry import all_sources
+
+        aliases = [a for s in all_sources() for a in s.aliases]
+        extra = [{"source_id": a, "sourced_from": 0} for a in aliases]
+        rep = _run(vfb, monkeypatch, override=self._with_source_rows(extra))
+        detail = _check(rep, "source_nodes_canonical")["detail"]
+        assert [x["source_id"] for x in detail["alias_source_nodes"]] == aliases
+        assert detail["unregistered_source_nodes"] == []
+
+    def test_an_unregistered_source_node_is_reported_not_failed(self, vfb, monkeypatch):
+        rep = _run(
+            vfb, monkeypatch, override=self._with_source_rows([{"source_id": "partner_feed", "sourced_from": 3}])
+        )
+        c = _check(rep, "source_nodes_canonical")
+        assert c["ok"] is True and "source_nodes_canonical" not in [x["check"] for x in rep.failed]
+        assert c["detail"]["unregistered_source_nodes"] == [{"source_id": "partner_feed", "sourced_from": 3}]
 
 
 class TestLegacyRelationshipProperties:
