@@ -2115,7 +2115,8 @@ neo4j_sync_dag = DAG(
     # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (default 8 h limit), build_relationships
     # and run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
     # run_neo4j_sync's limit is EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger
-    # value uses 22); this arithmetic and the alert thresholds are derived from the default 8 h. Above
+    # value uses 22); this arithmetic is derived from the default 8 h (EdgeGuardNeo4jSyncStale follows
+    # the limit through edgeguard_neo4j_sync_task_limit_seconds). Above
     # 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a late
     # build_relationships or run_enrichment_jobs is then cut (marked skipped, without a failure
     # callback), while the 22 h cap keeps all three sync attempts and the 24 h guard inside the limits
@@ -2224,8 +2225,8 @@ run_neo4j_sync_task = PythonOperator(
     # minutes on a local Neo4j, but hours against a remote one with many changed events (a prod sync at
     # about 0.9 NVD CVE/s, one event with 21,887 changed CVEs, took 8 h 37 min), so the limit is
     # EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger value uses 22, an invalid one
-    # 8, both with a warning). The 68 h arithmetic and the alert thresholds are derived from the default
-    # 8 h; above 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a
+    # 8, both with a warning). The 68 h arithmetic is derived from the default 8 h (the stale-sync alert
+    # follows the limit); above 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a
     # late build_relationships or run_enrichment_jobs is then cut (marked skipped, without a failure
     # callback), while the 22 h cap keeps all three sync attempts and the 24 h guard inside the limits.
     execution_timeout=timedelta(hours=_neo4j_sync_timeout_hours()),

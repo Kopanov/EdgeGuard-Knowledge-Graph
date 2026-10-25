@@ -358,7 +358,7 @@ The `edgeguard_baseline` DAG holds a lock for the whole run: the `baseline_acqui
 - While the lock is held, the five scheduled DAGs skip at task start: a collector task succeeds with `skipped: true` (a green task, reason `baseline_in_progress`), and every writing task of `edgeguard_neo4j_sync` skips.
 - A failed run keeps the lock, so clearing the failed task resumes under it. A refusal of `baseline_clean` before the wipe (a misspelt `fresh_baseline` key, an invalid `wipe_scope`, the backup gate) releases it, so the corrected trigger is not refused.
 - The lock ends with a successful run, after `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48 hours by default, above the 32-hour run limit) or when the operator removes the file. The scheduled DAGs read the holder's run state through the Airflow REST API and fall back to the file's age.
-- Pausing the scheduled DAGs first is optional; it is recommended before a fresh baseline. Pausing stops new tasks and retries, while a scheduled task that is already running when the lock is taken keeps running to its end (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), so before a fresh baseline also wait until none of the five DAGs has a running run; preflight check `[5]` fails while one has ([docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol), Option A).
+- Pausing the scheduled DAGs first is optional; it is recommended before a fresh baseline. Pausing stops new tasks and retries, while a scheduled task that is already running when the lock is taken keeps running to its end (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), and a paused DAG's run stays `running` while tasks of it are left; so before a fresh baseline mark every run the five DAGs still have failed (Airflow UI, or `edgeguard dag kill --dag-id <dag>`) and wait until its task has stopped; preflight check `[5]` fails while one of them has a running run ([docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol), Option A).
 
 Full lock semantics: [docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol).
 
@@ -406,6 +406,11 @@ It runs checks `[1]` to `[12]`: settings, Neo4j and APOC, MISP, the pause state 
 # 1. Pause the five scheduled DAGs (optional; recommended before a fresh baseline)
 for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
   docker compose exec airflow airflow dags pause "$dag"
+done
+
+# Before a fresh baseline: each of the five must print [] (mark a run it still lists failed in the Airflow UI)
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
+  docker compose exec -T airflow airflow dags list-runs "$dag" --state running -o json
 done
 
 # 2. Trigger the baseline (additive)

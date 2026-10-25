@@ -804,10 +804,13 @@ already running keeps running, and a `run_neo4j_sync` attempt can last up
 to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Before a destructive
 fresh-baseline, pause the 5 DAGs (this includes `edgeguard_neo4j_sync`: a
 full MISP→Neo4j sync running during the baseline is the same
-concurrent-writer hazard) and wait until the `list-runs` command below
-prints `[]` for each of them. A run that must not finish can be marked
-failed in the Airflow UI: Airflow then stops its running task; wait until
-the task log shows that the task has stopped:
+concurrent-writer hazard) and check with the `list-runs` command below.
+A paused DAG's run stays `running` while tasks of it are left, because the
+scheduler starts none of them, so waiting does not end it: mark each run
+the command lists failed in the Airflow UI (`edgeguard dag kill --dag-id
+<dag>` does the same through the REST API). Airflow fails a task of it that
+is still running and stops it. Wait until the task log shows that the task
+has stopped and each of the 5 DAGs prints `[]`:
 
 ```bash
 docker compose exec airflow airflow dags pause edgeguard_daily

@@ -243,7 +243,7 @@ all four, on every exit path.
 | `edgeguard_sync_events_index_total` | Gauge | - | Events returned from the MISP index on the last sync |
 | `edgeguard_sync_events_processed` | Gauge | - | Events whose `sync_to_neo4j` completed successfully |
 | `edgeguard_sync_events_failed` | Gauge | - | Events that failed permanently (first pass + retry pass + cap exhaustion) |
-| `edgeguard_sync_events_paged_incomplete` | Gauge | - | Processed events of the last sync fetched in pages whose pages brought fewer attribute rows than the MISP index lists (`[PAGED-FETCH-INCOMPLETE]`; the run stays green). Read by `EdgeGuardSyncPagedFetchIncomplete` |
+| `edgeguard_sync_events_paged_incomplete` | Gauge | - | Events of the last sync fetched in pages whose pages brought fewer attribute rows than the MISP index lists (`[PAGED-FETCH-INCOMPLETE]`; the run stays green). Read by `EdgeGuardSyncPagedFetchIncomplete` |
 
 ### Source-truthful Timestamp Pipeline
 

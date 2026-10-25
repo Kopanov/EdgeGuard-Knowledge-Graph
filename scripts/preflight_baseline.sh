@@ -256,7 +256,7 @@ else
       # Pausing stops new tasks and retries only: a task that is already running keeps running (a
       # run_neo4j_sync attempt up to EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS), and the baseline lock is read
       # only when a task starts. `-o json` prints [] when no run is running (`-o plain` prints
-      # "No data found"); the last line that is a JSON list is read, so log lines before it do no harm.
+      # "No data found"); the last line that parses as a JSON list is read, so log lines do no harm.
       if RUNS_JSON=$(docker compose exec -T airflow airflow dags list-runs "$dag" --state running -o json 2>/dev/null); then
         RUNNING=$(printf '%s\n' "$RUNS_JSON" | python3 -c '
 import json, sys
@@ -264,7 +264,15 @@ text = sys.stdin.read()
 try:
     runs = json.loads(text)
 except ValueError:
-    runs = json.loads([line for line in text.splitlines() if line.lstrip().startswith("[")][-1])
+    runs = None
+    for line in reversed(text.splitlines()):
+        try:
+            cand = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(cand, list):
+            runs = cand
+            break
 print(len(runs) if isinstance(runs, list) else "?")
 ' 2>/dev/null || echo "?")
       else
@@ -273,7 +281,7 @@ print(len(runs) if isinstance(runs, list) else "?")
       if [[ "$RUNNING" == "0" ]]; then
         pass "DAG $dag has no running run"
       elif [[ "$RUNNING" =~ ^[0-9]+$ ]]; then
-        fail "DAG $dag has $RUNNING running run(s): pausing does not stop a task that is already running (a run_neo4j_sync attempt lasts up to EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS); wait until it ends, or mark the run failed and wait until its task has stopped, before the baseline (docs/RUNBOOK.md Option A)"
+        fail "DAG $dag has $RUNNING running run(s): pausing does not stop a task that is already running (a run_neo4j_sync attempt lasts up to EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS), and the scheduler does not end a paused DAG's run while tasks of it are left; mark the run failed in the Airflow UI and wait until its task has stopped, before the baseline (docs/RUNBOOK.md Option A)"
       else
         warn "running runs of DAG $dag not queryable (airflow dags list-runs $dag --state running -o json failed or printed no JSON list)"
       fi

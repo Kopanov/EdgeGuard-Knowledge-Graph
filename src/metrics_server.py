@@ -1083,7 +1083,7 @@ def record_sync_event_accounting(
     is what would have caught the 2026-04-14 NVD regression (event 4 was
     neither processed nor failed — it was silently dropped, and the counter
     gap stayed hidden because nothing exported the numbers).
-    ``events_paged_incomplete`` counts the processed events whose paged fetch brought fewer attribute
+    ``events_paged_incomplete`` counts the events whose paged fetch brought fewer attribute
     rows than the MISP index lists; each run sets it, so it clears with the next complete run.
     """
     SYNC_EVENTS_INDEX_TOTAL.set(max(events_index_total, 0))

@@ -354,8 +354,9 @@ clearing:
    when the OTX records give sectors and none states one (the pulses' industries lost on the
    way to the sync).
    The baseline DAG holds the baseline lock for the whole run, and the scheduled tasks skip when
-   they start. Before a destructive run, pause the scheduled DAGs and wait until none of them has
-   a running run: pausing does not stop a task that is already running
+   they start. Before a destructive run, pause the scheduled DAGs and mark any run they still have
+   failed: pausing does not stop a task that is already running, and a paused DAG's run stays
+   `running` while tasks of it are left
    ([RUNBOOK § Baseline day protocol](RUNBOOK.md#baseline-day-protocol)).
    The `baseline_clean` step may take up to 60 minutes on a 730-day store: it deletes Neo4j
    relationships in batches before the nodes, and each MISP event delete may wait up to
@@ -434,11 +435,12 @@ See RUNBOOK § "Baseline launch path" for the full procedure:
    `edgeguard_pipeline`, `edgeguard_low_freq`, `edgeguard_neo4j_sync`)
    so that none of their tasks or retries starts during the baseline. Pausing does not stop a
    task that is already running, and a `run_neo4j_sync` attempt can last up to
-   `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`: wait until
-   `docker compose exec -T airflow airflow dags list-runs <dag> --state running -o json`
-   prints `[]` for each of the 5 (check `[5]` fails while one has a running run), or mark the
-   running run failed in the Airflow UI and wait until its task log shows that the task has
-   stopped.
+   `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. A paused DAG's run also stays `running` while tasks of
+   it are left, because the scheduler starts none of them. Run
+   `docker compose exec -T airflow airflow dags list-runs <dag> --state running -o json` for each
+   of the 5, mark each run it lists failed in the Airflow UI (`edgeguard dag kill --dag-id <dag>`
+   does the same), wait until the task log shows that its task has stopped, and repeat until each
+   prints `[]` (check `[5]` fails while one has a running run).
 2. `edgeguard fresh-baseline --days 730 --wipe-all` (destructive, see
    § [6] step 4) or `edgeguard baseline --days 730` (additive)
 3. Watch `baseline_complete` and `baseline_release_lock`; unpause the 5
@@ -461,7 +463,7 @@ check prunes it once the run state is success, or when it is older than
 `wipe_scope`, the backup gate) releases the lock. The lock is read when a
 task starts, so a task that is already running when the lock is taken keeps
 running to its end; pausing the 5 scheduled DAGs stops new tasks and
-retries, and step 1 waits for the running ones.
+retries, and step 1 marks the runs still listed as running failed.
 
 ---
 
