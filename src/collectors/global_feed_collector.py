@@ -23,6 +23,7 @@ from collectors.collector_utils import (
     RateLimiter,
     TransientServerError,
     feed_time,
+    install_export_key_log_filter,
     is_auth_or_access_denied,
     lower_limit,
     make_skipped_optional_source,
@@ -70,8 +71,10 @@ def download_abusech_export(url: str, key: str, *, context: str, timeout: Any) -
     """One GET of an abuse.ch v2 export URL (the key is in ``url``) with the key kept out of every trace.
 
     The helper's own log lines, the exceptions it raises and the returned response (``.url``) show
-    ``/v2/files/exports/<redacted>/...`` instead of the key.
+    ``/v2/files/exports/<redacted>/...`` instead of the key, and so do the DEBUG records of the HTTP
+    library (``install_export_key_log_filter``).
     """
+    install_export_key_log_filter()  # idempotent; already installed when collector_utils was imported
     try:
         response = request_with_rate_limit_retries(
             "GET",
@@ -462,11 +465,11 @@ class URLhausCollector:
     """
     Collects malware URLs from URLhaus - Global malware URL feed.
 
-    URLhaus is a project from abuse.ch to share malicious URLs. 2026-10: the keyless CSV
-    downloads are retired (HTTP 410); the v2 ``recent.csv`` export (last 30 days, same columns)
-    needs the abuse.ch Auth-Key (``THREATFOX_API_KEY``), which sits in the URL path. Without a
-    key the run is skipped (``missing_abusech_key``); HTTP 401/403 → skipped
-    (``urlhaus_auth_denied``). The key never appears in logs, errors or status dicts.
+    URLhaus is a project from abuse.ch to share malicious URLs. The v2 ``recent.csv`` export
+    (about 63,000 URLs on 2026-10-24) needs the abuse.ch Auth-Key (``THREATFOX_API_KEY``),
+    which sits in the URL path. Without a key the run is skipped (``missing_abusech_key``);
+    HTTP 401/403 → skipped (``urlhaus_auth_denied``). The key never appears in logs, errors,
+    status dicts or the HTTP library's DEBUG records.
     """
 
     def __init__(self, api_key: Optional[str] = None, misp_writer: MISPWriter = None):
@@ -485,8 +488,8 @@ class URLhausCollector:
 
     @staticmethod
     def max_per_run() -> int:
-        """``config.URLHAUS_MAX_PER_RUN`` (default 50,000; ``0`` = no per-run cap)."""
-        return source_run_cap("URLHAUS_MAX_PER_RUN", 50000)
+        """``config.URLHAUS_MAX_PER_RUN`` (default 100,000; ``0`` = no per-run cap)."""
+        return source_run_cap("URLHAUS_MAX_PER_RUN", 100000)
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _fetch_feed(self, url: str) -> str:

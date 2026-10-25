@@ -2831,7 +2831,7 @@ def cmd_preflight(args) -> int:
     # Source API keys: ask each provider whether it accepts the key. "The variable is set" does not
     # say whether the source will deliver — a rejected key only shows inside a run, as a skipped
     # task (or, for NVD, as a failed one).
-    from source_key_check import REJECTED, VALID, check_source_keys, required_sources
+    from source_key_check import REJECTED, VALID, check_source_keys, required_sources, undelivered_required_sources
 
     key_statuses = check_source_keys()
     required_keyed_sources = required_sources()
@@ -2841,7 +2841,7 @@ def cmd_preflight(args) -> int:
         elif key_status.status == REJECTED and key_status.task_fails:
             err(key_status.message())
             errors += 1
-        elif key_status.source in required_keyed_sources and key_status.will_collect is False:
+        elif undelivered_required_sources(key_status, required_keyed_sources):
             err(f"{key_status.message()} [named in EDGEGUARD_BASELINE_REQUIRED_SOURCES]")
             errors += 1
         elif key_status.status == REJECTED:

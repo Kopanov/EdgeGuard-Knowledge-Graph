@@ -17,13 +17,13 @@
 | 5 | VirusTotal | grows by ≤ 400 lookups/day (free-tier budget) | ✅ Auto-tagged | Enrichment of hashes already in MISP (lookups, not a feed) | ✅ Active |
 | 6 | ThreatFox | the IOCs of the last 7 days (7,398 on the 730-day baseline; about 1,100 new per day), ≤ 10,000 per run | ✅ Auto-tagged | Malware IOCs | ✅ Active |
 | 7 | AbuseIPDB | the blacklist: at most one request per run of at most 10,000 addresses (the free plan's maximum per request; 10,000 on the 730-day baseline); 5 blacklist requests per UTC day on the free plan: an answer is reused for the rest of its UTC day, and a 429 fails the task ([COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector)) | ✅ Auto-tagged | IP reputation | ✅ Active |
-| 8 | URLhaus | the URLs of the last 30 days (34,003 on the 730-day baseline; about 1,130 new per day), ≤ 50,000 per run | ✅ Auto-tagged | Malware URLs | ✅ Active |
+| 8 | URLhaus | the `recent.csv` export (about 63,000 URLs on 2026-10-24; about 1,130 new per day), ≤ 100,000 per run; abuse.ch Auth-Key required | ✅ Auto-tagged | Malware URLs | ✅ Active |
 | 9 | Feodo Tracker | 7,607 servers on a baseline (complete history; abuse.ch last updated the feed on 2026-03-04), ≤ 15,000 per run | ✅ Auto-tagged (keyword detector; Global in practice) | Botnet C&C IPs with malware family | ✅ Active |
 | 10 | SSL Blacklist | ~11,000 (10,964 on 2026-10-12), the whole list per run, ≤ 20,000 | ✅ Auto-tagged (keyword detector; Global in practice) | Malware SSL certs | ✅ Active |
 | 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
 | 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
 | 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) |
-| 14 | MalwareBazaar | ~1,000 samples per export (last 48 h; 1,027 on 2026-10-12, 762 with a family label), ≤ 500 pushed per run | ✅ Auto-tagged (`detect_zones_from_text()` on the family label) | Malware sample hashes (sha256) with the family label → `INDICATES` edges to `Malware` nodes | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) |
+| 14 | MalwareBazaar | ~830–1,000 samples per export (last 48 h; 1,027 on 2026-10-12, 762 with a family label; about 830 on 2026-10-24), ≤ 500 pushed per run; abuse.ch Auth-Key required | ✅ Auto-tagged (`detect_zones_from_text()` on the family label) | Malware sample hashes (sha256) with the family label → `INDICATES` edges to `Malware` nodes | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) |
 | 15 | FIRST EPSS | ~385,000 scores / day (only existing CVEs updated) | N/A | Exploit-prediction score and percentile per CVE; the one source written to Neo4j without MISP (§ 8b) | 🚩 Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, default on) |
 
 **Note:** Energy and Healthcare collectors are placeholders. Member-only ISAC feeds (EE-ISAC, Health-ISAC) are not planned and no membership is budgeted, and HC3, a public source of the US Department of Health and Human Services, is not collected. No DAG task calls the two placeholder modules. CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
@@ -81,17 +81,17 @@
 ---
 
 ### 3. URLhaus
-**Items:** the URLs added in the last 30 days (`recent.csv`; 34,003 on the 730-day baseline of 2026-10-13, about 1,130 new per day), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000) per run | **Zone Distribution:** Global 100%
+**Items:** the URLs of the `recent.csv` export (about 63,000 on 2026-10-24, about 1,130 new per day), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000) per run | **Zone Distribution:** Global 100%
 
 | Attribute | Value |
 |-----------|-------|
-| URL | `https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` (2026-10: the keyless `downloads/csv_recent/` and `csv_top10k/` answer HTTP 410) |
+| URL | `https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` |
 | Format | CSV |
-| Auth | The abuse.ch Auth-Key (`THREATFOX_API_KEY`, https://auth.abuse.ch/) in the URL path; without it the task is skipped (`missing_abusech_key`), HTTP 401/403 → skipped (`urlhaus_auth_denied`). The key is redacted in every log line and error |
+| Auth | The abuse.ch Auth-Key (`THREATFOX_API_KEY`, https://auth.abuse.ch/) in the URL path; without it the task is skipped (`missing_abusech_key`), HTTP 401/403 → skipped (`urlhaus_auth_denied`). The key is redacted in every log line and error, the HTTP library's DEBUG records included |
 | Update | Daily |
 | Classification | ✅ `detect_zones_from_text()` on threat names and tags |
 
-**Per-run cap:** the daily run reads the whole 30-day file, so that no URL leaves the window uncollected. The cap `EDGEGUARD_URLHAUS_MAX_PER_RUN` (default 50,000) covers the window with headroom; a run that reaches it keeps the newest URLs by `dateadded` and logs a warning. ThreatFox (the IOCs of the last 7 days, the most `get_iocs` serves; 7,398 on the same baseline) has the same rule with `EDGEGUARD_THREATFOX_MAX_PER_RUN` (default 10,000), newest by `first_seen` ([COLLECTORS.md § 8](COLLECTORS.md#8-global-feed-collector)).
+**Per-run cap:** the daily run reads the whole export, so that no URL leaves the window uncollected. The cap `EDGEGUARD_URLHAUS_MAX_PER_RUN` (default 100,000) covers the export (about 63,000 URLs on 2026-10-24) with headroom; a run that reaches it keeps the newest URLs by `dateadded` and logs a warning. ThreatFox (the IOCs of the last 7 days, the most `get_iocs` serves; 7,398 on the same baseline) has the same rule with `EDGEGUARD_THREATFOX_MAX_PER_RUN` (default 10,000), newest by `first_seen` ([COLLECTORS.md § 8](COLLECTORS.md#8-global-feed-collector)).
 
 **What we get:**
 - Malware distribution URLs
@@ -159,13 +159,13 @@
 ---
 
 ### 4c. MalwareBazaar (abuse.ch) — flag-guarded
-**Items:** one `sha256` indicator per sample; the recent export holds the samples of the last 48 hours (1,027 rows on 2026-10-12: 458 Mirai, 265 without a label) and at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) are pushed per run | **Zone:** `detect_zones_from_text()` on the family label (`global` when the label is `n/a`)
+**Items:** one `sha256` indicator per sample; the recent export holds the samples of the last 48 hours (1,027 rows on 2026-10-12: 458 Mirai, 265 without a label; about 830 on 2026-10-24) and at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) are pushed per run | **Zone:** `detect_zones_from_text()` on the family label (`global` when the label is `n/a`)
 
 | Attribute | Value |
 |-----------|-------|
-| URL | `https://mb-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` (2026-10: the keyless `/export/csv/recent/` answers HTTP 410) — per `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`). The full export (`/export/csv/full/`) is the complete history and is not used |
+| URL | `https://mb-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` — per `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`). The full export (`/export/csv/full/`) is the complete history and is not used |
 | Format | CSV with `#` comment lines; columns `first_seen_utc, sha256_hash, md5_hash, sha1_hash, reporter, file_name, file_type_guess, mime_type, signature, clamav, vtpercent, imphash, ssdeep, tlsh` |
-| Auth | The abuse.ch Auth-Key (`THREATFOX_API_KEY`) in the URL path; required since 2026-10 (without it the task is skipped, `missing_abusech_key`) |
+| Auth | The abuse.ch Auth-Key (`THREATFOX_API_KEY`) in the URL path, required (without it the task is skipped, `missing_abusech_key`); redacted in every log line and error, the HTTP library's DEBUG records included |
 | Update | Daily (`edgeguard_daily` → `collect_malwarebazaar`) and baseline tier 2, only when `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`; both read the recent export, so the history builds up over the daily runs |
 | Classification | ✅ `detect_zones_from_text()` on `signature` |
 | Terms | Free of charge for commercial and non-commercial use (https://bazaar.abuse.ch/faq/#tos) |
@@ -314,10 +314,11 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus and MalwareBazaar read the abuse.ch v2 `recent.csv` exports with the Auth-Key (`THREATFOX_API_KEY`) in the URL path, because the keyless downloads (`downloads/csv_recent/`, `csv_top10k/`, `/export/csv/recent/`) answer HTTP 410 since 2026-10; the URLhaus export listed about 63,000 URLs on 2026-10-24 (the keyless 30-day file 34,003 on 2026-10-13), and `EDGEGUARD_URLHAUS_MAX_PER_RUN` is 100,000 (was 50,000), so the cap covers it again.
 - 2026-10-23 — HC3 named as a public source that is not collected, not as a member-only feed; no DAG task calls the placeholder modules.
 - 2026-10-18 — OTX: the sectors the pulse's own industries name are its statement (`otx_industries` on `TARGETS`); Financial Services, Investment(s), Pharmaceuticals, Pharmacy and Petroleum map to a sector.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

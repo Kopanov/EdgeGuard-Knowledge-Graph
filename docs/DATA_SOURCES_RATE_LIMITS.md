@@ -183,15 +183,15 @@
 
 | Aspect | Details |
 |--------|---------|
-| **API Required** | No (CSV download) |
-| **Registration** | Not required |
-| **Rate Limit** | None (CSV download) |
+| **API Required** | The abuse.ch Auth-Key (`THREATFOX_API_KEY`) in the export URL path |
+| **Registration** | Free abuse.ch account (https://auth.abuse.ch/) |
+| **Rate Limit** | None; one export download per run (about 16 MB, about 63,000 URLs on 2026-10-24) |
 | **Data Provided** | Malware URLs, tags, threat types |
 | **Format** | CSV |
 | **Update Frequency** | Hourly |
 
 **Download URLs:**
-- Recent (2026-10, Auth-Key in the path; the old `downloads/csv_recent/` answers HTTP 410): https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv
+- Recent (read by the collector; Auth-Key in the path): https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv
 - Full: https://urlhaus.abuse.ch/downloads/csv_all/ (not used)
 - API: https://urlhaus.abuse.ch/api/
 
@@ -355,10 +355,11 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus: the export needs the abuse.ch Auth-Key in its URL path and a free abuse.ch account (the keyless `downloads/csv_recent/` answers HTTP 410 since 2026-10); about 63,000 URLs per export on 2026-10-24.
 - 2026-10-17 — The NVD key is optional (5 requests per 30 s without it; the page said required); the KEV feed listed as a JSON download; the MITRE download named as `MITRECollector.attack_url`, plus the ATT&CK for ICS bundle with `EDGEGUARD_ENABLE_MITRE_ICS=true`; the setup checklist adds `THREATFOX_API_KEY`, names the environment variables and marks every source key optional; main text limited to current behaviour, with the change history in this section.
 - 2026-10-16 — AbuseIPDB: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests; a blacklist 429 fails `collect_abuseipdb` at once (the task had stayed green with a count of 0); a fetched, non-empty answer is reused on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`; the collector line that names the KEV feed URL cited.
 - 2026-10-15 — One entry removed from the alternative and premium sources.

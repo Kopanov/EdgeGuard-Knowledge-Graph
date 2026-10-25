@@ -255,7 +255,7 @@ cp backups/baseline_checkpoint-2026-04-19.json checkpoints/baseline_checkpoint.j
 
 If no checkpoint backup exists, the next incremental run will re-collect
 each source's incremental window (OTX 3 days, NVD 14 days, CISA ICS 30
-days, the ThreatFox and URLhaus feeds' 7 and 30 days; CISA KEV reads the
+days, ThreatFox 7 days, URLhaus its `recent.csv` export; CISA KEV reads the
 whole catalogue every run).
 
 **Step 5 — Restart and verify:**
@@ -316,10 +316,11 @@ update into a wrapper.
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus re-reads its abuse.ch `recent.csv` export (the keyless 30-day download answers HTTP 410 since 2026-10).
 - 2026-10-23 — A Neo4j wipe that fails part-way writes an audit line with what it deleted (`details.outcome = "failed"`), one per attempt when the graph client retries; before, only a wipe that completed wrote a line, and a retried wipe recorded only the nodes of its last attempt.
 - 2026-10-23 — Each audit line names the process that ran the delete (`actor`); the wipes of `edgeguard clear neo4j` and `scripts/clear_neo4j.py` are listed with that of the fresh baseline.
 - 2026-10-23 — The readiness cross-reference points to PRODUCTION_READINESS.md; the README section it named was removed.

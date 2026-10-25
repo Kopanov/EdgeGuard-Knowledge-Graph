@@ -350,13 +350,16 @@ _REGISTRY: Tuple[Source, ...] = (
         misp_tag="source:SSL-Blacklist",
         reliable_first_seen=True,
     ),
+    # URLhaus: the v2 ``recent.csv`` export carries the abuse.ch Auth-Key in its URL path, the
+    # key ThreatFox and MalwareBazaar use too (``THREATFOX_API_KEY``); without it the source is
+    # skipped.
     Source(
         canonical_id="urlhaus",
         display_name="URLhaus",
         source_type="threat_intel",
         reliability=0.7,
         cli_id="urlhaus",
-        api_key_env=None,
+        api_key_env="THREATFOX_API_KEY",
         rate_limit="unlimited",
         cli_default_enabled=True,
         cli_description="Malware URLs",
@@ -397,7 +400,8 @@ _REGISTRY: Tuple[Source, ...] = (
     ),
     # MalwareBazaar (abuse.ch, 2026-10): sha256 hashes of recent malware samples with the
     # family label (``signature``). Flag-guarded (EDGEGUARD_ENABLE_MALWAREBAZAAR, default
-    # OFF) — hence cli_default_enabled=False. No API key is required for the recent export.
+    # OFF) — hence cli_default_enabled=False. The recent export carries the abuse.ch Auth-Key
+    # (``THREATFOX_API_KEY``) in its URL path; without it the source is skipped.
     Source(
         canonical_id="malwarebazaar",
         aliases=("bazaar", "mb"),
@@ -405,7 +409,7 @@ _REGISTRY: Tuple[Source, ...] = (
         source_type="threat_intel",
         reliability=0.7,
         cli_id="malwarebazaar",
-        api_key_env=None,
+        api_key_env="THREATFOX_API_KEY",
         rate_limit="unlimited",
         cli_default_enabled=False,
         cli_description="Malware sample hashes with family labels",

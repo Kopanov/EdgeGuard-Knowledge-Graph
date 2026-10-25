@@ -300,6 +300,45 @@ def scrub_export_key_error(exc: BaseException, key: Optional[str] = None) -> Bas
     return exc
 
 
+class ExportKeyLogFilter(logging.Filter):
+    """Redacts the Auth-Key of an abuse.ch export URL in the records of the HTTP library's loggers.
+
+    ``urllib3.connectionpool`` logs the request line of every request, path included, at DEBUG
+    (``https://host:443 "GET /v2/files/exports/<AUTH-KEY>/recent.csv HTTP/1.1" 200 None``), so a
+    log level raised to DEBUG would otherwise write the key into the task log. The filter keeps
+    every record and rewrites only one whose text holds an export key path.
+    """
+
+    edgeguard_export_key_filter = True  # marker: install_export_key_log_filter adds one filter per logger
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # a malformed record is left to the logging module's own error handling
+            return True
+        redacted = redact_export_key(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+# ``urllib3.connectionpool`` writes the request line; ``urllib3.util.retry`` writes the URL when a
+# retry is counted. A logger filter applies only to records of that exact logger.
+EXPORT_KEY_LOGGERS = ("urllib3.connectionpool", "urllib3.util.retry")
+
+
+def install_export_key_log_filter() -> None:
+    """Add :class:`ExportKeyLogFilter` to each logger in ``EXPORT_KEY_LOGGERS``; a second call adds nothing."""
+    for name in EXPORT_KEY_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(getattr(existing, "edgeguard_export_key_filter", False) for existing in target.filters):
+            target.addFilter(ExportKeyLogFilter())
+
+
+install_export_key_log_filter()
+
+
 # ---------------------------------------------------------------------------
 # Shared state directory
 # ---------------------------------------------------------------------------

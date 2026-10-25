@@ -117,16 +117,16 @@ Component detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the diagrams 
 | | MITRE ATT&CK for ICS | ICS techniques and tactics | opt-in |
 | Indicators | AlienVault OTX | Pulses: indicators, actors, malware, CVEs | on, key |
 | | ThreatFox | Indicators with malware family | on, key |
-| | URLhaus | Malicious URLs | on |
+| | URLhaus | Malicious URLs | on, key |
 | | Feodo Tracker | Botnet C2 servers | on |
 | | SSL Blacklist | Malicious certificate fingerprints | on |
 | | AbuseIPDB | IP blacklist with abuse score | on, key |
-| | MalwareBazaar | SHA-256 of recent samples with family | opt-in |
+| | MalwareBazaar | SHA-256 of recent samples with family | opt-in, key |
 | | VirusTotal | Lookups of hashes already in MISP | on, key |
 | Curated | Curated packages | Claims about actors and malware | on demand |
 
-- **Keys.** A source marked "key" is skipped while its key is missing (`OTX_API_KEY`, `THREATFOX_API_KEY`, `ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY`). NVD works without `NVD_API_KEY` at a lower request rate. `edgeguard preflight` and the baseline ask each provider whether it accepts the configured key. How to obtain each key: [docs/API_KEYS_SETUP.md](docs/API_KEYS_SETUP.md).
-- **History per source.** A baseline reaches back 730 days wherever the source's API does. ThreatFox's API returns at most the last 7 days, URLhaus serves the last 30 days, MalwareBazaar's export the last 48 hours and AbuseIPDB its current blacklist; ATT&CK has no time window.
+- **Keys.** A source marked "key" is skipped while its key is missing (`OTX_API_KEY`, `THREATFOX_API_KEY` for ThreatFox, URLhaus and MalwareBazaar, `ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY`). NVD works without `NVD_API_KEY` at a lower request rate. `edgeguard preflight` and the baseline ask each provider whether it accepts the configured key. How to obtain each key: [docs/API_KEYS_SETUP.md](docs/API_KEYS_SETUP.md).
+- **History per source.** A baseline reaches back 730 days wherever the source's API does. ThreatFox's API returns at most the last 7 days, URLhaus its recent export (about 63,000 URLs on 2026-10-24), MalwareBazaar's export the last 48 hours and AbuseIPDB its current blacklist; ATT&CK has no time window.
 - **VirusTotal.** The free tier allows lookups only (4 per minute, 500 per day). EdgeGuard looks up the hashes already in MISP within a daily budget of 400 lookups and 60 per run; it scans and uploads nothing.
 - **Feodo Tracker.** A baseline loads the complete C2 history; the daily runs read the list of the last 30 days, and the collector logs a warning when the feed's own header is older than 7 days ([docs/COLLECTORS.md § 7](docs/COLLECTORS.md#7-finance-feed-collector)).
 - **Placeholders.** The energy and healthcare sector modules are placeholders that no DAG task runs; member-only ISAC feeds are not collected. Sector labels come from keyword detection in every collector, from the industries an OTX pulse names and, with CISA ICS enabled, from the sectors CISA names.
@@ -609,4 +609,4 @@ EdgeGuard is developed by IICT-BAS and Ratio1 and financed by ResilMesh Open Cal
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_

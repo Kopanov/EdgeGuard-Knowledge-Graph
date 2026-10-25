@@ -65,16 +65,16 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 |---|---|---|
 | `OTX_API_KEY` | unset | AlienVault OTX; without it OTX is skipped |
 | `NVD_API_KEY` | unset | NVD; without it NVD runs at the lower anonymous rate |
-| `THREATFOX_API_KEY` | unset | abuse.ch key; ThreatFox is skipped without it |
+| `THREATFOX_API_KEY` | unset | abuse.ch key; ThreatFox, URLhaus and MalwareBazaar are skipped without it |
 | `ABUSEIPDB_API_KEY` | unset | AbuseIPDB; skipped without it |
 | `VIRUSTOTAL_API_KEY` | unset | VirusTotal lookups; skipped without it |
 | `EDGEGUARD_COLLECT_SOURCES` | unset (all) | Comma-separated allowlist of collectors |
 | `EDGEGUARD_SOURCE_KEY_CHECK` | `true` | Ask each provider whether it accepts the key |
 | `EDGEGUARD_BASELINE_REQUIRED_SOURCES` | empty | Keyed sources a baseline must not start without |
 
-- `THREATFOX_API_KEY` is also the key of the URLhaus and MalwareBazaar exports (2026-10: part of the export URL path); without it both are skipped.
-- The key check runs in `edgeguard preflight`, `scripts/preflight_baseline.sh` and the baseline task `source_key_check`, one authenticated request per keyed source; `false` reports configured keys as unverified.
-- `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `otx`, `nvd`, `virustotal`, `threatfox` and `abuseipdb`. A listed source without a key, with a rejected key or switched off fails `source_key_check`, before the lock and the wipe.
+- `THREATFOX_API_KEY` is also the key of the URLhaus and MalwareBazaar exports, part of the export URL path (redacted in every log line); without it both are skipped.
+- The key check runs in `edgeguard preflight`, `scripts/preflight_baseline.sh` and the baseline task `source_key_check`, one authenticated request per key; `false` reports configured keys as unverified. One ThreatFox query checks the abuse.ch key, and its line names each of ThreatFox, URLhaus and MalwareBazaar that is switched on.
+- `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `otx`, `nvd`, `virustotal`, `threatfox`, `urlhaus`, `malwarebazaar` and `abuseipdb`; `urlhaus` and `malwarebazaar` are judged by `THREATFOX_API_KEY`. A listed source without a key, with a rejected key or switched off (for MalwareBazaar also `EDGEGUARD_ENABLE_MALWAREBAZAAR=false`) fails `source_key_check`, before the lock and the wipe.
 - How to obtain each key: [API_KEYS_SETUP.md](API_KEYS_SETUP.md).
 
 ---
@@ -151,7 +151,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | Variable | Default | Purpose |
 |---|---|---|
 | `EDGEGUARD_THREATFOX_MAX_PER_RUN` | `10000` | ThreatFox indicators per run (newest kept) |
-| `EDGEGUARD_URLHAUS_MAX_PER_RUN` | `50000` | URLhaus URLs per run (newest kept) |
+| `EDGEGUARD_URLHAUS_MAX_PER_RUN` | `100000` | URLhaus URLs per run (newest kept); above the whole `recent.csv` export |
 | `EDGEGUARD_FEODO_MAX_PER_RUN` | `15000` | Feodo Tracker servers per run |
 | `EDGEGUARD_SSLBL_MAX_PER_RUN` | `20000` | SSL Blacklist certificates per run |
 | `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` | `10000` | Limit of the one AbuseIPDB blacklist request per run |
@@ -449,10 +449,11 @@ When to set it, and when to lower `EDGEGUARD_EARLIEST_IOC_DATE` for historical c
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `THREATFOX_API_KEY` is the key of the URLhaus and MalwareBazaar v2 exports too (the keyless downloads answer HTTP 410 since 2026-10); `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `urlhaus` and `malwarebazaar`; `EDGEGUARD_URLHAUS_MAX_PER_RUN` default 100,000 (was 50,000), above the about 63,000 URLs of the export on 2026-10-24.
 - 2026-10-23 — The host scripts that query Neo4j over HTTP have no remote default: with neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` set they use the Compose Neo4j at `http://127.0.0.1:7474` (they sent the credentials to a built-in remote address), `scripts/run_cypher_catalog_http.py` also reads `NEO4J_HTTP`, a value that is not a valid http(s) URL (scheme, host, port) stops them, and `scripts/neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`; rows for `NEO4J_HTTP_USER_AGENT` and `NEO4J_WSS_HOST`.
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY` and `SSL_VERIFY` fail closed: `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off` are recognised, any other value keeps verification on with a warning, and every reader uses the one rule in `src/tls_verify.py`; only ASCII whitespace around the value is ignored, and `scripts/preflight_baseline.sh` applies the rule in the C locale.
 - 2026-10-23 — Created from the README's settings tables, split by area, with the rows that were missing (`EDGEGUARD_API_KEY`, `EDGEGUARD_CORS_ORIGINS`, the MISP push thresholds and back-off, `EDGEGUARD_SYNC_INTERVAL_DAYS`, `EDGEGUARD_EARLIEST_IOC_DATE`, the paths and operator tools) and the behaviour stated as the code has it: `NEO4J_URI`, the API ports and the metrics bind fixed on Compose, the Fernet, JWT and Grafana names Compose maps, the memory variables on the `neo4j` service, `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` skipping longer values, `EDGEGUARD_SSL_VERIFY` turning verification off for any value other than `true`, `MITRE_FORCE_REFETCH` for scheduled runs, `EDGEGUARD_INCREMENTAL_LIMIT` applying to OTX and VirusTotal, and `EDGEGUARD_VERSION` on bare-metal metrics only.

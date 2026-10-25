@@ -468,7 +468,7 @@ fi
 # -----------------------------------------------------------------------------
 # "The variable is set" does not say whether a source will deliver. A key the
 # provider rejects shows up only inside the run: as a skipped task that Airflow
-# shows green (OTX, VirusTotal, ThreatFox, AbuseIPDB), or as a failed NVD task
+# shows green (OTX, VirusTotal, ThreatFox, URLhaus, MalwareBazaar, AbuseIPDB), or as a failed NVD task
 # after the wipe. src/source_key_check.py asks each provider once (cost: one
 # VirusTotal lookup and one AbuseIPDB check; key values are never printed).
 hdr "[12] source API keys (live check)"

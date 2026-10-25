@@ -3,10 +3,10 @@
 The daily DAG passed ``get_effective_limit("threatfox" / "urlhaus")`` to ``collect()``; neither
 source was in ``NO_LIMIT_SOURCES`` or ``OWN_RUN_CAP_SOURCES``, so both were cut at
 ``EDGEGUARD_INCREMENTAL_LIMIT`` (200). ThreatFox serves the IOCs of the last 7 days and URLhaus
-``recent.csv`` the URLs of the last 30 days, about 1,100 new entries per day each, and neither has
-a cursor: about 80% of each day's entries left the window without being collected. Each source
-now has its own cap sized to its window (``EDGEGUARD_THREATFOX_MAX_PER_RUN`` 10,000,
-``EDGEGUARD_URLHAUS_MAX_PER_RUN`` 50,000), and a run that reaches it keeps the newest entries
+its ``recent.csv`` export (about 63,000 URLs on 2026-10-24), about 1,100 new entries per day each,
+and neither has a cursor: about 80% of each day's entries left the window without being collected.
+Each source now has its own cap above its whole window (``EDGEGUARD_THREATFOX_MAX_PER_RUN`` 10,000,
+``EDGEGUARD_URLHAUS_MAX_PER_RUN`` 100,000), and a run that reaches it keeps the newest entries
 whatever order the feed returns them in, and says so in a warning.
 
 Payload shapes: the ThreatFox ``get_iocs`` record and the URLhaus ``recent.csv`` header and row
@@ -81,7 +81,7 @@ def _defaults(monkeypatch):
     monkeypatch.setattr(config, "INCREMENTAL_COLLECTION_LIMIT", 200)
     monkeypatch.setattr(config, "MAX_ENTRIES_PER_SOURCE", 0)
     monkeypatch.setattr(config, "THREATFOX_MAX_PER_RUN", 10000)
-    monkeypatch.setattr(config, "URLHAUS_MAX_PER_RUN", 50000)
+    monkeypatch.setattr(config, "URLHAUS_MAX_PER_RUN", 100000)
     for breaker in (gfc.THREATFOX_CIRCUIT_BREAKER, gfc.URLHAUS_CIRCUIT_BREAKER):
         monkeypatch.setattr(breaker, "can_execute", lambda: True)
         monkeypatch.setattr(breaker, "record_success", lambda: None)
@@ -142,7 +142,7 @@ def test_code_defaults_and_environment_override():
         fresh = importlib.reload(config)
         try:
             assert fresh.THREATFOX_MAX_PER_RUN == 10000
-            assert fresh.URLHAUS_MAX_PER_RUN == 50000
+            assert fresh.URLHAUS_MAX_PER_RUN == 100000
             os.environ["EDGEGUARD_THREATFOX_MAX_PER_RUN"] = "1234"
             os.environ["EDGEGUARD_URLHAUS_MAX_PER_RUN"] = "0"
             fresh = importlib.reload(config)
