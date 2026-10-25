@@ -35,7 +35,9 @@ def _load_dag_module(skip_if_not_importable=True):
     # Purge the Airflow stubs other tests leave in ``sys.modules`` (``test_graphql_api.py`` registers
     # MagicMock placeholders for ``airflow.*`` and ``opentelemetry.*``), so the real Airflow is imported.
     for key in list(sys.modules):
-        if key.startswith("airflow") or key == "opentelemetry" or key.startswith("opentelemetry."):
+        # Airflow itself, not sibling modules such as ``airflow_client`` that other test modules
+        # patch by object identity.
+        if key in ("airflow", "opentelemetry") or key.startswith(("airflow.", "opentelemetry.")):
             del sys.modules[key]
     spec = importlib.util.spec_from_file_location("_dag_module_full_sync_request_test", DAG_PATH)
     assert spec is not None and spec.loader is not None

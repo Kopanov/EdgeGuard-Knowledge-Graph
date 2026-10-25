@@ -116,7 +116,10 @@ def _import_dag_module():
     for key in list(sys.modules):
         if (
             key == "edgeguard_pipeline"
-            or key.startswith("airflow")
+            # airflow itself, not sibling modules such as ``airflow_client`` that other test modules
+            # patch by object identity
+            or key == "airflow"
+            or key.startswith("airflow.")
             or key == "opentelemetry"
             or key.startswith("opentelemetry.")
         ):

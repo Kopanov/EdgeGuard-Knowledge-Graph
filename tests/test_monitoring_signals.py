@@ -986,7 +986,9 @@ def _load_dag_file(module_name: str):
     is imported."""
     if isinstance(sys.modules.get("airflow"), MagicMock):
         for key in list(sys.modules):
-            if key.startswith("airflow") or key == "opentelemetry" or key.startswith("opentelemetry."):
+            # Airflow itself, not sibling modules such as ``airflow_client`` that other test modules
+            # patch by object identity.
+            if key in ("airflow", "opentelemetry") or key.startswith(("airflow.", "opentelemetry.")):
                 del sys.modules[key]
     spec = importlib.util.spec_from_file_location(module_name, _DAGS / "edgeguard_pipeline.py")
     assert spec is not None and spec.loader is not None
