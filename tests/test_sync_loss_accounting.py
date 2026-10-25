@@ -374,9 +374,41 @@ def test_fewer_events_than_min_events_fails_before_any_event_is_processed(monkey
     # (events_index_total == events_processed + events_failed); the summary keeps the found count.
     assert exported and exported[-1]["events_index_total"] == 0
     assert exported[-1]["events_processed"] == 0 and exported[-1]["events_failed"] == 0
+    assert exported[-1]["events_paged_incomplete"] == 0
     assert sync.stats["events_index_total"] == 2
     assert sync.stats["events_index_total"] == 2
     assert outcomes["success"] == 0
+
+
+def test_a_sync_that_crashes_before_any_event_exports_a_zero_paged_fetch_count(monkeypatch):
+    """Exception path: the gauge of EdgeGuardSyncPagedFetchIncomplete is set on every exit, so a crashed
+    run does not leave the previous run's count firing."""
+    sync, fetched, _outcomes = _run_sync(monkeypatch, [])
+
+    def listing_fails(since=None, sector=None):
+        raise RuntimeError("MISP index unreachable")
+
+    monkeypatch.setattr(sync, "fetch_edgeguard_events", listing_fails)
+    exported: list = []
+    monkeypatch.setattr(rm, "record_sync_event_accounting", lambda **kw: exported.append(kw))
+    assert sync.run(incremental=True) is False
+    assert fetched == []
+    assert exported and exported[-1]["events_paged_incomplete"] == 0
+
+
+def test_the_paged_fetch_gauge_holds_the_count_of_the_last_run(monkeypatch):
+    """metrics_server: each call sets edgeguard_sync_events_paged_incomplete; a call without the count resets it."""
+    from prometheus_client import REGISTRY
+
+    import metrics_server
+
+    metrics_server.record_sync_event_accounting(
+        events_index_total=4, events_processed=4, events_failed=0, events_paged_incomplete=2
+    )
+    assert REGISTRY.get_sample_value("edgeguard_sync_events_paged_incomplete") == 2
+    assert REGISTRY.get_sample_value("edgeguard_sync_events_processed") == 4
+    metrics_server.record_sync_event_accounting(events_index_total=1, events_processed=1, events_failed=0)
+    assert REGISTRY.get_sample_value("edgeguard_sync_events_paged_incomplete") == 0
 
 
 def test_min_events_satisfied_processes_the_window(monkeypatch):

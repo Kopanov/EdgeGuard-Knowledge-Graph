@@ -78,8 +78,9 @@ the change to take effect. Revert by unsetting the variable and recreating the s
 | `EdgeGuardApocBatchPartial` | warning | `increase(edgeguard_apoc_batch_partial_total[15m]) > 0` |
 | `EdgeGuardMispFetchFallbackActive` | warning | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="engaged"}[10m])) > 0` for 10m (sustained fallback engagement signals that the primary `/events/index` is broken) |
 | `EdgeGuardMispFetchFallbackHardError` | **critical** | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"}[5m])) > 0` for 1m (the `_MispFallbackHardError` sentinel was raised; the sync task fails: the baseline's `full_neo4j_sync` at once (`retries=0`), the scheduled `run_neo4j_sync` after its retries) |
-| `EdgeGuardNeo4jSyncStale` | warning | `time() - edgeguard_neo4j_sync_last_success_timestamp > 439200` (122 h) for 1h: no MISP→Neo4j sync, scheduled or baseline, completed within the longest gap the 72-hour schedule leaves plus the next sync's longest run; see "MISP → Neo4j sync schedule" |
+| `EdgeGuardNeo4jSyncStale` | warning | `time() - edgeguard_neo4j_sync_last_success_timestamp` above 439200 s (122 h) plus 3 × the part of `edgeguard_neo4j_sync_task_limit_seconds` above 8 h, for 1h: no MISP→Neo4j sync, scheduled or baseline, completed within the longest gap the 72-hour schedule leaves plus the next sync's longest run at the configured limit; see "MISP → Neo4j sync schedule" |
 | `EdgeGuardNeo4jFullSyncRequestPending` | warning | `edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"}` rose in the last 3 days, or appeared for the first time: a requested full sync (`NEO4J_FULL_SYNC=true`) failed on its last attempt and the request stands, so no incremental sync runs; it clears 3 days after the last failure, also when the request was resolved earlier (silence it then); see "Requesting a full MISP → Neo4j sync" |
+| `EdgeGuardSyncPagedFetchIncomplete` | warning | `edgeguard_sync_events_paged_incomplete > 0` for 10m: the last MISP→Neo4j sync fetched an event in pages and received fewer attribute rows than the MISP index lists; the run is green; see "Large MISP events fetched in pages" |
 | `EdgeGuardSourceAccessDenied` | warning | `edgeguard_collector_skips_total{reason_class=~".+_auth_denied"}` rose in the last 25 h, or appeared for the first time. The provider refuses the source's requests (HTTP 401/403) and the task stays green while nothing is collected: run `python src/source_key_check.py`, renew the key, or check whether the provider blocks this host |
 
 Verify alerts load cleanly on baseline day:
@@ -522,7 +523,7 @@ Each entry: symptom → detection signal → remediation.
 ## Large MISP events fetched in pages (`[PAGED-FETCH-INCOMPLETE]`)
 
 - **What applies.** The sync fetches an event whose MISP index `attribute_count` is above `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000; `0` = off) as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 in attribute id order, instead of one `/events/view`. An event whose whole-event fetch still answers HTTP 5xx after its retries is fetched the same way, with the warning `Event <id>: whole-event fetch failed after retries (…) — fetching in pages`. Paging stops at an empty page or at a page that brings no attribute not already received ([COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)).
-- **Symptom.** Per event: `[PAGED-FETCH-INCOMPLETE] Event <id>: /attributes/restSearch returned <n> attribute rows (top-level and object), the MISP index lists <m>.` In the run summary: `Events fetched in pages with fewer attributes than the MISP index lists: <k>`. The rows received are synced, the event counts as processed, the task stays green, and no metric or alert reads it.
+- **Symptom.** Per event: `[PAGED-FETCH-INCOMPLETE] Event <id>: /attributes/restSearch returned <n> attribute rows (top-level and object), the MISP index lists <m>.` In the run summary: `Events fetched in pages with fewer attributes than the MISP index lists: <k>`. The rows received are synced, the event counts as processed and the task stays green. The run sets the gauge `edgeguard_sync_events_paged_incomplete` to the number of such events, and `EdgeGuardSyncPagedFetchIncomplete` (warning) fires while it is above 0 for 10 minutes; the next sync that fetches every event completely sets it back to 0.
 - **Log probe.**
   ```bash
   docker logs edgeguard_airflow 2>&1 | grep "\[PAGED-FETCH-INCOMPLETE\]" | tail -20
@@ -556,7 +557,7 @@ Each entry: symptom → detection signal → remediation.
 - **When it runs.** `edgeguard_neo4j_sync` runs every 72 hours, a fixed interval (`schedule=timedelta(days=3)`). A run is due 72 h after the previous scheduled run; a manual run does not move the schedule. A run that fell due while the DAG was paused or Airflow was down starts once when it resumes, and the next one is due 72 h after it. The Airflow UI shows the next run under *Next Run*.
 - **The 24-hour guard.** `check_sync_needed` skips a run when the last successful sync started less than 24 hours ago (the state file `state/edgeguard_last_neo4j_sync.json`): that happens only after a baseline's full sync or a `force_sync` run, which stamp the file. A skipped run is green, with `run_neo4j_sync` and everything after it skipped, and logs `Skipping Neo4j sync - the last sync started at …`. A regular run is never skipped: even a sync that started on its third attempt (16 h 42 min after its run was due at the default 8-hour limit of `run_neo4j_sync`, 44 h 42 min at its 22-hour cap) leaves 55 h (27 h) until the next.
 - **After a baseline.** When `edgeguard_neo4j_sync` is unpaused after the baseline (Baseline-day protocol, Option A) and a run is due, it starts at once and is skipped by the guard if the baseline's full sync started less than 24 hours before; the first scheduled sync then starts at most 96 hours after the baseline's full sync started. It reads the attributes changed since the incremental window overlap before that start (`EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS`, default 1 h), which includes what the baseline collected in that overlap. To sync sooner, trigger a forced run: `docker compose exec airflow airflow dags trigger edgeguard_neo4j_sync --conf '{"force_sync": true}'`.
-- **`EdgeGuardNeo4jSyncStale`** (warning) fires when no sync, scheduled or baseline, has completed in 122 hours: the longest gap between two sync starts (96 h after a baseline's or a forced sync) plus the longest run of the next sync (32 min of `check_sync_needed` / `neo4j_health_check` attempts, three attempts of `run_neo4j_sync` at its default 8-hour limit, `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, and two 5-minute retry delays), with about an hour for the scheduler (`prometheus/alerts.yml`). The 122 hours are sized for the default limit: with a limit of N hours above 8, raise the threshold in `prometheus/alerts.yml` to 439200 + 10800 × (N − 8) seconds, or expect this warning during a retried sync. `EdgeGuardCollectionStale{source="misp_to_neo4j"}` fires at 98 hours without a sync connecting. When either fires: check that the DAG is not paused (`airflow dags list | grep edgeguard_neo4j_sync`), that the scheduler runs, and the log of the last `run_neo4j_sync` attempt; a baseline holding its lock also skips the sync (`Neo4j sync ShortCircuit: EdgeGuard baseline is running`).
+- **`EdgeGuardNeo4jSyncStale`** (warning) fires when no sync, scheduled or baseline, has completed in 122 hours at the default 8-hour limit of `run_neo4j_sync` (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`): the longest gap between two sync starts (96 h after a baseline's or a forced sync) plus the longest run of the next sync (32 min of `check_sync_needed` / `neo4j_health_check` attempts, three attempts of `run_neo4j_sync` at its limit and two 5-minute retry delays), with about an hour for the scheduler (`prometheus/alerts.yml`). The threshold follows the limit: each attempt of `run_neo4j_sync` records its limit in `edgeguard_neo4j_sync_task_limit_seconds` when it starts, and each hour above 8 adds 3 hours, so a limit of N hours gives 122 + 3 × (N − 8) hours (134 hours at 12, 164 hours at the 22-hour cap). Until an attempt has recorded its limit, the alert uses the default 8 hours; a limit below 8 hours keeps 122 hours. `EdgeGuardCollectionStale{source="misp_to_neo4j"}` fires at 98 hours without a sync connecting. When either fires: check that the DAG is not paused (`airflow dags list | grep edgeguard_neo4j_sync`), that the scheduler runs, and the log of the last `run_neo4j_sync` attempt; a baseline holding its lock also skips the sync (`Neo4j sync ShortCircuit: EdgeGuard baseline is running`).
 - **Fixed settings.** The interval and the guard are fixed in `dags/edgeguard_pipeline.py` (`NEO4J_SYNC_EVERY`, `NEO4J_SYNC_MIN_GAP`), because the alert thresholds are derived from them. The limit of one `run_neo4j_sync` attempt is configurable (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, 8 hours by default): see *Duration* in § *Requesting a full MISP → Neo4j sync*. The Airflow Variable `NEO4J_SYNC_INTERVAL` and `EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN` are not read.
 
 ## Requesting a full MISP → Neo4j sync (`NEO4J_FULL_SYNC`)
@@ -575,7 +576,7 @@ Each entry: symptom → detection signal → remediation.
   ```bash
   docker compose exec airflow airflow variables set NEO4J_FULL_SYNC false
   ```
-- **Duration.** A full sync of a 730-day MISP takes about 6 hours (the baseline DAG's `full_neo4j_sync` limit). The task's limit is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, 8 hours by default: the estimate plus a third, because a limit at the estimate could fail every attempt of a request, and a request stands until it succeeds; below about 6 hours a requested full sync can fail every attempt of every run. It takes whole hours up to 22 (a larger value uses 22, an invalid one 8, both with a warning). When a remote Neo4j with many changed events needs more, raise it in `.env` and recreate the airflow container between runs (`docker compose up -d airflow`). The DAG run's limit of 68 hours covers every task of the chain failing on all three attempts, plus 20%, as for the other DAGs; it and the 122-hour `EdgeGuardNeo4jSyncStale` are sized for the default limit.
+- **Duration.** A full sync of a 730-day MISP takes about 6 hours (the baseline DAG's `full_neo4j_sync` limit). The task's limit is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, 8 hours by default: the estimate plus a third, because a limit at the estimate could fail every attempt of a request, and a request stands until it succeeds; below about 6 hours a requested full sync can fail every attempt of every run. It takes whole hours up to 22 (a larger value uses 22, an invalid one 8, both with a warning). When a remote Neo4j with many changed events needs more, raise it in `.env` and recreate the airflow container between runs (`docker compose up -d airflow`). The DAG run's limit of 68 hours covers every task of the chain failing on all three attempts, plus 20%, as for the other DAGs, and is sized for the default limit; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit (§ *MISP → Neo4j sync schedule*).
 
 ## AbuseIPDB daily blacklist quota (429)
 
@@ -776,14 +777,17 @@ baseline of 2026-04-19 lost 14.7% of its NVD attributes that way). The
 holder's liveness is the DAG-run state read through the Airflow REST
 API, with the sentinel age as fallback (`EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`,
 default 48 h). `tests/test_tier1_sequential_robustness.py` pins the
-DAG-side acquisition. A scheduled task that is already running when the
-lock is taken completes its current write, so pausing the scheduled DAGs
-before a destructive `fresh-baseline` remains recommended.
+DAG-side acquisition. The lock is read when a task starts: a scheduled
+task that is already running when the lock is taken keeps running to its
+end, and a `run_neo4j_sync` attempt can last up to
+`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Before a destructive `fresh-baseline`,
+pause the scheduled DAGs and wait until none of them has a running run
+(Option A).
 
 **Every launch path takes the lock:** the DAG, whether it is triggered from
 the Airflow UI, the API or the CLI wrappers, and the in-process
-`python src/run_pipeline.py --baseline`. Pausing the scheduled DAGs first
-only guarantees that none of them is mid-write when the lock is taken.
+`python src/run_pipeline.py --baseline`. Pausing the scheduled DAGs stops
+new tasks and retries only; a task that is already running keeps running.
 
 > **Note:** the `baseline_in_progress.lock` sentinel is written by the
 > baseline DAG itself (`baseline_acquire_lock`) and by the legacy
@@ -795,10 +799,15 @@ only guarantees that none of them is mid-write when the lock is taken.
 
 Whether you trigger via the Airflow UI, the API, or the CLI wrappers,
 the baseline DAG holds the lock and the scheduled DAGs skip at task
-start. Pausing them first guarantees that none is mid-write when the
-lock is taken (recommended before a destructive fresh-baseline; this
-includes `edgeguard_neo4j_sync` — a full MISP→Neo4j sync firing
-mid-baseline is the same concurrent-writer hazard):
+start. Pausing them stops new tasks and retries only: a task that is
+already running keeps running, and a `run_neo4j_sync` attempt can last up
+to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Before a destructive
+fresh-baseline, pause the 5 DAGs (this includes `edgeguard_neo4j_sync`: a
+full MISP→Neo4j sync running during the baseline is the same
+concurrent-writer hazard) and wait until the `list-runs` command below
+prints `[]` for each of them. A run that must not finish can be marked
+failed in the Airflow UI: Airflow then stops its running task; wait until
+the task log shows that the task has stopped:
 
 ```bash
 docker compose exec airflow airflow dags pause edgeguard_daily
@@ -806,6 +815,11 @@ docker compose exec airflow airflow dags pause edgeguard_medium_freq
 docker compose exec airflow airflow dags pause edgeguard_pipeline
 docker compose exec airflow airflow dags pause edgeguard_low_freq
 docker compose exec airflow airflow dags pause edgeguard_neo4j_sync
+
+# no running run: each of the 5 must print []
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
+  docker compose exec -T airflow airflow dags list-runs "$dag" --state running -o json
+done
 
 # trigger the baseline
 # additive (no wipe):
@@ -827,9 +841,10 @@ docker compose exec airflow airflow dags unpause edgeguard_neo4j_sync
 
 Alternatively, run the preflight helper. It checks that the MISP and
 Neo4j endpoints respond and that the env-var prerequisites are met, and
-it reports the pause state of the 5 DAGs. A DAG that is unpaused, or
-whose state cannot be queried, is only a warning, so exit 0 does not
-mean they are paused. With `--strict` (or `EDGEGUARD_PREFLIGHT_STRICT=1`),
+it reports the pause state of the 5 DAGs and fails while one of them has
+a running run (the `list-runs` command above). A DAG that is unpaused, or
+whose pause state or running runs cannot be queried, is only a warning, so
+exit 0 does not mean they are paused. With `--strict` (or `EDGEGUARD_PREFLIGHT_STRICT=1`),
 every warning is a failure:
 
 ```bash
@@ -855,9 +870,10 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    `edgeguard_baseline` DAG (`airflow dags trigger edgeguard_baseline`, the
    Airflow UI, or the `edgeguard baseline` / `edgeguard fresh-baseline`
    wrappers, which trigger the same DAG), preferably after pausing the 5
-   scheduled DAGs.
+   scheduled DAGs and waiting until none of them has a running run.
 2. **Preflight green.** `./scripts/preflight_baseline.sh --launch-path=dag` returns exit 0
    (add `--strict` to make an unpaused DAG, like every other warning, a failure).
+   Check `[5]` fails while one of the 5 scheduled DAGs has a running run.
    Check `[12]` asks every provider whether it accepts the configured API
    key; a rejected key means that source is skipped for the whole baseline
    (a rejected NVD key stops it). The baseline DAG repeats the check in its
@@ -1320,9 +1336,10 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Baseline-day protocol: pausing the scheduled DAGs stops new tasks and retries only, and a task that is already running keeps running (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); before a fresh baseline, wait until `airflow dags list-runs <dag> --state running -o json` prints `[]` for each of the 5 DAGs, and preflight check `[5]` fails while one has a running run.
 - 2026-10-25 — Fresh-baseline wipe: the OTX event of a 730-day baseline is the one of about 150,000 attributes; other sources' events hold at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (20,000) each (the text said the NVD event too).
-- 2026-10-25 — MISP → Neo4j sync schedule and Requesting a full MISP → Neo4j sync: the limit of `run_neo4j_sync` is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8 hours, at most 22; raised in `.env` with a recreate of the airflow container), the 68-hour DAG-run limit and the 122-hour `EdgeGuardNeo4jSyncStale` are sized for the default, and the mode line of the task log ends with the limit of the attempt.
-- 2026-10-25 — New section on large MISP events fetched in pages (`[PAGED-FETCH-INCOMPLETE]`, its run-summary line, the whole-event fallback warning, remediation); Baseline-day protocol item 5 sends one test alert per receiver (a `severity=critical` alert alone reaches only the `critical` receiver).
+- 2026-10-25 — MISP → Neo4j sync schedule and Requesting a full MISP → Neo4j sync: the limit of `run_neo4j_sync` is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8 hours, at most 22; raised in `.env` with a recreate of the airflow container), the 68-hour DAG-run limit is sized for the default, the threshold of `EdgeGuardNeo4jSyncStale` (122 hours at the default) follows the limit through `edgeguard_neo4j_sync_task_limit_seconds`, which each attempt sets when it starts, so a larger limit needs no change of `prometheus/alerts.yml`, and the mode line of the task log ends with the limit of the attempt.
+- 2026-10-25 — New section on large MISP events fetched in pages (`[PAGED-FETCH-INCOMPLETE]`, its run-summary line, the gauge `edgeguard_sync_events_paged_incomplete` and the warning `EdgeGuardSyncPagedFetchIncomplete`, the whole-event fallback warning, remediation); Baseline-day protocol item 5 sends one test alert per receiver (a `severity=critical` alert alone reaches only the `critical` receiver).
 - 2026-10-23 — The acceptance script and the graph export of the threat-actor rebuild read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) names another instance; they no longer fall back to a built-in remote address.
 - 2026-10-23 — The baseline launch path section is titled for the lock that every launch path takes (it offered a choice of paths); it names the green `skipped: true` collector task, the refusals that release the lock and its reaping. Raw MISP data: a section on who asserts a link, what the source cited, an indicator's age and the GraphQL MISP links, which the README carried. The STIX import of `run_pipeline.py` is always on in that CLI; the memory pointer names MEMORY_TUNING.md; the MISP backoff symptom no longer cites a one-hour service-level objective, which is defined nowhere.
 - 2026-10-22 — "Importing a curated package" is written for any registered curated source; the removal queries keep the registered sources and labels.

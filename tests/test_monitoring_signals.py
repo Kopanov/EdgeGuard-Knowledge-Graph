@@ -957,6 +957,44 @@ def _worst_run(task) -> timedelta:
     return (task.retries + 1) * task.execution_timeout + task.retries * task.retry_delay
 
 
+_STALE_EXPR = re.compile(
+    r"time\(\) - edgeguard_neo4j_sync_last_success_timestamp > (\d+) \+ (\d+) \* scalar\(clamp_min\("
+    r"\(max\(edgeguard_neo4j_sync_task_limit_seconds\) or vector\((\d+)\)\) - (\d+), 0\)\) "
+    r"and edgeguard_neo4j_sync_last_success_timestamp > 0"
+)
+
+
+def _stale_threshold(limit_seconds) -> timedelta:
+    """EdgeGuardNeo4jSyncStale's threshold, evaluated from the rule's expression as Prometheus evaluates it.
+
+    ``limit_seconds`` is the value of ``edgeguard_neo4j_sync_task_limit_seconds`` (``None``: no series).
+    ``max(...)`` and ``vector(d)`` both have an empty label set, so ``or`` yields ``d`` only without a
+    series; ``scalar()`` reads that one sample, ``clamp_min`` keeps the excess over the offset at 0 or more.
+    """
+    match = _STALE_EXPR.fullmatch(_norm(_rule("EdgeGuardNeo4jSyncStale")["expr"]))
+    assert match, _rule("EdgeGuardNeo4jSyncStale")["expr"]
+    base, factor, fallback, offset = (int(g) for g in match.groups())
+    value = fallback if limit_seconds is None else limit_seconds
+    return timedelta(seconds=base + factor * max(value - offset, 0))
+
+
+def _load_dag_file(module_name: str):
+    """A fresh load of the DAG file, so it reads EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS as Airflow's parse does.
+
+    ``tests/test_graphql_api.py`` registers MagicMock placeholders for ``airflow.*`` and
+    ``opentelemetry.*`` when it is imported first; those are dropped (only then) so the real Airflow
+    is imported."""
+    if isinstance(sys.modules.get("airflow"), MagicMock):
+        for key in list(sys.modules):
+            if key.startswith("airflow") or key == "opentelemetry" or key.startswith("opentelemetry."):
+                del sys.modules[key]
+    spec = importlib.util.spec_from_file_location(module_name, _DAGS / "edgeguard_pipeline.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _simulate_sync_schedule(dag_module, dag, state_dir: Path) -> SimpleNamespace:
     """Sync starts of the sync DAG's schedule through the real cadence guard over eight years.
 
@@ -1063,10 +1101,14 @@ class TestSyncStaleness:
 
         expr = _norm(_rule("EdgeGuardNeo4jSyncStale")["expr"])
         assert expr == (
-            "time() - edgeguard_neo4j_sync_last_success_timestamp > 439200 "
+            "time() - edgeguard_neo4j_sync_last_success_timestamp > 439200 + 3 * scalar(clamp_min(("
+            "max(edgeguard_neo4j_sync_task_limit_seconds) or vector(28800)) - 28800, 0)) "
             "and edgeguard_neo4j_sync_last_success_timestamp > 0"
         )
-        threshold = timedelta(seconds=439200)
+        sync_limit = sync_dag.get_task("run_neo4j_sync").execution_timeout
+        assert sync_limit == timedelta(hours=8)
+        threshold = _stale_threshold(sync_limit.total_seconds())
+        assert threshold == _stale_threshold(None) == timedelta(seconds=439200), "no series: the default limit"
         # The stamp is written when run_neo4j_sync succeeds, so the next sync may take every attempt of the
         # tasks before it and of that task longer than the gap between the two sync starts.
         longest_start_gap = (dag_module.NEO4J_SYNC_MIN_GAP + dag_module.NEO4J_SYNC_EVERY).total_seconds() / 3600
@@ -1081,6 +1123,70 @@ class TestSyncStaleness:
         assert worst < threshold <= worst + timedelta(hours=2), "covers the worst case, with a margin of at most 2 h"
         assert _rule("EdgeGuardNeo4jSyncStale")["for"] == "1h"
         assert "122 hours" in _rule("EdgeGuardNeo4jSyncStale")["annotations"]["description"]
+
+    @pytest.mark.parametrize("hours, threshold_hours", [(8, 122), (12, 134), (22, 164)])
+    def test_the_threshold_follows_the_sync_task_limit(self, monkeypatch, tmp_path, hours, threshold_hours):
+        """2026-10-25: with EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS=N the attempt records N h when it starts (also
+        an attempt that then fails), and the threshold covers the worst case at that limit: the longest
+        gap between two sync starts plus every attempt of the tasks, with a margin of at most 2 h. The
+        operator no longer edits prometheus/alerts.yml for a larger limit."""
+        monkeypatch.setenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", str(hours))
+        module = _load_dag_file(f"_dag_module_sync_limit_{hours}")
+        task = module.run_neo4j_sync_task
+        assert task.execution_timeout == timedelta(hours=hours)
+
+        monkeypatch.setattr(module, "ensure_metrics_server", lambda: None)
+        monkeypatch.setattr(module, "Variable", _StubVariable)
+        monkeypatch.setenv("EDGEGUARD_BASELINE_LOCK_PATH", str(tmp_path / "no_such.lock"))
+        monkeypatch.setenv("EDGEGUARD_STATE_DIR", str(tmp_path / "state"))
+        assert module.METRICS_SERVER_AVAILABLE
+
+        class _FailingSync:
+            _last_sync_failure_reason = "scripted failure"
+
+            def run(self, incremental=True, since=None):
+                return False
+
+        monkeypatch.setitem(sys.modules, "run_misp_to_neo4j", SimpleNamespace(MISPToNeo4jSync=_FailingSync))
+        metrics_server.NEO4J_SYNC_TASK_LIMIT.set(1)
+        with pytest.raises(Exception, match="Neo4j sync failed"):
+            module.run_neo4j_sync(task=task)
+        recorded = _sample("edgeguard_neo4j_sync_task_limit_seconds")
+        assert recorded == hours * 3600, "set when the attempt starts, before the sync runs"
+
+        threshold = _stale_threshold(recorded)
+        assert threshold == timedelta(hours=threshold_hours)
+        dag = module.neo4j_sync_dag
+        worst = (
+            module.NEO4J_SYNC_MIN_GAP
+            + module.NEO4J_SYNC_EVERY
+            + _worst_run(dag.get_task("check_sync_needed"))
+            + _worst_run(dag.get_task("neo4j_health_check"))
+            + _worst_run(dag.get_task("run_neo4j_sync"))
+        )
+        assert worst < threshold <= worst + timedelta(hours=2), (worst, threshold)
+
+    def test_a_limit_below_the_default_keeps_the_default_threshold(self):
+        assert _stale_threshold(4 * 3600) == _stale_threshold(8 * 3600) == timedelta(hours=122)
+
+    def test_the_docs_say_the_threshold_follows_the_limit(self):
+        """The manual edit of prometheus/alerts.yml for a larger limit is gone from every place that asked for it."""
+        for name in (
+            ".env.example",
+            "docs/CONFIGURATION.md",
+            "docs/COLLECTION_AND_SYNC_LIMITS.md",
+            "docs/RUNBOOK.md",
+            "docs/PROMETHEUS_SETUP.md",
+            "docs/AIRFLOW_DAGS.md",
+            "prometheus/alerts.yml",
+        ):
+            text = (_ROOT / name).read_text().split("\n## History", 1)[0]
+            flat = " ".join(text.replace("#", " ").split())
+            assert "follows the limit" in flat, name
+            assert "raise that alert's threshold" not in flat and "raise the threshold in" not in flat, name
+            assert "expect this warning during a retried sync" not in flat, name
+            assert "expect that warning during a retried sync" not in flat, name
+            assert "or expect it during a retried sync" not in flat, name
 
     def test_misp_to_neo4j_staleness_covers_the_longest_gap_between_two_syncs(
         self, dag_module, dags, compose_metrics, tmp_path

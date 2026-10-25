@@ -200,6 +200,7 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 | `edgeguard_neo4j_relationships` | Gauge | `rel_type` | Counts `build_relationships` reported in its last completed run, one per step key (e.g. `in_tactic`, `attributed_to`; also `multi_zone_indicators` and the `attributed_to_several_actor_pulses_removed` / `_trimmed` counts). Not a total of the graph's relationships per Neo4j type |
 | `edgeguard_neo4j_sync_duration_seconds` | Histogram | - | Neo4j sync duration (one observation per sync) |
 | `edgeguard_neo4j_sync_last_success_timestamp` | Gauge | - | End of the last successful MISP→Neo4j sync, scheduled or baseline (`EdgeGuardNeo4jSyncStale`) |
+| `edgeguard_neo4j_sync_task_limit_seconds` | Gauge | - | Limit of the latest `run_neo4j_sync` attempt in seconds (its `execution_timeout`, `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), set when the attempt starts; the threshold of `EdgeGuardNeo4jSyncStale` follows it |
 | `edgeguard_neo4j_queries_total` | Counter | `query_type`, `status` | Query count |
 | `edgeguard_neo4j_query_duration_seconds` | Histogram | `query_type` | Neo4j query time (read by `EdgeGuardNeo4jQuerySlow`) |
 | `edgeguard_neo4j_merge_ineffective_batch_total` | Counter | `label`, `source` | Non-empty MERGE batches that wrote nothing Neo4j counts (read by `EdgeGuardNeo4jIneffectiveBatch`) |
@@ -234,13 +235,15 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 ### MISP Sync Event Accounting
 
 These gauges enforce the invariant `events_index_total == events_processed + events_failed`
-for every sync run — the `EdgeGuardSyncCoverageGap` alert fires when it breaks.
+for every sync run — the `EdgeGuardSyncCoverageGap` alert fires when it breaks. Every run sets
+all four, on every exit path.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `edgeguard_sync_events_index_total` | Gauge | - | Events returned from the MISP index on the last sync |
 | `edgeguard_sync_events_processed` | Gauge | - | Events whose `sync_to_neo4j` completed successfully |
 | `edgeguard_sync_events_failed` | Gauge | - | Events that failed permanently (first pass + retry pass + cap exhaustion) |
+| `edgeguard_sync_events_paged_incomplete` | Gauge | - | Processed events of the last sync fetched in pages whose pages brought fewer attribute rows than the MISP index lists (`[PAGED-FETCH-INCOMPLETE]`; the run stays green). Read by `EdgeGuardSyncPagedFetchIncomplete` |
 
 ### Source-truthful Timestamp Pipeline
 
@@ -541,7 +544,7 @@ def ensure_metrics_server():
 ### Built-in Alert Rules
 
 `prometheus/alerts.yml` is the canonical source of truth; it
-defines **39 alert rules** and 3 recording rules in nine groups
+defines **40 alert rules** and 3 recording rules in nine groups
 (`edgeguard_collection`, `edgeguard_circuit_breaker`, `edgeguard_health`,
 `edgeguard_pipeline`, `edgeguard_containers`, `edgeguard_sync_integrity`,
 `edgeguard_neo4j`, `edgeguard_host_disk`,
@@ -562,11 +565,12 @@ list (including the disk, inode and `build_relationships` alerts), grep
 | `EdgeGuardDAGRunFailures` | More than 3 failed collector or sync task attempts in one hour, across all DAGs (all counted under `dag_id="edgeguard_pipeline"`, see `edgeguard_dag_runs_total`) | warning |
 | `EdgeGuardDAGRunStuck` | A DAG run marked in progress longer than its `dagrun_timeout` plus 15 minutes (`edgeguard:dag_run_max_seconds`; pipeline 5 h 45 min, medium 5 h 15 min, low and daily 8 h 45 min, Neo4j sync 68 h 15 min, baseline 32 h 15 min). The scheduler fails a run at its timeout and its listener hook clears the mark; a run marked failed or successful by hand (UI, `PATCH dagRuns`, `edgeguard dag kill`) is cleared by the API server's hook. When the run that ends is not the DAG's run in progress (an older run marked failed by hand), the mark keeps the start of the run still running. The alert therefore means a run the scheduler did not end, a run deleted while in progress, or a listener plugin that is not loaded (see [DAG run in progress](#dag-run-in-progress)) | critical |
 | `EdgeGuardDAGLastSuccessStale` | No successful task for longer than one schedule interval plus the DAG's `dagrun_timeout` (`edgeguard:dag_max_success_gap_seconds`: `edgeguard_pipeline` 6 h, `edgeguard_medium_freq` 9 h, `edgeguard_low_freq` 16 h 30 min). The limits are per DAG because a single 6 h limit would fire about 1.5 h of every 8 h for `edgeguard_low_freq`. `edgeguard_daily` has `EdgeGuardDailyDAGStale` (25 h) | warning |
-| `EdgeGuardNeo4jSyncStale` | No MISP→Neo4j sync (scheduled or baseline) completed in 122 hours: the longest gap between two sync starts plus the longest run of the next sync. `edgeguard_neo4j_sync` runs every 72 h and skips a run within 24 h of the last sync start, so scheduled syncs start 72 h apart and the first one after a baseline's or a forced sync starts less than 96 h after it; the next sync can then take 32 min of `check_sync_needed` / `neo4j_health_check` attempts and three attempts of `run_neo4j_sync` at its default 8-hour limit (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`) with two 5-minute retry delays (120 h 42 min in all). With a limit of N hours the threshold needs 439200 + 10800 × (N − 8) seconds; otherwise expect the warning during a retried sync | warning |
+| `EdgeGuardNeo4jSyncStale` | No MISP→Neo4j sync (scheduled or baseline) completed in 122 hours at the default 8-hour limit of `run_neo4j_sync` (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`): the longest gap between two sync starts plus the longest run of the next sync. `edgeguard_neo4j_sync` runs every 72 h and skips a run within 24 h of the last sync start, so scheduled syncs start 72 h apart and the first one after a baseline's or a forced sync starts less than 96 h after it; the next sync can then take 32 min of `check_sync_needed` / `neo4j_health_check` attempts and three attempts of `run_neo4j_sync` at its limit with two 5-minute retry delays (120 h 42 min in all at 8 hours). The threshold follows the limit: each attempt records it in `edgeguard_neo4j_sync_task_limit_seconds` when it starts, and each hour above 8 adds 3 hours (439200 + 10800 × (N − 8) seconds for a limit of N hours; 122 hours while no attempt has recorded a limit) | warning |
 | `EdgeGuardNeo4jFullSyncRequestPending` | A requested full MISP→Neo4j sync (Airflow Variable `NEO4J_FULL_SYNC=true`) failed on its last attempt in the last 3 days: `edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"}` rose, or appeared for the first time. The Variable stays set, so every scheduled run is a full sync again and no incremental sync runs until one succeeds. The alert clears 3 days after the last failure, also when the request was resolved earlier (silence it then); see [RUNBOOK.md](RUNBOOK.md), "Requesting a full MISP → Neo4j sync" | warning |
 | `EdgeGuardContainerRestartLoop` | >3 container restarts in 1 hour (requires cAdvisor) | critical |
 | `EdgeGuardSyncEventsFailed` | Any MISP event in the last sync landed in `events_failed` | critical |
 | `EdgeGuardSyncCoverageGap` | `events_index_total ≠ events_processed + events_failed` — silent skip detected | critical |
+| `EdgeGuardSyncPagedFetchIncomplete` | `edgeguard_sync_events_paged_incomplete > 0` for 10m: the last sync fetched an event in pages and received fewer attribute rows than the MISP index lists. The rows received are synced and the run is green; an incremental sync does not write the missed rows, so after fixing the cause request a full sync ([RUNBOOK.md](RUNBOOK.md) § *Large MISP events fetched in pages*) | warning |
 | `EdgeGuardNeo4jLabelDropBig` | Per-label node count dropped >50% against the same label a day earlier (`offset 1d`); fed by the node counts recorded after every sync (the Grafana panel "Neo4j Node Count Change (24 h) by Label" shows the same comparison) | critical |
 | `EdgeGuardMispBatchPermanentFailure` | MISP push 5xx exhausted retries | critical |
 | `EdgeGuardMispSustainedBackoff` | MISP push backoff fired >1× in 15m | warning |
@@ -578,11 +582,12 @@ list (including the disk, inode and `build_relationships` alerts), grep
 
 What the sync-integrity, build_relationships and MISP-fallback alerts catch:
 - **`SyncEventsFailed` / `SyncCoverageGap` / `Neo4jLabelDropBig`** — catch MISP events the MISP→Neo4j sync skips silently, and large drops in a label's node count.
+- **`SyncPagedFetchIncomplete`** — reports events fetched in pages with fewer attribute rows than the MISP index lists, which leave the run green.
 - **`BuildRelationshipsSilentDeath` / `ApocBatchPartial`** — surface a `build_relationships` run that dies silently after the sync, and APOC partial-batch responses.
 - **`MispEventAttributesTruncated`** — surfaces events the CLI pipeline's `MISPCollector` sliced to 500 attributes.
 - **`MispFetchFallbackActive` / `MispFetchFallbackHardError`** — see § "MISP fetch fallback" in [`docs/RUNBOOK.md`](RUNBOOK.md) § 8 for triage.
 
-The invariant the `EdgeGuardSyncCoverageGap` alert guards is set by `record_sync_event_accounting` (`src/metrics_server.py`), which `MISPToNeo4jSync.run` calls on every exit path (see *MISP Sync Event Accounting* above).
+The invariant the `EdgeGuardSyncCoverageGap` alert guards and the count `EdgeGuardSyncPagedFetchIncomplete` reads are set by `record_sync_event_accounting` (`src/metrics_server.py`), which `MISPToNeo4jSync.run` calls on every exit path (see *MISP Sync Event Accounting* above).
 
 ### Alertmanager notifications
 
@@ -626,6 +631,12 @@ curl -X POST http://localhost:9090/-/reload
 
 If `--web.enable-lifecycle` is not set, restart the container:
 `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml restart prometheus`.
+
+`docker-compose.monitoring.yml` mounts `prometheus/alerts.yml` as a single file. A `git pull`, a
+`git checkout` or a `sed -i` writes a new file in its place; on a Linux Docker host the running
+container keeps reading the previous file, so `/-/reload` reloads the previous rules. After such a
+change, restart the container with the command above and check the rules at
+`http://localhost:9090/rules`.
 
 ### Custom Alerts
 
@@ -758,8 +769,9 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Gauge `edgeguard_sync_events_paged_incomplete` and warning `EdgeGuardSyncPagedFetchIncomplete` for events fetched in pages with fewer attribute rows than the MISP index lists (40 alert rules); gauge `edgeguard_neo4j_sync_task_limit_seconds`; a change that replaces `prometheus/alerts.yml` (a pull, a checkout) needs a restart of the prometheus container, because the file is mounted on its own and `/-/reload` reloads the previous rules.
 - 2026-10-25 — "Source label values": the two namings of the `source` label (collector and job metrics: the CLI name; writer metrics: the canonical id) and the test that keeps every collector and staleness-rule name a registered source; `edgeguard_merge_reject_placeholder_total` resolves a variant to the canonical id like the other writer metrics.
-- 2026-10-25 — `EdgeGuardNeo4jSyncStale`: the 8-hour limit of the three `run_neo4j_sync` attempts is the default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); the row gives the threshold a larger limit needs.
+- 2026-10-25 — `EdgeGuardNeo4jSyncStale`: the 8-hour limit of the three `run_neo4j_sync` attempts is the default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), and the threshold follows the configured limit through the gauge `edgeguard_neo4j_sync_task_limit_seconds`, which each attempt sets when it starts.
 - 2026-10-20 — `edgeguard_misp_attributes_dropped_total` lists its reasons, with `attack_id_invalid` for ATT&CK values without a valid ATT&CK id.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section and the leftover metric series of earlier versions to the appendix.
