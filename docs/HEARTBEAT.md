@@ -23,7 +23,7 @@ docker exec edgeguard_airflow airflow config get-value scheduler task_instance_h
 
 Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies appear in **Airflow scheduler** logs.
 
-**Docker Compose — Airflow container memory:** `docker-compose.yml` sets **`deploy.resources.limits.memory: ${AIRFLOW_MEMORY_LIMIT:-12g}`** on **`airflow`**. Large MISP events (100K+ attributes) require **8-12GB** due to PyMISP JSON parsing. Events are processed in pages of 5000 to limit amplification, but the initial event fetch loads the full JSON. **-9** with free host RAM usually means the **container** cgroup limit — check **`docker inspect … OOMKilled`**, **`docker stats`**, and [SETUP_GUIDE.md](SETUP_GUIDE.md) § troubleshooting.
+**Docker Compose — Airflow container memory:** `docker-compose.yml` sets **`deploy.resources.limits.memory: ${AIRFLOW_MEMORY_LIMIT:-12g}`** on **`airflow`**. Large MISP events (100K+ attributes) are sized at **8-12GB**: the sync holds an event's attribute list in memory. Events with up to **`EDGEGUARD_MISP_PAGED_FETCH_ABOVE`** attributes (default **20000**) are fetched whole (PyMISP `get_event`, REST `/events/view` as fallback), larger ones as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 joined into one list; the list is then parsed and written to Neo4j in pages of 5000. **-9** with free host RAM usually means the **container** cgroup limit — check **`docker inspect … OOMKilled`**, **`docker stats`**, and [SETUP_GUIDE.md](SETUP_GUIDE.md) § troubleshooting.
 
 ## MISP → Neo4j–specific notes
 
@@ -38,10 +38,11 @@ Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Airflow container memory: events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000) attributes are fetched as metadata plus attribute pages of 5000 joined into one list (the page said the initial fetch loads the full event JSON).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to the current system; the Airflow 2 variable names moved to the appendix.
 - 2026-10-17 — Airflow 3 heartbeats described (the supervisor's heartbeat every `[workers] min_heartbeat_interval`, the scheduler's `task_instance_heartbeat_timeout` and detection interval); `docker-compose.yml` sets the Airflow 3 names (3600 s timeout, 60 s detection interval) instead of the Airflow 2 names `SCHEDULER_ZOMBIE_TASK_THRESHOLD=3600`, `LOCAL_TASK_JOB_HEARTBEAT_SEC=30` and `ZOMBIE_DETECTION_INTERVAL=60`, which Airflow 3 does not read, so Airflow's defaults (300 s, 10 s) applied until then.

@@ -38,7 +38,10 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 ┌─────────────────────────────────────────────────────────────┐
 │   MISP → Neo4j (Airflow: MISPToNeo4jSync.run)              │
 │  • Fetches EdgeGuard events (``/events/index`` + filter; restSearch fallback) │
-│  • Loads full event JSON → parse_attribute() per flat row   │
+│  • Fetches each event: whole up to 20,000 attributes,       │
+│    larger ones as metadata + /attributes/restSearch pages   │
+│    of 5000 (EDGEGUARD_MISP_PAGED_FETCH_ABOVE)               │
+│  • parse_attribute() per flat row                           │
 │  • MERGE nodes + relationships (not a STIX bundle load)     │
 │  • MISP ``Object`` / nested attrs: not ingested (flat       │
 │    ``Attribute`` list only) — see run_misp_to_neo4j logs    │
@@ -510,10 +513,11 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The MISP → Neo4j box states the event fetch: whole up to `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20,000) attributes, larger events as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 (the box said the full event JSON is loaded).
 - 2026-10-23 — Key Files lists `src/tls_verify.py`, the one rule for `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY`.
 - 2026-10-23 — Key Files takes the module notes of the README's project tree, corrected: `run_pipeline.py` always takes the STIX flow, no step runs `MISPCollector`, `query_api.py` also serves the STIX and Wazuh exports and the explorer data; the GraphQL API runs on ISIM's port with its own schema (the page said it is queried exactly as ISIM); the README pointers name CONFIGURATION.md, TECHNICAL_SPEC.md, SETUP_GUIDE.md and docs/README.md; Key Files lists `abuseipdb_collector.py` and keeps one short clause per file.
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.

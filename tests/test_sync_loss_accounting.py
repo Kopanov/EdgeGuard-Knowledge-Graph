@@ -308,7 +308,7 @@ def test_relationship_failures_fail_the_run_even_without_merge_errors(monkeypatc
     details = {"7": {"id": "7", "info": "EdgeGuard-test", "Attribute": []}}
     sync, _fetched, outcomes = _run_sync(monkeypatch, [{"id": "7", "info": "EdgeGuard-test"}], details=details)
 
-    def process(event_id, event_info):
+    def process(event_id, event_info, attribute_count=0):
         sync.stats["events_processed"] += 1
         sync.stats["relationships_failed"] += 4
         return 10, 0, 0
