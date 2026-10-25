@@ -246,6 +246,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | `2.0` | Pause between event fetches |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Larger events are deferred to the end (`0` = off) |
 | `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` | `20000` | Larger events are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 instead of one `/events/view` (`0` = off; a whole-event fetch that keeps answering 5xx falls back to pages either way) |
+| `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` | `20000` | A source/date event that holds this many attributes is continued in `EdgeGuard-<source>-<date>-part2`, `-part3`, ... (`0` = off: one event per source and day, as before). A push with OTX report ids is never split |
 | `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` | `4096` | Largest attribute value the sync accepts |
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Pause before retrying events that failed |
 | `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | `500` | Parsed items merged per chunk |
@@ -455,6 +456,7 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — `THREATFOX_API_KEY` is the key of the URLhaus and MalwareBazaar v2 exports too (the keyless downloads answer HTTP 410 since 2026-10); `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `urlhaus` and `malwarebazaar` (a listed one that is switched off is also an error in `edgeguard preflight`); `EDGEGUARD_URLHAUS_MAX_PER_RUN` default 100,000 (was 50,000), above the about 63,000 URLs of the export on 2026-10-24.
+- 2026-10-25 — Row for `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000): `MISPWriter` continues a source/date event in `-part2`, `-part3` ... past this many attributes, since the hosted MISP could neither view nor edit a 145k-attribute NVD event; OTX events are not split (the sync links report items only within one event).
 - 2026-10-25 — Row for `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000): larger MISP events are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 instead of one `/events/view`, which the hosted MISP answered with HTTP 500 for a 145k-attribute event on 2026-10-24.
 - 2026-10-23 — The host scripts that query Neo4j over HTTP have no remote default: with neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` set they use the Compose Neo4j at `http://127.0.0.1:7474` (they sent the credentials to a built-in remote address), `scripts/run_cypher_catalog_http.py` also reads `NEO4J_HTTP`, a value that is not a valid http(s) URL (scheme, host, port) stops them, and `scripts/neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`; rows for `NEO4J_HTTP_USER_AGENT` and `NEO4J_WSS_HOST`.
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY` and `SSL_VERIFY` fail closed: `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off` are recognised, any other value keeps verification on with a warning, and every reader uses the one rule in `src/tls_verify.py`; only ASCII whitespace around the value is ignored, and `scripts/preflight_baseline.sh` applies the rule in the C locale.

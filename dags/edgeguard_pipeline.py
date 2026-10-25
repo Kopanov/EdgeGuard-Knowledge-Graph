@@ -3904,12 +3904,12 @@ baseline_clean_task = PythonOperator(
 #
 # **What this DOES NOT fix:** the per-event-grows-with-size cost on a
 # single oversized event (MISP edit-event loads the entire event for
-# dedup; cost grows linearly with existing attribute count). That's the
-# architectural fix tracked separately — event partitioning by date
-# range so no single event exceeds ~20K attributes (Issue #61).
+# dedup; cost grows linearly with existing attribute count). Since 2026-10
+# MISPWriter caps it: past EDGEGUARD_MISP_EVENT_SPLIT_ABOVE (20000) attributes
+# a source/date event continues in -part2, -part3 ... (not OTX; Issue #61).
 #
 # Tier2 has no order inside the group. Its feeds write small events except
-# URLhaus (its whole recent.csv export in one event). 2026-10: all 7 at
+# URLhaus (its whole recent.csv export in one push, split into parts of 20000). 2026-10: all 7 at
 # once pushed MISP php-fpm past its memory limit (HTTP 502), and a daily
 # catch-up run plus OTX, VT and NVD hit the airflow container's limit, so
 # every collector of every DAG takes a slot of COLLECTOR_POOL: at most
