@@ -38,7 +38,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `NEO4J_USER` | `neo4j` | Neo4j user |
 | `NEO4J_PASSWORD` | required | Neo4j password |
 | `NEO4J_DATABASE` | unset | Database of every session (multi-database servers) |
-| `NEO4J_HTTP` | `http://neo4j:7474` on Compose | Neo4j HTTP API of the DAG diagnostics; of the host scripts when `NEO4J_HTTP_URL` is unset |
+| `NEO4J_HTTP` | unset | Neo4j HTTP API of the host scripts when `NEO4J_HTTP_URL` is unset |
 | `NEO4J_HTTP_URL` | `http://127.0.0.1:7474` | Neo4j HTTP API of the host scripts |
 | `NEO4J_HTTP_USER_AGENT` | a browser's | User-Agent of the host scripts' HTTP requests |
 | `NEO4J_WSS_HOST` | unset | Host of the Bolt-over-WebSocket bridge: `scripts/neo4j_wss_bridge.py` run on its own exits 2 without it; `tests/test_cypher_query_catalog.py` uses the bridge when it is set |
@@ -456,6 +456,7 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — Row for `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8): an incremental sync to a remote prod Neo4j took 8 h 37 min, over the fixed 8 h limit of `run_neo4j_sync`; whole hours from 1 to 22 (a larger value uses 22, an invalid one 8, both with a warning), and the row states the full-sync floor and the alert threshold to raise with a larger limit.
+- 2026-10-25 — `NEO4J_HTTP` is read only by the host scripts and no service reads it: the sync DAG's `check_neo4j_quality` task counts nodes through `Neo4jClient` (`NEO4J_URI`), and Compose no longer passes `NEO4J_HTTP` (default `http://neo4j:7474`) to the containers.
 - 2026-10-25 — `THREATFOX_API_KEY` is the key of the URLhaus and MalwareBazaar v2 exports too (the keyless downloads answer HTTP 410 since 2026-10); `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `urlhaus` and `malwarebazaar` (a listed one that is switched off is also an error in `edgeguard preflight`); `EDGEGUARD_URLHAUS_MAX_PER_RUN` default 100,000 (was 50,000), above the about 63,000 URLs of the export on 2026-10-24.
 - 2026-10-25 — Row for `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000): larger MISP events are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 instead of one `/events/view`, which the hosted MISP answered with HTTP 500 for a 145k-attribute event on 2026-10-24.
 - 2026-10-23 — The host scripts that query Neo4j over HTTP have no remote default: with neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` set they use the Compose Neo4j at `http://127.0.0.1:7474` (they sent the credentials to a built-in remote address), `scripts/run_cypher_catalog_http.py` also reads `NEO4J_HTTP`, a value that is not a valid http(s) URL (scheme, host, port) stops them, and `scripts/neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`; rows for `NEO4J_HTTP_USER_AGENT` and `NEO4J_WSS_HOST`.

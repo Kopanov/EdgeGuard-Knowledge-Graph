@@ -2215,59 +2215,42 @@ run_neo4j_sync_task = PythonOperator(
     dag=neo4j_sync_dag,
 )
 
-check_neo4j_quality_task = BashOperator(
+
+# 2026-10: reads through ``Neo4jClient`` (``NEO4J_URI``), like the sync tasks, so it reports on the
+# database the sync wrote. It was a curl to ``NEO4J_HTTP`` that printed nothing and exited 0 when that
+# address was not the synced instance (a ``NEO4J_URI`` pointed at a remote Neo4j). Credentials no
+# longer go through curl at all (the PR-F9 argv / curl-config escaping is gone with it). The counts
+# come from ``count_nodes_by_label``, which raises on any failure: ``Neo4jClient.run`` returns [] on a
+# terminal error (a Cypher syntax error, a non-retryable DatabaseError), which would pass with no count.
+def check_neo4j_quality(**kwargs):
+    """Log the node count per core label. Fails when Neo4j is unreachable (the sync just used it) or
+    when the count query fails."""
+    from neo4j_client import Neo4jClient
+
+    client = Neo4jClient()
+    try:
+        try:
+            connected = client.connect()
+        except Exception as e:
+            raise AirflowException(f"Neo4j quality check FAILED — connect raised after retries: {e}") from e
+        if not connected:
+            raise AirflowException("Neo4j quality check FAILED — cannot connect")
+        try:
+            counts = client.count_nodes_by_label(
+                ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique", "Tactic", "Campaign")
+            )
+        except Exception as e:
+            raise AirflowException(f"Neo4j quality check FAILED — node count query raised: {e}") from e
+        logger.info("Neo4j sync complete - %s", datetime.now(timezone.utc).isoformat())
+        for label, count in counts.items():
+            logger.info("%s: %s", label, count)
+    finally:
+        client.close()
+
+
+check_neo4j_quality_task = PythonOperator(
     task_id="check_neo4j_quality",
-    # PR-F9 Red Team audit (HIGH): the original implementation used
-    # ``curl -s -u "$NEO4J_USER:$NEO4J_PWD" ...`` which writes the
-    # password into the process argv (visible in ``/proc/<pid>/cmdline``
-    # and ``ps auxw`` to any co-resident process for the lifetime of
-    # the curl call).
-    #
-    # PR-F9 Bugbot LOW (round-2): the first fix used curl's netrc
-    # format, which is whitespace-delimited with no quoting mechanism —
-    # a password containing a space would silently truncate to only
-    # the first token (old ``curl -u "user:$PWD"`` handled this via
-    # shell quoting). Replaced with curl's config-file format
-    # (``-K`` / ``--config``), which supports quoted string values
-    # with backslash-escaped whitespace / quotes / backslashes. Same
-    # security win (password in file not argv) AND correct for
-    # realistic passwords; no silent truncation on
-    # e.g. ``NEO4J_PASSWORD="my pass phrase"``.
-    bash_command="""
-        set -euo pipefail
-        echo "Neo4j Sync Complete - $(date)"
-        NEO4J_USER="${NEO4J_USER:-neo4j}"
-        NEO4J_PWD="${NEO4J_PASSWORD:-}"
-        NEO4J_HTTP="${NEO4J_HTTP:-http://neo4j:7474}"
-        if [ -z "$NEO4J_PWD" ]; then
-            echo "Quality check skipped (NEO4J_PASSWORD not set)"
-            exit 0
-        fi
-
-        # Write creds to a 0600 curl-config file the curl process reads
-        # directly. trap cleans up on any exit path (success, error, signal).
-        CURL_CFG="$(mktemp -t edgeguard-curlcfg.XXXXXXXX)"
-        chmod 600 "$CURL_CFG"
-        trap 'rm -f "$CURL_CFG"' EXIT HUP INT TERM
-
-        # Escape password for curl config's quoted-string format:
-        #   backslash → double-backslash, double-quote → backslash-quote
-        # (curl config supports these escape sequences inside double-quoted
-        # values; spelled out in words because a literal backslash-space in
-        # this non-raw Python triple-quoted string emits SyntaxWarning:
-        # invalid escape sequence — a hard SyntaxError in future CPython)
-        NEO4J_PWD_ESC="${NEO4J_PWD//\\\\/\\\\\\\\}"
-        NEO4J_PWD_ESC="${NEO4J_PWD_ESC//\\\"/\\\\\\\"}"
-
-        # Write the user credential via curl's config-file format
-        # (``user = "u:p"``). Quoted string handles whitespace + escapes.
-        printf 'user = "%s:%s"\\n' "$NEO4J_USER" "$NEO4J_PWD_ESC" > "$CURL_CFG"
-
-        curl -s -K "$CURL_CFG" "${NEO4J_HTTP}/db/neo4j/tx/commit" \
-            -H "Content-Type: application/json" \
-            -d '{"statements": [{"statement": "MATCH (n) WHERE n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Tactic OR n:Campaign RETURN labels(n)[0] as type, count(*) as cnt ORDER BY cnt DESC"}]}' 2>/dev/null | \
-            python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'{r[\\"row\\"][0]}: {r[\\"row\\"][1]}') for r in d.get('results',[{}])[0].get('data',[])]" || echo "Quality check skipped"
-    """,
+    python_callable=check_neo4j_quality,
     execution_timeout=timedelta(minutes=15),
     dag=neo4j_sync_dag,
 )

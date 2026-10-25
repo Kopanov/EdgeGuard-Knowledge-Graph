@@ -220,7 +220,7 @@ flowchart LR
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>default 8h timeout]
     C --> D["build_relationships<br/>20 link steps → many edge types incl. INDICATES (family + same-pulse), EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL"]
     D --> E[run_enrichment_jobs<br/>6 post-sync jobs]
-    E --> F[check_neo4j_quality<br/>Node/edge counts]
+    E --> F[check_neo4j_quality<br/>Node counts]
 
     A -->|"skip: a baseline holds the lock, or the last sync started < 24 h ago (force_sync bypasses the 24 h guard)"| SKIP[All downstream<br/>SKIPPED]
 
@@ -349,6 +349,7 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — The sync chain labels the `run_neo4j_sync` limit as the default 8 h (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`).
+- 2026-10-25 — § 5: `check_neo4j_quality` is labelled with node counts, the only counts it logs (it was labelled node/edge counts).
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — The report-scoped build pairs a pulse's indicators with its CVEs too (cap 50 CVEs per pulse); § 3 draws `INDICATES` from `Indicator` to `CVE` with a legend line.
 - 2026-10-18 — Six enrichment jobs: the co-occurrence calibration job was removed from § 1, § 2, § 5 and § 8 (no current code writes the edges it rescored).
