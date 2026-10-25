@@ -466,10 +466,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             // node-level DB-local fallback to the per-indicator result.
             //
             // 2026-10-25: each edge gives the source's claim, else the source's latest report
-            // (``r.last_reported_at``, on every indicator edge): OTX gives no claims, so a campaign
-            // whose indicators all came from OTX took EdgeGuard's import time as its first and last
-            // seen. The first seen date of an indicator is never later than its first import
-            // (``indicator_seen_dates``, shared with the alert enrichment).
+            // (``r.last_reported_at``, on the edges the MISP -> Neo4j sync writes): OTX gives no
+            // claims, so a campaign whose indicators all came from OTX took EdgeGuard's import time as
+            // its first and last seen. The first seen date of an indicator is never later than its
+            // first import (``indicator_seen_dates``, shared with the alert enrichment).
             OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
             WITH a, malware_list, i,
                  min({indicator_seen_dates.edge_first("r")}) AS i_edges_first,

@@ -234,3 +234,97 @@ class TestDocumentation:
         script = (_ROOT / "scripts" / "preflight_baseline.sh").read_text()
         assert 'fail "DAG $dag is NOT paused' not in script
         assert 'warn "DAG $dag is not paused' in script
+
+
+class TestPreflightRunningRuns:
+    """Check [5] of preflight_baseline.sh (2026-10-25): pausing stops new tasks and retries only, so a
+    task that is already running (a ``run_neo4j_sync`` attempt up to EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS)
+    keeps writing into a store the fresh baseline wipes. The check fails while one of the five
+    scheduled DAGs has a running run and warns when the runs cannot be read."""
+
+    # The fake ``docker``: every DAG is paused; list-runs answers per DAG. edgeguard_neo4j_sync has
+    # one running run (after a log line), edgeguard_pipeline answers as ``-o plain`` would with no
+    # run, edgeguard_low_freq fails, the other two have none.
+    _DOCKER = r"""#!/bin/sh
+echo "$*" >> calls.txt
+case "$7 $8" in
+  "details "*) echo "is_paused | True"; exit 0 ;;
+  "list-runs edgeguard_neo4j_sync")
+    echo "[2026-10-25T05:00:00.000+0000] {dagbag.py:588} INFO - Filling up the DagBag"
+    echo '[{"dag_id": "edgeguard_neo4j_sync", "run_id": "scheduled__2026-10-25T03:00:00+00:00", "state": "running"}]'
+    exit 0 ;;
+  "list-runs edgeguard_pipeline") echo "No data found"; exit 0 ;;
+  "list-runs edgeguard_low_freq") echo "Connection refused" >&2; exit 1 ;;
+  "list-runs "*) echo "[]"; exit 0 ;;
+esac
+exit 2
+"""
+
+    _DAGS = (
+        "edgeguard_daily",
+        "edgeguard_medium_freq",
+        "edgeguard_pipeline",
+        "edgeguard_low_freq",
+        "edgeguard_neo4j_sync",
+    )
+
+    def _run_check(self, tmp_path, launch_path="dag"):
+        import subprocess
+
+        script = (_ROOT / "scripts" / "preflight_baseline.sh").read_text()
+        block = script[script.index('hdr "[4][5]') : script.index("# [6] Airflow worker RAM")]
+        block = block[: block.rindex("fi\n") + 3]
+        docker = tmp_path / "docker"
+        docker.write_text(self._DOCKER)
+        docker.chmod(0o755)
+        harness = (
+            f"set -uo pipefail\nLAUNCH_PATH={launch_path}\n"
+            'pass() { echo "PASS|$*"; }\nwarn() { echo "WARN|$*"; }\nfail() { echo "FAIL|$*"; }\nhdr() { :; }\n' + block
+        )
+        env = {"PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"}
+        done = subprocess.run(
+            ["bash", "-c", harness], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60
+        )
+        assert done.returncode == 0, done.stderr
+        return done.stdout.splitlines(), (tmp_path / "calls.txt").read_text().splitlines()
+
+    def test_a_running_run_fails_and_an_unreadable_answer_warns(self, tmp_path):
+        out, calls = self._run_check(tmp_path)
+        by_dag: dict = {}
+        for line in out:
+            dag = next(d for d in self._DAGS if f" {d} " in f" {line} ")
+            by_dag.setdefault(dag, []).append(line.split("|", 1)[0])
+        assert by_dag == {
+            "edgeguard_daily": ["PASS", "PASS"],
+            "edgeguard_medium_freq": ["PASS", "PASS"],
+            "edgeguard_pipeline": ["PASS", "WARN"],
+            "edgeguard_low_freq": ["PASS", "WARN"],
+            "edgeguard_neo4j_sync": ["PASS", "FAIL"],
+        }, out
+        (failure,) = [line for line in out if line.startswith("FAIL|")]
+        assert "edgeguard_neo4j_sync has 1 running run(s)" in failure
+        assert "EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS" in failure
+        assert "PASS|DAG edgeguard_daily has no running run" in out
+        for dag in self._DAGS:
+            assert f"compose exec -T airflow airflow dags list-runs {dag} --state running -o json" in calls
+
+    def test_the_cli_launch_path_checks_running_runs_too(self, tmp_path):
+        # The in-process baseline wipes as well, and a task already running keeps writing whatever the path.
+        out, calls = self._run_check(tmp_path, launch_path="cli")
+        assert not [c for c in calls if " details " in f" {c} "], "the CLI path does not read the pause state"
+        for dag in self._DAGS:
+            assert f"compose exec -T airflow airflow dags list-runs {dag} --state running -o json" in calls
+        (failure,) = [line for line in out if line.startswith("FAIL|")]
+        assert "edgeguard_neo4j_sync has 1 running run(s)" in failure
+        assert "PASS|DAG edgeguard_daily has no running run" in out
+
+    def test_the_docs_no_longer_say_pausing_stops_a_running_write(self):
+        runbook = (_ROOT / "docs" / "RUNBOOK.md").read_text()
+        checklist = (_ROOT / "docs" / "BASELINE_LAUNCH_CHECKLIST.md").read_text()
+        for name, text in (("RUNBOOK.md", runbook), ("BASELINE_LAUNCH_CHECKLIST.md", checklist)):
+            main = text.split("\n## History", 1)[0]
+            assert "mid-write" not in main and "finishes its write" not in main, name
+            assert "airflow dags list-runs" in main and "--state running -o json" in main, name
+        protocol = runbook.split("## Baseline-day protocol", 1)[1].split("\n---", 1)[0]
+        assert "Pausing them stops new tasks and retries only" in protocol
+        assert 'airflow dags list-runs "$dag" --state running -o json' in protocol

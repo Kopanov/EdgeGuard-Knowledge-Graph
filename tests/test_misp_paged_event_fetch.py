@@ -49,6 +49,12 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# tests/test_graphql_api.py replaces neo4j_client (and neo4j, pymisp) with MagicMocks when it is collected first.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j_client" or k.startswith("neo4j")):
+    clear_graphql_api_magicmock_stubs()
+
 import run_misp_to_neo4j  # noqa: E402
 import source_trust  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync, MispTransientServerError, misp_event_object_to_event_dict  # noqa: E402
@@ -565,6 +571,54 @@ def test_an_incomplete_paged_event_is_summarised_without_failing_the_run(monkeyp
     assert summary and summary[0].startswith(
         "Events fetched in pages with fewer attributes than the MISP index lists: 1"
     )
+
+
+def _paged_incomplete_gauge():
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value("edgeguard_sync_events_paged_incomplete")
+
+
+def test_an_incomplete_paged_event_sets_the_gauge_the_alert_reads(monkeypatch, run_env):
+    """End to end: the real paged fetch counts the event, run() exports the count through
+    record_sync_event_accounting, and edgeguard_sync_events_paged_incomplete (EdgeGuardSyncPagedFetchIncomplete)
+    holds it while the run stays green."""
+    assert run_misp_to_neo4j._METRICS_AVAILABLE, "prometheus_client is a declared dependency"
+    sync = _run_sync(monkeypatch, [{"id": EVENT_ID, "info": EVENT_FIELDS["info"], "attribute_count": "30000"}])
+    monkeypatch.setattr(sync, "_misp_post_json", _FakeMisp([_search_rows()[-1]]))
+    assert sync.run(incremental=False) is True
+    assert sync.stats["events_paged_incomplete"] == 1
+    assert _paged_incomplete_gauge() == 1
+
+
+def test_a_complete_paged_event_sets_the_gauge_back_to_zero(monkeypatch, run_env):
+    """Control: every listed row arrives through the paged fetch, so the next run clears the alert."""
+    monkeypatch.setenv("EDGEGUARD_MISP_PAGED_FETCH_ABOVE", "5")
+    rows = _search_rows()
+    run_misp_to_neo4j.record_sync_event_accounting(
+        events_index_total=1, events_processed=1, events_failed=0, events_paged_incomplete=3
+    )
+    assert _paged_incomplete_gauge() == 3
+    sync = _run_sync(monkeypatch, [{"id": EVENT_ID, "info": EVENT_FIELDS["info"], "attribute_count": str(len(rows))}])
+    fake = _FakeMisp(rows)
+    monkeypatch.setattr(sync, "_misp_post_json", fake)
+    assert sync.run(incremental=False) is True
+    assert fake.attribute_bodies(), "the event went through the paged fetch"
+    assert sync.stats["events_paged_incomplete"] == 0
+    assert _paged_incomplete_gauge() == 0
+
+
+def test_a_run_that_fails_after_an_incomplete_paged_event_still_exports_it(monkeypatch, run_env):
+    """The finally block exports the count on the exception path too (here Neo4j fails after the events)."""
+    sync = _run_sync(monkeypatch, [{"id": EVENT_ID, "info": EVENT_FIELDS["info"], "attribute_count": "30000"}])
+    monkeypatch.setattr(sync, "_misp_post_json", _FakeMisp([_search_rows()[-1]]))
+    sync.neo4j.apply_sector_labels.side_effect = RuntimeError("Neo4j connection lost")
+    exported: list = []
+    monkeypatch.setattr(run_misp_to_neo4j, "record_sync_event_accounting", lambda **kw: exported.append(kw))
+    assert sync.run(incremental=False) is False
+    assert "Neo4j connection lost" in sync.get_stats()["last_failure_reason"]
+    assert exported and exported[-1]["events_paged_incomplete"] == 1
+    assert exported[-1]["events_processed"] == 1
 
 
 @pytest.mark.parametrize("attribute_count", ["30000", "145261"])

@@ -17,7 +17,7 @@
 | 5 | VirusTotal | grows by ≤ 400 lookups/day (free-tier budget) | ✅ Auto-tagged | Enrichment of hashes already in MISP (lookups, not a feed) | ✅ Active |
 | 6 | ThreatFox | the IOCs of the last 7 days (7,398 on the 730-day baseline; about 1,100 new per day), ≤ 10,000 per run | ✅ Auto-tagged | Malware IOCs | ✅ Active |
 | 7 | AbuseIPDB | the blacklist: at most one request per run of at most 10,000 addresses (the free plan's maximum per request; 10,000 on the 730-day baseline); 5 blacklist requests per UTC day on the free plan: an answer is reused for the rest of its UTC day, and a 429 fails the task ([COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector)) | ✅ Auto-tagged | IP reputation | ✅ Active |
-| 8 | URLhaus | the `recent.csv` export (about 63,000 URLs on 2026-10-24; about 1,130 new per day), ≤ 100,000 per run; abuse.ch Auth-Key required | ✅ Auto-tagged | Malware URLs | ✅ Active |
+| 8 | URLhaus | the `recent.csv` export, the URLs added in the past 30 days (about 63,000 on 2026-10-24, about 2,100 a day on average), ≤ 100,000 per run; abuse.ch Auth-Key required | ✅ Auto-tagged | Malware URLs | ✅ Active |
 | 9 | Feodo Tracker | 7,607 servers on a baseline (complete history; abuse.ch last updated the feed on 2026-03-04), ≤ 15,000 per run | ✅ Auto-tagged (keyword detector; Global in practice) | Botnet C&C IPs with malware family | ✅ Active |
 | 10 | SSL Blacklist | ~11,000 (10,964 on 2026-10-12), the whole list per run, ≤ 20,000 | ✅ Auto-tagged (keyword detector; Global in practice) | Malware SSL certs | ✅ Active |
 | 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
@@ -81,7 +81,7 @@
 ---
 
 ### 3. URLhaus
-**Items:** the URLs of the `recent.csv` export (about 63,000 on 2026-10-24, about 1,130 new per day), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000) per run | **Zone Distribution:** Global 100%
+**Items:** the URLs of the `recent.csv` export, those added in the past 30 days (about 63,000 on 2026-10-24, about 2,100 a day on average), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000) per run | **Zone Distribution:** Global 100%
 
 | Attribute | Value |
 |-----------|-------|
@@ -163,7 +163,7 @@
 
 | Attribute | Value |
 |-----------|-------|
-| URL | `https://mb-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` — per `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`). The full export (`/export/csv/full/`) is the complete history and is not used |
+| URL | `https://mb-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv` — per `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`). The full export (all hashes, a v2 export with the Auth-Key, regenerated hourly) is the complete history and is not used |
 | Format | CSV with `#` comment lines; columns `first_seen_utc, sha256_hash, md5_hash, sha1_hash, reporter, file_name, file_type_guess, mime_type, signature, clamav, vtpercent, imphash, ssdeep, tlsh` |
 | Auth | The abuse.ch Auth-Key (`THREATFOX_API_KEY`) in the URL path, required (without it the task is skipped, `missing_abusech_key`); redacted in every log line and error, the HTTP library's DEBUG records included |
 | Update | Daily (`edgeguard_daily` → `collect_malwarebazaar`) and baseline tier 2, only when `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`; both read the recent export, so the history builds up over the daily runs |
@@ -318,6 +318,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (the page gave about 1,130 a day, the rate of the keyless 30-day file). MalwareBazaar: the full export is a v2 export with the Auth-Key (the keyless `/export/csv/full/` answers HTTP 410).
 - 2026-10-25 — URLhaus per-run cap: the ThreatFox count names its baseline (2026-10-13); it pointed to the URLhaus count, which is now the export of 2026-10-24.
 - 2026-10-25 — URLhaus and MalwareBazaar read the abuse.ch v2 `recent.csv` exports with the Auth-Key (`THREATFOX_API_KEY`) in the URL path, because the keyless downloads (`downloads/csv_recent/`, `csv_top10k/`, `/export/csv/recent/`) answer HTTP 410 since 2026-10; the URLhaus export listed about 63,000 URLs on 2026-10-24 (the keyless 30-day file 34,003 on 2026-10-13), and `EDGEGUARD_URLHAUS_MAX_PER_RUN` is 100,000 (was 50,000), so the cap covers it again.
 - 2026-10-23 — HC3 named as a public source that is not collected, not as a member-only feed; no DAG task calls the placeholder modules.

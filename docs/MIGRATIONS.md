@@ -63,6 +63,11 @@ canonical fix is:
 #   edgeguard_daily, edgeguard_neo4j_sync
 # Leave edgeguard_baseline unpaused: a run triggered on a paused DAG stays queued.
 # While the baseline runs, its lock keeps the scheduled DAGs from writing.
+# Each must print [] (mark a run it lists failed in the Airflow UI or with
+# `edgeguard dag kill --dag-id <dag>`, and wait until its task has stopped):
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
+  docker compose exec -T airflow airflow dags list-runs "$dag" --state running -o json
+done
 
 # 2. Wipe the graph (dev/test only — never production): deletes the nodes EdgeGuard
 #    created (edgeguard_managed = true; --full-wipe deletes every node after a typed
@@ -83,10 +88,11 @@ run from a clean slate".
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Heal path: after pausing, every run the five scheduled DAGs still have is marked failed before the wipe (a task already running keeps writing).
 - 2026-10-23 — `scripts/verify_fresh_baseline.py` checks the Compose Neo4j at `http://127.0.0.1:7474` when neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` is set (it checked a built-in remote instance); the heal path's verify step runs without `NEO4J_HTTP_URL`.
 - 2026-10-23 — The heal path states that `scripts/clear_neo4j.py --force` deletes the nodes EdgeGuard created (`edgeguard_managed = true`) and that `--full-wipe` asks for a typed confirmation.
 - 2026-10-18 — Removed `scripts/backfill_cve_dates_from_nvd_meta.py`, `scripts/backfill_edge_misp_event_ids.py` with its runbook in `migrations/`, and the read-only audit `scripts/audit_legacy_unicode_bypass_nodes.py`: they repaired or inspected data written by earlier versions, which a fresh baseline rebuilds.

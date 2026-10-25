@@ -262,15 +262,26 @@ NEO4J_SYNC_DURATION = Histogram(
 # alert was permanently firing or permanently silent depending on eval
 # semantics. Either way it carried no signal. This gauge is written on
 # every successful sync completion and read by the alert as
-# ``time() - edgeguard_neo4j_sync_last_success_timestamp > 439200``
-# (2026-10: 122 h, the longest gap the 72-hour schedule leaves between two sync starts plus the
-# sync task's longest run; the derivation is in prometheus/alerts.yml). Since 2026-10 the
-# baseline DAG's full sync writes it too.
+# ``time() - edgeguard_neo4j_sync_last_success_timestamp > <threshold>``
+# (122 h at the default 8 h limit of run_neo4j_sync: the longest gap the 72-hour schedule leaves
+# between two sync starts plus the sync task's longest run; the threshold follows the limit through
+# NEO4J_SYNC_TASK_LIMIT below, and the derivation is in prometheus/alerts.yml). The baseline DAG's
+# full sync writes it too.
 NEO4J_SYNC_LAST_SUCCESS = Gauge(
     "edgeguard_neo4j_sync_last_success_timestamp",
     "Unix timestamp (seconds) of the last successful MISP→Neo4j sync "
     "completion. Used by EdgeGuardNeo4jSyncStale alert. Set on every "
     "successful run of MISPToNeo4jSync.run() after counters are flushed.",
+    multiprocess_mode="mostrecent",
+)
+
+# The limit of one run_neo4j_sync attempt (the task's execution_timeout, EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS),
+# set when an attempt starts. EdgeGuardNeo4jSyncStale adds three times the part above the default 8 h to
+# its threshold, so the alert follows the configured limit; without the series it uses the default.
+NEO4J_SYNC_TASK_LIMIT = Gauge(
+    "edgeguard_neo4j_sync_task_limit_seconds",
+    "Per-attempt limit of run_neo4j_sync (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS) in seconds, set when an "
+    "attempt starts; read by EdgeGuardNeo4jSyncStale.",
     multiprocess_mode="mostrecent",
 )
 
@@ -326,6 +337,16 @@ SYNC_EVENTS_FAILED = Gauge(
 SYNC_EVENTS_INDEX_TOTAL = Gauge(
     "edgeguard_sync_events_index_total",
     "Total events returned by MISP events index for the most recent sync run",
+    multiprocess_mode="mostrecent",
+)
+
+# Events of the run fetched in pages (``fetch_event_details_paged``) whose pages brought fewer attribute
+# rows than the MISP index lists ([PAGED-FETCH-INCOMPLETE]). The rows received are synced and the run
+# stays green, so EdgeGuardSyncPagedFetchIncomplete reads this gauge.
+SYNC_EVENTS_PAGED_INCOMPLETE = Gauge(
+    "edgeguard_sync_events_paged_incomplete",
+    "Events of the most recent MISP->Neo4j sync run fetched in pages with fewer attribute rows than the "
+    "MISP index lists ([PAGED-FETCH-INCOMPLETE])",
     multiprocess_mode="mostrecent",
 )
 
@@ -729,7 +750,8 @@ SOURCE_TRUTHFUL_FUTURE_CLAMP = Counter(
 )
 
 # 2026-10 (shared-database contract): every destructive graph operation EdgeGuard runs — the
-# full wipe, the edgeguard-only wipe, CVSS de-duplication — increments this and appends one line
+# full wipe, the edgeguard-only wipe, CVSS de-duplication, the alias Source cleanup of ensure_sources —
+# increments this and appends one line
 # to the JSONL trail written by ``destructive_ops_audit``.
 DESTRUCTIVE_OPS = Counter(
     "edgeguard_destructive_ops_total",
@@ -1054,6 +1076,7 @@ def record_sync_event_accounting(
     events_index_total: int,
     events_processed: int,
     events_failed: int,
+    events_paged_incomplete: int = 0,
 ) -> None:
     """Export the per-run event accounting so alerts can catch silent skips.
 
@@ -1061,10 +1084,18 @@ def record_sync_event_accounting(
     is what would have caught the 2026-04-14 NVD regression (event 4 was
     neither processed nor failed — it was silently dropped, and the counter
     gap stayed hidden because nothing exported the numbers).
+    ``events_paged_incomplete`` counts the events whose paged fetch brought fewer attribute
+    rows than the MISP index lists; each run sets it, so it clears with the next complete run.
     """
     SYNC_EVENTS_INDEX_TOTAL.set(max(events_index_total, 0))
     SYNC_EVENTS_PROCESSED.set(max(events_processed, 0))
     SYNC_EVENTS_FAILED.set(max(events_failed, 0))
+    SYNC_EVENTS_PAGED_INCOMPLETE.set(max(events_paged_incomplete, 0))
+
+
+def record_neo4j_sync_task_limit(seconds: float) -> None:
+    """Export the limit of the run_neo4j_sync attempt that starts (read by EdgeGuardNeo4jSyncStale)."""
+    NEO4J_SYNC_TASK_LIMIT.set(max(float(seconds), 0.0))
 
 
 def record_neo4j_relationships(rel_counts: Dict[str, int]):

@@ -282,6 +282,7 @@ try:
         record_dag_run,
         record_misp_push,
         record_neo4j_sync,
+        record_neo4j_sync_task_limit,
         record_pipeline_error,
         record_task_duration,
         set_source_health,
@@ -521,6 +522,22 @@ def _record_successful_sync_metrics(duration: float, *, node_counts: bool = True
         logger.warning("Neo4j sync duration / last-success metrics not recorded: %s", e)
     if node_counts:
         record_neo4j_node_counts()
+
+
+def _record_neo4j_sync_task_limit(limit) -> None:
+    """Export the limit of the run_neo4j_sync attempt that starts (``edgeguard_neo4j_sync_task_limit_seconds``).
+
+    EdgeGuardNeo4jSyncStale adds three times the part of this limit above the default 8 h to its
+    threshold, so the alert follows EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS. ``limit`` is the task's
+    ``execution_timeout``; anything else records nothing. Never raises: a metrics failure must not
+    fail the sync.
+    """
+    if not (METRICS_SERVER_AVAILABLE and isinstance(limit, timedelta)):
+        return
+    try:
+        record_neo4j_sync_task_limit(limit.total_seconds())
+    except Exception as e:
+        logger.warning("run_neo4j_sync task limit not recorded (edgeguard_neo4j_sync_task_limit_seconds): %s", e)
 
 
 def record_error(task: str, error_type: str, source: str = ""):
@@ -1615,6 +1632,10 @@ def run_neo4j_sync(**context):
 
     # Ensure metrics server is running
     ensure_metrics_server()
+    # The limit in force for this attempt (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS when the DAG file was parsed),
+    # exported at the start of every attempt for EdgeGuardNeo4jSyncStale.
+    _limit = getattr(context.get("task"), "execution_timeout", None)
+    _record_neo4j_sync_task_limit(_limit)
 
     try:
         import time
@@ -1660,8 +1681,6 @@ def run_neo4j_sync(**context):
                 logger.debug("Could not check SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
 
         _attempt = getattr(context.get("ti") or context.get("task_instance"), "try_number", None)
-        # The limit in force for this attempt (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS when the DAG file was parsed).
-        _limit = getattr(context.get("task"), "execution_timeout", None)
         _limit_note = f", task limit {_limit.total_seconds() / 3600:g} h" if isinstance(_limit, timedelta) else ""
         if is_first_run:
             logger.info(
@@ -2096,7 +2115,8 @@ neo4j_sync_dag = DAG(
     # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (default 8 h limit), build_relationships
     # and run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
     # run_neo4j_sync's limit is EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger
-    # value uses 22); this arithmetic and the alert thresholds are derived from the default 8 h. Above
+    # value uses 22); this arithmetic is derived from the default 8 h (EdgeGuardNeo4jSyncStale follows
+    # the limit through edgeguard_neo4j_sync_task_limit_seconds). Above
     # 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a late
     # build_relationships or run_enrichment_jobs is then cut (marked skipped, without a failure
     # callback), while the 22 h cap keeps all three sync attempts and the 24 h guard inside the limits
@@ -2205,8 +2225,8 @@ run_neo4j_sync_task = PythonOperator(
     # minutes on a local Neo4j, but hours against a remote one with many changed events (a prod sync at
     # about 0.9 NVD CVE/s, one event with 21,887 changed CVEs, took 8 h 37 min), so the limit is
     # EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger value uses 22, an invalid one
-    # 8, both with a warning). The 68 h arithmetic and the alert thresholds are derived from the default
-    # 8 h; above 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a
+    # 8, both with a warning). The 68 h arithmetic is derived from the default 8 h (the stale-sync alert
+    # follows the limit); above 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a
     # late build_relationships or run_enrichment_jobs is then cut (marked skipped, without a failure
     # callback), while the 22 h cap keeps all three sync attempts and the 24 h guard inside the limits.
     execution_timeout=timedelta(hours=_neo4j_sync_timeout_hours()),
@@ -3400,7 +3420,8 @@ def _baseline_acquire_lock(**context) -> None:
     holder's liveness is the DAG-run state through the Airflow REST API, with the sentinel
     age as fallback (see ``src/baseline_lock.py``). Idempotent for the same run id, so a
     retry or a manual re-run of this task succeeds. A task of a scheduled DAG that is
-    already running when the lock is taken completes its current write.
+    already running when the lock is taken keeps running to its end; preflight check [5]
+    (scripts/preflight_baseline.sh) fails while one of the five scheduled DAGs has a running run.
     """
     from baseline_lock import acquire_baseline_lock, baseline_lock_path, is_baseline_running
 

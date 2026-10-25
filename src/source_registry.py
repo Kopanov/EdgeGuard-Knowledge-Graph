@@ -46,7 +46,7 @@ of the five legacy registries becomes a one-liner derivation:
 ```python
 # src/neo4j_client.py
 from source_registry import to_neo4j_sources_dict
-SOURCES = to_neo4j_sources_dict()  # shape unchanged; callers untouched
+SOURCES = to_neo4j_sources_dict()  # one entry per canonical id, in registry order
 
 # src/edgeguard.py
 from source_registry import to_cli_sources_dict
@@ -66,10 +66,14 @@ class MISPWriter:
     SOURCE_TAGS = source_to_misp_tag_map()
 ```
 
-Every existing call site keeps the SAME variable name and the SAME
-shape — this is a behavior-preserving refactor. Parity is pinned by
-``tests/test_source_registry.py`` (the derived dicts must match
-captured pre-refactor snapshots byte-for-byte).
+Every call site keeps its variable name. ``SOURCES`` has one entry per
+canonical id, in registry order, so the graph holds one ``Source`` node
+per source (an alias is a lookup key only); the other derived maps keep
+the shape of the hand-maintained registries they replace.
+``tests/test_source_registry.py`` compares them with snapshots captured
+before the refactor: every legacy key of the other maps keeps its value,
+and every legacy ``SOURCES`` key, resolved to its canonical id, finds
+the same value.
 
 To add a new source: append one ``Source(...)`` entry below. All five
 derivations recompute on next import. ``test_adding_a_new_source_*``
@@ -218,17 +222,18 @@ class Source:
 # The registry — single source of truth
 # ===========================================================================
 #
-# ORDERING NOTE: tests/test_source_registry.py asserts the LEGACY
-# byte-for-byte shape of every derived dict. The order of entries in
-# this list IS PART OF THE PUBLIC CONTRACT for the derived ``SOURCES``
-# / ``DEFAULT_SOURCES`` dicts (Python 3.7+ dicts preserve insertion
+# ORDERING NOTE: the order of entries in this list IS PART OF THE
+# PUBLIC CONTRACT for the derived ``SOURCES`` dict, which has one entry
+# per canonical id in this order (pinned by tests/test_source_registry.py),
+# and for the ``DEFAULT_SOURCES`` entries after
+# ``_LEGACY_CLI_LISTING_ORDER`` (Python 3.7+ dicts preserve insertion
 # order; downstream callers that iterate may depend on it). When
 # adding a new source, append AT THE END unless there's a specific
 # reason to insert earlier.
 #
-# Entries are listed in the historical order they appeared in the
-# legacy ``SOURCES`` dict in ``neo4j_client.py``, so the derived
-# dict matches byte-for-byte.
+# Entries are listed in the order their canonical ids had in the legacy
+# ``SOURCES`` dict in ``neo4j_client.py``; the sources added since then
+# follow at the end.
 
 _REGISTRY: Tuple[Source, ...] = (
     Source(
@@ -430,8 +435,9 @@ _REGISTRY: Tuple[Source, ...] = (
         reliable_first_seen=True,
     ),
     # Curated sources (2026-10): packages imported once into MISP as their own event, not
-    # feeds polled by a collector — hence no ``cli_id``. No aliases on purpose: every alias
-    # becomes an extra ``:Source`` node (see ``to_neo4j_sources_dict``).
+    # feeds polled by a collector — hence no ``cli_id``. No aliases: none is needed, and an alias would
+    # be a lookup key only, since the graph has one ``Source`` node per canonical id
+    # (``to_neo4j_sources_dict``).
     Source(
         canonical_id="coreideas",
         display_name="Core Ideas",

@@ -126,7 +126,7 @@ Component detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the diagrams 
 | Curated | Curated packages | Claims about actors and malware | on demand |
 
 - **Keys.** A source marked "key" is skipped while its key is missing (`OTX_API_KEY`, `THREATFOX_API_KEY` for ThreatFox, URLhaus and MalwareBazaar, `ABUSEIPDB_API_KEY`, `VIRUSTOTAL_API_KEY`). NVD works without `NVD_API_KEY` at a lower request rate. `edgeguard preflight` and the baseline ask each provider whether it accepts the configured key. How to obtain each key: [docs/API_KEYS_SETUP.md](docs/API_KEYS_SETUP.md).
-- **History per source.** A baseline reaches back 730 days wherever the source's API does. ThreatFox's API returns at most the last 7 days, URLhaus its recent export (about 63,000 URLs on 2026-10-24), MalwareBazaar's export the last 48 hours and AbuseIPDB its current blacklist; ATT&CK has no time window.
+- **History per source.** A baseline reaches back 730 days wherever the source's API does. ThreatFox's API returns at most the last 7 days, URLhaus its recent export, the URLs added in the last 30 days (about 63,000 on 2026-10-24), MalwareBazaar's export the last 48 hours and AbuseIPDB its current blacklist; ATT&CK has no time window.
 - **VirusTotal.** The free tier allows lookups only (4 per minute, 500 per day). EdgeGuard looks up the hashes already in MISP within a daily budget of 400 lookups and 60 per run; it scans and uploads nothing.
 - **Feodo Tracker.** A baseline loads the complete C2 history; the daily runs read the list of the last 30 days, and the collector logs a warning when the feed's own header is older than 7 days ([docs/COLLECTORS.md § 7](docs/COLLECTORS.md#7-finance-feed-collector)).
 - **Placeholders.** The energy and healthcare sector modules are placeholders that no DAG task runs; member-only ISAC feeds are not collected. Sector labels come from keyword detection in every collector, from the industries an OTX pulse names and, with CISA ICS enabled, from the sectors CISA names.
@@ -326,13 +326,15 @@ The Graph Explorer is served by hand ([Graph Explorer](#graph-explorer)), and th
 ./install.sh --update
 ```
 
-It pulls the branch (fast-forward only), records the commit in `.env` as `EDGEGUARD_GIT_SHA` with `scripts/record_deployed_commit.sh`, rebuilds the images and starts the stack; both `/health` responses report the commit as `git_sha`. Run it only while no baseline runs, because recreating the `airflow` container stops its tasks. The manual equivalent, which rebuilds every image and recreates every container:
+It pulls the branch (fast-forward only), records the commit in `.env` as `EDGEGUARD_GIT_SHA` with `scripts/record_deployed_commit.sh`, rebuilds the images and starts the stack; both `/health` responses report the commit as `git_sha`. Run it only while no baseline runs, because recreating the `airflow` container stops its tasks. The manual equivalent, which rebuilds every image and recreates every container of `docker-compose.yml`:
 
 ```bash
 git pull --ff-only
 scripts/record_deployed_commit.sh
 docker compose build && docker compose up -d --force-recreate
 ```
+
+With the monitoring stack running, restart Prometheus after an update that changes `prometheus/alerts.yml`: `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml restart prometheus`. The file is mounted on its own, so neither the recreate above nor `/-/reload` loads the new rules ([docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md)).
 
 Rebuilding only the Airflow image leaves REST, GraphQL and STIX on the old code, because the `api` and `graphql` images contain `src/`.
 
@@ -358,7 +360,7 @@ The `edgeguard_baseline` DAG holds a lock for the whole run: the `baseline_acqui
 - While the lock is held, the five scheduled DAGs skip at task start: a collector task succeeds with `skipped: true` (a green task, reason `baseline_in_progress`), and every writing task of `edgeguard_neo4j_sync` skips.
 - A failed run keeps the lock, so clearing the failed task resumes under it. A refusal of `baseline_clean` before the wipe (a misspelt `fresh_baseline` key, an invalid `wipe_scope`, the backup gate) releases it, so the corrected trigger is not refused.
 - The lock ends with a successful run, after `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48 hours by default, above the 32-hour run limit) or when the operator removes the file. The scheduled DAGs read the holder's run state through the Airflow REST API and fall back to the file's age.
-- Pausing the scheduled DAGs first is optional. It is recommended before a fresh baseline, because a scheduled task that is already running when the lock is taken completes its current write.
+- Pausing the scheduled DAGs first is optional; it is recommended before a fresh baseline. Pausing stops new tasks and retries, while a scheduled task that is already running when the lock is taken keeps running to its end (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), and a paused DAG's run stays `running` while tasks of it are left; so before a fresh baseline mark every run the five DAGs still have failed (Airflow UI, or `edgeguard dag kill --dag-id <dag>`) and wait until its task has stopped; preflight check `[5]` fails while one of them has a running run ([docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol), Option A).
 
 Full lock semantics: [docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol).
 
@@ -395,7 +397,7 @@ set -a; . ./.env; set +a
 ./scripts/preflight_baseline.sh --launch-path=dag
 ```
 
-It runs checks `[1]` to `[12]`: settings, Neo4j and APOC, MISP, the pause state of the scheduled DAGs, worker memory, the alert rules and the Alertmanager wiring, a leftover lock, the operations-only switches, the test collection, the baseline invariants in the code, and whether each provider accepts its source key. Exit 0 means ready; on exit 1, fix the items marked ✗. Check by check: [docs/BASELINE_LAUNCH_CHECKLIST.md](docs/BASELINE_LAUNCH_CHECKLIST.md).
+It runs checks `[1]` to `[12]`: settings, Neo4j and APOC, MISP, the pause state and running runs of the scheduled DAGs, worker memory, the alert rules and the Alertmanager wiring, a leftover lock, the operations-only switches, the test collection, the baseline invariants in the code, and whether each provider accepts its source key. Exit 0 means ready; on exit 1, fix the items marked ✗. Check by check: [docs/BASELINE_LAUNCH_CHECKLIST.md](docs/BASELINE_LAUNCH_CHECKLIST.md).
 
 - Checks `[10]` to `[12]` use the repository's `.venv` ([Prerequisites](#prerequisites)). Without it, check `[11]` reports the three critical-chain tasks as missing `retries=0`, the test-collection check `[10]` is skipped, and the source-key check `[12]` falls back to the system `python3`.
 - With the shipped `prometheus/alertmanager.yml`, check `[7b]` fails until its PagerDuty `service_key` is rendered with a real key or the PagerDuty receiver is removed ([docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md#alertmanager-notifications)).
@@ -406,6 +408,11 @@ It runs checks `[1]` to `[12]`: settings, Neo4j and APOC, MISP, the pause state 
 # 1. Pause the five scheduled DAGs (optional; recommended before a fresh baseline)
 for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
   docker compose exec airflow airflow dags pause "$dag"
+done
+
+# Before a fresh baseline: each of the five must print [] (mark a run it still lists failed in the Airflow UI)
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
+  docker compose exec -T airflow airflow dags list-runs "$dag" --state running -o json
 done
 
 # 2. Trigger the baseline (additive)
@@ -421,7 +428,7 @@ done
 
 For a fresh baseline triggered this way, set `EDGEGUARD_LAST_BACKUP_AT` in `.env` and run `docker compose up -d airflow` first, unless Neo4j and MISP are empty. The run configuration also takes `baseline_days` and `wipe_scope` ([docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md)).
 
-**4. Monitor.** Watch the `edgeguard` alert groups in Prometheus at `http://localhost:9090` (39 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume. Logs:
+**4. Monitor.** Watch the `edgeguard` alert groups in Prometheus at `http://localhost:9090` (40 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume. Logs:
 
 ```bash
 docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'

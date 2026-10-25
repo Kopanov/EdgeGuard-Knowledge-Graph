@@ -283,7 +283,9 @@ Times are SSDs on a workstation; spinning disk + cloud storage adds 2-5×.
 ## Audit trail and what this procedure does not cover
 
 Destructive operations leave an audit trail: `src/destructive_ops_audit.py`
-appends one JSONL line per Neo4j wipe and CVSS de-duplication to
+appends one JSONL line per Neo4j wipe, CVSS de-duplication and removal of
+`Source` nodes keyed by a registry alias that have no relationship
+(`ensure_sources`, operation `source_alias_cleanup`) to
 `EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH` (default `logs/destructive_ops.jsonl`).
 The Neo4j wipes are those of the fresh baseline, of `edgeguard clear neo4j`
 and of `scripts/clear_neo4j.py`. Each line names the operation, the store,
@@ -320,6 +322,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Audit trail: `ensure_sources` writes a line when it deletes `Source` nodes keyed by a registry alias that have no relationship (`source_alias_cleanup`).
 - 2026-10-25 — URLhaus re-reads its abuse.ch `recent.csv` export (the keyless 30-day download answers HTTP 410 since 2026-10).
 - 2026-10-23 — A Neo4j wipe that fails part-way writes an audit line with what it deleted (`details.outcome = "failed"`), one per attempt when the graph client retries; before, only a wipe that completed wrote a line, and a retried wipe recorded only the nodes of its last attempt.
 - 2026-10-23 — Each audit line names the process that ran the delete (`actor`); the wipes of `edgeguard clear neo4j` and `scripts/clear_neo4j.py` are listed with that of the fresh baseline.

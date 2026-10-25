@@ -39,10 +39,17 @@ from __future__ import annotations
 
 import os
 import sys
+from unittest.mock import MagicMock
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
+
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# tests/test_graphql_api.py replaces neo4j_client (and neo4j) with MagicMocks when it is collected first.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j_client" or k.startswith("neo4j")):
+    clear_graphql_api_magicmock_stubs()
 
 
 # ---------------------------------------------------------------------------

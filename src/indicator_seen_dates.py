@@ -5,9 +5,10 @@ An indicator's dates live on its ``SOURCED_FROM`` edges, one per source (``docs/
 * ``r.source_reported_first_at`` / ``r.source_reported_last_at``, the source's own first-seen and
   last-seen claims, from the sources on the reliable first-seen allowlist only
   (``source_truthful_timestamps``; OTX is not on it, so an OTX edge has neither);
-* ``r.last_reported_at``, the source's latest report of the indicator, on every indicator edge:
-  the source's own last-report date capped at the MISP record time, or the MISP record time when
-  the source gave none (``indicator_aging``).
+* ``r.last_reported_at``, the source's latest report of the indicator, on every indicator edge the
+  MISP -> Neo4j sync writes (not on the edges of the STIX import or the VirusTotal re-enrichment,
+  which carry no MISP report): the source's own last-report date capped at the MISP record time, or
+  the MISP record time when the source gave none (``indicator_aging``).
 
 Reading the claims alone left every indicator without them undated, and a campaign whose indicators
 all came from OTX took EdgeGuard's import time as its first and last seen. The seen dates read
