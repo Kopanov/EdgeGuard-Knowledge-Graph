@@ -1043,13 +1043,52 @@ class TestSourceNodesCanonical:
         return lambda st, rows: rows + extra if "AS sourced_from" in st else rows
 
     def test_correct_graph_passes(self, vfb, monkeypatch):
+        from source_registry import all_sources
+
         c = _check(_run(vfb, monkeypatch), "source_nodes_canonical")
         assert c["ok"] is True and c["mandatory"] is True
         assert c["detail"] == {
             "alias_source_nodes": [],
             "unregistered_source_nodes": [],
             "canonical_source_nodes": len(_SOURCE_ROWS),
+            "variants": {s.canonical_id: list(s.aliases) for s in all_sources()},
         }
+
+    def test_the_report_lists_which_variants_fold_into_which_source(self, vfb, monkeypatch):
+        variants = _check(_run(vfb, monkeypatch), "source_nodes_canonical")["detail"]["variants"]
+        assert variants["alienvault_otx"] == ["otx"]
+        assert variants["ssl_blacklist"] == ["sslbl", "abusech_ssl"]
+        assert variants["nvd"] == [], "a source without variants is listed too"
+
+    def test_a_newly_registered_source_needs_no_change_to_the_check(self, vfb, monkeypatch):
+        """The check reads the registry when it runs: a source added there is judged at once, its
+        canonical id passing and its variants failing as nodes, without editing the script."""
+        import source_registry
+
+        new = source_registry.Source(
+            canonical_id="newfeed_2027",
+            aliases=("nf27",),
+            display_name="New Feed",
+            source_type="threat_intel",
+            reliability=0.7,
+            misp_tag="source:NewFeed-2027",
+            reliable_first_seen=False,
+        )
+        monkeypatch.setattr(source_registry, "_REGISTRY", source_registry._REGISTRY + (new,))
+
+        ok = _check(
+            _run(vfb, monkeypatch, override=self._with_source_rows([{"source_id": "newfeed_2027", "sourced_from": 9}])),
+            "source_nodes_canonical",
+        )
+        assert ok["ok"] is True
+        assert ok["detail"]["canonical_source_nodes"] == len(_SOURCE_ROWS) + 1
+        assert ok["detail"]["variants"]["newfeed_2027"] == ["nf27"]
+
+        rep = _run(vfb, monkeypatch, override=self._with_source_rows([{"source_id": "nf27", "sourced_from": 0}]))
+        assert [c["check"] for c in rep.failed] == ["source_nodes_canonical"]
+        assert _check(rep, "source_nodes_canonical")["detail"]["alias_source_nodes"] == [
+            {"source_id": "nf27", "sourced_from": 0, "canonical_id": "newfeed_2027"}
+        ]
 
     @pytest.mark.parametrize(
         "alias,canonical",
@@ -1078,13 +1117,12 @@ class TestSourceNodesCanonical:
         assert [x["source_id"] for x in detail["alias_source_nodes"]] == aliases
         assert detail["unregistered_source_nodes"] == []
 
-    def test_an_unregistered_source_node_is_reported_not_failed(self, vfb, monkeypatch):
-        rep = _run(
-            vfb, monkeypatch, override=self._with_source_rows([{"source_id": "partner_feed", "sourced_from": 3}])
-        )
+    @pytest.mark.parametrize("unregistered", ["partner_feed", "stix_import"])
+    def test_an_unregistered_source_node_is_reported_not_failed(self, vfb, monkeypatch, unregistered):
+        rep = _run(vfb, monkeypatch, override=self._with_source_rows([{"source_id": unregistered, "sourced_from": 3}]))
         c = _check(rep, "source_nodes_canonical")
         assert c["ok"] is True and "source_nodes_canonical" not in [x["check"] for x in rep.failed]
-        assert c["detail"]["unregistered_source_nodes"] == [{"source_id": "partner_feed", "sourced_from": 3}]
+        assert c["detail"]["unregistered_source_nodes"] == [{"source_id": unregistered, "sourced_from": 3}]
 
 
 class TestLegacyRelationshipProperties:

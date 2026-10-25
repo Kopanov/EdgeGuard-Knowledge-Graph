@@ -1148,6 +1148,9 @@ def run_checks(
     #      of a registered source (``otx``, ``cisa``, ``vt``, ...) is a lookup key, never a node: every
     #      ``SOURCED_FROM`` writer resolves it to the canonical id. A ``Source`` node whose id the
     #      registry does not know is not one ``ensure_sources`` creates; it is reported, never failed on.
+    #      The canonical ids and their variants are read from ``src/source_registry.py`` at run time
+    #      and listed in the report (``variants``), so a source added there is judged without a change
+    #      here.
     canonical_ids = {s.canonical_id for s in all_sources()}
     alias_nodes: List[Dict[str, Any]] = []
     unregistered: List[Dict[str, Any]] = []
@@ -1168,6 +1171,7 @@ def run_checks(
             "alias_source_nodes": alias_nodes,
             "unregistered_source_nodes": unregistered,
             "canonical_source_nodes": sum(1 for x in source_rows if x.get("source_id") in canonical_ids),
+            "variants": {s.canonical_id: list(s.aliases) for s in all_sources()},
         },
     )
 

@@ -231,3 +231,21 @@ def test_no_writer_creates_a_source_node():
     assert len(hits) == 1, [where for where, _ in hits]
     where, text = hits[0]
     assert where.startswith("src/neo4j_client.py:") and "MERGE (s:Source {source_id: $source_id})" in text
+
+
+def test_the_documented_variant_table_equals_the_registry():
+    """``docs/KNOWLEDGE_GRAPH.md`` lists every source with the variants that resolve to it; the table
+    must name exactly the registry's canonical ids, in registry order, each with its aliases."""
+    import re
+
+    lines = (_SRC.parent / "docs" / "KNOWLEDGE_GRAPH.md").read_text().splitlines()
+    start = lines.index("| Source (canonical id) | Variants that resolve to it |") + 2
+    rows = []
+    for line in lines[start:]:
+        if not line.startswith("|"):
+            break
+        source_cell, variants_cell = [cell.strip() for cell in line.strip("|").split("|")]
+        canonical = re.match(r"`([^`]+)`", source_cell).group(1)
+        variants = [] if variants_cell == "none" else re.findall(r"`([^`]+)`", variants_cell)
+        rows.append((canonical, variants))
+    assert rows == [(s.canonical_id, list(s.aliases)) for s in source_registry.all_sources()]

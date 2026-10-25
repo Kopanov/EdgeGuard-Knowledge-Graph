@@ -75,7 +75,27 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 
 ### SOURCED_FROM edge schema
 
-**`Source` nodes.** One per registered source (`src/source_registry.py`), keyed by its canonical id (`alienvault_otx`, `nvd`, `cisa_kev`, `mitre_attck`, `virustotal`, `abuseipdb`, `urlhaus`, `threatfox`, `feodo_tracker`, `ssl_blacklist`, `cisa_ics`, `malwarebazaar`, `misp`, and the curated sources `coreideas` and `misp_galaxy`), with `name`, `type` and `reliability` from the registry. `ensure_sources` creates them; no other statement does. An alias of a source (`otx`, `cisa`, `vt`, `feodo`, `sslbl`, …) is a lookup key, never a node: every `SOURCED_FROM` writer resolves the id it is given to the canonical id before it matches the node, and the batch writers refuse an id the registry does not know. The acceptance check `source_nodes_canonical` fails on a `Source` node keyed by an alias.
+**`Source` nodes.** One per registered source in `src/source_registry.py`, keyed by its canonical id, with `name`, `type` and `reliability` from the registry; `ensure_sources` creates them and no other statement does. A variant of a source (an alias, matched without regard to case) is a lookup key, never a node: every `SOURCED_FROM` writer resolves the id it is given to the canonical id before it matches the node. The sources and their variants (`tests/test_source_nodes_canonical.py` keeps this table equal to the registry):
+
+| Source (canonical id) | Variants that resolve to it |
+|---|---|
+| `alienvault_otx` | `otx` |
+| `virustotal` | `vt` |
+| `abuseipdb` | none |
+| `mitre_attck` | `mitre` |
+| `nvd` | none |
+| `misp` | none |
+| `cisa_kev` | `cisa` |
+| `feodo_tracker` | `feodo` |
+| `ssl_blacklist` | `sslbl`, `abusech_ssl` |
+| `urlhaus` | none |
+| `threatfox` | none |
+| `cisa_ics` | `cisa-ics`, `ics_advisories` |
+| `malwarebazaar` | `bazaar`, `mb` |
+| `coreideas` (curated) | none |
+| `misp_galaxy` (curated) | none |
+
+**A new source** is one `Source(...)` entry in the registry, with its canonical id and its variants ([COLLECTORS.md](COLLECTORS.md), step 1): its node, the writers and the acceptance check follow from that entry without any other change. **A name the registry does not know** has no `Source` node: the batch writers refuse its records with an error, and a single-item write stores the node without a `SOURCED_FROM` edge (today the STIX import of a bundle whose objects name no EdgeGuard source, attributed to `stix_import`). The acceptance check `source_nodes_canonical` fails on a `Source` node keyed by a variant, lists one whose id the registry does not know without failing on it, and reports the variant map it judged by (`variants`).
 
 Every threat-intel node (Indicator, CVE, Vulnerability, Malware, ThreatActor, Technique, Tactic, Tool) carries one `(:Node)-[r:SOURCED_FROM]->(:Source)` edge per reporting source. The edge holds both DB-local facts (when EdgeGuard saw this source report this entity) AND the source's own claim (when the source itself says it first/last recorded the entity). Per-source attribution preserves full provenance for multi-source IOCs.
 
