@@ -36,7 +36,7 @@
 
 x-common-env: &common-env
   NEO4J_URI: bolt://neo4j:7687
-  # HTTP API (Browser / transactional endpoint) for optional DAG curl checks — not the Bolt URI.
+  # HTTP API (Browser / transactional endpoint) for the HTTP-based scripts (src/neo4j_http_endpoint.py) — not the Bolt URI.
   NEO4J_HTTP: ${NEO4J_HTTP:-http://neo4j:7474}
   NEO4J_USER: ${NEO4J_USER:-neo4j}
   NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}

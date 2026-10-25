@@ -191,8 +191,8 @@ class TestDeadPlaceholdersRemoved:
 
 class TestCurlCredentialFileReplacement:
     """Neo4j password must NOT appear in ``curl -u user:$PWD`` form
-    anywhere (would leak into ``/proc/<pid>/cmdline``). Use curl's
-    config-file format (``-K``) with a 0600 file + trap cleanup.
+    anywhere (would leak into ``/proc/<pid>/cmdline``). ``src/check_progress.sh``
+    uses curl's config-file format (``-K``) with a 0600 file + trap cleanup.
 
     PR-F9 round-2 (Bugbot LOW): initially used ``--netrc-file``, but
     netrc is whitespace-delimited with no quoting — a password
@@ -201,37 +201,20 @@ class TestCurlCredentialFileReplacement:
     supports quoted strings + backslash escapes (handles whitespace,
     ``"``, and ``\\``). Same security win; correct for realistic
     passwords.
+
+    2026-10: the DAG quality check no longer shells out at all (it queries through
+    ``Neo4jClient``), so the password cannot reach argv from it.
     """
 
-    def test_dag_quality_check_uses_config_file_not_argv_password(self):
+    def test_dag_quality_check_does_not_shell_out(self):
         with open("dags/edgeguard_pipeline.py") as fh:
             src = fh.read()
-        # Find the check_neo4j_quality_task bash_command block
         idx = src.find("check_neo4j_quality_task =")
         assert idx > 0
-        end = src.find("\n)", idx)
-        block = src[idx:end]
-
-        # The password-in-argv pattern must be gone
-        assert 'curl -s -u "${NEO4J_USER}:${NEO4J_PWD}"' not in block, (
-            "DAG quality check must NOT use ``curl -u user:$PWD`` — password leaks into "
-            "/proc/cmdline. Use ``curl -K <config-file>`` instead."
-        )
-        # Must use the config-file approach
-        assert "curl -s -K " in block or "curl -K " in block, (
-            "DAG quality check must use ``curl -K <config>`` "
-            "(supports quoted-string credentials with whitespace; "
-            "PR-F9 round-2 Bugbot LOW fix)"
-        )
-        # Must have a cleanup trap
-        assert "trap " in block, "curl config file MUST be cleaned up via ``trap``, even on crash / signal"
-        # chmod 600 is required so the file isn't world-readable
-        assert "chmod 600" in block, "curl config file must be chmod 600"
-        # netrc's truncation-on-whitespace bug must NOT return
-        assert "--netrc-file" not in block, (
-            "netrc format truncates passwords with whitespace — "
-            "use ``-K`` (curl config) instead (PR-F9 round-2 Bugbot LOW)"
-        )
+        block = src[idx : src.find("\n)", idx)]
+        assert "PythonOperator(" in block, "DAG quality check must be a PythonOperator, not a shell command"
+        assert "BashOperator" not in block and "bash_command" not in block
+        assert "curl" not in block, "DAG quality check must not shell out to curl (password handling)"
 
     def test_check_progress_sh_uses_config_file_not_argv_password(self):
         with open("src/check_progress.sh") as fh:
@@ -248,17 +231,16 @@ class TestCurlCredentialFileReplacement:
 
     def test_password_is_escaped_for_curl_config_format(self):
         """curl config's quoted-string format supports ``\\\\`` (backslash)
-        and ``\\"`` (double-quote) escapes. Both call sites must escape
+        and ``\\"`` (double-quote) escapes. The call site must escape
         the password before writing it into the config file — otherwise
         a password containing ``"`` would break the config parser."""
-        for path in ("dags/edgeguard_pipeline.py", "src/check_progress.sh"):
-            with open(path) as fh:
-                content = fh.read()
-            assert "NEO4J_PWD_ESC" in content, (
-                f"{path} must escape password characters (backslash + quote) "
-                "before embedding in curl config — otherwise special chars "
-                "break the config parser (PR-F9 round-2)"
-            )
+        with open("src/check_progress.sh") as fh:
+            content = fh.read()
+        assert "NEO4J_PWD_ESC" in content, (
+            "src/check_progress.sh must escape password characters (backslash + quote) "
+            "before embedding in curl config — otherwise special chars "
+            "break the config parser (PR-F9 round-2)"
+        )
 
 
 # ===========================================================================
