@@ -58,7 +58,7 @@ fails under STRICT=1) and skips check [5]. Specifically:
 * `[2] Neo4j reachable + APOC + indexes` — through `docker compose exec neo4j cypher-shell` when the Compose neo4j service runs, else `cypher-shell -a $NEO4J_URL` (default bolt://localhost:7687; the script reads NEO4J_URL, not NEO4J_URI, and logs in as user `neo4j`)
 * `[3] MISP API reachable + auth valid`
 * `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; `--launch-path=cli` refers only to the in-process `run_pipeline.py --baseline` path)
-* `[5] IF DAG path: 5 scheduled DAGs PAUSED` (an unpaused DAG is a warning, a failure under STRICT=1: the baseline lock makes scheduled tasks skip at start, and pausing guarantees that none is mid-write)
+* `[5] IF DAG path: 5 scheduled DAGs PAUSED, none with a running run` (an unpaused DAG is a warning, a failure under STRICT=1: the baseline lock makes scheduled tasks skip when they start, and pausing stops new tasks and retries. A running run of one of the 5 DAGs is a failure: pausing does not stop a task that is already running, and a `run_neo4j_sync` attempt can last up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Running runs that cannot be queried are a warning)
 * `[6] Airflow worker RAM ≥ 4 GB`
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
 * `[7b] alertmanager.yml has no placeholder / un-rendered ${...} pager key`
@@ -353,8 +353,10 @@ clearing:
    not "collector not run yet". With OTX collected, add `--require-otx-industries`: it fails
    when the OTX records give sectors and none states one (the pulses' industries lost on the
    way to the sync).
-   The baseline DAG holds the baseline lock for the whole run; pausing the scheduled DAGs
-   before triggering is the recommended extra step for a destructive run
+   The baseline DAG holds the baseline lock for the whole run, and the scheduled tasks skip when
+   they start. Before a destructive run, pause the scheduled DAGs and mark any run they still have
+   failed: pausing does not stop a task that is already running, and a paused DAG's run stays
+   `running` while tasks of it are left
    ([RUNBOOK § Baseline day protocol](RUNBOOK.md#baseline-day-protocol)).
    The `baseline_clean` step may take up to 60 minutes on a 730-day store: it deletes Neo4j
    relationships in batches before the nodes, and each MISP event delete may wait up to
@@ -431,7 +433,14 @@ See RUNBOOK § "Baseline launch path" for the full procedure:
 
 1. Pause the 5 scheduled DAGs (`edgeguard_daily`, `edgeguard_medium_freq`,
    `edgeguard_pipeline`, `edgeguard_low_freq`, `edgeguard_neo4j_sync`)
-   so they don't race the baseline.
+   so that none of their tasks or retries starts during the baseline. Pausing does not stop a
+   task that is already running, and a `run_neo4j_sync` attempt can last up to
+   `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. A paused DAG's run also stays `running` while tasks of
+   it are left, because the scheduler starts none of them. Run
+   `docker compose exec -T airflow airflow dags list-runs <dag> --state running -o json` for each
+   of the 5, mark each run it lists failed in the Airflow UI (`edgeguard dag kill --dag-id <dag>`
+   does the same), wait until the task log shows that its task has stopped, and repeat until each
+   prints `[]` (check `[5]` fails while one has a running run).
 2. `edgeguard fresh-baseline --days 730 --wipe-all` (destructive, see
    § [6] step 4) or `edgeguard baseline --days 730` (additive)
 3. Watch `baseline_complete` and `baseline_release_lock`; unpause the 5
@@ -451,9 +460,10 @@ so that clearing the failed task resumes under the mutex; the liveness
 check prunes it once the run state is success, or when it is older than
 `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48 h). A refusal of
 `baseline_clean` before the wipe (a typo'd `fresh_baseline`, an invalid
-`wipe_scope`, the backup gate) releases the lock. Pausing the 5 scheduled
-DAGs is still recommended: a task that is already running when the lock
-is taken finishes its write.
+`wipe_scope`, the backup gate) releases the lock. The lock is read when a
+task starts, so a task that is already running when the lock is taken keeps
+running to its end; pausing the 5 scheduled DAGs stops new tasks and
+retries, and step 1 marks the runs still listed as running failed.
 
 ---
 
@@ -584,6 +594,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Check `[5]` and the launch decision: pausing the scheduled DAGs stops new tasks and retries only, and a task that is already running keeps running (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); check `[5]` fails while one of the 5 DAGs has a running run, and step 1 waits until `airflow dags list-runs <dag> --state running -o json` prints `[]` for each.
 - 2026-10-25 — Acceptance check `source_nodes_canonical`: one `Source` node per registered source, none keyed by an alias.
 - 2026-10-25 — Check `[12]`: `THREATFOX_API_KEY` is the key of ThreatFox, URLhaus and MalwareBazaar, and a source named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES` that cannot deliver fails the check; step 6 states that MalwareBazaar needs the key; `EdgeGuardSyncCoverageGap` compares event counts (the page said attribute counts), and an event fetched in pages with fewer attribute rows than the MISP index lists is found with `[PAGED-FETCH-INCOMPLETE]`.
 - 2026-10-25 — `verify_fresh_baseline.py` lists URLhaus among the keyed sources, not among those collected by default: its export needs `THREATFOX_API_KEY`, the abuse.ch Auth-Key.

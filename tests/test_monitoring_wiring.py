@@ -235,6 +235,25 @@ def test_every_edgeguard_metric_in_alert_expressions_is_defined():
     assert not missing, missing
 
 
+def test_paged_fetch_shortfall_alert_reads_the_sync_gauge():
+    """2026-10-25: an event fetched in pages with fewer attribute rows than the MISP index lists leaves the
+    run green, and an incremental sync does not read the missed rows again; the warning is its signal."""
+    rule = _rule("EdgeGuardSyncPagedFetchIncomplete")
+    assert " ".join(rule["expr"].split()) == "edgeguard_sync_events_paged_incomplete > 0"
+    assert rule["for"] == "10m" and rule["labels"]["severity"] == "warning"
+    group = next(g for g in _RULES["groups"] if rule in g["rules"])
+    assert group["name"] == "edgeguard_sync_integrity"
+    description = " ".join(rule["annotations"]["description"].split())
+    assert "[PAGED-FETCH-INCOMPLETE]" in description
+    assert 'docs/RUNBOOK.md § "Large MISP events fetched in pages"' in description
+    assert "request a full sync" in description and "the run is green" in description
+    runbook = (_ROOT / "docs" / "RUNBOOK.md").read_text()
+    section = runbook.split("## Large MISP events fetched in pages", 1)[1].split("\n## ", 1)[0]
+    assert "`EdgeGuardSyncPagedFetchIncomplete`" in section and "edgeguard_sync_events_paged_incomplete" in section
+    assert "no metric or alert reads it" not in section
+    assert "| `EdgeGuardSyncPagedFetchIncomplete` |" in (_ROOT / "docs" / "PROMETHEUS_SETUP.md").read_text()
+
+
 # ---------------------------------------------------------------------------------------------------
 # Source label names (2026-10-25): every ``source`` value the scheduled collectors, the collectors
 # themselves and the staleness rule use maps to a registered source (``src/source_registry.py``), so a

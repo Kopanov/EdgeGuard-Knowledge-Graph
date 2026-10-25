@@ -19,7 +19,7 @@
 #   [2] Neo4j reachable + APOC available + baseline-critical indexes present
 #   [3] MISP API reachable + auth valid + server version ≥ 2.4
 #   [4] launch-path decision confirmed (CLI or DAG+pause) — see RUNBOOK
-#   [5] IF DAG launch path: the 5 scheduled DAGs are PAUSED (Issue #57)
+#   [5] IF DAG launch path: the 5 scheduled DAGs are PAUSED, none with a running run (Issue #57)
 #   [6] Airflow worker RAM ≥ 4 GB
 #   [7] Prometheus alerts.yml parses + edgeguard rule group loaded
 #   [8] no stale baseline_lock sentinel from a previous aborted run
@@ -233,7 +233,7 @@ if [[ "$LAUNCH_PATH" == "cli" ]]; then
   pass "CLI launch path — in-process baseline_lock will gate incrementals (src/run_pipeline.py:1093)"
   pass "No DAG pausing needed; baseline_skip_reason() will self-skip the scheduled DAGs"
 else
-  # DAG path — verify the 5 scheduled DAGs are paused
+  # DAG path — verify the 5 scheduled DAGs are paused and none of them has a running run
   if ! command -v docker >/dev/null 2>&1; then
     warn "docker not found; cannot verify Airflow DAG pause state automatically"
   else
@@ -251,7 +251,39 @@ else
       elif [[ -z "$STATE" ]]; then
         warn "DAG $dag state not queryable (airflow service unresponsive?)"
       else
-        warn "DAG $dag is not paused — the baseline DAG holds the baseline lock and scheduled tasks skip at start; pause it to guarantee none is mid-write (docs/RUNBOOK.md Option A). Issue #57."
+        warn "DAG $dag is not paused — the baseline DAG holds the baseline lock and scheduled tasks skip at start; pause it so that no new task or retry starts during the baseline (docs/RUNBOOK.md Option A). Issue #57."
+      fi
+      # Pausing stops new tasks and retries only: a task that is already running keeps running (a
+      # run_neo4j_sync attempt up to EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS), and the baseline lock is read
+      # only when a task starts. `-o json` prints [] when no run is running (`-o plain` prints
+      # "No data found"); the last line that parses as a JSON list is read, so log lines do no harm.
+      if RUNS_JSON=$(docker compose exec -T airflow airflow dags list-runs "$dag" --state running -o json 2>/dev/null); then
+        RUNNING=$(printf '%s\n' "$RUNS_JSON" | python3 -c '
+import json, sys
+text = sys.stdin.read()
+try:
+    runs = json.loads(text)
+except ValueError:
+    runs = None
+    for line in reversed(text.splitlines()):
+        try:
+            cand = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(cand, list):
+            runs = cand
+            break
+print(len(runs) if isinstance(runs, list) else "?")
+' 2>/dev/null || echo "?")
+      else
+        RUNNING="?"
+      fi
+      if [[ "$RUNNING" == "0" ]]; then
+        pass "DAG $dag has no running run"
+      elif [[ "$RUNNING" =~ ^[0-9]+$ ]]; then
+        fail "DAG $dag has $RUNNING running run(s): pausing does not stop a task that is already running (a run_neo4j_sync attempt lasts up to EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS), and the scheduler does not end a paused DAG's run while tasks of it are left; mark the run failed in the Airflow UI and wait until its task has stopped, before the baseline (docs/RUNBOOK.md Option A)"
+      else
+        warn "running runs of DAG $dag not queryable (airflow dags list-runs $dag --state running -o json failed or printed no JSON list)"
       fi
     done
   fi

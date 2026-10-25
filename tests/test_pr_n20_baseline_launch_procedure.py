@@ -456,9 +456,12 @@ class TestFix5ReadmeLaunchProcedure:
         assert "reason `baseline_in_progress`" in section, (
             "README must explain that the scheduled DAGs skip while the baseline holds the lock"
         )
-        assert "completes its current write" in section, (
-            "README must explain why pausing the scheduled DAGs is recommended before a fresh-baseline"
+        # 2026-10-25: pausing does not stop a task that is already running (the lock is read when a task
+        # starts); the README said such a task "completes its current write", as if pausing covered it.
+        assert "keeps running to its end" in section and "has a running run" in section, (
+            "README must explain why pausing is recommended before a fresh-baseline and what it does not stop"
         )
+        assert "completes its current write" not in section
 
     def test_readme_documents_misp_retrieval_paths(self):
         rd = self._readme()

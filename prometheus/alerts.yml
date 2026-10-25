@@ -291,14 +291,19 @@ groups:
         # written when the sync succeeds, so the next sync's longest run adds to that gap: 32 min of
         # check_sync_needed / neo4j_health_check attempts and run_neo4j_sync's three attempts of its
         # default 8 h limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS) with two 5 min retry delays (24 h 10 min),
-        # 120 h 42 min in all; a limit of N h needs 439200 + 10800 × (N − 8) seconds here. 122 h leaves
-        # about an hour for the scheduler; `for: 1h` adds the margin. Before, the day-of-month cron
-        # `0 3 */3 * *` with a 71 h guard left up to 120 h (leap-year February) or 143 h (after a
-        # baseline) between two sync starts and the threshold was 145 h. A failed sync is reported by
-        # its failed task; this alert reports syncs that stop happening. tests/test_monitoring_signals.py
-        # simulates the schedule through the real guard and derives the threshold from the tasks.
+        # 120 h 42 min in all. 122 h (439200 s) leaves about an hour for the scheduler; `for: 1h` adds the
+        # margin. The threshold follows the limit: run_neo4j_sync sets
+        # edgeguard_neo4j_sync_task_limit_seconds to its execution_timeout when an attempt starts, and each
+        # hour of limit above the default 8 h (28800 s) adds 3 h for the three attempts, so a limit of N h
+        # gives 439200 + 10800 × (N − 8) seconds (134 h at 12 h, 164 h at the 22 h cap). Without the series
+        # (no attempt recorded yet) the default 8 h applies; a limit below 8 h keeps 122 h. `max(...)` has
+        # no labels, like `vector(28800)`, so `or` adds the default only when the series is absent and
+        # scalar() always reads one sample. A failed sync is reported by its failed task; this alert
+        # reports syncs that stop happening. tests/test_monitoring_signals.py simulates the schedule
+        # through the real guard and derives the threshold from the tasks.
         expr: |
-          time() - edgeguard_neo4j_sync_last_success_timestamp > 439200
+          time() - edgeguard_neo4j_sync_last_success_timestamp
+            > 439200 + 3 * scalar(clamp_min((max(edgeguard_neo4j_sync_task_limit_seconds) or vector(28800)) - 28800, 0))
           and edgeguard_neo4j_sync_last_success_timestamp > 0
         for: 1h
         labels:
@@ -306,7 +311,7 @@ groups:
           component: neo4j
         annotations:
           summary: "Neo4j sync is stale"
-          description: "No MISP to Neo4j sync has completed in over 122 hours: the longest gap the 72-hour schedule leaves between two sync starts (96 hours after a baseline's or a forced sync), plus every attempt of the sync task at its default 8-hour limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS)."
+          description: "No MISP to Neo4j sync has completed in over 122 hours at the default 8-hour limit of the sync task (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS), 3 hours more for each hour of limit above 8 (edgeguard_neo4j_sync_task_limit_seconds): the longest gap the 72-hour schedule leaves between two sync starts (96 hours after a baseline's or a forced sync), plus every attempt of the sync task at its limit."
 
       - alert: EdgeGuardNeo4jFullSyncRequestPending
         # 2026-10: a requested full sync (Airflow Variable NEO4J_FULL_SYNC=true) that failed on its last
@@ -508,6 +513,33 @@ groups:
             events, but processed + failed does not equal that total. This
             means events were SILENTLY SKIPPED — the exact failure pattern
             of the 2026-04-14 NVD regression. Investigate immediately.
+
+      - alert: EdgeGuardSyncPagedFetchIncomplete
+        # An event fetched in pages (fetch_event_details_paged: above EDGEGUARD_MISP_PAGED_FETCH_ABOVE
+        # attributes, or after its whole-event fetch kept answering HTTP 5xx) whose pages brought fewer
+        # attribute rows than the MISP index lists. The rows received are synced, the event counts as
+        # processed and the run stays green, because MISP itself can leave rows out or the event can
+        # change after the index was read. An incremental sync does not read the missed rows again, so
+        # this warning is the only signal besides the [PAGED-FETCH-INCOMPLETE] log lines. The gauge is
+        # set at the end of every run (src/run_misp_to_neo4j.py, record_sync_event_accounting), so the
+        # alert clears with the next sync that fetches every event completely.
+        expr: edgeguard_sync_events_paged_incomplete > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: sync
+        annotations:
+          summary: "MISP->Neo4j sync fetched {{ $value }} event(s) in pages with fewer attributes than the MISP index lists"
+          description: |
+            The most recent MISP->Neo4j sync fetched {{ $value }} event(s) in
+            pages and received fewer attribute rows than the MISP index lists;
+            the rows received were synced and the run is green. Grep
+            [PAGED-FETCH-INCOMPLETE] in the sync log for the event ids and
+            both counts, and see docs/RUNBOOK.md § "Large MISP events fetched
+            in pages". After fixing the cause (an Allowedlist entry or a
+            default search filter of the sync account, or a MISP that ignores
+            page), request a full sync: an incremental sync does not write the
+            rows it missed.
 
       # PR-N31 (post-PR-N29 follow-up, 2026-04-25): MISP fetch fallback
       # alerts. The PyMISP / requests-restSearch fallback in

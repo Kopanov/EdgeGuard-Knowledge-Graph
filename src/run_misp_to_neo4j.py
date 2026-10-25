@@ -6713,6 +6713,8 @@ class MISPToNeo4jSync:
                         events_index_total=int(locals().get("events_index_total", 0) or 0),
                         events_processed=int(self.stats.get("events_processed", 0) or 0),
                         events_failed=int(self.stats.get("events_failed", 0) or 0),
+                        # Read by EdgeGuardSyncPagedFetchIncomplete: the run stays green for these events.
+                        events_paged_incomplete=int(self.stats.get("events_paged_incomplete", 0) or 0),
                     )
                 except Exception:
                     logger.debug("Sync event accounting export failed", exc_info=True)
