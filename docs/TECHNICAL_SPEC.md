@@ -216,8 +216,8 @@ Auth:    Configured via environment variables
   actor_name: STRING,       // The ThreatActor it groups
   indicator_count: INTEGER, // Active indicators at the last run
   malware_count: INTEGER,   // Member malware at the last run
-  first_seen: DATETIME,     // Earliest indicator observation; never moves later
-  last_seen: DATETIME,      // Latest indicator observation; never moves earlier
+  first_seen: DATETIME,     // Earliest first seen of its indicators (a source's claim, else its latest report); never moves later
+  last_seen: DATETIME,      // Latest last seen of its indicators (a source's claim, else its latest report); never moves earlier
   zone: LIST,               // Union of the indicators' zones
   active: BOOLEAN,          // false once no indicator linked to it is active
   tlp: STRING               // most restrictive r.tlp of the links it rests on (a curated claim's level); absent when none has one
@@ -1014,9 +1014,11 @@ other type is compared as given.
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
+
+- 2026-10-25 — Campaign `first_seen` / `last_seen`: the seen dates of its indicators (a source's claim, else its latest report), not the import time for indicators without a claim.
 
 - 2026-10-23 — The GraphQL `/health` behaviour and body and the REST routes' connection check are described here; the page pointed to a README table, which this page replaces; the note on the NATS response points to ROADMAP.md, which lists the planned work (it pointed to a to-do list in RESILMESH_INTEROPERABILITY.md § 8.6).
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.

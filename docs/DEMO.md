@@ -68,7 +68,7 @@ How the read-only answer differs from a `process_alert` answer, because nothing 
 |-------|------------------|-----------------|
 | `query_metadata.indicator_found` | `false` for an indicator the graph does not hold | `true` once its write succeeded: it creates the indicator before reading |
 | `enrichment.confidence` | the stored value (`0.0` for an indicator the graph does not hold) | at least 0.8: before reading, the write raises the indicator's confidence to 0.8 when it is lower, for a known indicator too (`create_indicator_from_alert`) |
-| `enrichment.last_updated`, `first_seen` | the stored values (`null` for an indicator the graph does not hold) | when no source reports a last seen, `last_updated` is the time of the write (it sets `last_updated` on every alert); an indicator it creates is first imported then |
+| `enrichment.last_updated`, `first_seen` | the indicator's seen dates from the stored values (`null` for an indicator the graph does not hold) | for an indicator no source dated, `last_updated` is the time of the write (it sets `last_updated` on every alert); an indicator it creates is first imported then |
 | `enrichment.sectors_affected` | the indicator's stored zones (the alert's `zone` when the graph does not hold the indicator), plus the alert's `tags` | the indicator's zones after the alert's zones (its `tags`, else its `zone`) were added to them, plus the alert's `tags` |
 | `enrichment.known_malware`, `query_metadata.malware_found` | a malware the alert names is listed even when the graph does not hold the indicator, so `malware_found` can be `true` from the alert alone | the same |
 | `enrichment.assets`, `users` | empty | empty: no code path writes `(Alert)-[:TARGETS]->(Asset)` or `(Alert)-[:INVOLVES_USER]->(User)` |
@@ -193,8 +193,8 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       "assets": [],
       "users": [],
       "confidence": "<the indicator's confidence_score>",
-      "first_seen": "<earliest first seen a source reports, else the first import>",
-      "last_updated": "<latest last seen a source reports, else the last update>",
+      "first_seen": "<earliest first seen a source claims, else its latest report; never after the first import>",
+      "last_updated": "<latest last seen a source claims, else its latest report; the last update when no source dated it>",
       "sectors_affected": ["<zone>"],
       "cross_zone_detected": "<true when more than one zone>",
       "recommendations": ["<generated from the fields above, e.g. Block IP <indicator> at perimeter firewall>"]
@@ -337,9 +337,11 @@ lines were written, how many keys were skipped (URL and IPv6 keys contain `:`) a
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-25_
 
 ## History
+
+- 2026-10-25 — `first_seen` and `last_updated` of the alert enrichment are the indicator's seen dates: per source the claim, else the source's latest report (an indicator only OTX reported, which has no claim, had shown its import time and its last write).
 
 - 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide states when an alert shows them (the indicator has the link; per-event build and per-pulse caps) and how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles (those the graph links as named in the same OTX report, if any).
 - 2026-10-18 — Step 1 says that `stats` warns when it reads no sync state file on the host (none there, or unreadable).

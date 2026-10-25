@@ -372,23 +372,25 @@ def test_campaign_builder_aggregates_per_source_edges_via_traversal():
 
     The Campaign builder Cypher must aggregate per-source claims
     by TRAVERSING the SOURCED_FROM edges of each indicator, not
-    by reading a node property. The expected pattern (post-edge-
-    refactor):
+    by reading a node property. The expected pattern (2026-10-25,
+    the seen dates of ``indicator_seen_dates``):
 
         OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
-        WITH a, malware_list, i, r
+        WITH a, malware_list, i,
+             min(<edge_first r>) AS i_edges_first,
+             max(<edge_last r>)  AS i_edges_last
         WITH a, malware_list,
              count(DISTINCT i) AS indicator_total,
-             collect(DISTINCT i)[0..100] AS indicator_sample,
-             min(coalesce(r.source_reported_first_at, i.first_imported_at)) AS first_seen,
-             max(coalesce(r.source_reported_last_at, i.last_updated))       AS last_seen
+             collect(DISTINCT i) AS all_indicators,
+             min(<first_seen i_edges_first, i>) AS first_seen,
+             max(<last_seen i_edges_last, i>)   AS last_seen
 
     For an indicator with N sources, the OPTIONAL MATCH expands to
-    N rows; the outer aggregation correctly de-dupes via DISTINCT.
-    Coalescing with the indicator-level `first_imported_at` /
-    `last_updated` ensures indicators with NO SOURCED_FROM edges
-    (legacy data, edge-case bugs) still contribute SOMETHING to
-    the campaign timeline rather than silently dropping out.
+    N rows; the first stage groups them per indicator. Falling back
+    to the indicator-level `first_imported_at` / `last_updated`
+    ensures indicators with NO dated SOURCED_FROM edge (one an alert
+    created) still contribute SOMETHING to the campaign timeline
+    rather than silently dropping out.
 
     This test source-greps for the specific Cypher pattern so a
     future refactor that reverts to node-level reads or breaks the
@@ -411,20 +413,31 @@ def test_campaign_builder_aggregates_per_source_edges_via_traversal():
     # PR (S5) (bugbot c9bb277 MED): the aggregation MUST be
     # two-stage — per-indicator across edges FIRST (native MIN/MAX
     # ignores NULLs), THEN per-campaign across indicators with the
-    # node-level DB-local coalesce fallback. The previous single-stage
+    # node-level DB-local fallback. The previous single-stage
     # `min/max(coalesce(r.X, i.Y))` pattern row-multiplied on NULL
     # edges and polluted the MAX with i.last_updated wall-clock.
-    assert "min(r.source_reported_first_at) AS i_source_first" in pre_merge, (
-        "Campaign builder MUST aggregate per-indicator edge MIN first "
+    # 2026-10-25: the stages read the seen dates of ``indicator_seen_dates`` (per edge the claim,
+    # else the source's latest report); tests/test_indicator_seen_dates.py checks the rendered
+    # statement, tests/test_campaign_seen_dates_neo4j.py the dates on a real Neo4j.
+    import re
+
+    per_indicator = re.search(
+        r"WITH a, malware_list, i,\s*"
+        r'min\(\{indicator_seen_dates\.edge_first\("r"\)\}\) AS i_edges_first,\s*'
+        r'max\(\{indicator_seen_dates\.edge_last\("r"\)\}\)\s+AS i_edges_last',
+        pre_merge,
+    )
+    assert per_indicator, (
+        "Campaign builder MUST aggregate per-indicator edge MIN/MAX first "
         "(bugbot c9bb277 MED — prevents MAX pollution from NULL-edge rows)"
     )
-    assert "max(r.source_reported_last_at)  AS i_source_last" in pre_merge
-    # Outer coalesce on the PER-INDICATOR aggregate, not the per-edge
-    assert "min(coalesce(i_source_first, i.first_imported_at))" in pre_merge, (
-        "Campaign first_seen MUST coalesce the PER-INDICATOR source MIN "
-        "(not the raw edge value) with the indicator's first_imported_at"
+    # The node-level fallback applies to the PER-INDICATOR aggregate, not the per-edge value
+    after = pre_merge[per_indicator.end() :]
+    assert re.search(r'min\(\{indicator_seen_dates\.first_seen\("i_edges_first", "i"\)\}\)\s+AS first_seen', after), (
+        "Campaign first_seen MUST apply the indicator's first_imported_at to the PER-INDICATOR edge MIN "
+        "(not the raw edge value)"
     )
-    assert "max(coalesce(i_source_last,  i.last_updated))" in pre_merge
+    assert re.search(r'max\(\{indicator_seen_dates\.last_seen\("i_edges_last", "i"\)\}\)\s+AS last_seen', after)
 
 
 def test_campaign_builder_last_seen_has_max_guard():
