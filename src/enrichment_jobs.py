@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import campaign_evidence  # noqa: E402
 import config  # noqa: E402
+import indicator_seen_dates  # noqa: E402
 from attack_revoked import load_revoked_ids  # noqa: E402
 from attack_software_names import (  # noqa: E402
     CYPHER_BASE_NODES_READ,
@@ -358,13 +359,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       actor_name      — source actor name
       indicator_count — number of indicators at last update
       malware_count   — number of malware families at last update
-      first_seen      — earliest world-truthful indicator first observation
-                        (from coalesce(i.first_seen_at_source,
-                        i.first_imported_at) — see PR (S5) for the
-                        source-truthful timestamps design)
-      last_seen       — latest world-truthful indicator last observation
-                        (from coalesce(i.last_seen_at_source,
-                        i.last_updated))
+      first_seen      — the earliest first seen date of its active indicators
+                        (``indicator_seen_dates``: per source, the first-seen
+                        claim, else the source's latest report; never later
+                        than the indicator's first import); only moves earlier
+      last_seen       — the latest last seen date of its active indicators
+                        (per source, the last-seen claim, else the source's
+                        latest report); only moves later
       zone            — union of all indicator zones
       tag             — actor tag (for UNIQUE constraint key)
     """
@@ -461,13 +462,18 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             // claim.
             //
             // Fix: aggregate edges per-indicator FIRST (ignoring NULL
-            // claims — that's what min/max do natively), THEN coalesce
-            // the per-indicator result with the node-level DB-local
-            // fallback ONLY when ALL source claims are NULL.
+            // claims — that's what min/max do natively), THEN apply the
+            // node-level DB-local fallback to the per-indicator result.
+            //
+            // 2026-10-25: each edge gives the source's claim, else the source's latest report
+            // (``r.last_reported_at``, on every indicator edge): OTX gives no claims, so a campaign
+            // whose indicators all came from OTX took EdgeGuard's import time as its first and last
+            // seen. The first seen date of an indicator is never later than its first import
+            // (``indicator_seen_dates``, shared with the alert enrichment).
             OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
             WITH a, malware_list, i,
-                 min(r.source_reported_first_at) AS i_source_first,
-                 max(r.source_reported_last_at)  AS i_source_last
+                 min({indicator_seen_dates.edge_first("r")}) AS i_edges_first,
+                 max({indicator_seen_dates.edge_last("r")})  AS i_edges_last
             // PR-M3d §5-MD-C2 (CRITICAL): ``all_zones`` (below) used to be
             // computed from ``collect(DISTINCT i)[0..100]``, a 100-sample
             // in Neo4j's internal (non-deterministic) iteration order. On
@@ -484,8 +490,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i) AS all_indicators,
-                 min(coalesce(i_source_first, i.first_imported_at)) AS first_seen,
-                 max(coalesce(i_source_last,  i.last_updated))      AS last_seen
+                 min({indicator_seen_dates.first_seen("i_edges_first", "i")}) AS first_seen,
+                 max({indicator_seen_dates.last_seen("i_edges_last", "i")})   AS last_seen
             WHERE size(malware_list) > 0 AND indicator_total > 0
             // PR-N5 C5 (Devil's Advocate F3, audit 09): deterministic
             // zone ordering. ``apoc.coll.toSet()`` dedupes but preserves
@@ -530,15 +536,17 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                                        THEN first_seen ELSE c.first_seen END,
                 // PR (S5) (bugbot MED): MAX-guard c.last_seen
                 // symmetrically with c.first_seen. Rationale: the
-                // aggregation now reads ``max(coalesce(i.last_seen_at_source,
-                // i.last_updated))`` — with source-truthful data, an
-                // indicator's ``last_seen_at_source`` can be much OLDER
-                // than its ``last_updated`` (e.g. source claims 2020,
-                // EdgeGuard last sync'd in 2026). Without the MAX-guard,
-                // ``c.last_seen`` would regress backwards on the first
-                // post-deploy enrichment run. The CASE mirrors the
+                // aggregation reads the sources' dates, which can be much
+                // OLDER than EdgeGuard's own times (e.g. source claims 2020,
+                // EdgeGuard last sync'd in 2026), and indicators that expire
+                // leave the aggregate. Without the MAX-guard, ``c.last_seen``
+                // would regress backwards. The CASE mirrors the
                 // first_seen pattern and is safe against both baseline
                 // and incremental (MAX preserves the newest observation).
+                // 2026-10-25: for the same reason a stored value later than
+                // every source date (an import time, which the build stored
+                // for indicators without a claim before the seen dates read
+                // the reports) stays; a rebuilt graph does not have it.
                 // bugbot LOW: same NULL-aggregate defensive guard.
                 c.last_seen        = CASE WHEN last_seen IS NOT NULL
                                        AND (c.last_seen IS NULL OR last_seen > c.last_seen)

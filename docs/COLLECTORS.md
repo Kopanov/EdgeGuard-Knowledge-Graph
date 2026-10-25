@@ -705,7 +705,7 @@ The keyword detector deliberately contains no malware family names (families are
 | `(Indicator)-[:SOURCED_FROM]->(Source {source_id: "feodo_tracker"})` | `source_reported_first_at` = `first_seen_utc`; `source_reported_last_at` = `last_online` (the first-seen time when both fall on the same day; absent when the feed gives no date); `raw_data` JSON keeps `threat_type=botnet_cc` and the labels `c2_status:…`, `port:…`, `family:…` | per source |
 | `(Indicator)-[:INDICATES]->(Malware)` | built by `build_relationships` when `malware_family` equals a Malware node name or alias (case-insensitive); QakBot, Emotet, TrickBot, Dridex, BumbleBee and Pikabot all match MITRE ATT&CK software | family match |
 
-The source-reported last-seen time matters for campaigns: a Campaign's `last_seen` falls back to the import time for an indicator with no such claim, which would make a botnet that stopped in 2021 look active today.
+The source-reported last-seen time matters for campaigns: for an indicator without one, a Campaign's `last_seen` takes the edge's latest report (`last_reported_at`), which for a row without a date is the time MISP recorded it, so a botnet that stopped in 2021 would look active on the day it was collected.
 
 ### SSL Blacklist: what reaches the graph
 Each row is the SHA-1 fingerprint of a TLS certificate seen on malware infrastructure, not a file hash. It is collected as `indicator_type: "x509-fingerprint-sha1"`, pushed to MISP under MISP's own attribute type `x509-fingerprint-sha1` (default category *Network activity*) and synced as an `x509-fingerprint-sha1` Indicator; the STIX export pattern is `[x509-certificate:hashes.'SHA-1' = '…']`.
@@ -1306,10 +1306,11 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Feodo Tracker: a Campaign's `last_seen` for an indicator without a last-seen claim is the edge's latest report (`last_reported_at`), not the import time.
 - 2026-10-23 — The energy and healthcare placeholders are modules no DAG task calls (the page said they show on the skip dashboard); HC3 named as a public source that is not collected; the unsupported OTX node estimate removed; the MISP row states that no DAG or CLI step runs `MISPCollector`. These were the README's collector-limit notes. The baseline-limits section keeps the current limits only (its title no longer says "planned"), as a three-column table with the notes in a list below it (the Feodo Tracker feed state is left to § 7); the ThreatFox import, the paid VirusTotal path and the ATT&CK for ICS sector mapping are listed in ROADMAP.md.
 - 2026-10-22 — MITRE: MISPWriter's dedup reads an ATT&CK `text` value as `<id> - <name>` or `<id>: <name>` (`attack_values.attack_value_key`), so an entry a MISP holds in the colon form is not written again in the hyphen form.
 - 2026-10-22 — OTX adversaries: the run logs the country, state and nationality names the actor-name hygiene dropped from adversary fields (`[ACTOR-NAMES]`, with the pulses of each name), also a country followed by a parenthetical that yields no name; `Qilin` and `Agenda` count as Water Galura in the canonical threat-actor reference.

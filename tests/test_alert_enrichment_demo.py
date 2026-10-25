@@ -127,8 +127,8 @@ class _Graph:
                 [
                     {
                         "indicator": {"value": _INDICATOR, "zone": ["energy"], "confidence_score": 0.6},
-                        "source_first": "2026-09-01T00:00:00+00:00",
-                        "source_last": "2026-10-01T00:00:00+00:00",
+                        "first_seen": "2026-09-01T00:00:00+00:00",
+                        "last_seen": "2026-10-01T00:00:00+00:00",
                     }
                 ]
             )

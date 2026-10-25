@@ -30,8 +30,11 @@ ThreatFox has three SOURCED_FROM edges. Each edge preserves that
 source's specific claim. Aggregating to a single node property would
 destroy the per-source provenance. Queries that want a single
 canonical value compute ``MIN(r.source_reported_first_at)`` / ``MAX(...)``
-across the edges on read (STIX valid_from, alert enrichment, campaign
-aggregate all do this).
+across the edges on read (the STIX export's valid_from and
+``x_edgeguard_*_seen_at_source``). The campaign aggregate and the alert
+enrichment read the seen dates of ``indicator_seen_dates`` instead, which
+take an edge's ``r.last_reported_at`` (the source's latest report) where
+the source gives no claim (2026-10-25).
 
 **The names are deliberate**. ``source_reported_first_at`` on the
 edge makes explicit: "what the source claims", not "first observed
