@@ -132,9 +132,13 @@ events by date range, so that no single event exceeds ~20K attributes,
 is not implemented.
 
 **Tier 2 has no order, and the collector pool bounds it** —
-the tier-2 feeds are individually small and don't trigger the
-oversized-event failure mode, so `tier2_feeds` puts no edges between
-them. Their load is not negligible, though: all 7 at once grow the MISP
+`tier2_feeds` puts no edges between the tier-2 feeds. All of them but
+URLhaus write small events; URLhaus writes its whole `recent.csv` export
+(about 63,000 URLs on 2026-10-24, at most `EDGEGUARD_URLHAUS_MAX_PER_RUN`,
+100,000) into one event, past the ~20K above and past the ~50,000
+attributes from which a default MISP container answers HTTP 500 to batch
+pushes ([MISP_TUNING.md](MISP_TUNING.md)). Their load together is not
+negligible either: all 7 at once grow the MISP
 php-fpm workers past the MISP container's memory limit (HTTP 502), and a
 daily catch-up run together with OTX, VirusTotal and NVD reaches the
 `airflow` container's memory limit (tasks killed). Every
@@ -506,6 +510,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Tier 2: URLhaus writes its whole `recent.csv` export (about 63,000 URLs on 2026-10-24) into one event, past the ~50,000 attributes of MISP_TUNING.md; the text called every tier-2 feed small.
 - 2026-10-25 — URLhaus reads the abuse.ch v2 `recent.csv` export (about 63,000 URLs on 2026-10-24; the keyless `csv_recent` download answers HTTP 410 since 2026-10); `EDGEGUARD_URLHAUS_MAX_PER_RUN` 100,000 (was 50,000).
 - 2026-10-23 — The per-source run rules point to COLLECTION_AND_SYNC_LIMITS.md and the chunk setting to CONFIGURATION.md; the README sections they named were moved there.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
