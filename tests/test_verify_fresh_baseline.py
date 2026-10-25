@@ -187,6 +187,15 @@ _MARKED_PULSES = ["68cd617b3eb5b1212d11643d", "6a4fdf500b5e6dffde939998"]
 # 2026-10-16: check 13d on a correct graph: every campaign EdgeGuard built rests on its actor's
 # ATTRIBUTED_TO or USES_MALWARE links and has the actor's RUNS.
 _CAMPAIGN_EVIDENCE_ROW = {"campaigns": 210, "without_evidence": 0, "without_runs": 0, "runs_without_evidence": 0}
+# 2026-10-25: check 13e on a correct graph: no campaign is first seen after an indicator member's first
+# date or last seen before a member's latest dated report.
+_CAMPAIGN_SEEN_DATES_ROW = {
+    "campaigns": 210,
+    "members": 18400,
+    "first_seen_after_members": 0,
+    "last_seen_before_members": 0,
+    "examples": [],
+}
 _ATTRIBUTION_ROW = {
     "links": 3212,
     "resting_on_several_actor_reports": 0,
@@ -328,6 +337,9 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     # statements name that relationship.
     if "AS malware_links" in s:
         return [{"malware_links": 1600, "without_evidence": 0}]
+    # 2026-10-25: check 13e (campaign seen dates).
+    if "AS first_seen_after_members" in s:
+        return [dict(_CAMPAIGN_SEEN_DATES_ROW)]
     if "AS runs_without_evidence" in s:
         return [dict(_CAMPAIGN_EVIDENCE_ROW)]
     if "d.name =~ $suffixed" in s:
@@ -1457,6 +1469,68 @@ class TestCampaignEvidence:
         assert campaign_evidence.has_evidence("a") in seen["st"]
         assert "(:ThreatActor {name: c.actor_name})-[:RUNS]->(c)" in seen["st"]
         assert "coalesce(a.name = rc.actor_name, false)" in seen["st"]
+
+
+class TestCampaignSeenDates:
+    """2026-10-25: no campaign EdgeGuard built is first seen later than an indicator member's first date
+    (per edge the source's first-seen claim, else its latest report; never after the member's first
+    import) or last seen earlier than a member's latest dated report. A build that dates indicators
+    without a first-seen claim by EdgeGuard's import time fails; tests/test_campaign_seen_dates_neo4j.py
+    runs the statement on campaigns ``build_campaign_nodes`` built. Informational without members."""
+
+    def test_a_correct_graph_passes(self, vfb, monkeypatch):
+        c = _check(_run(vfb, monkeypatch), "campaign_seen_dates_cover_members")
+        assert c["ok"] is True and c["mandatory"] is True
+        assert c["detail"] == _CAMPAIGN_SEEN_DATES_ROW
+
+    @pytest.mark.parametrize("column", ["first_seen_after_members", "last_seen_before_members"])
+    def test_each_defect_fails(self, vfb, monkeypatch, column):
+        example = {
+            "campaign": "x Campaign",
+            "first_seen": "2026-10-22T23:05:39Z",
+            "earliest_member": "2026-04-15T00:00Z",
+        }
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [dict(rows[0], **{column: 3, "examples": [example]})] if "AS first_seen_after_members" in st else rows
+            ),
+        )
+        assert [c["check"] for c in rep.failed] == ["campaign_seen_dates_cover_members"]
+        assert _check(rep, "campaign_seen_dates_cover_members")["detail"]["examples"] == [example]
+
+    def test_informational_without_members(self, vfb, monkeypatch):
+        empty = dict(_CAMPAIGN_SEEN_DATES_ROW, campaigns=0, members=0)
+        rep = _run(vfb, monkeypatch, override=lambda st, rows: [empty] if "AS first_seen_after_members" in st else rows)
+        assert _check(rep, "campaign_seen_dates_cover_members")["ok"] is None and rep.failed == []
+
+    def test_query_shape(self, vfb, monkeypatch):
+        seen = {}
+
+        def capture(st, rows):
+            if "AS first_seen_after_members" in st:
+                seen["st"] = st
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        st = seen["st"]
+        assert st == vfb.CAMPAIGN_SEEN_DATES_CHECK_QUERY
+        # The campaigns EdgeGuard built and their indicator members (linked by the last build).
+        assert "MATCH (c:Campaign) WHERE c.edgeguard_managed = true" in st
+        assert "MATCH (i:Indicator)-[m:PART_OF_CAMPAIGN]->(c)" in st
+        # Only edges no write touched since that build: a later sync cannot fail the check.
+        assert "WHERE r.updated_at <= m.updated_at AND r.updated_at <= c.last_updated" in st
+        # Per edge the claim, else the latest report; the first date never after the first import.
+        assert "coalesce(r.source_reported_first_at, r.last_reported_at)" in st
+        assert "+ [i.first_imported_at]" in st
+        assert "max(coalesce(r.source_reported_last_at, r.last_reported_at)) AS member_last" in st
+        # The node's last write moves with every write, so the check does not read it.
+        assert "i.last_updated" not in st
+        # The script states the definition itself instead of importing the one the build reads
+        # (``indicator_seen_dates``), so a change to that definition fails the check.
+        script = Path(_SCRIPT).read_text(encoding="utf-8")
+        assert not re.search(r"^\s*(from|import)\s+indicator_seen_dates\b", script, re.MULTILINE)
 
 
 class TestCveScoreFromCvss:
