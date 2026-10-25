@@ -3661,8 +3661,8 @@ class MISPWriter:
                 # A later part the walk could not look up may hold some of these attributes, and without a
                 # complete cross-event listing nothing else names them: nothing of the group is written.
                 logger.error(
-                    "MISP push %s (%s): the lookup of a later part failed and the cross-event listing is "
-                    "incomplete — %d attribute(s) counted as failed, nothing written",
+                    "MISP push %s (%s): the lookup of a later part failed and there is no complete cross-event "
+                    "listing — %d attribute(s) counted as failed, nothing written",
                     source,
                     date,
                     len(unique_attrs),
