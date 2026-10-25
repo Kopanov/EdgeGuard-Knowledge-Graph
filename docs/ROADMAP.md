@@ -175,7 +175,7 @@ A run fails on collector errors, on a MISP push success rate below its threshold
 
 **Live graph invariants**
 
-- The sync DAG's `check_neo4j_quality` task only logs node counts per label; it checks no invariant. The acceptance checks of `scripts/verify_fresh_baseline.py` run by hand, after a fresh baseline. Planned: a task that runs the checks that must hold between baselines (precise relationship types, live indicator aging, fresh EPSS scores, the expected constraints), fails on a broken one and exports a metric.
+- The sync DAG's `check_neo4j_quality` task only logs node counts per label, counted through `Neo4jClient`: it fails when Neo4j is unreachable or the count query fails, but checks no invariant. The acceptance checks of `scripts/verify_fresh_baseline.py` run by hand, after a fresh baseline. Planned: a task that runs the checks that must hold between baselines (precise relationship types, live indicator aging, fresh EPSS scores, the expected constraints), fails on a broken one and exports a metric.
 - Most relationship-build statements, the CVE bridge, the schema statements and the acceptance queries never run on a real Neo4j in CI. Planned: an `EXPLAIN` test of every statement, and a golden-path test on an empty database.
 
 **Baseline, cursor and configuration safety**
@@ -226,7 +226,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
-- 2026-10-25 — Known defects: the entry for `check_neo4j_quality` exiting 0 when its query fails is reworded; the task queries through `Neo4jClient` and fails when Neo4j is unreachable, but still checks no invariant.
+- 2026-10-25 — Operational guardrails, live graph invariants: the entry for `check_neo4j_quality` exiting 0 when its query fails is reworded; the task counts nodes through `Neo4jClient` and fails when Neo4j is unreachable or the count query fails, but still checks no invariant.
 - 2026-10-25 — Known defects: the entry for the `_process_single_event` docstring is removed, since events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20,000) attributes are now fetched page by page from `/attributes/restSearch` as it says. Bounded memory for large MISP events: rewritten, as the pages are joined into one attribute list before the Neo4j chunks; still missing are processing each page before fetching the next and confirming a pushed `MISPWriter` batch without the full-event answer.
 - 2026-10-23 — Known defects: the entry for the host scripts that sent the Neo4j credentials to a built-in remote address is removed; they read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` or `NEO4J_HTTP` is set ([CONFIGURATION.md](CONFIGURATION.md#neo4j-connection-and-memory)).
 - 2026-10-23 — Removed the known defect of `scripts/clear_neo4j.py` (deleted nodes by label, partner `Vulnerability` and `CVE` nodes included, without an audit line): the script deletes the nodes EdgeGuard created through the wipe of the fresh baseline and records every delete.

@@ -2151,19 +2151,16 @@ run_neo4j_sync_task = PythonOperator(
     dag=neo4j_sync_dag,
 )
 
+
 # 2026-10: reads through ``Neo4jClient`` (``NEO4J_URI``), like the sync tasks, so it reports on the
 # database the sync wrote. It was a curl to ``NEO4J_HTTP`` that printed nothing and exited 0 when that
 # address was not the synced instance (a ``NEO4J_URI`` pointed at a remote Neo4j). Credentials no
-# longer go through curl at all (the PR-F9 argv / curl-config escaping is gone with it).
-_QUALITY_CHECK_QUERY = (
-    "MATCH (n) WHERE n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor "
-    "OR n:Technique OR n:Tactic OR n:Campaign "
-    "RETURN labels(n)[0] AS type, count(*) AS cnt ORDER BY cnt DESC"
-)
-
-
+# longer go through curl at all (the PR-F9 argv / curl-config escaping is gone with it). The counts
+# come from ``count_nodes_by_label``, which raises on any failure: ``Neo4jClient.run`` returns [] on a
+# terminal error (a Cypher syntax error, a non-retryable DatabaseError), which would pass with no count.
 def check_neo4j_quality(**kwargs):
-    """Log the node count per core label. Fails when Neo4j is unreachable: the sync just used it."""
+    """Log the node count per core label. Fails when Neo4j is unreachable (the sync just used it) or
+    when the count query fails."""
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient()
@@ -2175,12 +2172,14 @@ def check_neo4j_quality(**kwargs):
         if not connected:
             raise AirflowException("Neo4j quality check FAILED — cannot connect")
         try:
-            rows = client.run(_QUALITY_CHECK_QUERY)
+            counts = client.count_nodes_by_label(
+                ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique", "Tactic", "Campaign")
+            )
         except Exception as e:
-            raise AirflowException(f"Neo4j quality check FAILED — count query raised: {e}") from e
+            raise AirflowException(f"Neo4j quality check FAILED — node count query raised: {e}") from e
         logger.info("Neo4j sync complete - %s", datetime.now(timezone.utc).isoformat())
-        for row in rows:
-            logger.info("%s: %s", row["type"], row["cnt"])
+        for label, count in counts.items():
+            logger.info("%s: %s", label, count)
     finally:
         client.close()
 
