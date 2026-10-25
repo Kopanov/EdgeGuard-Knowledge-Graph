@@ -1,8 +1,9 @@
 """Append-only audit trail for EdgeGuard's destructive graph operations (2026-10).
 
 EdgeGuard may share its Neo4j database with ResilMesh. Every code path that deletes nodes —
-the full wipe (``clear_all``), the edgeguard-only wipe (``clear_edgeguard_managed``) and the
-CVSS de-duplication that runs with ``create_constraints`` — records one JSON line here and
+the full wipe (``clear_all``), the edgeguard-only wipe (``clear_edgeguard_managed``), the
+CVSS de-duplication that runs with ``create_constraints`` and the removal of ``Source`` nodes keyed by a
+registry alias that have no relationship (``ensure_sources``) — records one JSON line here and
 increments the Prometheus counter ``edgeguard_destructive_ops_total{operation,target}``. The
 fresh-baseline clean, ``edgeguard clear neo4j`` and ``scripts/clear_neo4j.py`` reach the first two.
 A wipe attempt that fails after deleting something also records a line, with what it deleted and
@@ -92,9 +93,10 @@ def record_destructive_op(
 ) -> Optional[Dict[str, Any]]:
     """Append one audit line and bump the counter. Returns the record, or ``None`` if nothing was written.
 
-    ``operation`` names the code path (``clear_all``, ``clear_edgeguard_managed``, ``cvss_dedup``),
-    ``target`` the store (``neo4j``), ``affected`` the number of nodes removed, ``scope`` the
-    Cypher-level selection the operation used; ``actor`` (added here) the process that ran it.
+    ``operation`` names the code path (``clear_all``, ``clear_edgeguard_managed``, ``cvss_dedup``,
+    ``source_alias_cleanup``), ``target`` the store (``neo4j``), ``affected`` the number of nodes
+    removed, ``scope`` the Cypher-level selection the operation used; ``actor`` (added here) the
+    process that ran it.
     """
     record: Dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),

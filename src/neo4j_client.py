@@ -2421,7 +2421,8 @@ class Neo4jClient:
     @retry_with_backoff(max_retries=3)
     def ensure_sources(self) -> bool:
         """
-        Ensure one Source node per registered source, keyed by its canonical id (``SOURCES``).
+        Ensure one Source node per registered source, keyed by its canonical id (``SOURCES``), and
+        delete an EdgeGuard Source node keyed by a registry alias that has no relationship.
 
         Returns:
             True if successful
@@ -2457,6 +2458,37 @@ class Neo4jClient:
                         reliability=info["reliability"],
                         timeout=NEO4J_READ_TIMEOUT,
                     ).consume()
+
+                # A Source node keyed by a registry alias (``otx``, ``cisa``, ...) is never created; one
+                # that a graph still holds and that has no relationship is deleted. Only EdgeGuard's own
+                # nodes (``edgeguard_managed``) qualify; one with a relationship is kept.
+                canonical_ids = {src.canonical_id for src in source_registry.all_sources()}
+                alias_ids = sorted(source_registry.all_aliases() - canonical_ids)
+                record = session.run(
+                    """
+                    MATCH (stale:Source)
+                    WHERE stale.source_id IN $alias_ids AND stale.edgeguard_managed = true AND NOT EXISTS { (stale)--() }
+                    WITH stale, stale.source_id AS source_id
+                    DELETE stale
+                    RETURN count(source_id) AS deleted, collect(source_id) AS source_ids
+                    """,
+                    alias_ids=alias_ids,
+                    timeout=NEO4J_READ_TIMEOUT,
+                ).single()
+                deleted = record["deleted"] if record else 0
+                if isinstance(deleted, int) and deleted > 0:
+                    deleted_ids = sorted(str(sid) for sid in (record["source_ids"] or []))
+                    logger.info(
+                        f"Deleted {deleted} Source node(s) keyed by a registry alias with no relationship: "
+                        + ", ".join(deleted_ids)
+                    )
+                    record_destructive_op(
+                        "source_alias_cleanup",
+                        target="neo4j",
+                        affected=deleted,
+                        scope="Source keyed by a registry alias, edgeguard_managed, no relationship",
+                        details={"source_ids": deleted_ids},
+                    )
 
             logger.info(f"Ensured {len(SOURCES)} Source nodes exist")
             return True

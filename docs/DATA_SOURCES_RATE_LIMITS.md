@@ -188,11 +188,11 @@
 | **Rate Limit** | None; one export download per run (about 16 MB, about 63,000 URLs on 2026-10-24) |
 | **Data Provided** | Malware URLs, tags, threat types |
 | **Format** | CSV |
-| **Update Frequency** | Hourly |
+| **Update Frequency** | Every 5 minutes (abuse.ch asks not to fetch more often) |
 
 **Download URLs:**
-- Recent (read by the collector; Auth-Key in the path): https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv
-- Full: https://urlhaus.abuse.ch/downloads/csv_all/ (not used)
+- Recent (read by the collector; Auth-Key in the path; the URLs added in the past 30 days): https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv
+- Full dump (v2 export with the Auth-Key; URLs active or added in the past 90 days): not used
 - API: https://urlhaus.abuse.ch/api/
 
 **Pricing:** Free
@@ -359,6 +359,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus: the export is regenerated every 5 minutes (the table said hourly); the recent export lists the URLs added in the past 30 days; the full dump is a v2 export with the Auth-Key of the URLs active or added in the past 90 days (the keyless `downloads/csv_all/` answers HTTP 410).
 - 2026-10-25 — The setup checklist names URLhaus and MalwareBazaar among the sources skipped without their key.
 - 2026-10-25 — URLhaus: the export needs the abuse.ch Auth-Key in its URL path and a free abuse.ch account (the keyless `downloads/csv_recent/` answers HTTP 410 since 2026-10); about 63,000 URLs per export on 2026-10-24.
 - 2026-10-17 — The NVD key is optional (5 requests per 30 s without it; the page said required); the KEV feed listed as a JSON download; the MITRE download named as `MITRECollector.attack_url`, plus the ATT&CK for ICS bundle with `EDGEGUARD_ENABLE_MITRE_ICS=true`; the setup checklist adds `THREATFOX_API_KEY`, names the environment variables and marks every source key optional; main text limited to current behaviour, with the change history in this section.

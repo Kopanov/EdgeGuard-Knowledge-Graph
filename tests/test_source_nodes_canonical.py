@@ -23,6 +23,16 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+_TESTS = Path(__file__).resolve().parent
+if str(_TESTS) not in sys.path:
+    sys.path.insert(0, str(_TESTS))
+
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# tests/test_graphql_api.py replaces neo4j_client (and neo4j) with MagicMocks when it is collected
+# first; only then are the stubs removed, so this module binds the real client.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j_client" or k.startswith("neo4j")):
+    clear_graphql_api_magicmock_stubs()
 
 from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
 
@@ -112,6 +122,111 @@ class TestRegistry:
         assert sorted(merged) == sorted(CANONICAL_IDS)
         uuids = {p["source_id"]: p["source_uuid"] for q, p in client.driver.runs if "MERGE (s:Source" in q}
         assert all(uuids[sid] == _source_uuid(sid) for sid in CANONICAL_IDS)
+
+
+class _SourceGraph:
+    """A driver over a few ``Source`` nodes (``source_id`` -> ``{"managed": bool, "edges": int}``). It
+    applies a ``DELETE stale`` statement by the conditions the statement's text names: the alias ids it is
+    given, EdgeGuard's ownership marker and no relationship, so a statement without one of them
+    deletes more. Every statement is recorded with the number of the session that sent it."""
+
+    def __init__(self, nodes):
+        self.nodes = {sid: dict(node) for sid, node in nodes.items()}
+        self.runs: list = []
+        self._sessions = 0
+
+    def session(self, **kwargs):
+        self._sessions += 1
+        graph, number = self, self._sessions
+
+        class _GraphSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def run(self, query, **params):
+                graph.runs.append((number, query, params))
+                if "DELETE stale" in query:
+                    gone = [
+                        sid
+                        for sid, node in graph.nodes.items()
+                        if sid in params["alias_ids"]
+                        and (node["managed"] or "stale.edgeguard_managed = true" not in query)
+                        and (node["edges"] == 0 or "NOT EXISTS { (stale)--() }" not in query)
+                    ]
+                    for sid in gone:
+                        del graph.nodes[sid]
+                    return SimpleNamespace(single=lambda: {"deleted": len(gone), "source_ids": gone})
+                if "MERGE (s:Source" in query:
+                    graph.nodes.setdefault(params["source_id"], {"managed": True, "edges": 0})
+                return _Result()
+
+        return _GraphSession()
+
+
+class TestAliasNodesLeftInTheGraph:
+    """A graph built while ``SOURCES`` had one entry per alias holds a ``Source`` node per alias, none
+    with a ``SOURCED_FROM`` edge. ``ensure_sources`` deletes such a node when it has no relationship."""
+
+    def test_an_alias_node_without_a_relationship_is_deleted_and_one_with_a_relationship_is_kept(
+        self, caplog, monkeypatch
+    ):
+        audited = []
+        monkeypatch.setattr(nc, "record_destructive_op", lambda op, **kw: audited.append((op, kw)))
+        graph = _SourceGraph(
+            {
+                "otx": {"managed": True, "edges": 0},
+                "cisa": {"managed": True, "edges": 2},
+                "alienvault_otx": {"managed": True, "edges": 5},
+                "nvd": {"managed": True, "edges": 0},
+            }
+        )
+        client = _client()
+        client.driver = graph
+        with caplog.at_level("INFO", logger="neo4j_client"):
+            assert client.ensure_sources() is True
+        assert "otx" not in graph.nodes, "an alias node with no relationship is deleted"
+        assert graph.nodes["cisa"] == {"managed": True, "edges": 2}, "an alias node with a relationship is kept"
+        assert CANONICAL_IDS <= set(graph.nodes), "no canonical node is deleted, one with no edge included"
+        assert set(graph.nodes) == CANONICAL_IDS | {"cisa"}
+        assert "Deleted 1 Source node(s) keyed by a registry alias with no relationship: otx" in caplog.text
+        assert audited == [
+            (
+                "source_alias_cleanup",
+                {
+                    "target": "neo4j",
+                    "affected": 1,
+                    "scope": "Source keyed by a registry alias, edgeguard_managed, no relationship",
+                    "details": {"source_ids": ["otx"]},
+                },
+            )
+        ], "the delete leaves a destructive-operations audit line"
+
+    def test_the_delete_names_every_alias_and_runs_last_in_the_merge_session(self):
+        graph = _SourceGraph({})
+        client = _client()
+        client.driver = graph
+        assert client.ensure_sources() is True
+        deletes = [(number, params) for number, query, params in graph.runs if "DELETE stale" in query]
+        assert len(deletes) == 1
+        number, params = deletes[0]
+        assert params["alias_ids"] == sorted(ALIASES)
+        assert not set(params["alias_ids"]) & CANONICAL_IDS
+        assert params["timeout"] == nc.NEO4J_READ_TIMEOUT
+        assert {n for n, _, _ in graph.runs} == {number}, "one session: the MERGE loop, then the delete"
+        assert "DELETE stale" in graph.runs[-1][1]
+
+    def test_a_node_edgeguard_did_not_create_is_kept(self, monkeypatch):
+        audited = []
+        monkeypatch.setattr(nc, "record_destructive_op", lambda op, **kw: audited.append(op))
+        graph = _SourceGraph({"otx": {"managed": False, "edges": 0}})
+        client = _client()
+        client.driver = graph
+        assert client.ensure_sources() is True
+        assert "otx" in graph.nodes
+        assert audited == [], "nothing deleted, no audit line"
 
 
 class TestWritersResolveAliases:
@@ -339,10 +454,70 @@ class TestMetricSourceLabels:
         assert count("otx") == before_variant
 
 
+def _curated_importer():
+    """``scripts/import_curated_package.py``, whose ``build_event`` gives the MISP event of a package."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "import_curated_package_for_stix_flow", _SRC.parent / "scripts" / "import_curated_package.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _curated_package_event(name: str, source: str = "coreideas") -> dict:
+    """The MISP event (flat ``Event`` dict, as ``fetch_event_details`` returns it) of a package whose
+    ``name`` (the event info ``scripts/import_curated_package.py`` writes) is *name*: tags ``EdgeGuard``,
+    the package source's ``source:*`` tag and ``tlp:<level>``."""
+    package = {
+        "name": name,
+        "source": source,
+        "tlp": "amber",
+        "entities": [{"kind": "threat_actor", "name": "apt29", "claims": [{"p": "uses_technique", "o": "T1566"}]}],
+    }
+    return _curated_importer().build_event(package)["Event"]
+
+
+def _run_stix_flow(events: dict):
+    """Drive ``EdgeGuardPipeline._run_stix_flow`` over ``{event info: full event}`` with a fake exporter.
+    Returns ``(converted event infos, loaded objects)``."""
+    import run_pipeline
+
+    pipeline = run_pipeline.EdgeGuardPipeline.__new__(run_pipeline.EdgeGuardPipeline)
+    converted: list = []
+    bundles: list = []
+
+    class _Exporter:
+        def fetch_edgeguard_events(self):
+            return [{"id": str(i), "info": info} for i, info in enumerate(events, start=1)]
+
+        def fetch_event_details(self, event_id):
+            return dict(list(events.values())[int(event_id) - 1])
+
+        def convert_to_stix21(self, event):
+            info = event.get("Event", event).get("info")
+            converted.append(info)
+            return {"objects": [{"type": "threat-actor", "id": f"threat-actor--{len(converted)}", "name": info}]}
+
+    class _Neo4j:
+        def run(self, _query):
+            return [{"ok": 1}]
+
+    pipeline.stix_exporter = _Exporter()
+    pipeline.neo4j = _Neo4j()
+    pipeline.load_stix21_to_neo4j = lambda bundle: bundles.append(bundle) or {}
+    pipeline._run_stix_flow()
+    return converted, [obj for bundle in bundles for obj in bundle["objects"]]
+
+
 class TestStixFlowEventSource:
-    """2026-10-25: the STIX flow names each object's source from its MISP event's name, as a canonical
-    id; a name that gives no registered source is attributed to ``misp`` (it was ``"unknown"``, which no
-    ``Source`` node carries)."""
+    """The STIX flow of the ``run_pipeline.py`` CLI names each object's source, as a canonical id, from
+    its MISP event's own ``source:*`` tag, else (a collector's event, tagged ``EdgeGuard`` only) from
+    the event's name; a name that gives no registered source is attributed to ``misp``. A curated
+    package's event is skipped: its claims are links the MISP -> Neo4j sync makes between existing
+    nodes, and a package never creates nodes."""
 
     @pytest.mark.parametrize(
         "event_info,expected",
@@ -351,7 +526,6 @@ class TestStixFlowEventSource:
             ("EdgeGuard-otx-2026-10-22", "alienvault_otx"),
             ("EdgeGuard-nvd-2026-10-22-part2", "nvd"),
             ("EdgeGuard-cisa_ics-2026-10-20", "cisa_ics"),
-            ("EdgeGuard-coreideas-2026-10-22", "coreideas"),
         ],
     )
     def test_a_registered_source_in_the_event_name(self, event_info, expected):
@@ -368,9 +542,53 @@ class TestStixFlowEventSource:
         assert "attributing it to 'misp'" in caplog.text
         assert "misp" in nc.SOURCES
 
-    def test_the_flow_uses_the_helper_and_never_unknown(self):
+    @pytest.mark.parametrize(
+        "name", ["2026-10-24_EdgeGuard_CoreIdeas_package", "2026-10-24_EdgeGuard_CoreIdeas_galaxy_package"]
+    )
+    def test_a_curated_package_event_is_skipped(self, name, caplog):
+        event = _curated_package_event(name)
+        assert {t["name"] for t in event["Tag"]} == {"EdgeGuard", "source:CoreIdeas", "tlp:amber"}
+        from run_pipeline import _misp_event_source, _misp_event_tag_source
+
+        assert _misp_event_source(name) == "misp", "the package's name names no source"
+        assert _misp_event_tag_source(event) == "coreideas"
+        with caplog.at_level("INFO", logger="run_pipeline"):
+            converted, objects = _run_stix_flow({name: event})
+        assert converted == [] and objects == [], "no object of a curated package is loaded"
+        assert f"Skipping event 1 ({name!r}): a curated package of coreideas creates no nodes" in caplog.text
+
+    @pytest.mark.parametrize("source", source_registry.curated_source_ids())
+    def test_every_registered_curated_source_is_skipped(self, source, caplog):
+        event = _curated_package_event("2026-10-24_EdgeGuard_CoreIdeas_package", source=source)
+        assert source_registry.get_source(source).misp_tag in {t["name"] for t in event["Tag"]}
+        with caplog.at_level("INFO", logger="run_pipeline"):
+            converted, objects = _run_stix_flow({event["info"]: event})
+        assert converted == [] and objects == []
+        assert f"a curated package of {source} creates no nodes" in caplog.text
+
+    def test_a_collector_event_beside_a_curated_package_takes_its_source_from_its_name(self):
+        package = _curated_package_event("2026-10-24_EdgeGuard_CoreIdeas_package")
+        collector = {"id": "2", "info": "EdgeGuard-nvd-2026-10-22-part2", "Tag": [{"name": "EdgeGuard"}]}
+        converted, objects = _run_stix_flow({package["info"]: package, collector["info"]: {"Event": collector}})
+        assert converted == ["EdgeGuard-nvd-2026-10-22-part2"]
+        assert [o["x_edgeguard_source"] for o in objects] == ["nvd"]
+
+    def test_the_events_source_tag_comes_before_its_name(self):
+        event = {"info": "A partner's report", "Tag": [{"name": "EdgeGuard"}, {"name": "source:ThreatFox"}]}
+        converted, objects = _run_stix_flow({event["info"]: event})
+        assert converted == ["A partner's report"]
+        assert [o["x_edgeguard_source"] for o in objects] == ["threatfox"]
+
+    def test_an_unregistered_source_tag_is_attributed_to_misp_as_in_the_sync(self, caplog):
+        event = {"info": "EdgeGuard-nvd-2026-10-22", "Tag": [{"name": "EdgeGuard"}, {"name": "source:Retired-Feed"}]}
+        with caplog.at_level("WARNING", logger="run_pipeline"):
+            converted, objects = _run_stix_flow({event["info"]: event})
+        assert [o["x_edgeguard_source"] for o in objects] == ["misp"]
+        assert "'source:Retired-Feed' names no registered source" in caplog.text
+
+    def test_the_flow_never_names_unknown(self):
         text = (_SRC / "run_pipeline.py").read_text()
-        assert "source_from_event = _misp_event_source(event_info)" in text
+        assert "source_from_event = _misp_event_tag_source(full_event) or _misp_event_source(event_info)" in text
         assert 'source_from_event = "unknown"' not in text
 
 
