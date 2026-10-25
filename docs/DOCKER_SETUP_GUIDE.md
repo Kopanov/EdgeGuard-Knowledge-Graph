@@ -191,7 +191,7 @@ docker compose exec airflow sh -c 'curl -vk "$MISP_URL" -o /dev/null'   # uses t
 
 ### MISP performance tuning (large baselines)
 
-During baseline collection, MISP can receive **tens of thousands** of attributes in a single event (e.g. NVD pushes ~95K CVEs into one event). Under default Apache settings, this causes **memory exhaustion and timeouts** because each `POST /attributes/add` request spawns a PHP process that loads the full event context.
+During baseline collection, MISP can receive **tens of thousands** of attributes in a single event (e.g. the OTX event of a 730-day baseline, about 150,000 attributes; the writer splits other sources' events at `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, 20,000). Under default Apache settings, this causes **memory exhaustion and timeouts** because each `POST /attributes/add` request spawns a PHP process that loads the full event context.
 
 **1. Reduce Apache `MaxRequestWorkers`** (critical on hosts with ≤ 32 GB RAM):
 
@@ -285,10 +285,11 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — MISP performance tuning: the OTX event (about 150,000 attributes in a 730-day baseline) is the example of a large event, since the writer splits other sources' events at `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (the text named an NVD event of about 95K CVEs).
 - 2026-10-23 — § 7 points to CONFIGURATION.md and to the documentation index docs/README.md, which replaced the README's documentation section.
 - 2026-10-18 — § 4 builds every image and recreates every container (`docker compose build`, then `docker compose up -d --force-recreate`; the start command built only the Airflow image) and records the deployed commit in `.env` (`scripts/record_deployed_commit.sh` writes `EDGEGUARD_GIT_SHA`, which both `/health` responses report as `git_sha`).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

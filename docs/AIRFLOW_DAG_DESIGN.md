@@ -127,22 +127,23 @@ concurrency without any MISP server changes.
 
 **What this does not address:** the per-event-grows-with-size cost on a
 single oversized event (MISP `edit-event` loads the entire event for
-dedup; cost grows linearly with existing attribute count). Since 2026-10
-the writer caps that size instead: past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`
-(default 20000) attributes it continues a source/date event in
-`EdgeGuard-<source>-<date>-part2`, `-part3`, ... OTX events are the
-exception and still grow without a limit: the sync links report items only
+dedup; cost grows linearly with existing attribute count). The writer
+bounds that size: past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000)
+attributes it continues a source/date event in
+`EdgeGuard-<source>-<date>-part2`, `-part3`, and so on. OTX events are the
+exception and grow without that limit: the sync links report items only
 within one event, and shared malware, actor and CVE items carry the ids of
-nearly every pulse of a day ([COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)).
+nearly every pulse of a day ([COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts)).
 
 **Tier 2 has no order, and the collector pool bounds it** —
-`tier2_feeds` puts no edges between the tier-2 feeds. All of them but
-URLhaus write small events; URLhaus writes its whole `recent.csv` export
-(about 63,000 URLs on 2026-10-24, at most `EDGEGUARD_URLHAUS_MAX_PER_RUN`,
-100,000) in one push, which the event split above spreads over parts of
-20,000 (before 2026-10 one event, past the ~50,000 attributes from which a
-default MISP container answers HTTP 500 to batch pushes,
-[MISP_TUNING.md](MISP_TUNING.md)). Their load together is not
+`tier2_feeds` puts no edges between the tier-2 feeds. They write small
+events, except URLhaus's first push after a wipe: URLhaus passes its whole
+`recent.csv` export (about 63,000 URLs on 2026-10-24, at most
+`EDGEGUARD_URLHAUS_MAX_PER_RUN`, 100,000) to every push, which the first
+time spreads over about 4 event parts of 20,000 attributes (the event split
+above); a daily run writes only the URLs MISP does not hold yet (about
+1,130 a day) into that day's event, because the duplicate check drops the
+rest. Their load together is not
 negligible either: all 7 at once grow the MISP
 php-fpm workers past the MISP container's memory limit (HTTP 502), and a
 daily catch-up run together with OTX, VirusTotal and NVD reaches the
@@ -515,8 +516,8 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The per-event size cost is bounded by the writer's event split (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, `-partN` events, not OTX); tier 2: URLhaus's first push after a wipe spreads over about 4 parts, and a daily run writes the about 1,130 URLs MISP does not hold into one event (the text said partitioning was not implemented, and that URLhaus writes one event).
 - 2026-10-25 — The timeout table gives the `run_neo4j_sync` limit as 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, at most 22).
-- 2026-10-25 — The per-event size cost is capped by the writer's event split (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, `-partN` events, not OTX); the text said partitioning was not implemented, and that URLhaus writes one event.
 - 2026-10-25 — Tier 2: URLhaus writes its whole `recent.csv` export (about 63,000 URLs on 2026-10-24) into one event, past the ~50,000 attributes of MISP_TUNING.md; the text called every tier-2 feed small.
 - 2026-10-25 — URLhaus reads the abuse.ch v2 `recent.csv` export (about 63,000 URLs on 2026-10-24; the keyless `csv_recent` download answers HTTP 410 since 2026-10); `EDGEGUARD_URLHAUS_MAX_PER_RUN` 100,000 (was 50,000).
 - 2026-10-23 — The per-source run rules point to COLLECTION_AND_SYNC_LIMITS.md and the chunk setting to CONFIGURATION.md; the README sections they named were moved there.

@@ -117,7 +117,7 @@ Priority 2: Event-level zone/sector tags + zone from Event.info  (merged; "globa
 Priority 3: "global"  (fallback only)
 ```
 
-**MISP events created by `MISPWriter`** use **`EdgeGuard-{source}-{date}`** as the event name, with the **`EdgeGuard`** tag at event level. **Zone classification** lives exclusively on **attribute-level tags** (`zone:Finance`, `zone:Healthcare`) — a single event can contain multi-zone attributes. Attribute `zone:` tags are the primary classification signal for Neo4j sync.
+**MISP events created by `MISPWriter`** use **`EdgeGuard-{source}-{date}`** as the event name (continued in `-part2`, `-part3`, ... once the event holds `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes, OTX events excepted; [COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts)), with the **`EdgeGuard`** tag at event level. **Zone classification** lives exclusively on **attribute-level tags** (`zone:Finance`, `zone:Healthcare`) — a single event can contain multi-zone attributes. Attribute `zone:` tags are the primary classification signal for Neo4j sync.
 
 **Collectors → MISP:** Optional **per-event attribute prefetch** and **source-specific** incremental cursors reduce duplicate writes when event names rotate by date — see [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance*.
 
@@ -517,6 +517,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — MISP event names: the `-part2`, `-part3`, ... events past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (OTX events are not split).
 - 2026-10-25 — The MISP → Neo4j box states the event fetch: whole up to `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20,000) attributes, larger events as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 (the box said the full event JSON is loaded).
 - 2026-10-23 — Key Files lists `src/tls_verify.py`, the one rule for `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY`.
 - 2026-10-23 — Key Files takes the module notes of the README's project tree, corrected: `run_pipeline.py` always takes the STIX flow, no step runs `MISPCollector`, `query_api.py` also serves the STIX and Wazuh exports and the explorer data; the GraphQL API runs on ISIM's port with its own schema (the page said it is queried exactly as ISIM); the README pointers name CONFIGURATION.md, TECHNICAL_SPEC.md, SETUP_GUIDE.md and docs/README.md; Key Files lists `abuseipdb_collector.py` and keeps one short clause per file.

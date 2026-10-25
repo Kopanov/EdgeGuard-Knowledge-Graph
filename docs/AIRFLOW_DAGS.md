@@ -246,7 +246,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 |-----|------|
 | **`EdgeGuard`** | Platform provenance (e.g. ResilMesh / EdgeGuard pipeline). **Only** event-level tag added on create. |
 
-**`Event.info`** uses **`EdgeGuard-{source}-{date}`** (e.g., `EdgeGuard-nvd-2026-03-29`). Zone classification lives on attribute-level tags (`zone:Finance`, `zone:Healthcare`), not in the event name. A single event can contain multi-zone attributes. See [MISP_SOURCES.md](MISP_SOURCES.md).
+**`Event.info`** uses **`EdgeGuard-{source}-{date}`** (e.g., `EdgeGuard-nvd-2026-03-29`), continued in `-part2`, `-part3`, ... once the event holds `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (not for OTX). Zone classification lives on attribute-level tags (`zone:Finance`, `zone:Healthcare`), not in the event name. A single event can contain multi-zone attributes. See [MISP_SOURCES.md](MISP_SOURCES.md).
 
 ### Attribute level (all pushed indicators/objects)
 
@@ -334,7 +334,7 @@ Device, NetworkService, SoftwareVersion, Application, Role and User carry **no**
 
 **Running again does NOT create duplicates** — MERGE on the natural key updates existing nodes, attaches a new `SOURCED_FROM` edge when a new source reports the same entity.
 
-**MISP vs Neo4j:** The graph deduplication above is **independent** of MISP. The same logical IOC may still appear on **more than one** EdgeGuard MISP event (e.g., different dates); **`MISPWriter`** prefetch + cross-event-source dedup reduce **re-pushes** to MISP itself — see [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance*. Partitioning MISP events by date range, so that no single event exceeds about 20K attributes, is not implemented.
+**MISP vs Neo4j:** The graph deduplication above is **independent** of MISP. The same logical IOC may still appear on **more than one** EdgeGuard MISP event (e.g., different dates); **`MISPWriter`** prefetch + cross-event-source dedup reduce **re-pushes** to MISP itself — see [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance*. `MISPWriter` continues a source/date event in `-part2`, `-part3`, ... past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes; OTX events are not split ([COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts)).
 
 ---
 
@@ -718,6 +718,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — MISP event names: a source/date event continues in `-part2`, `-part3`, ... past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, OTX events excepted (the page said partitioning MISP events is not implemented).
 - 2026-10-25 — `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` sets the `run_neo4j_sync` limit (default 8 h, at most 22 h); the `dagrun_timeout` table, the skip guard and the stale alert state that their 8 h is the default limit; the mode line of the task log ends with the limit of the attempt.
 - 2026-10-25 — Neo4j sync: a green `run_neo4j_sync` can include an event fetched in pages with fewer attribute rows than the MISP index lists (`[PAGED-FETCH-INCOMPLETE]`, run summary, not a failure); the memory note names the attribute list the sync holds, not PyMISP JSON parsing; the MalwareBazaar and URLhaus skip rules are listed with the abuse.ch key, not among the feeds without a key.
 - 2026-10-25 — URLhaus and MalwareBazaar need `THREATFOX_API_KEY`, the abuse.ch Auth-Key, in their v2 export URL (the keyless downloads answer HTTP 410 since 2026-10): `missing_abusech_key` and `urlhaus_auth_denied` added to the optional-key table, MalwareBazaar no longer listed as a keyless feed, the source key check reports the key for all three abuse.ch sources, and `edgeguard preflight` counts a required abuse.ch source that is switched off as an error even when the key is accepted; URLhaus reads the `recent.csv` export (about 63,000 URLs on 2026-10-24) with a cap of 100,000 (was 50,000).

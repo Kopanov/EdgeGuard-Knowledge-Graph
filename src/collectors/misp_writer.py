@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import requests
 import urllib3
@@ -1030,10 +1030,16 @@ class StoredCopy(NamedTuple):
     last_seen: Optional[str]
 
 
-# 2026-10: the events ``_get_or_create_event`` creates (``EdgeGuard-{source}-{date}``). Only copies in
-# them are refreshed: the sync reads EdgeGuard's events, and a copy that keeps the source tag in
-# an analyst's or a federated organisation's event is not EdgeGuard's to edit.
+# 2026-10: the events ``_get_or_create_event`` creates (``EdgeGuard-{source}-{date}``, ``-part<N>``).
+# Only copies in them are refreshed: the sync reads EdgeGuard's events, and a copy that keeps the
+# source tag in an analyst's or a federated organisation's event is not EdgeGuard's to edit.
 _OWN_EVENT_PREFIX = "EdgeGuard-"
+
+
+_EVENT_SPLIT_DEFAULT = 20000
+# The smallest limit accepted: a typo such as 20 would cut a 140,000-attribute NVD baseline into
+# thousands of events, each looked up on every later push of the day.
+_EVENT_SPLIT_MIN = 1000
 
 
 def _event_split_above() -> int:
@@ -1043,12 +1049,54 @@ def _event_split_above() -> int:
     The prod NVD event of 2026-10-22 reached 145,261 attributes (about 550 MB of JSON): MISP answered
     HTTP 500 to a view of it, its edit handler choked, and every batch's prefetch of the event cost more
     than the one before. The default equals ``EDGEGUARD_MISP_PAGED_FETCH_ABOVE`` (20000), so each part
-    still loads with one ``/events/view``.
+    still loads with one ``/events/view``. A value that is not a whole number, or one from 1 to 999,
+    logs a warning and uses the default.
     """
+    raw = (os.environ.get("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE") or "").strip()
+    if not raw:
+        return _EVENT_SPLIT_DEFAULT
     try:
-        return int(os.environ.get("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE", "20000"))
-    except (ValueError, TypeError):
-        return 20000
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "EDGEGUARD_MISP_EVENT_SPLIT_ABOVE=%r is not a whole number — using %d", raw, _EVENT_SPLIT_DEFAULT
+        )
+        return _EVENT_SPLIT_DEFAULT
+    if value <= 0:
+        return 0
+    if value < _EVENT_SPLIT_MIN:
+        logger.warning(
+            "EDGEGUARD_MISP_EVENT_SPLIT_ABOVE=%d is below %d — using %d (0 turns the split off)",
+            value,
+            _EVENT_SPLIT_MIN,
+            _EVENT_SPLIT_DEFAULT,
+        )
+        return _EVENT_SPLIT_DEFAULT
+    return value
+
+
+class _PrefetchedKeys(set):
+    """The ``(type, value)`` keys of an event's attributes (``MISPWriter._get_existing_attribute_keys``).
+
+    ``complete`` is False when the listing stopped early or the prefetch is off, and ``failed`` is True
+    when it stopped early (an error, a non-JSON answer, the page cap) (2026-10): the number of keys is
+    then no size of the event, and the event split (``_event_split_above``) takes the size from the
+    event's ``attribute_count`` instead.
+    """
+
+    def __init__(self, keys: Sequence = (), complete: bool = True, failed: bool = False):
+        super().__init__(keys)
+        self.complete = complete
+        self.failed = failed
+
+
+class _PendingPart(NamedTuple):
+    """A ``-partN`` event ``push_items`` creates when its first batch is about to be written (2026-10): after
+    the pause and the liveness check of that batch, so a push that stops early leaves no empty part behind."""
+
+    source: str
+    date: str
+    part: int
 
 
 def _attribute_report_ids(attribute: Dict[str, Any]) -> List[str]:
@@ -1076,11 +1124,19 @@ def _attribute_report_ids(attribute: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(str(x).strip() for x in ids if x and str(x).strip()))
 
 
-def _split_for_parts(attributes: List[Dict[str, Any]], room: int, cap: int) -> List[List[Dict[str, Any]]]:
-    """Cut ``attributes`` into the chunk the current part takes (``room`` attributes, may be empty) and
-    one chunk per further part of at most ``cap`` (2026-10, see ``_event_split_above``). No chunk after
-    the first is empty, so no part is created that receives nothing."""
-    return [attributes[:room]] + [attributes[k : k + cap] for k in range(room, len(attributes), cap)]
+def _allot_to_parts(
+    attributes: List[Dict[str, Any]], rooms: Sequence[int], cap: int
+) -> Tuple[List[List[Dict[str, Any]]], List[List[Dict[str, Any]]]]:
+    """Cut ``attributes`` for the event split (2026-10, see ``_event_split_above``): one chunk per existing
+    part, in order, of at most its room (empty where a part takes none), then chunks of at most ``cap``
+    for new parts. No new-part chunk is empty, so no part is created that receives nothing."""
+    chunks: List[List[Dict[str, Any]]] = []
+    rest = list(attributes)
+    for room in rooms:
+        take = max(0, room)
+        chunks.append(rest[:take])
+        rest = rest[take:]
+    return chunks, [rest[k : k + cap] for k in range(0, len(rest), cap)]
 
 
 def _event_name(source: str, date: str, part: int = 1) -> str:
@@ -1265,6 +1321,25 @@ def _event_id_exact_from_restsearch_rows(rows: List[Any], event_name: str) -> Op
         eid, info = _event_id_and_info_from_restsearch_row(row)
         if eid and info == event_name:
             return eid
+    return None
+
+
+def _event_attribute_count_from_restsearch_rows(rows: List[Any], event_name: str) -> Optional[int]:
+    """``attribute_count`` of the row named exactly ``event_name``, or None (2026-10).
+
+    MISP 2.5 answers the metadata lookup with ``"attribute_count": "145261"`` (a string; measured on the
+    hosted MISP 2.5.45). The event split reads a part's size from it when the part's attribute listing
+    is incomplete.
+    """
+    for row in rows:
+        eid, info = _event_id_and_info_from_restsearch_row(row)
+        if not (eid and info == event_name):
+            continue
+        ev = row.get("Event") if isinstance(row.get("Event"), dict) else row
+        try:
+            return max(0, int(str(ev.get("attribute_count")).strip()))
+        except (TypeError, ValueError):
+            return None
     return None
 
 
@@ -1586,9 +1661,9 @@ class MISPWriter:
         (~19 requests). Amortized over the entire baseline run (one call
         per source per push_items invocation, not per batch).
 
-        See also Issue #61 — the architectural fix is event partitioning
-        by attribute date, not push date. This helper is the cheap
-        quick-fix until #61 lands.
+        Event size is bounded by the event split (``_event_split_above``, ``-part<N>``; not OTX). With
+        the split, a complete listing is also what keeps an attribute out of a second part of the day;
+        without one, ``push_items`` lists the other parts.
         """
         if not MISP_PREFETCH_EXISTING_ATTRS:
             return set()
@@ -1727,13 +1802,16 @@ class MISPWriter:
 
         Used to avoid re-posting the same indicator when collectors re-run or incremental
         windows overlap. MISP does not dedupe across different events (e.g. different days).
+        The result is a ``_PrefetchedKeys``: ``complete`` is False when the listing stopped early or the
+        prefetch is off (2026-10, read by the event split).
         """
         if not MISP_PREFETCH_EXISTING_ATTRS:
-            return set()
+            return _PrefetchedKeys(complete=False)
         eid = sanitize_value(str(event_id), max_length=20)
         if not eid:
-            return set()
+            return _PrefetchedKeys(complete=False)
         keys: set = set()
+        complete = False
         page = 1
         page_limit = 5000
         max_pages = 200
@@ -1784,11 +1862,12 @@ class MISPWriter:
                 if t is not None and v is not None and str(v).strip():
                     keys.add(_dedup_key(str(t), str(v)))
             if len(attrs) < page_limit:
+                complete = True
                 break
             page += 1
         if keys:
             logger.debug("MISP event %s: prefetched %s existing attribute keys", eid, len(keys))
-        return keys
+        return _PrefetchedKeys(keys, complete=complete, failed=not complete)
 
     def index_source_attributes(
         self, source_tag: str, attr_type: str, *, keep_meta: bool = False
@@ -1979,6 +2058,7 @@ class MISPWriter:
             rows = self._restsearch_events_for_name(event_name)
             exact = _event_id_exact_from_restsearch_rows(rows, event_name)
             if exact:
+                self._note_event_size(exact, _event_attribute_count_from_restsearch_rows(rows, event_name))
                 return exact
         except _TRANSIENT_HTTP_ERRORS:
             raise
@@ -2003,8 +2083,8 @@ class MISPWriter:
                 "analysis": 0,  # Initial
                 "date": date,
                 "Attribute": [],
-                # Event is an organizational container: ``EdgeGuard-{source}-{date}`` groups by
-                # source + day.  Zone classification lives on **attributes** (``zone:…`` tags)
+                # Event is an organizational container: ``EdgeGuard-{source}-{date}`` (``-part<N>``) groups
+                # by source + day.  Zone classification lives on **attributes** (``zone:…`` tags)
                 # so multi-zone items are handled correctly.  The single event tag marks the
                 # events EdgeGuard wrote (provenance inside this MISP instance).
                 "Tag": [{"name": "EdgeGuard"}],
@@ -2016,6 +2096,7 @@ class MISPWriter:
                 rows2 = self._restsearch_events_for_name(event_name)
                 exact2 = _event_id_exact_from_restsearch_rows(rows2, event_name)
                 if exact2:
+                    self._note_event_size(exact2, _event_attribute_count_from_restsearch_rows(rows2, event_name))
                     return exact2
 
                 response = self.session.post(
@@ -2039,6 +2120,7 @@ class MISPWriter:
                         )
                     if event_id:
                         self.stats["events_created"] += 1
+                        self._note_event_size(str(event_id), 0)
                         logger.info(f"Created MISP event: {event_name} (ID: {event_id})")
                         return str(event_id)
                     return None
@@ -2055,15 +2137,56 @@ class MISPWriter:
 
     @retry_with_backoff(max_retries=4, base_delay=10.0)
     def _find_event_id(self, event_name: str) -> Optional[str]:
-        """The id of the event named exactly ``event_name``, or None; never creates one."""
-        return _event_id_exact_from_restsearch_rows(self._restsearch_events_for_name(event_name), event_name)
+        """The id of the event named exactly ``event_name``, or None; never creates one. Notes the
+        event's ``attribute_count`` (``_note_event_size``)."""
+        rows = self._restsearch_events_for_name(event_name)
+        event_id = _event_id_exact_from_restsearch_rows(rows, event_name)
+        if event_id:
+            self._note_event_size(event_id, _event_attribute_count_from_restsearch_rows(rows, event_name))
+        return event_id
 
-    def _find_later_parts(self, source: str, date: str, part_ids: List[str]) -> List[str]:
-        """``part_ids`` with the ids of the ``-part2``, ``-part3`` ... events of the source/date that exist (2026-10).
+    def _note_event_size(self, event_id: str, count: Optional[int]) -> None:
+        """Remember the ``attribute_count`` an event lookup answered (2026-10, the size of a part for the
+        event split; ``__dict__`` because some tests build the writer without ``__init__``)."""
+        sizes = self.__dict__.setdefault("_event_sizes", {})
+        if count is None:
+            sizes.pop(str(event_id), None)  # each lookup is authoritative: no size kept from an earlier one
+        else:
+            sizes[str(event_id)] = count
 
-        Called only when part 1 is full (parts fill in order, so a later part exists only then). A failed
-        lookup ends the walk at the parts found so far and creates nothing: a second ``-partN`` must not be
-        opened beside the one the lookup missed, and the push goes on to the last part found.
+    def _list_part(self, event_id: str) -> set:
+        """``_get_existing_attribute_keys`` for a later part of the event split (2026-10). A network error
+        does not abort the push: the part's listing counts as failed, so its size comes from its
+        ``attribute_count`` (or it counts as full) and the dedup degrades as for an incomplete listing."""
+        try:
+            return self._get_existing_attribute_keys(event_id)
+        except _TRANSIENT_HTTP_ERRORS as e:
+            logger.warning(
+                "Listing of MISP event %s failed (%s: %s) — sized by its attribute_count", event_id, type(e).__name__, e
+            )
+            return _PrefetchedKeys(complete=False, failed=True)
+
+    def _part_size(self, event_id: str, keys: Optional[set], cap: int) -> int:
+        """Attributes the event holds, for the event split (2026-10): the larger of its prefetched keys and
+        the ``attribute_count`` its lookup answered. An event whose listing failed and whose lookup gave no
+        count counts as full (``cap``), so a MISP error never sends a full part another cap; with the
+        prefetch off and no count, the size is unknown and counts as 0: the event takes up to one more limit."""
+        counted = self.__dict__.get("_event_sizes", {}).get(str(event_id))
+        listed = len(keys) if keys is not None else 0
+        if keys is not None and getattr(keys, "complete", True):
+            return max(listed, counted or 0)
+        if counted is not None:
+            return max(listed, counted)
+        if keys is None or getattr(keys, "failed", False):
+            return cap
+        return listed
+
+    def _find_later_parts(self, source: str, date: str, part_ids: List[str]) -> Tuple[List[str], bool]:
+        """``part_ids`` with the ids of the ``-part2``, ``-part3`` ... events of the source/date that exist,
+        and whether the walk reached the first missing part (2026-10).
+
+        Each lookup notes the part's ``attribute_count``. A failed lookup ends the walk at the parts found
+        so far and returns False: no part is created then, since the one the lookup missed may exist.
         """
         source = sanitize_value(source, max_length=50)
         date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -2072,17 +2195,17 @@ class MISPWriter:
             while True:
                 nxt = self._find_event_id(_event_name(source, date, len(parts) + 1))
                 if not nxt:
-                    return parts
+                    return parts, True
                 parts.append(nxt)
         except Exception as e:
             logger.warning(
-                "Lookup of the parts of %r failed (%s: %s) — pushing to part %d",
+                "Lookup of part %d of %r failed (%s: %s) — no later part is created in this push",
+                len(parts) + 1,
                 _event_name(source, date),
                 type(e).__name__,
                 e,
-                len(parts),
             )
-            return parts
+            return parts, False
 
     def _get_zones_to_tag(self, item: Dict) -> List[str]:
         """
@@ -3126,9 +3249,16 @@ class MISPWriter:
         See docs/MISP_TUNING.md for the full playbook (php.ini /
         my.cnf settings + when to apply each EdgeGuard env knob).
 
+        2026-10 (event split): a group goes to ``EdgeGuard-<source>-<date>`` and, past
+        ``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`` attributes, to ``-part2``, ``-part3`` ... (the push goes to the
+        first part with room; a new part is created right before its first batch); a group with
+        source-report ids (OTX) is not split. See ``_event_split_above`` and
+        docs/COLLECTION_AND_SYNC_LIMITS.md.
+
         2026-10 (unstored items): after the call, ``self.last_push_unstored_items`` lists the
-        positions in *items* of the items MISP did not store because their batch, or their group's
-        event lookup, failed, and of the items of a systemic conversion drop (below). A cursor that
+        positions in *items* of the items MISP did not store because their batch, their group's
+        event lookup, the creation of their part or the lookup of a further part failed, and of the
+        items of a systemic conversion drop (below). A cursor that
         must not pass them (OTX) stops below them. A batch
         failed when MISP stored none of it: HTTP 4xx, a batch error, HTTP 429 or 5xx after the
         retries, and under strict accounting an HTTP 200 that confirms none of it; attributes
@@ -3291,7 +3421,9 @@ class MISPWriter:
         # The threading was added in round 1 (F1: stale source) + round 1
         # (F2: avoid duplicate _get_existing_attribute_keys fetch); the
         # type annotation was forgotten and silently misled mypy.
-        push_queue: List[Tuple[str, str, int, List[Dict]]] = []
+        push_queue: List[Tuple[str, Union[str, _PendingPart], int, List[Dict]]] = []
+        # 2026-10: the event split limit, read once per push (an invalid value warns once).
+        split_knob = _event_split_above()
 
         # PR-F7 (Issue #61 quick-fix): cache cross-event prefetch per
         # source so a single push_items call doesn't re-fetch the same
@@ -3401,8 +3533,9 @@ class MISPWriter:
                     )
                     continue
 
-            # Get or create the group's event (2026-10: its last part, see ``_event_split_above``). A transient failure that survives the retry decorator is
-            # recorded as a failed batch for this source group; the remaining groups are pushed.
+            # Get or create the group's event (2026-10: part 1; later parts below, ``_event_split_above``). A
+            # transient failure that survives the retry decorator is recorded as a failed batch for this
+            # source group; the remaining groups are pushed.
             try:
                 event_id = self._get_or_create_event(source, date)
             except _TRANSIENT_HTTP_ERRORS as e:
@@ -3423,26 +3556,50 @@ class MISPWriter:
                 continue
 
             per_event_keys = self._get_existing_attribute_keys(event_id)
-            # 2026-10: part 1 holding the limit means later parts may exist; new attributes go to the last one.
-            # An attribute already in an earlier part of the day must not be added to it: a complete
-            # cross-event listing names it (``checked_first``); without one the earlier parts are listed here.
+            # 2026-10: the event split (``_event_split_above``). A group with an attribute of a source report
+            # (OTX) is not split: the sync links items per report within one event, and a shared malware/CVE
+            # item carries the ids of nearly every pulse of the day, so no cut keeps the reports whole. It
+            # goes to the event as before.
+            split_above = 0 if split_knob > 0 and any(_attribute_report_ids(a) for a in unique_attrs) else split_knob
             part_ids = [event_id]
+            part_sizes: List[int] = []
+            target = 0
+            walk_complete = True
             earlier_keys: set = set()
-            split_above = _event_split_above()
-            # 2026-10: a group with an attribute of a source report (OTX) is not split: the sync links
-            # items per report within one event, and a shared malware/CVE item carries the ids of nearly
-            # every pulse of the day, so no cut keeps the reports whole. It goes to the event as before.
-            if split_above > 0 and any(_attribute_report_ids(a) for a in unique_attrs):
-                split_above = 0
-            if split_above > 0 and len(per_event_keys) >= split_above:
-                part_ids = self._find_later_parts(source, date, part_ids)
-                if len(part_ids) > 1:
+            if split_above > 0:
+                first_keys = per_event_keys
+                part_sizes = [self._part_size(event_id, per_event_keys, split_above)]
+                # The later parts are looked up when part 1 is full or this push does not fit it, so an overflow
+                # never goes to a part whose size was not read, and on every push without a complete cross-event
+                # listing (``checked_first``), whose dedup then needs every other part of the day: part 1 can be
+                # short (a failed batch) while later parts exist.
+                if part_sizes[0] >= split_above or len(unique_attrs) > split_above - part_sizes[0] or not checked_first:
+                    part_ids, walk_complete = self._find_later_parts(source, date, part_ids)
+                    # Without a complete cross-event listing every part is listed for the dedup below, and the
+                    # listing sizes it too; otherwise a later part is sized by its lookup's ``attribute_count``
+                    # (no count: full).
+                    part_keys: Dict[int, set] = {0: first_keys}
                     if not checked_first:
-                        earlier_keys = set(per_event_keys)
-                        for mid_id in part_ids[1:-1]:
-                            earlier_keys |= self._get_existing_attribute_keys(mid_id)
-                    event_id = part_ids[-1]
-                    per_event_keys = self._get_existing_attribute_keys(event_id)
+                        for k in range(1, len(part_ids)):
+                            part_keys[k] = self._list_part(part_ids[k])
+                    part_sizes += [
+                        self._part_size(part_ids[k], part_keys.get(k), split_above) for k in range(1, len(part_ids))
+                    ]
+                    # The first part with room takes the push: parts fill in order, and a part left short
+                    # (a failed batch) is filled before a new one is opened.
+                    target = next((k for k, size in enumerate(part_sizes) if size < split_above), len(part_ids) - 1)
+                    if target:
+                        event_id = part_ids[target]
+                        if target not in part_keys:
+                            part_keys[target] = self._list_part(event_id)
+                        per_event_keys = part_keys[target]
+                        part_sizes[target] = self._part_size(event_id, per_event_keys, split_above)
+                    # An attribute already in another part of the day must not be added again: a complete
+                    # cross-event listing names it; without one the other parts' listings are used here.
+                    if not checked_first:
+                        for k, keys_k in part_keys.items():
+                            if k != target:
+                                earlier_keys |= keys_k
             before_ct = len(unique_attrs)
             # Per-event filter (attrs already in THIS event, or in an earlier part of the day)
             after_per_event = [
@@ -3497,49 +3654,49 @@ class MISPWriter:
             #    prefetch cost on the exact events PR-N4 targets. Reuse
             #    the count we already paid for during dedup.
             #
-            # 2026-10: the last part takes attributes up to ``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE``; the rest
-            # goes to the next parts, each created here, before the push loop writes anything to it, so
-            # a crash leaves full parts and at most an empty one, never attributes without an event.
-            room = max(0, split_above - len(per_event_keys)) if split_above > 0 else len(unique_attrs)
-            if len(unique_attrs) <= room:
+            if split_above <= 0:
                 push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
-            else:
-                chunks = _split_for_parts(unique_attrs, room, split_above)
-                if chunks[0]:
-                    push_queue.append((source, event_id, len(per_event_keys), chunks[0]))
-                part_no = len(part_ids)
-                for n_chunk, chunk in enumerate(chunks[1:], start=1):
-                    part_no += 1
-                    try:
-                        part_event_id = self._get_or_create_event(source, date, part_no)
-                    except _TRANSIENT_HTTP_ERRORS as e:
-                        logger.error(
-                            "Creation of part %d of %s (%s) failed after retries (%s: %s)",
-                            part_no,
-                            source,
-                            date,
-                            type(e).__name__,
-                            e,
-                        )
-                        self.stats["errors"] += 1
-                        part_event_id = None
-                    if not part_event_id:
-                        lost = [a for later in chunks[n_chunk:] for a in later]
-                        total_failed += len(lost)
-                        _note_unstored(lost)
-                        break
-                    logger.info(
-                        "MISP push %s (%s): event %s holds %s attributes (split above %s) — %s go to part %d (event %s)",
-                        source,
-                        date,
-                        part_ids[-1],
-                        len(per_event_keys),
-                        split_above,
-                        len(chunk),
-                        part_no,
-                        part_event_id,
-                    )
-                    push_queue.append((source, part_event_id, 0, chunk))
+                continue
+            # 2026-10: the part found above takes attributes up to ``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE``, the later
+            # parts that exist take what fits them, and the rest goes to new parts of at most the limit each.
+            # A new part is created by the push loop when its first batch is about to be written
+            # (``_PendingPart``), so a push that stops early leaves no empty part.
+            later = range(target, len(part_ids))
+            chunks, new_chunks = _allot_to_parts(
+                unique_attrs, [split_above - part_sizes[k] for k in later], split_above
+            )
+            for k, chunk in zip(later, chunks, strict=True):
+                if chunk:
+                    push_queue.append((source, part_ids[k], part_sizes[k], chunk))
+            if new_chunks and not walk_complete:
+                lost = [a for chunk in new_chunks for a in chunk]
+                logger.error(
+                    "MISP push %s (%s): %d attribute(s) do not fit the parts found, and the lookup of the next "
+                    "part failed — counted as failed, no part created",
+                    source,
+                    date,
+                    len(lost),
+                )
+                self.stats["errors"] += 1
+                total_failed += len(lost)
+                _note_unstored(lost)
+                new_chunks = []
+            for part_no, chunk in enumerate(new_chunks, start=len(part_ids) + 1):
+                push_queue.append((source, _PendingPart(source, date, part_no), 0, chunk))
+            if len(part_ids) > 1 or new_chunks:
+                logger.info(
+                    "MISP push %s (%s): split above %d — %s",
+                    source,
+                    date,
+                    split_above,
+                    "; ".join(
+                        [
+                            f"part {k + 1} (event {part_ids[k]}) holds {part_sizes[k]}, takes {len(chunk)}"
+                            for k, chunk in zip(later, chunks, strict=True)
+                        ]
+                        + [f"new part {n} takes {len(c)}" for n, c in enumerate(new_chunks, start=len(part_ids) + 1)]
+                    ),
+                )
 
         # Only a true dedup skip: nothing failed (#216: a group whose event lookup/creation failed is
         # counted as failed) and nothing was dropped in conversion (2026-10; a drop that is only
@@ -3553,7 +3710,7 @@ class MISPWriter:
             )
 
         # Throttle delay between batches — gives MISP time to free memory
-        # when processing large events (e.g. 95K NVD attributes).
+        # when processing large events (e.g. the OTX event of a 730-day baseline, about 150,000 attributes).
         try:
             batch_throttle = float(os.environ.get("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "5.0"))
         except (ValueError, TypeError):
@@ -3718,7 +3875,25 @@ class MISPWriter:
         if not hasattr(self, "_misp_push_consecutive_successes"):
             self._misp_push_consecutive_successes = 0
 
+        # 2026-10: (source, date) groups whose new part could not be created; their later parts are not
+        # created either, so the walk of the next push finds no part after a gap.
+        failed_part_groups: set = set()
         for source, event_id, existing_attrs_count, unique_attrs in push_queue:
+            pending = event_id if isinstance(event_id, _PendingPart) else None
+            if pending is not None:
+                event_id = None
+                if (pending.source, pending.date) in failed_part_groups:
+                    total_batches -= -(-len(unique_attrs) // _adaptive_for(existing_attrs_count)[0])
+                    logger.error(
+                        "MISP push %s (%s): part %d not created — %d attribute(s) counted as failed",
+                        pending.source,
+                        pending.date,
+                        pending.part,
+                        len(unique_attrs),
+                    )
+                    total_failed += len(unique_attrs)
+                    _note_unstored(unique_attrs)
+                    continue
             # PR-N4: ADAPTIVE SCALING. ``existing_attrs_count`` was
             # captured during the dedup loop above (we already paid for
             # ``_get_existing_attribute_keys(event_id)`` there) and
@@ -3843,6 +4018,45 @@ class MISPWriter:
                 liveness_cb = getattr(self, "liveness_callback", None)
                 if liveness_cb is not None:
                     liveness_cb()
+
+                # 2026-10: a new part of the event split is created here, after the throttle pause, the
+                # back-off cooldown and the liveness check of its first batch, so a push that stops before it
+                # writes to a part leaves no empty part. A part that cannot be created fails its attributes
+                # and every later new part of its group (``failed_part_groups``).
+                if pending is not None and event_id is None:
+                    try:
+                        event_id = self._get_or_create_event(pending.source, pending.date, pending.part)
+                    except _TRANSIENT_HTTP_ERRORS as e:
+                        logger.error(
+                            "Creation of part %d of %s (%s) failed after retries (%s: %s)",
+                            pending.part,
+                            pending.source,
+                            pending.date,
+                            type(e).__name__,
+                            e,
+                        )
+                        self.stats["errors"] += 1
+                    if not event_id:
+                        failed_part_groups.add((pending.source, pending.date))
+                        total_batches -= -(-len(unique_attrs) // effective_batch_size)
+                        logger.error(
+                            "MISP push %s (%s): part %d not created — %d attribute(s) counted as failed",
+                            pending.source,
+                            pending.date,
+                            pending.part,
+                            len(unique_attrs),
+                        )
+                        total_failed += len(unique_attrs)
+                        _note_unstored(unique_attrs)
+                        break
+                    logger.info(
+                        "MISP push %s (%s): part %d is event %s — %d attribute(s) go to it",
+                        pending.source,
+                        pending.date,
+                        pending.part,
+                        event_id,
+                        len(unique_attrs),
+                    )
 
                 # Progress logging
                 processed_batches += 1

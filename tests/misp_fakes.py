@@ -57,6 +57,7 @@ class FakeMisp:
         self.adds_without_list = False  # answer additions without the event's attribute list
         self.listing_status = None  # HTTP status of every attribute listing request
         self.rows_without_event = False  # listing rows without their ``Event`` (as a reduced answer)
+        self.event_lookup_status = None  # HTTP status of every event lookup (``/events/restSearch``)
 
     def _now(self, at_least: float = 0.0) -> str:
         now = self.clock() if self.clock is not None else at_least
@@ -68,10 +69,20 @@ class FakeMisp:
         if path == "/attributes/restSearch":
             return self._rest_search(json or {})
         if path == "/events/restSearch":
-            # MISP's exact Event.info filter (``eventinfo``, honoured from 2.4.177 on).
+            # MISP's exact Event.info filter (``eventinfo``, honoured from 2.4.177 on). The metadata rows carry
+            # ``attribute_count`` as a string, as MISP 2.5.45 answers it.
             info = (json or {}).get("eventinfo")
+            if self.event_lookup_status is not None:
+                return Response(self.event_lookup_status, {"errors": "lookup failed"})
             return Response(
-                200, {"response": [{"Event": {"id": i, "info": n}} for i, n in self.events.items() if n == info]}
+                200,
+                {
+                    "response": [
+                        {"Event": {"id": i, "info": n, "attribute_count": str(self._count(i))}}
+                        for i, n in self.events.items()
+                        if n == info
+                    ]
+                },
             )
         if path == "/events":
             event_id = str(200 + len(self.events))
@@ -98,6 +109,9 @@ class FakeMisp:
             for a in (body or {}).get("Attribute", [])
         ]
 
+    def events_by_name(self, name: str) -> str:
+        return next(i for i, n in self.events.items() if n == name)
+
     def by_value(self, value: str) -> dict:
         return next(a for a in self.attributes if a["value"] == value)
 
@@ -113,6 +127,9 @@ class FakeMisp:
         ]
 
     # ------------------------------------------------------------------ answers
+    def _count(self, event_id: str) -> int:
+        return sum(1 for a in self.attributes if a["event_id"] == event_id)
+
     def _row(self, attr: dict) -> dict:
         row = copy.deepcopy(attr)
         if not self.rows_without_event:

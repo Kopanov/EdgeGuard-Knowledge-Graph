@@ -2,10 +2,11 @@
 
 **Audience:** operators deploying or upgrading EdgeGuard against a
 MISP backend that will absorb >50,000 attributes per event during
-baseline runs (OTX at 365–730 day lookback; since 2026-10 the writer
-splits other sources' events at `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, default
-20000, see [Event size](#event-size), so NVD and URLhaus pass 50,000 only
-in events written before that or with the split off).
+baseline runs: the OTX event of a 365–730 day baseline, which the writer
+does not split. Every other source/date event is continued in `-part2`,
+`-part3`, ... at `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000, see
+[Event size](#event-size)), so NVD and URLhaus pass 50,000 attributes per
+event only with the split off or set above 50,000.
 
 **Why this exists:** a default Docker MISP container answers HTTP 500
 to most batch pushes once an event holds more than about 50,000
@@ -17,8 +18,8 @@ batching alone, against a small PHP `memory_limit`, only fails more
 slowly.
 
 The thresholds and settings here are field-tested against the
-EdgeGuard 730-day baseline workload (~150K OTX attrs + ~100K NVD
-attrs in single events).
+EdgeGuard 730-day baseline workload: single events of up to ~150K
+attributes (the OTX event of a 730-day baseline).
 
 ---
 
@@ -211,9 +212,10 @@ environment, and `docker-compose.yml` forwards every one of them from
 | `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Sleep between batches. The adaptive logic widens this to `15s` / `30s` for large/huge events. Attribute edits also sleep it after every 50 edits, without widening: the NVD incremental run, the CISA KEV in-place edits (every run compares the whole catalogue) and the `last_seen` refresh of indicators a source reports again. |
 | `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` | `50000` | Above this attribute count on the target event, EdgeGuard switches to `batch_size=100, throttle=15s`. Lower if your MISP is undersized. |
 | `EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD` | `100000` | Above this, switches to `batch_size=50, throttle=30s`. |
+| `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` | `20000` | Most attributes per event of a source/date; the writer continues in `-part2`, `-part3`, ... ([Event size](#event-size)). While it is not above `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD`, no part reaches the tiers below. Lower it (1000 at least) to keep parts smaller on an undersized MISP; it does not change the OTX event. `0` turns the split off. |
 | `EDGEGUARD_MISP_BACKOFF_THRESHOLD` | `3` | Number of consecutive 5xx batch failures before EdgeGuard inserts an extended cooldown. **Valid range: 2–100.** Setting `1` would trigger the 5-min cooldown after a single failure (which `@retry_with_backoff` already handles internally), turning every transient 5xx into a multi-hour stall — values below 2 are silently clamped to the default 3 with a WARN. |
 | `EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC` | `300.0` | Cooldown duration. 5 min is enough for MISP's PHP to recycle and MySQL to free transaction locks. |
-| `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` | `true` | Master switch of the duplicate check before a push: existing `(type, value)` on the target event (its count also drives the adaptive tier) and, with `EDGEGUARD_MISP_CROSS_EVENT_DEDUP` (default `true`), among the attributes that carry the source's tag in any MISP event. **Leave on** — the adaptive scaling tier resolution depends on `existing_attrs_count` which is computed from the prefetch result. With prefetch off, the writer has no per-event size signal and falls back to the configured default batch/throttle for every event, which is the non-adaptive behaviour the scaling exists to avoid. Turning it off only makes sense if you have an external dedup layer (rare). |
+| `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` | `true` | Master switch of the duplicate check before a push: existing `(type, value)` on the target event (its count also drives the adaptive tier) and, with `EDGEGUARD_MISP_CROSS_EVENT_DEDUP` (default `true`), among the attributes that carry the source's tag in any MISP event. **Leave on** — the adaptive scaling tier resolution depends on `existing_attrs_count` which is computed from the prefetch result, and the event split takes a part's size from it (with prefetch off, from the event's `attribute_count` alone; without a count the part counts as empty and can take up to one more limit). With prefetch off, the writer has no per-event size signal for an event it does not split (OTX, or every event with the split off) and falls back to the configured default batch/throttle for it, which is the non-adaptive behaviour the scaling exists to avoid. Turning it off only makes sense if you have an external dedup layer (rare). |
 
 ### Adaptive scaling tiers (the rule EdgeGuard applies per event)
 
@@ -312,15 +314,22 @@ host.
 
 ## Event size
 
-A baseline used to write one MISP event per source. Since 2026-10 the
-writer continues a source/date event in `EdgeGuard-<source>-<date>-part2`,
+The writer continues a source/date event in `EdgeGuard-<source>-<date>-part2`,
 `-part3`, ... once it holds `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default
-20000) attributes, so a part stays small enough for one `/events/view` and
-the adaptive batching above no longer engages for new parts. OTX events are
-not split and can still grow past 50K; adaptive batching with the settings
-above still applies to them and to events written before the split
-([COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)). Moving OTX
-to parts needs sync-side linking across parts:
+20000) attributes, each part holding at most that many, so a part loads with
+one `/events/view` and, with the default thresholds, never reaches the
+adaptive tiers above (an `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` lowered below
+the split, such as the 10000 of the small-host settings, applies them to
+parts too). A (source, date) group with an attribute that names an OTX
+report is not split, because the sync links report items only within one
+event: the OTX event of a 365–730 day baseline passes 50K attributes, and
+the adaptive batching and the server settings above apply to it, as to
+every event with the split off. An event of an earlier day takes no new
+attributes, only in-place edits, which `EDGEGUARD_MISP_BATCH_THROTTLE_SEC`
+paces without the tiers
+([COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts)).
+Splitting OTX events needs the sync to link report items across the parts
+of a day:
 [ROADMAP.md § Collection depth and scale](ROADMAP.md#collection-depth-and-scale).
 
 ---
@@ -340,7 +349,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
-- 2026-10-25 — Event size: the writer continues a source/date event in `-partN` events past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000), except OTX; the audience and the event-size section say so (they said a baseline writes one event per source and partitioning is planned).
+- 2026-10-25 — Event size and audience: the writer continues a source/date event in `-partN` events of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, except a group with OTX report ids, so the OTX event is the baseline event past 50,000 attributes; with the default thresholds no part reaches the adaptive tiers (a lowered `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` applies them to parts); a knob row for the split, and the prefetch row says the split reads a part's size from it (the page said a baseline writes one event per source, URLhaus one event of about 63,000 URLs, and partitioning is planned).
 - 2026-10-25 — Audience: URLhaus (its whole `recent.csv` export in one baseline event, about 63,000 URLs on 2026-10-24) named among the sources whose baseline events pass 50,000 attributes; ThreatFox (at most 10,000 IOCs per run) removed from them.
 - 2026-10-23 — The page names no deployed MISP image: it said `harvarditsecurity/misp:latest` is deployed, which the repository cannot verify; the README points here for the MISP server settings; the planned event sharding (a shard per 25K attributes) gave way to a pointer to ROADMAP.md, which lists the partitioning of large baseline events by date range.
 - 2026-10-17 — The reference `php-overrides.ini` for `coolacid` documented with its larger values (8G, 512M, 3600 s; for hosts with 16 GB or more), where the page said the values were identical for both images; `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` also paces the CISA KEV in-place edits and the `last_seen` refresh; `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` described as the master switch of the per-event and cross-event duplicate checks; the alert rules shown as shipped in `prometheus/alerts.yml` (the documented backoff rule `rate(...) > 1` never fired); `docker-compose.yml` forwards `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` and the four threshold and back-off settings (a value set in `.env` for those five had not reached the container, so the code defaults applied); main text limited to current behaviour, with the change history in this section.

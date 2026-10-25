@@ -870,7 +870,9 @@ class TestBugbotRound2Fixes:
         added in round 1 (Bugbot F1 + F2). Pre-fix the annotation said
         2-tuple while the data was 4-tuple, silently misleading mypy."""
         src = self._src()
-        assert "push_queue: List[Tuple[str, str, int, List[Dict]]] = []" in src, (
+        # 2026-10: the event id slot may hold a ``_PendingPart`` (a part of the event split created when its
+        # first batch is written).
+        assert "push_queue: List[Tuple[str, Union[str, _PendingPart], int, List[Dict]]] = []" in src, (
             "Round-2 Fix #7: push_queue type annotation must match the "
             "4-tuple actually used (source, event_id, existing_count, attrs)"
         )

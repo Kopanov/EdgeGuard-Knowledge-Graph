@@ -105,7 +105,7 @@ Airflow and collectors resolve **`MISP_URL`** from **inside** containers. `local
 
 **Apache vhost / `Host` header:** If MISP only answers for a specific name, set **`EDGEGUARD_MISP_HTTP_HOST`** (no `https://`).
 
-**MISP event vs attribute tags:** EdgeGuard events use **`EdgeGuard-{source}-{date}`** as the event name (e.g., `EdgeGuard-nvd-2026-03-29`). The event carries the **`EdgeGuard`** tag at event level. **Zone and source classification** lives on **attribute-level tags** (`zone:Finance`, `source:NVD`) — a single event can contain multi-zone attributes. See [MISP_SOURCES.md](MISP_SOURCES.md). Sector keyword scoring thresholds: **`EDGEGUARD_ZONE_DETECT_THRESHOLD`** / **`EDGEGUARD_ZONE_ITEM_THRESHOLD`** in **`.env.example`**.
+**MISP event vs attribute tags:** EdgeGuard events use **`EdgeGuard-{source}-{date}`** as the event name (e.g., `EdgeGuard-nvd-2026-03-29`), continued in `-part2`, `-part3`, ... once the event holds `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (OTX events are not split). The event carries the **`EdgeGuard`** tag at event level. **Zone and source classification** lives on **attribute-level tags** (`zone:Finance`, `source:NVD`) — a single event can contain multi-zone attributes. See [MISP_SOURCES.md](MISP_SOURCES.md). Sector keyword scoring thresholds: **`EDGEGUARD_ZONE_DETECT_THRESHOLD`** / **`EDGEGUARD_ZONE_ITEM_THRESHOLD`** in **`.env.example`**.
 
 ### 3.4 Build and start
 
@@ -301,10 +301,11 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — MISP event names: the `-part2`, `-part3`, ... events past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (OTX events are not split).
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY`: only `false`, `0`, `no` or `off` turns TLS verification off; any other value keeps it on with a warning (minimum-variables table and troubleshooting).
 - 2026-10-23 — The documentation map is docs/README.md, with links to CONFIGURATION.md and CLI.md; § 3.6 names the Airflow API password a host shell needs, which the README carried, and the second cause of the "Could not query DAG list" warning (no EdgeGuard DAG registered yet).
 - 2026-10-22 — `certificate verify failed` (MISP): `requests` and PyMISP trust the `certifi` bundle only; a corporate CA goes into a bundle named by `REQUESTS_CA_BUNDLE`.

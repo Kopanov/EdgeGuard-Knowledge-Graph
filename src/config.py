@@ -664,9 +664,9 @@ MISP_PREFETCH_EXISTING_ATTRS = _env_bool("EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS
 # event) and skips them — saves MISP storage AND avoids the per-event size
 # cost that triggers HTTP 500s on big events.
 #
-# The architectural fix (event partitioning by attribute date) is Issue #61.
-# This flag is the cheap quick-fix that takes immediate pressure off MISP
-# without the migration that #61 requires. Default ON — operators on small
+# Event size is bounded by MISPWriter's event split (EDGEGUARD_MISP_EVENT_SPLIT_ABOVE,
+# -part<N>; not OTX); with the split, this listing also dedups across the parts of
+# a day (without it the writer lists the other parts). Default ON — operators on small
 # MISP installs (where the cross-event prefetch query is cheap) get
 # protection out-of-the-box; operators on huge installs can disable if
 # the prefetch query becomes the slow part of a baseline.

@@ -218,7 +218,8 @@ NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
 
 # Substring of the event title that marks an EdgeGuard event (titles look like
-# ``EdgeGuard-{source}-{date}``), matched case-insensitively by ``_is_edgeguard_index_event``.
+# ``EdgeGuard-{source}-{date}``, ``-part<N>`` from the second part), matched case-insensitively by
+# ``_is_edgeguard_index_event``.
 # 2026-10: the restSearch fallback sends it as ``eventinfo: "%<needle>%"`` (a LIKE filter on
 # ``Event.info``). MISP honours ``eventinfo`` from 2.4.177 on and an older MISP ignores it, so the
 # fallback also keeps only the rows ``_is_edgeguard_index_event`` accepts. The ``search`` key used
@@ -851,7 +852,7 @@ _ENTITY_STIX_TYPES = frozenset({"malware", "intrusion-set", "threat-actor", "too
 
 
 def _event_source_id(event_info: Any) -> str:
-    """The source id in an EdgeGuard event name (``EdgeGuard-<source>-<date>``), or ``""``."""
+    """The source id in an EdgeGuard event name (``EdgeGuard-<source>-<date>``, ``-part<N>`` too), or ``""``."""
     parts = str(event_info or "").split("-")
     return parts[1] if len(parts) >= 3 and parts[0] == "EdgeGuard" else ""
 

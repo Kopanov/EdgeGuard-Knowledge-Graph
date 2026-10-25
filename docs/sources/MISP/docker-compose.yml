@@ -8,7 +8,7 @@
 ## § "Where MISP runs" for the path differences (Apache vs php-fpm).
 ##
 ## Settings here are field-tested against the EdgeGuard 730-day baseline
-## (~150K OTX attrs + ~100K NVD attrs in single events). See PR-N4 +
+## (single events of up to ~150K attributes: the OTX event of a 730-day baseline). See PR-N4 +
 ## docs/MISP_TUNING.md for the full backend-tuning playbook.
 
 services:
@@ -17,7 +17,7 @@ services:
     container_name: misp_misp_1
     restart: unless-stopped
     # Memory limit bumped to 8g (from the 4g default) because a full
-    # EdgeGuard baseline pushes 95K+ attributes per event (NVD feed),
+    # EdgeGuard baseline pushes ~150K attributes into one event (OTX),
     # and PHP loads the full event context on every POST /attributes/add.
     # On a 4g cap the MISP container OOM-kills mid-baseline and the
     # Airflow task has to retry. See docs/MISP_TUNING.md § "Prerequisites"
@@ -38,7 +38,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
       # PHP process memory_limit override — the Docker mem_limit (8g) is the
       # container ceiling; this .ini raises the PHP-internal ceiling from 2g
-      # to match. Without it, PHP OOM-kills on the NVD 95K-attribute event
+      # to match. Without it, PHP OOM-kills on the ~150K-attribute OTX event
       # even though the container has 6g of headroom.
       #
       # Mount path matches coolacid/misp-docker (debian:bullseye-slim base,
@@ -57,7 +57,7 @@ services:
     image: mysql:8.0
     container_name: misp_db_1
     restart: unless-stopped
-    # Matches the misp service bump — a 95K-row insert needs working
+    # Matches the misp service bump — a ~150K-row event needs working
     # memory for InnoDB buffer pool and query cache. 4g is the old
     # default and was OOM-prone during baseline.
     mem_limit: 8g

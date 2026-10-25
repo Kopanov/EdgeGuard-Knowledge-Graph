@@ -33,8 +33,6 @@ for item in items:
 
 ## HIGH — H2. Large-event split is never performed by the writer
 
-> **Fixed 2026-10-25.** `push_items` continues a source/date event in `EdgeGuard-<source>-<date>-part2`, `-part3` ... above `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (default 20000, `0` = off); the next part is created before any attribute is written to it, dedup spans all parts. OTX events are not split (the sync links report items only within one event, and shared malware/CVE items carry the ids of nearly every pulse of a day), so they still grow without a limit; splitting them needs sync-side linking across parts. Events that were already oversized are not migrated; the sync pages them (`EDGEGUARD_MISP_PAGED_FETCH_ABOVE`). The text below is the 2026-04-20 finding.
-
 **File:** `src/collectors/misp_writer.py:1344-1617`
 
 `EDGEGUARD_MAX_EVENT_ATTRIBUTES` is only consulted on the READ side (`run_misp_to_neo4j.py:3405`) to defer oversize events on sync. **`push_items` has no split-off logic**: NVD pushing ~95k attrs to one event just piles them on. MISP's per-event edit handler chokes (observed 22% HTTP 500 on 730d NVD baseline). `@retry_with_backoff` retries the same overloaded event forever until terminal failure.
