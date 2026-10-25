@@ -194,9 +194,9 @@ MAX_RETRIES = 4
 
 # 2026-10: events with more attributes than this (MISP index ``attribute_count``) are read in pages
 # (``/events/restSearch`` metadata, then ``/attributes/restSearch``) instead of one ``/events/view``.
-# Prod MISP answered HTTP 500 to every ``/events/view`` of a 145k-attribute NVD event (about 550 MB
-# of JSON), so each sync that saw it changed failed. ``0`` turns the threshold off; a whole-event
-# fetch that still answers 5xx after its retries falls back to pages either way.
+# The hosted MISP answered HTTP 500 to every ``/events/view`` of a 145k-attribute NVD event (about
+# 550 MB of JSON), so each sync that saw it changed failed. ``0`` turns the threshold off; a
+# whole-event fetch that still answers 5xx after its retries falls back to pages either way.
 def _paged_fetch_above() -> int:
     try:
         return int(os.environ.get("EDGEGUARD_MISP_PAGED_FETCH_ABOVE", "20000"))
@@ -2005,6 +2005,9 @@ class MISPToNeo4jSync:
             # 2026-10-20: ``text`` attributes that start like an ATT&CK id but hold no valid one (a value
             # MISP's Import Regexp rules rewrote), skipped with an [ATTACK-VALUE] warning.
             "attack_values_skipped": 0,
+            # 2026-10: events fetched in pages that arrived with fewer attribute rows than the MISP
+            # index lists ([PAGED-FETCH-INCOMPLETE]); reported in the run summary, not an error.
+            "events_paged_incomplete": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None,
@@ -2654,13 +2657,22 @@ class MISPToNeo4jSync:
         response.raise_for_status()
         return response.json()
 
-    def fetch_event_details_paged(self, event_id: str) -> Optional[Dict]:
+    def fetch_event_details_paged(self, event_id: str, attribute_count: int = 0) -> Optional[Dict]:
         """Fetch an event as ``fetch_event_details`` does, without one ``/events/view`` (2026-10).
 
         The event fields and tags come from ``/events/restSearch`` with ``metadata``, the attributes
-        from ``/attributes/restSearch`` in pages of ``_ATTR_PAGE_SIZE``. Only top-level attributes
-        are kept (``object_id`` 0), which is what ``/events/view`` lists under ``Attribute``; the
-        sync reads only those. Returns None when MISP lists no such event.
+        from ``/attributes/restSearch`` in pages of ``_ATTR_PAGE_SIZE``, ordered by attribute id so
+        that offset paging has a defined order. Only top-level attributes are kept (``object_id``
+        0), which is what ``/events/view`` lists under ``Attribute``; the sync reads only those.
+
+        Paging stops on an empty page or on a page with no attribute not seen before (MISP ignored
+        ``page``). A short page does not end it: MISP removes rows from a page after applying the
+        limit (Allowedlist entries, the sync account's default search filters), so more pages can
+        follow. ``attribute_count`` is the event's count in the MISP index, top-level and object
+        attributes together; when fewer distinct rows arrive, a ``[PAGED-FETCH-INCOMPLETE]``
+        warning names the event and both counts and ``stats["events_paged_incomplete"]`` counts the
+        event for the run summary. The rows received are synced and the run does not fail for it.
+        Returns None when MISP lists no such event.
         """
         body = self._misp_post_json(
             "/events/restSearch", {"eventid": event_id, "metadata": True, "returnFormat": "json"}
@@ -2676,7 +2688,13 @@ class MISPToNeo4jSync:
         while True:
             body = self._misp_post_json(
                 "/attributes/restSearch",
-                {"eventid": event_id, "page": page, "limit": self._ATTR_PAGE_SIZE, "returnFormat": "json"},
+                {
+                    "eventid": event_id,
+                    "page": page,
+                    "limit": self._ATTR_PAGE_SIZE,
+                    "order": "Attribute.id",
+                    "returnFormat": "json",
+                },
             )
             response = body.get("response") if isinstance(body, dict) else None
             page_rows = coerce_misp_attribute_list((response or {}).get("Attribute"))
@@ -2686,14 +2704,34 @@ class MISPToNeo4jSync:
                 if str(attr.get("object_id") or "0") == "0":
                     attr.pop("Event", None)  # restSearch adds the parent event; /events/view does not
                     attributes.append(attr)
-            # A short page ends the listing; a page with nothing new means MISP ignored ``page``.
-            if len(page_rows) < self._ATTR_PAGE_SIZE or not new:
+            # An empty page ends the listing; a page with nothing new means MISP ignored ``page``.
+            if not page_rows or not new:
                 break
             page += 1
         event["Attribute"] = attributes
+        received = len(seen)
         logger.info(
-            "Event %s: fetched %s attributes in %s page(s) of %s", event_id, len(attributes), page, self._ATTR_PAGE_SIZE
+            "Event %s: fetched %s top-level attributes (%s rows with object attributes) in %s request(s) of %s",
+            event_id,
+            len(attributes),
+            received,
+            page,
+            self._ATTR_PAGE_SIZE,
         )
+        if attribute_count > 0 and received < attribute_count:
+            logger.warning(
+                "[PAGED-FETCH-INCOMPLETE] Event %s: /attributes/restSearch returned %s attribute rows "
+                "(top-level and object), the MISP index lists %s. MISP may have removed rows (an "
+                "Allowedlist entry or a default search filter of the sync account), or the event "
+                "changed after the index was read. The rows received are synced; the run does not "
+                "fail for this.",
+                event_id,
+                received,
+                attribute_count,
+            )
+            stats = getattr(self, "stats", None)
+            if isinstance(stats, dict):
+                stats["events_paged_incomplete"] = int(stats.get("events_paged_incomplete", 0) or 0) + 1
         return event
 
     # Distinct unmapped ``source:*`` tag names that receive their own
@@ -5658,16 +5696,19 @@ class MISPToNeo4jSync:
             ", ".join(missing) or "(names not available)",
         )
 
-    # Attribute page size for streaming large events (prevents OOM on 100K+ attribute events).
+    # Page size of the ``/attributes/restSearch`` fetch and chunk size of the Neo4j writes of a large event.
     _ATTR_PAGE_SIZE = 5000
 
     def _process_single_event(self, event_id: str, event_info: str, attribute_count: int = 0) -> Tuple[int, int, int]:
         """Process one MISP event: fetch → parse → merge → relationships.
 
         Events over ``EDGEGUARD_MISP_PAGED_FETCH_ABOVE`` attributes (``attribute_count``, from the
-        MISP index) are fetched in pages via ``/attributes/restSearch``
-        (``fetch_event_details_paged``). For events exceeding ``_ATTR_PAGE_SIZE`` attributes,
-        each page of attributes is synced to Neo4j before the next is parsed.
+        MISP index) are fetched as ``/events/restSearch`` metadata plus ``/attributes/restSearch``
+        pages of ``_ATTR_PAGE_SIZE`` (``fetch_event_details_paged``), joined into one attribute
+        list; smaller events are fetched whole (``fetch_event_details``), and a whole-event fetch
+        that still answers 5xx after its retries falls back to pages. An event with more than
+        ``_ATTR_PAGE_SIZE`` attributes is then parsed and written to Neo4j in chunks of that size
+        (``_process_large_event_paged``).
 
         Returns:
             (parsed_items_count, cross_rels_count, error_count)
@@ -5678,7 +5719,7 @@ class MISPToNeo4jSync:
 
         paged_above = _paged_fetch_above()
         if paged_above > 0 and attribute_count > paged_above:
-            full_event = self.fetch_event_details_paged(event_id)
+            full_event = self.fetch_event_details_paged(event_id, attribute_count)
         else:
             try:
                 full_event = self.fetch_event_details(event_id)
@@ -5686,7 +5727,7 @@ class MISPToNeo4jSync:
                 logger.warning(
                     "Event %s: whole-event fetch failed after retries (%s) — fetching in pages", event_id, exc
                 )
-                full_event = self.fetch_event_details_paged(event_id)
+                full_event = self.fetch_event_details_paged(event_id, attribute_count)
         if not full_event:
             # ``fetch_event_details`` returns None only after its retries are exhausted or on
             # a permanent (4xx / unparsable) failure. Count the event as failed so the
@@ -5862,9 +5903,9 @@ class MISPToNeo4jSync:
     ) -> Tuple[int, int, int]:
         """Process a large event by chunking its attributes into pages.
 
-        Each page of attributes is parsed, synced to Neo4j, and then discarded
-        before the next page is loaded.  This keeps peak memory proportional to
-        ``_ATTR_PAGE_SIZE`` rather than the full event size.
+        Each chunk of ``_ATTR_PAGE_SIZE`` attributes is parsed, synced to Neo4j and discarded before
+        the next chunk is parsed, so the parsed items held at once are bounded by the chunk size.
+        The event's attribute list (``all_attributes``) stays in memory for the whole call.
         """
         import gc
 
@@ -6549,6 +6590,15 @@ class MISPToNeo4jSync:
                     "ATT&CK values skipped because they hold no valid ATT&CK id: %d (grep '[ATTACK-VALUE]'; "
                     "a MISP Import Regexp rule may have rewritten them; not counted as errors)",
                     attack_values_skipped,
+                )
+            # 2026-10: paged events with fewer attribute rows than the MISP index lists
+            # (``fetch_event_details_paged``).
+            events_paged_incomplete = int(self.stats.get("events_paged_incomplete", 0) or 0)
+            if events_paged_incomplete:
+                logger.warning(
+                    "Events fetched in pages with fewer attributes than the MISP index lists: %d "
+                    "(grep '[PAGED-FETCH-INCOMPLETE]'; the rows received were synced; not counted as errors)",
+                    events_paged_incomplete,
                 )
             # PR-N28: surface placeholder rejections separately so operators
             # can distinguish "graph corrupted by adversarial input" from
