@@ -3067,7 +3067,7 @@ def run_baseline_full_sync(**context):
     # 2026-10: the scheduled sync derives its window from this file. Without a stamp it ran a full
     # sync after the baseline (no file) or treated every attribute since the previous baseline as
     # changed (a stale file): the baseline's full sync (about 6 h) again, within the scheduled task's
-    # own 8 h limit (4 h before 2026-10).
+    # own limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, 8 h by default; 4 h before 2026-10).
     import json
 
     state_file = get_state_file()
