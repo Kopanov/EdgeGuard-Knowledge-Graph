@@ -353,7 +353,7 @@ class TestMISPWriterCallbackIntegration:
         is structurally impossible."""
         with open("src/collectors/misp_writer.py") as fh:
             src = fh.read()
-        idx = src.find("def __init__(")
+        idx = src.find("def __init__(", src.find("class MISPWriter"))
         assert idx > 0
         end = src.find("\n", src.find('"""', idx))
         # Look at the function signature (first 800 chars)

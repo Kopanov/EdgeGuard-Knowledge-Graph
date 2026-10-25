@@ -440,7 +440,7 @@ When `run_misp_to_neo4j.py` resolves the zone for an attribute, it applies a str
 | Priority | Source | Logic |
 |----------|--------|-------|
 | 1 (highest) | Attribute-level tags | If the attribute itself carries specific `zone:*` tags, use those exclusively |
-| 2 | Event-level tags | If attribute has no specific zone, check `zone:*` / `sector:*` tags from the parent event. Event names (`EdgeGuard-{source}-{date}`) do not contain zone information — zone lives exclusively on attribute tags. |
+| 2 | Event-level tags | If attribute has no specific zone, check `zone:*` / `sector:*` tags from the parent event. Event names (`EdgeGuard-{source}-{date}`, with `-part<N>` from the second part of a source/date) do not contain zone information — zone lives exclusively on attribute tags. |
 | 3 (fallback) | `global` | Only if neither of the above produces a specific sector |
 
 **Merging logic (event name + event tags):**
@@ -604,6 +604,7 @@ _Last updated: 2026-10-25_
 - 2026-10-25 — A node's `source` list holds canonical ids whichever writer stores it (a record's own list included, such as a STIX object's `x_edgeguard_source`), and the REST `/indicators` `source` filter resolves a variant.
 - 2026-10-25 — `stix_import` (the objects of an external STIX bundle that name no EdgeGuard source) is a registered source: its records get a `SOURCED_FROM` edge, which until then matched no `Source` node; its description rank is unchanged (`ranked_for_descriptions=False`).
 - 2026-10-25 — One `Source` node per registered source, keyed by its canonical id; until then `ensure_sources` also created a node for every alias (26 nodes on the 730-day baseline of 2026-10-22, of which 10 held `SOURCED_FROM` edges and no alias node held one). The `SOURCED_FROM` writers resolve an alias to the canonical id.
+- 2026-10-25 — Zone resolution: event names carry `-part<N>` from the second part of a source/date (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`), and still no zone.
 - 2026-10-25 — A campaign's `first_seen` / `last_seen` come from the seen dates of its indicators: per source the claim, else the source's latest report (`r.last_reported_at`). The build had read the claims alone, so a campaign whose indicators all came from OTX had EdgeGuard's import time as its first and last seen; the alert enrichment reads the same dates.
 - 2026-10-23 — The STIX flow of the `run_pipeline.py` CLI is always on there (`--stix-flow` cannot turn it off; the page called it opt-in); the sync settings point to CONFIGURATION.md.
 - 2026-10-22 — "Curated packages" is written for any registered curated source; the filter for leaving the layer out keeps the registered sources.

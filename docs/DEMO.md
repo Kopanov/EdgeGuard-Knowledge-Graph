@@ -238,7 +238,7 @@ edgeguard stats --misp          # or: python src/edgeguard.py stats --misp
 
 Next to the graph's node counts, prints the number of EdgeGuard events and attributes in MISP and
 a table of events and attributes per source, parsed from the event names
-(`EdgeGuard-<source>-<date>`). The summary reads every page of MISP's `/events/index`
+(`EdgeGuard-<source>-<date>`; a `-part<N>` event counts under its source). The summary reads every page of MISP's `/events/index`
 (`searchall=EdgeGuard`, 500 events a page, at most 200 pages; it warns when it stops at that cap,
 and `--json` then carries `"truncated": true`). `--json` prints the same as JSON. The closing
 "Last sync" line reads the sync state file of the host it runs on
@@ -341,6 +341,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `edgeguard stats --misp`: a `-part<N>` event (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`) counts under its source.
 - 2026-10-25 — `first_seen` and `last_updated` of the alert enrichment are the indicator's seen dates: per source the claim, else the source's latest report (an indicator only OTX reported, which has no claim, had shown its import time and its last write).
 - 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide states when an alert shows them (the indicator has the link; per-event build and per-pulse caps) and how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles (those the graph links as named in the same OTX report, if any).
 - 2026-10-18 — Step 1 says that `stats` warns when it reads no sync state file on the host (none there, or unreadable).

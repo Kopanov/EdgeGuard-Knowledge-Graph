@@ -317,8 +317,9 @@ Each entry: symptom → detection signal → remediation.
   hub nodes ran a 2 GB heap out of memory), and it waits up to
   `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` (default 900 s) for each MISP event
   delete, because MISP deletes an event's attributes inside the request
-  (the OTX and NVD events of a 730-day baseline hold about 150,000
-  attributes each).
+  (the OTX event of a 730-day baseline holds about 150,000 attributes;
+  the writer splits other sources' events at `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`,
+  20,000).
   Fix the cause, then clear `baseline_clean` together with its downstream
   tasks (it has `retries=0`); the run resumes under the baseline lock it
   still holds.
@@ -1319,6 +1320,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Fresh-baseline wipe: the OTX event of a 730-day baseline is the one of about 150,000 attributes; other sources' events hold at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (20,000) each (the text said the NVD event too).
 - 2026-10-25 — MISP → Neo4j sync schedule and Requesting a full MISP → Neo4j sync: the limit of `run_neo4j_sync` is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8 hours, at most 22; raised in `.env` with a recreate of the airflow container), the 68-hour DAG-run limit and the 122-hour `EdgeGuardNeo4jSyncStale` are sized for the default, and the mode line of the task log ends with the limit of the attempt.
 - 2026-10-25 — New section on large MISP events fetched in pages (`[PAGED-FETCH-INCOMPLETE]`, its run-summary line, the whole-event fallback warning, remediation); Baseline-day protocol item 5 sends one test alert per receiver (a `severity=critical` alert alone reaches only the `critical` receiver).
 - 2026-10-23 — The acceptance script and the graph export of the threat-actor rebuild read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) names another instance; they no longer fall back to a built-in remote address.

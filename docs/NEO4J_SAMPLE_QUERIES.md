@@ -219,8 +219,9 @@ LIMIT 25
 
 ```cypher
 // Use case: pivoting from one IoC to others pushed in the same MISP event(s).
-// EdgeGuard's MISP events are per-source, per-day buckets (EdgeGuard-{source}-{date}),
-// so a shared event means "same source, same day", not "same report".
+// EdgeGuard's MISP events are per-source, per-day buckets (EdgeGuard-{source}-{date},
+// continued in -part2, -part3, ... for a large day), so a shared event means
+// "same source, same day" (for a split day, the same part), not "same report".
 MATCH (a:Indicator {value: $known_value})-[ra:INDICATES]->(:Malware)
 WITH ra.misp_event_ids AS shared_events
 MATCH (b:Indicator)-[rb:INDICATES]->(m:Malware)
@@ -366,10 +367,11 @@ LIMIT 25
 
 *Save queries to test the prototype*
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The shared-event pivot: a source/date past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes continues in `-part<N>` events, so a shared event means the same part of a split day.
 - 2026-10-18 — Sample query: the CVEs named in the same OTX report as an indicator (`INDICATES` to a `CVE`).
 - 2026-10-18 — Sector links: OTX's industries statement (`otx_industries`) and a query of who targets a sector by evidence.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

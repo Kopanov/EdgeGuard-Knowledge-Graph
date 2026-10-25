@@ -3886,8 +3886,8 @@ baseline_clean_task = PythonOperator(
     python_callable=_baseline_clean,
     # Generous timeout: a 730-day baseline can have ~8K MISP events; deletes
     # are paginated 500/round at ~50ms/delete, but MISP deletes an event's
-    # attributes inside the request, and the OTX and NVD events of a 730-day
-    # baseline hold ~150K attributes each (one delete may wait
+    # attributes inside the request, and the OTX event of a 730-day baseline
+    # holds ~150K attributes (other sources' events are split; one delete may wait
     # EDGEGUARD_MISP_DELETE_TIMEOUT_SEC, 900 s); the batched Neo4j wipe of
     # ~2.7M relationships takes ~5 min, plus the verify poll (2026-10).
     execution_timeout=timedelta(minutes=60),
@@ -3951,12 +3951,12 @@ baseline_clean_task = PythonOperator(
 #
 # **What this DOES NOT fix:** the per-event-grows-with-size cost on a
 # single oversized event (MISP edit-event loads the entire event for
-# dedup; cost grows linearly with existing attribute count). That's the
-# architectural fix tracked separately — event partitioning by date
-# range so no single event exceeds ~20K attributes (Issue #61).
+# dedup; cost grows linearly with existing attribute count). MISPWriter
+# bounds it: past EDGEGUARD_MISP_EVENT_SPLIT_ABOVE (20000) attributes a
+# source/date event continues in -part2, -part3 ... (not OTX; Issue #61).
 #
 # Tier2 has no order inside the group. Its feeds write small events except
-# URLhaus (its whole recent.csv export in one event). 2026-10: all 7 at
+# URLhaus's first push after a wipe (~63,000 URLs, ~4 parts). 2026-10: all 7 at
 # once pushed MISP php-fpm past its memory limit (HTTP 502), and a daily
 # catch-up run plus OTX, VT and NVD hit the airflow container's limit, so
 # every collector of every DAG takes a slot of COLLECTOR_POOL: at most

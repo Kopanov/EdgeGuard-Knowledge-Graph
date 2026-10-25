@@ -4,8 +4,12 @@
 
 > This index and reports 01–09 describe the code and the
 > plan as of those dates. Most Tier-A items were later addressed (PR-M1, PR-M2, PR-M3a–d and
-> later work), but the large-event split (MA-H2) is still tracked as
-> [Issue #61](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/61), and no PR-M4 shipped. Issue #57 (baseline lock) shipped in
+> later work), and no PR-M4 shipped. The large-event split (MA-H2) shipped in 2026-10 as a split
+> by attribute count for every source/date group without source-report ids
+> (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, `-part2`, `-part3`, ...;
+> [COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](../COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts));
+> OTX events are not split, which is still tracked as
+> [Issue #61](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/61). Issue #57 (baseline lock) shipped in
 > 2026-10: the `edgeguard_baseline` DAG now holds the lock itself. `decay_ioc_confidence` now
 > applies the indicator aging rule (`src/indicator_aging.py`). The file:line pointers below are
 > not maintained.
@@ -146,8 +150,9 @@ These get audited after the main pipeline is bug-fixed and the 730d run exposes 
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The opening note gives the status of MA-H2: the writer splits every source/date group without source-report ids by attribute count (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`); OTX events are not split (Issue #61).
 - 2026-10-23 — The opening note links the README section by its new anchor (the README headings carry no emoji).

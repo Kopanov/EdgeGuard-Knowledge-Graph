@@ -154,8 +154,8 @@ def _stix_object_source(obj: dict) -> str:
 
 
 def _misp_event_source(event_info: str) -> str:
-    """The source of an EdgeGuard MISP event, from its name (``EdgeGuard-<source>-<date>``), as its
-    canonical id (2026-10-25). A name that gives no registered source falls back to ``misp``, the
+    """The source of an EdgeGuard MISP event, from its name (``EdgeGuard-<source>-<date>``, with
+    ``-part<N>`` on a continued event), as its canonical id (2026-10-25). A name that gives no registered source falls back to ``misp``, the
     registered source of MISP's own data, with a warning: never ``"unknown"``, which no ``Source``
     node carries, so every object of the STIX flow reaches a ``Source`` node."""
     parts = str(event_info or "").split("-", 2)

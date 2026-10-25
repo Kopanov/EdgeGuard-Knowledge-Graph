@@ -46,6 +46,7 @@ def test_push_items_dispatches_tactic_to_misp_batch():
     ]
     with (
         patch.object(w, "_get_or_create_event", return_value="42"),
+        patch.object(w, "_find_event_id", return_value=None),  # no -part2 of the day (event split)
         patch.object(w, "_push_batch", return_value=(1, 0)) as mock_batch,
         patch("collectors.misp_writer.MISP_PREFETCH_EXISTING_ATTRS", False),
     ):
