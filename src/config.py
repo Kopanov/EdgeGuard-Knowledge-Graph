@@ -1441,9 +1441,8 @@ MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
 # Both feeds are read as a window without a cursor: ThreatFox ``get_iocs`` serves the IOCs of
 # the last 7 days (7,398 on the 730-day baseline of 2026-10-13; about 1,050-1,140 new per day),
 # URLhaus its ``recent.csv`` export, the URLs added in the past 30 days (about 63,000 on 2026-10-24,
-# about 2,100 a day on average). The generic incremental default (200) let most of each day's
-# entries (about 80% for ThreatFox, about 90% for URLhaus) age out of the
-# window uncollected. Each cap covers the whole window with headroom, so a daily run
+# about 2,100 a day on average). The generic incremental default (200) let about 80% of each day's
+# entries age out of the window uncollected (at the current URLhaus export it would be about 90%). Each cap covers the whole window with headroom, so a daily run
 # keeps everything the feed still lists and a run that misses days catches up; a run that
 # reaches the cap keeps the newest entries (by ``first_seen`` / ``dateadded``) and logs a
 # warning. Entries MISP already holds are not pushed again (cross-event duplicate prefetch).

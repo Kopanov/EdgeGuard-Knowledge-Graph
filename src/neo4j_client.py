@@ -2467,7 +2467,7 @@ class Neo4jClient:
                 record = session.run(
                     """
                     MATCH (stale:Source)
-                    WHERE stale.source_id IN $alias_ids AND stale.edgeguard_managed = true AND NOT (stale)--()
+                    WHERE stale.source_id IN $alias_ids AND stale.edgeguard_managed = true AND NOT EXISTS { (stale)--() }
                     WITH stale, stale.source_id AS source_id
                     DELETE stale
                     RETURN count(source_id) AS deleted, collect(source_id) AS source_ids

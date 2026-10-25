@@ -148,7 +148,7 @@ class _SourceGraph:
                         for sid, node in graph.nodes.items()
                         if sid in params["alias_ids"]
                         and (node["managed"] or "stale.edgeguard_managed = true" not in query)
-                        and (node["edges"] == 0 or "NOT (stale)--()" not in query)
+                        and (node["edges"] == 0 or "NOT EXISTS { (stale)--() }" not in query)
                     ]
                     for sid in gone:
                         del graph.nodes[sid]
@@ -462,9 +462,9 @@ def _curated_importer():
 
 
 def _curated_package_event(name: str, source: str = "coreideas") -> dict:
-    """The MISP event (flat ``Event`` dict, as ``fetch_event_details`` returns it) of a package named as
-    the packages are (``Core-Ideas_CTI/packages/<name>.json``): tags ``EdgeGuard``, the package source's
-    ``source:*`` tag and ``tlp:<level>``."""
+    """The MISP event (flat ``Event`` dict, as ``fetch_event_details`` returns it) of a package whose
+    ``name`` (the event info ``scripts/import_curated_package.py`` writes) is *name*: tags ``EdgeGuard``,
+    the package source's ``source:*`` tag and ``tlp:<level>``."""
     package = {
         "name": name,
         "source": source,
@@ -552,11 +552,13 @@ class TestStixFlowEventSource:
         assert f"Skipping event 1 ({name!r}): a curated package of coreideas creates no nodes" in caplog.text
 
     @pytest.mark.parametrize("source", source_registry.curated_source_ids())
-    def test_every_registered_curated_source_is_skipped(self, source):
+    def test_every_registered_curated_source_is_skipped(self, source, caplog):
         event = _curated_package_event("2026-10-24_EdgeGuard_CoreIdeas_package", source=source)
         assert source_registry.get_source(source).misp_tag in {t["name"] for t in event["Tag"]}
-        converted, objects = _run_stix_flow({event["info"]: event})
+        with caplog.at_level("INFO", logger="run_pipeline"):
+            converted, objects = _run_stix_flow({event["info"]: event})
         assert converted == [] and objects == []
+        assert f"a curated package of {source} creates no nodes" in caplog.text
 
     def test_a_collector_event_beside_a_curated_package_takes_its_source_from_its_name(self):
         package = _curated_package_event("2026-10-24_EdgeGuard_CoreIdeas_package")

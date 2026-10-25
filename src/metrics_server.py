@@ -729,7 +729,8 @@ SOURCE_TRUTHFUL_FUTURE_CLAMP = Counter(
 )
 
 # 2026-10 (shared-database contract): every destructive graph operation EdgeGuard runs — the
-# full wipe, the edgeguard-only wipe, CVSS de-duplication — increments this and appends one line
+# full wipe, the edgeguard-only wipe, CVSS de-duplication, the alias Source cleanup of ensure_sources —
+# increments this and appends one line
 # to the JSONL trail written by ``destructive_ops_audit``.
 DESTRUCTIVE_OPS = Counter(
     "edgeguard_destructive_ops_total",
