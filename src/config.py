@@ -804,10 +804,11 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN (default 500) is the per-run limit for this source.
 #   nvd (2026-10): a run reads every CVE modified since its cursor and caps its MISP writes with
 #   EDGEGUARD_NVD_MAX_PER_RUN (default 5000); a cut at 200 lost 37% of new CVEs (30-day replay).
-#   threatfox, urlhaus (2026-10): the daily run reads a 7-day (ThreatFox API) and a 30-day
-#   (URLhaus csv_recent) window holding about 1,100 new entries per day each; cut at 200, about
-#   80% of them were never collected (neither feed has a cursor). EDGEGUARD_THREATFOX_MAX_PER_RUN
-#   and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap to the whole window (see their definitions).
+#   threatfox, urlhaus (2026-10): the daily run reads the 7-day ThreatFox API window and the
+#   URLhaus recent.csv export (about 63,000 URLs on 2026-10-24), with about 1,100 new entries per
+#   day each; cut at 200, about 80% of them were never collected (neither feed has a cursor).
+#   EDGEGUARD_THREATFOX_MAX_PER_RUN and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap above the whole
+#   window (see their definitions).
 #   feodo, sslbl (2026-10): each run reads the whole list the source publishes; abuseipdb: at most
 #   one blacklist request of at most 10,000 addresses, which AbuseIPDB chooses. Cut at 200, the other
 #   entries were never reported again and aged while still listed. EDGEGUARD_FEODO_MAX_PER_RUN and
@@ -1419,8 +1420,10 @@ CISA_ICS_MIN_EXPECTED_ADVISORIES = _env_int("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADV
 # MalwareBazaar (abuse.ch) collector (2026-10)
 # ---------------------------------------------------------------------------
 # ``MalwareBazaarCollector`` in ``src/collectors/global_feed_collector.py`` —
-# one ``sha256`` indicator per sample from the public "recent" CSV export
-# (the last 48 hours, about 1,000 samples, no API key required). The
+# one ``sha256`` indicator per sample from the "recent" CSV export (the last
+# 48 hours, about 830-1,000 samples). The export URL carries the abuse.ch
+# Auth-Key (``THREATFOX_API_KEY``) in its path; without a key the source is
+# skipped (``missing_abusech_key``). The
 # ``signature`` column is the malware family and links the hash to ``Malware``
 # nodes through the same TF_META path as ThreatFox. Flag-guarded and OFF by
 # default: the daily and baseline DAG tasks return a skipped status (success,
@@ -1436,16 +1439,16 @@ MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
 # ---------------------------------------------------------------------------
 # Both feeds are read as a window without a cursor: ThreatFox ``get_iocs`` serves the IOCs of
 # the last 7 days (7,398 on the 730-day baseline of 2026-10-13; about 1,050-1,140 new per day),
-# URLhaus ``csv_recent`` the URLs of the last 30 days (34,003 on the same baseline; about 1,130
-# per day). The generic incremental default (200) let about 80% of each day's entries age out
-# of the window uncollected. Each cap covers the whole window with headroom, so a daily run
+# URLhaus its ``recent.csv`` export (about 63,000 URLs on 2026-10-24; about 1,130 new per day).
+# The generic incremental default (200) let about 80% of each day's entries age out of the
+# window uncollected. Each cap covers the whole window with headroom, so a daily run
 # keeps everything the feed still lists and a run that misses days catches up; a run that
 # reaches the cap keeps the newest entries (by ``first_seen`` / ``dateadded``) and logs a
 # warning. Entries MISP already holds are not pushed again (cross-event duplicate prefetch).
 # ``EDGEGUARD_MAX_ENTRIES`` and an explicit baseline limit still apply when lower; ``0``
 # removes the cap.
 THREATFOX_MAX_PER_RUN = _env_int("EDGEGUARD_THREATFOX_MAX_PER_RUN", 10000)
-URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 50000)
+URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 100000)
 
 # ---------------------------------------------------------------------------
 # Feodo Tracker / SSL Blacklist / AbuseIPDB per-run caps (2026-10)

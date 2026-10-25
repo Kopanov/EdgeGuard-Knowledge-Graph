@@ -2,7 +2,7 @@
 """
 EdgeGuard - Global Threat Feed Collectors
 Universal feeds that apply to all zones
-Sources: ThreatFox, URLhaus
+Sources: ThreatFox, URLhaus, MalwareBazaar
 """
 
 import os
@@ -23,14 +23,18 @@ from collectors.collector_utils import (
     RateLimiter,
     TransientServerError,
     feed_time,
+    install_export_key_log_filter,
     is_auth_or_access_denied,
     lower_limit,
     make_skipped_optional_source,
     make_status,
     newest_first,
     optional_api_key_effective,
+    redact_export_key,
     request_with_rate_limit_retries,
     retry_with_backoff,
+    scrub_export_key_error,
+    scrub_export_key_response,
     source_run_cap,
     status_after_misp_push,
 )
@@ -48,6 +52,46 @@ URLHAUS_CIRCUIT_BREAKER = get_circuit_breaker("urlhaus", failure_threshold=3, re
 
 THREATFOX_RATE_LIMITER = RateLimiter(min_interval=2.0)  # 2 sec between requests
 URLHAUS_RATE_LIMITER = RateLimiter(min_interval=1.0)  # 1 req/sec for URLhaus
+
+# 2026-10: abuse.ch retired the keyless downloads (``urlhaus.abuse.ch/downloads/csv_recent/``,
+# ``csv_top10k/`` and ``bazaar.abuse.ch/export/csv/recent/`` answer HTTP 410 Gone, with or without an
+# ``Auth-Key`` header). The v2 exports carry the abuse.ch Auth-Key (``THREATFOX_API_KEY``) IN THE URL
+# PATH, so the URL is a secret: build it only here, never log or return it unredacted (see
+# ``download_abusech_export``).
+ABUSECH_AUTH_URL = "https://auth.abuse.ch/"
+URLHAUS_EXPORT_URL = "https://urlhaus-api.abuse.ch/v2/files/exports/{key}/recent.csv"
+
+
+def abusech_export_key(api_key: Optional[str]) -> Optional[str]:
+    """The usable abuse.ch Auth-Key (stripped; ``None`` when unset or a template placeholder)."""
+    return optional_api_key_effective(api_key, THREATFOX_API_KEY_PLACEHOLDERS)
+
+
+def download_abusech_export(url: str, key: str, *, context: str, timeout: Any) -> requests.Response:
+    """One GET of an abuse.ch v2 export URL (the key is in ``url``) with the key kept out of every trace.
+
+    The helper's own log lines, the exceptions it raises and the returned response (``.url``) show
+    ``/v2/files/exports/<redacted>/...`` instead of the key, and so do the DEBUG records of the HTTP
+    library (``install_export_key_log_filter``).
+    """
+    install_export_key_log_filter()  # idempotent; already installed when collector_utils was imported
+    try:
+        response = request_with_rate_limit_retries(
+            "GET",
+            url,
+            session=None,
+            timeout=timeout,
+            verify=SSL_VERIFY,
+            max_rate_limit_retries=3,
+            fallback_delay_sec=30.0,
+            retry_on_403=False,
+            context=context,
+            log_url=redact_export_key(url, key),
+        )
+    except Exception as exc:
+        raise scrub_export_key_error(exc, key)
+    scrub_export_key_response(response, key)
+    return response
 
 
 def get_zones_from_malware(malware_name: str) -> List[str]:
@@ -67,9 +111,10 @@ def get_zones_from_malware(malware_name: str) -> List[str]:
 MALWAREBAZAAR_CIRCUIT_BREAKER = get_circuit_breaker("malwarebazaar", failure_threshold=3, recovery_timeout=1800)
 MALWAREBAZAAR_RATE_LIMITER = RateLimiter(min_interval=2.0)  # one export download per run; 2 s guard
 MALWAREBAZAAR_SOURCE_ID = "malwarebazaar"
-# Public "recent" export: samples of the last 48 hours (about 1,000 rows), no API key required.
-# The full export (``/export/csv/full/``) is the complete history and is deliberately not used.
-MALWAREBAZAAR_EXPORT_URL = "https://bazaar.abuse.ch/export/csv/recent/"
+# "Recent" export: samples of the last 48 hours (about 830-1,000 rows). 2026-10: needs the abuse.ch
+# Auth-Key in the URL path (the keyless ``/export/csv/recent/`` is gone, HTTP 410). The full export
+# is the complete history and is deliberately not used.
+MALWAREBAZAAR_EXPORT_URL = "https://mb-api.abuse.ch/v2/files/exports/{key}/recent.csv"
 MALWAREBAZAAR_SAMPLE_URL = "https://bazaar.abuse.ch/sample/{sha256}/"
 # Column order of the export (verified 2026-10-12); the header is read from the ``#`` comment
 # line when present so a reordered export still parses by name.
@@ -420,45 +465,43 @@ class URLhausCollector:
     """
     Collects malware URLs from URLhaus - Global malware URL feed.
 
-    URLhaus is a project from abuse.ch to share malicious URLs.
-    Public CSV feeds available without authentication.
+    URLhaus is a project from abuse.ch to share malicious URLs. The v2 ``recent.csv`` export
+    (about 63,000 URLs on 2026-10-24) needs the abuse.ch Auth-Key (``THREATFOX_API_KEY``),
+    which sits in the URL path. Without a key the run is skipped (``missing_abusech_key``);
+    HTTP 401/403 → skipped (``urlhaus_auth_denied``). The key never appears in logs, errors,
+    status dicts or the HTTP library's DEBUG records.
     """
 
-    def __init__(self, misp_writer: MISPWriter = None):
+    def __init__(self, api_key: Optional[str] = None, misp_writer: MISPWriter = None):
         """
         Initialize URLhaus collector.
 
         Args:
+            api_key: abuse.ch Auth-Key (defaults to ``THREATFOX_API_KEY``)
             misp_writer: MISPWriter instance for pushing to MISP
         """
-        self.urls = [
-            # Recent malware URLs (CSV)
-            "https://urlhaus.abuse.ch/downloads/csv_recent/",
-            # Top 1000 malware URLs
-            "https://urlhaus.abuse.ch/downloads/csv_top10k/",
-        ]
+        self.api_key = abusech_export_key(api_key if api_key is not None else os.getenv("THREATFOX_API_KEY"))
+        # One export (the ``csv_top10k`` mirror has no v2 equivalent); empty without a key.
+        self.urls = [URLHAUS_EXPORT_URL.format(key=self.api_key)] if self.api_key else []
         self.source_name = "urlhaus"
         self.misp_writer = misp_writer or MISPWriter()
 
     @staticmethod
     def max_per_run() -> int:
-        """``config.URLHAUS_MAX_PER_RUN`` (default 50,000; ``0`` = no per-run cap)."""
-        return source_run_cap("URLHAUS_MAX_PER_RUN", 50000)
+        """``config.URLHAUS_MAX_PER_RUN`` (default 100,000; ``0`` = no per-run cap)."""
+        return source_run_cap("URLHAUS_MAX_PER_RUN", 100000)
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _fetch_feed(self, url: str) -> str:
-        """Download a URLhaus feed CSV with retry. Transient network errors
+        """Download the URLhaus export CSV with retry. Transient network errors
         retry 4x with backoff before the exception propagates."""
-        response = request_with_rate_limit_retries(
-            "GET",
+        response = download_abusech_export(
             url,
-            session=None,
-            timeout=(15, 30),  # tuple: connect=15s, read=30s
-            verify=SSL_VERIFY,
-            max_rate_limit_retries=3,
-            fallback_delay_sec=30.0,
-            retry_on_403=False,
+            self.api_key or "",
             context="URLhaus",
+            # connect=15s; read=120s because the export is about 16 MB (63k lines) and the
+            # server builds it on demand — the old 30 s read limit was sized for a smaller file.
+            timeout=(15, 120),
         )
         response.raise_for_status()
         return response.text
@@ -483,6 +526,20 @@ class URLhausCollector:
         if baseline:
             logger.info("📜 Baseline mode: Collecting full URLhaus history...")
             # Could add more URLhaus feed types here
+
+        # 2026-10: the export needs the abuse.ch Auth-Key; no usable key → skip without a request.
+        if not self.api_key:
+            logger.warning(
+                "URLhaus: No abuse.ch Auth-Key — skipping (the keyless feeds are retired). "
+                f"Set THREATFOX_API_KEY (free): {ABUSECH_AUTH_URL}"
+            )
+            if push_to_misp:
+                return make_skipped_optional_source(
+                    "urlhaus",
+                    skip_reason=f"THREATFOX_API_KEY not set — {ABUSECH_AUTH_URL}",
+                    skip_reason_class="missing_abusech_key",
+                )
+            return []
 
         # Check circuit breaker
         if not URLHAUS_CIRCUIT_BREAKER.can_execute():
@@ -524,7 +581,7 @@ class URLhausCollector:
                         "URLhaus: %s lists %d URLs, more than this run's cap of %d "
                         "(EDGEGUARD_URLHAUS_MAX_PER_RUN, or a lower EDGEGUARD_MAX_ENTRIES / baseline limit); "
                         "the newest %d by dateadded are kept, %d older ones are not collected by this run",
-                        url.split("/")[-2],
+                        "recent.csv",
                         listed,
                         cap,
                         cap,
@@ -582,13 +639,26 @@ class URLhausCollector:
                             }
                         )
 
-                logger.info(f"[OK] URLhaus: Collected from {url.split('/')[-2]}")
+                logger.info("[OK] URLhaus: Collected from recent.csv")
                 URLHAUS_CIRCUIT_BREAKER.record_success()
                 mirror_success = True
                 break  # Got data, no need to try other URLs
 
             except Exception as e:
-                logger.warning(f"URLhaus {url}: {e}")
+                # The key is in the URL: log the redacted text only (``_fetch_feed`` already scrubs
+                # the exception; this covers any other path that quotes the URL).
+                safe = redact_export_key(e, self.api_key)
+                if is_auth_or_access_denied(e):
+                    logger.warning(f"URLhaus: auth/access denied — skipping (optional): {safe}")
+                    URLHAUS_CIRCUIT_BREAKER.record_success()
+                    if push_to_misp:
+                        return make_skipped_optional_source(
+                            "urlhaus",
+                            skip_reason=safe,
+                            skip_reason_class="urlhaus_auth_denied",
+                        )
+                    return []
+                logger.warning(f"URLhaus export {redact_export_key(url, self.api_key)}: {safe}")
                 URLHAUS_CIRCUIT_BREAKER.record_failure()
                 mirror_failures += 1
                 continue
@@ -663,9 +733,10 @@ class MalwareBazaarCollector:
     Collects malware sample hashes from MalwareBazaar (abuse.ch) — flag-guarded, OFF by default.
 
     One ``sha256`` indicator per sample from the public **recent** CSV export
-    (``MALWAREBAZAAR_EXPORT_URL``: the last 48 hours, about 1,000 samples). The
-    export needs no API key; when ``THREATFOX_API_KEY`` (the abuse.ch Auth-Key,
-    shared by all abuse.ch platforms) is configured it is sent as ``Auth-Key``.
+    (``MALWAREBAZAAR_EXPORT_URL``: the last 48 hours, about 830-1,000 samples). 2026-10:
+    the keyless export is retired (HTTP 410); the v2 export needs the abuse.ch Auth-Key
+    (``THREATFOX_API_KEY``, shared by all abuse.ch platforms) IN THE URL PATH, so the key
+    must never appear in logs, errors or status dicts (``download_abusech_export`` redacts it).
     The ``signature`` column is the malware family: it becomes ``malware_family``
     on the item, travels to MISP inside the ``TF_META`` comment exactly like the
     ThreatFox family and is rehydrated as ``Indicator.malware_family`` in Neo4j,
@@ -685,7 +756,8 @@ class MalwareBazaarCollector:
     override) is still honoured when it is lower than the cap.
 
     Failure contract (optional source): flag off → skipped status
-    (``malwarebazaar_disabled_by_flag``) without an HTTP request; HTTP 401/403 →
+    (``malwarebazaar_disabled_by_flag``) and no usable key → skipped status
+    (``missing_abusech_key``), both without an HTTP request; HTTP 401/403 →
     skipped (``malwarebazaar_auth_denied``); timeouts, connection errors, HTTP 429
     after the Retry-After retries and 5xx → ``MalwareBazaarTransientError`` propagates
     so ``run_collector_with_metrics`` marks the task skipped with an alert; other HTTP
@@ -701,11 +773,10 @@ class MalwareBazaarCollector:
         Initialize MalwareBazaar collector.
 
         Args:
-            api_key: Optional abuse.ch Auth-Key (defaults to ``THREATFOX_API_KEY``; not required)
+            api_key: abuse.ch Auth-Key (defaults to ``THREATFOX_API_KEY``; the source is skipped without one)
             misp_writer: MISPWriter instance for pushing to MISP
         """
-        self.api_key = api_key if api_key is not None else os.getenv("THREATFOX_API_KEY")
-        self.export_url = MALWAREBAZAAR_EXPORT_URL
+        self.api_key = abusech_export_key(api_key if api_key is not None else os.getenv("THREATFOX_API_KEY"))
         self.source_name = MALWAREBAZAAR_SOURCE_ID
         self.misp_writer = misp_writer or MISPWriter()
 
@@ -734,24 +805,14 @@ class MalwareBazaarCollector:
     # HTTP
     # ------------------------------------------------------------------
 
-    def _headers(self) -> Optional[Dict[str, str]]:
-        key = optional_api_key_effective(self.api_key, THREATFOX_API_KEY_PLACEHOLDERS)
-        return {"Auth-Key": key} if key else None
-
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _download_export(self) -> requests.Response:
         """One download with transport-error retry; HTTP 429 / 5xx are retried inside the helper."""
-        return request_with_rate_limit_retries(
-            "GET",
-            self.export_url,
-            session=None,
-            headers=self._headers(),
-            timeout=(15, 60),  # tuple: connect=15s, read=60s (about 450 KB)
-            verify=SSL_VERIFY,
-            max_rate_limit_retries=3,
-            fallback_delay_sec=30.0,
-            retry_on_403=False,
+        return download_abusech_export(
+            MALWAREBAZAAR_EXPORT_URL.format(key=self.api_key),
+            self.api_key or "",
             context="MalwareBazaar",
+            timeout=(15, 60),  # tuple: connect=15s, read=60s (about 450 KB)
         )
 
     def _fetch_export(self) -> str:
@@ -901,9 +962,23 @@ class MalwareBazaarCollector:
                 )
             return []
 
+        if not self.api_key:
+            logger.warning(
+                "MalwareBazaar: No abuse.ch Auth-Key — skipping (the keyless export is retired). "
+                "Set THREATFOX_API_KEY (free): %s",
+                ABUSECH_AUTH_URL,
+            )
+            if push_to_misp:
+                return make_skipped_optional_source(
+                    MALWAREBAZAAR_SOURCE_ID,
+                    skip_reason=f"THREATFOX_API_KEY not set — {ABUSECH_AUTH_URL}",
+                    skip_reason_class="missing_abusech_key",
+                )
+            return []
+
         if baseline:
             logger.info(
-                "MalwareBazaar baseline: the recent export (last 48 hours) is the only key-free export; "
+                "MalwareBazaar baseline: the recent export (last 48 hours) is the only export read; "
                 "baseline_days=%d is not applicable and the history accumulates over daily runs",
                 baseline_days,
             )

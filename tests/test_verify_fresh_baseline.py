@@ -1442,7 +1442,7 @@ class TestDefaultSourcesDelivered:
         assert c["detail"]["keyed_sources_without_data"] == ["virustotal"]
         assert c["detail"]["flag_guarded_sources_without_data"] == ["cisa_ics", "malwarebazaar"]
 
-    @pytest.mark.parametrize("source", ["urlhaus", "nvd", "ssl_blacklist"])
+    @pytest.mark.parametrize("source", ["feodo_tracker", "nvd", "ssl_blacklist"])
     def test_a_silent_default_source_warns_without_failing(self, vfb, monkeypatch, source):
         def override(st, rows):
             if "AS sourced_from" in st:
@@ -1467,11 +1467,14 @@ class TestDefaultSourcesDelivered:
     def test_a_keyed_source_without_data_is_not_a_warning(self, vfb, monkeypatch):
         def override(st, rows):
             if "AS sourced_from" in st:
-                return [dict(x, sourced_from=0) if x["source_id"] in ("threatfox", "abuseipdb") else x for x in rows]
+                silent = ("threatfox", "urlhaus", "abuseipdb")
+                return [dict(x, sourced_from=0) if x["source_id"] in silent else x for x in rows]
             return rows
 
         c = _check(_run(vfb, monkeypatch, override=override), "default_sources_delivered")
-        assert c["ok"] is True and c["detail"]["keyed_sources_without_data"] == ["virustotal", "threatfox", "abuseipdb"]
+        assert c["ok"] is True
+        assert c["detail"]["keyed_sources_without_data"] == ["virustotal", "threatfox", "urlhaus", "abuseipdb"]
+        assert c["detail"]["default_sources_without_data"] == [], "URLhaus needs the abuse.ch key (THREATFOX_API_KEY)"
 
     def test_classification_follows_the_collectors_keys_and_flags(self, vfb):
         import collector_allowlist
@@ -1484,8 +1487,13 @@ class TestDefaultSourcesDelivered:
             return src.canonical_id
 
         collectors = {canonical(n) for n in collector_allowlist.COLLECT_SOURCES_CANONICAL}
-        keyed = {canonical(s.name) for s in source_key_check.KEYED_SOURCES if s.needs_key}
-        flagged = {s for s in collectors - keyed if not source_registry.get_source(s).cli_default_enabled}
+        needs_key = [s for s in source_key_check.KEYED_SOURCES if s.needs_key]
+        # A source behind its own flag stays flag-guarded when it also needs a key (MalwareBazaar uses
+        # the abuse.ch key): its flag is off by default.
+        primary = {canonical(s.name) for s in needs_key}
+        flagged = {s for s in collectors - primary if not source_registry.get_source(s).cli_default_enabled}
+        keyed = {canonical(name) for s in needs_key for name in s.sources} - flagged
+        assert "urlhaus" in keyed, "the URLhaus export carries the abuse.ch key (THREATFOX_API_KEY)"
         assert set(vfb.KEYED_SOURCES) == keyed
         assert set(vfb.FLAG_GUARDED_SOURCES) == flagged == {"cisa_ics", "malwarebazaar"}
         assert set(vfb.DEFAULT_SOURCES) == collectors - keyed - flagged
@@ -1517,7 +1525,7 @@ class TestWarningLevel:
         return code, capsys.readouterr().out
 
     def test_text_output_with_a_warning(self, vfb, monkeypatch, capsys):
-        code, out = self._main(vfb, monkeypatch, capsys, [], "urlhaus")
+        code, out = self._main(vfb, monkeypatch, capsys, [], "feodo_tracker")
         assert code == 0
         assert "[WARN] default_sources_delivered:" in out
         assert "RESULT: PASS; 1 warning(s): default_sources_delivered" in out
@@ -1530,7 +1538,7 @@ class TestWarningLevel:
     def test_a_failure_still_fails_next_to_a_warning(self, vfb, monkeypatch, capsys):
         def override(st, rows):
             if "AS sourced_from" in st:
-                return [dict(x, sourced_from=0) if x["source_id"] == "urlhaus" else x for x in rows]
+                return [dict(x, sourced_from=0) if x["source_id"] == "feodo_tracker" else x for x in rows]
             if "AS part_of_to_campaign" in st:
                 return [dict(rows[0], part_of_to_campaign=5)]
             return rows
@@ -1544,7 +1552,7 @@ class TestWarningLevel:
         assert "RESULT: FAIL (1 mandatory check(s) failed); 1 warning(s): default_sources_delivered" in out
 
     def test_json_output(self, vfb, monkeypatch, capsys):
-        code, out = self._main(vfb, monkeypatch, capsys, ["--json"], "urlhaus")
+        code, out = self._main(vfb, monkeypatch, capsys, ["--json"], "feodo_tracker")
         result = json.loads(out)
         c = next(x for x in result["checks"] if x["check"] == "default_sources_delivered")
         assert code == 0 and result["passed"] is True and c["ok"] is False and c["mandatory"] is False

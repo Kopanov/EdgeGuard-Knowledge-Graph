@@ -297,9 +297,10 @@ _CVE_BEST_CVSS = (
 # default deployment runs it (``src/source_registry.py``, the collector flags in ``src/config.py``,
 # the keys in ``src/source_key_check.py``; pinned by a test). Collected by default, without a key
 # or a flag (NVD also answers without a key, at a lower rate):
-DEFAULT_SOURCES = ("cisa_kev", "mitre_attck", "nvd", "urlhaus", "feodo_tracker", "ssl_blacklist")
+DEFAULT_SOURCES = ("cisa_kev", "mitre_attck", "nvd", "feodo_tracker", "ssl_blacklist")
 # Skipped by design without an API key; this script cannot see which keys the deployment holds.
-KEYED_SOURCES = ("alienvault_otx", "virustotal", "threatfox", "abuseipdb")
+# URLhaus reads its export with the abuse.ch Auth-Key (``THREATFOX_API_KEY``).
+KEYED_SOURCES = ("alienvault_otx", "virustotal", "threatfox", "urlhaus", "abuseipdb")
 # Off unless EDGEGUARD_ENABLE_CISA_ICS / EDGEGUARD_ENABLE_MALWAREBAZAAR is set; judged by
 # --require-cisa-ics / --require-malwarebazaar.
 FLAG_GUARDED_SOURCES = ("cisa_ics", "malwarebazaar")

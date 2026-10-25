@@ -14,10 +14,10 @@
 | MITRE ATT&CK | ❌ No | No limit (STIX download) | Free | STIX 2.1 |
 | VirusTotal | ✅ Yes | 4 requests/min, 500/day (free) | Free tier used; paid plans from $50/month | JSON |
 | AbuseIPDB | ✅ Yes | 1,000 `check` requests/day, 5 `blacklist` requests per UTC day (free) | $50+/month | JSON |
-| URLhaus | ❌ No | No limit (CSV) | Free | CSV |
+| URLhaus | ✅ Yes (abuse.ch Auth-Key) | No limit (CSV) | Free | CSV |
 | Feodo Tracker | ❌ No | No limit (CSV) | Free | CSV |
 | SSL Blacklist | ❌ No | No limit (CSV) | Free | CSV |
-| MalwareBazaar (flag-guarded) | ❌ No (export) | One export download per run (about 450 KB) | Free | CSV |
+| MalwareBazaar (flag-guarded) | ✅ Yes (abuse.ch Auth-Key, export) | One export download per run (about 450 KB) | Free | CSV |
 | CISA ICS advisories (flag-guarded) | ❌ No | GitHub raw files (`cisagov/CSAF`) | Free | CSAF 2.0 JSON |
 | ThreatFox | ✅ Yes | Varies by key | Free tier | JSON |
 | MISP | ✅ Yes | Varies (self-hosted) | Free (self-hosted) | JSON |
@@ -183,16 +183,16 @@
 
 | Aspect | Details |
 |--------|---------|
-| **API Required** | No (CSV download) |
-| **Registration** | Not required |
-| **Rate Limit** | None (CSV download) |
+| **API Required** | The abuse.ch Auth-Key (`THREATFOX_API_KEY`) in the export URL path |
+| **Registration** | Free abuse.ch account (https://auth.abuse.ch/) |
+| **Rate Limit** | None; one export download per run (about 16 MB, about 63,000 URLs on 2026-10-24) |
 | **Data Provided** | Malware URLs, tags, threat types |
 | **Format** | CSV |
 | **Update Frequency** | Hourly |
 
 **Download URLs:**
-- Recent: https://urlhaus.abuse.ch/downloads/csv_recent/
-- Full: https://urlhaus.abuse.ch/downloads/csv_all/
+- Recent (read by the collector; Auth-Key in the path): https://urlhaus-api.abuse.ch/v2/files/exports/<AUTH-KEY>/recent.csv
+- Full: https://urlhaus.abuse.ch/downloads/csv_all/ (not used)
 - API: https://urlhaus.abuse.ch/api/
 
 **Pricing:** Free
@@ -277,7 +277,7 @@
 | NVD | `NVD_API_KEY` | https://nvd.nist.gov/developers |
 | VirusTotal | `VIRUSTOTAL_API_KEY` | https://www.virustotal.com |
 | AbuseIPDB | `ABUSEIPDB_API_KEY` | https://www.abuseipdb.com |
-| ThreatFox (also sent by MalwareBazaar when set) | `THREATFOX_API_KEY` | https://auth.abuse.ch/ |
+| ThreatFox (also used by URLhaus and MalwareBazaar) | `THREATFOX_API_KEY` | https://auth.abuse.ch/ |
 
 ### Optional (Recommended for Production)
 
@@ -355,10 +355,11 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus: the export needs the abuse.ch Auth-Key in its URL path and a free abuse.ch account (the keyless `downloads/csv_recent/` answers HTTP 410 since 2026-10); about 63,000 URLs per export on 2026-10-24.
 - 2026-10-17 — The NVD key is optional (5 requests per 30 s without it; the page said required); the KEV feed listed as a JSON download; the MITRE download named as `MITRECollector.attack_url`, plus the ATT&CK for ICS bundle with `EDGEGUARD_ENABLE_MITRE_ICS=true`; the setup checklist adds `THREATFOX_API_KEY`, names the environment variables and marks every source key optional; main text limited to current behaviour, with the change history in this section.
 - 2026-10-16 — AbuseIPDB: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests; a blacklist 429 fails `collect_abuseipdb` at once (the task had stayed green with a count of 0); a fetched, non-empty answer is reused on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`; the collector line that names the KEV feed URL cited.
 - 2026-10-15 — One entry removed from the alternative and premium sources.

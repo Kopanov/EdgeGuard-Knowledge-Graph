@@ -3,9 +3,11 @@
 
 A presence check ("the variable is set") cannot answer that. A key the provider does not
 accept shows up only inside a run: the collector returns a *skipped* task that Airflow
-shows as successful (OTX, VirusTotal, ThreatFox, AbuseIPDB), and a rejected NVD key fails
-the NVD task, which in a fresh baseline happens after the stores were wiped. This module
-asks each provider once, before a run.
+shows as successful (OTX, VirusTotal, ThreatFox, URLhaus, MalwareBazaar, AbuseIPDB), and a
+rejected NVD key fails the NVD task, which in a fresh baseline happens after the stores were
+wiped. This module asks each provider once, before a run. One key can serve several sources:
+the abuse.ch Auth-Key (``THREATFOX_API_KEY``) is the key of ThreatFox, URLhaus and
+MalwareBazaar, so its line names every one of them that is switched on.
 
 Used by ``edgeguard preflight``, by the first task of the baseline DAG, by
 ``scripts/preflight_baseline.sh`` and directly::
@@ -30,7 +32,8 @@ Rules
   lookups a minute, shared with the collector).
   AbuseIPDB: one ``check`` request (1,000 a day on the free plan); the ``blacklist``
   endpoint the collector uses (5 a day) is not touched. ThreatFox: one query whose body
-  is not downloaded.
+  is not downloaded; it checks the abuse.ch Auth-Key for URLhaus and MalwareBazaar too
+  (their exports are not downloaded).
 * ``EDGEGUARD_SOURCE_KEY_CHECK=false`` disables the requests (air-gapped installations);
   configured keys are then reported as ``unverified``.
 """
@@ -269,7 +272,7 @@ def _key_abuseipdb() -> Tuple[Optional[str], str]:
 
 @dataclass(frozen=True)
 class KeyedSource:
-    """A source that authenticates with an API key."""
+    """A source that authenticates with an API key, and the other sources that use the same key."""
 
     name: str  # source name, as used by the DAGs
     collectors: Tuple[str, ...]  # collector names in EDGEGUARD_COLLECT_SOURCES that use this key
@@ -278,6 +281,27 @@ class KeyedSource:
     needs_key: bool  # False: the source also answers without a key (NVD, at a lower rate)
     rejected_fails_task: bool  # True: a rejected key fails the collector task instead of skipping it
     get_key_at: str
+    # Other sources that authenticate with this key; each name is also its collector name in
+    # EDGEGUARD_COLLECT_SOURCES and a name EDGEGUARD_BASELINE_REQUIRED_SOURCES accepts.
+    also_serves: Tuple[str, ...] = ()
+
+    @property
+    def sources(self) -> Tuple[str, ...]:
+        """Every source that uses this key, ``name`` first."""
+        return (self.name,) + self.also_serves
+
+    def collectors_of(self, source: str) -> Tuple[str, ...]:
+        """The collectors of one of :attr:`sources` in EDGEGUARD_COLLECT_SOURCES."""
+        if source in self.also_serves:
+            return (source,)
+        return tuple(name for name in self.collectors if name not in self.also_serves)
+
+
+# A source that runs only while its own flag is true, besides EDGEGUARD_COLLECT_SOURCES:
+# source -> (attribute in ``config``, environment variable).
+SOURCE_FLAGS: Dict[str, Tuple[str, str]] = {
+    "malwarebazaar": ("ENABLE_MALWAREBAZAAR", "EDGEGUARD_ENABLE_MALWAREBAZAAR"),
+}
 
 
 KEYED_SOURCES: Tuple[KeyedSource, ...] = (
@@ -294,7 +318,18 @@ KEYED_SOURCES: Tuple[KeyedSource, ...] = (
         False,
         "https://www.virustotal.com/gui/my-apikey",
     ),
-    KeyedSource("threatfox", ("threatfox",), _key_threatfox, _probe_threatfox, True, False, "https://auth.abuse.ch/"),
+    # The abuse.ch Auth-Key: ThreatFox sends it as a header, the URLhaus and MalwareBazaar exports
+    # carry it in their URL path. One ThreatFox query checks it for all three.
+    KeyedSource(
+        "threatfox",
+        ("threatfox", "urlhaus", "malwarebazaar"),
+        _key_threatfox,
+        _probe_threatfox,
+        True,
+        False,
+        "https://auth.abuse.ch/",
+        also_serves=("urlhaus", "malwarebazaar"),
+    ),
     KeyedSource(
         "abuseipdb",
         ("abuseipdb",),
@@ -310,22 +345,43 @@ KEYED_SOURCES: Tuple[KeyedSource, ...] = (
 # --------------------------------------------------------------------------- result
 @dataclass(frozen=True)
 class SourceKeyStatus:
-    source: str
+    source: str  # the key's entry in KEYED_SOURCES (its first source)
     configured_in: str
     status: str
     detail: str
-    will_collect: Optional[bool]  # None: not known (the key could not be judged)
+    will_collect: Optional[bool]  # None: not known (the key could not be judged); for the switched-on sources
     task_fails: bool  # the collector task would fail (a rejected NVD key)
     get_key_at: str
+    sources: Tuple[str, ...] = ()  # every source that uses this key (empty: ``source`` alone)
+    switched_off: Tuple[str, ...] = ()  # those of ``sources`` that are switched off
 
     @property
     def is_problem(self) -> bool:
         """A configured key that the provider refuses: always a configuration error."""
         return self.status == REJECTED
 
+    @property
+    def all_sources(self) -> Tuple[str, ...]:
+        return self.sources or (self.source,)
+
+    @property
+    def switched_on(self) -> Tuple[str, ...]:
+        """The sources that use this key and are switched on."""
+        return tuple(name for name in self.all_sources if name not in self.switched_off)
+
     def message(self) -> str:
+        named = self.switched_on or self.all_sources
+        label = ", ".join(named)
+        subject = "these sources will" if len(named) > 1 else "the source will"
+        off = [name for name in self.switched_off if name in self.all_sources] if self.switched_on else []
+        note = (
+            f" ({', '.join(off)} {'use' if len(off) > 1 else 'uses'} the same key and "
+            f"{'are' if len(off) > 1 else 'is'} switched off)"
+            if off
+            else ""
+        )
         if self.status == VALID:
-            return f"{self.source}: key accepted by the provider ({self.configured_in}) — the source will be collected"
+            return f"{label}: key accepted by the provider ({self.configured_in}) — {subject} be collected{note}"
         if self.status == REJECTED:
             if self.task_fails:
                 effect = (
@@ -333,37 +389,64 @@ class SourceKeyStatus:
                     "(the source also answers without a key, at a lower rate)"
                 )
             else:
-                effect = "the source will be SKIPPED"
+                effect = f"{subject} be SKIPPED{note}"
             return (
-                f"{self.source}: key REJECTED by the provider ({self.configured_in}; {self.detail}) — {effect}. "
+                f"{label}: key REJECTED by the provider ({self.configured_in}; {self.detail}) — {effect}. "
                 f"Key management: {self.get_key_at}"
             )
         if self.status == NOT_SET:
             if self.will_collect:
-                return f"{self.source}: no key ({self.configured_in} {self.detail}) — collected without a key, at the lower public rate"
+                return f"{label}: no key ({self.configured_in} {self.detail}) — collected without a key, at the lower public rate"
             return (
-                f"{self.source}: no key ({self.configured_in} {self.detail}) — the source will be skipped. "
+                f"{label}: no key ({self.configured_in} {self.detail}) — {subject} be skipped{note}. "
                 f"Key: {self.get_key_at}"
             )
         if self.status == DISABLED:
-            return f"{self.source}: {self.detail} — key not checked"
-        return f"{self.source}: key NOT VERIFIED ({self.configured_in}; {self.detail})"
+            return f"{label}: {self.detail} — key not checked"
+        return f"{label}: key NOT VERIFIED ({self.configured_in}; {self.detail}){note}"
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
-def _check_one(source: KeyedSource, live: bool) -> SourceKeyStatus:
+def _switched_on(source: KeyedSource, name: str) -> bool:
+    """True when one of the source's collectors is allowed and its flag (if it has one) is on."""
     from collector_allowlist import is_collector_enabled_by_allowlist
+
+    if not any(is_collector_enabled_by_allowlist(collector) for collector in source.collectors_of(name)):
+        return False
+    flag = SOURCE_FLAGS.get(name)
+    if flag is None:
+        return True
+    import config
+
+    return bool(getattr(config, flag[0], False))
+
+
+def _check_one(source: KeyedSource, live: bool) -> SourceKeyStatus:
+    switched_off = tuple(name for name in source.sources if not _switched_on(source, name))
+    served = source.sources if source.also_serves else ()
 
     def result(
         status: str, detail: str, will_collect: Optional[bool], configured_in: str, task_fails: bool = False
     ) -> SourceKeyStatus:
-        return SourceKeyStatus(source.name, configured_in, status, detail, will_collect, task_fails, source.get_key_at)
+        return SourceKeyStatus(
+            source.name,
+            configured_in,
+            status,
+            detail,
+            will_collect,
+            task_fails,
+            source.get_key_at,
+            served,
+            switched_off,
+        )
 
     key, configured_in = source.key()
-    if not any(is_collector_enabled_by_allowlist(name) for name in source.collectors):
-        return result(DISABLED, "switched off by EDGEGUARD_COLLECT_SOURCES", False, configured_in)
+    if len(switched_off) == len(source.sources):
+        flags = [SOURCE_FLAGS[name][1] for name in source.sources if name in SOURCE_FLAGS]
+        switches = " or ".join(["EDGEGUARD_COLLECT_SOURCES", *flags])
+        return result(DISABLED, f"switched off by {switches}", False, configured_in)
     if not key:
         return result(NOT_SET, "is not set or holds a template placeholder", not source.needs_key, configured_in)
     if not live:
@@ -383,10 +466,27 @@ def _check_one(source: KeyedSource, live: bool) -> SourceKeyStatus:
 
 
 def check_source_keys(sources: Optional[Iterable[str]] = None) -> List[SourceKeyStatus]:
-    """One status per keyed source (all of them, or the named ones), in a fixed order."""
+    """One status per key (all of them, or those of the named sources), in a fixed order."""
     wanted = {name.strip().lower() for name in sources} if sources is not None else None
     live = key_check_enabled()
-    return [_check_one(source, live) for source in KEYED_SOURCES if wanted is None or source.name in wanted]
+    return [
+        _check_one(source, live) for source in KEYED_SOURCES if wanted is None or not wanted.isdisjoint(source.sources)
+    ]
+
+
+def undelivered_required_sources(status: SourceKeyStatus, required: Iterable[str]) -> List[str]:
+    """The sources named in ``required`` that use this status's key and will not deliver.
+
+    A source will not deliver when the key is missing, rejected or switched off with all its
+    sources (``will_collect`` is False), or when the source itself is switched off. A key that
+    could not be judged does not count.
+    """
+    needed = {name.strip().lower() for name in required}
+    return [
+        name
+        for name in status.all_sources
+        if name in needed and (status.will_collect is False or name in status.switched_off)
+    ]
 
 
 def baseline_blockers(statuses: Iterable[SourceKeyStatus], required: Optional[Iterable[str]] = None) -> List[str]:
@@ -396,17 +496,18 @@ def baseline_blockers(statuses: Iterable[SourceKeyStatus], required: Optional[It
       case; stopping at the first task spares the wipe of a fresh baseline.
     * A source named in ``EDGEGUARD_BASELINE_REQUIRED_SOURCES`` that is known not to deliver
       (no key, rejected key, switched off). A key that could not be judged does not block.
+      ``urlhaus`` and ``malwarebazaar`` are judged by the abuse.ch key they share with ThreatFox.
     """
     needed = required_sources() if required is None else frozenset(name.strip().lower() for name in required)
     blockers: List[str] = []
     for status in statuses:
         if status.status == REJECTED and status.task_fails:
             blockers.append(status.message())
-        elif status.source in needed and status.will_collect is False:
+        elif undelivered_required_sources(status, needed):
             blockers.append(
                 f"required source (EDGEGUARD_BASELINE_REQUIRED_SOURCES) cannot deliver — {status.message()}"
             )
-    known = {source.name for source in KEYED_SOURCES}
+    known = {name for source in KEYED_SOURCES for name in source.sources}
     for name in sorted(needed - known):
         logger.warning(
             "%s EDGEGUARD_BASELINE_REQUIRED_SOURCES names '%s', which is not a keyed source (%s) — ignored",

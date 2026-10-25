@@ -224,7 +224,7 @@ Unpause the scheduled DAGs (`edgeguard_pipeline`, `edgeguard_medium_freq`, etc.)
 | NVD | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back; then the records of every KEV CVE and of `EDGEGUARD_NVD_EXTRA_CVE_IDS`, whatever their age | Resumes from checkpoint on restart |
 | OTX | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back | Resumes from checkpoint on restart |
 | CISA / MITRE | Full catalog fetch | Already returns complete list |
-| ThreatFox / URLhaus / Feodo / etc. | Full current feed (ThreatFox: last 7 days, at most `EDGEGUARD_THREATFOX_MAX_PER_RUN`; URLhaus: `csv_recent`, at most `EDGEGUARD_URLHAUS_MAX_PER_RUN`; Feodo Tracker: the complete C2 history, at most `EDGEGUARD_FEODO_MAX_PER_RUN`; SSL Blacklist: the whole blacklist, at most `EDGEGUARD_SSLBL_MAX_PER_RUN`; AbuseIPDB: one blacklist request of at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` addresses) | Flat feeds, no history API |
+| ThreatFox / URLhaus / Feodo / etc. | Full current feed (ThreatFox: last 7 days, at most `EDGEGUARD_THREATFOX_MAX_PER_RUN`; URLhaus: the `recent.csv` export, at most `EDGEGUARD_URLHAUS_MAX_PER_RUN`; Feodo Tracker: the complete C2 history, at most `EDGEGUARD_FEODO_MAX_PER_RUN`; SSL Blacklist: the whole blacklist, at most `EDGEGUARD_SSLBL_MAX_PER_RUN`; AbuseIPDB: one blacklist request of at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` addresses) | Flat feeds, no history API |
 
 ---
 
@@ -247,7 +247,7 @@ EDGEGUARD_INCREMENTAL_LIMIT=500
 EDGEGUARD_INCREMENTAL_LIMIT=0
 ```
 
-This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV, CISA ICS and MITRE ATT&CK do not use it: each applies its own per-run cap. MITRE downloads the ATT&CK bundle only when its ETag changed and pushes every object in it, since a cut run that stored the new ETag would never read the objects it left out. CISA KEV compares its whole catalogue with MISP in every run and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500). CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, because a cut at 200 (advisory, CVE) items would stop inside the window, and an advisory naming 200 or more CVEs would hold its cursor for good, every run green. ThreatFox and URLhaus read a 7-day and a 30-day window of about 1,100 new entries per day each, of which a cut at 200 would lose about 80%. Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 would leave the stored copies of the others unreported, so they would age while still listed. AbuseIPDB makes one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan. The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
+This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV, CISA ICS and MITRE ATT&CK do not use it: each applies its own per-run cap. MITRE downloads the ATT&CK bundle only when its ETag changed and pushes every object in it, since a cut run that stored the new ETag would never read the objects it left out. CISA KEV compares its whole catalogue with MISP in every run and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500). CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, because a cut at 200 (advisory, CVE) items would stop inside the window, and an advisory naming 200 or more CVEs would hold its cursor for good, every run green. ThreatFox reads a 7-day window and URLhaus its `recent.csv` export (about 63,000 URLs on 2026-10-24), each with about 1,100 new entries per day, of which a cut at 200 would lose about 80%. Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 would leave the stored copies of the others unreported, so they would age while still listed. AbuseIPDB makes one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan. The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
 
 ### Priority order in `get_effective_limit()`
 
@@ -258,7 +258,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
    threatfox, urlhaus, feodo, sslbl,                     its own cap (EDGEGUARD_NVD_MAX_PER_RUN,
    abuseipdb, cisa / cisa_kev, cisa_ics, mitre)          EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN,
                                                          EDGEGUARD_THREATFOX_MAX_PER_RUN 10000,
-                                                         EDGEGUARD_URLHAUS_MAX_PER_RUN 50000,
+                                                         EDGEGUARD_URLHAUS_MAX_PER_RUN 100000,
                                                          EDGEGUARD_FEODO_MAX_PER_RUN 15000,
                                                          EDGEGUARD_SSLBL_MAX_PER_RUN 20000,
                                                          EDGEGUARD_ABUSEIPDB_MAX_PER_RUN 10000,
@@ -274,7 +274,7 @@ This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tr
 | | Baseline | Incremental |
 |--|----------|-------------|
 | Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB and CISA ICS use their own per-run caps, MITRE ATT&CK pushes its whole bundle when it changed, and CISA KEV compares its whole catalogue (edits capped by `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`) |
-| Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | From each collector's cursor (NVD, OTX, CISA ICS) or its feed's current window (ThreatFox: 7 days; URLhaus: `csv_recent`; Feodo Tracker: the servers active in the last 30 days); CISA KEV and MITRE ATT&CK read the whole catalogue (see [Incremental Collection Limit](#incremental-collection-limit)) |
+| Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | From each collector's cursor (NVD, OTX, CISA ICS) or its feed's current window (ThreatFox: 7 days; URLhaus: the `recent.csv` export; Feodo Tracker: the servers active in the last 30 days); CISA KEV and MITRE ATT&CK read the whole catalogue (see [Incremental Collection Limit](#incremental-collection-limit)) |
 | Trigger | Manual (once before production) | Automatic (cron schedules) |
 | Scope | Full historical load | New / updated data only |
 
@@ -502,10 +502,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus reads the abuse.ch v2 `recent.csv` export (about 63,000 URLs on 2026-10-24; the keyless `csv_recent` download answers HTTP 410 since 2026-10); `EDGEGUARD_URLHAUS_MAX_PER_RUN` 100,000 (was 50,000).
 - 2026-10-23 — The per-source run rules point to COLLECTION_AND_SYNC_LIMITS.md and the chunk setting to CONFIGURATION.md; the README sections they named were moved there.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — The relationship table lists `(Indicator)-[:INDICATES]->(CVE)`, written by the sync for an indicator and a CVE named in the same OTX pulse.

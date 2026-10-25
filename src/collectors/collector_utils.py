@@ -11,6 +11,7 @@ across every collector:
 
 import logging
 import os
+import re
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -156,6 +157,7 @@ def request_with_rate_limit_retries(
     retry_on_403: bool = False,
     retry_on_429: bool = True,
     context: str = "HTTP",
+    log_url: Optional[str] = None,
     **kwargs: Any,
 ) -> requests.Response:
     """
@@ -181,6 +183,8 @@ def request_with_rate_limit_retries(
             endpoint whose 429 means a daily quota is spent, waiting minutes cannot succeed;
             502/503/504 are still retried.
         context: Label for log messages (e.g. ``OTX``)
+        log_url: URL shown in log messages instead of ``url`` (2026-10). A URL that carries a
+            credential in its path (the abuse.ch exports) passes its redacted form here.
         **kwargs: Passed to ``session.request`` / ``requests.request``
 
     Returns:
@@ -223,7 +227,8 @@ def request_with_rate_limit_retries(
 
         rate_limit_hits += 1
         if rate_limit_hits > max_rate_limit_retries:
-            url_dbg = f"{url[:80]}..." if len(url) > 80 else url
+            shown = log_url if log_url is not None else url
+            url_dbg = f"{shown[:80]}..." if len(shown) > 80 else shown
             logger.error(
                 f"[{context}] HTTP {code} after {max_rate_limit_retries} backoff retries — giving up (url={url_dbg})"
             )
@@ -239,6 +244,99 @@ def request_with_rate_limit_retries(
         time.sleep(delay)
 
     return last_response  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# abuse.ch v2 exports: the Auth-Key is part of the URL path (2026-10)
+# ---------------------------------------------------------------------------
+# ``https://<host>/v2/files/exports/<AUTH-KEY>/recent.csv``. ``requests`` puts the full URL into
+# the text of its HTTPError / ConnectionError / Timeout messages and into ``response.url``, and the
+# retry decorator and the DAG wrapper log or alert that text, so every download of such a URL
+# passes through ``scrub_export_key_error`` / ``scrub_export_key_response`` before the result
+# leaves the collector.
+
+_EXPORT_KEY_PATH_RE = re.compile(r"(/v2/files/exports/)[^/\s'\"?#]+")
+
+
+def redact_export_key(text: Any, key: Optional[str] = None) -> str:
+    """``text`` with the Auth-Key of an abuse.ch export URL replaced by ``<redacted>``.
+
+    Replaces the path segment after ``/v2/files/exports/`` and, when ``key`` is given, any other
+    occurrence of the literal key.
+    """
+    out = _EXPORT_KEY_PATH_RE.sub(r"\1<redacted>", str(text))
+    if key:
+        out = out.replace(key, "<redacted>")
+    return out
+
+
+def _scrub_url_attr(obj: Any, key: Optional[str]) -> None:
+    url = getattr(obj, "url", None)
+    if isinstance(url, str):
+        try:
+            obj.url = redact_export_key(url, key)
+        except Exception:  # read-only attribute on an exotic type
+            pass
+
+
+def scrub_export_key_response(response: Any, key: Optional[str] = None) -> None:
+    """Redact the key in ``response.url`` and ``response.request.url`` in place."""
+    _scrub_url_attr(response, key)
+    _scrub_url_attr(getattr(response, "request", None), key)
+
+
+def scrub_export_key_error(exc: BaseException, key: Optional[str] = None) -> BaseException:
+    """Redact the key in ``exc`` (message, ``request`` / ``response`` URLs); hide its chained cause.
+
+    Returns the same exception object, so its type and traceback stay: ``raise scrub_export_key_error(e)``.
+    """
+    exc.args = tuple(redact_export_key(a, key) if isinstance(a, (str, BaseException)) else a for a in exc.args)
+    response = getattr(exc, "response", None)
+    if response is not None:
+        scrub_export_key_response(response, key)
+    _scrub_url_attr(getattr(exc, "request", None), key)
+    exc.__cause__ = None
+    exc.__suppress_context__ = True
+    return exc
+
+
+class ExportKeyLogFilter(logging.Filter):
+    """Redacts the Auth-Key of an abuse.ch export URL in the records of the HTTP library's loggers.
+
+    ``urllib3.connectionpool`` logs the request line of every request, path included, at DEBUG
+    (``https://host:443 "GET /v2/files/exports/<AUTH-KEY>/recent.csv HTTP/1.1" 200 None``), so a
+    log level raised to DEBUG would otherwise write the key into the task log. The filter keeps
+    every record and rewrites only one whose text holds an export key path.
+    """
+
+    edgeguard_export_key_filter = True  # marker: install_export_key_log_filter adds one filter per logger
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # a malformed record is left to the logging module's own error handling
+            return True
+        redacted = redact_export_key(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+# ``urllib3.connectionpool`` writes the request line; ``urllib3.util.retry`` writes the URL when a
+# retry is counted. A logger filter applies only to records of that exact logger.
+EXPORT_KEY_LOGGERS = ("urllib3.connectionpool", "urllib3.util.retry")
+
+
+def install_export_key_log_filter() -> None:
+    """Add :class:`ExportKeyLogFilter` to each logger in ``EXPORT_KEY_LOGGERS``; a second call adds nothing."""
+    for name in EXPORT_KEY_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(getattr(existing, "edgeguard_export_key_filter", False) for existing in target.filters):
+            target.addFilter(ExportKeyLogFilter())
+
+
+install_export_key_log_filter()
 
 
 # ---------------------------------------------------------------------------

@@ -3,13 +3,13 @@
 The daily DAG passed ``get_effective_limit("threatfox" / "urlhaus")`` to ``collect()``; neither
 source was in ``NO_LIMIT_SOURCES`` or ``OWN_RUN_CAP_SOURCES``, so both were cut at
 ``EDGEGUARD_INCREMENTAL_LIMIT`` (200). ThreatFox serves the IOCs of the last 7 days and URLhaus
-``csv_recent`` the URLs of the last 30 days, about 1,100 new entries per day each, and neither has
-a cursor: about 80% of each day's entries left the window without being collected. Each source
-now has its own cap sized to its window (``EDGEGUARD_THREATFOX_MAX_PER_RUN`` 10,000,
-``EDGEGUARD_URLHAUS_MAX_PER_RUN`` 50,000), and a run that reaches it keeps the newest entries
+its ``recent.csv`` export (about 63,000 URLs on 2026-10-24), about 1,100 new entries per day each,
+and neither has a cursor: about 80% of each day's entries left the window without being collected.
+Each source now has its own cap above its whole window (``EDGEGUARD_THREATFOX_MAX_PER_RUN`` 10,000,
+``EDGEGUARD_URLHAUS_MAX_PER_RUN`` 100,000), and a run that reaches it keeps the newest entries
 whatever order the feed returns them in, and says so in a warning.
 
-Payload shapes: the ThreatFox ``get_iocs`` record and the URLhaus ``csv_recent`` header and row
+Payload shapes: the ThreatFox ``get_iocs`` record and the URLhaus ``recent.csv`` header and row
 layout as abuse.ch documents and serves them (fields the collectors read).
 """
 
@@ -81,7 +81,7 @@ def _defaults(monkeypatch):
     monkeypatch.setattr(config, "INCREMENTAL_COLLECTION_LIMIT", 200)
     monkeypatch.setattr(config, "MAX_ENTRIES_PER_SOURCE", 0)
     monkeypatch.setattr(config, "THREATFOX_MAX_PER_RUN", 10000)
-    monkeypatch.setattr(config, "URLHAUS_MAX_PER_RUN", 50000)
+    monkeypatch.setattr(config, "URLHAUS_MAX_PER_RUN", 100000)
     for breaker in (gfc.THREATFOX_CIRCUIT_BREAKER, gfc.URLHAUS_CIRCUIT_BREAKER):
         monkeypatch.setattr(breaker, "can_execute", lambda: True)
         monkeypatch.setattr(breaker, "record_success", lambda: None)
@@ -104,7 +104,8 @@ def _threatfox(iocs: List[Dict[str, Any]]) -> gfc.ThreatFoxCollector:
 
 def _urlhaus(text: str) -> gfc.URLhausCollector:
     c = gfc.URLhausCollector.__new__(gfc.URLhausCollector)
-    c.urls = ["https://urlhaus.abuse.ch/downloads/csv_recent/"]
+    c.api_key = "a" * 48
+    c.urls = [f"https://urlhaus-api.abuse.ch/v2/files/exports/{c.api_key}/recent.csv"]
     c.source_name = "urlhaus"
     c.misp_writer = MagicMock()
     c.misp_writer.push_indicators.side_effect = lambda items, _src: (len(items), 0)
@@ -141,7 +142,7 @@ def test_code_defaults_and_environment_override():
         fresh = importlib.reload(config)
         try:
             assert fresh.THREATFOX_MAX_PER_RUN == 10000
-            assert fresh.URLHAUS_MAX_PER_RUN == 50000
+            assert fresh.URLHAUS_MAX_PER_RUN == 100000
             os.environ["EDGEGUARD_THREATFOX_MAX_PER_RUN"] = "1234"
             os.environ["EDGEGUARD_URLHAUS_MAX_PER_RUN"] = "0"
             fresh = importlib.reload(config)
@@ -214,7 +215,7 @@ def test_urlhaus_daily_run_is_not_cut_at_the_incremental_default():
     rows = "".join(_urlhaus_row(n, f"2026-10-{1 + n % 14:02d} 12:00:{n % 60:02d}") for n in range(450))
     c = _urlhaus(_URLHAUS_BANNER + rows)
     st = c.collect(limit=config.get_effective_limit("urlhaus"), push_to_misp=True)
-    assert st["count"] == 450, "the whole csv_recent window is collected, not the first 200"
+    assert st["count"] == 450, "the whole recent.csv window is collected, not the first 200"
     pushed = c.misp_writer.push_indicators.call_args[0][0]
     assert len(pushed) == 450 and pushed[0]["first_seen"] == "2026-10-01 12:00:00", "feed order kept below the cap"
 
@@ -238,7 +239,7 @@ def test_urlhaus_capped_run_keeps_the_newest_urls_whatever_the_feed_order(caplog
         pushed = c.misp_writer.push_indicators.call_args[0][0]
         assert [i["first_seen"] for i in pushed] == ["2026-10-15 07:01:04", "2026-10-14 22:10:00"]
         assert any(
-            "csv_recent lists 4 URLs" in r.message and "cap of 2" in r.message and "2 older ones" in r.message
+            "recent.csv lists 4 URLs" in r.message and "cap of 2" in r.message and "2 older ones" in r.message
             for r in caplog.records
         )
 

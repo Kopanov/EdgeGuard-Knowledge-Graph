@@ -358,6 +358,124 @@ def test_fixed_order_and_selection(http) -> None:
         "abuseipdb",
     ]
     assert [status.source for status in skc.check_source_keys(["ThreatFox ", "nvd"])] == ["nvd", "threatfox"]
+    assert [status.source for status in skc.check_source_keys(["URLhaus"])] == ["threatfox"], "same key"
+
+
+# ---------------------------------------------------------------------------
+# The abuse.ch Auth-Key: ThreatFox, URLhaus and MalwareBazaar
+# ---------------------------------------------------------------------------
+
+
+def _malwarebazaar_flag(monkeypatch, on: bool) -> None:
+    monkeypatch.setattr(_config(), "ENABLE_MALWAREBAZAAR", on)
+
+
+def _abusech(statuses: List[skc.SourceKeyStatus]) -> skc.SourceKeyStatus:
+    (status,) = [status for status in statuses if status.source == "threatfox"]
+    return status
+
+
+@pytest.mark.parametrize(
+    "allowed, flag, named",
+    [
+        ("urlhaus", False, "urlhaus"),
+        ("urlhaus,nvd", True, "urlhaus"),
+        ("malwarebazaar", True, "malwarebazaar"),
+        ("urlhaus,malwarebazaar", True, "urlhaus, malwarebazaar"),
+    ],
+)
+def test_the_abusech_key_is_checked_for_urlhaus_and_malwarebazaar_when_threatfox_is_switched_off(
+    http, monkeypatch, allowed, flag, named
+) -> None:
+    """Both exports carry the abuse.ch Auth-Key (THREATFOX_API_KEY) in their URL path."""
+    monkeypatch.setenv("EDGEGUARD_COLLECT_SOURCES", allowed)
+    _malwarebazaar_flag(monkeypatch, flag)
+    missing = _one("threatfox")
+    assert (missing.status, missing.will_collect) == (skc.NOT_SET, False)
+    assert missing.message().startswith(f"{named}: no key (THREATFOX_API_KEY ")
+    assert "will be skipped" in missing.message() and "https://auth.abuse.ch/" in missing.message()
+
+    _set_key(monkeypatch, "threatfox")
+    http.answers[URLS["threatfox"]] = _Response(403, {"query_status": "unknown_auth_key"})
+    rejected = _one("threatfox")
+    assert rejected.status == skc.REJECTED and rejected.is_problem
+    assert rejected.message().startswith(f"{named}: key REJECTED by the provider (THREATFOX_API_KEY; HTTP 403")
+    assert "will be SKIPPED" in rejected.message()
+    assert http.urls() == [URLS["threatfox"]], "one ThreatFox query checks the key shared by the three sources"
+
+
+def test_the_abusech_key_messages_name_every_source_that_uses_it(http, monkeypatch) -> None:
+    _malwarebazaar_flag(monkeypatch, True)
+    every = _one("threatfox")
+    assert every.message().startswith("threatfox, urlhaus, malwarebazaar: no key (THREATFOX_API_KEY ")
+    assert "these sources will be skipped" in every.message()
+    assert every.sources == ("threatfox", "urlhaus", "malwarebazaar") and every.switched_off == ()
+
+    _malwarebazaar_flag(monkeypatch, False)  # the default: MalwareBazaar is flag-guarded
+    _set_key(monkeypatch, "threatfox")
+    http.answers[URLS["threatfox"]] = _Response(200)
+    default = _one("threatfox")
+    assert default.status == skc.VALID and default.switched_off == ("malwarebazaar",)
+    assert default.message() == (
+        "threatfox, urlhaus: key accepted by the provider (THREATFOX_API_KEY) — these sources will be collected "
+        "(malwarebazaar uses the same key and is switched off)"
+    )
+    assert default.as_dict()["sources"] == ("threatfox", "urlhaus", "malwarebazaar")
+
+
+def test_the_abusech_key_is_not_checked_when_all_three_sources_are_off(http, monkeypatch) -> None:
+    _set_key(monkeypatch, "threatfox")
+    _malwarebazaar_flag(monkeypatch, True)
+    monkeypatch.setenv("EDGEGUARD_COLLECT_SOURCES", "otx,feodo")
+    status = _one("threatfox")
+    assert status.status == skc.DISABLED and http.calls == []
+    assert status.message().startswith("threatfox, urlhaus, malwarebazaar: switched off by EDGEGUARD_COLLECT_SOURCES")
+    _malwarebazaar_flag(monkeypatch, False)
+    monkeypatch.setenv("EDGEGUARD_COLLECT_SOURCES", "malwarebazaar")
+    assert _one("threatfox").status == skc.DISABLED, "MalwareBazaar runs only with EDGEGUARD_ENABLE_MALWAREBAZAAR"
+    assert "EDGEGUARD_ENABLE_MALWAREBAZAAR" in _one("threatfox").detail
+
+
+@pytest.mark.parametrize("required", ["urlhaus", "malwarebazaar", " URLhaus , MalwareBazaar "])
+def test_urlhaus_and_malwarebazaar_can_be_required_sources_of_a_baseline(http, monkeypatch, caplog, required) -> None:
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", required)
+    _malwarebazaar_flag(monkeypatch, True)
+    with caplog.at_level(logging.WARNING, logger="source_key_check"):
+        statuses = skc.check_source_keys()
+        blockers = skc.baseline_blockers(statuses)
+    assert len(blockers) == 1 and blockers[0].startswith("required source (EDGEGUARD_BASELINE_REQUIRED_SOURCES)")
+    assert "no key (THREATFOX_API_KEY" in blockers[0] and skc.exit_code(statuses) == 2
+    assert not any("not a keyed source" in record.getMessage() for record in caplog.records)
+
+    _set_key(monkeypatch, "threatfox")
+    http.answers[URLS["threatfox"]] = _Response(403, {"query_status": "unknown_auth_key"})
+    assert len(skc.baseline_blockers(skc.check_source_keys())) == 1, "a rejected key: the source cannot deliver"
+    http.answers[URLS["threatfox"]] = _Response(200)
+    assert skc.baseline_blockers(skc.check_source_keys()) == []
+
+
+@pytest.mark.parametrize(
+    "required, allowed, flag",
+    [
+        ("urlhaus", "threatfox,malwarebazaar", True),  # URLhaus left out of EDGEGUARD_COLLECT_SOURCES
+        ("malwarebazaar", "", False),  # EDGEGUARD_ENABLE_MALWAREBAZAAR is off
+    ],
+)
+def test_a_required_abusech_source_that_is_switched_off_stops_a_baseline_with_a_valid_key(
+    http, monkeypatch, required, allowed, flag
+) -> None:
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", required)
+    if allowed:
+        monkeypatch.setenv("EDGEGUARD_COLLECT_SOURCES", allowed)
+    _malwarebazaar_flag(monkeypatch, flag)
+    _set_key(monkeypatch, "threatfox")
+    http.answers[URLS["threatfox"]] = _Response(200)
+    status = _one("threatfox")
+    assert status.status == skc.VALID and status.switched_off == (required,)
+    (blocker,) = skc.baseline_blockers([status])
+    assert f"({required} uses the same key and is switched off)" in blocker
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", "threatfox")
+    assert skc.baseline_blockers([status]) == [], "ThreatFox itself is switched on and its key is accepted"
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +767,51 @@ def test_preflight_counts_a_rejected_nvd_key_and_a_missing_required_source_as_er
     monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", "abuseipdb")
     required = _preflight(monkeypatch, [OTX_VALID, ABUSE_NOT_SET])
     assert (required["errors"], required["code"]) == (clean["errors"] + 1, 1)
-    assert "[named in EDGEGUARD_BASELINE_REQUIRED_SOURCES]" in required["text"]
+    assert "[abuseipdb: named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and will not deliver]" in required["text"]
+
+
+def test_preflight_counts_a_required_urlhaus_without_the_abusech_key_as_an_error(http, monkeypatch) -> None:
+    statuses = skc.check_source_keys()  # no key configured anywhere
+    clean = _preflight(monkeypatch, statuses)
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", "urlhaus")
+    required = _preflight(monkeypatch, statuses)
+    assert (required["errors"], required["code"]) == (clean["errors"] + 1, 1)
+    assert "no key (THREATFOX_API_KEY" in required["text"]
+    assert "[urlhaus: named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and will not deliver]" in required["text"]
+
+
+@pytest.mark.parametrize(
+    "required, allowed, flag",
+    [
+        ("malwarebazaar", None, False),  # EDGEGUARD_ENABLE_MALWAREBAZAAR left at its default
+        ("threatfox", "otx,nvd,urlhaus,feodo,sslbl,cisa,mitre", False),  # ThreatFox left out, URLhaus on
+        ("urlhaus", "threatfox,malwarebazaar", True),  # URLhaus left out
+    ],
+)
+def test_preflight_counts_a_switched_off_required_source_as_an_error_when_the_shared_key_is_accepted(
+    http, monkeypatch, required, allowed, flag
+) -> None:
+    """The abuse.ch key can be accepted for the switched-on sources while a required one is off."""
+    if allowed is not None:
+        monkeypatch.setenv("EDGEGUARD_COLLECT_SOURCES", allowed)
+    _malwarebazaar_flag(monkeypatch, flag)
+    _set_key(monkeypatch, "threatfox")
+    http.answers[URLS["threatfox"]] = _Response(200)
+    statuses = skc.check_source_keys()
+    abusech = _abusech(statuses)
+    assert abusech.status == skc.VALID and required in abusech.switched_off
+    clean = _preflight(monkeypatch, statuses)
+
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", required)
+    assert skc.baseline_blockers(statuses), "the baseline task stops"
+    preflight = _preflight(monkeypatch, statuses)
+    assert (preflight["errors"], preflight["code"]) == (clean["errors"] + 1, 1), "preflight agrees with the baseline"
+    assert f"[{required}: named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and will not deliver]" in preflight["text"]
+
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", abusech.switched_on[0])
+    switched_on = _preflight(monkeypatch, statuses)
+    assert switched_on["errors"] == clean["errors"], "a required source that is on and keyed is not an error"
+    assert skc.baseline_blockers(statuses) == []
 
 
 # ---------------------------------------------------------------------------

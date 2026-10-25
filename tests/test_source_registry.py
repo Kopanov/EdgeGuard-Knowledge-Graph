@@ -123,7 +123,8 @@ _LEGACY_DEFAULT_SOURCES = {
     },
     "urlhaus": {
         "name": "URLhaus",
-        "api_key_env": None,
+        # The v2 export carries the abuse.ch Auth-Key in its URL path (the keyless download is gone).
+        "api_key_env": "THREATFOX_API_KEY",
         "rate_limit": "unlimited",
         "enabled": True,
         "description": "Malware URLs",

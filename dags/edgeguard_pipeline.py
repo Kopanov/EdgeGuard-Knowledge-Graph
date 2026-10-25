@@ -3305,9 +3305,10 @@ baseline_misp_health = PythonOperator(
 def _baseline_source_key_check(**context) -> None:
     """Report which keyed sources will deliver, before anything is locked or wiped.
 
-    A key the provider rejects otherwise shows up hours into the run as one skipped task
-    (OTX, VirusTotal, ThreatFox, AbuseIPDB) or as a failed NVD task after ``baseline_clean``
-    wiped the stores. The report is one line per source in the task log. The run stops here
+    A key the provider rejects otherwise shows up hours into the run as skipped tasks
+    (OTX, VirusTotal, AbuseIPDB, and ThreatFox, URLhaus and MalwareBazaar, which share the
+    abuse.ch key) or as a failed NVD task after ``baseline_clean`` wiped the stores. The
+    report is one line per key in the task log. The run stops here
     only for a key state that would stop it later anyway (a rejected NVD key) or for a
     source the operator declared mandatory (``EDGEGUARD_BASELINE_REQUIRED_SOURCES``); a
     missing or rejected key of an optional source never blocks, and neither does a provider

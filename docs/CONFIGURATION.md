@@ -65,16 +65,16 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 |---|---|---|
 | `OTX_API_KEY` | unset | AlienVault OTX; without it OTX is skipped |
 | `NVD_API_KEY` | unset | NVD; without it NVD runs at the lower anonymous rate |
-| `THREATFOX_API_KEY` | unset | abuse.ch key; ThreatFox is skipped without it |
+| `THREATFOX_API_KEY` | unset | abuse.ch key; ThreatFox, URLhaus and MalwareBazaar are skipped without it |
 | `ABUSEIPDB_API_KEY` | unset | AbuseIPDB; skipped without it |
 | `VIRUSTOTAL_API_KEY` | unset | VirusTotal lookups; skipped without it |
 | `EDGEGUARD_COLLECT_SOURCES` | unset (all) | Comma-separated allowlist of collectors |
 | `EDGEGUARD_SOURCE_KEY_CHECK` | `true` | Ask each provider whether it accepts the key |
 | `EDGEGUARD_BASELINE_REQUIRED_SOURCES` | empty | Keyed sources a baseline must not start without |
 
-- `THREATFOX_API_KEY` is also sent as the abuse.ch `Auth-Key` to MalwareBazaar, which needs no key.
-- The key check runs in `edgeguard preflight`, `scripts/preflight_baseline.sh` and the baseline task `source_key_check`, one authenticated request per keyed source; `false` reports configured keys as unverified.
-- `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `otx`, `nvd`, `virustotal`, `threatfox` and `abuseipdb`. A listed source without a key, with a rejected key or switched off fails `source_key_check`, before the lock and the wipe.
+- `THREATFOX_API_KEY` is also the key of the URLhaus and MalwareBazaar exports, part of the export URL path (redacted in every log line); without it both are skipped.
+- The key check runs in `edgeguard preflight`, `scripts/preflight_baseline.sh` and the baseline task `source_key_check`, one authenticated request per key; `false` reports configured keys as unverified. One ThreatFox query checks the abuse.ch key, and its line names each of ThreatFox, URLhaus and MalwareBazaar that is switched on.
+- `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `otx`, `nvd`, `virustotal`, `threatfox`, `urlhaus`, `malwarebazaar` and `abuseipdb`; `urlhaus` and `malwarebazaar` are judged by `THREATFOX_API_KEY`. A listed source without a key, with a rejected key or switched off (for MalwareBazaar also `EDGEGUARD_ENABLE_MALWAREBAZAAR=false`) fails `source_key_check`, before the lock and the wipe, and is an error in `edgeguard preflight`.
 - How to obtain each key: [API_KEYS_SETUP.md](API_KEYS_SETUP.md).
 
 ---
@@ -90,7 +90,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 
 - CISA ICS maps CISA's sectors to `energy`, `healthcare` and `finance`; its `AFFECTS` links carry `advisory_sector` at 0.9. It runs as an isolated daily task and in the baseline.
 - ATT&CK for ICS items carry `attack_domain = ics`; a failed ICS fetch never affects the Enterprise ingest.
-- MalwareBazaar reads the public export of the last 48 hours; its samples link to `Malware` nodes by `INDICATES`.
+- MalwareBazaar reads the export of the last 48 hours (abuse.ch Auth-Key required); its samples link to `Malware` nodes by `INDICATES`.
 - EPSS runs after every Neo4j sync and the baseline; a feed outage is logged and skipped.
 - On an existing graph, an additive baseline loads the history of CISA ICS and ATT&CK for ICS; for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works.
 
@@ -151,7 +151,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | Variable | Default | Purpose |
 |---|---|---|
 | `EDGEGUARD_THREATFOX_MAX_PER_RUN` | `10000` | ThreatFox indicators per run (newest kept) |
-| `EDGEGUARD_URLHAUS_MAX_PER_RUN` | `50000` | URLhaus URLs per run (newest kept) |
+| `EDGEGUARD_URLHAUS_MAX_PER_RUN` | `100000` | URLhaus URLs per run (newest kept); above the whole `recent.csv` export |
 | `EDGEGUARD_FEODO_MAX_PER_RUN` | `15000` | Feodo Tracker servers per run |
 | `EDGEGUARD_SSLBL_MAX_PER_RUN` | `20000` | SSL Blacklist certificates per run |
 | `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` | `10000` | Limit of the one AbuseIPDB blacklist request per run |
@@ -163,7 +163,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_VIRUSTOTAL_BUDGET_PATH` | in the state directory | VirusTotal daily ledger file |
 
 - The ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB and MalwareBazaar caps replace `EDGEGUARD_INCREMENTAL_LIMIT` for their sources, in baseline and scheduled runs alike; `0` means no cap, except for AbuseIPDB, where `0` means 10,000.
-- ThreatFox's API returns at most the last 7 days and URLhaus serves the last 30; a run that reaches its cap keeps the newest items and logs a warning.
+- ThreatFox's API returns at most the last 7 days and URLhaus its `recent.csv` export (about 63,000 URLs on 2026-10-24); a run that reaches its cap keeps the newest items and logs a warning.
 - AbuseIPDB makes at most one blacklist request per run, none when it reuses the answer fetched earlier on the same UTC day; the free plan returns at most 10,000 addresses per request and allows 5 blacklist requests per day, and a 429 fails `collect_abuseipdb` ([RUNBOOK.md § AbuseIPDB daily blacklist quota](RUNBOOK.md#abuseipdb-daily-blacklist-quota-429)).
 - MalwareBazaar keeps labelled samples first. VirusTotal's free tier allows 500 lookups per day; an exhausted budget skips the task (log prefix `[VT-QUOTA]`). The ledger file defaults to `virustotal_daily_budget.json` in the state directory.
 
@@ -454,6 +454,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `THREATFOX_API_KEY` is the key of the URLhaus and MalwareBazaar v2 exports too (the keyless downloads answer HTTP 410 since 2026-10); `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `urlhaus` and `malwarebazaar` (a listed one that is switched off is also an error in `edgeguard preflight`); `EDGEGUARD_URLHAUS_MAX_PER_RUN` default 100,000 (was 50,000), above the about 63,000 URLs of the export on 2026-10-24.
 - 2026-10-25 — Row for `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000): larger MISP events are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 instead of one `/events/view`, which the hosted MISP answered with HTTP 500 for a 145k-attribute event on 2026-10-24.
 - 2026-10-23 — The host scripts that query Neo4j over HTTP have no remote default: with neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` set they use the Compose Neo4j at `http://127.0.0.1:7474` (they sent the credentials to a built-in remote address), `scripts/run_cypher_catalog_http.py` also reads `NEO4J_HTTP`, a value that is not a valid http(s) URL (scheme, host, port) stops them, and `scripts/neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`; rows for `NEO4J_HTTP_USER_AGENT` and `NEO4J_WSS_HOST`.
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY` and `SSL_VERIFY` fail closed: `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off` are recognised, any other value keeps verification on with a warning, and every reader uses the one rule in `src/tls_verify.py`; only ASCII whitespace around the value is ignored, and `scripts/preflight_baseline.sh` applies the rule in the C locale.

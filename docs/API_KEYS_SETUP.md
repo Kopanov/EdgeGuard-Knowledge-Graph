@@ -84,7 +84,7 @@ This guide explains how to obtain API keys for all the threat intelligence sourc
    export THREATFOX_API_KEY="your-abuse-ch-auth-key"
    ```
 
-**Note:** Without the key the ThreatFox collector is skipped (optional source). MalwareBazaar needs no key; when `THREATFOX_API_KEY` is set, it sends the same key as `Auth-Key`.
+**Note:** Without the key the ThreatFox, URLhaus and MalwareBazaar collectors are skipped (optional sources). ThreatFox sends the key as a header; the URLhaus and MalwareBazaar exports carry it in their URL path, where it is redacted from every log line and error. `python src/source_key_check.py` checks the key once (one ThreatFox query) and names every one of the three sources that is switched on; `EDGEGUARD_BASELINE_REQUIRED_SOURCES` accepts `threatfox`, `urlhaus` and `malwarebazaar` for it.
 
 ---
 
@@ -141,7 +141,7 @@ services:
 | `OTX_API_KEY` | AlienVault OTX API key | *(optional)* |
 | `NVD_API_KEY` | NVD API key | *(optional)* |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB API key (used by `src/collectors/abuseipdb_collector.py`) | *(optional)* |
-| `THREATFOX_API_KEY` | abuse.ch Auth-Key (ThreatFox; also sent by MalwareBazaar when set; used by `src/collectors/global_feed_collector.py`) | *(optional)* |
+| `THREATFOX_API_KEY` | abuse.ch Auth-Key (ThreatFox, URLhaus and MalwareBazaar exports; used by `src/collectors/global_feed_collector.py`) | *(optional)* |
 | `VIRUSTOTAL_API_KEY` | VirusTotal API key | *(optional)* |
 | `NEO4J_URI` | Neo4j connection URI | `bolt://localhost:7687` |
 | `NEO4J_USER` | Neo4j username | `neo4j` |
@@ -177,10 +177,11 @@ services:
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus and MalwareBazaar need the abuse.ch Auth-Key in their v2 export URL path (the keyless downloads answer HTTP 410 since 2026-10); the key check covers all three abuse.ch sources and the key is redacted from the HTTP library's DEBUG records too.
 - 2026-10-17 — The MISP key must be able to create events and add, edit and tag attributes (the guide advised a read-only key for collection, which makes every collector push fail); `MISP_URL` falls back to `https://localhost:8443` when unset (it said required, no default); `NEO4J_DATABASE` unset means the server's default database (it said `neo4j`); AbuseIPDB and ThreatFox / abuse.ch key sections added, with `THREATFOX_API_KEY` as the abuse.ch Auth-Key MalwareBazaar also sends; `EDGEGUARD_ALLOW_UNAUTH` does not lift the key requirement in production; main text limited to current behaviour, with the change history in this section.
 - 2026-04-26 — The `neo4j://` cluster URI scheme documented in place of the deprecated `bolt+routing://`; `bolt+s://` / `bolt+ssc://` rows added; `EDGEGUARD_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY` and `VIRUSTOTAL_API_KEY` added to the environment variable summary.
 - 2026-03-17 — Guide to obtaining the API keys of the threat intelligence sources.

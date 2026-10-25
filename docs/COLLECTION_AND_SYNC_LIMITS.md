@@ -28,7 +28,7 @@ Several numbers (**200**, **500**) appear across EdgeGuard docs and code. They c
 
 - NVD: `EDGEGUARD_NVD_MAX_PER_RUN` (5,000).
 - MalwareBazaar: `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500).
-- ThreatFox and URLhaus: `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) and `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000).
+- ThreatFox and URLhaus: `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) and `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000), each above its feed's whole window (URLhaus: the `recent.csv` export, about 63,000 URLs on 2026-10-24).
 - Feodo Tracker and SSL Blacklist: `EDGEGUARD_FEODO_MAX_PER_RUN` (15,000) and `EDGEGUARD_SSLBL_MAX_PER_RUN` (20,000).
 - AbuseIPDB: `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (10,000), the request limit of its one blacklist request per run.
 - CISA KEV: the whole catalogue every run; entries are added without a cap, and at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) stored copies are edited.
@@ -84,6 +84,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `EDGEGUARD_URLHAUS_MAX_PER_RUN` default 100,000 (was 50,000): the abuse.ch v2 `recent.csv` export listed about 63,000 URLs on 2026-10-24, more than the old cap.
 - 2026-10-25 — Events whose index attribute count is over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000) are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 (in attribute id order, until an empty page) instead of one `/events/view`, which the hosted MISP answered with HTTP 500 for every request for a 145k-attribute NVD event on 2026-10-24; fewer rows than the index count are warned (`[PAGED-FETCH-INCOMPLETE]`) and summarised; the large-event paragraph states that the attribute list is held in memory and only the parsed items are bounded per page; the event-fetch pause applies to paged fetches too.
 - 2026-10-23 — MITRE ATT&CK listed among the sources with their own per-run rule (the whole changed bundle), and VirusTotal's lookup cap named, so `EDGEGUARD_INCREMENTAL_LIMIT` in effect cuts OTX; `MISPCollector` is run by no DAG or CLI step; `docker-compose.yml` forwards eight source caps, `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` among them (the page said seven), and the per-source rules moved from the table into a list below it.
 - 2026-10-19 — Report-scoped links: a 50-CVE cap per pulse beside the existing caps (2,000 indicators, 50 malware, 10 actors); an incremental sync takes the first items in event order (it put the changed items first) and rebuilds only the pulses of its changed items (it also rebuilt other pulses of the unchanged items).

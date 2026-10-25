@@ -143,7 +143,7 @@ How far back a collector reaches comes from the run, not from the collector: `ba
 
 Flag any collector that uses a hardcoded absolute date instead of a relative offset from `datetime.now()`, or that hardcodes a lookback instead of taking `baseline_days` / its incremental window. Taking a whole catalogue on purpose (every CISA KEV run and the NVD KEV sweep, `docs/DATA_SOURCES.md`) is not a lookback violation.
 Flag any comparison of a timestamp parsed from a source payload with a timezone-aware datetime when the parsed value is not normalised first (`tzinfo is None` → UTC). NVD and OTX send timestamps without a zone; the comparison raises `TypeError`, and inside a broad `except` the check silently never runs.
-Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`). Sources in `config.OWN_RUN_CAP_SOURCES` apply their own per-run cap instead of `EDGEGUARD_INCREMENTAL_LIMIT` (`EDGEGUARD_<SOURCE>_MAX_PER_RUN`: MalwareBazaar 500, NVD 5,000 MISP writes, ThreatFox 10,000, URLhaus 50,000, Feodo 15,000, SSLBL 20,000, AbuseIPDB 10,000; CISA KEV compares its whole catalogue and caps only its edits, `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`; CISA ICS reads at most `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`, 1,200 advisory files); `EDGEGUARD_MAX_ENTRIES` overrides them. Flag a source added there without its own cap, or a cap that cuts below one run's window.
+Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`). Sources in `config.OWN_RUN_CAP_SOURCES` apply their own per-run cap instead of `EDGEGUARD_INCREMENTAL_LIMIT` (`EDGEGUARD_<SOURCE>_MAX_PER_RUN`: MalwareBazaar 500, NVD 5,000 MISP writes, ThreatFox 10,000, URLhaus 100,000, Feodo 15,000, SSLBL 20,000, AbuseIPDB 10,000; CISA KEV compares its whole catalogue and caps only its edits, `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`; CISA ICS reads at most `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`, 1,200 advisory files); `EDGEGUARD_MAX_ENTRIES` overrides them. Flag a source added there without its own cap, or a cap that cuts below one run's window.
 
 ### Incremental cursor moved past work that did not reach MISP
 A collector with an incremental cursor advances it only over work whose MISP writes succeeded: OTX, after a push with failures, no further than the pulses modified before the oldest pulse with an item `MISPWriter.push_items` lists in `last_push_unstored_items` (a failed batch or event lookup, or a conversion drop that is systemic for the source), and not at all when the writer gives no list; CISA ICS and NVD only after a run without a failed write. NVD also requires the lastMod window to have been read completely, counts an addition as written only when MISP's answer or a lookup by value (`MISPWriter.existing_values`) shows it stored, fails the task while the cursor cannot move, and moves the cursor at most to the record where `EDGEGUARD_NVD_MAX_PER_RUN` stopped the run. NVD's lastMod results must be read one answer per time slice (`_iter_lastmod_slices`), not paged across a window that changes while it is read.
@@ -1048,10 +1048,11 @@ When code changes affect user-visible behavior (CLI commands, env vars, DAG sett
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus per-run cap 100,000 (was 50,000): the abuse.ch v2 `recent.csv` export listed about 63,000 URLs on 2026-10-24.
 - 2026-10-19 — The `USES_TECHNIQUE` pattern comment says what the link is: the indicator's OTX report lists the technique.
 - 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag. The `OTX_META` sentinel pair lists the OTX CVE writer (`create_vulnerability_attribute`) and reader (`_vulnerability_report_ids`).
 - 2026-10-18 — Sector links: `otx_industries` (0.6) only on `TARGETS` to a sector an OTX pulse's industries state; `MITRE_USES_TECHNIQUES.ind` / `rsz`, `OTX_META.report_stated_zones`.
