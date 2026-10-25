@@ -45,13 +45,13 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **10** a
 | VirusTotal | API | Active | Yes | Optional key |
 | AbuseIPDB | API | Active | Yes | Optional key |
 | ThreatFox | API | Active | Yes | Abuse.ch key |
-| URLhaus | API | Active | Yes | |
+| URLhaus | CSV export | Active | Yes | Abuse.ch key |
 | Feodo Tracker | CSV | Active | Yes | Botnet C&C (keyword detector: Global in practice) |
 | SSL Blacklist | CSV | Active | Yes | |
 | Energy sector | — | Placeholder | No | Needs membership / feed |
 | Healthcare sector | — | Placeholder | No | Needs membership / feed |
 | CISA ICS Advisories | CSAF JSON (GitHub raw) | Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, off) | Yes | CVE ↔ sector as CISA states it |
-| MalwareBazaar | CSV export | Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, off) | Yes | sha256 + family label |
+| MalwareBazaar | CSV export | Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, off) | Yes | sha256 + family label; abuse.ch key |
 | FIRST EPSS | gzip CSV | Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, on) | No (writes to Neo4j) | Exploit-prediction score on existing CVE nodes |
 
 **Optional `MISPCollector`:** pulls from MISP **`/events`** with **its own** limits; **not** wired into default baseline collector step 2. It is not counted among the DATA_SOURCES.md sources.
@@ -180,10 +180,11 @@ Usually **MITRE-specific** types/tags vs MISP policy. Read the full MISP error b
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Source table: URLhaus and MalwareBazaar need the abuse.ch key (`THREATFOX_API_KEY`); URLhaus is read as a CSV export.
 - 2026-10-23 — Self-signed MISP: only `false`, `0`, `no` or `off` turns TLS verification off; any other value of `EDGEGUARD_SSL_VERIFY` keeps it on with a warning.
 - 2026-10-23 — The settings reference points to CONFIGURATION.md, which holds the README's settings tables.
 - 2026-10-20 — ATT&CK techniques, tactics and tools are written as `<id> - <name>`, which MISP's default Import Regexp rules leave unchanged (as `<id>: <name>`, the rules rewrote the nine entries named "Windows …" on the run of 2026-10-20); the sync reads both forms and skips a value with no valid ATT&CK id with an `[ATTACK-VALUE]` warning; new section on the attribute types and values.

@@ -232,9 +232,11 @@ This is why Invariant 2 is mandatory.
 #### Seen dates of an indicator (campaigns, alert enrichment)
 
 Concepts 1 and 2 come only from the sources on the reliable first-seen allowlist, so an
-indicator's OTX edge has neither; every indicator edge has the source's latest report,
-`r.last_reported_at` (the source's own last-report date capped at the MISP timestamp, or the MISP
-timestamp when the source gave none). The campaign build and the alert enrichment read one
+indicator's OTX edge has neither; every indicator edge the MISP → Neo4j sync writes has the
+source's latest report, `r.last_reported_at` (the source's own last-report date capped at the MISP
+timestamp, or the MISP timestamp when the source gave none). Writers that carry no MISP report (the
+command-line STIX import of `run_pipeline.py`, for example) record none on the edges they write, so
+such an edge dates the indicator only by a claim. The campaign build and the alert enrichment read one
 definition of when an indicator was first and last reported (`src/indicator_seen_dates.py`):
 
 | Date | Per edge | Over the indicator's edges | No edge dates it |
@@ -249,10 +251,14 @@ reports.
 - **Campaign** (`build_campaign_nodes`): `first_seen` is the earliest first seen of its active
   indicators, `last_seen` the latest last seen. `first_seen` only moves earlier and `last_seen`
   only later, so a campaign keeps the widest span a build computed, also after the indicators that
-  gave it expire.
+  gave it expire. A `last_seen` a build stored too late therefore stays until a fresh baseline
+  rebuilds the graph, or until a build deletes the campaign because its actor has no evidence left.
 - **Alert enrichment** (`alert_processor`): `first_seen` and `last_updated` of the indicator,
-  computed for each alert: once a source reports an indicator again after its import, its first
-  seen is the import time. An alert is no report: once a source dates an indicator, its last seen
+  computed for each alert, with no stored value. An edge without a first-seen claim (such as OTX's)
+  keeps only the source's latest report, so once that source reports the indicator
+  again after its import, the indicator's first seen is its import time, unless another edge dates
+  it earlier (a first-seen claim, which keeps the earliest date the source gave, or an earlier
+  report of another source). An alert is no report: once a source dates an indicator, its last seen
   is the source's, even when an alert saw it later.
 
 An edge keeps only a source's latest report, so the first seen of an indicator only OTX reported is
@@ -497,6 +503,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Seen dates: only the edges the sync writes carry `r.last_reported_at`; the alert enrichment's import-time first seen holds for an edge without a first-seen claim; a campaign `last_seen` a build stored too late stays until a fresh baseline.
 - 2026-10-25 — Seen dates of an indicator for the campaign build and the alert enrichment: per edge the source's claim, else its latest report (`r.last_reported_at`); the first seen date never later than the first import. Both had read the claims alone, so an indicator without one (one only OTX reported) was dated by EdgeGuard's import time, and a campaign whose indicators all came from OTX had the import time as its first and last seen.
 - 2026-10-18 — STIX export times only from the graph: SDO `created` falls back to `created_at` (Campaign, Sector) and `modified` is never before `created`; relationships take `created_at` / `imported_at` / `updated_at` (they had the export time); the primary `valid_from` chain ends at the SDO's `created` instead of `now()`; the Indicator's `confidence` and `valid_until` (the retirement time of the aging rule); the Indicator no longer carries `x_edgeguard_last_updated`.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

@@ -109,8 +109,8 @@ Flag any collector that calls `neo4j_client` methods directly or writes graph da
 Any new `*_collector.py` file must accept `misp_writer` as a constructor parameter and call it during collection.
 
 ### API key required but not checked at startup
-For **optional** third-party feeds (OTX, VirusTotal, AbuseIPDB, ThreatFox — NVD works without a key, with slower rate limits), `collect(..., push_to_misp=True)` must:
-1. Detect a missing/placeholder key before hammering the API (**ThreatFox** requires a free key from abuse.ch; skip with `missing_threatfox_key` if unset)
+For **optional** third-party feeds (OTX, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, MalwareBazaar — NVD works without a key, with slower rate limits), `collect(..., push_to_misp=True)` must:
+1. Detect a missing/placeholder key before hammering the API (**ThreatFox**, **URLhaus** and **MalwareBazaar** share the free abuse.ch key `THREATFOX_API_KEY`; skip with `missing_threatfox_key` (ThreatFox) or `missing_abusech_key` (URLhaus, MalwareBazaar) if unset)
 2. On **HTTP 401/403** or “invalid API key” responses, treat like optional failure: **`success=True`, `skipped=True`** with a `*_auth_denied` **`skip_reason_class`** (see `is_auth_or_access_denied` in `collector_utils.py`) so the DAG does not fail
 3. Log a clear `WARNING` and return **`make_status(..., success=True, skipped=True, skip_reason, skip_reason_class)`** so Airflow **`run_collector_with_metrics`** records **`edgeguard_collector_skips_total`**
 Flag collectors that return **`success=False`** for “no key” on optional sources, or that raise unhandled exceptions for auth failures on those feeds.
@@ -1052,6 +1052,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The optional-key rule names URLhaus and MalwareBazaar, which need the abuse.ch key (`missing_abusech_key`).
 - 2026-10-25 — URLhaus per-run cap 100,000 (was 50,000): the abuse.ch v2 `recent.csv` export listed about 63,000 URLs on 2026-10-24.
 - 2026-10-19 — The `USES_TECHNIQUE` pattern comment says what the link is: the indicator's OTX report lists the technique.
 - 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag. The `OTX_META` sentinel pair lists the OTX CVE writer (`create_vulnerability_attribute`) and reader (`_vulnerability_report_ids`).

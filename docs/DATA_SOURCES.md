@@ -91,7 +91,7 @@
 | Update | Daily |
 | Classification | ✅ `detect_zones_from_text()` on threat names and tags |
 
-**Per-run cap:** the daily run reads the whole export, so that no URL leaves the window uncollected. The cap `EDGEGUARD_URLHAUS_MAX_PER_RUN` (default 100,000) covers the export (about 63,000 URLs on 2026-10-24) with headroom; a run that reaches it keeps the newest URLs by `dateadded` and logs a warning. ThreatFox (the IOCs of the last 7 days, the most `get_iocs` serves; 7,398 on the same baseline) has the same rule with `EDGEGUARD_THREATFOX_MAX_PER_RUN` (default 10,000), newest by `first_seen` ([COLLECTORS.md § 8](COLLECTORS.md#8-global-feed-collector)).
+**Per-run cap:** the daily run reads the whole export, so that no URL leaves the window uncollected. The cap `EDGEGUARD_URLHAUS_MAX_PER_RUN` (default 100,000) covers the export (about 63,000 URLs on 2026-10-24) with headroom; a run that reaches it keeps the newest URLs by `dateadded` and logs a warning. ThreatFox (the IOCs of the last 7 days, the most `get_iocs` serves; 7,398 on the 730-day baseline of 2026-10-13) has the same rule with `EDGEGUARD_THREATFOX_MAX_PER_RUN` (default 10,000), newest by `first_seen` ([COLLECTORS.md § 8](COLLECTORS.md#8-global-feed-collector)).
 
 **What we get:**
 - Malware distribution URLs
@@ -318,6 +318,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus per-run cap: the ThreatFox count names its baseline (2026-10-13); it pointed to the URLhaus count, which is now the export of 2026-10-24.
 - 2026-10-25 — URLhaus and MalwareBazaar read the abuse.ch v2 `recent.csv` exports with the Auth-Key (`THREATFOX_API_KEY`) in the URL path, because the keyless downloads (`downloads/csv_recent/`, `csv_top10k/`, `/export/csv/recent/`) answer HTTP 410 since 2026-10; the URLhaus export listed about 63,000 URLs on 2026-10-24 (the keyless 30-day file 34,003 on 2026-10-13), and `EDGEGUARD_URLHAUS_MAX_PER_RUN` is 100,000 (was 50,000), so the cap covers it again.
 - 2026-10-23 — HC3 named as a public source that is not collected, not as a member-only feed; no DAG task calls the placeholder modules.
 - 2026-10-18 — OTX: the sectors the pulse's own industries name are its statement (`otx_industries` on `TARGETS`); Financial Services, Investment(s), Pharmaceuticals, Pharmacy and Petroleum map to a sector.

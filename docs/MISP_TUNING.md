@@ -2,8 +2,9 @@
 
 **Audience:** operators deploying or upgrading EdgeGuard against a
 MISP backend that will absorb >50,000 attributes per event during
-baseline runs (typical for OTX, NVD, ThreatFox at 365–730 day
-lookback).
+baseline runs (OTX and NVD at 365–730 day lookback, and URLhaus, whose
+whole `recent.csv` export, about 63,000 URLs on 2026-10-24, lands in one
+event).
 
 **Why this exists:** a default Docker MISP container answers HTTP 500
 to most batch pushes once an event holds more than about 50,000
@@ -328,10 +329,11 @@ large baseline events is planned work:
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Audience: URLhaus (its whole `recent.csv` export in one baseline event, about 63,000 URLs on 2026-10-24) named among the sources whose baseline events pass 50,000 attributes; ThreatFox (at most 10,000 IOCs per run) removed from them.
 - 2026-10-23 — The page names no deployed MISP image: it said `harvarditsecurity/misp:latest` is deployed, which the repository cannot verify; the README points here for the MISP server settings; the planned event sharding (a shard per 25K attributes) gave way to a pointer to ROADMAP.md, which lists the partitioning of large baseline events by date range.
 - 2026-10-17 — The reference `php-overrides.ini` for `coolacid` documented with its larger values (8G, 512M, 3600 s; for hosts with 16 GB or more), where the page said the values were identical for both images; `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` also paces the CISA KEV in-place edits and the `last_seen` refresh; `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` described as the master switch of the per-event and cross-event duplicate checks; the alert rules shown as shipped in `prometheus/alerts.yml` (the documented backoff rule `rate(...) > 1` never fired); `docker-compose.yml` forwards `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` and the four threshold and back-off settings (a value set in `.env` for those five had not reached the container, so the code defaults applied); main text limited to current behaviour, with the change history in this section.
 - 2026-10-15 — NVD incremental runs sleep `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` after every 50 attribute edits.
