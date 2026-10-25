@@ -53,6 +53,7 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from stub_cleanup import drop_modules_for_test  # noqa: E402
 
 # ===========================================================================
 # Source pins — both verify_api_key functions use hmac.compare_digest
@@ -151,8 +152,10 @@ class TestVerifyApiKeyBehavioural:
         # Set the reference key BEFORE re-importing (the module reads
         # EDGEGUARD_API_KEY at import time)
         monkeypatch.setenv("EDGEGUARD_API_KEY", "test-secret-12345")
-        # Force re-import to pick up the env value
-        sys.modules.pop("query_api", None)
+        # Force re-import to pick up the env value, for this test only: a module left keyed with
+        # this value answered 401 to later tests that import ``query_api`` (or ``graphql_api``) at
+        # call time.
+        drop_modules_for_test(monkeypatch, "query_api")
         import query_api as qa
 
         # Correct key — must not raise
@@ -163,7 +166,7 @@ class TestVerifyApiKeyBehavioural:
         from fastapi import HTTPException
 
         monkeypatch.setenv("EDGEGUARD_API_KEY", "test-secret-12345")
-        sys.modules.pop("query_api", None)
+        drop_modules_for_test(monkeypatch, "query_api")
         import query_api as qa
 
         with pytest.raises(HTTPException) as exc_info:
@@ -178,7 +181,7 @@ class TestVerifyApiKeyBehavioural:
         from fastapi import HTTPException
 
         monkeypatch.setenv("EDGEGUARD_API_KEY", "test-secret-12345")
-        sys.modules.pop("query_api", None)
+        drop_modules_for_test(monkeypatch, "query_api")
         import query_api as qa
 
         with pytest.raises(HTTPException) as exc_info:
@@ -190,7 +193,7 @@ class TestVerifyApiKeyBehavioural:
         (the prod safety check at module-load fires elsewhere — here
         we just confirm verify is a no-op)."""
         monkeypatch.delenv("EDGEGUARD_API_KEY", raising=False)
-        sys.modules.pop("query_api", None)
+        drop_modules_for_test(monkeypatch, "query_api")
         import query_api as qa
 
         # No exception with any input
@@ -204,7 +207,7 @@ class TestVerifyApiKeyBehavioural:
         from fastapi import HTTPException
 
         monkeypatch.setenv("EDGEGUARD_API_KEY", "test-secret-12345")
-        sys.modules.pop("query_api", None)
+        drop_modules_for_test(monkeypatch, "query_api")
         import query_api as qa
 
         # If anything weird comes in, verify still behaves cleanly
@@ -213,7 +216,7 @@ class TestVerifyApiKeyBehavioural:
 
     def test_graphql_api_accepts_correct_key(self, monkeypatch):
         monkeypatch.setenv("EDGEGUARD_API_KEY", "test-secret-67890")
-        sys.modules.pop("graphql_api", None)
+        drop_modules_for_test(monkeypatch, "graphql_api")
         import graphql_api as ga
 
         ga._verify_api_key("test-secret-67890")
@@ -223,7 +226,7 @@ class TestVerifyApiKeyBehavioural:
         from fastapi import HTTPException
 
         monkeypatch.setenv("EDGEGUARD_API_KEY", "test-secret-67890")
-        sys.modules.pop("graphql_api", None)
+        drop_modules_for_test(monkeypatch, "graphql_api")
         import graphql_api as ga
 
         with pytest.raises(HTTPException) as exc_info:

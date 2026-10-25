@@ -33,6 +33,7 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+from stub_cleanup import drop_modules_for_test  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Finding #1 — broken row.* references in 6 standalone helpers
@@ -2601,7 +2602,7 @@ def test_zone_clause_semantic_matrix_via_ephemeral_cypher():
 # ---------------------------------------------------------------------------
 
 
-def test_build_relationships_sector_uuids_derived_from_valid_zones():
+def test_build_relationships_sector_uuids_derived_from_valid_zones(monkeypatch):
     """PR #34 round 24 (bugbot MED): ``_SECTOR_UUIDS`` in build_relationships.py
     used to hardcode ``("healthcare", "energy", "finance", "global")`` — a
     parallel copy of ``config.VALID_ZONES``. Adding a 5th zone to
@@ -2612,10 +2613,10 @@ def test_build_relationships_sector_uuids_derived_from_valid_zones():
     Pin the derivation so a regression that re-hardcodes the tuple fails."""
     import importlib
 
-    # Reload both modules to clear any cached state.
-    for mod in ("build_relationships", "config"):
-        if mod in sys.modules:
-            del sys.modules[mod]
+    # Reload both modules to clear any cached state, for this test only. Left in ``sys.modules``, a
+    # second ``config`` split later tests in two: code that imports ``config`` at call time read it,
+    # while test files bound to the first copy patched that one.
+    drop_modules_for_test(monkeypatch, "build_relationships", "config")
     build_relationships = importlib.import_module("build_relationships")
     from config import VALID_ZONES
 
@@ -2645,16 +2646,15 @@ def test_build_relationships_sector_uuids_derived_from_valid_zones():
         )
 
 
-def test_zone_enum_derived_from_valid_zones():
+def test_zone_enum_derived_from_valid_zones(monkeypatch):
     """PR #34 round 24: ``ZoneEnum`` in query_api.py used to hardcode the 4
     zones as enum members. Derive from VALID_ZONES so FastAPI query-param
     validation stays in lockstep with Cypher-layer zone membership checks.
     """
     import importlib
 
-    for mod in ("query_api", "config"):
-        if mod in sys.modules:
-            del sys.modules[mod]
+    # Fresh modules for this test only.
+    drop_modules_for_test(monkeypatch, "query_api", "config")
     query_api = importlib.import_module("query_api")
     from config import VALID_ZONES
 
@@ -2711,7 +2711,7 @@ def test_debug_zone_check_uses_valid_zones():
 # write-time MERGE sites in build_relationships.py and neo4j_client.py.
 
 
-def test_adding_a_fifth_zone_propagates_through_all_derived_sources():
+def test_adding_a_fifth_zone_propagates_through_all_derived_sources(monkeypatch):
     """Integration smoke test for the single-source-of-truth contract:
     monkey-patch VALID_ZONES to include a fifth zone and verify all
     derived structures pick it up on module reload.
@@ -2721,9 +2721,8 @@ def test_adding_a_fifth_zone_propagates_through_all_derived_sources():
     """
     import importlib
 
-    for mod in ("config", "build_relationships", "query_api"):
-        if mod in sys.modules:
-            del sys.modules[mod]
+    # Fresh modules for this test only.
+    drop_modules_for_test(monkeypatch, "config", "build_relationships", "query_api")
 
     import config
 

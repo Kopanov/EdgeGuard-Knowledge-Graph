@@ -42,6 +42,7 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+from stub_cleanup import drop_modules_for_test  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # B1 — _NATURAL_KEYS ↔ create_constraints sync
@@ -198,7 +199,7 @@ def test_merge_key_dict_matches_natural_keys_for_every_helper():
 # ---------------------------------------------------------------------------
 
 
-def test_sector_keywords_keys_are_subset_of_valid_zones():
+def test_sector_keywords_keys_are_subset_of_valid_zones(monkeypatch):
     """B3: ``SECTOR_KEYWORDS`` enumerates the zones that have keyword-based
     detection rules. Every key here MUST be a valid zone (i.e. in
     ``VALID_ZONES``) — otherwise ``detect_zones_from_text`` could return a
@@ -210,8 +211,10 @@ def test_sector_keywords_keys_are_subset_of_valid_zones():
     """
     import importlib
 
-    if "config" in sys.modules:
-        del sys.modules["config"]
+    # A fresh ``config`` for this test only. Left in ``sys.modules``, the second copy split later
+    # tests in two: code that imports ``config`` at call time read it, while test files bound to the
+    # first copy patched that one.
+    drop_modules_for_test(monkeypatch, "config")
     config = importlib.import_module("config")
 
     keyword_zones = set(config.SECTOR_KEYWORDS.keys())
@@ -236,7 +239,7 @@ def test_sector_keywords_keys_are_subset_of_valid_zones():
 # ---------------------------------------------------------------------------
 
 
-def test_graphql_indicator_uuid_field_matches_compute_node_uuid():
+def test_graphql_indicator_uuid_field_matches_compute_node_uuid(monkeypatch):
     """B4: the GraphQL ``Indicator.uuid`` field (and any other entity uuid
     field) must surface the SAME uuid that ``compute_node_uuid`` would
     compute for the same natural key. Without this, a consumer querying
@@ -251,12 +254,8 @@ def test_graphql_indicator_uuid_field_matches_compute_node_uuid():
     import importlib
     from unittest.mock import MagicMock
 
-    if "config" in sys.modules:
-        del sys.modules["config"]
-    if "graphql_api" in sys.modules:
-        del sys.modules["graphql_api"]
-    if "node_identity" in sys.modules:
-        del sys.modules["node_identity"]
+    # Fresh modules for this test only (see B3).
+    drop_modules_for_test(monkeypatch, "config", "graphql_api", "node_identity")
     graphql_api = importlib.import_module("graphql_api")
     node_identity = importlib.import_module("node_identity")
 

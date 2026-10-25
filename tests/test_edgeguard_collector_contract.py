@@ -70,7 +70,10 @@ def test_run_collector_with_metrics_rejects_non_dict_return():
         # sees `opentelemetry.sdk` as a module and fails with "not a package".
         if (
             key == "edgeguard_pipeline"
-            or key.startswith("airflow")
+            # airflow itself, not sibling modules such as ``airflow_client`` that other test modules
+            # patch by object identity
+            or key == "airflow"
+            or key.startswith("airflow.")
             or key == "opentelemetry"
             or key.startswith("opentelemetry.")
         ):
@@ -111,7 +114,10 @@ def test_run_collector_with_metrics_baseline_skips_unknown_collect_params():
         # sees `opentelemetry.sdk` as a module and fails with "not a package".
         if (
             key == "edgeguard_pipeline"
-            or key.startswith("airflow")
+            # airflow itself, not sibling modules such as ``airflow_client`` that other test modules
+            # patch by object identity
+            or key == "airflow"
+            or key.startswith("airflow.")
             or key == "opentelemetry"
             or key.startswith("opentelemetry.")
         ):
@@ -163,7 +169,10 @@ def test_run_collector_with_metrics_baseline_forwards_when_collect_accepts():
         # sees `opentelemetry.sdk` as a module and fails with "not a package".
         if (
             key == "edgeguard_pipeline"
-            or key.startswith("airflow")
+            # airflow itself, not sibling modules such as ``airflow_client`` that other test modules
+            # patch by object identity
+            or key == "airflow"
+            or key.startswith("airflow.")
             or key == "opentelemetry"
             or key.startswith("opentelemetry.")
         ):
