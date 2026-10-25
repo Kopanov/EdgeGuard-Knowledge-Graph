@@ -518,6 +518,19 @@ Each entry: symptom → detection signal → remediation.
 
 ---
 
+## Large MISP events fetched in pages (`[PAGED-FETCH-INCOMPLETE]`)
+
+- **What applies.** The sync fetches an event whose MISP index `attribute_count` is above `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000; `0` = off) as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 in attribute id order, instead of one `/events/view`. An event whose whole-event fetch still answers HTTP 5xx after its retries is fetched the same way, with the warning `Event <id>: whole-event fetch failed after retries (…) — fetching in pages`. Paging stops at an empty page or at a page that brings no attribute not already received ([COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)).
+- **Symptom.** Per event: `[PAGED-FETCH-INCOMPLETE] Event <id>: /attributes/restSearch returned <n> attribute rows (top-level and object), the MISP index lists <m>.` In the run summary: `Events fetched in pages with fewer attributes than the MISP index lists: <k>`. The rows received are synced, the event counts as processed, the task stays green, and no metric or alert reads it.
+- **Log probe.**
+  ```bash
+  docker logs edgeguard_airflow 2>&1 | grep "\[PAGED-FETCH-INCOMPLETE\]" | tail -20
+  ```
+- **Remediation.**
+  - **The event changed after the index was read** (attributes deleted in between): nothing is missing.
+  - **An Allowedlist entry (global, kept by a MISP site admin) or a default search filter of the sync account removed rows:** remove the entry or the filter in MISP, then request a full sync (§ *Requesting a full MISP → Neo4j sync*). An incremental sync writes only the attributes whose timestamp is in its window, so it does not write the rows it missed.
+  - **MISP ignored `page`:** the line before the warning reads `Event <id>: fetched … (5000 rows with object attributes) in 2 request(s) of 5000`, so only the first page arrived. Set `EDGEGUARD_MISP_PAGED_FETCH_ABOVE=0` so events are fetched whole (the MISP server needs the limits of [MISP_TUNING.md](MISP_TUNING.md) for large events), recreate the Airflow containers, then request a full sync.
+
 ## Neo4j statement timeouts (`[NEO4J-TIMEOUT]`)
 
 - **What applies.** Every pipeline statement carries a transaction timeout that the Neo4j server enforces. The limits are protection against a statement that hangs, set loose so that a slow statement on a large graph does not reach them:
@@ -865,10 +878,18 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    curl -s localhost:9090/api/v1/rules | \
      jq '.data.groups[] | select(.name=="edgeguard_pipeline_observability" or .name=="edgeguard_sync_integrity") | .rules[].name'
    ```
-5. **Alert paging destinations confirmed.** Test that each alert
-   actually reaches the on-call pager/inbox. Send a test alert straight to
-   Alertmanager (started with `--profile alerts`):
+5. **Alert paging destinations confirmed.** Test that every receiver
+   actually reaches the on-call pager/inbox. Send test alerts straight to
+   Alertmanager (started with `--profile alerts`). The route follows the
+   labels (`prometheus/alertmanager.yml`): this alert (`severity=critical`,
+   no `component`) reaches only the `critical` receiver (e-mail to
+   `oncall@edgeguard.local`, Slack `#edgeguard-alerts`):
    `curl -X POST localhost:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{"labels":{"alertname":"EdgeGuardPagingTest","severity":"critical"}}]'`
+   Send it again with `"component":"circuit-breaker"` added (also the
+   PagerDuty receiver `on-call`), with `"component":"collector"` added
+   (also the Slack receiver `team-platform`, `#edgeguard-platform`), and
+   once with neither `severity` nor `component` (the `default` e-mail
+   receiver, `admin@edgeguard.local`).
 6. **Worker RAM sized.** NVD baseline holds ~1-2 GB of CVE dicts in
    memory (a known limit). Ensure the `airflow`
    container has ≥ 4 GB RAM: `docker inspect edgeguard_airflow | grep -i mem`.
@@ -1299,6 +1320,7 @@ _Last updated: 2026-10-25_
 ## History
 
 - 2026-10-25 — MISP → Neo4j sync schedule and Requesting a full MISP → Neo4j sync: the limit of `run_neo4j_sync` is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8 hours, at most 22; raised in `.env` with a recreate of the airflow container), the 68-hour DAG-run limit and the 122-hour `EdgeGuardNeo4jSyncStale` are sized for the default, and the mode line of the task log ends with the limit of the attempt.
+- 2026-10-25 — New section on large MISP events fetched in pages (`[PAGED-FETCH-INCOMPLETE]`, its run-summary line, the whole-event fallback warning, remediation); Baseline-day protocol item 5 sends one test alert per receiver (a `severity=critical` alert alone reaches only the `critical` receiver).
 - 2026-10-23 — The acceptance script and the graph export of the threat-actor rebuild read the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) names another instance; they no longer fall back to a built-in remote address.
 - 2026-10-23 — The baseline launch path section is titled for the lock that every launch path takes (it offered a choice of paths); it names the green `skipped: true` collector task, the refusals that release the lock and its reaping. Raw MISP data: a section on who asserts a link, what the source cited, an indicator's age and the GraphQL MISP links, which the README carried. The STIX import of `run_pipeline.py` is always on in that CLI; the memory pointer names MEMORY_TUNING.md; the MISP backoff symptom no longer cites a one-hour service-level objective, which is defined nowhere.
 - 2026-10-22 — "Importing a curated package" is written for any registered curated source; the removal queries keep the registered sources and labels.

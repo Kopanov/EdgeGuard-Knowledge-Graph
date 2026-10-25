@@ -269,7 +269,7 @@
 
 ## Setup Checklist for New Instance
 
-### API Keys (free tier; OTX, VirusTotal, AbuseIPDB and ThreatFox are skipped without their key, NVD runs slower without one)
+### API Keys (free tier; OTX, VirusTotal, AbuseIPDB, ThreatFox, URLhaus and MalwareBazaar are skipped without their key, NVD runs slower without one)
 
 | Source | Environment variable | Signup URL |
 |--------|----------------------|------------|
@@ -359,6 +359,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The setup checklist names URLhaus and MalwareBazaar among the sources skipped without their key.
 - 2026-10-25 — URLhaus: the export needs the abuse.ch Auth-Key in its URL path and a free abuse.ch account (the keyless `downloads/csv_recent/` answers HTTP 410 since 2026-10); about 63,000 URLs per export on 2026-10-24.
 - 2026-10-17 — The NVD key is optional (5 requests per 30 s without it; the page said required); the KEV feed listed as a JSON download; the MITRE download named as `MITRECollector.attack_url`, plus the ATT&CK for ICS bundle with `EDGEGUARD_ENABLE_MITRE_ICS=true`; the setup checklist adds `THREATFOX_API_KEY`, names the environment variables and marks every source key optional; main text limited to current behaviour, with the change history in this section.
 - 2026-10-16 — AbuseIPDB: the free plan's 5 `blacklist` requests per UTC day besides the 1,000 `check` requests; a blacklist 429 fails `collect_abuseipdb` at once (the task had stayed green with a count of 0); a fetched, non-empty answer is reused on the same UTC day within `EDGEGUARD_ABUSEIPDB_BLACKLIST_CACHE_HOURS`; the collector line that names the KEV feed URL cited.

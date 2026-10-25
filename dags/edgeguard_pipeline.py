@@ -3972,8 +3972,8 @@ baseline_clean_task = PythonOperator(
 # architectural fix tracked separately — event partitioning by date
 # range so no single event exceeds ~20K attributes (Issue #61).
 #
-# Tier2 has no order inside the group: its feeds are individually small and
-# don't trigger the failure-mode-2 oversized-event problem. 2026-10: all 7 at
+# Tier2 has no order inside the group. Its feeds write small events except
+# URLhaus (its whole recent.csv export in one event). 2026-10: all 7 at
 # once pushed MISP php-fpm past its memory limit (HTTP 502), and a daily
 # catch-up run plus OTX, VT and NVD hit the airflow container's limit, so
 # every collector of every DAG takes a slot of COLLECTOR_POOL: at most

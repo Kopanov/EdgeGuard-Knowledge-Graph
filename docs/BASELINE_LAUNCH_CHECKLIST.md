@@ -70,11 +70,16 @@ fails under STRICT=1) and skips check [5]. Specifically:
 * `[11] baseline hardening invariants` — sentinel class, retries=0, 48h lock
   max-age, fallback metric wiring
 * `[12] source API keys` — each configured key (OTX, NVD, VirusTotal,
-  ThreatFox, AbuseIPDB) is accepted by its provider. A rejected key is
-  a warning (the source would be skipped for the whole baseline), a
-  rejected NVD key is a failure (the NVD task would fail after the
-  wipe). A source without a key is listed as information: decide
-  before the launch whether the baseline should run without it
+  AbuseIPDB, and `THREATFOX_API_KEY`, the abuse.ch key of ThreatFox,
+  URLhaus and MalwareBazaar) is accepted by its provider. A rejected key
+  is a warning (every source that uses it would be skipped for the whole
+  baseline; for the abuse.ch key that includes URLhaus, which, unlike
+  MalwareBazaar, runs without an enable flag), a rejected NVD key is a failure (the NVD task
+  would fail after the wipe), and so is a source named in
+  `EDGEGUARD_BASELINE_REQUIRED_SOURCES` that cannot deliver (no key,
+  rejected key, or switched off). A source without a key is listed as
+  information: decide before the launch whether the baseline should run
+  without it
 
 **If it fails:** the failing check names the exact remediation. Do
 **NOT** override `STRICT=1` to skip a fail — every fail in this script
@@ -405,7 +410,9 @@ clearing:
    - `EDGEGUARD_ENABLE_MITRE_ICS=true`, `docker compose up -d airflow`, then either the same
      additive baseline or `MITRE_FORCE_REFETCH=true` for one daily run — the daily MITRE
      task skips both bundles while the Enterprise bundle's ETag is unchanged.
-   - `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`, `docker compose up -d airflow`, then one
+   - With `THREATFOX_API_KEY` set (the export URL carries the abuse.ch key; without it the
+     task is skipped, `missing_abusech_key`, and `--require-malwarebazaar` fails),
+     `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`, `docker compose up -d airflow`, then one
      `edgeguard_daily` run (or the additive baseline — both load the same recent export: the
      last 48 hours, at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` = 500 samples, labelled
      first), followed by `edgeguard_neo4j_sync` and
@@ -464,8 +471,13 @@ is taken finishes its write.
   (`edgeguard_enrichment_duration_seconds{enricher_type}`) and the last
   completion of build_relationships
   (`edgeguard_build_relationships_last_completion_timestamp`).
-* The `EdgeGuardSyncCoverageGap` alert is what catches silent
-  truncation between MISP attribute count and processed count.
+* The `EdgeGuardSyncCoverageGap` alert catches MISP events the sync
+  neither processed nor counted as failed (`events_index_total` ≠
+  `events_processed` + `events_failed`). It counts events, not
+  attributes: an event fetched in pages that brings fewer attribute rows
+  than the MISP index lists counts as processed and raises no alert;
+  grep the `full_neo4j_sync` log for `[PAGED-FETCH-INCOMPLETE]`
+  ([RUNBOOK.md](RUNBOOK.md)).
 
 ## After the run
 
@@ -571,6 +583,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Check `[12]`: `THREATFOX_API_KEY` is the key of ThreatFox, URLhaus and MalwareBazaar, and a source named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES` that cannot deliver fails the check; step 6 states that MalwareBazaar needs the key; `EdgeGuardSyncCoverageGap` compares event counts (the page said attribute counts), and an event fetched in pages with fewer attribute rows than the MISP index lists is found with `[PAGED-FETCH-INCOMPLETE]`.
 - 2026-10-25 — `verify_fresh_baseline.py` lists URLhaus among the keyed sources, not among those collected by default: its export needs `THREATFOX_API_KEY`, the abuse.ch Auth-Key.
 - 2026-10-23 — The acceptance script reads the Compose Neo4j at `http://127.0.0.1:7474` unless `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) names the instance under test; it no longer falls back to a built-in remote address.
 - 2026-10-23 — The memory pass criteria point to MEMORY_TUNING.md, which now holds the 730-day profile the README listed.
