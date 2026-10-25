@@ -290,7 +290,8 @@ groups:
         # less than 24 h + 72 h = 96 h after it (a run due within the 24 h is skipped). The gauge is
         # written when the sync succeeds, so the next sync's longest run adds to that gap: 32 min of
         # check_sync_needed / neo4j_health_check attempts and run_neo4j_sync's three attempts of its
-        # 8 h limit with two 5 min retry delays (24 h 10 min), 120 h 42 min in all. 122 h leaves
+        # default 8 h limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS) with two 5 min retry delays (24 h 10 min),
+        # 120 h 42 min in all; a limit of N h needs 439200 + 10800 × (N − 8) seconds here. 122 h leaves
         # about an hour for the scheduler; `for: 1h` adds the margin. Before, the day-of-month cron
         # `0 3 */3 * *` with a 71 h guard left up to 120 h (leap-year February) or 143 h (after a
         # baseline) between two sync starts and the threshold was 145 h. A failed sync is reported by
@@ -305,7 +306,7 @@ groups:
           component: neo4j
         annotations:
           summary: "Neo4j sync is stale"
-          description: "No MISP to Neo4j sync has completed in over 122 hours: the longest gap the 72-hour schedule leaves between two sync starts (96 hours after a baseline's or a forced sync), plus every attempt of the sync task."
+          description: "No MISP to Neo4j sync has completed in over 122 hours: the longest gap the 72-hour schedule leaves between two sync starts (96 hours after a baseline's or a forced sync), plus every attempt of the sync task at its default 8-hour limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS)."
 
       - alert: EdgeGuardNeo4jFullSyncRequestPending
         # 2026-10: a requested full sync (Airflow Variable NEO4J_FULL_SYNC=true) that failed on its last

@@ -90,7 +90,7 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Baseline collectors OTX / NVD (unlimited)            | 5 hours each |
 | Baseline collectors CISA / MITRE / Tier 2 feeds      | 2 hours each |
 | Baseline wipe (`baseline_clean`) | 60 minutes |
-| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours (a full sync of a 730-day MISP takes about 6 hours, the baseline full sync's limit; plus a third, because a requested full sync stands until it succeeds) |
+| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, whole hours, at most 22; a full sync of a 730-day MISP takes about 6 hours, the baseline full sync's limit; plus a third, because a requested full sync stands until it succeeds) |
 | Neo4j full sync (baseline) | 6 hours |
 | build_relationships | 5 hours |
 | run_enrichment_jobs | 5 hours |
@@ -506,6 +506,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The timeout table gives the `run_neo4j_sync` limit as 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, at most 22).
 - 2026-10-25 — URLhaus reads the abuse.ch v2 `recent.csv` export (about 63,000 URLs on 2026-10-24; the keyless `csv_recent` download answers HTTP 410 since 2026-10); `EDGEGUARD_URLHAUS_MAX_PER_RUN` 100,000 (was 50,000).
 - 2026-10-23 — The per-source run rules point to COLLECTION_AND_SYNC_LIMITS.md and the chunk setting to CONFIGURATION.md; the README sections they named were moved there.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.

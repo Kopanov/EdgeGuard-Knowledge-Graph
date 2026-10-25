@@ -7,7 +7,7 @@ file, and the repair the operator asked for was silently incomplete. The flag is
 after a successful full sync. Because it then persists until a full sync succeeds, the task's
 limit is 8 h (was 4 h; a full sync of a 730-day MISP takes about 6 h), the DAG run's limit covers
 every task failing on all attempts, and the last failed attempt alerts that incremental syncs are
-suspended while the flag stays set.
+suspended while the flag stays set. The 8 h limit is the default of ``EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS``.
 
 The DAG module is imported as Airflow would import it; the Variable store and
 ``MISPToNeo4jSync`` are stand-ins.
@@ -31,13 +31,22 @@ sys.path.insert(0, "dags")
 DAG_PATH = "dags/edgeguard_pipeline.py"
 
 
-def _load_dag_module():
+def _load_dag_module(skip_if_not_importable=True):
+    # Purge the Airflow stubs other tests leave in ``sys.modules`` (``test_graphql_api.py`` registers
+    # MagicMock placeholders for ``airflow.*`` and ``opentelemetry.*``), so the real Airflow is imported.
+    for key in list(sys.modules):
+        if key.startswith("airflow") or key == "opentelemetry" or key.startswith("opentelemetry."):
+            del sys.modules[key]
     spec = importlib.util.spec_from_file_location("_dag_module_full_sync_request_test", DAG_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
     except Exception as e:  # pragma: no cover - environment-dependent
+        # Skip only where Airflow is not installed: with Airflow present an import error is a
+        # failure, so a stub left by another test cannot turn every DAG test here into a skip.
+        if not skip_if_not_importable or importlib.util.find_spec("airflow") is not None:
+            raise
         pytest.skip(f"DAG module not importable in this environment: {e}")
     return module
 
@@ -155,6 +164,27 @@ def test_the_log_states_the_mode_and_why(dag_module, env, caplog):
     assert any("Sync mode: incremental" in r.message for r in caplog.records)
 
 
+def test_the_log_states_the_task_limit_of_the_attempt(dag_module, env, caplog):
+    _ScriptedSync.outcomes = [True, True, True]
+    task = SimpleNamespace(execution_timeout=timedelta(hours=14))
+    with caplog.at_level(logging.INFO):
+        dag_module.run_neo4j_sync(ti=SimpleNamespace(try_number=2), task=task)
+    assert any(
+        r.getMessage().startswith("Sync mode: FULL") and r.getMessage().endswith("(attempt 2), task limit 14 h")
+        for r in caplog.records
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _attempt(dag_module, 1)
+    modes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Sync mode:")]
+    assert modes == ["Sync mode: incremental — state file present and NEO4J_FULL_SYNC not set (attempt 1)"]
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        dag_module.run_neo4j_sync(ti=SimpleNamespace(try_number=1), task=task)
+    modes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Sync mode:")]
+    assert modes and modes[0].startswith("Sync mode: incremental") and modes[0].endswith("(attempt 1), task limit 14 h")
+
+
 def test_a_variable_write_failure_after_success_does_not_fail_the_task(dag_module, env, caplog):
     _ScriptedSync.outcomes = [True]
     _Variables.fail_set = True
@@ -179,17 +209,86 @@ def test_the_sync_task_limit_leaves_margin_above_the_full_sync_estimate(dag_modu
     assert dag_module.run_neo4j_sync_task.execution_timeout > dag_module.baseline_full_sync_task.execution_timeout
 
 
+_INVALID = "(expected whole hours from 1 to 22) — using 8"
+_ABOVE_CAP = "is above 22 — using 22 (three attempts must end inside the 68 h dagrun_timeout)"
+
+
 @pytest.mark.parametrize(
-    "value, hours",
-    [(None, 8), ("14", 14), (" 12 ", 12), ("0", 8), ("-3", 8), ("abc", 8), ("", 8), ("1.5", 8)],
+    "value, hours, warning",
+    [
+        (None, 8, None),
+        ("14", 14, None),
+        (" 12 ", 12, None),
+        ("", 8, None),
+        ("22", 22, None),
+        ("0", 8, _INVALID),
+        ("-3", 8, _INVALID),
+        ("abc", 8, _INVALID),
+        ("1.5", 8, _INVALID),
+        ("23", 22, _ABOVE_CAP),
+        (str(24 * 10**9), 22, _ABOVE_CAP),
+    ],
+    ids=["unset", "set", "padded", "empty", "cap", "zero", "negative", "text", "fraction", "above-cap", "huge"],
 )
-def test_the_sync_task_limit_follows_the_env_knob(dag_module, monkeypatch, value, hours):
-    """EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS: a remote Neo4j can need more than 8 h; bad values use 8."""
+def test_the_sync_task_limit_follows_the_env_knob(dag_module, monkeypatch, caplog, value, hours, warning):
+    """EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS: a remote Neo4j can need more than 8 h; an invalid value uses 8
+    and one above the 22 h cap uses 22, both with a warning."""
     if value is None:
         monkeypatch.delenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", raising=False)
     else:
         monkeypatch.setenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", value)
-    assert dag_module._neo4j_sync_timeout_hours() == hours
+    with caplog.at_level(logging.WARNING):
+        assert dag_module._neo4j_sync_timeout_hours() == hours
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS" in r.getMessage()
+    ]
+    if warning is None:
+        assert warnings == []
+    else:
+        assert len(warnings) == 1 and warning in warnings[0] and repr(value) in warnings[0]
+
+
+@pytest.mark.parametrize(
+    "value, hours",
+    [("14", 14), (None, 8), ("30", 22), (str(24 * 10**9), 22)],
+    ids=["set", "unset", "above-cap", "huge"],
+)
+def test_the_dag_file_sets_the_sync_task_limit_from_the_env_knob(dag_module, monkeypatch, value, hours):
+    """The variable is read when the DAG file is parsed: the task's execution_timeout is what Airflow enforces.
+    ``dag_module`` skips where the DAG file is not importable; here a failing import (an ``OverflowError``
+    from ``timedelta`` for a huge value) fails the test."""
+    if value is None:
+        monkeypatch.delenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", raising=False)
+    else:
+        monkeypatch.setenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", value)
+    module = _load_dag_module(skip_if_not_importable=False)
+    assert module.run_neo4j_sync_task.execution_timeout == timedelta(hours=hours)
+    if value is None:
+        assert module._NEO4J_SYNC_TIMEOUT_DEFAULT_HOURS == 8
+
+
+def test_the_cap_keeps_three_sync_attempts_and_the_skip_guard_inside_the_limits(dag_module):
+    """22 h: the largest whole number of hours with which every attempt of run_neo4j_sync, after the
+    worst case of the two tasks before it, ends inside the DAG run's limit, and the previous sync's
+    latest start leaves the next 72 h run more than the 24 h skip guard."""
+    dag = dag_module.neo4j_sync_dag
+    sync = dag.get_task("run_neo4j_sync")
+
+    def worst(task):
+        return task.execution_timeout * (1 + task.retries) + task.retry_delay * task.retries
+
+    before = worst(dag.get_task("check_sync_needed")) + worst(dag.get_task("neo4j_health_check"))
+
+    def all_attempts_end_inside_the_run(limit):
+        return before + limit * (1 + sync.retries) + sync.retry_delay * sync.retries < dag.dagrun_timeout
+
+    cap = timedelta(hours=dag_module._NEO4J_SYNC_TIMEOUT_MAX_HOURS)
+    assert all_attempts_end_inside_the_run(cap)
+    assert not all_attempts_end_inside_the_run(cap + timedelta(hours=1)), "the largest such whole hour"
+    latest_start = before + (cap + sync.retry_delay) * sync.retries
+    assert dag_module.NEO4J_SYNC_EVERY - latest_start > dag_module.NEO4J_SYNC_MIN_GAP
 
 
 def test_the_dag_run_limit_covers_every_task_failing_on_all_attempts(dag_module):
