@@ -306,7 +306,7 @@ MISP search/index responses are normalized in code (see **`normalize_misp_event_
 | ThreatActor | ~100 | name, aliases, description |
 | Technique | ~300 | mitre_id, name, description |
 | Malware | ~100 | name, family, type |
-| Source | ~12 logical sources (~19 rows with registry aliases) | source_id, name |
+| Source | 16, one per registered source, keyed by its canonical id; a variant is a lookup key, never a node ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Source nodes") | source_id, name, type, reliability |
 
 ### Deduplication
 Neo4j uses UNIQUE constraints on the **natural key** per node label —
@@ -718,6 +718,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Node table: one `Source` node per registered source, keyed by its canonical id (the row counted a node per registry alias).
 - 2026-10-25 — MISP event names: a source/date event continues in `-part2`, `-part3`, ... past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, OTX events excepted (the page said partitioning MISP events is not implemented).
 - 2026-10-25 — `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` sets the `run_neo4j_sync` limit (default 8 h, at most 22 h); the `dagrun_timeout` table, the skip guard and the stale alert state that their 8 h is the default limit; the mode line of the task log ends with the limit of the attempt.
 - 2026-10-25 — Neo4j sync: a green `run_neo4j_sync` can include an event fetched in pages with fewer attribute rows than the MISP index lists (`[PAGED-FETCH-INCOMPLETE]`, run summary, not a failure); the memory note names the attribute list the sync holds, not PyMISP JSON parsing; the MalwareBazaar and URLhaus skip rules are listed with the abuse.ch key, not among the feeds without a key.

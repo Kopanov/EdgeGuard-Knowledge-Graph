@@ -38,7 +38,7 @@ from config import baseline_collection_limit_from_env, get_effective_limit
 from neo4j_client import Neo4jClient
 from relationship_provenance import node_feeds, prov_set, prov_with
 from sector_evidence import stated_zones as sector_stated_zones
-from source_registry import get_source
+from source_registry import get_source, is_curated_source, misp_tag_to_canonical_map
 
 
 # PR #35 commit 2: surface CLI-path collector failures to Prometheus + Slack
@@ -165,6 +165,29 @@ def _misp_event_source(event_info: str) -> str:
         logger.warning("Could not take a registered source from event info %r; attributing it to 'misp'", event_info)
         return "misp"
     return src.canonical_id
+
+
+def _misp_event_tag_source(misp_event: object) -> Optional[str]:
+    """The source a MISP event names in its own ``source:*`` tag, as a canonical id, through the
+    registry's MISP-tag map (``misp_tag_to_canonical_map``, the map the MISP -> Neo4j sync reads as
+    ``SOURCE_MAPPING``). A curated package's event carries one (``scripts/import_curated_package.py``:
+    ``EdgeGuard``, the package source's ``source:*`` tag, ``tlp:<level>``); a collector's event carries
+    only ``EdgeGuard``, so ``None`` sends it to the name rule (``_misp_event_source``). A ``source:*``
+    name the map does not hold gives ``misp``, with a warning, as in the sync."""
+    event = misp_event.get("Event", misp_event) if isinstance(misp_event, dict) else None
+    if not isinstance(event, dict):
+        return None
+    tags = event.get("Tag") or []
+    for tag in tags if isinstance(tags, list) else [tags]:
+        name = str((tag.get("name") if isinstance(tag, dict) else tag) or "")
+        if not name.startswith("source:"):
+            continue
+        canonical = misp_tag_to_canonical_map().get(name[len("source:") :])
+        if canonical is None:
+            logger.warning("MISP event tag %r names no registered source; attributing the event to 'misp'", name)
+            return "misp"
+        return canonical
+    return None
 
 
 class EdgeGuardPipeline:
@@ -727,6 +750,7 @@ class EdgeGuardPipeline:
             logger.info("   🔄 Step 3b: Converting events to STIX 2.1 format...")
             all_stix_objects = []
             conversion_errors = 0
+            skipped_curated = 0
 
             for event in events:
                 event_id = event.get("id")
@@ -737,15 +761,28 @@ class EdgeGuardPipeline:
                     continue
                 logger.debug(f"   Converting event {event_id} to STIX 2.1")
 
-                # The event's source from its name (EdgeGuard-{source}-{date}), as a canonical id.
-                source_from_event = _misp_event_source(event_info)
-
                 try:
                     # Fetch full event details
                     full_event = self.stix_exporter.fetch_event_details(str(event_id))
                     if not full_event:
                         logger.warning(f"   [WARN]  Skipping event {event_id} - failed to fetch details")
                         conversion_errors += 1
+                        continue
+
+                    # The event's source, as a canonical id: from its own source:* tag, else (a
+                    # collector's event, tagged EdgeGuard only) from its name (EdgeGuard-{source}-{date}).
+                    source_from_event = _misp_event_tag_source(full_event) or _misp_event_source(event_info)
+                    if is_curated_source(source_from_event):
+                        # A curated package carries claims about existing nodes and never creates
+                        # nodes; the MISP -> Neo4j sync (run_misp_to_neo4j.py) links its claims.
+                        logger.info(
+                            "   Skipping event %s (%r): a curated package of %s creates no nodes; "
+                            "the MISP -> Neo4j sync links its claims",
+                            event_id,
+                            event_info,
+                            source_from_event,
+                        )
+                        skipped_curated += 1
                         continue
 
                     # Convert to STIX 2.1 using PyMISP to_stix2()
@@ -761,7 +798,10 @@ class EdgeGuardPipeline:
                     logger.warning(f"   [WARN]  Error converting event {event_id}: {e}")
                     conversion_errors += 1
 
-            logger.info(f"   [OK] Converted {len(events) - conversion_errors}/{len(events)} events")
+            logger.info(
+                f"   [OK] Converted {len(events) - conversion_errors - skipped_curated}/{len(events)} events"
+                + (f" ({skipped_curated} curated package event(s) skipped)" if skipped_curated else "")
+            )
             logger.info(f"   [STATS] Total STIX objects created: {len(all_stix_objects)}")
 
             # Step 3c: Load STIX objects into Neo4j

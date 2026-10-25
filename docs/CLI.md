@@ -215,15 +215,16 @@ python src/run_pipeline.py --baseline --baseline-days 730
 ```
 
 - **`run_misp_to_neo4j.py`** reads, without `--full`, the events of the last `EDGEGUARD_SYNC_INTERVAL_DAYS` days plus one (four by default). The Airflow task reads from the last sync's start minus `EDGEGUARD_SYNC_WINDOW_OVERLAP_HOURS` instead. `--sector` sets the start date from the sector time range; it does not filter events by sector.
-- **`run_pipeline.py`** runs the collectors into MISP and then loads Neo4j through STIX 2.1 (MISP → STIX → Neo4j); the STIX flow is always on, and `--stix-flow` is accepted for compatibility. `--baseline` takes the baseline lock in-process, and `--fresh-baseline` clears Neo4j, MISP and the checkpoints first. The Airflow DAGs do not use this path.
+- **`run_pipeline.py`** runs the collectors into MISP and then loads Neo4j through STIX 2.1 (MISP → STIX → Neo4j); the STIX flow is always on, and `--stix-flow` is accepted for compatibility. It takes each EdgeGuard event's source from the event's `source:*` tag, else from its name, and skips the event of a curated package, whose claims only `run_misp_to_neo4j.py` links ([ARCHITECTURE.md](ARCHITECTURE.md) states how each object's source is named). `--baseline` takes the baseline lock in-process, and `--fresh-baseline` clears Neo4j, MISP and the checkpoints first. The Airflow DAGs do not use this path.
 - **`health_check.py`** prints MISP's status and response time, Neo4j's status and version, and counts of `Vulnerability`, `Indicator`, `CVE`, `Malware`, `ThreatActor`, `Technique` and `Source` nodes and `SOURCED_FROM` relationships. Its "Last Pipeline Run" line reads `data/metrics.json`, which no pipeline step writes, so it shows "Never"; `edgeguard stats` shows the last sync.
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `run_pipeline.py`: the STIX flow names an event's source from its `source:*` tag, else its name, and skips a curated package's event.
 - 2026-10-23 — `verify_fresh_baseline.py`, `run_cypher_catalog_http.py` and the graph export of `build_canonical_threat_actors.py` read the Compose Neo4j at `http://127.0.0.1:7474` when neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` is set (they used a built-in remote address) and stop with exit code 2 on an address that is not a valid http(s) URL; `run_cypher_catalog_http.py` also reads `NEO4J_HTTP` and exits 2 without writing its results when Neo4j does not answer a first `RETURN 1`; `neo4j_wss_bridge.py` requires `NEO4J_WSS_HOST`.
 - 2026-10-23 — `scripts/clear_neo4j.py` deletes the nodes EdgeGuard created through the wipe of the fresh baseline, `--label` narrows that scope, `--full-wipe` asks for a typed confirmation, also with `--force`, and every delete writes a destructive-operations audit line, also one that fails part-way; it deleted every node of the EdgeGuard labels, partner `Vulnerability` and `CVE` nodes included, and recorded nothing.
 - 2026-10-23 — `heal` removes the MISP writer's event-creation lock only when no process holds it, reports the pipeline and baseline locks without removing them and counts the kept lock files in its summary, and no longer removes other `*.lock` files in the repository root or the temporary directory.

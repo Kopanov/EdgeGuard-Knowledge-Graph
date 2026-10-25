@@ -138,12 +138,13 @@ nearly every pulse of a day ([COLLECTION_AND_SYNC_LIMITS.md § MISP event parts]
 **Tier 2 has no order, and the collector pool bounds it** —
 `tier2_feeds` puts no edges between the tier-2 feeds. They write small
 events, except URLhaus's first push after a wipe: URLhaus passes its whole
-`recent.csv` export (about 63,000 URLs on 2026-10-24, at most
+`recent.csv` export (the URLs added in the past 30 days: about 63,000 on
+2026-10-24, about 2,100 a day on average; at most
 `EDGEGUARD_URLHAUS_MAX_PER_RUN`, 100,000) to every push, which the first
 time spreads over about 4 event parts of 20,000 attributes (the event split
-above); a daily run writes only the URLs MISP does not hold yet (about
-1,130 a day) into that day's event, because the duplicate check drops the
-rest. Their load together is not
+above); a daily run writes only the URLs MISP does not hold yet into that
+day's event, because the duplicate check drops the rest, and a run after a
+gap of failed runs brings more and can spread over parts. Their load together is not
 negligible either: all 7 at once grow the MISP
 php-fpm workers past the MISP container's memory limit (HTTP 502), and a
 daily catch-up run together with OTX, VirusTotal and NVD reaches the
@@ -257,7 +258,7 @@ EDGEGUARD_INCREMENTAL_LIMIT=500
 EDGEGUARD_INCREMENTAL_LIMIT=0
 ```
 
-This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV, CISA ICS and MITRE ATT&CK do not use it: each applies its own per-run cap. MITRE downloads the ATT&CK bundle only when its ETag changed and pushes every object in it, since a cut run that stored the new ETag would never read the objects it left out. CISA KEV compares its whole catalogue with MISP in every run and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500). CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, because a cut at 200 (advisory, CVE) items would stop inside the window, and an advisory naming 200 or more CVEs would hold its cursor for good, every run green. ThreatFox reads a 7-day window and URLhaus its `recent.csv` export (about 63,000 URLs on 2026-10-24), each with about 1,100 new entries per day, of which a cut at 200 would lose about 80%. Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 would leave the stored copies of the others unreported, so they would age while still listed. AbuseIPDB makes one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan. The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
+This is a **per-source** limit. NVD, MalwareBazaar, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB, CISA KEV, CISA ICS and MITRE ATT&CK do not use it: each applies its own per-run cap. MITRE downloads the ATT&CK bundle only when its ETag changed and pushes every object in it, since a cut run that stored the new ETag would never read the objects it left out. CISA KEV compares its whole catalogue with MISP in every run and caps only its edits (`EDGEGUARD_KEV_MAX_EDITS_PER_RUN` 500). CISA ICS reads the advisories changed since its cursor up to `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200) files, because a cut at 200 (advisory, CVE) items would stop inside the window, and an advisory naming 200 or more CVEs would hold its cursor for good, every run green. ThreatFox reads a 7-day window (about 1,100 new IOCs a day) and URLhaus its `recent.csv` export, the URLs added in the past 30 days (about 63,000 on 2026-10-24, about 2,100 a day on average): a cut at 200 would lose about 80% of ThreatFox's daily entries and about 90% of URLhaus's. Feodo Tracker, SSL Blacklist and AbuseIPDB publish lists of thousands of entries, and a cut at 200 would leave the stored copies of the others unreported, so they would age while still listed. AbuseIPDB makes one blacklist request per run: its cap is that request's `limit`, at most 10,000 on the free plan. The other collectors in the incremental DAGs take at most 200 items each per run (plus optional separate VirusTotal enrichment runs if enabled).
 
 ### Priority order in `get_effective_limit()`
 
@@ -516,6 +517,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (tier 2 and the per-source limit gave about 1,130 and 1,100 a day, the rate of the keyless 30-day file); a run after a gap of failed runs can spread over parts.
 - 2026-10-25 — The per-event size cost is bounded by the writer's event split (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, `-partN` events, not OTX); tier 2: URLhaus's first push after a wipe spreads over about 4 parts, and a daily run writes the about 1,130 URLs MISP does not hold into one event (the text said partitioning was not implemented, and that URLhaus writes one event).
 - 2026-10-25 — The timeout table gives the `run_neo4j_sync` limit as 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, at most 22).
 - 2026-10-25 — Tier 2: URLhaus writes its whole `recent.csv` export (about 63,000 URLs on 2026-10-24) into one event, past the ~50,000 attributes of MISP_TUNING.md; the text called every tier-2 feed small.

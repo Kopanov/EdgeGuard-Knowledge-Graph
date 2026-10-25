@@ -92,9 +92,10 @@ def record_destructive_op(
 ) -> Optional[Dict[str, Any]]:
     """Append one audit line and bump the counter. Returns the record, or ``None`` if nothing was written.
 
-    ``operation`` names the code path (``clear_all``, ``clear_edgeguard_managed``, ``cvss_dedup``),
-    ``target`` the store (``neo4j``), ``affected`` the number of nodes removed, ``scope`` the
-    Cypher-level selection the operation used; ``actor`` (added here) the process that ran it.
+    ``operation`` names the code path (``clear_all``, ``clear_edgeguard_managed``, ``cvss_dedup``,
+    ``source_alias_cleanup``), ``target`` the store (``neo4j``), ``affected`` the number of nodes
+    removed, ``scope`` the Cypher-level selection the operation used; ``actor`` (added here) the
+    process that ran it.
     """
     record: Dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),

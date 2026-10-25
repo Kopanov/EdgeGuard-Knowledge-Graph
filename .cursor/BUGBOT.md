@@ -783,8 +783,9 @@ EdgeGuard types (`Indicator`, `ThreatActor`, `Malware`, `Technique`, `Tactic`, `
 These rules ensure that every node in Neo4j can be traced back to its original source, and that raw data remains accessible via MISP.
 
 ### MERGE block missing SOURCED_FROM edge
-Every MERGE of a node from a source record must be followed (in the same transaction or immediately after) by a `MERGE (n)-[:SOURCED_FROM]->(s:Source {source_id: $source_id})` that stores the full collector payload in `r.raw_data`. Derived nodes (Campaign, Sector, the CVSS sub-nodes) have no `SOURCED_FROM` edge.
+Every MERGE of a node from a source record must be followed (in the same transaction or immediately after) by `MATCH (s:Source {source_id: $source_id}) MERGE (n)-[r:SOURCED_FROM]->(s)`, with `$source_id` resolved by `source_registry.canonical_source_id`, that stores the full collector payload in `r.raw_data`. Derived nodes (Campaign, Sector, the CVSS sub-nodes) have no `SOURCED_FROM` edge.
 Flag any node creation path for a source record that does not create or update the `SOURCED_FROM` relationship. Without it, there is no way to retrieve the raw data that produced the node.
+Flag a statement other than `Neo4jClient.ensure_sources` that creates a `Source` node (a `MERGE` or `CREATE` of `(:Source)`, also inside an edge pattern), and a `SOURCED_FROM` writer that matches the `Source` node by an id it has not resolved with `canonical_source_id`: the graph holds one `Source` node per registered source, keyed by its canonical id, and the acceptance check `source_nodes_canonical` fails on a node keyed by a variant.
 
 ### `first_imported_at` overwritten after initial import
 `first_imported_at` records when a node first entered the graph and must never be updated after creation.
@@ -1056,6 +1057,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — MERGE block missing SOURCED_FROM edge: the edge MATCHes the `Source` node by the canonical id (the rule's pattern MERGEd the node); new flags for a statement other than `ensure_sources` that creates a `Source` node and for a `SOURCED_FROM` writer that does not resolve its id with `canonical_source_id`.
 - 2026-10-25 — Duplicate event creation allows the `-part<N>` events of a source and day (`_get_or_create_event(source, date, part)`); new rule Event split: lookups of later parts never create, a part is created only right before its first batch and once the existing parts are allotted to the limit, no part after a failed lookup or creation, and a group with source-report ids is never split.
 - 2026-10-25 — The optional-key rule names URLhaus and MalwareBazaar, which need the abuse.ch key (`missing_abusech_key`).
 - 2026-10-25 — URLhaus per-run cap 100,000 (was 50,000): the abuse.ch v2 `recent.csv` export listed about 63,000 URLs on 2026-10-24.

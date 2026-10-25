@@ -804,9 +804,10 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN (default 500) is the per-run limit for this source.
 #   nvd (2026-10): a run reads every CVE modified since its cursor and caps its MISP writes with
 #   EDGEGUARD_NVD_MAX_PER_RUN (default 5000); a cut at 200 lost 37% of new CVEs (30-day replay).
-#   threatfox, urlhaus (2026-10): the daily run reads the 7-day ThreatFox API window and the
-#   URLhaus recent.csv export (about 63,000 URLs on 2026-10-24), with about 1,100 new entries per
-#   day each; cut at 200, about 80% of them were never collected (neither feed has a cursor).
+#   threatfox, urlhaus (2026-10): the daily run reads the 7-day ThreatFox API window (about 1,100
+#   new IOCs a day) and the URLhaus recent.csv export, the URLs added in the past 30 days (about
+#   63,000 on 2026-10-24, about 2,100 a day on average); cut at 200, about 80% of ThreatFox's and
+#   about 90% of URLhaus's daily entries would never be collected (neither feed has a cursor).
 #   EDGEGUARD_THREATFOX_MAX_PER_RUN and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap above the whole
 #   window (see their definitions).
 #   feodo, sslbl (2026-10): each run reads the whole list the source publishes; abuseipdb: at most
@@ -1439,8 +1440,9 @@ MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
 # ---------------------------------------------------------------------------
 # Both feeds are read as a window without a cursor: ThreatFox ``get_iocs`` serves the IOCs of
 # the last 7 days (7,398 on the 730-day baseline of 2026-10-13; about 1,050-1,140 new per day),
-# URLhaus its ``recent.csv`` export (about 63,000 URLs on 2026-10-24; about 1,130 new per day).
-# The generic incremental default (200) let about 80% of each day's entries age out of the
+# URLhaus its ``recent.csv`` export, the URLs added in the past 30 days (about 63,000 on 2026-10-24,
+# about 2,100 a day on average). The generic incremental default (200) let most of each day's
+# entries (about 80% for ThreatFox, about 90% for URLhaus) age out of the
 # window uncollected. Each cap covers the whole window with headroom, so a daily run
 # keeps everything the feed still lists and a run that misses days catches up; a run that
 # reaches the cap keeps the newest entries (by ``first_seen`` / ``dateadded``) and logs a

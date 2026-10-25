@@ -13,6 +13,14 @@ from unittest.mock import MagicMock
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# tests/test_graphql_api.py replaces neo4j_client (and neo4j) with MagicMocks when it is collected
+# first; only then are the stubs removed, so this module reads the real client's source.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j_client" or k.startswith("neo4j")):
+    clear_graphql_api_magicmock_stubs()
 
 import destructive_ops_audit as audit  # noqa: E402
 import neo4j_client as nc  # noqa: E402
@@ -69,6 +77,7 @@ def test_every_node_deleting_path_in_neo4j_client_records(monkeypatch):
         (nc.Neo4jClient.clear_all, "clear_all"),
         (nc.Neo4jClient.clear_edgeguard_managed, "clear_edgeguard_managed"),
         (nc.Neo4jClient.create_constraints, "cvss_dedup"),
+        (nc.Neo4jClient.ensure_sources, "source_alias_cleanup"),
     ):
         src = inspect.getsource(inspect.unwrap(method))
         assert re.search(rf'record_destructive_op\(\s*"{op}"', src), op

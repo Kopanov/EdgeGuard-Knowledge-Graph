@@ -2,9 +2,10 @@
 
 The daily DAG passed ``get_effective_limit("threatfox" / "urlhaus")`` to ``collect()``; neither
 source was in ``NO_LIMIT_SOURCES`` or ``OWN_RUN_CAP_SOURCES``, so both were cut at
-``EDGEGUARD_INCREMENTAL_LIMIT`` (200). ThreatFox serves the IOCs of the last 7 days and URLhaus
-its ``recent.csv`` export (about 63,000 URLs on 2026-10-24), about 1,100 new entries per day each,
-and neither has a cursor: about 80% of each day's entries left the window without being collected.
+``EDGEGUARD_INCREMENTAL_LIMIT`` (200). ThreatFox serves the IOCs of the last 7 days (about 1,100
+new a day) and URLhaus its ``recent.csv`` export, the URLs added in the past 30 days (about 63,000 on
+2026-10-24, about 2,100 a day on average), and neither has a cursor: most of each day's entries
+(about 80% for ThreatFox, about 90% for URLhaus) left the window without being collected.
 Each source now has its own cap above its whole window (``EDGEGUARD_THREATFOX_MAX_PER_RUN`` 10,000,
 ``EDGEGUARD_URLHAUS_MAX_PER_RUN`` 100,000), and a run that reaches it keeps the newest entries
 whatever order the feed returns them in, and says so in a warning.

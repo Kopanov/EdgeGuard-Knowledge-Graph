@@ -95,7 +95,8 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
    # by the MISP → Neo4j sync, sets them). description follows the sync's source ranking
    # with description_source "resilmesh", below every registered feed: it fills a CVE without a
    # description and never replaces a feed's text (NVD's, the KEV's, ...); it can replace the text of
-   # another source of an unregistered source's rank whose id sorts after it, such as stix_import's. cwe, ref_tags,
+   # another source without a description rank (an unregistered source, or stix_import, registered with
+   # ranked_for_descriptions=False) whose id sorts after it, such as stix_import's. cwe, ref_tags,
    # cpe_type and result_impacts are kept when omitted.
 
    # Example: create the bridge between a ResilMesh Vulnerability (keyed on cve_id) and the CVE.
@@ -146,10 +147,11 @@ ResilMesh then works on a Neo4j graph that holds **both**:
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — `merge_resilmesh_cve` example: `stix_import` is a registered source without a description rank (`ranked_for_descriptions=False`), so `resilmesh`, whose id sorts first, still replaces its text.
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: `tests/test_resilmesh_schema.py` is a pytest module that needs no Neo4j (as a plain script it checks nothing) and the methods and labels it checks are listed; the recommended split follows RESILMESH_INTEROPERABILITY.md §4 and §6 (ResilMesh writes its topology, mission and scanner data, EdgeGuard the threat intelligence and `CVE` + `CVSSv*`); no indicator- or CVE-to-asset bridge exists yet.
 - 2026-10-16 — `merge_resilmesh_cve` example: the description follows the sync's source ranking with `description_source` `resilmesh`, below every registered feed.
 - 2026-10-15 — `merge_resilmesh_cve` example: `description`, `published` and `last_modified` only fill a CVE node that has none, and the lists a call omits are kept.
