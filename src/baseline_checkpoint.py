@@ -45,7 +45,8 @@ if _candidate != _PROJECT_ROOT and not _candidate.is_relative_to(_PROJECT_ROOT):
     _candidate = _default_checkpoint_dir
 
 CHECKPOINT_DIR = _candidate
-CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+# The directory is created by the first write (``_atomic_write``, ``_atomic_acquire_lock_fd``), not at
+# import: every process that imports the module (the CLI, the DAG files, a test run) would create it.
 CHECKPOINT_FILE = CHECKPOINT_DIR / "baseline_checkpoint.json"
 
 
@@ -54,6 +55,7 @@ CHECKPOINT_FILE = CHECKPOINT_DIR / "baseline_checkpoint.json"
 
 def _atomic_write(path: Path, data: dict) -> None:
     """Write *data* as JSON to *path* atomically (tmp → fsync → rename)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     try:
         with open(tmp, "w") as f:
@@ -212,6 +214,7 @@ def _atomic_acquire_lock_fd(lock_path: Path) -> int:
         finally:
             os.close(fd)  # also releases the flock
     """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     return os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
 
 

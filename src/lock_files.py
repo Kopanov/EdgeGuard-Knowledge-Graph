@@ -27,6 +27,12 @@ from typing import Iterator, Tuple
 
 MISP_EVENT_LOCK_DEFAULT = "/tmp/edgeguard_misp_get_or_create_event.lock"
 
+# The presence-based lock of a CLI pipeline run, taken by ``EdgeGuardPipeline.run`` (``run_pipeline.py``).
+# The run reads it when it starts, so tests set it to a temporary path instead of the checkout's.
+PIPELINE_LOCK_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "checkpoints", "pipeline.lock"
+)
+
 # ``remove_if_unheld`` outcomes.
 ABSENT = "absent"
 REMOVED = "removed"
