@@ -50,7 +50,10 @@ indicators are linked to a CVE named in the same OTX report (``Indicator -[:INDI
 when such a link is not labelled ``otx_pulse`` or cites no OTX report (``alienvault_otx:<pulse id>``).
 Since 2026-10-25 it fails when a ``Source`` node is keyed by an alias of a registered source (``otx``,
 ``cisa``, ``vt``, ...) instead of its canonical id (``src/source_registry.py``), and reports a ``Source``
-node whose id the registry does not know.
+node whose id the registry does not know. Since the campaign seen dates of 2026-10-25 it fails when a
+campaign is first seen later than the first date of one of its indicator members (a source's first-seen
+claim, else its latest report, never after the member's first import) or last seen earlier than a
+member's latest dated report.
 
 Env (``src/neo4j_http_endpoint.py``):
   NEO4J_HTTP_URL   base URL, then NEO4J_HTTP; neither set: the local Compose Neo4j
@@ -295,6 +298,41 @@ _CVE_BEST_CVSS = (
         for rel, label, version in _CVSS_SELECTION_ORDER
     )
     + "] WHERE p[0] IS NOT NULL]) AS best"
+)
+# Campaign seen dates (2026-10-25, check 13e): ``build_campaign_nodes`` stores a campaign's first_seen
+# no later than the first date of any active indicator it counts, and its last_seen no earlier than
+# the latest dated report of one; the stored values only move earlier / later. A member's first date
+# is, per SOURCED_FROM edge, the source's first-seen claim, else its latest report
+# (``r.last_reported_at``), and never later than the member's first import; its last date, per edge,
+# the last-seen claim, else the latest report (docs/TIMESTAMPS.md, "Seen dates of an indicator").
+# Written here apart from ``indicator_seen_dates``, so the check also catches a change to that shared
+# definition. The members are the indicators linked by the last build (``PART_OF_CAMPAIGN``, a sample
+# of up to 100 per campaign; each was counted by the build that linked it), and only the edges no
+# write has touched since that build count (``r.updated_at`` at or before the member link and the
+# campaign's ``last_updated``), so a sync after the build cannot fail the check. The node's
+# ``last_updated`` (the date of an indicator no edge dates) changes with every write and is not read.
+CAMPAIGN_SEEN_DATES_CHECK_QUERY = (
+    "MATCH (c:Campaign) WHERE c.edgeguard_managed = true AND c.first_seen IS NOT NULL AND c.last_seen IS NOT NULL "
+    "MATCH (i:Indicator)-[m:PART_OF_CAMPAIGN]->(c) "
+    "OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source) "
+    "WHERE r.updated_at <= m.updated_at AND r.updated_at <= c.last_updated "
+    "WITH c, i, "
+    "[d IN collect(coalesce(r.source_reported_first_at, r.last_reported_at)) + [i.first_imported_at] "
+    "WHERE d IS NOT NULL] AS firsts, "
+    "max(coalesce(r.source_reported_last_at, r.last_reported_at)) AS member_last "
+    "WITH c, i, member_last, reduce(e = head(firsts), d IN tail(firsts) | CASE WHEN d < e THEN d ELSE e END) "
+    "AS member_first "
+    "WITH c, count(i) AS members, min(member_first) AS earliest, max(member_last) AS latest "
+    "WITH c, members, earliest, latest, coalesce(c.first_seen > earliest, false) AS first_late, "
+    "coalesce(c.last_seen < latest, false) AS last_early "
+    "ORDER BY c.name "
+    "RETURN count(c) AS campaigns, sum(members) AS members, "
+    "sum(CASE WHEN first_late THEN 1 ELSE 0 END) AS first_seen_after_members, "
+    "sum(CASE WHEN last_early THEN 1 ELSE 0 END) AS last_seen_before_members, "
+    "[x IN collect(CASE WHEN first_late OR last_early THEN {campaign: c.name, "
+    "first_seen: toString(c.first_seen), earliest_member: toString(earliest), "
+    "last_seen: toString(c.last_seen), latest_member: toString(latest)} END) WHERE x IS NOT NULL][0..5] "
+    "AS examples"
 )
 # Per-source presence (2026-10): the canonical ``Source.source_id`` of every collector, by how a
 # default deployment runs it (``src/source_registry.py``, the collector flags in ``src/config.py``,
@@ -1247,6 +1285,15 @@ def run_checks(
     defects = ("without_evidence", "without_runs", "runs_without_evidence")
     judged = r.get("campaigns") or r.get("runs_without_evidence")
     rep.add("campaigns_have_evidence", all(r.get(k) == 0 for k in defects) if judged else None, r)
+
+    # 13e. Campaign seen dates (2026-10-25): no campaign EdgeGuard built is first seen later than an
+    #      indicator member's first date or last seen earlier than a member's latest dated report
+    #      (``CAMPAIGN_SEEN_DATES_CHECK_QUERY``). A build that dates an indicator without a first-seen
+    #      claim (every OTX indicator) by EdgeGuard's import time fails here. Informational while no
+    #      campaign has an indicator member.
+    r = _one(CAMPAIGN_SEEN_DATES_CHECK_QUERY)
+    seen_dates_ok = r.get("first_seen_after_members") == 0 and r.get("last_seen_before_members") == 0
+    rep.add("campaign_seen_dates_cover_members", seen_dates_ok if r.get("members") else None, r)
 
     # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from
     #     its CVSS sub-nodes (``_CVSS_SELECTION_ORDER``): with a valid sub-node, the score and

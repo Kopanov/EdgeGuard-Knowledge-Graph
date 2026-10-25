@@ -3,9 +3,11 @@
 An OTX indicator's ``SOURCED_FROM`` edge carries no first-seen / last-seen claim (OTX is not on the
 reliable first-seen allowlist), but the source's latest report, ``r.last_reported_at``. The campaign
 build read the claims alone, so a campaign whose indicators all came from OTX took EdgeGuard's import
-time as its first and last seen. The build and the alert enrichment now read the seen dates of ``indicator_seen_dates``: per edge the claim, else the
-latest report; the first seen date never later than the first import; the indicator's own times only
-when no edge dates it.
+time as its first and last seen. The build and the alert enrichment now read the seen dates of
+``indicator_seen_dates``: per edge the claim, else the latest report; the first seen date never later
+than the first import; the indicator's own times only when no edge dates it. The acceptance script's
+check of the seen dates (``scripts/verify_fresh_baseline.py``, check 13e) runs on the campaigns built
+here: they pass it, a sync after the build leaves it passing, and import-time dates fail it.
 
 The indicators are written as production writes them: an item shaped as the collector emits it, the
 attribute ``MISPWriter`` builds from it with the fields MISP adds when it stores it (the key set of a
@@ -18,6 +20,7 @@ the production code creates get the label right after), refuses any other node.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -37,6 +40,8 @@ import neo4j_client  # noqa: E402
 from node_identity import compute_node_uuid  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not URI, reason="EDGEGUARD_IT_NEO4J_URI is not set (no throwaway Neo4j)")
+
+SCRIPT = TESTS.parent / "scripts" / "verify_fresh_baseline.py"
 
 ACTOR = "it-seen-actor"
 CAMPAIGN = f"{ACTOR} Campaign"
@@ -235,6 +240,25 @@ def _alert_dates(client, value: str) -> tuple:
     return _parse(answer.enrichment["first_seen"]), _parse(answer.enrichment["last_updated"])
 
 
+# The cutoff of check 13e: only the edges no write touched since the build count.
+_CUTOFF = "WHERE r.updated_at <= m.updated_at AND r.updated_at <= c.last_updated "
+
+
+def _acceptance(raw_driver, without_cutoff: bool = False) -> dict:
+    """Check 13e of the acceptance script on this database (its statement as the script sends it);
+    ``without_cutoff`` drops its cutoff, to show what the cutoff keeps out."""
+    spec = importlib.util.spec_from_file_location("verify_fresh_baseline_seen_dates", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    statement = module.CAMPAIGN_SEEN_DATES_CHECK_QUERY
+    assert _CUTOFF in statement
+    if without_cutoff:
+        statement = statement.replace(_CUTOFF, "")
+    with raw_driver.session() as session:
+        return dict(session.run(statement).single())
+
+
 def _parse(text: str) -> datetime:
     """A time of the payload (``iso_str``: the driver value's native ``isoformat()``, microseconds at
     most), as an aware datetime."""
@@ -379,3 +403,69 @@ def test_an_indicator_no_source_dated_takes_its_own_times(client, raw_driver):
     imported, written = _node_times(raw_driver)[value]
     assert (campaign["first"], campaign["last"]) == (imported, written)
     assert _alert_dates(client, value) == (imported, written)
+
+
+def test_the_acceptance_check_passes_after_a_build_and_a_later_sync_leaves_it_passing(client, raw_driver):
+    """Check 13e on a campaign the build dated passes. A source that reports a member after the build,
+    with a first-seen claim earlier than the campaign's first seen, leaves it passing (the cutoff keeps
+    the new edge out; without it the check would fail); the next build takes the claim."""
+    now = _now()
+    reports = {"it-seen-e.example": now - timedelta(days=200), "it-seen-f.example": now - timedelta(days=120)}
+    attrs = [
+        _stored(_otx_item(value, report - timedelta(days=10), report), 20 + n, now - timedelta(days=2))
+        for n, (value, report) in enumerate(reports.items())
+    ]
+    _merge(client, raw_driver, "alienvault_otx", attrs)
+    _indicates(raw_driver, *reports)
+    _build(client, raw_driver)
+
+    r = _acceptance(raw_driver)
+    assert (r["campaigns"], r["members"]) == (1, 2)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"], r["examples"]) == (0, 0, [])
+
+    claim = now - timedelta(days=400)
+    tf_item = _threatfox_item("it-seen-e.example", claim, now - timedelta(days=50))
+    _merge(client, raw_driver, "threatfox", [_stored(tf_item, 22, now - timedelta(hours=1))])
+    r = _acceptance(raw_driver)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (0, 0), "the later sync is left out"
+    assert _acceptance(raw_driver, without_cutoff=True)["first_seen_after_members"] == 1, "what the cutoff keeps out"
+
+    assert _build(client, raw_driver)["first"] == claim
+    r = _acceptance(raw_driver)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (0, 0)
+
+
+def test_the_acceptance_check_fails_on_dates_a_build_without_the_reports_stored(client, raw_driver):
+    """The import time as first seen (what the build stored for indicators without a claim before it read
+    the reports) fails check 13e, and so does a last seen before a member's latest report."""
+    now = _now()
+    reports = {"it-seen-g.example": now - timedelta(days=200), "it-seen-h.example": now - timedelta(days=120)}
+    attrs = [
+        _stored(_otx_item(value, report - timedelta(days=10), report), 30 + n, now - timedelta(days=2))
+        for n, (value, report) in enumerate(reports.items())
+    ]
+    _merge(client, raw_driver, "alienvault_otx", attrs)
+    _indicates(raw_driver, *reports)
+    built = _build(client, raw_driver)
+    assert _acceptance(raw_driver)["first_seen_after_members"] == 0
+
+    with raw_driver.session() as session:
+        session.run(
+            "MATCH (c:Campaign {name: $name}) MATCH (i:Indicator)-[:PART_OF_CAMPAIGN]->(c) "
+            "WITH c, min(i.first_imported_at) AS imported SET c.first_seen = imported",
+            name=CAMPAIGN,
+        )
+    r = _acceptance(raw_driver)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (1, 0)
+    assert [x["campaign"] for x in r["examples"]] == [CAMPAIGN]
+
+    early = reports["it-seen-h.example"] - timedelta(days=1)
+    with raw_driver.session() as session:
+        session.run(
+            "MATCH (c:Campaign {name: $name}) SET c.first_seen = datetime($first), c.last_seen = datetime($early)",
+            name=CAMPAIGN,
+            first=built["first"].isoformat(),
+            early=early.isoformat(),
+        )
+    r = _acceptance(raw_driver)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (0, 1)

@@ -253,6 +253,9 @@ reports.
   only later, so a campaign keeps the widest span a build computed, also after the indicators that
   gave it expire. A `last_seen` a build stored too late therefore stays until a fresh baseline
   rebuilds the graph, or until a build deletes the campaign because its actor has no evidence left.
+  The acceptance script checks the dates after a baseline: no campaign is first seen after an
+  indicator member's first date or last seen before a member's latest dated report
+  (`campaign_seen_dates_cover_members`, [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md)).
 - **Alert enrichment** (`alert_processor`): `first_seen` and `last_updated` of the indicator,
   computed for each alert, with no stored value. An edge without a first-seen claim (such as OTX's)
   keeps only the source's latest report, so once that source reports the indicator
@@ -503,6 +506,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The acceptance script checks the campaign seen dates (`campaign_seen_dates_cover_members`).
 - 2026-10-25 — Seen dates: only the edges the sync writes carry `r.last_reported_at`; the alert enrichment's import-time first seen holds for an edge without a first-seen claim; a campaign `last_seen` a build stored too late stays until a fresh baseline.
 - 2026-10-25 — Seen dates of an indicator for the campaign build and the alert enrichment: per edge the source's claim, else its latest report (`r.last_reported_at`); the first seen date never later than the first import. Both had read the claims alone, so an indicator without one (one only OTX reported) was dated by EdgeGuard's import time, and a campaign whose indicators all came from OTX had the import time as its first and last seen.
 - 2026-10-18 — STIX export times only from the graph: SDO `created` falls back to `created_at` (Campaign, Sector) and `modified` is never before `created`; relationships take `created_at` / `imported_at` / `updated_at` (they had the export time); the primary `valid_from` chain ends at the SDO's `created` instead of `now()`; the Indicator's `confidence` and `valid_until` (the retirement time of the aging rule); the Indicator no longer carries `x_edgeguard_last_updated`.
