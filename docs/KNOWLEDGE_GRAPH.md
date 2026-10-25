@@ -75,6 +75,33 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 
 ### SOURCED_FROM edge schema
 
+**`Source` nodes.** One per registered source in `src/source_registry.py`, keyed by its canonical id, with `name`, `type` and `reliability` from the registry; `ensure_sources` creates them and no other statement does. A variant of a source (an alias, matched without regard to case) is a lookup key, never a node: every `SOURCED_FROM` writer resolves the id it is given to the canonical id before it matches the node. The sources and their variants (`tests/test_source_nodes_canonical.py` keeps this table equal to the registry):
+
+| Source (canonical id) | Variants that resolve to it |
+|---|---|
+| `alienvault_otx` | `otx` |
+| `virustotal` | `vt` |
+| `abuseipdb` | none |
+| `mitre_attck` | `mitre` |
+| `nvd` | none |
+| `misp` | none |
+| `cisa_kev` | `cisa` |
+| `feodo_tracker` | `feodo` |
+| `ssl_blacklist` | `sslbl`, `abusech_ssl` |
+| `urlhaus` | none |
+| `threatfox` | none |
+| `cisa_ics` | `cisa-ics`, `ics_advisories` |
+| `malwarebazaar` | `bazaar`, `mb` |
+| `coreideas` (curated) | none |
+| `misp_galaxy` (curated) | none |
+| `stix_import` (import) | none |
+
+`stix_import` is the source of the objects of an external STIX 2.1 bundle that name no EdgeGuard source (the in-process STIX loader, `run_pipeline.load_stix21_to_neo4j`). It is not a feed: no collector, no CLI entry, no MISP event. Its records reach its `Source` node through `SOURCED_FROM` edges like any other source's; its producer is unknown, so it has the lowest `reliability` (0.5), no first-seen claims, and the description rank of an unregistered source (`ranked_for_descriptions=False`; [Descriptions and their source](#descriptions-and-their-source)).
+
+**Source names everywhere else.** The other places that name a source hold the same canonical ids: a node's `source` list (every writer resolves each name in it: a variant to its canonical id, a name the registry does not know lowercased and stripped), `r.sources` on a relationship, `r.source` on a `SOURCED_FROM` edge, `description_source` and `last_reported_source`. So do the REST and GraphQL outputs and the STIX export (`x_edgeguard_sources`), which read them. Input takes the variants too: the REST `GET /indicators` `source` filter resolves its value the same way (`otx` finds the indicators whose list holds `alienvault_otx`), and the STIX loader resolves an object's `x_edgeguard_source`.
+
+**A new source** is one `Source(...)` entry in the registry, with its canonical id and its variants ([COLLECTORS.md](COLLECTORS.md), step 1): its node, the writers and the acceptance check follow from that entry without any other change. **A name the registry does not know** has no `Source` node: the batch writers refuse its records with an error, and a single-item write stores the node without a `SOURCED_FROM` edge. The acceptance check `source_nodes_canonical` fails on a `Source` node keyed by a variant, lists one whose id the registry does not know without failing on it, and reports the variant map it judged by (`variants`).
+
 Every threat-intel node (Indicator, CVE, Vulnerability, Malware, ThreatActor, Technique, Tactic, Tool) carries one `(:Node)-[r:SOURCED_FROM]->(:Source)` edge per reporting source. The edge holds both DB-local facts (when EdgeGuard saw this source report this entity) AND the source's own claim (when the source itself says it first/last recorded the entity). Per-source attribution preserves full provenance for multi-source IOCs.
 
 | Property | Semantic | Type | Write rule | Source |
@@ -198,7 +225,7 @@ A `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tact
 | `Malware`, `ThreatActor`, `Tool`, `Technique`, `Tactic` | MITRE ATT&CK, the curated sources (Core Ideas, then MISP Galaxy), then every other source |
 
 - **The rule.** A record sets the description, with its source, when its source ranks at least as high as the source of the stored text: the same source's revised record replaces its own text, a lower-ranked source never replaces a higher-ranked one, and any record fills an empty description (null or `''`). A record without text changes nothing. Neo4j decides once per write, before it sets both properties (`DescriptionRanking.set_cypher`).
-- **No ties.** Inside a group of several sources (the curated sources, every other source) the source with the higher registry `reliability` ranks higher, then the one whose id sorts first; a source the registry does not know (`stix_import`, `resilmesh` for a ResilMesh-native write through `merge_resilmesh_cve` / `merge_resilmesh_vulnerability`, the source name of an external STIX bundle) ranks below every registered one, two such sources by id. So no two sources share a rank, and the order of arrival cannot decide.
+- **No ties.** Inside a group of several sources (the curated sources, every other source) the source with the higher registry `reliability` ranks higher, then the one whose id sorts first; a source the registry does not know (`resilmesh` for a ResilMesh-native write through `merge_resilmesh_cve` / `merge_resilmesh_vulnerability`, the source name of an external STIX bundle), or one it registers with `ranked_for_descriptions=False` (`stix_import`), ranks below every ranked one, two such sources by id. So no two sources share a rank, and the order of arrival cannot decide.
 - **Order of arrival.** MISP holds one attribute per source per CVE or entity: MISPWriter skips an attribute whose type and value its source already holds in any event (cross-event deduplication), and NVD's update and every CISA KEV run edit their stored copies in place. Each source gives one text, so the node shows the highest-ranked text whatever the order of the events, in a full and an incremental sync and in the attribute and the STIX flow alike. Where MISP holds two attributes of one source for one node (the cross-event check switched off or its prefetch failed, both logged; a technique, tactic or tool ATT&CK renamed, whose attribute value carries the name), the one merged last is kept.
 - **Merged nodes.** The actor alias merge and the Malware ATT&CK-id twin merge keep the description, with its source, that the ranking keeps among the nodes they fold together (equal ranks: the canonical node's).
 - **Where it is exposed.** REST (`/vulnerabilities`, `/actors/{name}/summary`, the Graph Explorer's vulnerability view, which shows of a CVE's twin nodes, `:CVE` and `:Vulnerability`, the description the ranking keeps; at an equal rank the twin that names a source, since a record of that source replaces a text without one, then the source id), GraphQL (`descriptionSource` on `CVE`, `Vulnerability`, `ThreatActor`, `Malware`, `Technique`, `Tactic`, `Tool`) and the STIX export (`x_edgeguard_description_source` on an SDO with a description, extension definition 1.6.0).
@@ -574,6 +601,9 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — A node's `source` list holds canonical ids whichever writer stores it (a record's own list included, such as a STIX object's `x_edgeguard_source`), and the REST `/indicators` `source` filter resolves a variant.
+- 2026-10-25 — `stix_import` (the objects of an external STIX bundle that name no EdgeGuard source) is a registered source: its records get a `SOURCED_FROM` edge, which until then matched no `Source` node; its description rank is unchanged (`ranked_for_descriptions=False`).
+- 2026-10-25 — One `Source` node per registered source, keyed by its canonical id; until then `ensure_sources` also created a node for every alias (26 nodes on the 730-day baseline of 2026-10-22, of which 10 held `SOURCED_FROM` edges and no alias node held one). The `SOURCED_FROM` writers resolve an alias to the canonical id.
 - 2026-10-25 — Zone resolution: event names carry `-part<N>` from the second part of a source/date (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`), and still no zone.
 - 2026-10-25 — A campaign's `first_seen` / `last_seen` come from the seen dates of its indicators: per source the claim, else the source's latest report (`r.last_reported_at`). The build had read the claims alone, so a campaign whose indicators all came from OTX had EdgeGuard's import time as its first and last seen; the alert enrichment reads the same dates.
 - 2026-10-23 — The STIX flow of the `run_pipeline.py` CLI is always on there (`--stix-flow` cannot turn it off; the page called it opt-in); the sync settings point to CONFIGURATION.md.

@@ -109,9 +109,10 @@ class Source:
         Human-readable name shown in CLI / docs / Neo4j ``:Source.name``.
     source_type : str
         One of ``threat_intel`` / ``advisory`` / ``framework`` /
-        ``vulnerability_db`` / ``curated``. Drives Neo4j ``:Source.type``.
+        ``vulnerability_db`` / ``curated`` / ``import``. Drives Neo4j ``:Source.type``.
         ``curated`` marks a curated package imported once into MISP rather
-        than a feed polled by a collector.
+        than a feed polled by a collector; ``import`` marks records loaded
+        from outside the pipeline (``stix_import``: an external STIX bundle).
     reliability : float
         ``[0.0, 1.0]`` confidence base used by the merge layer for
         corroboration scoring. Drives Neo4j ``:Source.reliability``.
@@ -145,6 +146,15 @@ class Source:
         pulse-publish-date, MISP-only pipeline metadata) —
         extractor returns
         ``(None, None)`` and the value never reaches the edge.
+    ranked_for_descriptions : bool
+        ``True`` (default) ⇒ the description ranking
+        (``description_ranking.py``) ranks this source among the registered
+        ones, by group and ``reliability``. ``False`` ⇒ it ranks the source
+        as one the registry does not know: below every registered source,
+        ordered against other such sources by id. ``stix_import`` is
+        registered for its ``Source`` node and ``SOURCED_FROM`` edges; the
+        text of an external STIX bundle, whose producer EdgeGuard cannot
+        judge, keeps the rank it had before the source was registered.
     """
 
     canonical_id: str
@@ -170,6 +180,7 @@ class Source:
     # was just "NVD" (acronym fits dashboard widths). Refactor
     # preserves both.
     cli_display_name: Optional[str] = None
+    ranked_for_descriptions: bool = True
 
     def __post_init__(self) -> None:
         """Validate Source invariants at construction time.
@@ -195,10 +206,10 @@ class Source:
     @property
     def all_keys(self) -> Tuple[str, ...]:
         """``(canonical_id,) + aliases`` — every key under which this
-        source can be looked up. Used by the derivation helpers to
-        build the legacy alias-keyed dicts (every Cypher MERGE on
-        ``:Source {source_id: $X}`` needs an entry per alias because
-        the merge query itself doesn't know about aliases).
+        source can be looked up: ``get_source`` / ``canonical_source_id``,
+        the reliable first-seen allowlist, the MISP tag map and the
+        metrics label bound. The Neo4j ``Source`` node is keyed by
+        ``canonical_id`` alone (``to_neo4j_sources_dict``).
         """
         return (self.canonical_id,) + self.aliases
 
@@ -443,6 +454,24 @@ _REGISTRY: Tuple[Source, ...] = (
         misp_tag="source:MISP-Galaxy",
         reliable_first_seen=False,
     ),
+    # 2026-10-25: the objects of an external STIX bundle that name no EdgeGuard source
+    # (``run_pipeline.STIX_IMPORT_SOURCE_ID``, the in-process STIX loader). Registered so their
+    # records reach a ``Source`` node through a ``SOURCED_FROM`` edge. Not a feed: no collector, no
+    # CLI entry, no MISP event (the loader writes to Neo4j directly; the tag only completes the
+    # record). The producer is unknown, hence the lowest reliability, no first-seen claims (an
+    # object's ``created`` is when its producer made it, not an observation) and the description
+    # rank of an unregistered source.
+    Source(
+        canonical_id="stix_import",
+        display_name="STIX import",
+        source_type="import",
+        reliability=0.5,
+        cli_default_enabled=False,
+        cli_description="Objects of an external STIX 2.1 bundle that name no EdgeGuard source",
+        misp_tag="source:STIX-Import",
+        reliable_first_seen=False,
+        ranked_for_descriptions=False,
+    ),
 )
 
 
@@ -520,27 +549,22 @@ _validate_no_alias_collisions()
 
 
 def to_neo4j_sources_dict() -> Dict[str, Dict[str, object]]:
-    """Re-creates the legacy ``neo4j_client.SOURCES`` dict shape.
+    """The ``neo4j_client.SOURCES`` dict: ``{canonical_id: {"name": str, "type": str, "reliability": float}}``.
 
-    Schema: ``{source_id: {"name": str, "type": str, "reliability": float}}``
-
-    One entry per ALIAS so the existing Cypher
-    ``MERGE (:Source {source_id: $sid})`` calls (which don't know
-    about aliases) keep working for every legacy id.
-
-    Insertion order matches the legacy hand-maintained dict so a
-    parity test can assert byte-for-byte equality.
+    One entry per registered source, keyed by its canonical id, in registry order.
+    ``ensure_sources`` creates one ``Source`` node per entry, so the graph holds one node per
+    source. An alias (``otx``, ``cisa``, ``vt``, ...) is a lookup key and never a node: every
+    ``SOURCED_FROM`` writer resolves the id it is given with ``canonical_source_id`` before it
+    matches the ``Source`` node.
     """
-    out: Dict[str, Dict[str, object]] = {}
-    for src in _REGISTRY:
-        payload = {
+    return {
+        src.canonical_id: {
             "name": src.display_name,
             "type": src.source_type,
             "reliability": src.reliability,
         }
-        for key in src.all_keys:
-            out[key] = dict(payload)
-    return out
+        for src in _REGISTRY
+    }
 
 
 # PR #43 audit-2 (LOW — bugbot): the legacy `edgeguard.DEFAULT_SOURCES`

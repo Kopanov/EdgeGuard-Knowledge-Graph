@@ -48,6 +48,9 @@ when a ranked description names no source (``description_source``) or an Indicat
 ``aging_basis`` / ``source_confidence``. Since the same-report CVE links of 2026-10-18 it reports how many
 indicators are linked to a CVE named in the same OTX report (``Indicator -[:INDICATES]-> CVE``) and fails
 when such a link is not labelled ``otx_pulse`` or cites no OTX report (``alienvault_otx:<pulse id>``).
+Since 2026-10-25 it fails when a ``Source`` node is keyed by an alias of a registered source (``otx``,
+``cisa``, ``vt``, ...) instead of its canonical id (``src/source_registry.py``), and reports a ``Source``
+node whose id the registry does not know.
 
 Env (``src/neo4j_http_endpoint.py``):
   NEO4J_HTTP_URL   base URL, then NEO4J_HTTP; neither set: the local Compose Neo4j
@@ -134,7 +137,7 @@ from sector_evidence import (  # noqa: E402
     STATEMENT_LABELS,
     STATING_FEEDS,
 )
-from source_registry import SOURCE_REF_SEPARATOR  # noqa: E402
+from source_registry import SOURCE_REF_SEPARATOR, all_sources, get_source  # noqa: E402
 
 # Labels and relationship types EdgeGuard writes. Anything else on a shared
 # database belongs to ResilMesh and is reported, never failed on.
@@ -1139,6 +1142,37 @@ def run_checks(
         "no_legacy_relationship_properties",
         not [x for x in legacy if x["type"] in EDGEGUARD_REL_TYPES] and keyless == 0,
         {"legacy_keys_by_type": legacy, "source_nodes_without_source_id": keyless, "source_nodes": len(source_rows)},
+    )
+
+    # 12d. One ``Source`` node per registered source, keyed by its canonical id (2026-10-25). An alias
+    #      of a registered source (``otx``, ``cisa``, ``vt``, ...) is a lookup key, never a node: every
+    #      ``SOURCED_FROM`` writer resolves it to the canonical id. A ``Source`` node whose id the
+    #      registry does not know is not one ``ensure_sources`` creates; it is reported, never failed on.
+    #      The canonical ids and their variants are read from ``src/source_registry.py`` at run time
+    #      and listed in the report (``variants``), so a source added there is judged without a change
+    #      here.
+    canonical_ids = {s.canonical_id for s in all_sources()}
+    alias_nodes: List[Dict[str, Any]] = []
+    unregistered: List[Dict[str, Any]] = []
+    for x in source_rows:
+        sid = x.get("source_id")
+        if sid is None or sid in canonical_ids:
+            continue
+        src = get_source(sid)
+        row = {"source_id": sid, "sourced_from": x.get("sourced_from") or 0}
+        if src is not None:
+            alias_nodes.append({**row, "canonical_id": src.canonical_id})
+        else:
+            unregistered.append(row)
+    rep.add(
+        "source_nodes_canonical",
+        not alias_nodes,
+        {
+            "alias_source_nodes": alias_nodes,
+            "unregistered_source_nodes": unregistered,
+            "canonical_source_nodes": sum(1 for x in source_rows if x.get("source_id") in canonical_ids),
+            "variants": {s.canonical_id: list(s.aliases) for s in all_sources()},
+        },
     )
 
     # 13. Campaign membership (2026-10): Malware / Indicator -[:PART_OF_CAMPAIGN]-> Campaign.

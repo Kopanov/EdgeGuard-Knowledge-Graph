@@ -209,8 +209,9 @@ the provenance of the graph relationship it comes from:
   `x_edgeguard_match_type`, not properties of their own). Read `advisory_sector`
   as "deployed in", never as targeting, and `otx_industries` as "targeted",
   never as deployment;
-- `x_edgeguard_sources` — the sources that assert the link (`mitre_attck`,
-  `alienvault_otx`, `threatfox`, `coreideas`, …);
+- `x_edgeguard_sources` — the sources that assert the link, by their canonical
+  ids (`mitre_attck`, `alienvault_otx`, `threatfox`, `coreideas`, …; the list
+  with each source's variants is in KNOWLEDGE_GRAPH.md, "Source nodes");
 - `x_edgeguard_source_refs` — their record ids, `"<source>:<id>"` (at most 200);
 - `x_edgeguard_misp_event_ids` — the MISP events that carried the link;
 - `x_edgeguard_cited_ids` — only on a link to a technique that a source cited by an id ATT&CK has
@@ -567,6 +568,7 @@ _Last updated: 2026-10-21_
 
 ## History
 
+- 2026-10-25 — `x_edgeguard_sources` named as canonical source ids, with a pointer to the list of sources and their variants.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs the graph links to it as named in the same OTX report (`INDICATES`, `otx_pulse`; built per MISP event and OTX report, within the per-report caps).
 - 2026-10-18 — `otx_industries` (confidence 60) on a sector link the graph holds as `TARGETS`, where an OTX pulse's own industries state the sector.

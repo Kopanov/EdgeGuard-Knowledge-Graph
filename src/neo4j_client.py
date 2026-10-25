@@ -1206,26 +1206,30 @@ def resolve_vulnerability_cve_id(item: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-# Source definitions
-# PR (S5) (bugbot HIGH on c9bb277 — partial): the ``SOURCES`` dict
-# MUST contain a key for every tag the collectors actually emit, because
-# the SOURCED_FROM edge MERGE does ``MATCH (s:Source {source_id: $id})``
-# against whatever source_id parse_attribute resolved — and a missing
-# match produces zero edges silently. CISA is already covered by both
-# ``cisa`` and ``cisa_kev`` entries. Feodo + SSL previously only had
-# the LEGACY short names (``feodo`` / ``sslbl``) while the collectors
-# emit ``feodo_tracker`` / ``ssl_blacklist`` (config.SOURCE_TAGS +
-# finance_feed_collector); those two paths were silently dropping
-# edge writes. PR #41 added the canonical collector-tag entries.
-#
-# The unified registry refactor (chip 5a follow-up) MOVES this dict's
-# definition to ``src/source_registry.py`` so adding a new source is
-# a single declarative edit there. Three additional aliases (``otx``,
-# ``vt``, ``mitre``) are now ALSO covered — same gap the PR #41
-# round added ``feodo_tracker`` / ``ssl_blacklist`` for. The shape of
-# this dict is unchanged for every legacy 16-entry id (parity pinned
-# in tests/test_source_registry.py).
+# Source definitions, derived from ``src/source_registry.py``: one entry per registered source,
+# keyed by its canonical id. ``ensure_sources`` creates one ``Source`` node per entry. The
+# ``SOURCED_FROM`` writers (``_upsert_sourced_relationship``, ``merge_indicators_batch``,
+# ``merge_vulnerabilities_batch``, ``link_to_source``) MATCH the ``Source`` node and never create
+# it, so each resolves the id it is given with ``source_registry.canonical_source_id`` first: an
+# alias (``otx``, ``cisa``, ``feodo``, ``sslbl``, ...) writes to the canonical node, and an id the
+# registry does not know matches no node (the batch writers refuse it).
 SOURCES = source_registry.to_neo4j_sources_dict()
+
+
+def _canonical_source_list(names: Any) -> List[str]:
+    """A node's ``source`` list as the writers store it: each name resolved with
+    ``source_registry.canonical_source_id`` (a variant to its canonical id; a name the registry does
+    not know lowercased and stripped, as in ``r.sources``), blanks dropped, duplicates removed in
+    order. A single string counts as a one-item list. The REST ``source`` filter resolves its value
+    the same way, so ``otx`` finds the nodes whose list holds ``alienvault_otx``."""
+    if isinstance(names, str):
+        names = [names]
+    out: List[str] = []
+    for name in names or ():
+        sid = source_registry.canonical_source_id(name)
+        if sid and sid not in out:
+            out.append(sid)
+    return out
 
 
 # PR-N15 (2026-04-21 pre-baseline audit Fix #1): Neo4j error codes that
@@ -2417,7 +2421,7 @@ class Neo4jClient:
     @retry_with_backoff(max_retries=3)
     def ensure_sources(self) -> bool:
         """
-        Ensure all Source nodes exist.
+        Ensure one Source node per registered source, keyed by its canonical id (``SOURCES``).
 
         Returns:
             True if successful
@@ -2580,6 +2584,9 @@ class Neo4jClient:
         if not self.driver:
             logger.error("Cannot merge node: no connection")
             return False
+        # The canonical id, as in the batch writers: the node's ``source`` default, ``last_imported_from``
+        # and report source name the ``Source`` node its ``SOURCED_FROM`` edge reaches (``SOURCES`` above).
+        source_id = source_registry.canonical_source_id(source_id) or source_id
 
         # 2026-10-16: refused before the statement is built, so a caller that bypasses the ranking fails
         # loudly instead of being logged as a terminal write error.
@@ -2601,9 +2608,7 @@ class Neo4jClient:
             raw_data = {k: v for k, v in data.items() if k not in key_props}
 
             # Get source as array (like zone)
-            source_array = data.get("source", [source_id])
-            if isinstance(source_array, str):
-                source_array = [source_array]
+            source_array = _canonical_source_list(data.get("source", [source_id]))
 
             # Include original_source if present in the data
             original_source = data.get("original_source")
@@ -3185,6 +3190,8 @@ class Neo4jClient:
         for k in key_props:
             _validate_prop_name(k)
         key_conditions = " AND ".join([f"n.{k} = ${k}" for k in key_props.keys()])
+        # The Source node is keyed by the canonical id; an alias writes to it (``SOURCES`` above).
+        source_id = source_registry.canonical_source_id(source_id) or source_id
 
         # Endpoint uuids — same canonicalization as the actual node MERGEs, so
         # r.src_uuid/r.trg_uuid resolve back to (label, key_props) and (Source, source_id).
@@ -3851,7 +3858,9 @@ class Neo4jClient:
             # Prometheus alerting. None-guarded (PR-N5 R1 pattern).
             if _MERGE_REJECT_PLACEHOLDER is not None:
                 try:
-                    _MERGE_REJECT_PLACEHOLDER.labels(label="Malware", source=source_id).inc()
+                    _MERGE_REJECT_PLACEHOLDER.labels(
+                        label="Malware", source=source_registry.canonical_source_id(source_id) or source_id
+                    ).inc()
                 except Exception as _metric_err:
                     logger.debug("placeholder-reject metric increment failed: %s", _metric_err, exc_info=True)
             return False
@@ -3916,7 +3925,9 @@ class Neo4jClient:
             # PR-N18 (2026-04-22): same counter emission as merge_malware.
             if _MERGE_REJECT_PLACEHOLDER is not None:
                 try:
-                    _MERGE_REJECT_PLACEHOLDER.labels(label="ThreatActor", source=source_id).inc()
+                    _MERGE_REJECT_PLACEHOLDER.labels(
+                        label="ThreatActor", source=source_registry.canonical_source_id(source_id) or source_id
+                    ).inc()
                 except Exception as _metric_err:
                     logger.debug("placeholder-reject metric increment failed: %s", _metric_err, exc_info=True)
             return False
@@ -4120,6 +4131,8 @@ class Neo4jClient:
 
         success_count = 0
         error_count = 0
+        # The Source node is keyed by the canonical id; an alias writes to it (``SOURCES`` above).
+        source_id = source_registry.canonical_source_id(source_id) or source_id
 
         # PR (S5) (Red Team v3 H1 + H2): defensive pre-validation.
         # The inner Cypher does ``MATCH (s:Source {source_id: item.source_id})``
@@ -4134,7 +4147,7 @@ class Neo4jClient:
         # Defense: assert all items use the function-arg source_id and
         # that the source_id resolves to a real Source.
         for item in items:
-            if "source_id" in item and item["source_id"] != source_id:
+            if "source_id" in item and source_registry.canonical_source_id(item["source_id"]) != source_id:
                 logger.warning(
                     "merge_indicators_batch: item source_id=%r differs from "
                     "batch source_id=%r — overriding to batch value to keep "
@@ -4142,11 +4155,9 @@ class Neo4jClient:
                     item.get("source_id"),
                     source_id,
                 )
-                item["source_id"] = source_id
-            elif "source_id" not in item:
-                # Stamp the function-arg source_id so the inner Cypher's
-                # ``MATCH (s:Source {source_id: item.source_id})`` resolves.
-                item["source_id"] = source_id
+            # Stamp the batch's canonical id (an item's alias of the same source included) so the
+            # inner Cypher's ``MATCH (s:Source {source_id: item.source_id})`` resolves.
+            item["source_id"] = source_id
         if source_id not in SOURCES:
             logger.error(
                 "merge_indicators_batch refused: source_id=%r is not in SOURCES "
@@ -4178,9 +4189,7 @@ class Neo4jClient:
                     if isinstance(zone, str):
                         zone = [zone] if zone else ["global"]
                     # Extract source as array (like zone)
-                    source_list = item.get("source", [source_id])
-                    if isinstance(source_list, str):
-                        source_list = [source_list]
+                    source_list = _canonical_source_list(item.get("source", [source_id]))
                     tag = item.get("tag", "default")
 
                     # PR #37 (Logic Tracker Tier S): canonicalize the merge-key
@@ -4492,22 +4501,22 @@ class Neo4jClient:
 
         success_count = 0
         error_count = 0
+        # The Source node is keyed by the canonical id; an alias writes to it (``SOURCES`` above).
+        source_id = source_registry.canonical_source_id(source_id) or source_id
 
         # PR (S5) (Red Team v3 H1+H2): same defensive
         # pre-validation as merge_indicators_batch — see that function
         # for the rationale (silent-orphan + trg_uuid mismatch
         # protection).
         for item in items:
-            if "source_id" in item and item["source_id"] != source_id:
+            if "source_id" in item and source_registry.canonical_source_id(item["source_id"]) != source_id:
                 logger.warning(
                     "merge_vulnerabilities_batch: item source_id=%r differs from "
                     "batch source_id=%r — overriding to batch value",
                     item.get("source_id"),
                     source_id,
                 )
-                item["source_id"] = source_id
-            elif "source_id" not in item:
-                item["source_id"] = source_id
+            item["source_id"] = source_id
         if source_id not in SOURCES:
             logger.error(
                 "merge_vulnerabilities_batch refused: source_id=%r is not in "
@@ -4545,9 +4554,7 @@ class Neo4jClient:
                     if isinstance(zone, str):
                         zone = [zone] if zone else ["global"]
                     # Extract source as array (like zone)
-                    source_list = item.get("source", [source_id])
-                    if isinstance(source_list, str):
-                        source_list = [source_list]
+                    source_list = _canonical_source_list(item.get("source", [source_id]))
 
                     # Per-row Vulnerability uuid; same logic as Indicator batch.
                     node_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
@@ -4811,6 +4818,8 @@ class Neo4jClient:
         for k in node_key:
             _validate_prop_name(k)
         key_conditions = " AND ".join([f"n.{k} = ${k}" for k in node_key.keys()])
+        # The Source node is keyed by the canonical id; an alias writes to it (``SOURCES`` above).
+        source_id = source_registry.canonical_source_id(source_id) or source_id
 
         query = f"""
         MATCH (n:{node_label})

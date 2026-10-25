@@ -18,9 +18,10 @@ The ranking, highest first:
 
 The ranking is total, so no two sources tie: inside a group of several sources (the curated sources,
 every other source) the source with the higher registry ``reliability`` ranks higher, then the one whose
-id sorts first. A source the registry does not know (``stix_import``, ``resilmesh``, the source name an
-external STIX bundle gives) ranks below every registered one; two such sources are ordered by id, the
-one that sorts first ranking higher.
+id sorts first. A source the registry does not know (``resilmesh``, the source name an external STIX
+bundle gives), or one it registers with ``ranked_for_descriptions=False`` (``stix_import``, registered
+2026-10-25 for its ``Source`` node only), ranks below every ranked one; two such sources are ordered by
+id, the one that sorts first ranking higher.
 
 A record sets the description when its source ranks at least as high as the source of the stored text:
 the same source's revised record replaces its own text, a lower-ranked source never replaces a
@@ -73,9 +74,10 @@ class RankedDescription:
 class DescriptionRanking:
     """A fixed, total ranking of the sources of one kind of node's description.
 
-    ``groups`` are the named groups of sources, highest first; every other registered source follows
-    them. ``ranks`` gives every registered source a distinct rank, highest first from the number of
-    registered sources down to 1; an unregistered source ranks 0.
+    ``groups`` are the named groups of sources, highest first; every other ranked registered source
+    follows them. ``ranks`` gives every registered source with ``ranked_for_descriptions`` a distinct
+    rank, highest first from the number of such sources down to 1; an unregistered source, or one
+    registered with ``ranked_for_descriptions=False``, ranks 0.
     """
 
     name: str
@@ -85,7 +87,8 @@ class DescriptionRanking:
 
     def __post_init__(self) -> None:
         group_of = {sid: i for i, group in enumerate(self.groups) for sid in group}
-        registered = list(all_sources())
+        # A source registered with ``ranked_for_descriptions=False`` ranks 0, as an unregistered one.
+        registered = [src for src in all_sources() if src.ranked_for_descriptions]
         unknown = set(group_of) - {src.canonical_id for src in registered}
         if unknown:
             raise ValueError(f"description ranking {self.name!r}: unregistered sources {sorted(unknown)}")

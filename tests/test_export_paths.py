@@ -710,6 +710,28 @@ class TestDigestTypeFilter:
         assert params["indicator_type"] == "hash" and "indicator_value_pattern" not in params
         assert "=~" not in query
 
+    @pytest.mark.parametrize(
+        "requested,matched",
+        [
+            ("alienvault_otx", "alienvault_otx"),
+            ("otx", "alienvault_otx"),
+            ("OTX", "alienvault_otx"),
+            ("sslbl", "ssl_blacklist"),
+            ("cisa", "cisa_kev"),
+            ("partner_feed", "partner_feed"),
+        ],
+    )
+    def test_rest_indicators_source_filter_resolves_a_variant(self, monkeypatch, requested, matched):
+        """2026-10-25: a node's ``source`` list holds canonical ids, so ``?source=`` resolves a variant
+        the way the writers do; a name the registry does not know is compared as given."""
+        session = _Session([("RETURN count(n) as total", _Result(single={"total": 0}))])
+        client = _rest(monkeypatch, session)
+        assert client.get(f"/indicators?source={requested}").status_code == 200
+        assert session.calls
+        for query, params in session.calls:
+            assert "$source IN n.source" in query
+            assert params["source"] == matched
+
     def test_wazuh_export(self, monkeypatch):
         session = _Session()
         resp = _rest(monkeypatch, session).get("/export/wazuh/cdb?list=indicators&indicator_type=md5")
