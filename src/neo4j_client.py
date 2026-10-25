@@ -1216,6 +1216,22 @@ def resolve_vulnerability_cve_id(item: Dict[str, Any]) -> Optional[str]:
 SOURCES = source_registry.to_neo4j_sources_dict()
 
 
+def _canonical_source_list(names: Any) -> List[str]:
+    """A node's ``source`` list as the writers store it: each name resolved with
+    ``source_registry.canonical_source_id`` (a variant to its canonical id; a name the registry does
+    not know lowercased and stripped, as in ``r.sources``), blanks dropped, duplicates removed in
+    order. A single string counts as a one-item list. The REST ``source`` filter resolves its value
+    the same way, so ``otx`` finds the nodes whose list holds ``alienvault_otx``."""
+    if isinstance(names, str):
+        names = [names]
+    out: List[str] = []
+    for name in names or ():
+        sid = source_registry.canonical_source_id(name)
+        if sid and sid not in out:
+            out.append(sid)
+    return out
+
+
 # PR-N15 (2026-04-21 pre-baseline audit Fix #1): Neo4j error codes that
 # the server reports as TransientError OR as DatabaseError-wrapped
 # transient conditions. The driver classifies most `Neo.TransientError.*`
@@ -2592,9 +2608,7 @@ class Neo4jClient:
             raw_data = {k: v for k, v in data.items() if k not in key_props}
 
             # Get source as array (like zone)
-            source_array = data.get("source", [source_id])
-            if isinstance(source_array, str):
-                source_array = [source_array]
+            source_array = _canonical_source_list(data.get("source", [source_id]))
 
             # Include original_source if present in the data
             original_source = data.get("original_source")
@@ -4171,9 +4185,7 @@ class Neo4jClient:
                     if isinstance(zone, str):
                         zone = [zone] if zone else ["global"]
                     # Extract source as array (like zone)
-                    source_list = item.get("source", [source_id])
-                    if isinstance(source_list, str):
-                        source_list = [source_list]
+                    source_list = _canonical_source_list(item.get("source", [source_id]))
                     tag = item.get("tag", "default")
 
                     # PR #37 (Logic Tracker Tier S): canonicalize the merge-key
@@ -4538,9 +4550,7 @@ class Neo4jClient:
                     if isinstance(zone, str):
                         zone = [zone] if zone else ["global"]
                     # Extract source as array (like zone)
-                    source_list = item.get("source", [source_id])
-                    if isinstance(source_list, str):
-                        source_list = [source_list]
+                    source_list = _canonical_source_list(item.get("source", [source_id]))
 
                     # Per-row Vulnerability uuid; same logic as Indicator batch.
                     node_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})

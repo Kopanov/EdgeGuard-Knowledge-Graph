@@ -89,6 +89,8 @@ No STIX bundle is materialized on this path: each MISP attribute is parsed into 
 MISP → convert_to_stix21() / PyMISP to_stix2 → load_stix21_to_neo4j() → Neo4j
 ```
 
+Each object names its source in `x_edgeguard_source`: the canonical id the MISP event's name gives (`EdgeGuard-<source>-<date>`), or `misp`, with a warning, when the name gives no registered source. The loader resolves a variant to its canonical id and attributes an object without `x_edgeguard_source` (an external bundle) to `stix_import`, a registered source, so every imported record reaches a `Source` node ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Source nodes").
+
 The MISP → STIX conversion of this path lives in **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** — those helpers are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow. STIX leaves EdgeGuard only through the graph exporter, **`GET /stix/export/{object_type}/{identifier}`** (`src/stix_exporter.py`, [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
 
 **After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging — one rule for every Indicator, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later, so a re-run of an older run never moves a node's aging back ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*) —, campaigns, FIRST EPSS). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
@@ -517,6 +519,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — The STIX flow states how each loaded object's source is named: `x_edgeguard_source`, resolved to the canonical id, or `stix_import` for an object without it. An event name that gives no registered source is attributed to `misp` (until then to `"unknown"`, which reached no `Source` node).
 - 2026-10-25 — The MISP → Neo4j box states the event fetch: whole up to `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20,000) attributes, larger events as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 (the box said the full event JSON is loaded).
 - 2026-10-23 — Key Files lists `src/tls_verify.py`, the one rule for `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY`.
 - 2026-10-23 — Key Files takes the module notes of the README's project tree, corrected: `run_pipeline.py` always takes the STIX flow, no step runs `MISPCollector`, `query_api.py` also serves the STIX and Wazuh exports and the explorer data; the GraphQL API runs on ISIM's port with its own schema (the page said it is queried exactly as ISIM); the README pointers name CONFIGURATION.md, TECHNICAL_SPEC.md, SETUP_GUIDE.md and docs/README.md; Key Files lists `abuseipdb_collector.py` and keeps one short clause per file.

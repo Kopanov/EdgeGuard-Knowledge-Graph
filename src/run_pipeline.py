@@ -38,6 +38,7 @@ from config import baseline_collection_limit_from_env, get_effective_limit
 from neo4j_client import Neo4jClient
 from relationship_provenance import node_feeds, prov_set, prov_with
 from sector_evidence import stated_zones as sector_stated_zones
+from source_registry import get_source
 
 
 # PR #35 commit 2: surface CLI-path collector failures to Prometheus + Slack
@@ -150,6 +151,19 @@ STIX_RELATIONSHIP_MATCH_TYPE = "stix_relationship"
 
 def _stix_object_source(obj: dict) -> str:
     return str(obj.get("x_edgeguard_source") or STIX_IMPORT_SOURCE_ID)
+
+
+def _misp_event_source(event_info: str) -> str:
+    """The source of an EdgeGuard MISP event, from its name (``EdgeGuard-<source>-<date>``), as its
+    canonical id (2026-10-25). A name that gives no registered source falls back to ``misp``, the
+    registered source of MISP's own data, with a warning: never ``"unknown"``, which no ``Source``
+    node carries, so every object of the STIX flow reaches a ``Source`` node."""
+    parts = str(event_info or "").split("-", 2)
+    src = get_source(parts[1]) if len(parts) >= 2 else None
+    if src is None:
+        logger.warning("Could not take a registered source from event info %r; attributing it to 'misp'", event_info)
+        return "misp"
+    return src.canonical_id
 
 
 class EdgeGuardPipeline:
@@ -722,17 +736,8 @@ class EdgeGuardPipeline:
                     continue
                 logger.debug(f"   Converting event {event_id} to STIX 2.1")
 
-                # Extract source from event info (format: EdgeGuard-{source}-{date})
-                source_from_event = "unknown"
-                try:
-                    parts = event_info.split("-", 2)
-                    if len(parts) >= 2:
-                        source_from_event = parts[1]  # e.g., "alienvault_otx"
-                except Exception as e:
-                    # PR #33 round 13: upgraded debug → warning so the
-                    # operator sees STIX export source-extraction failures
-                    # in production logs (debug is invisible by default).
-                    logger.warning(f"Could not extract source from event info '{event_info}': {e}")
+                # The event's source from its name (EdgeGuard-{source}-{date}), as a canonical id.
+                source_from_event = _misp_event_source(event_info)
 
                 try:
                     # Fetch full event details

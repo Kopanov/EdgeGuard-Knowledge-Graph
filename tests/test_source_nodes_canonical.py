@@ -252,6 +252,102 @@ class TestStixImport:
         assert "stix_import" in nc.SOURCES, "ensure_sources creates the node the edges MATCH"
 
 
+class TestNodeSourceListsAreCanonical:
+    """2026-10-25: a node's ``source`` list names canonical ids, whichever writer stores it and
+    whatever name its record gives, so REST, GraphQL and the STIX export (``x_edgeguard_sources``)
+    show the names of the ``Source`` nodes the node's ``SOURCED_FROM`` edges reach."""
+
+    def test_the_resolution_rule(self):
+        assert nc._canonical_source_list(["otx", "alienvault_otx", " OTX ", None, ""]) == ["alienvault_otx"]
+        assert nc._canonical_source_list("sslbl") == ["ssl_blacklist"]
+        assert nc._canonical_source_list(["cisa", "nvd"]) == ["cisa_kev", "nvd"]
+        # As in ``r.sources``: a name the registry does not know is kept, lowercased and stripped.
+        assert nc._canonical_source_list([" Partner Feed "]) == ["partner feed"]
+
+    def test_single_item_write_with_an_explicit_source_list(self):
+        client = _client()
+        assert client.merge_indicator(
+            {"indicator_type": "ipv4", "value": "203.0.113.31", "zone": ["global"], "source": ["otx", "OTX"]},
+            source_id="otx",
+        )
+        ((_, params),) = [r for r in client.driver.runs if "MERGE (n:Indicator" in r[0]]
+        assert params["source_array"] == ["alienvault_otx"]
+
+    def test_indicator_batch_with_an_explicit_source_list(self):
+        client = _client()
+        items = [{"indicator_type": "ipv4", "value": "203.0.113.32", "zone": ["global"], "source": ["sslbl"]}]
+        assert client.merge_indicators_batch(items, source_id="ssl_blacklist") == (1, 0)
+        ((_, params),) = [r for r in client.driver.runs if "UNWIND $batch as item" in r[0]]
+        assert [row["source_array"] for row in params["batch"]] == [["ssl_blacklist"]]
+
+    def test_vulnerability_batch_with_an_explicit_source_list(self):
+        client = _client()
+        items = [{"type": "vulnerability", "cve_id": "CVE-2026-1001", "zone": ["global"], "source": "cisa"}]
+        assert client.merge_vulnerabilities_batch(items, source_id="cisa_kev") == (1, 0)
+        ((_, params),) = [r for r in client.driver.runs if "UNWIND $batch as item" in r[0]]
+        assert [row["source_array"] for row in params["batch"]] == [["cisa_kev"]]
+
+    def test_a_stix_bundle_that_names_a_variant(self):
+        """End to end: an object whose ``x_edgeguard_source`` is a variant reaches the canonical
+        ``Source`` node and names it in its ``source`` list."""
+        from run_pipeline import EdgeGuardPipeline
+
+        pipeline = EdgeGuardPipeline()
+        pipeline.neo4j = _client()
+        bundle = {
+            "type": "bundle",
+            "objects": [
+                {
+                    "type": "indicator",
+                    "id": "indicator--2",
+                    "pattern": "[ipv4-addr:value = '203.0.113.33']",
+                    "x_edgeguard_source": "otx",
+                }
+            ],
+        }
+        pipeline.load_stix21_to_neo4j(bundle)
+        runs = pipeline.neo4j.driver.runs
+        ((_, node),) = [r for r in runs if "MERGE (n:Indicator" in r[0]]
+        ((_, edge),) = [r for r in runs if "MERGE (n)-[r:SOURCED_FROM]->(s)" in r[0]]
+        assert node["source_array"] == ["alienvault_otx"]
+        assert (edge["source_id"], edge["trg_uuid"]) == ("alienvault_otx", _source_uuid("alienvault_otx"))
+
+
+class TestStixFlowEventSource:
+    """2026-10-25: the STIX flow names each object's source from its MISP event's name, as a canonical
+    id; a name that gives no registered source is attributed to ``misp`` (it was ``"unknown"``, which no
+    ``Source`` node carries)."""
+
+    @pytest.mark.parametrize(
+        "event_info,expected",
+        [
+            ("EdgeGuard-alienvault_otx-2026-10-22", "alienvault_otx"),
+            ("EdgeGuard-otx-2026-10-22", "alienvault_otx"),
+            ("EdgeGuard-nvd-2026-10-22-part2", "nvd"),
+            ("EdgeGuard-cisa_ics-2026-10-20", "cisa_ics"),
+            ("EdgeGuard-coreideas-2026-10-22", "coreideas"),
+        ],
+    )
+    def test_a_registered_source_in_the_event_name(self, event_info, expected):
+        from run_pipeline import _misp_event_source
+
+        assert _misp_event_source(event_info) == expected
+
+    @pytest.mark.parametrize("event_info", ["A partner's report", "", None, "EdgeGuard-notasource-2026-10-22"])
+    def test_no_registered_source_falls_back_to_misp(self, event_info, caplog):
+        from run_pipeline import _misp_event_source
+
+        with caplog.at_level("WARNING"):
+            assert _misp_event_source(event_info) == "misp"
+        assert "attributing it to 'misp'" in caplog.text
+        assert "misp" in nc.SOURCES
+
+    def test_the_flow_uses_the_helper_and_never_unknown(self):
+        text = (_SRC / "run_pipeline.py").read_text()
+        assert "source_from_event = _misp_event_source(event_info)" in text
+        assert 'source_from_event = "unknown"' not in text
+
+
 def test_no_writer_creates_a_source_node():
     """Only ``ensure_sources`` creates ``Source`` nodes; every other statement MATCHes them, so an id
     the registry does not know can never become a node."""

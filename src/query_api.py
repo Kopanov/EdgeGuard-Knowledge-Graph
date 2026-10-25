@@ -41,6 +41,7 @@ from ioc_normalize import (
 )
 from neo4j_client import Neo4jClient
 from package_meta import deployed_git_sha, package_version
+from source_registry import canonical_source_id
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -953,8 +954,10 @@ def _indicator_filter_conditions(
         conditions.append("$zone IN n.zone")
         params["zone"] = zone
     if source:
+        # A source id or one of its variants (``otx``), resolved as the writers resolve the names of a
+        # node's ``source`` list (``source_registry.canonical_source_id``), so a variant finds its nodes.
         conditions.append("$source IN n.source")
-        params["source"] = source
+        params["source"] = canonical_source_id(source) or source
     conditions.append("(n.edgeguard_managed = true OR n.edgeguard_enriched = true)")
     return conditions, params
 
@@ -985,7 +988,11 @@ async def list_indicators(
     request: Request,
     indicator_type: Optional[IndicatorTypeEnum] = Query(None, description="Filter by type"),
     zone: Optional[ZoneEnum] = Query(None, description="Filter by zone"),
-    source: Optional[str] = Query(None, max_length=100, description="Filter by source"),
+    source: Optional[str] = Query(
+        None,
+        max_length=100,
+        description="Filter by source: its canonical id (alienvault_otx) or a variant (otx), any case",
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0, le=100_000),
 ):
