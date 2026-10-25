@@ -15,13 +15,16 @@ Pinned here:
   sub-dict and ``Tag``) around real NVD attributes of the hosted MISP
   (``tests/test_cvss_real_payloads.json``, event 138).
 * Only top-level attributes are kept (as ``/events/view`` lists them under ``Attribute``), and the
-  ``Event`` copy restSearch adds to each attribute is dropped.
+  ``Event`` copy restSearch adds to each attribute is dropped. The objects of the object rows are
+  listed under ``Object`` by id, so an event holding its attributes only in objects is warned about
+  on both fetch paths.
 * Paging sends ``order: Attribute.id`` and stops only on an empty page or a page with nothing new
   (MISP ignored ``page``). MISP removes rows after applying the limit (Allowedlist entries, the
   account's default search filters), so a short page in the middle does not end the listing.
 * Fewer rows (top-level and object rows) than the index ``attribute_count`` log a
   ``[PAGED-FETCH-INCOMPLETE]`` warning naming the event and both counts and are counted in the run
-  summary; the run does not fail for it.
+  summary once per event, also when the retry pass fetches the event again; the run does not fail
+  for it.
 * ``run()`` hands each event's index ``attribute_count`` to the fetch: an event over
   ``EDGEGUARD_MISP_PAGED_FETCH_ABOVE`` (default 20000, ``0`` = off) goes to the paged fetch with its
   count on the first pass, among the deferred large events and in the retry pass; a whole-event
@@ -357,6 +360,37 @@ def test_paged_event_keeps_top_level_attributes_without_the_event_copy():
     assert fake.calls[0] == ("/events/restSearch", {"eventid": EVENT_ID, "metadata": True, "returnFormat": "json"})
 
 
+def test_paged_event_lists_the_objects_of_its_object_rows():
+    """``/events/restSearch`` metadata has no ``Object``; the object rows of the pages name them."""
+    event = _paged_syncer(_FakeMisp(_search_rows())).fetch_event_details_paged(EVENT_ID, len(_NVD_138) + 1)
+    view_event = misp_event_object_to_event_dict(_view_body())
+    assert [o["id"] for o in event["Object"]] == [o["id"] for o in view_event["Object"]] == [_OBJECT_ID]
+
+
+def test_paged_event_without_object_rows_lists_no_object():
+    event = _paged_syncer(_FakeMisp(_synthetic_rows(3)), page_size=2).fetch_event_details_paged(EVENT_ID, 3)
+    assert not event.get("Object")
+
+
+@pytest.mark.parametrize("attribute_count, paged", [(1, False), (30000, True)])
+def test_an_event_holding_only_object_attributes_is_warned_on_both_fetch_paths(
+    monkeypatch, caplog, attribute_count, paged
+):
+    """The same event, fetched whole (``/events/view``) or in pages, logs the same MISP Object warning."""
+    monkeypatch.delenv("EDGEGUARD_MISP_PAGED_FETCH_ABOVE", raising=False)
+    fake = _FakeMisp([_search_rows()[-1]])
+    syncer = _paged_syncer(fake)
+    view = _view_body()
+    view["Event"]["Attribute"] = []
+    syncer.fetch_event_details = lambda event_id: misp_event_object_to_event_dict(copy.deepcopy(view))
+    with caplog.at_level(logging.WARNING, logger=SYNC_LOGGER):
+        assert syncer._process_single_event(EVENT_ID, EVENT_FIELDS["info"], attribute_count) == (0, 0, 0)
+    assert bool(fake.calls) is paged
+    warnings = [r.getMessage() for r in caplog.records if "but no top-level Attribute list" in r.getMessage()]
+    assert len(warnings) == 1 and warnings[0].startswith(f"Event {EVENT_ID} has 1 MISP Object(s)"), warnings
+    assert syncer.stats["events_processed"] == 1 and syncer.stats["events_failed"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Paging: order, stop condition, completeness
 # ---------------------------------------------------------------------------
@@ -401,7 +435,8 @@ def test_paged_fetch_returns_none_when_misp_lists_no_event():
 
 
 def _incomplete_records(caplog):
-    return [r for r in caplog.records if "[PAGED-FETCH-INCOMPLETE]" in r.getMessage()]
+    """The per-event warnings (the run summary line names the tag too, but does not start with it)."""
+    return [r for r in caplog.records if r.getMessage().startswith("[PAGED-FETCH-INCOMPLETE]")]
 
 
 def test_fewer_rows_than_the_index_count_are_warned_and_counted(caplog):
@@ -526,6 +561,36 @@ def test_an_incomplete_paged_event_is_summarised_without_failing_the_run(monkeyp
     assert sync.stats["events_processed"] == 1 and sync.stats["events_failed"] == 0
     assert run_env["success"] == 1 and run_env["failure"] == []
     assert "1 attribute rows" in _incomplete_records(caplog)[0].getMessage()
+    summary = [r.getMessage() for r in caplog.records if "fewer attributes than the MISP index lists" in r.getMessage()]
+    assert summary and summary[0].startswith(
+        "Events fetched in pages with fewer attributes than the MISP index lists: 1"
+    )
+
+
+@pytest.mark.parametrize("attribute_count", ["30000", "145261"])
+def test_an_incomplete_event_fetched_again_on_retry_is_counted_once(monkeypatch, run_env, caplog, attribute_count):
+    """The Neo4j write fails after the fetch; the retry pass fetches the event again (first pass and deferred)."""
+    sync = _run_sync(monkeypatch, [{"id": EVENT_ID, "info": EVENT_FIELDS["info"], "attribute_count": attribute_count}])
+    fake = _FakeMisp(_search_rows())
+    monkeypatch.setattr(sync, "_misp_post_json", fake)
+    writes: list = []
+
+    def sync_to_neo4j(items):
+        writes.append(len(items))
+        if len(writes) == 1:
+            raise RuntimeError("Neo4j write rejected")
+        return len(items), 0, 0
+
+    monkeypatch.setattr(sync, "sync_to_neo4j", sync_to_neo4j)
+    monkeypatch.setattr(sync, "_create_relationships", lambda *_a, **_k: 0)
+    monkeypatch.setattr(sync, "_write_cross_item_relationships", lambda *_a, **_k: 0)
+    with caplog.at_level(logging.WARNING, logger=SYNC_LOGGER):
+        assert sync.run(incremental=False) is True
+    assert writes == [len(_NVD_138), len(_NVD_138)]
+    assert [path for path, _body in fake.calls].count("/events/restSearch") == 2
+    assert len(_incomplete_records(caplog)) == 2  # one warning per fetch
+    assert sync.stats["events_paged_incomplete"] == 1
+    assert sync.stats["events_processed"] == 1 and sync.stats["events_failed"] == 0
     summary = [r.getMessage() for r in caplog.records if "fewer attributes than the MISP index lists" in r.getMessage()]
     assert summary and summary[0].startswith(
         "Events fetched in pages with fewer attributes than the MISP index lists: 1"

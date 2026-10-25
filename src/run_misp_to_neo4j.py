@@ -2006,7 +2006,8 @@ class MISPToNeo4jSync:
             # MISP's Import Regexp rules rewrote), skipped with an [ATTACK-VALUE] warning.
             "attack_values_skipped": 0,
             # 2026-10: events fetched in pages that arrived with fewer attribute rows than the MISP
-            # index lists ([PAGED-FETCH-INCOMPLETE]); reported in the run summary, not an error.
+            # index lists ([PAGED-FETCH-INCOMPLETE]), each event once per run however often it is
+            # fetched (``_paged_incomplete_ids``); reported in the run summary, not an error.
             "events_paged_incomplete": 0,
             "errors": 0,
             "start_time": None,
@@ -2664,6 +2665,9 @@ class MISPToNeo4jSync:
         from ``/attributes/restSearch`` in pages of ``_ATTR_PAGE_SIZE``, ordered by attribute id so
         that offset paging has a defined order. Only top-level attributes are kept (``object_id``
         0), which is what ``/events/view`` lists under ``Attribute``; the sync reads only those.
+        The metadata has no ``Object`` list, so the objects of the object rows are listed under
+        ``Object`` by id, and the MISP Object diagnostic of ``_process_single_event`` covers both
+        fetch paths.
 
         Paging stops on an empty page or on a page with no attribute not seen before (MISP ignored
         ``page``). A short page does not end it: MISP removes rows from a page after applying the
@@ -2671,7 +2675,8 @@ class MISPToNeo4jSync:
         follow. ``attribute_count`` is the event's count in the MISP index, top-level and object
         attributes together; when fewer distinct rows arrive, a ``[PAGED-FETCH-INCOMPLETE]``
         warning names the event and both counts and ``stats["events_paged_incomplete"]`` counts the
-        event for the run summary. The rows received are synced and the run does not fail for it.
+        event once per run for the run summary (the deferred and retry passes fetch an event again).
+        The rows received are synced and the run does not fail for it.
         Returns None when MISP lists no such event.
         """
         body = self._misp_post_json(
@@ -2683,6 +2688,7 @@ class MISPToNeo4jSync:
             logger.error("Event %s: /events/restSearch metadata returned no event", event_id)
             return None
         attributes: List[Dict] = []
+        object_ids: Dict[str, None] = {}  # distinct, in attribute id order
         seen: set = set()
         page = 1
         while True:
@@ -2701,14 +2707,19 @@ class MISPToNeo4jSync:
             new = [a for a in page_rows if a.get("uuid") not in seen]
             for attr in new:
                 seen.add(attr.get("uuid"))
-                if str(attr.get("object_id") or "0") == "0":
+                object_id = str(attr.get("object_id") or "0")
+                if object_id == "0":
                     attr.pop("Event", None)  # restSearch adds the parent event; /events/view does not
                     attributes.append(attr)
+                else:
+                    object_ids.setdefault(object_id, None)
             # An empty page ends the listing; a page with nothing new means MISP ignored ``page``.
             if not page_rows or not new:
                 break
             page += 1
         event["Attribute"] = attributes
+        if object_ids:
+            event["Object"] = [{"id": oid} for oid in object_ids]
         received = len(seen)
         logger.info(
             "Event %s: fetched %s top-level attributes (%s rows with object attributes) in %s request(s) of %s",
@@ -2730,7 +2741,9 @@ class MISPToNeo4jSync:
                 attribute_count,
             )
             stats = getattr(self, "stats", None)
-            if isinstance(stats, dict):
+            counted: set = self.__dict__.setdefault("_paged_incomplete_ids", set())
+            if isinstance(stats, dict) and str(event_id) not in counted:
+                counted.add(str(event_id))
                 stats["events_paged_incomplete"] = int(stats.get("events_paged_incomplete", 0) or 0) + 1
         return event
 
@@ -5744,7 +5757,8 @@ class MISPToNeo4jSync:
         attributes = coerce_misp_attribute_list(full_event.get("Attribute"))
         attr_count = len(attributes)
 
-        # Log MISP Object diagnostic (applies to both normal and paged paths)
+        # MISP Object diagnostic for both fetch paths: ``/events/view`` lists the objects, and
+        # ``fetch_event_details_paged`` lists the objects of its object rows by id.
         obj_count = len(full_event.get("Object") or [])
         if obj_count and not attributes:
             logger.warning(
@@ -6069,6 +6083,8 @@ class MISPToNeo4jSync:
         logger.info("=" * 60)
 
         self._last_sync_failure_reason = None
+        # Events already counted in ``events_paged_incomplete`` this run (``fetch_event_details_paged``).
+        self._paged_incomplete_ids: set = set()
         self.stats["start_time"] = datetime.now(timezone.utc).isoformat()
 
         # Determine sync window
