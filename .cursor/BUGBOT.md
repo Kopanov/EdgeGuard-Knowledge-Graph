@@ -166,7 +166,7 @@ Flag any source that reuses another source's canonical id / `source_id` (e.g., a
 ## 3. MISP DATA QUALITY — Blocking
 
 ### Required MISP metadata
-The day event `EdgeGuard-{source}-{date}` carries the single event tag `EdgeGuard`; sources and zones are not event tags. Every attribute EdgeGuard writes carries:
+The day event `EdgeGuard-{source}-{date}` and its parts (`-part<N>`) carry the single event tag `EdgeGuard`; sources and zones are not event tags. Every attribute EdgeGuard writes carries:
 - **Source tag**: `MISPWriter.SOURCE_TAGS` (derived from `source_registry`, e.g. `source:AlienVault-OTX`), or `source:<name>` for a source the registry does not know
 - **Zone tags**: `zone:<Zone>` for each of the item's specific zones, `zone:Global` when it has only global or none (`_get_zones_to_tag`)
 - **TLP tag**: `tlp:<level>` (`_tlp_tag`: the item's or the OTX pulse's level, else `EDGEGUARD_DEFAULT_TLP`, default `white`)
@@ -185,9 +185,13 @@ Before updating an existing MISP event or attribute:
 Flag any merge/update path that does not validate the incoming value before overwriting.
 
 ### Duplicate event creation
-Events are created only through `MISPWriter._get_or_create_event(source, date)`: one event `EdgeGuard-{source}-{date}` per source and UTC day of the push (zones live on attribute `zone:` tags). It finds the day's event through `_restsearch_events_for_name`: `/events/restSearch` with `eventinfo` (an exact match from MISP 2.4.177 on) and `metadata: true`, paged until a row matches or a page comes back short, at most `EVENT_LOOKUP_MAX_PAGES` pages, then the exact `Event.info` match. It creates an event only inside `_cross_process_event_creation_lock` after a second lookup, never after a failed or capped lookup (`MispLookupError`), and `push_items` looks up an event only for a (source, date) group with at least one attribute left to write.
+Events are created only through `MISPWriter._get_or_create_event(source, date, part)`: `EdgeGuard-{source}-{date}` per source and UTC day of the push, continued in `EdgeGuard-{source}-{date}-part<N>` (N >= 2, `_event_name`) by the event split below (zones live on attribute `zone:` tags). It finds the day's event through `_restsearch_events_for_name`: `/events/restSearch` with `eventinfo` (an exact match from MISP 2.4.177 on) and `metadata: true`, paged until a row matches or a page comes back short, at most `EVENT_LOOKUP_MAX_PAGES` pages, then the exact `Event.info` match. It creates an event only inside `_cross_process_event_creation_lock` after a second lookup, never after a failed or capped lookup (`MispLookupError`), and `push_items` looks up an event only for a (source, date) group with at least one attribute left to write.
 Flag a collector that creates events directly, a lookup that filters by anything other than `eventinfo` (`info` is not a restSearch parameter: MISP answers with the first events of the store, the lookup misses the day's event and a duplicate same-day event is created), asks for full events or reads one page only, and an event created after a lookup error — duplicates inflate MISP with redundant events and corrupt provenance tracking.
 In `fetch_edgeguard_events`, flag an event listing not de-duplicated by event id, paging that continues after a page that brings no new event, and a listing reported complete after a failed page, a cut at the page cap or a page-1 payload that is not a listing: the run must fail, so the sync cursor is not stamped past events never listed.
+
+### Event split
+`push_items` continues a (source, date) group in parts of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (`_event_split_above`). It looks later parts up only with `_find_later_parts` / `_find_event_id` (exact `Event.info`, never creating), sends a push to the first part with room, creates a new part (`_PendingPart`) only right before its first batch, and after a failed part lookup or creation creates no later part of that group and counts the attributes as failed (`_note_unstored`).
+Flag a part created outside `_get_or_create_event`, a part lookup that creates, a new part opened while an existing part of the day still has room in the allotment (`_allot_to_parts`) or with no attributes to write, and a split of a group with an attribute that names a source report (`_attribute_report_ids`; the sync links report items only within one event).
 
 ### `imported_at` / `first_seen` overwritten on re-import
 Original import timestamps (`imported_at`, `first_seen`) must be set with `ON CREATE SET` semantics — written once and never updated.
@@ -344,7 +348,7 @@ Flag any **`CAN_USE`** relationship or fuzzy name/description matching between M
 
 ### Zone lists come from `VALID_ZONES`
 
-Event names carry no zone (`EdgeGuard-{source}-{date}`): `_extract_zone_from_event_name()` in `run_misp_to_neo4j.py` always returns None, and zones come from `zone:` tags (`extract_zones_from_tags`, checked against `config.VALID_ZONES`).
+Event names carry no zone (`EdgeGuard-{source}-{date}`, `-part<N>` from the second part): `_extract_zone_from_event_name()` in `run_misp_to_neo4j.py` always returns None, and zones come from `zone:` tags (`extract_zones_from_tags`, checked against `config.VALID_ZONES`).
 
 Flag any new hard-coded zone list instead of an import of `VALID_ZONES`.
 
@@ -1052,6 +1056,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Duplicate event creation allows the `-part<N>` events of a source and day (`_get_or_create_event(source, date, part)`); new rule Event split: lookups of later parts never create, a part is created only right before its first batch and once the existing parts are allotted to the limit, no part after a failed lookup or creation, and a group with source-report ids is never split.
 - 2026-10-25 — The optional-key rule names URLhaus and MalwareBazaar, which need the abuse.ch key (`missing_abusech_key`).
 - 2026-10-25 — URLhaus per-run cap 100,000 (was 50,000): the abuse.ch v2 `recent.csv` export listed about 63,000 URLs on 2026-10-24.
 - 2026-10-19 — The `USES_TECHNIQUE` pattern comment says what the link is: the indicator's OTX report lists the technique.

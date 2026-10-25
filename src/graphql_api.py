@@ -205,7 +205,7 @@ def _neo4j_list(val) -> Optional[List[str]]:
 def _misp_attribute_urls(attribute_ids: List[str]) -> Optional[List[str]]:
     """``<MISP_URL>/attributes/view/<uuid>`` for each stored MISP attribute reference, in stored order.
 
-    The event-level links (``misp_event_urls``) open a whole source event, which for OTX or NVD holds
+    The event-level links (``misp_event_urls``) open a whole source event, which for OTX holds
     100,000+ attributes; this link names the one attribute. None when ``MISP_URL`` is unset or nothing
     usable is stored; a value that is neither a UUID nor a numeric id is skipped.
     """

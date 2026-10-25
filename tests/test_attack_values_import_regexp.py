@@ -251,6 +251,7 @@ def _pushed_attributes(monkeypatch) -> List[Dict]:
     monkeypatch.setattr(mw, "MISP_PREFETCH_EXISTING_ATTRS", False)
     monkeypatch.setattr(mw, "MISP_CROSS_EVENT_DEDUP", False)
     monkeypatch.setattr(writer, "_get_or_create_event", lambda *a, **k: "42")
+    monkeypatch.setattr(writer, "_find_event_id", lambda *a, **k: None)  # no -part2 of the day (event split)
 
     def push_batch(event_id, attributes):
         pushed.extend(attributes)
