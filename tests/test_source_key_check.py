@@ -767,7 +767,7 @@ def test_preflight_counts_a_rejected_nvd_key_and_a_missing_required_source_as_er
     monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", "abuseipdb")
     required = _preflight(monkeypatch, [OTX_VALID, ABUSE_NOT_SET])
     assert (required["errors"], required["code"]) == (clean["errors"] + 1, 1)
-    assert "[named in EDGEGUARD_BASELINE_REQUIRED_SOURCES]" in required["text"]
+    assert "[abuseipdb: named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and will not deliver]" in required["text"]
 
 
 def test_preflight_counts_a_required_urlhaus_without_the_abusech_key_as_an_error(http, monkeypatch) -> None:
@@ -777,7 +777,41 @@ def test_preflight_counts_a_required_urlhaus_without_the_abusech_key_as_an_error
     required = _preflight(monkeypatch, statuses)
     assert (required["errors"], required["code"]) == (clean["errors"] + 1, 1)
     assert "no key (THREATFOX_API_KEY" in required["text"]
-    assert "[named in EDGEGUARD_BASELINE_REQUIRED_SOURCES]" in required["text"]
+    assert "[urlhaus: named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and will not deliver]" in required["text"]
+
+
+@pytest.mark.parametrize(
+    "required, allowed, flag",
+    [
+        ("malwarebazaar", None, False),  # EDGEGUARD_ENABLE_MALWAREBAZAAR left at its default
+        ("threatfox", "otx,nvd,urlhaus,feodo,sslbl,cisa,mitre", False),  # ThreatFox left out, URLhaus on
+        ("urlhaus", "threatfox,malwarebazaar", True),  # URLhaus left out
+    ],
+)
+def test_preflight_counts_a_switched_off_required_source_as_an_error_when_the_shared_key_is_accepted(
+    http, monkeypatch, required, allowed, flag
+) -> None:
+    """The abuse.ch key can be accepted for the switched-on sources while a required one is off."""
+    if allowed is not None:
+        monkeypatch.setenv("EDGEGUARD_COLLECT_SOURCES", allowed)
+    _malwarebazaar_flag(monkeypatch, flag)
+    _set_key(monkeypatch, "threatfox")
+    http.answers[URLS["threatfox"]] = _Response(200)
+    statuses = skc.check_source_keys()
+    abusech = _abusech(statuses)
+    assert abusech.status == skc.VALID and required in abusech.switched_off
+    clean = _preflight(monkeypatch, statuses)
+
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", required)
+    assert skc.baseline_blockers(statuses), "the baseline task stops"
+    preflight = _preflight(monkeypatch, statuses)
+    assert (preflight["errors"], preflight["code"]) == (clean["errors"] + 1, 1), "preflight agrees with the baseline"
+    assert f"[{required}: named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and will not deliver]" in preflight["text"]
+
+    monkeypatch.setenv("EDGEGUARD_BASELINE_REQUIRED_SOURCES", abusech.switched_on[0])
+    switched_on = _preflight(monkeypatch, statuses)
+    assert switched_on["errors"] == clean["errors"], "a required source that is on and keyed is not an error"
+    assert skc.baseline_blockers(statuses) == []
 
 
 # ---------------------------------------------------------------------------

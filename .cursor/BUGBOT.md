@@ -1048,10 +1048,11 @@ When code changes affect user-visible behavior (CLI commands, env vars, DAG sett
 
 ---
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — URLhaus per-run cap 100,000 (was 50,000): the abuse.ch v2 `recent.csv` export listed about 63,000 URLs on 2026-10-24.
 - 2026-10-19 — The `USES_TECHNIQUE` pattern comment says what the link is: the indicator's OTX report lists the technique.
 - 2026-10-18 — Canonical directions: `(Indicator)-[:INDICATES]->(CVE)` for an indicator and a CVE named in the same OTX pulse; `EXPLOITS` stays the indicator's own CVE tag. The `OTX_META` sentinel pair lists the OTX CVE writer (`create_vulnerability_attribute`) and reader (`_vulnerability_report_ids`).
 - 2026-10-18 — Sector links: `otx_industries` (0.6) only on `TARGETS` to a sector an OTX pulse's industries state; `MITRE_USES_TECHNIQUES.ind` / `rsz`, `OTX_META.report_stated_zones`.

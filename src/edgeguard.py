@@ -2836,14 +2836,20 @@ def cmd_preflight(args) -> int:
     key_statuses = check_source_keys()
     required_keyed_sources = required_sources()
     for key_status in key_statuses:
-        if key_status.status == VALID:
-            ok(key_status.message())
-        elif key_status.status == REJECTED and key_status.task_fails:
+        # Same order as baseline_blockers: one key can serve several sources, so an accepted key
+        # does not mean that each of them is switched on.
+        undelivered = undelivered_required_sources(key_status, required_keyed_sources)
+        if key_status.status == REJECTED and key_status.task_fails:
             err(key_status.message())
             errors += 1
-        elif undelivered_required_sources(key_status, required_keyed_sources):
-            err(f"{key_status.message()} [named in EDGEGUARD_BASELINE_REQUIRED_SOURCES]")
+        elif undelivered:
+            err(
+                f"{key_status.message()} "
+                f"[{', '.join(undelivered)}: named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and will not deliver]"
+            )
             errors += 1
+        elif key_status.status == VALID:
+            ok(key_status.message())
         elif key_status.status == REJECTED:
             warn(key_status.message())
             warnings += 1
