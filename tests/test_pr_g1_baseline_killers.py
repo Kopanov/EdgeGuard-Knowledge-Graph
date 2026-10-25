@@ -444,58 +444,35 @@ class TestNvdCheckpointPageMath:
             "completed-checkpoint branch must explicitly reset the counter to 0 for fresh baseline runs"
         )
 
-    def test_seed_recovers_persisted_page_end_to_end(self, tmp_path, monkeypatch) -> None:
+    def test_seed_recovers_persisted_page_end_to_end(self, _baseline_checkpoint_outside_the_repo) -> None:
         """End-to-end: persist a fake NVD checkpoint via the real
         ``update_source_checkpoint`` API, then read back the value the
         nvd_collector seed expression would read.  This proves the
         seed + writer key agree, closing the class of bug Bugbot
         caught at the source level (writer persists under
-        ``current_page`` but seed was reading ``page``)."""
-        import importlib
+        ``current_page`` but seed was reading ``page``).
 
-        # The checkpoint module stays under the project root by design
-        # (path-traversal guard at baseline_checkpoint.py:34-42), so we
-        # set EDGEGUARD_CHECKPOINT_DIR to a path inside the repo that's
-        # safe to write to. ``tmp_path`` is guaranteed clean per-test.
-        project_root = REPO_ROOT
-        safe_dir = project_root / ".pytest_checkpoint_tmp"
-        safe_dir.mkdir(exist_ok=True)
-        monkeypatch.setenv("EDGEGUARD_CHECKPOINT_DIR", str(safe_dir))
-
-        # Reload so the module re-reads the env var + rebuilds
-        # ``CHECKPOINT_FILE`` at the redirected path.
+        The checkpoint is written to the test's own empty directory outside
+        the checkout (``_baseline_checkpoint_outside_the_repo`` in
+        ``tests/conftest.py``), which also restores the module's paths."""
         import baseline_checkpoint
 
-        importlib.reload(baseline_checkpoint)
-        try:
-            # Wipe any stale state from a previous test run.
-            if baseline_checkpoint.CHECKPOINT_FILE.exists():
-                baseline_checkpoint.CHECKPOINT_FILE.unlink()
+        assert baseline_checkpoint.CHECKPOINT_FILE.parent == _baseline_checkpoint_outside_the_repo
+        assert not baseline_checkpoint.CHECKPOINT_FILE.is_relative_to(REPO_ROOT)
+        assert not baseline_checkpoint.CHECKPOINT_FILE.exists()
 
-            # Simulate what the NVD collector writes on each batch.
-            baseline_checkpoint.update_source_checkpoint(
-                "nvd",
-                page=42,
-                items_collected=84000,
-                extra={"nvd_window_idx": 3, "nvd_start_index": 4000},
-            )
+        # Simulate what the NVD collector writes on each batch.
+        baseline_checkpoint.update_source_checkpoint(
+            "nvd",
+            page=42,
+            items_collected=84000,
+            extra={"nvd_window_idx": 3, "nvd_start_index": 4000},
+        )
 
-            # Now read back and apply the nvd_collector's seed expression.
-            ckpt = baseline_checkpoint.get_source_checkpoint("nvd")
-            seeded = int(ckpt.get("current_page") or (max(ckpt.get("pages") or [0]) if ckpt.get("pages") else 0) or 0)
-            assert seeded == 42, (
-                f"seed expression must recover the persisted ``page`` value; got {seeded}. "
-                f"checkpoint keys present: {sorted(ckpt.keys())}"
-            )
-        finally:
-            # Clean up so this test leaves no artefacts in the repo.
-            if baseline_checkpoint.CHECKPOINT_FILE.exists():
-                baseline_checkpoint.CHECKPOINT_FILE.unlink()
-            lock = baseline_checkpoint.CHECKPOINT_FILE.with_suffix(".lock")
-            if lock.exists():
-                lock.unlink()
-            if safe_dir.exists() and not any(safe_dir.iterdir()):
-                safe_dir.rmdir()
-            # Reload the module one more time so subsequent tests see
-            # the normal project-default checkpoint path again.
-            importlib.reload(baseline_checkpoint)
+        # Now read back and apply the nvd_collector's seed expression.
+        ckpt = baseline_checkpoint.get_source_checkpoint("nvd")
+        seeded = int(ckpt.get("current_page") or (max(ckpt.get("pages") or [0]) if ckpt.get("pages") else 0) or 0)
+        assert seeded == 42, (
+            f"seed expression must recover the persisted ``page`` value; got {seeded}. "
+            f"checkpoint keys present: {sorted(ckpt.keys())}"
+        )
