@@ -179,6 +179,19 @@ def test_the_sync_task_limit_leaves_margin_above_the_full_sync_estimate(dag_modu
     assert dag_module.run_neo4j_sync_task.execution_timeout > dag_module.baseline_full_sync_task.execution_timeout
 
 
+@pytest.mark.parametrize(
+    "value, hours",
+    [(None, 8), ("14", 14), (" 12 ", 12), ("0", 8), ("-3", 8), ("abc", 8), ("", 8), ("1.5", 8)],
+)
+def test_the_sync_task_limit_follows_the_env_knob(dag_module, monkeypatch, value, hours):
+    """EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS: a remote Neo4j can need more than 8 h; bad values use 8."""
+    if value is None:
+        monkeypatch.delenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", raising=False)
+    else:
+        monkeypatch.setenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", value)
+    assert dag_module._neo4j_sync_timeout_hours() == hours
+
+
 def test_the_dag_run_limit_covers_every_task_failing_on_all_attempts(dag_module):
     """The method docs/AIRFLOW_DAGS.md states for every DAG: execution_timeout × (1 + retries) +
     retries × retry_delay, summed over the sequential chain, plus 20%."""

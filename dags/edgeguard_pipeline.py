@@ -2085,8 +2085,10 @@ neo4j_sync_dag = DAG(
     max_active_runs=1,
     # 2026-10 (was 22 h): worst case as for the other DAGs, every task of the chain failing on all
     # three attempts (execution_timeout × 3 + 2 retry delays of 5 min): check_sync_needed and
-    # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (8 h limit), build_relationships and
-    # run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
+    # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (default 8 h limit), build_relationships
+    # and run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
+    # The arithmetic assumes the default EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS; with a larger limit this
+    # 68 h bounds the run first.
     # A requested full sync keeps its flag until it succeeds, so it may need all three attempts. 68 h
     # is below the 72 h interval, so a run has ended before the next one is due.
     dagrun_timeout=timedelta(hours=68),
@@ -2136,6 +2138,15 @@ neo4j_preflight_task = PythonOperator(
     dag=neo4j_sync_dag,
 )
 
+
+def _neo4j_sync_timeout_hours() -> int:
+    try:
+        hours = int(os.environ.get("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", "8"))
+    except (ValueError, TypeError):
+        return 8
+    return hours if hours > 0 else 8
+
+
 run_neo4j_sync_task = PythonOperator(
     task_id="run_neo4j_sync",
     python_callable=run_neo4j_sync,
@@ -2143,9 +2154,11 @@ run_neo4j_sync_task = PythonOperator(
     # estimated at about 6 h on a 730-day MISP (the baseline DAG's ``full_neo4j_sync`` has 6 h, see the
     # baseline dagrun_timeout comment). At 4 h such a sync timed out and its retries ran incrementally;
     # now the request is kept until a full sync succeeds, so a limit at the estimate itself could fail
-    # every attempt of every scheduled run. 8 h is the estimate plus a third. Incremental runs take
-    # minutes; the limit only bounds a hung one.
-    execution_timeout=timedelta(hours=8),
+    # every attempt of every scheduled run. 8 h is the estimate plus a third. An incremental run takes
+    # minutes on a local Neo4j, but hours against a remote one with many changed events (a prod sync at
+    # about 0.9 NVD CVE/s, one event with 21,887 changed CVEs, took 8 h 37 min), so the limit is
+    # EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS (default 8; a value that is not a positive integer uses 8).
+    execution_timeout=timedelta(hours=_neo4j_sync_timeout_hours()),
     # 2026-10: after the last attempt, alert when NEO4J_FULL_SYNC is still set (incremental syncs suspended).
     on_failure_callback=_on_neo4j_sync_failure,
     dag=neo4j_sync_dag,
