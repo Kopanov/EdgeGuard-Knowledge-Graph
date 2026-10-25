@@ -28,6 +28,7 @@ from neo4j import READ_ACCESS
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import indicator_seen_dates
 from ioc_normalize import canonicalize_lookup
 from neo4j_client import Neo4jClient
 from package_meta import package_version
@@ -415,10 +416,11 @@ class AlertProcessor:
         read (``Neo4jClient.create_indicator_from_alert``): an indicator the graph does not hold is
         ``indicator_found: false`` here (``process_alert`` creates it first and then finds it); the
         indicator's ``confidence`` is the stored one here, while ``process_alert`` first raises it to
-        at least 0.8, for a known indicator too; ``last_updated``, when no source reports a last
-        seen, is the stored value here and the time of the write there (``first_seen`` too, for an
-        indicator ``process_alert`` creates); and ``sectors_affected`` comes from the indicator's
-        stored zones, to which ``process_alert`` first adds the alert's zones.
+        at least 0.8, for a known indicator too; ``last_updated``, for an indicator no source dated
+        (one an alert created), is the stored value here and the time of the write there
+        (``first_seen`` too, for an indicator ``process_alert`` creates); and ``sectors_affected``
+        comes from the indicator's stored zones, to which ``process_alert`` first adds the alert's
+        zones.
 
         ``enriched`` is false when an enrichment query failed (2026-10): ``_enrich_indicator`` then
         returns its defaults for every part it had not read yet, with ``query_metadata.error`` set,
@@ -514,25 +516,27 @@ class AlertProcessor:
                 # PR (S5) (architecture redesign): per-source
                 # timestamps live on ``(i)-[r:SOURCED_FROM]->(:Source)``
                 # edges, NOT on the node. For the alert enrichment
-                # payload we still want a single value per indicator —
-                # we aggregate MIN(r.source_reported_first_at) /
-                # MAX(r.source_reported_last_at) across all source
-                # edges so ResilMesh sees the earliest claim across
-                # all sources. Falls back to ``i.first_imported_at``
-                # (DB-local) when no source claim exists.
+                # payload we still want a single value per indicator,
+                # aggregated across all source edges.
+                # 2026-10-25: the seen dates of ``indicator_seen_dates`` (shared with the campaign
+                # build): per edge the source's claim, else the source's latest report, so an indicator
+                # only OTX reported (no claims) is dated by its reports, not EdgeGuard's import time;
+                # the first seen never later than the first import; ``first_imported_at`` /
+                # ``last_updated`` when no edge dates it.
                 indicator_result = session.run(
-                    """
-                    MATCH (i:Indicator {value: $indicator})
+                    f"""
+                    MATCH (i:Indicator {{value: $indicator}})
                     OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
                     WITH i,
-                         min(r.source_reported_first_at) AS source_first,
-                         max(r.source_reported_last_at)  AS source_last
-                    RETURN i {
+                         min({indicator_seen_dates.edge_first("r")}) AS edges_first,
+                         max({indicator_seen_dates.edge_last("r")})  AS edges_last
+                    RETURN i {{
                         .value, .indicator_type, .zone, .source,
                         .confidence_score,
                         .first_imported_at, .last_updated
-                    } as indicator,
-                    source_first, source_last
+                    }} as indicator,
+                    {indicator_seen_dates.first_seen("edges_first", "i")} AS first_seen,
+                    {indicator_seen_dates.last_seen("edges_last", "i")} AS last_seen
                 """,
                     indicator=indicator,
                 )
@@ -542,18 +546,12 @@ class AlertProcessor:
                     ind_data = indicator_record["indicator"]
                     metadata["indicator_found"] = True
                     enrichment["confidence"] = ind_data.get("confidence_score", 0.0)
-                    # PR (S5): prefer source-claimed first/last
-                    # (aggregated across edges); fall back to DB-local
-                    # ``first_imported_at`` / ``last_updated`` when no
-                    # source claim is on file. ``_iso_str`` wraps each
-                    # candidate so neo4j.time.DateTime values become
-                    # plain ISO-8601 strings (NATS payload is JSON).
-                    enrichment["first_seen"] = _iso_str(indicator_record.get("source_first")) or _iso_str(
-                        ind_data.get("first_imported_at")
-                    )
-                    enrichment["last_updated"] = _iso_str(indicator_record.get("source_last")) or _iso_str(
-                        ind_data.get("last_updated")
-                    )
+                    # The seen dates (the statement already falls back to ``first_imported_at`` /
+                    # ``last_updated`` when no edge dates the indicator). ``_iso_str`` wraps each
+                    # value so neo4j.time.DateTime values become plain ISO-8601 strings (NATS
+                    # payload is JSON).
+                    enrichment["first_seen"] = _iso_str(indicator_record.get("first_seen"))
+                    enrichment["last_updated"] = _iso_str(indicator_record.get("last_seen"))
 
                     # Add zone from indicator if different from alert
                     ind_zone = ind_data.get("zone")
