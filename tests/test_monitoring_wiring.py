@@ -233,3 +233,132 @@ def test_every_edgeguard_metric_in_alert_expressions_is_defined():
         referenced |= set(re.findall(r"\bedgeguard_[a-z0-9_]+", unquoted))
     missing = sorted(m for m in referenced if base(m) not in defined_base)
     assert not missing, missing
+
+
+# ---------------------------------------------------------------------------------------------------
+# Source label names (2026-10-25): every ``source`` value the scheduled collectors, the collectors
+# themselves and the staleness rule use maps to a registered source (``src/source_registry.py``), so a
+# renamed or removed source cannot linger in monitoring. Collector and job metrics carry the source's
+# CLI name (``cli_id``); docs/PROMETHEUS_SETUP.md, "Source label values".
+
+# Job names that are not a source's CLI name: the source a job belongs to, or None for a job of no
+# source.
+_JOB_LABELS = {
+    "misp_to_neo4j": None,  # the MISP → Neo4j sync (edgeguard_last_success_timestamp, failures)
+    "virustotal_enrich": "virustotal",  # VirusTotal's re-enrichment of hashes already in MISP
+}
+# Collector modules no DAG task runs (docs/DATA_SOURCES.md: placeholders).
+_PLACEHOLDER_COLLECTORS = {"energy_placeholder", "healthcare_placeholder"}
+
+
+def _dag_collector_names() -> list:
+    """The collector name of every ``run_collector_with_metrics`` and ``run_baseline_collector`` call
+    in the DAG module (scheduled and baseline runs). The one call that passes the baseline wrapper's
+    own ``collector_name`` parameter on is skipped; any other name that is not a string literal fails."""
+    import ast
+
+    tree = ast.parse(_dag_text())
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) in (
+            "run_collector_with_metrics",
+            "run_baseline_collector",
+        ):
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Name) and first.id == "collector_name":
+                continue
+            assert isinstance(first, ast.Constant) and isinstance(first.value, str), ast.dump(node)[:200]
+            names.append(first.value)
+    return names
+
+
+def _collector_self_names() -> list:
+    """Every ``self.source_name = <name>`` in ``src/collectors``: the name a collector stamps on
+    ``edgeguard_last_success_timestamp`` / ``edgeguard_collection_failures_total`` itself. A module
+    constant (``MALWAREBAZAAR_SOURCE_ID``) is resolved to its string."""
+    import ast
+
+    names = []
+    for path in sorted((_ROOT / "src" / "collectors").glob("*.py")):
+        tree = ast.parse(path.read_text())
+        constants = {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            for target in node.targets
+            if isinstance(target, ast.Name) and isinstance(node.value.value, str)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == "source_name":
+                    value = node.value
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                        names.append(value.value)
+                    elif isinstance(value, ast.Name) and value.id in constants:
+                        names.append(constants[value.id])
+                    else:
+                        raise AssertionError(f"{path.name}:{node.lineno}: source_name is not a string constant")
+    return names
+
+
+def _stale_rule_names() -> list:
+    expr = _rule("edgeguard:collector_max_stale_seconds", key="record")["expr"]
+    return re.findall(r'label_replace\(vector\(\d+\), "source", "([a-z0-9_]+)"', expr)
+
+
+def _unmapped(names) -> list:
+    """The names that resolve to no registered source and are no known job, in order."""
+    from source_registry import get_source
+
+    out = []
+    for name in names:
+        if name in _JOB_LABELS:
+            owner = _JOB_LABELS[name]
+            if owner is not None and get_source(owner) is None:
+                out.append(name)
+        elif get_source(name) is None:
+            out.append(name)
+    return out
+
+
+def test_the_guard_flags_a_name_no_registered_source_has():
+    """The check below can fail: a removed source (CyberCure, 2026-10-12) or a typo is flagged."""
+    assert _unmapped(["otx", "cybercure", "otx_feed", "misp_to_neo4j"]) == ["cybercure", "otx_feed"]
+
+
+def test_every_scheduled_collector_name_is_a_registered_sources_cli_name():
+    names = _dag_collector_names()
+    assert len(names) >= 13 and {"otx", "cisa", "mitre", "feodo", "sslbl"} <= set(names)
+    assert set(names) >= set(re.findall(r'run_collector_with_metrics\("([a-z0-9_]+)"', _dag_text()))
+    assert not _unmapped(names)
+    from source_registry import get_source
+
+    for name in names:
+        if name not in _JOB_LABELS:
+            assert get_source(name).cli_id == name, f"{name}: collector metrics carry the source's CLI name"
+
+
+def test_every_collector_stamps_a_registered_sources_cli_name():
+    """``edgeguard_last_success_timestamp`` is joined on ``source`` with the staleness rule: a collector
+    stamping another spelling than the rule's would never be judged by its cadence."""
+    names = [n for n in _collector_self_names() if n not in _PLACEHOLDER_COLLECTORS]
+    assert len(names) >= 9
+    assert not _unmapped(names)
+    from source_registry import get_source
+
+    for name in names:
+        assert get_source(name).cli_id == name, f"{name}: a collector stamps the source's CLI name"
+
+
+def test_every_staleness_rule_name_is_a_registered_source_or_a_job():
+    names = _stale_rule_names()
+    assert len(names) >= 13
+    assert not _unmapped(names)
+    scheduled = set(_dag_collector_names()) | set(_JOB_LABELS)
+    assert set(names) <= scheduled, f"names no scheduled collector or job stamps: {set(names) - scheduled}"
+
+
+def _dag_text() -> str:
+    return (_ROOT / "dags" / "edgeguard_pipeline.py").read_text()

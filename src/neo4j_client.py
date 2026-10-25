@@ -3858,7 +3858,9 @@ class Neo4jClient:
             # Prometheus alerting. None-guarded (PR-N5 R1 pattern).
             if _MERGE_REJECT_PLACEHOLDER is not None:
                 try:
-                    _MERGE_REJECT_PLACEHOLDER.labels(label="Malware", source=source_id).inc()
+                    _MERGE_REJECT_PLACEHOLDER.labels(
+                        label="Malware", source=source_registry.canonical_source_id(source_id) or source_id
+                    ).inc()
                 except Exception as _metric_err:
                     logger.debug("placeholder-reject metric increment failed: %s", _metric_err, exc_info=True)
             return False
@@ -3923,7 +3925,9 @@ class Neo4jClient:
             # PR-N18 (2026-04-22): same counter emission as merge_malware.
             if _MERGE_REJECT_PLACEHOLDER is not None:
                 try:
-                    _MERGE_REJECT_PLACEHOLDER.labels(label="ThreatActor", source=source_id).inc()
+                    _MERGE_REJECT_PLACEHOLDER.labels(
+                        label="ThreatActor", source=source_registry.canonical_source_id(source_id) or source_id
+                    ).inc()
                 except Exception as _metric_err:
                     logger.debug("placeholder-reject metric increment failed: %s", _metric_err, exc_info=True)
             return False

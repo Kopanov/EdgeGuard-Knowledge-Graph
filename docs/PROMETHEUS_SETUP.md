@@ -150,6 +150,19 @@ To import manually:
 
 ## Available Metrics
 
+### Source label values
+
+A `source` label names a source in one of two ways. Both come from `src/source_registry.py`, and every value maps to one registered source; the table of sources and their variants is in [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Source nodes".
+
+| Metrics | `source` value | Values |
+|---------|----------------|--------|
+| Collector and job metrics: `edgeguard_indicators_collected_total`, `edgeguard_collector_last_run_outcome`, `edgeguard_collection_failures_total`, `edgeguard_collection_duration_seconds`, `edgeguard_last_success_timestamp`, `edgeguard_collector_skips_total`, `edgeguard_source_health`, `edgeguard_pipeline_errors_total`, `edgeguard_misp_events_total`, `edgeguard_misp_push_duration_seconds` | The collector's name, which is the source's CLI name (`cli_id`); for a job that is not a collector, the job's name | `otx`, `nvd`, `cisa`, `mitre`, `virustotal`, `abuseipdb`, `urlhaus`, `threatfox`, `feodo`, `sslbl`, `cisa_ics`, `malwarebazaar`; jobs: `virustotal_enrich` (VirusTotal's re-enrichment of hashes already in MISP), `misp_to_neo4j` (the MISP → Neo4j sync), `neo4j` (the sync's Neo4j connection failure) |
+| Writer metrics: `edgeguard_misp_push_permanent_failure_total`, `edgeguard_misp_push_backoff_triggered_total`, `edgeguard_misp_honest_null_violation_total`, `edgeguard_neo4j_merge_ineffective_batch_total`, `edgeguard_neo4j_batch_permanent_failure_total`, `edgeguard_merge_reject_placeholder_total` | The source's canonical id, the key of its `Source` node | `alienvault_otx`, `nvd`, `cisa_kev`, `mitre_attck`, `feodo_tracker`, `ssl_blacklist`, … |
+
+So one source can appear as `otx` in one panel and as `alienvault_otx` in another. No alert or Grafana panel joins the two kinds of metric on `source`, and the Grafana panels group by `source` without filtering on a value. `edgeguard_misp_event_attributes_truncated_total` (the command-line MISP collector) carries the source the MISP event's tags name, or the collector's tag; `edgeguard_misp_attributes_total` and `edgeguard_source_latency_seconds` are defined but written by no code path. The `source_id` label of the source-truthful counters is described under "Source-truthful Timestamp Pipeline" below.
+
+**Guard.** `tests/test_monitoring_wiring.py` checks that every collector name the DAG module schedules, every name a collector stamps itself (`self.source_name`) and every name in the recording rule `edgeguard:collector_max_stale_seconds` is a registered source's CLI name or one of the jobs above, and that the rule names only collectors or jobs that are scheduled. A renamed or removed source therefore fails the test instead of lingering in the rule. A new source scheduled under its CLI name needs no change to the test; until it is added to the recording rule, `EdgeGuardCollectionStaleUnmappedSource` watches it with a daily limit.
+
 ### Collection Metrics
 
 | Metric | Type | Labels | Description |
@@ -745,6 +758,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — "Source label values": the two namings of the `source` label (collector and job metrics: the CLI name; writer metrics: the canonical id) and the test that keeps every collector and staleness-rule name a registered source; `edgeguard_merge_reject_placeholder_total` resolves a variant to the canonical id like the other writer metrics.
 - 2026-10-25 — `EdgeGuardNeo4jSyncStale`: the 8-hour limit of the three `run_neo4j_sync` attempts is the default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); the row gives the threshold a larger limit needs.
 - 2026-10-20 — `edgeguard_misp_attributes_dropped_total` lists its reasons, with `attack_id_invalid` for ATT&CK values without a valid ATT&CK id.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

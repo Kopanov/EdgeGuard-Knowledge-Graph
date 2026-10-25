@@ -313,6 +313,25 @@ class TestNodeSourceListsAreCanonical:
         assert (edge["source_id"], edge["trg_uuid"]) == ("alienvault_otx", _source_uuid("alienvault_otx"))
 
 
+class TestMetricSourceLabels:
+    """2026-10-25: the writer metrics carry the canonical id (docs/PROMETHEUS_SETUP.md, "Source label
+    values"); the placeholder reject is counted before the merge resolves the name, so it resolves it."""
+
+    @pytest.mark.parametrize("merge,label", [("merge_malware", "Malware"), ("merge_actor", "ThreatActor")])
+    def test_a_placeholder_reject_counts_against_the_canonical_source(self, merge, label):
+        from prometheus_client import REGISTRY
+
+        def count(source):
+            name = "edgeguard_merge_reject_placeholder_total"
+            return REGISTRY.get_sample_value(name, {"label": label, "source": source}) or 0.0
+
+        before_canonical, before_variant = count("alienvault_otx"), count("otx")
+        client = _client()
+        assert getattr(client, merge)({"name": "unknown", "zone": ["global"]}, source_id="otx") is False
+        assert count("alienvault_otx") == before_canonical + 1
+        assert count("otx") == before_variant
+
+
 class TestStixFlowEventSource:
     """2026-10-25: the STIX flow names each object's source from its MISP event's name, as a canonical
     id; a name that gives no registered source is attributed to ``misp`` (it was ``"unknown"``, which no
