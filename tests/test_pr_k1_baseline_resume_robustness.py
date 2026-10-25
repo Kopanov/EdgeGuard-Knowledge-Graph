@@ -40,7 +40,6 @@ source-pin tests that guard against silent regressions.
 
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
 
@@ -58,39 +57,15 @@ if str(SRC) not in sys.path:
 
 
 @pytest.fixture
-def isolated_checkpoint_dir(tmp_path, monkeypatch):
-    """Redirect ``baseline_checkpoint`` state into a per-test directory.
+def isolated_checkpoint_dir(_baseline_checkpoint_outside_the_repo):
+    """This test's checkpoint directory and the ``baseline_checkpoint`` module.
 
-    The module captures the checkpoint path at import time via
-    ``EDGEGUARD_CHECKPOINT_DIR``. To mutate that, we set the env var
-    + reload the module; we restore afterwards so other tests see the
-    normal project-default path.
-
-    The path-traversal guard requires the dir to be INSIDE the project
-    root, so we use ``tmp_path / "inside_repo"`` placed as a child of
-    the repo. Safer: we use a repo-child dir and clean up.
+    ``_baseline_checkpoint_outside_the_repo`` (``tests/conftest.py``) points the module at an
+    empty directory of the test's own, outside the checkout.
     """
-    safe_dir = REPO_ROOT / ".pytest_k1_checkpoint_tmp"
-    safe_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("EDGEGUARD_CHECKPOINT_DIR", str(safe_dir))
-
     import baseline_checkpoint
 
-    importlib.reload(baseline_checkpoint)
-
-    yield safe_dir, baseline_checkpoint
-
-    # Cleanup
-    for entry in safe_dir.iterdir():
-        try:
-            entry.unlink()
-        except OSError:
-            pass
-    if safe_dir.exists() and not any(safe_dir.iterdir()):
-        safe_dir.rmdir()
-    # Restore module to normal state
-    monkeypatch.delenv("EDGEGUARD_CHECKPOINT_DIR", raising=False)
-    importlib.reload(baseline_checkpoint)
+    return _baseline_checkpoint_outside_the_repo, baseline_checkpoint
 
 
 # ===========================================================================

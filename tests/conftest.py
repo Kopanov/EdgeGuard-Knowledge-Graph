@@ -3,6 +3,7 @@ Pytest configuration — adds src/ to sys.path so tests can import project modul
 without needing an installed package.
 """
 
+import contextlib
 import os
 import sys
 import uuid
@@ -71,6 +72,28 @@ def _baseline_lock_outside_the_repo(monkeypatch, tmp_path_factory):
     """
     path = tmp_path_factory.getbasetemp() / "baseline_lock" / f"{uuid.uuid4().hex}.lock"
     monkeypatch.setenv("EDGEGUARD_BASELINE_LOCK_PATH", str(path))
+
+
+@pytest.fixture(autouse=True)
+def _baseline_checkpoint_outside_the_repo(monkeypatch, tmp_path_factory):
+    """Keep baseline checkpoints out of the checkout (2026-10-25).
+
+    ``baseline_checkpoint`` writes ``baseline_checkpoint.json`` and its ``.lock`` in
+    ``<repo>/checkpoints``, where a developer's real baseline checkpoint can live. The module reads
+    ``EDGEGUARD_CHECKPOINT_DIR`` once, at import, and refuses a directory outside the project root,
+    so the variable cannot point at a temporary directory; the module's paths are set instead. Each
+    test gets its own empty directory under the session's temporary directory, so no test sees a
+    checkpoint another test wrote. The value is that directory; an empty one is removed afterwards.
+    """
+    import baseline_checkpoint
+
+    directory = tmp_path_factory.getbasetemp() / "baseline_checkpoint" / uuid.uuid4().hex
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(baseline_checkpoint, "CHECKPOINT_DIR", directory)
+    monkeypatch.setattr(baseline_checkpoint, "CHECKPOINT_FILE", directory / "baseline_checkpoint.json")
+    yield directory
+    with contextlib.suppress(OSError):
+        directory.rmdir()
 
 
 @pytest.fixture(autouse=True)
