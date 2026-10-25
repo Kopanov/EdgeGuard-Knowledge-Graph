@@ -1036,6 +1036,61 @@ class StoredCopy(NamedTuple):
 _OWN_EVENT_PREFIX = "EdgeGuard-"
 
 
+def _event_split_above() -> int:
+    """``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`` (2026-10): attributes one event of a source/date takes before
+    the writer opens the next part (``EdgeGuard-<source>-<date>-part2``); ``0`` (or less) = never split.
+
+    The prod NVD event of 2026-10-22 reached 145,261 attributes (about 550 MB of JSON): MISP answered
+    HTTP 500 to a view of it, its edit handler choked, and every batch's prefetch of the event cost more
+    than the one before. The default equals ``EDGEGUARD_MISP_PAGED_FETCH_ABOVE`` (20000), so each part
+    still loads with one ``/events/view``.
+    """
+    try:
+        return int(os.environ.get("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE", "20000"))
+    except (ValueError, TypeError):
+        return 20000
+
+
+def _attribute_report_ids(attribute: Dict[str, Any]) -> List[str]:
+    """The source-report ids (OTX pulses) an attribute names in its metadata comment, or ``[]`` (2026-10).
+
+    ``OTX_META`` (indicators, CVEs) carries ``pulse_id`` + ``report_ids``; the ``MITRE_USES_TECHNIQUES``
+    block of OTX malware and actors carries ``pid`` + ``rids``. The sync links items per report within one
+    event (``_build_cross_item_relationships``), so a group with any such attribute is never split
+    (``push_items``): a shared malware, actor or CVE item carries the ids of every pulse naming it, which
+    joins nearly all of a day's pulses into one report.
+    """
+    comment = attribute.get("comment")
+    if not isinstance(comment, str) or ":" not in comment:
+        return []
+    prefix, _, body = comment.partition(":")
+    if prefix not in ("OTX_META", "MITRE_USES_TECHNIQUES"):
+        return []
+    try:
+        meta, _end = json.JSONDecoder().raw_decode(body)
+    except ValueError:
+        return []
+    if not isinstance(meta, dict):
+        return []
+    ids = [meta.get("pulse_id"), meta.get("pid")] + list(meta.get("report_ids") or []) + list(meta.get("rids") or [])
+    return list(dict.fromkeys(str(x).strip() for x in ids if x and str(x).strip()))
+
+
+def _split_for_parts(attributes: List[Dict[str, Any]], room: int, cap: int) -> List[List[Dict[str, Any]]]:
+    """Cut ``attributes`` into the chunk the current part takes (``room`` attributes, may be empty) and
+    one chunk per further part of at most ``cap`` (2026-10, see ``_event_split_above``). No chunk after
+    the first is empty, so no part is created that receives nothing."""
+    return [attributes[:room]] + [attributes[k : k + cap] for k in range(room, len(attributes), cap)]
+
+
+def _event_name(source: str, date: str, part: int = 1) -> str:
+    """``EdgeGuard-<source>-<date>``; part 2 and later append ``-part<N>`` (2026-10, see ``_event_split_above``).
+    The first part keeps the name events had before the split. Readers take the source as the second
+    ``-`` field of the name, so the suffix does not move it."""
+    name = f"{_OWN_EVENT_PREFIX}{source}-{date}"
+    return name if part <= 1 else f"{name}-part{part}"
+
+
 def _note_stored_copy(
     seen: Dict[Tuple[str, str], Optional[StoredCopy]],
     key: Tuple[str, str],
@@ -1900,10 +1955,11 @@ class MISPWriter:
         raise MispTransientError(f"MISP {context} failed after {attempts} attempts: {last_problem}")
 
     @retry_with_backoff(max_retries=4, base_delay=10.0)
-    def _get_or_create_event(self, source: str, date: str = None, **_kwargs) -> Optional[str]:
+    def _get_or_create_event(self, source: str, date: str = None, part: int = 1, **_kwargs) -> Optional[str]:
         """Get or create a MISP event for a source/date combination.
 
-        Event naming: ``EdgeGuard-{source}-{date}``.  Zone classification lives
+        Event naming: ``EdgeGuard-{source}-{date}``, ``-part{N}`` appended from part 2 (2026-10,
+        ``_event_split_above``).  Zone classification lives
         on attribute-level tags (``zone:Finance``, ``zone:Healthcare``), not in
         the event name — a single event can contain multi-zone attributes.
 
@@ -1917,7 +1973,7 @@ class MISPWriter:
         source = sanitize_value(source, max_length=50)
 
         date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        event_name = f"EdgeGuard-{source}-{date}"
+        event_name = _event_name(source, date, part)
 
         try:
             rows = self._restsearch_events_for_name(event_name)
@@ -1996,6 +2052,37 @@ class MISPWriter:
             logger.error(f"Event creation error: {e}")
             self.stats["errors"] += 1
             return None
+
+    @retry_with_backoff(max_retries=4, base_delay=10.0)
+    def _find_event_id(self, event_name: str) -> Optional[str]:
+        """The id of the event named exactly ``event_name``, or None; never creates one."""
+        return _event_id_exact_from_restsearch_rows(self._restsearch_events_for_name(event_name), event_name)
+
+    def _find_later_parts(self, source: str, date: str, part_ids: List[str]) -> List[str]:
+        """``part_ids`` with the ids of the ``-part2``, ``-part3`` ... events of the source/date that exist (2026-10).
+
+        Called only when part 1 is full (parts fill in order, so a later part exists only then). A failed
+        lookup ends the walk at the parts found so far and creates nothing: a second ``-partN`` must not be
+        opened beside the one the lookup missed, and the push goes on to the last part found.
+        """
+        source = sanitize_value(source, max_length=50)
+        date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        parts = list(part_ids)
+        try:
+            while True:
+                nxt = self._find_event_id(_event_name(source, date, len(parts) + 1))
+                if not nxt:
+                    return parts
+                parts.append(nxt)
+        except Exception as e:
+            logger.warning(
+                "Lookup of the parts of %r failed (%s: %s) — pushing to part %d",
+                _event_name(source, date),
+                type(e).__name__,
+                e,
+                len(parts),
+            )
+            return parts
 
     def _get_zones_to_tag(self, item: Dict) -> List[str]:
         """
@@ -3314,7 +3401,7 @@ class MISPWriter:
                     )
                     continue
 
-            # Get or create event. A transient failure that survives the retry decorator is
+            # Get or create the group's event (2026-10: its last part, see ``_event_split_above``). A transient failure that survives the retry decorator is
             # recorded as a failed batch for this source group; the remaining groups are pushed.
             try:
                 event_id = self._get_or_create_event(source, date)
@@ -3336,11 +3423,35 @@ class MISPWriter:
                 continue
 
             per_event_keys = self._get_existing_attribute_keys(event_id)
+            # 2026-10: part 1 holding the limit means later parts may exist; new attributes go to the last one.
+            # An attribute already in an earlier part of the day must not be added to it: a complete
+            # cross-event listing names it (``checked_first``); without one the earlier parts are listed here.
+            part_ids = [event_id]
+            earlier_keys: set = set()
+            split_above = _event_split_above()
+            # 2026-10: a group with an attribute of a source report (OTX) is not split: the sync links
+            # items per report within one event, and a shared malware/CVE item carries the ids of nearly
+            # every pulse of the day, so no cut keeps the reports whole. It goes to the event as before.
+            if split_above > 0 and any(_attribute_report_ids(a) for a in unique_attrs):
+                split_above = 0
+            if split_above > 0 and len(per_event_keys) >= split_above:
+                part_ids = self._find_later_parts(source, date, part_ids)
+                if len(part_ids) > 1:
+                    if not checked_first:
+                        earlier_keys = set(per_event_keys)
+                        for mid_id in part_ids[1:-1]:
+                            earlier_keys |= self._get_existing_attribute_keys(mid_id)
+                    event_id = part_ids[-1]
+                    per_event_keys = self._get_existing_attribute_keys(event_id)
             before_ct = len(unique_attrs)
-            # Per-event filter (attrs already in THIS event)
+            # Per-event filter (attrs already in THIS event, or in an earlier part of the day)
             after_per_event = [
                 a for a in unique_attrs if _dedup_key(a.get("type"), a.get("value")) not in per_event_keys
             ]
+            if earlier_keys:
+                after_per_event = [
+                    a for a in after_per_event if _dedup_key(a.get("type"), a.get("value")) not in earlier_keys
+                ]
             per_event_skipped = before_ct - len(after_per_event)
             if checked_first:
                 unique_attrs = after_per_event
@@ -3385,7 +3496,50 @@ class MISPWriter:
             #    paginated REST call on large events) — doubling the
             #    prefetch cost on the exact events PR-N4 targets. Reuse
             #    the count we already paid for during dedup.
-            push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
+            #
+            # 2026-10: the last part takes attributes up to ``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE``; the rest
+            # goes to the next parts, each created here, before the push loop writes anything to it, so
+            # a crash leaves full parts and at most an empty one, never attributes without an event.
+            room = max(0, split_above - len(per_event_keys)) if split_above > 0 else len(unique_attrs)
+            if len(unique_attrs) <= room:
+                push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
+            else:
+                chunks = _split_for_parts(unique_attrs, room, split_above)
+                if chunks[0]:
+                    push_queue.append((source, event_id, len(per_event_keys), chunks[0]))
+                part_no = len(part_ids)
+                for n_chunk, chunk in enumerate(chunks[1:], start=1):
+                    part_no += 1
+                    try:
+                        part_event_id = self._get_or_create_event(source, date, part_no)
+                    except _TRANSIENT_HTTP_ERRORS as e:
+                        logger.error(
+                            "Creation of part %d of %s (%s) failed after retries (%s: %s)",
+                            part_no,
+                            source,
+                            date,
+                            type(e).__name__,
+                            e,
+                        )
+                        self.stats["errors"] += 1
+                        part_event_id = None
+                    if not part_event_id:
+                        lost = [a for later in chunks[n_chunk:] for a in later]
+                        total_failed += len(lost)
+                        _note_unstored(lost)
+                        break
+                    logger.info(
+                        "MISP push %s (%s): event %s holds %s attributes (split above %s) — %s go to part %d (event %s)",
+                        source,
+                        date,
+                        part_ids[-1],
+                        len(per_event_keys),
+                        split_above,
+                        len(chunk),
+                        part_no,
+                        part_event_id,
+                    )
+                    push_queue.append((source, part_event_id, 0, chunk))
 
         # Only a true dedup skip: nothing failed (#216: a group whose event lookup/creation failed is
         # counted as failed) and nothing was dropped in conversion (2026-10; a drop that is only

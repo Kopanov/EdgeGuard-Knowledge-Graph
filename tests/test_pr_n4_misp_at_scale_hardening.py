@@ -541,6 +541,9 @@ class TestAdaptiveBatchSizing:
         the default 500)."""
 
         w = self._make_writer()
+        # The event split (EDGEGUARD_MISP_EVENT_SPLIT_ABOVE) would send these items to a new, empty part;
+        # this test is about the tier of one huge event.
+        monkeypatch.setenv("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE", "0")
         # Simulate a huge event: 120K existing attrs
         huge_keys = {("ip-dst", f"10.{i // 65536}.{(i // 256) % 256}.{i % 256}") for i in range(120_000)}
         monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-HUGE")
