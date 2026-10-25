@@ -647,6 +647,57 @@ class TestIncrementalRun:
         )
 
 
+# --------------------------------------------------------------------------- event parts
+class TestEventParts:
+    """The event split (``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE``) on the NVD update path: copies held in a
+    ``-partN`` event are edited like any other, and the run's listing reaches ``push_items`` as
+    ``known_source_keys``, so the additions go to the day's part with room without a further listing."""
+
+    def test_copies_held_in_a_part_are_edited(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        nvd = FakeNvd([nvd_record(c) for c in ALL])
+        part3 = "EdgeGuard-nvd-2026-10-13-part3"
+        misp = SharedFakeMisp([stored_attribute_with_ssvc(c) for c in KNOWN], event_info=part3, clock=NOW.timestamp)
+        status = run(env, nvd, misp, CursorStore())
+
+        edits = dict(misp.edits())
+        assert set(edits) == {stored_attribute(REJECTED)["uuid"], stored_attribute(ANALYSED)["uuid"]}
+        assert {misp.events[misp.by_value(c)["event_id"]] for c in (REJECTED, ANALYSED)} == {part3}
+        assert json.loads(misp.by_value(REJECTED)["comment"][len("NVD_META:") :])["status"] == ["rejected"]
+        assert sorted(misp.added_values()) == [KEV_OLD, NEW]
+        today = f"EdgeGuard-nvd-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        assert {misp.events[misp.by_value(c)["event_id"]] for c in (KEV_OLD, NEW)} == {today}
+        assert status["success"] is True
+        assert {k: status["nvd_incremental"][k] for k in ("added", "updated", "unchanged", "out_of_scope")} == {
+            "added": 2,
+            "updated": 2,
+            "unchanged": 2,
+            "out_of_scope": 1,
+        }
+
+    def test_with_part1_of_the_day_full_the_new_cves_go_to_part2_with_one_listing(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        env.setenv("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE", "3")
+        env.setattr(misp_writer, "_EVENT_SPLIT_MIN", 1)  # small limits keep the fakes small
+        today = f"EdgeGuard-nvd-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        held_today = []  # today's part 1, holding the limit: three CVEs an earlier run of the day added
+        for n in range(3):
+            attr = stored_attribute(REJECTED)
+            attr.update(value=f"CVE-2026-7{n:04d}", uuid=str(uuid.UUID(int=n + 1)), id=str(5000000 + n), event_id="139")
+            held_today.append(attr)
+        misp = FakeMisp([stored_attribute_with_ssvc(c) for c in KNOWN] + held_today)
+        misp.events["139"] = today
+        status = run(env, FakeNvd([nvd_record(c) for c in ALL]), misp, CursorStore())
+
+        assert sorted(misp.added_values()) == [KEV_OLD, NEW]
+        assert {misp.events[misp.by_value(c)["event_id"]] for c in (KEV_OLD, NEW)} == {f"{today}-part2"}
+        assert sum(1 for a in misp.attributes if a["event_id"] == "139") == 3, "part 1 takes nothing more"
+        assert len(misp.listings()) == 1, "push_items reuses the run's listing"
+        listed_events = [b["eventid"] for p, b in misp.posts if p == "/attributes/restSearch" and "eventid" in b]
+        assert listed_events == ["139"], "only part 1 is listed; the part the additions open is not"
+        assert len(dict(misp.edits())) == 2 and status["success"] is True
+
+
 # --------------------------------------------------------------------------- baseline and cursor
 class TestBaselineSeedsTheCursor:
     def _baseline(self, env, misp, store, checkpoint=None):

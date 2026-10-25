@@ -415,6 +415,62 @@ class TestFailures:
         assert push(misp, threatfox + items(50, offset=1000)) == (5, 50)
         assert sizes(misp)[f"{BASE}-part3"] == 100
 
+    @pytest.mark.parametrize("dedup", [True, False], ids=["dedup-on", "dedup-off"])
+    def test_a_failed_part_lookup_without_a_complete_listing_writes_nothing_of_the_group(
+        self, monkeypatch, caplog, dedup
+    ):
+        # part 1 left short (a failed batch) with parts 2 and 3 present; the source-tag listing answers 500 and
+        # the lookup of part 3 fails after its retries. The 10 values part 3 holds must not go to part 1 again.
+        monkeypatch.setattr(misp_writer, "MISP_CROSS_EVENT_DEDUP", dedup)
+        misp = FakeMisp(
+            existing(80, "200") + existing(100, "201", offset=500) + existing(40, "202", offset=900), event_info=BASE
+        )
+        misp.events.update({"201": f"{BASE}-part2", "202": f"{BASE}-part3"})
+        fail_when(misp, lambda p, b: p == "/attributes/restSearch" and "tags" in b, Response(500, {"errors": "x"}))
+        fail_when(
+            misp,
+            lambda p, b: p == "/events/restSearch" and str(b.get("eventinfo", "")).endswith("-part3"),
+            Response(500, {"errors": "x"}),
+        )
+        held_by_part3 = [
+            {"indicator_type": "ipv4", "value": a["value"], "tag": "urlhaus", "zone": ["global"]}
+            for a in existing(10, "202", 900)
+        ]
+        threatfox = [dict(i, tag="threatfox") for i in items(5, offset=9000)]
+        writer = writer_for(misp)
+        with caplog.at_level("ERROR", logger=misp_writer.logger.name):
+            assert writer.push_items(held_by_part3 + threatfox) == (5, 10)
+        assert writer.last_push_unstored_items == list(range(10))
+        assert any(
+            r.levelname == "ERROR" and "10 attribute(s) counted as failed, nothing written" in r.getMessage()
+            for r in caplog.records
+        )
+        assert no_duplicates(misp)
+        assert sizes(misp) == {
+            BASE: 80,
+            f"{BASE}-part2": 100,
+            f"{BASE}-part3": 40,
+            f"EdgeGuard-threatfox-{TODAY}": 5,
+        }
+
+    def test_a_failed_part_lookup_with_a_complete_listing_still_writes_to_the_parts_found(self, monkeypatch):
+        # the complete cross-event listing names every attribute of every part, so the parts found take what fits
+        # them; only the overflow, which would need the part the lookup missed, counts as failed
+        monkeypatch.setattr(misp_writer, "MISP_CROSS_EVENT_DEDUP", True)
+        misp = FakeMisp(
+            existing(80, "200") + existing(100, "201", offset=500) + existing(40, "202", offset=900), event_info=BASE
+        )
+        misp.events.update({"201": f"{BASE}-part2", "202": f"{BASE}-part3"})
+        fail_when(
+            misp,
+            lambda p, b: p == "/events/restSearch" and str(b.get("eventinfo", "")).endswith("-part3"),
+            Response(500, {"errors": "x"}),
+        )
+        writer = writer_for(misp)
+        assert writer.push_items(items(30, offset=5000)) == (20, 10)
+        assert writer.last_push_unstored_items == list(range(20, 30))
+        assert sizes(misp) == {BASE: 100, f"{BASE}-part2": 100, f"{BASE}-part3": 40}
+
     def test_failed_part_creation_fails_its_later_parts_too(self):
         misp = FakeMisp([], event_info=BASE)
         fail_when(

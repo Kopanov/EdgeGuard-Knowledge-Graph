@@ -52,8 +52,14 @@ from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
 # ``neo4j`` with mocks when it is collected first; the modules below then cache the mocks at import
 # (``source_truthful_timestamps._NEO4J_TEMPORAL_TYPES``, ``query_api._neo4j_time``). Only in that
 # case are the stubs removed and those modules imported afresh, so the usual collection order keeps
-# the module objects every other test module already holds.
-if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j" or k.startswith("neo4j.")):
+# the module objects every other test module already holds. A module imported while the stubs were
+# in place is imported afresh also when another test module has removed the stubs since.
+_cached_stub = getattr(sys.modules.get("source_truthful_timestamps"), "_NEO4J_TEMPORAL_TYPES", None) == () or (
+    isinstance(getattr(sys.modules.get("query_api"), "_neo4j_time", None), MagicMock)
+)
+if _cached_stub or any(
+    isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j" or k.startswith("neo4j.")
+):
     clear_graphql_api_magicmock_stubs()
     for _cached in ("source_truthful_timestamps", "stix_exporter", "query_api", "graphql_api"):
         sys.modules.pop(_cached, None)
@@ -719,11 +725,13 @@ class TestDigestTypeFilter:
             ("sslbl", "ssl_blacklist"),
             ("cisa", "cisa_kev"),
             ("partner_feed", "partner_feed"),
+            ("Partner_Feed", "partner_feed"),
         ],
     )
     def test_rest_indicators_source_filter_resolves_a_variant(self, monkeypatch, requested, matched):
         """2026-10-25: a node's ``source`` list holds canonical ids, so ``?source=`` resolves a variant
-        the way the writers do; a name the registry does not know is compared as given."""
+        the way the writers do; a name the registry does not know is stripped and lowercased, as the
+        writers store it."""
         session = _Session([("RETURN count(n) as total", _Result(single={"total": 0}))])
         client = _rest(monkeypatch, session)
         assert client.get(f"/indicators?source={requested}").status_code == 200

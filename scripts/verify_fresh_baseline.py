@@ -1289,7 +1289,7 @@ def run_checks(
     rep.add("cve_epss_and_ssvc", epss_ok, r, mandatory=False)
 
     # 15. Per-source presence (2026-10): the ``SOURCED_FROM`` count of every ``Source`` node (the
-    #     rows of 12c; alias nodes such as ``otx`` or ``cisa`` are listed too). A source collected by
+    #     rows of 12c; an alias node, which fails 12d, is listed too). A source collected by
     #     default that delivered nothing is a warning, not a failure: an upstream outage skips its
     #     collector without failing the run, and the collector's task log says why. A keyed source
     #     is skipped by design without its API key, a flag-guarded one without its flag (judged by

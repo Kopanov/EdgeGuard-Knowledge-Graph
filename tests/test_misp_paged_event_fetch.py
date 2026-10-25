@@ -49,6 +49,12 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# tests/test_graphql_api.py replaces neo4j_client (and neo4j, pymisp) with MagicMocks when it is collected first.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j_client" or k.startswith("neo4j")):
+    clear_graphql_api_magicmock_stubs()
+
 import run_misp_to_neo4j  # noqa: E402
 import source_trust  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync, MispTransientServerError, misp_event_object_to_event_dict  # noqa: E402
