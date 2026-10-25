@@ -171,14 +171,16 @@ NEO4J_SYNC_EVERY = timedelta(days=3)
 #     ``baseline_postcheck``, ``baseline_complete`` and ``baseline_release_lock`` 49 min with their
 #     retries: 16 h 49 min), so no scheduled sync starts during or just after the baseline's own chain;
 #   * it is shorter than the shortest gap a regular run sees: the previous sync may have started as late
-#     as 16 h 10 min after its run was due (its third attempt, after two 8 h attempts and two 5 min
-#     retry delays) plus 32 min of ``check_sync_needed`` and ``neo4j_health_check`` attempts, which
-#     leaves 55 h 18 min of the 72 h. A regular run is therefore never skipped; the former 71 h guard
-#     (``NEO4J_SYNC_INTERVAL`` minus ``EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN``) skipped the run after a
-#     sync that succeeded on a retry and the run at most month ends;
+#     as 16 h 10 min after its run was due (its third attempt, after two 8 h attempts at the default
+#     limit and two 5 min retry delays) plus 32 min of ``check_sync_needed`` and ``neo4j_health_check``
+#     attempts, which leaves 55 h 18 min of the 72 h. This holds for every limit up to the 22 h cap of
+#     ``EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS``: 44 h 10 min plus 32 min leave 27 h 18 min. A regular run
+#     is therefore never skipped; the former 71 h guard (``NEO4J_SYNC_INTERVAL`` minus
+#     ``EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN``) skipped the run after a sync that succeeded on a retry
+#     and the run at most month ends;
 #   * after a baseline or a forced sync the next scheduled sync starts at most 24 h + 72 h = 96 h later
-#     (before: up to 143 h), which with the sync task's longest run bounds EdgeGuardNeo4jSyncStale
-#     (prometheus/alerts.yml).
+#     (before: up to 143 h), which with the sync task's longest run at the default limit bounds
+#     EdgeGuardNeo4jSyncStale (prometheus/alerts.yml).
 NEO4J_SYNC_MIN_GAP = timedelta(hours=24)
 
 # Configure logging
@@ -1658,22 +1660,28 @@ def run_neo4j_sync(**context):
                 logger.debug("Could not check SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
 
         _attempt = getattr(context.get("ti") or context.get("task_instance"), "try_number", None)
+        # The limit in force for this attempt (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS when the DAG file was parsed).
+        _limit = getattr(context.get("task"), "execution_timeout", None)
+        _limit_note = f", task limit {_limit.total_seconds() / 3600:g} h" if isinstance(_limit, timedelta) else ""
         if is_first_run:
             logger.info(
-                "Sync mode: FULL — first sync run (no state file %s); loading all MISP history (attempt %s)",
+                "Sync mode: FULL — first sync run (no state file %s); loading all MISP history (attempt %s)%s",
                 state_file,
                 _attempt,
+                _limit_note,
             )
         elif not incremental:
             logger.info(
                 "Sync mode: FULL — requested by the Airflow Variable NEO4J_FULL_SYNC=true; the flag is "
-                "cleared only after this full sync succeeds, so a retry runs in full again (attempt %s)",
+                "cleared only after this full sync succeeds, so a retry runs in full again (attempt %s)%s",
                 _attempt,
+                _limit_note,
             )
         else:
             logger.info(
-                "Sync mode: incremental — state file present and NEO4J_FULL_SYNC not set (attempt %s)",
+                "Sync mode: incremental — state file present and NEO4J_FULL_SYNC not set (attempt %s)%s",
                 _attempt,
+                _limit_note,
             )
 
         # Window fix (same bug family as the 2026-06 skip fix of
@@ -2085,8 +2093,14 @@ neo4j_sync_dag = DAG(
     max_active_runs=1,
     # 2026-10 (was 22 h): worst case as for the other DAGs, every task of the chain failing on all
     # three attempts (execution_timeout × 3 + 2 retry delays of 5 min): check_sync_needed and
-    # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (8 h limit), build_relationships and
-    # run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
+    # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (default 8 h limit), build_relationships
+    # and run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
+    # run_neo4j_sync's limit is EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger
+    # value uses 22); this arithmetic and the alert thresholds are derived from the default 8 h. Above
+    # 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a late
+    # build_relationships or run_enrichment_jobs is then cut (marked skipped, without a failure
+    # callback), while the 22 h cap keeps all three sync attempts and the 24 h guard inside the limits
+    # (see _NEO4J_SYNC_TIMEOUT_MAX_HOURS).
     # A requested full sync keeps its flag until it succeeds, so it may need all three attempts. 68 h
     # is below the 72 h interval, so a run has ended before the next one is due.
     dagrun_timeout=timedelta(hours=68),
@@ -2136,6 +2150,50 @@ neo4j_preflight_task = PythonOperator(
     dag=neo4j_sync_dag,
 )
 
+
+# The limit of one run_neo4j_sync attempt. 22 h at most: three attempts, two 5 min retry delays and the
+# worst case of check_sync_needed and neo4j_health_check (32 min) must end inside the 68 h dagrun_timeout
+# (3 × 22 h + 10 min + 32 min = 66 h 42 min; 23 h would need 69 h 42 min), and the 24 h skip guard must
+# stay below the gap to the next 72 h run (72 h − (2 × (22 h + 5 min) + 32 min) = 27 h 18 min).
+_NEO4J_SYNC_TIMEOUT_DEFAULT_HOURS = 8
+_NEO4J_SYNC_TIMEOUT_MAX_HOURS = 22
+
+
+def _neo4j_sync_timeout_hours() -> int:
+    """``EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`` in whole hours (default 8, at most 22).
+
+    - Unset or empty (or only whitespace): the default, without a warning.
+    - Not a whole number or below 1: a warning and the default.
+    - Above 22: a warning and 22. The cap is applied before ``timedelta``, so a huge value cannot
+      raise ``OverflowError`` while the DAG file is parsed.
+    """
+    raw = (os.getenv("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS") or "").strip()
+    if not raw:
+        return _NEO4J_SYNC_TIMEOUT_DEFAULT_HOURS
+    try:
+        hours = int(raw)
+    except ValueError:
+        hours = 0
+    if hours < 1:
+        logger.warning(
+            "Invalid EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS=%r (expected whole hours from 1 to %d) — using %d",
+            raw,
+            _NEO4J_SYNC_TIMEOUT_MAX_HOURS,
+            _NEO4J_SYNC_TIMEOUT_DEFAULT_HOURS,
+        )
+        return _NEO4J_SYNC_TIMEOUT_DEFAULT_HOURS
+    if hours > _NEO4J_SYNC_TIMEOUT_MAX_HOURS:
+        logger.warning(
+            "EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS=%r is above %d — using %d (three attempts must end inside the "
+            "68 h dagrun_timeout)",
+            raw,
+            _NEO4J_SYNC_TIMEOUT_MAX_HOURS,
+            _NEO4J_SYNC_TIMEOUT_MAX_HOURS,
+        )
+        return _NEO4J_SYNC_TIMEOUT_MAX_HOURS
+    return hours
+
+
 run_neo4j_sync_task = PythonOperator(
     task_id="run_neo4j_sync",
     python_callable=run_neo4j_sync,
@@ -2143,9 +2201,15 @@ run_neo4j_sync_task = PythonOperator(
     # estimated at about 6 h on a 730-day MISP (the baseline DAG's ``full_neo4j_sync`` has 6 h, see the
     # baseline dagrun_timeout comment). At 4 h such a sync timed out and its retries ran incrementally;
     # now the request is kept until a full sync succeeds, so a limit at the estimate itself could fail
-    # every attempt of every scheduled run. 8 h is the estimate plus a third. Incremental runs take
-    # minutes; the limit only bounds a hung one.
-    execution_timeout=timedelta(hours=8),
+    # every attempt of every scheduled run. 8 h is the estimate plus a third. An incremental run takes
+    # minutes on a local Neo4j, but hours against a remote one with many changed events (a prod sync at
+    # about 0.9 NVD CVE/s, one event with 21,887 changed CVEs, took 8 h 37 min), so the limit is
+    # EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger value uses 22, an invalid one
+    # 8, both with a warning). The 68 h arithmetic and the alert thresholds are derived from the default
+    # 8 h; above 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a
+    # late build_relationships or run_enrichment_jobs is then cut (marked skipped, without a failure
+    # callback), while the 22 h cap keeps all three sync attempts and the 24 h guard inside the limits.
+    execution_timeout=timedelta(hours=_neo4j_sync_timeout_hours()),
     # 2026-10: after the last attempt, alert when NEO4J_FULL_SYNC is still set (incremental syncs suspended).
     on_failure_callback=_on_neo4j_sync_failure,
     dag=neo4j_sync_dag,
@@ -3003,7 +3067,7 @@ def run_baseline_full_sync(**context):
     # 2026-10: the scheduled sync derives its window from this file. Without a stamp it ran a full
     # sync after the baseline (no file) or treated every attribute since the previous baseline as
     # changed (a stale file): the baseline's full sync (about 6 h) again, within the scheduled task's
-    # own 8 h limit (4 h before 2026-10).
+    # own limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, 8 h by default; 4 h before 2026-10).
     import json
 
     state_file = get_state_file()

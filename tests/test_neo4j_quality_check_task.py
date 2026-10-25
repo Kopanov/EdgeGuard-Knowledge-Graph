@@ -8,7 +8,7 @@ returns [] on a terminal error (a Cypher syntax error, a non-retryable ``Databas
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import inspect
 import logging
 import os
@@ -49,8 +49,11 @@ def _import_dag_module():
 def dag_module():
     try:
         return _import_dag_module()
-    except Exception:
-        pytest.skip("Airflow not installed in this test env")
+    except Exception as e:
+        # Skip only where Airflow is not installed: with Airflow present an import error is a failure.
+        if importlib.util.find_spec("airflow") is not None:
+            raise
+        pytest.skip(f"Airflow not installed in this test env: {e}")
 
 
 class _FakeClient:

@@ -250,6 +250,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Pause before retrying events that failed |
 | `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | `500` | Parsed items merged per chunk |
 | `EDGEGUARD_REL_BATCH_SIZE` | `500` | Relationships per Neo4j write batch |
+| `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` | `8` | Hours before Airflow stops the `run_neo4j_sync` task (per attempt), whole hours from 1 to 22: a larger value uses 22, an invalid one 8, both with a warning. Below about 6 h (the full-sync estimate) a requested `NEO4J_FULL_SYNC` can fail every attempt of every run. The 68 h `dagrun_timeout` of `edgeguard_neo4j_sync`, `EdgeGuardNeo4jSyncStale` (122 h) and the margin of the 24 h skip guard are derived from the default: above 12 h a run in which every task fails on all attempts exceeds the 68 h, which then cuts the late tasks; with a limit of N h above 8, raise that alert's threshold in `prometheus/alerts.yml` (439200 + 10800 × (N − 8) seconds) or expect that warning during a retried sync |
 | `EDGEGUARD_NEO4J_READ_TIMEOUT` | `3600` | Transaction timeout of pipeline statements (s) |
 | `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` | `900` | Read timeout of one MISP event delete |
 | `EDGEGUARD_QUERY_PAUSE_SECONDS` | `0` | Pause between Neo4j chunks (at most 60) |
@@ -454,6 +455,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-10-25 — Row for `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8): an incremental sync to a remote prod Neo4j took 8 h 37 min, over the fixed 8 h limit of `run_neo4j_sync`; whole hours from 1 to 22 (a larger value uses 22, an invalid one 8, both with a warning), and the row states the full-sync floor and the alert threshold to raise with a larger limit.
 - 2026-10-25 — `NEO4J_HTTP` is read only by the host scripts and no service reads it: the sync DAG's `check_neo4j_quality` task counts nodes through `Neo4jClient` (`NEO4J_URI`), and Compose no longer passes `NEO4J_HTTP` (default `http://neo4j:7474`) to the containers.
 - 2026-10-25 — `THREATFOX_API_KEY` is the key of the URLhaus and MalwareBazaar v2 exports too (the keyless downloads answer HTTP 410 since 2026-10); `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `urlhaus` and `malwarebazaar` (a listed one that is switched off is also an error in `edgeguard preflight`); `EDGEGUARD_URLHAUS_MAX_PER_RUN` default 100,000 (was 50,000), above the about 63,000 URLs of the export on 2026-10-24.
 - 2026-10-25 — Row for `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000): larger MISP events are fetched as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 instead of one `/events/view`, which the hosted MISP answered with HTTP 500 for a 145k-attribute event on 2026-10-24.

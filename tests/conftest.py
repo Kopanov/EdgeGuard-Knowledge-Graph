@@ -28,6 +28,10 @@ if not os.getenv("MISP_API_KEY"):
 # explicit here; tests that exercise prod semantics set and restore the variable themselves.
 os.environ.setdefault("EDGEGUARD_ENV", "dev")
 
+# Read when the DAG file is parsed (the ``run_neo4j_sync`` limit): a value exported in the developer's
+# shell would change every module-scoped DAG load. Tests that need a value set it with monkeypatch.
+os.environ.pop("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", None)
+
 
 @pytest.fixture(autouse=True)
 def _edgeguard_required_env(monkeypatch):

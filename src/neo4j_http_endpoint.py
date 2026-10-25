@@ -8,8 +8,9 @@ Neo4j:
 
 - the address is ``NEO4J_HTTP_URL``, then ``NEO4J_HTTP`` (the name ``.env.example`` uses for the
   same endpoint); a set value must be an ``http://`` or ``https://`` URL with a host, a numeric
-  port from 0 to 65535 when it names one, and no space or control character. Any other is refused (:class:`Neo4jHttpEndpointError`) before a request is built,
-  so the scripts exit 2 instead of failing in ``urllib`` with ``http.client.InvalidURL``;
+  port from 0 to 65535 when it names one, and no space or control character. Any other is
+  refused (:class:`Neo4jHttpEndpointError`) before a request is built, so the scripts exit 2
+  instead of failing in ``urllib`` with ``http.client.InvalidURL``;
 - with neither set (or both empty) it is :data:`LOCAL_COMPOSE_HTTP_URL`, the HTTP port the
   ``neo4j`` service of ``docker-compose.yml`` publishes on host loopback. There is no remote
   default;

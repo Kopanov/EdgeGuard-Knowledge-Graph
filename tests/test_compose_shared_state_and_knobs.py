@@ -3,6 +3,7 @@ their defaults, the environment name, and the Neo4j database name reaching the s
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -72,6 +73,7 @@ AIRFLOW_KNOBS = [
     ("EDGEGUARD_MISP_EVENT_LOCK_PATH", "/tmp/edgeguard_misp_get_or_create_event.lock"),
     ("EDGEGUARD_MAX_EVENT_ATTRIBUTES", "50000"),
     ("EDGEGUARD_MISP_PAGED_FETCH_ABOVE", "20000"),
+    ("EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS", "8"),
     ("EDGEGUARD_MISP_PAGE_SIZE", "500"),
     ("EDGEGUARD_MISP_MAX_PAGES", "100"),
     ("EDGEGUARD_MISP_RETRY_COOLDOWN_SEC", "15.0"),
@@ -140,6 +142,21 @@ class TestKnobForwarding:
             m = re.search(caster + r'\(os\.(?:getenv|environ\.get)\("' + name + r'",\s*"([^"]+)"\)\)', src)
             assert m, f"{name}: expected {caster}(os.getenv(..., default)) in run_misp_to_neo4j.py"
             assert _default_of(env[name], name) == m.group(1), f"{name}: compose default drifted from the code default"
+
+    def test_sync_timeout_default_matches_the_dag(self):
+        # The DAG's default constant (tests/test_neo4j_full_sync_request.py checks that an unset variable
+        # gives the run_neo4j_sync task this limit).
+        tree = ast.parse((_ROOT / "dags" / "edgeguard_pipeline.py").read_text())
+        defaults = [
+            ast.literal_eval(node.value)
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and [getattr(t, "id", None) for t in node.targets] == ["_NEO4J_SYNC_TIMEOUT_DEFAULT_HOURS"]
+        ]
+        assert len(defaults) == 1, "expected one module-level _NEO4J_SYNC_TIMEOUT_DEFAULT_HOURS in the DAG file"
+        env = _compose()["services"]["airflow"]["environment"]
+        name = "EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS"
+        assert _default_of(env[name], name) == str(defaults[0])
 
     def test_cors_default_matches_both_api_modules(self):
         default = _default_of(_compose()["x-common-env"]["EDGEGUARD_CORS_ORIGINS"], "EDGEGUARD_CORS_ORIGINS")
