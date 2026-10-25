@@ -166,6 +166,23 @@ class TestWritersResolveAliases:
         upserts = [p for q, p in client.driver.runs if "MERGE (n)-[r:SOURCED_FROM]->(s)" in q]
         assert [p["source_id"] for p in upserts] == ["ssl_blacklist"]
 
+    def test_single_item_node_provenance_names_the_canonical_source(self):
+        """The node's own provenance (``n.source`` default, ``n.last_imported_from``, the report
+        source) names the ``Source`` node its edge reaches, as the batch writer's does."""
+        record = {"indicator_type": "domain", "value": "example.test", "zone": ["global"], "tag": "sslbl"}
+        single = _client()
+        assert single.merge_indicator(dict(record), source_id="sslbl")
+        ((query, params),) = [r for r in single.driver.runs if "MERGE (n:Indicator" in r[0]]
+        assert "n.last_imported_from = $source_id" in query
+        assert params["source_id"] == "ssl_blacklist"
+        assert params["source_array"] == ["ssl_blacklist"]
+
+        batch = _client()
+        assert batch.merge_indicators_batch([dict(record)], source_id="sslbl") == (1, 0)
+        ((_, batch_params),) = [r for r in batch.driver.runs if "UNWIND $batch as item" in r[0]]
+        (row,) = batch_params["batch"]
+        assert (row["source_id"], row["source_array"]) == (params["source_id"], params["source_array"])
+
     def test_link_to_source(self):
         client = _client()
         assert client.link_to_source("Indicator", {"value": "203.0.113.12"}, "vt") is True

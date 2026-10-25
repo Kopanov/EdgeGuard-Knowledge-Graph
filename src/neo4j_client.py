@@ -2568,6 +2568,9 @@ class Neo4jClient:
         if not self.driver:
             logger.error("Cannot merge node: no connection")
             return False
+        # The canonical id, as in the batch writers: the node's ``source`` default, ``last_imported_from``
+        # and report source name the ``Source`` node its ``SOURCED_FROM`` edge reaches (``SOURCES`` above).
+        source_id = source_registry.canonical_source_id(source_id) or source_id
 
         # 2026-10-16: refused before the statement is built, so a caller that bypasses the ranking fails
         # loudly instead of being logged as a terminal write error.
