@@ -1305,10 +1305,15 @@ def run_checks(
     #      with members and no comparable stored first_seen, or no comparable last_seen while an edge
     #      gives one of its members a last date. Informational without a defect while no member is dated
     #      by an edge: no member at all, every member edge written after the build, or no member edge
-    #      with a report date and an update time (after a baseline, a writer defect).
+    #      with a report date and an update time (after a baseline, a writer defect). Without a member
+    #      the verdict does not read the defect counts at all.
     r = _one(CAMPAIGN_SEEN_DATES_CHECK_QUERY)
-    seen_dates_clean = r.get("first_seen_after_members") == 0 and r.get("last_seen_before_members") == 0
-    seen_dates_ok = (True if r.get("edge_dated_members") else None) if seen_dates_clean else False
+    seen_dates_ok: Optional[bool] = None
+    if r.get("members"):
+        if r.get("first_seen_after_members") != 0 or r.get("last_seen_before_members") != 0:
+            seen_dates_ok = False
+        elif r.get("edge_dated_members"):
+            seen_dates_ok = True
     rep.add("campaign_seen_dates_cover_members", seen_dates_ok, r)
 
     # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from

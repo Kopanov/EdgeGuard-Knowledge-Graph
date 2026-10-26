@@ -408,6 +408,21 @@ def test_an_indicator_no_source_dated_takes_its_own_times(client, raw_driver):
     assert _alert_dates(client, value) == (imported, written)
 
 
+def test_the_acceptance_check_on_a_graph_without_campaigns(client, raw_driver):
+    """Check 13e before any build: one row of zero counts (Neo4j's sum over no rows is 0, not null), which
+    the script reports as informational."""
+    assert _acceptance(raw_driver) == {
+        "campaigns": 0,
+        "members": 0,
+        "edge_dated_members": 0,
+        "campaigns_without_edge_dated_member": 0,
+        "campaigns_without_edge_dated_member_names": [],
+        "first_seen_after_members": 0,
+        "last_seen_before_members": 0,
+        "examples": [],
+    }
+
+
 def test_the_acceptance_check_passes_after_a_build_and_a_later_sync_leaves_it_passing(client, raw_driver):
     """Check 13e on a campaign the build dated passes. A source that reports a member after the build,
     with a first-seen claim earlier than the campaign's first seen, leaves it passing (the cutoff keeps

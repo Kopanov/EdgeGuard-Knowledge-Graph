@@ -1509,6 +1509,27 @@ class TestCampaignSeenDates:
         rep = _run(vfb, monkeypatch, override=lambda st, rows: [empty] if "AS first_seen_after_members" in st else rows)
         assert _check(rep, "campaign_seen_dates_cover_members")["ok"] is None and rep.failed == []
 
+    def test_informational_without_members_whatever_the_counts(self, vfb, monkeypatch):
+        # Without a member the defect counts are not read: an empty answer (no row) and null sums stay
+        # informational (Neo4j returns 0 for a sum over no rows; tests/test_campaign_seen_dates_neo4j.py).
+        for empty in (
+            {},
+            dict(_CAMPAIGN_SEEN_DATES_ROW, campaigns=0, members=0, edge_dated_members=None),
+            dict(
+                _CAMPAIGN_SEEN_DATES_ROW,
+                members=None,
+                edge_dated_members=None,
+                first_seen_after_members=None,
+                last_seen_before_members=None,
+            ),
+        ):
+            rep = _run(
+                vfb,
+                monkeypatch,
+                override=lambda st, rows, e=empty: [e] if "AS first_seen_after_members" in st else rows,
+            )
+            assert _check(rep, "campaign_seen_dates_cover_members")["ok"] is None and rep.failed == [], empty
+
     def test_informational_while_no_member_is_dated_by_an_edge(self, vfb, monkeypatch):
         # Every member edge written after the build: a member dates only by its first import, which a
         # campaign dated by the import time also covers, so no defect is no pass either.
