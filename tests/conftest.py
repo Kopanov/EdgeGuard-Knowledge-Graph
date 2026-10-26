@@ -97,6 +97,71 @@ def _baseline_checkpoint_outside_the_repo(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _pipeline_lock_outside_the_repo(monkeypatch, tmp_path_factory):
+    """Keep the CLI pipeline lock out of ``<repo>/checkpoints`` (2026-10-25).
+
+    ``EdgeGuardPipeline.run`` takes ``checkpoints/pipeline.lock`` for the length of the run. A test
+    that runs the pipeline took the lock in the checkout: with a developer's pipeline running there,
+    the test failed; with a lock left by a pipeline that died, the test removed it; and a pipeline
+    started while the test held it refused to run. The run reads ``lock_files.PIPELINE_LOCK_PATH``
+    when it starts; each test gets its own path under the session's temporary directory (nothing is
+    created unless a test runs the pipeline).
+    """
+    import lock_files
+
+    path = tmp_path_factory.getbasetemp() / "pipeline_lock" / f"{uuid.uuid4().hex}.lock"
+    monkeypatch.setattr(lock_files, "PIPELINE_LOCK_PATH", str(path))
+
+
+@pytest.fixture(autouse=True)
+def _state_dir_outside_the_repo(monkeypatch, tmp_path_factory):
+    """Keep the shared state files out of ``<repo>/state`` (2026-10-25).
+
+    ``EDGEGUARD_STATE_DIR`` (default ``<repo>/state``) holds the start time of the last Neo4j sync,
+    which ``should_run_neo4j_sync`` reads to skip a sync less than 24 hours after it, and other files
+    shared across task runs. A test that runs the baseline sync task with a mocked sync wrote the
+    time of the test run there, so an Airflow run from the checkout would skip its next scheduled
+    sync. Each test gets its own directory under the session's temporary directory (the writer of a
+    file creates it); tests of these files set their own directory, which overrides this one, and
+    tests of the default unset the variable.
+    """
+    path = tmp_path_factory.getbasetemp() / "state" / uuid.uuid4().hex
+    monkeypatch.setenv("EDGEGUARD_STATE_DIR", str(path))
+
+
+@pytest.fixture(autouse=True)
+def _destructive_ops_audit_outside_the_repo(monkeypatch, tmp_path_factory):
+    """Keep the destructive-operations audit trail out of ``<repo>/logs`` (2026-10-25).
+
+    ``destructive_ops_audit.record_destructive_op`` appends one line per wipe, CVSS de-duplication or
+    ``Source`` removal to ``EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH``, default ``logs/destructive_ops.jsonl``
+    under the working directory, which is the checkout in a test run. The tests that run a wipe
+    against a mocked driver appended lines such as ``clear_edgeguard_managed`` with ``affected: 25000``
+    and the developer's user and host to the trail of a local instance. Each test gets its own path
+    under the session's temporary directory (nothing is created unless a test records a line); tests
+    of the trail set their own path, which overrides this one.
+    """
+    path = tmp_path_factory.getbasetemp() / "destructive_ops_audit" / f"{uuid.uuid4().hex}.jsonl"
+    monkeypatch.setenv("EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH", str(path))
+
+
+@pytest.fixture(autouse=True)
+def _pipeline_metrics_outside_the_repo(monkeypatch, tmp_path_factory):
+    """Keep the pipeline metrics file out of ``<repo>/data`` (2026-10-25).
+
+    ``metrics.PipelineMetrics`` keeps its runs in ``metrics.DEFAULT_METRICS_FILE``
+    (``<repo>/data/metrics.json``), which ``edgeguard stats`` reads, and creates the directory when
+    it is constructed. A test that constructs one left an empty ``data/`` in the checkout and read a
+    developer's metrics file when there was one. Each test gets its own path under the session's
+    temporary directory (the constructor creates its directory; only ``save`` writes the file).
+    """
+    import metrics
+
+    path = tmp_path_factory.getbasetemp() / "pipeline_metrics" / uuid.uuid4().hex / "metrics.json"
+    monkeypatch.setattr(metrics, "DEFAULT_METRICS_FILE", str(path))
+
+
+@pytest.fixture(autouse=True)
 def _reset_source_trust_env(monkeypatch):
     """PR #44 audit M4 (Bug Hunter / Maintainer Dev): reset
     ``source_trust`` module-level allowlists after every test so a

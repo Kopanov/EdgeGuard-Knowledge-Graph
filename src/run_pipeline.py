@@ -900,9 +900,10 @@ class EdgeGuardPipeline:
         # ── Pipeline lock: prevent concurrent CLI runs ──
         # NOTE: This lock only protects CLI invocations (python run_pipeline.py).
         # Airflow DAGs use max_active_runs=1 for concurrency control instead.
-        lock_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
-        os.makedirs(lock_dir, exist_ok=True)
-        lock_path = os.path.join(lock_dir, "pipeline.lock")
+        import lock_files
+
+        lock_path = lock_files.PIPELINE_LOCK_PATH
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
 
         # PR #38 (Bug Hunter Tier S S2): atomic lock acquisition via
         # ``O_CREAT|O_EXCL|O_WRONLY``. The previous TOCTOU pattern —
