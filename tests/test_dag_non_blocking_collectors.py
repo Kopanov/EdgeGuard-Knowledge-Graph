@@ -28,6 +28,8 @@ from __future__ import annotations
 import os
 import sys
 
+from stub_cleanup import dag_module_import
+
 _DAGS = os.path.join(os.path.dirname(__file__), "..", "dags")
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 for _p in (_DAGS, _SRC):
@@ -43,14 +45,11 @@ for _p in (_DAGS, _SRC):
 def _import_dag_module():
     """Defer import — Airflow may not be installed in every test env.
 
-    Mirrors the cleanup in ``test_edgeguard_collector_contract.py``:
-    ``test_graphql_api.py`` registers MagicMock placeholders for
-    ``airflow.*`` (and Airflow 3.2's ``opentelemetry.*`` deps) so GraphQL
-    tests can import without a real Airflow install. If those stubs are
-    still in ``sys.modules`` when we try to import ``edgeguard_pipeline``,
-    the import either fails or pulls in a half-mocked Airflow that
-    breaks the DAG file. Purge before importing so we get the REAL
-    Airflow.
+    Mirrors the cleanup in ``test_edgeguard_collector_contract.py``: purge
+    ``airflow.*`` (and Airflow 3.2's ``opentelemetry.*`` deps) before
+    importing, so the DAG file loads against a freshly imported REAL Airflow
+    and never a half-mocked one. Callers wrap the call in
+    ``stub_cleanup.dag_module_import()``.
     """
     for key in list(sys.modules):
         if (
@@ -73,12 +72,8 @@ def test_transient_error_classifier_recognizes_common_network_errors():
     by class name. Without this, ``URLhausCollector`` raising a
     ``requests.ConnectionError`` would be treated as a hard bug instead
     of a transient external failure."""
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        import pytest
-
-        pytest.skip("Airflow not installed in this test env — skipping DAG-module test")
 
     # Stdlib
     assert ep._is_transient_external_error(ConnectionError("boom"))
@@ -119,12 +114,8 @@ def test_transient_error_classifier_does_not_swallow_real_bugs():
     """A TypeError, ValueError, AttributeError, ImportError etc. must NOT
     be classified as transient — they indicate a real EdgeGuard bug we
     want to surface loudly. Otherwise we'd silently swallow code defects."""
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        import pytest
-
-        pytest.skip("Airflow not installed in this test env")
 
     for exc in (
         TypeError("argument mismatch"),
@@ -147,12 +138,8 @@ def test_transient_error_classifier_recognizes_named_third_party_errors():
     """Even without ``requests`` / ``httpx`` installed, the classifier must
     recognize their exception class names by walking ``type(exc).__mro__``.
     Synthesize fake classes with the canonical names to verify."""
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        import pytest
-
-        pytest.skip("Airflow not installed in this test env")
 
     # The classifier matches on class name strings — simulate every entry
     # in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES and verify each is recognized.
@@ -218,12 +205,8 @@ def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_erro
       - NOT re-raise
       - call set_source_health(..., False) so dashboards show degradation
     """
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        import pytest
-
-        pytest.skip("Airflow not installed in this test env")
 
     from unittest.mock import MagicMock, patch
 
@@ -280,12 +263,8 @@ def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_erro
 def test_run_collector_with_metrics_still_raises_on_real_bugs():
     """Negative pin: a TypeError or ImportError must STILL re-raise. We
     explicitly do NOT want to silently swallow real bugs."""
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        import pytest
-
-        pytest.skip("Airflow not installed in this test env")
 
     from unittest.mock import MagicMock, patch
 
@@ -347,12 +326,8 @@ def test_metric_emission_failure_does_not_break_transient_skip_path():
     transient path STILL returns the success-skipped status dict instead
     of re-raising the bomb.
     """
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        import pytest
-
-        pytest.skip("Airflow not installed in this test env")
 
     from unittest.mock import MagicMock, patch
 
@@ -412,12 +387,8 @@ def test_metric_emission_failure_does_not_mask_catastrophic_exception():
     operator paged on the Slack alert would chase a misleading
     'metric registry failure' instead of the actual TypeError that broke
     the collector."""
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        import pytest
-
-        pytest.skip("Airflow not installed in this test env")
 
     from unittest.mock import MagicMock, patch
 

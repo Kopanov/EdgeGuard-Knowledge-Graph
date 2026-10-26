@@ -58,6 +58,8 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from stub_cleanup import drop_modules_for_test  # noqa: E402
+
 os.environ.setdefault("NEO4J_PASSWORD", "test-pw-pr-n9")
 os.environ.setdefault("MISP_API_KEY", "test-key-pr-n9")
 
@@ -272,15 +274,14 @@ class TestFixBMergeObservability:
 
     # --- Behavioural ---
 
-    def test_behaviour_zero_counters_triggers_error(self, caplog):
+    def test_behaviour_zero_counters_triggers_error(self, caplog, monkeypatch):
         """Given a mocked result whose consume().counters show
         everything at 0 on a non-empty batch, the helper must emit an
         ERROR log."""
         import importlib
         import logging
 
-        if "neo4j_client" in sys.modules:
-            del sys.modules["neo4j_client"]
+        drop_modules_for_test(monkeypatch, "neo4j_client")
         neo4j_client = importlib.import_module("neo4j_client")
 
         # Build a mock result with all-zero counters
@@ -309,14 +310,13 @@ class TestFixBMergeObservability:
             f"expected ineffective-batch ERROR; got: {[r.message for r in caplog.records]}"
         )
 
-    def test_behaviour_nonzero_counters_no_error(self, caplog):
+    def test_behaviour_nonzero_counters_no_error(self, caplog, monkeypatch):
         """Given a mocked result with ANY non-zero counter, the helper
         must NOT emit the ineffective-batch ERROR."""
         import importlib
         import logging
 
-        if "neo4j_client" in sys.modules:
-            del sys.modules["neo4j_client"]
+        drop_modules_for_test(monkeypatch, "neo4j_client")
         neo4j_client = importlib.import_module("neo4j_client")
 
         counters = MagicMock()
@@ -342,13 +342,12 @@ class TestFixBMergeObservability:
             f"ineffective-batch ERROR must NOT fire when writes happened; got: {[r.message for r in ineffective]}"
         )
 
-    def test_behaviour_empty_batch_no_error(self, caplog):
+    def test_behaviour_empty_batch_no_error(self, caplog, monkeypatch):
         """batch_len == 0 is not ineffective (nothing to do). No ERROR."""
         import importlib
         import logging
 
-        if "neo4j_client" in sys.modules:
-            del sys.modules["neo4j_client"]
+        drop_modules_for_test(monkeypatch, "neo4j_client")
         neo4j_client = importlib.import_module("neo4j_client")
 
         counters = MagicMock()
@@ -372,14 +371,13 @@ class TestFixBMergeObservability:
         ineffective = [r for r in caplog.records if "MERGE-INEFFECTIVE" in r.message]
         assert not ineffective, "empty batch must not trigger ineffective-batch ERROR"
 
-    def test_behaviour_consume_exception_swallowed(self, caplog):
+    def test_behaviour_consume_exception_swallowed(self, caplog, monkeypatch):
         """If result.consume() itself raises, the helper must not
         propagate — observability code never breaks production writes."""
         import importlib
         import logging
 
-        if "neo4j_client" in sys.modules:
-            del sys.modules["neo4j_client"]
+        drop_modules_for_test(monkeypatch, "neo4j_client")
         neo4j_client = importlib.import_module("neo4j_client")
 
         result = MagicMock()

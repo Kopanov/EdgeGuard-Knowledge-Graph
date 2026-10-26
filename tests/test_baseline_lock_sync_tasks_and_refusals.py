@@ -38,6 +38,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from stub_cleanup import dag_module_import
 
 import airflow_client
 import baseline_lock
@@ -57,10 +58,8 @@ def _load_dag_module():
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    try:
+    with dag_module_import():
         spec.loader.exec_module(module)
-    except Exception as e:  # pragma: no cover - environment-dependent
-        pytest.skip(f"DAG module not importable in this environment: {e}")
     return module
 
 

@@ -17,10 +17,10 @@ from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
-from stub_cleanup import clear_graphql_api_magicmock_stubs
+from stub_cleanup import clear_graphql_api_magicmock_stubs, dag_module_import
 
-# The driver's real ``DatabaseError``: ``tests/test_graphql_api.py`` stubs ``neo4j`` with mocks when it
-# is collected first; only then are the stubs removed (as in ``tests/test_export_paths.py``).
+# The driver's real ``DatabaseError``: MagicMock placeholders for ``neo4j`` are removed when another test
+# module has left them in ``sys.modules`` (as in ``tests/test_export_paths.py``).
 if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j" or k.startswith("neo4j.")):
     clear_graphql_api_magicmock_stubs()
 
@@ -31,7 +31,7 @@ _LABELS = ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Techn
 
 
 def _import_dag_module():
-    """Purge Airflow stubs other tests leave in ``sys.modules``, then import the real DAG file."""
+    """Purge Airflow from ``sys.modules``, then import the real DAG file against a fresh import of it."""
     for key in list(sys.modules):
         if (
             key == "edgeguard_pipeline"
@@ -50,13 +50,8 @@ def _import_dag_module():
 
 @pytest.fixture
 def dag_module():
-    try:
+    with dag_module_import():
         return _import_dag_module()
-    except Exception as e:
-        # Skip only where Airflow is not installed: with Airflow present an import error is a failure.
-        if importlib.util.find_spec("airflow") is not None:
-            raise
-        pytest.skip(f"Airflow not installed in this test env: {e}")
 
 
 class _FakeClient:

@@ -155,7 +155,7 @@ A run fails on collector errors, on a MISP push success rate below its threshold
 
 **CI safety net**
 
-- Collection-time stubs in `tests/test_graphql_api.py` leave mock modules in `sys.modules`, so in a full run `tests/test_indicator_enrichment_parity.py` skips its check of the batch writer's ATT&CK-id promotion. Planned: the stubs in a fixture, and a session hook that fails when `neo4j_client` is a mock.
+- Nothing fails a run when a test module leaves a mock module, or a second copy of a project module, in `sys.modules`; the tests after it can then pass, fail or skip depending on the file order. Planned: a session hook that fails on either.
 - CI builds no Airflow DagBag, and `scripts/preflight_ci.sh` fails at its DagBag step ([Known defects](#known-defects)). Planned: a DagBag check of every DAG in CI and in the built Airflow image.
 - CI runs neither `promtool` nor `amtool`, and the preflight skips `promtool` when it is not installed. Planned: CI checks and unit-tests the alert rules and checks the Alertmanager configuration.
 - `tests/test_compose_env_forwarding.py` checks a fixed list of variables. Planned: a scan of the code's environment reads against `docker-compose.yml`, which catches a new setting Compose does not forward.
@@ -222,10 +222,11 @@ Defects found in the code; each is fixed in its own change.
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-10-26_
 
 ## History
 
+- 2026-10-26 — CI safety net: the entry for the collection-time stubs of `tests/test_graphql_api.py` is reworded; the stubs are in a fixture that puts `sys.modules` back after that file's tests, and test modules no longer leave second copies of `neo4j_client`, `run_misp_to_neo4j`, `build_relationships`, `enrichment_jobs` or `stix_exporter` behind. Still planned: a session hook that fails when a test module leaves either.
 - 2026-10-25 — OTX event partitioning (was MISP event partitioning): the writer splits every source/date event into `-partN` events of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20,000) attributes except a group with OTX report ids; what remains is report-scoped linking across the parts of a day in the sync, then splitting OTX; Bounded memory names the split instead of planned partitioning.
 - 2026-10-25 — Operational guardrails, live graph invariants: the entry for `check_neo4j_quality` exiting 0 when its query fails is reworded; the task counts nodes through `Neo4jClient` and fails when Neo4j is unreachable or the count query fails, but still checks no invariant.
 - 2026-10-25 — MISP event partitioning: the URLhaus event (about 63,000 URLs on 2026-10-24) named among the events past 50,000 attributes; the writer chooses smaller batches from the event's size before each push, not as the event grows during one push.

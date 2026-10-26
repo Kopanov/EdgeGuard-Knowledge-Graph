@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from stub_cleanup import drop_modules_for_test
 
 import baseline_clean
 import health_check
@@ -32,17 +33,18 @@ import query_api
 _ROOT = Path(__file__).resolve().parents[1]
 
 
-def _real_nats_client():
-    """Import ``nats_client`` against the real ``nats`` package.
+def _real_nats_client(monkeypatch):
+    """Import ``nats_client`` anew against the real ``nats`` package.
 
-    Other test modules register ``MagicMock`` placeholders for ``nats`` in ``sys.modules``; a
-    placeholder is not a package, so ``from nats.aio.client import ...`` fails at import time.
+    A ``MagicMock`` placeholder for ``nats`` in ``sys.modules`` is not a package, so
+    ``from nats.aio.client import ...`` would fail at import time: placeholders are removed first.
+    ``sys.modules`` gets the original ``nats_client`` back after the test.
     """
     for key in list(sys.modules):
-        if key == "nats_client" or key == "nats" or key.startswith("nats."):
-            if key == "nats_client" or isinstance(sys.modules[key], MagicMock):
-                del sys.modules[key]
+        if (key == "nats" or key.startswith("nats.")) and isinstance(sys.modules[key], MagicMock):
+            monkeypatch.delitem(sys.modules, key)
     pytest.importorskip("nats.aio.client")
+    drop_modules_for_test(monkeypatch, "nats_client")
     import nats_client
 
     return nats_client
@@ -240,7 +242,7 @@ class TestRestHealthAndReconnect:
 
 class TestNatsReconnectPolicy:
     def test_connect_requests_unbounded_reconnects_with_callbacks(self, monkeypatch):
-        nats_client = _real_nats_client()
+        nats_client = _real_nats_client(monkeypatch)
         captured: dict = {}
 
         async def fake_connect(**kwargs):
@@ -255,8 +257,8 @@ class TestNatsReconnectPolicy:
         for name in ("disconnected_cb", "reconnected_cb", "error_cb", "closed_cb"):
             assert asyncio.iscoroutinefunction(captured[name]), name
 
-    def test_callbacks_log_state_changes(self, caplog):
-        nats_client = _real_nats_client()
+    def test_callbacks_log_state_changes(self, caplog, monkeypatch):
+        nats_client = _real_nats_client(monkeypatch)
         client = nats_client.NATSClient(["nats://edge:4222"], use_tls=False)
         client.nc = MagicMock(connected_url="nats://edge:4222")
         with caplog.at_level(logging.INFO, logger="nats_client"):

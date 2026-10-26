@@ -27,6 +27,7 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+from stub_cleanup import drop_modules_for_test  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # S7 — cmd_doctor MISP probe must use SSL_VERIFY, not hardcoded False
@@ -133,8 +134,7 @@ def test_graphql_introspection_disabled_in_prod(monkeypatch):
 
     import importlib
 
-    if "graphql_api" in sys.modules:
-        del sys.modules["graphql_api"]
+    drop_modules_for_test(monkeypatch, "graphql_api")
     import graphql_api
 
     importlib.reload(graphql_api)
@@ -145,13 +145,6 @@ def test_graphql_introspection_disabled_in_prod(monkeypatch):
         f"In prod, schema must include AddValidationRules (carrying NoSchemaIntrospectionCustomRule); "
         f"got: {extension_class_names}"
     )
-
-    # Cleanup: reload once more without prod so other tests get back to baseline
-    monkeypatch.delenv("EDGEGUARD_ENV", raising=False)
-    monkeypatch.delenv("EDGEGUARD_API_KEY", raising=False)
-    monkeypatch.delenv("EDGEGUARD_GRAPHQL_HOST", raising=False)
-    if "graphql_api" in sys.modules:
-        del sys.modules["graphql_api"]
 
 
 def test_graphql_introspection_left_on_in_dev(monkeypatch):
@@ -172,8 +165,7 @@ def test_graphql_introspection_left_on_in_dev(monkeypatch):
 
     import importlib
 
-    if "graphql_api" in sys.modules:
-        del sys.modules["graphql_api"]
+    drop_modules_for_test(monkeypatch, "graphql_api")
     import graphql_api
 
     importlib.reload(graphql_api)
@@ -311,13 +303,11 @@ def test_parse_attribute_rejects_oversized_value(monkeypatch):
     monkeypatch.setenv("EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES", "100")
 
     # Defer the heavy imports; bypass __init__ so we don't try to connect to MISP
-    import sys as _sys
 
     # run_misp_to_neo4j requires several deps; if it fails to import in the
     # test env, skip rather than fail
     try:
-        if "run_misp_to_neo4j" in _sys.modules:
-            del _sys.modules["run_misp_to_neo4j"]
+        drop_modules_for_test(monkeypatch, "run_misp_to_neo4j")
         import run_misp_to_neo4j
     except Exception:
         import pytest
@@ -364,14 +354,11 @@ def test_max_attr_value_bytes_is_read_once_at_module_load():
     )
 
 
-def test_parse_attribute_accepts_normal_value():
+def test_parse_attribute_accepts_normal_value(monkeypatch):
     """Negative pin: a normal-sized value (well under 4KB default) must
     parse normally — the cap must not break the happy path."""
-    import sys as _sys
-
     try:
-        if "run_misp_to_neo4j" in _sys.modules:
-            del _sys.modules["run_misp_to_neo4j"]
+        drop_modules_for_test(monkeypatch, "run_misp_to_neo4j")
         import run_misp_to_neo4j
     except Exception:
         import pytest

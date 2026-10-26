@@ -30,6 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 import yaml
+from stub_cleanup import dag_module_import
 
 import source_key_check as skc
 
@@ -839,10 +840,8 @@ def _import_dag_module():
 
 @pytest.fixture
 def dag():
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        pytest.skip("Airflow not installed in this test env")
     names = (
         "ensure_metrics_server",
         "log_circuit_breaker_status",

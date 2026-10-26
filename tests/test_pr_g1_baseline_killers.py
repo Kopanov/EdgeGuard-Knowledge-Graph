@@ -211,11 +211,18 @@ class TestStixAttributeConversionDoesNotCrash:
     and assert we now get back valid STIX 2.1 SDOs instead of a NameError
     or a KeyError one level up."""
 
-    def _make_syncer(self):
-        """Build a MISPToNeo4jSync without touching Neo4j or MISP."""
+    def _make_syncer(self, monkeypatch):
+        """Build a MISPToNeo4jSync without touching Neo4j or MISP.
+
+        The module is imported anew for the test (a reload would replace the classes of the module
+        other test modules imported at collection) and ``sys.modules`` gets the original back."""
         # Avoid importing the whole module's side effects — just the class.
         import importlib
         from unittest.mock import patch
+
+        from stub_cleanup import drop_modules_for_test
+
+        drop_modules_for_test(monkeypatch, "run_misp_to_neo4j")
 
         with (
             patch.dict(
@@ -232,18 +239,17 @@ class TestStixAttributeConversionDoesNotCrash:
             patch("neo4j_client.Neo4jClient") as _,
         ):
             mod = importlib.import_module("run_misp_to_neo4j")
-            importlib.reload(mod)
             # Bypass __init__ to avoid driver wiring — just bind the
             # method off the class.
             syncer = mod.MISPToNeo4jSync.__new__(mod.MISPToNeo4jSync)
             return syncer
 
-    def test_tool_with_empty_tags_returns_valid_stix(self) -> None:
+    def test_tool_with_empty_tags_returns_valid_stix(self, monkeypatch) -> None:
         """Pre-fix: empty ``attr_tags`` meant the old ``for tag in attr_tags``
         loop body never ran, ``tag`` was never bound, and ``"tag": tag``
         raised NameError. Post-fix: branch must return a valid STIX tool
         SDO with id + spec_version + external_references."""
-        syncer = self._make_syncer()
+        syncer = self._make_syncer(monkeypatch)
         attr = {
             "type": "text",
             "value": "S0002: Mimikatz",
@@ -264,14 +270,14 @@ class TestStixAttributeConversionDoesNotCrash:
         refs = result.get("external_references") or []
         assert any(r.get("external_id") == "S0002" and r.get("source_name") == "mitre-attack" for r in refs)
 
-    def test_tactic_with_empty_tags_returns_valid_stix(self) -> None:
+    def test_tactic_with_empty_tags_returns_valid_stix(self, monkeypatch) -> None:
         """Tactic branch was identically broken. Same NameError trigger,
         same KeyError-on-caller.
 
         Bugbot round-2 catch: tactics MUST use STIX type
         ``x-mitre-tactic`` — NOT ``attack-pattern``. The consumer's
         routing for ``attack-pattern`` goes to ``merge_technique``."""
-        syncer = self._make_syncer()
+        syncer = self._make_syncer(monkeypatch)
         attr = {
             "type": "text",
             "value": "TA0001: Initial Access",
@@ -288,7 +294,7 @@ class TestStixAttributeConversionDoesNotCrash:
         refs = result.get("external_references") or []
         assert any(r.get("external_id") == "TA0001" and r.get("source_name") == "mitre-attack" for r in refs)
 
-    def test_tactic_type_matches_consumer_routing_contract(self) -> None:
+    def test_tactic_type_matches_consumer_routing_contract(self, monkeypatch) -> None:
         """Cross-file contract check: the type we emit for tactics in
         ``_attribute_to_stix21`` MUST match the type the consumer in
         ``run_pipeline.py::load_stix21_to_neo4j`` routes to
@@ -299,7 +305,7 @@ class TestStixAttributeConversionDoesNotCrash:
         (attack-pattern → merge_technique) silently misclassifies
         data in Neo4j. The contract is: tactics go through
         ``x-mitre-tactic``. Period."""
-        syncer = self._make_syncer()
+        syncer = self._make_syncer(monkeypatch)
         attr = {
             "type": "text",
             "value": "TA0003: Persistence",
@@ -349,11 +355,11 @@ class TestStixAttributeConversionDoesNotCrash:
             f"this is the exact misrouting bug Bugbot round-2 caught"
         )
 
-    def test_tool_with_mitre_uses_techniques_comment_parses(self) -> None:
+    def test_tool_with_mitre_uses_techniques_comment_parses(self, monkeypatch) -> None:
         """The MITRE_USES_TECHNIQUES comment format must still parse,
         with the result stashed under ``x_edgeguard_uses_techniques``
         (not at top level, per STIX 2.1 custom-property rules)."""
-        syncer = self._make_syncer()
+        syncer = self._make_syncer(monkeypatch)
         attr = {
             "type": "text",
             "value": "S0002: Mimikatz",

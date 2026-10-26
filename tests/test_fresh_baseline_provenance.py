@@ -57,11 +57,6 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-# test_graphql_api may register a MagicMock as sys.modules["neo4j_client"] — drop it.
-for _mod in ("neo4j_client", "run_misp_to_neo4j"):
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
 import config  # noqa: E402
 import neo4j_client as neo4j_client_mod  # noqa: E402
 from collectors.misp_writer import MISPWriter, _technique_meta, _tlp_tag  # noqa: E402

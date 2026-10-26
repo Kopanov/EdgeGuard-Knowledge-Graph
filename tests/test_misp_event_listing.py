@@ -36,6 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+from stub_cleanup import dag_module_import
 
 import run_misp_to_neo4j as rm
 
@@ -499,10 +500,8 @@ def _load_dag_module():
     spec = importlib.util.spec_from_file_location("_dag_module_misp_event_listing_test", DAG_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    try:
+    with dag_module_import():
         spec.loader.exec_module(module)
-    except Exception as e:  # pragma: no cover - environment-dependent
-        pytest.skip(f"DAG module not importable in this environment: {e}")
     return module
 
 

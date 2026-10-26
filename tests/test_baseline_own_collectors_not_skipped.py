@@ -21,6 +21,7 @@ from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 import pytest
+from stub_cleanup import dag_module_import
 
 import airflow_client
 import baseline_lock
@@ -151,10 +152,8 @@ class _Collector:
 
 @pytest.fixture
 def dag(monkeypatch):
-    try:
+    with dag_module_import():
         ep = _import_dag_module()
-    except Exception:
-        pytest.skip("Airflow not installed in this test env")
     # The DAG module (re-imported above) binds the real modules; point the fake REST client at the one it uses.
     _Collector.built = []
     _Collector.calls = []

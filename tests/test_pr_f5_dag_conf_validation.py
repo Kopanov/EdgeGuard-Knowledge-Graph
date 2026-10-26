@@ -110,18 +110,15 @@ def _import_validator():
     triggering Airflow imports at test-collection time."""
     import importlib.util
 
+    from stub_cleanup import dag_module_import
+
     spec = importlib.util.spec_from_file_location("_dag_module_for_test", DAG_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    try:
+    # Where Airflow isn't installed the behavioral tests skip; the source-pin
+    # tests above cover the contract independently.
+    with dag_module_import():
         spec.loader.exec_module(module)
-    except Exception as e:
-        # If Airflow isn't available at test time, skip the behavioral
-        # tests rather than fail. The source-pin tests above cover the
-        # contract independently.
-        import pytest
-
-        pytest.skip(f"DAG module not importable in this environment: {e}")
     return module._validate_baseline_dag_conf, module._KNOWN_BASELINE_CONF_KEYS, module._BASELINE_CONF_TYPO_MAP
 
 

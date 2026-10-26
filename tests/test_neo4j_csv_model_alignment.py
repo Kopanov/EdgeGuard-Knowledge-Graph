@@ -16,12 +16,9 @@ from pathlib import Path
 
 import pytest
 
-# See tests/test_neo4j_client_guards.py — test_graphql_api stubs neo4j_client globally.
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
-if "neo4j_client" in sys.modules:
-    del sys.modules["neo4j_client"]
 
 from neo4j_client import _ALLOWED_NODE_LABELS, _validate_rel_type
 

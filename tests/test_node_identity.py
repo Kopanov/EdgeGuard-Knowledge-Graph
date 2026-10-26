@@ -23,6 +23,8 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+from stub_cleanup import drop_modules_for_test  # noqa: E402
+
 from node_identity import (  # noqa: E402
     EDGEGUARD_NODE_UUID_NAMESPACE,
     NEO4J_TO_STIX_TYPE,
@@ -146,7 +148,7 @@ def test_neo4j_uuid_equals_stix_sdo_id_uuid_portion(label, key_dict, stix_type, 
     )
 
 
-def test_sector_stix_parity_end_to_end():
+def test_sector_stix_parity_end_to_end(monkeypatch):
     """PR #34 round 22 (multi-agent UUID audit, HIGH): the parametrized
     parity test above only exercises ``_deterministic_id`` directly with a
     hand-crafted ``stix_natural_key_string``. It does NOT drive the actual
@@ -162,8 +164,7 @@ def test_sector_stix_parity_end_to_end():
     that re-adds a prefix anywhere along the path will fail this test."""
     import importlib
 
-    if "stix_exporter" in sys.modules:
-        del sys.modules["stix_exporter"]
+    drop_modules_for_test(monkeypatch, "stix_exporter")
     stix_exporter = importlib.import_module("stix_exporter")
 
     # Bypass the heavy __init__ — _sector_sdo is a pure function on props.

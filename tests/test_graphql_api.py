@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from stub_cleanup import sys_modules_restored
 
 # Put src/ on the path before importing the module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -34,10 +35,11 @@ os.environ.setdefault("NEO4J_PASSWORD", "test")
 os.environ.setdefault("EDGEGUARD_ENV", "dev")
 
 # ── Stub heavy transitive imports so tests run without a live environment ────
-# neo4j, pymisp, apache-airflow etc. are not installed in the slim CI image
-# used for unit tests.  We insert lightweight stubs into sys.modules BEFORE
-# any src/ file is imported so that import-time side-effects are skipped.
-_stub_modules = [
+# The ``gapi`` fixture imports graphql_api against a stub ``neo4j_client`` (no
+# database) and MagicMock stubs for the drivers, Airflow and OpenTelemetry where
+# nothing loaded the real module before. It puts sys.modules back after the last
+# test of this file, so the other test files import the real modules.
+_STUB_MODULES = [
     "neo4j",
     "neo4j.exceptions",
     "neo4j.time",
@@ -61,16 +63,23 @@ _stub_modules = [
     "opentelemetry.exporter.otlp.proto",
     "opentelemetry.exporter.otlp.proto.grpc",
 ]
-for _mod in _stub_modules:
-    if _mod not in sys.modules:
-        sys.modules[_mod] = MagicMock()  # type: ignore[assignment]
 
-# Stub Neo4jClient so graphql_api can be imported without a real DB
-_fake_neo4j_client_cls = MagicMock()
-_fake_neo4j_module = MagicMock()
-_fake_neo4j_module.Neo4jClient = _fake_neo4j_client_cls
-_fake_neo4j_module.NEO4J_READ_TIMEOUT = 120
-sys.modules["neo4j_client"] = _fake_neo4j_module  # type: ignore[assignment]
+
+@pytest.fixture(scope="module", autouse=True)
+def gapi():
+    """``graphql_api`` imported anew against the stubs, with a stub ``neo4j_client`` so no real DB is needed."""
+    with sys_modules_restored():
+        for name in _STUB_MODULES:
+            if name not in sys.modules:
+                sys.modules[name] = MagicMock()  # type: ignore[assignment]
+        fake_neo4j_module = MagicMock()
+        fake_neo4j_module.Neo4jClient = MagicMock()
+        fake_neo4j_module.NEO4J_READ_TIMEOUT = 120
+        sys.modules["neo4j_client"] = fake_neo4j_module  # type: ignore[assignment]
+        sys.modules.pop("graphql_api", None)
+        import graphql_api
+
+        yield graphql_api
 
 
 # ---------------------------------------------------------------------------
@@ -209,13 +218,11 @@ def mock_client():
 
 
 @pytest.fixture()
-def graphql_client(mock_client):
+def graphql_client(gapi, mock_client):
     """TestClient with Neo4jClient patched out."""
     client, session_ctx = mock_client
 
-    import graphql_api as gapi  # noqa: E402 — after sys.modules stubs
-
-    with patch("graphql_api.Neo4jClient", return_value=client):
+    with patch.object(gapi, "Neo4jClient", return_value=client):
         gapi._client = client
         test_client = TestClient(gapi.app, raise_server_exceptions=True)
         yield test_client, session_ctx
@@ -418,10 +425,9 @@ def test_threat_actors_list(graphql_client):
     assert data["data"]["threatActors"][0]["name"] == "APT29"
 
 
-def test_indicator_provenance_fields(graphql_client, monkeypatch):
+def test_indicator_provenance_fields(gapi, graphql_client, monkeypatch):
     """Indicator must expose MISP back-references and import audit fields."""
     client, session_ctx = graphql_client
-    import graphql_api as gapi  # noqa: E402
 
     monkeypatch.setattr(gapi, "MISP_URL", "https://misp.example.com")
 
@@ -475,10 +481,9 @@ def test_indicator_provenance_fields(graphql_client, monkeypatch):
     assert ind["lastImportedFrom"] == "alienvault_otx"
 
 
-def test_indicator_misp_urls_absent_when_no_misp_url_env(graphql_client, monkeypatch):
+def test_indicator_misp_urls_absent_when_no_misp_url_env(gapi, graphql_client, monkeypatch):
     """misp_event_urls must be None when MISP_URL env var is not set."""
     client, session_ctx = graphql_client
-    import graphql_api as gapi  # noqa: E402
 
     monkeypatch.setattr(gapi, "MISP_URL", "")  # explicitly unset
 
@@ -525,10 +530,9 @@ def _one_indicator(session_ctx, **props) -> None:
     session_ctx.run.return_value.__iter__ = MagicMock(return_value=iter([record]))
 
 
-def test_indicator_attribute_urls_from_stored_uuids(graphql_client, monkeypatch):
+def test_indicator_attribute_urls_from_stored_uuids(gapi, graphql_client, monkeypatch):
     """One link per stored MISP attribute UUID, in stored order, to /attributes/view/<uuid>."""
     client, session_ctx = graphql_client
-    import graphql_api as gapi  # noqa: E402
 
     monkeypatch.setattr(gapi, "MISP_URL", "https://misp.example.com")
     uuids = ["8814f87d-508e-4e63-8c56-637bb35f80af", "0B2E4C1A-9F3D-4E5B-8A7C-1D2E3F405162"]
@@ -560,11 +564,10 @@ def test_indicator_attribute_urls_from_stored_uuids(graphql_client, monkeypatch)
     ],
 )
 def test_indicator_attribute_urls_skip_values_that_are_not_attribute_references(
-    graphql_client, monkeypatch, stored, expected
+    gapi, graphql_client, monkeypatch, stored, expected
 ):
     """A stored value that is not a UUID or numeric id never becomes a link; nothing usable gives null."""
     client, session_ctx = graphql_client
-    import graphql_api as gapi  # noqa: E402
 
     monkeypatch.setattr(gapi, "MISP_URL", "https://misp.example.com")
     _one_indicator(session_ctx, misp_attribute_ids=stored)

@@ -49,7 +49,7 @@ from stub_cleanup import drop_modules_for_test  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def test_every_natural_key_label_has_a_unique_constraint():
+def test_every_natural_key_label_has_a_unique_constraint(monkeypatch):
     """B1: every label declared in ``_NATURAL_KEYS`` (the single source of
     truth for "what counts as a uuidable node") MUST have a matching
     UNIQUE constraint declared in ``Neo4jClient.create_constraints``.
@@ -66,10 +66,7 @@ def test_every_natural_key_label_has_a_unique_constraint():
     import importlib
     import inspect
 
-    if "node_identity" in sys.modules:
-        del sys.modules["node_identity"]
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "node_identity", "neo4j_client")
     node_identity = importlib.import_module("node_identity")
     neo4j_client = importlib.import_module("neo4j_client")
 
@@ -117,7 +114,7 @@ def test_every_natural_key_label_has_a_unique_constraint():
 # ---------------------------------------------------------------------------
 
 
-def test_merge_key_dict_matches_natural_keys_for_every_helper():
+def test_merge_key_dict_matches_natural_keys_for_every_helper(monkeypatch):
     """B2: every node-merge helper in ``Neo4jClient`` (e.g. ``merge_indicator``,
     ``merge_resilmesh_user``, ``create_alert_node``) must construct the
     natural-key dict for ``compute_node_uuid`` using EXACTLY the fields
@@ -136,10 +133,7 @@ def test_merge_key_dict_matches_natural_keys_for_every_helper():
     import ast
     import importlib
 
-    if "node_identity" in sys.modules:
-        del sys.modules["node_identity"]
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "node_identity", "neo4j_client")
     node_identity = importlib.import_module("node_identity")
     neo4j_client = importlib.import_module("neo4j_client")
 
@@ -317,7 +311,7 @@ def test_graphql_indicator_uuid_field_matches_compute_node_uuid(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_zone_override_global_helper_drops_global_when_specifics_present():
+def test_zone_override_global_helper_drops_global_when_specifics_present(monkeypatch):
     """B5: ``_zone_override_global_clause`` is the single source of truth
     for write-time zone accumulation. The CASE expression must produce a
     set that excludes 'global' when at least one specific sector is
@@ -331,8 +325,7 @@ def test_zone_override_global_helper_drops_global_when_specifics_present():
     """
     import importlib
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     # Python emulator of the CASE semantics. The Cypher reads:
@@ -386,7 +379,7 @@ def test_zone_override_global_helper_drops_global_when_specifics_present():
 # ---------------------------------------------------------------------------
 
 
-def test_run_pipeline_edges_stamp_endpoint_uuids():
+def test_run_pipeline_edges_stamp_endpoint_uuids(monkeypatch):
     """Round 28 (bugbot MED): the CLI path in ``run_pipeline.py`` creates
     INDICATES (co-occurrence) and EXPLOITS edges via its own
     apoc.periodic.iterate blocks. Before round 28 these did NOT stamp
@@ -398,8 +391,7 @@ def test_run_pipeline_edges_stamp_endpoint_uuids():
     queries."""
     import importlib
 
-    if "run_pipeline" in sys.modules:
-        del sys.modules["run_pipeline"]
+    drop_modules_for_test(monkeypatch, "run_pipeline")
     run_pipeline = importlib.import_module("run_pipeline")
     src_path = run_pipeline.__file__
     with open(src_path) as fh:
@@ -419,7 +411,7 @@ def test_run_pipeline_edges_stamp_endpoint_uuids():
         ), f"{edge_name} edge in run_pipeline.py must coalesce src/trg uuids on SET (idempotent)"
 
 
-def test_build_relationships_summary_denominator_matches_query_count():
+def test_build_relationships_summary_denominator_matches_query_count(monkeypatch):
     """Round 28 (bugbot LOW): the ``[BUILD_RELATIONSHIPS SUMMARY]`` log
     line used to hardcode ``failures=%d/11`` but there were 12 independent
     _safe_run_batched calls. "failures=12/11" is not a valid fraction.
@@ -439,8 +431,7 @@ def test_build_relationships_summary_denominator_matches_query_count():
     import importlib
     import inspect
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     br = importlib.import_module("build_relationships")
     src = inspect.getsource(br.build_relationships)
 

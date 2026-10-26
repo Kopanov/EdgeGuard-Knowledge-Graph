@@ -18,12 +18,6 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-# test_graphql_api may register a MagicMock as sys.modules["neo4j_client"] — drop it.
-if "neo4j_client" in sys.modules:
-    del sys.modules["neo4j_client"]
-if "run_misp_to_neo4j" in sys.modules:
-    del sys.modules["run_misp_to_neo4j"]
-
 from run_misp_to_neo4j import (  # noqa: E402
     MISPToNeo4jSync,
     _dedupe_parsed_items,

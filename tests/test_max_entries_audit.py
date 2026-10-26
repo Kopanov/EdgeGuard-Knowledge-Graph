@@ -16,14 +16,14 @@ import pytest
 
 
 @pytest.fixture
-def stub_run_misp_to_neo4j():
+def stub_run_misp_to_neo4j(monkeypatch):
     """Avoid importing neo4j_client via run_misp_to_neo4j when loading run_pipeline_misp_spt."""
     name = "run_misp_to_neo4j"
     fake = types.ModuleType(name)
     fake.MISPToNeo4jSync = MagicMock()
-    sys.modules[name] = fake
-    yield
-    sys.modules.pop(name, None)
+    # monkeypatch puts the real module back afterwards (a pop would leave no entry, and the next
+    # import a second copy).
+    monkeypatch.setitem(sys.modules, name, fake)
 
 
 def _reload_config(monkeypatch: pytest.MonkeyPatch, **env: str) -> None:

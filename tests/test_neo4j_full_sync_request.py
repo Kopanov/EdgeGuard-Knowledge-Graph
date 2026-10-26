@@ -24,6 +24,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from stub_cleanup import dag_module_import, drop_airflow_magicmock_stubs
 
 sys.path.insert(0, "src")
 sys.path.insert(0, "dags")
@@ -32,24 +33,17 @@ DAG_PATH = "dags/edgeguard_pipeline.py"
 
 
 def _load_dag_module(skip_if_not_importable=True):
-    # Purge the Airflow stubs other tests leave in ``sys.modules`` (``test_graphql_api.py`` registers
-    # MagicMock placeholders for ``airflow.*`` and ``opentelemetry.*``), so the real Airflow is imported.
-    for key in list(sys.modules):
-        # Airflow itself, not sibling modules such as ``airflow_client`` that other test modules
-        # patch by object identity.
-        if key in ("airflow", "opentelemetry") or key.startswith(("airflow.", "opentelemetry.")):
-            del sys.modules[key]
+    """Load the DAG file as an isolated module; skips only where Airflow is not installed, and never
+    with ``skip_if_not_importable=False``."""
     spec = importlib.util.spec_from_file_location("_dag_module_full_sync_request_test", DAG_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    try:
+    if not skip_if_not_importable:
+        drop_airflow_magicmock_stubs()
         spec.loader.exec_module(module)
-    except Exception as e:  # pragma: no cover - environment-dependent
-        # Skip only where Airflow is not installed: with Airflow present an import error is a
-        # failure, so a stub left by another test cannot turn every DAG test here into a skip.
-        if not skip_if_not_importable or importlib.util.find_spec("airflow") is not None:
-            raise
-        pytest.skip(f"DAG module not importable in this environment: {e}")
+        return module
+    with dag_module_import():
+        spec.loader.exec_module(module)
     return module
 
 

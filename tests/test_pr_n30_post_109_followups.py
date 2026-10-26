@@ -34,6 +34,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from stub_cleanup import dag_module_import
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
 DAGS = REPO_ROOT / "dags"
@@ -49,14 +51,8 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n30")
 def _import_dag_module():
     """Defer import of ``edgeguard_pipeline``. Mirrors the pattern in
     tests/test_dag_non_blocking_collectors.py::_import_dag_module —
-    purges Airflow + opentelemetry stubs that test_graphql_api may
-    have registered so we get the REAL Airflow for DAG instantiation.
-
-    Note: this import triggers module-level DAG instantiation which
-    queries ``airflow.models.Variable``. That requires an initialized
-    Airflow metadata DB. In CI with a proper Airflow fixture this
-    works; in local test envs without the DB the import raises
-    OperationalError. Callers should wrap with pytest.skip.
+    purges Airflow + opentelemetry so we get the REAL Airflow for DAG
+    instantiation.
     """
     for key in list(sys.modules):
         if (
@@ -73,28 +69,13 @@ def _import_dag_module():
 
 
 def _import_dag_module_or_skip():
-    """Wrapper that pytest-skips if the import fails for any reason
-    (Airflow not installed, metadata DB not initialized, etc.). This
-    lets the behavioural tests run in CI environments that set up
-    a proper pytest-airflow fixture AND gracefully skip in local/
-    minimal test envs.
-
-    Setting up a real Airflow metadata DB in tests is tracked as a
-    separate follow-up (see PR-N29 chip / PR-N30 scope — the behavioural
-    test was REC-B1 and requires this fixture work).
+    """Wrapper that pytest-skips only where Airflow is not installed; with
+    Airflow installed an import error fails the test. The DAG file needs no
+    Airflow metadata DB to import. Where it skips, the source-text pins in
+    test_pr_n26_edge_misp_traceability.py cover the contract.
     """
-    import pytest
-
-    try:
+    with dag_module_import():
         return _import_dag_module()
-    except Exception as e:
-        pytest.skip(
-            f"Cannot import edgeguard_pipeline — Airflow metadata DB likely "
-            f"not initialized in this test env ({type(e).__name__}: {e}). "
-            f"This behavioural test requires a pytest-airflow fixture; run "
-            f"the source-text pins in test_pr_n26_edge_misp_traceability.py "
-            f"for contract coverage in this env."
-        )
 
 
 # ===========================================================================

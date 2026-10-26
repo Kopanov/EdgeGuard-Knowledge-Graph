@@ -158,18 +158,16 @@ class TestMemoryProbeFirstMatchWins:
 
 def _import_dag_module():
     """Import the DAG module to get access to its validator helpers.
-    Skips if the DAG module can't be loaded (e.g., Airflow unavailable)."""
+    Skips only where Airflow is not installed (``stub_cleanup.dag_module_import``)."""
     import importlib.util
+
+    from stub_cleanup import dag_module_import
 
     spec = importlib.util.spec_from_file_location("_dag_module_for_test", "dags/edgeguard_pipeline.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    try:
+    with dag_module_import():
         spec.loader.exec_module(module)
-    except Exception as e:
-        import pytest
-
-        pytest.skip(f"DAG module not importable in this environment: {e}")
     return module
 
 

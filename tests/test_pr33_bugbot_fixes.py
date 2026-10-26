@@ -736,7 +736,7 @@ def test_lowercase_label_uuid_matches_pinned_anchor():
 # ---------------------------------------------------------------------------
 
 
-def test_sector_uuid_case_uses_double_quotes_not_single():
+def test_sector_uuid_case_uses_double_quotes_not_single(monkeypatch):
     """``_SECTOR_UUID_CASE`` is f-string-interpolated into ``_q7a_inner`` and
     ``_q7b_inner``, which are then wrapped in SINGLE quotes by
     ``_safe_run_batched`` for ``apoc.periodic.iterate('outer', 'inner', ...)``.
@@ -744,8 +744,7 @@ def test_sector_uuid_case_uses_double_quotes_not_single():
     rendered Cypher. The CASE must use DOUBLE quotes (Cypher accepts both)."""
     import importlib
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     build_relationships = importlib.import_module("build_relationships")
 
     case_expr = build_relationships._SECTOR_UUID_CASE
@@ -763,15 +762,14 @@ def test_sector_uuid_case_uses_double_quotes_not_single():
 
 
 @pytest.mark.parametrize("name", ["_Q7A_STATEMENTS", "_Q7B_STATEMENTS", "_Q7C_STATEMENTS", "_Q7D_STATEMENTS"])
-def test_q7_statements_have_no_single_quotes(name):
+def test_q7_statements_have_no_single_quotes(name, monkeypatch):
     """The rendered statements of the sector steps (7a TARGETS, 7b AFFECTS, 7c / 7d actor and malware
     TARGETS) must not contain any single quote: ``apoc.periodic.iterate('outer', 'inner')`` wraps them
     in single quotes. Since 2026-10-16 they are built by ``_sector_link_statements`` from shared
     fragments, so the rendered text is checked, not the source literals."""
     import importlib
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     build_relationships = importlib.import_module("build_relationships")
 
     stmts = getattr(build_relationships, name)
@@ -814,15 +812,14 @@ _TOPOLOGY_LABELS = (
 )
 
 
-def test_all_topology_labels_have_uuid_index():
+def test_all_topology_labels_have_uuid_index(monkeypatch):
     """Each of the 8 topology labels must have a CREATE INDEX on n.uuid in
     create_indexes — same as the MISP-derived labels. Without an index per
     label, MERGE-by-uuid in delta sync degrades to a label scan."""
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
     src = inspect.getsource(neo4j_client.Neo4jClient.create_indexes)
     for label in _TOPOLOGY_LABELS:
@@ -835,15 +832,14 @@ def test_all_topology_labels_have_uuid_index():
         ), f"create_indexes is missing a uuid index for {label}"
 
 
-def test_all_topology_mergers_compute_node_uuid():
+def test_all_topology_mergers_compute_node_uuid(monkeypatch):
     """Each of the 8 topology merge_* functions must call compute_node_uuid
     and pass it as a Cypher parameter. Without this, n.uuid stays NULL and
     delta-sync / self-describing-edge consumers see a silent gap."""
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     fn_to_label = {
@@ -868,7 +864,7 @@ def test_all_topology_mergers_compute_node_uuid():
         )
 
 
-def test_resilmesh_cve_and_vulnerability_paths_stamp_uuid():
+def test_resilmesh_cve_and_vulnerability_paths_stamp_uuid(monkeypatch):
     """The duplicate ResilMesh-native CVE and Vulnerability mergers must
     produce the SAME n.uuid as the canonical MISP path (both keyed on
     cve_id). Without this, a node MERGEd via the ResilMesh path would have
@@ -877,8 +873,7 @@ def test_resilmesh_cve_and_vulnerability_paths_stamp_uuid():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src_cve = inspect.getsource(neo4j_client.Neo4jClient.merge_resilmesh_cve)
@@ -892,7 +887,7 @@ def test_resilmesh_cve_and_vulnerability_paths_stamp_uuid():
     assert "v.uuid = $vuln_uuid" in src_v, "merge_resilmesh_vulnerability does not stamp v.uuid"
 
 
-def test_topology_relationship_helpers_stamp_endpoint_uuids():
+def test_topology_relationship_helpers_stamp_endpoint_uuids(monkeypatch):
     """The 11 topology relationship helpers whose endpoints are both in
     _NATURAL_KEYS must stamp r.src_uuid and r.trg_uuid via the bound endpoint
     .uuid (Mechanism B). Other helpers (involving User/Node/Component/etc.)
@@ -900,8 +895,7 @@ def test_topology_relationship_helpers_stamp_endpoint_uuids():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     helpers_to_check = (
@@ -965,7 +959,7 @@ def test_topology_uuid_matches_compute_node_uuid_contract():
 # ---------------------------------------------------------------------------
 
 
-def test_merge_cvss_node_params_spread_filtered_first():
+def test_merge_cvss_node_params_spread_filtered_first(monkeypatch):
     """Bugbot (round 8, MED): in ``_merge_cvss_node`` the params dict spreads
     ``filtered_cvss`` AFTER explicit ``cve_uuid``/``cvss_uuid`` keys, so a
     cvss_data entry named ``cve_uuid`` or ``cvss_uuid`` would silently
@@ -974,8 +968,7 @@ def test_merge_cvss_node_params_spread_filtered_first():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient._merge_cvss_node)
@@ -1005,7 +998,7 @@ def test_merge_cvss_node_params_spread_filtered_first():
 # label-allowlist tests above and by tests in test_round26_invariants.py.
 
 
-def test_merge_device_refuses_missing_device_id():
+def test_merge_device_refuses_missing_device_id(monkeypatch):
     """Bugbot (round 8, MED): the previous fallback ``str(id(data))`` for
     missing device_id used Python's memory-address id(), producing a
     different uuid every call for the same logical Device. Refuse the call
@@ -1021,8 +1014,7 @@ def test_merge_device_refuses_missing_device_id():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.merge_device)
@@ -1042,7 +1034,7 @@ def test_merge_device_refuses_missing_device_id():
     assert client.merge_device({"device_id": ""}) is False, "merge_device with empty device_id must return False"
 
 
-def test_standalone_cvss_mergers_were_deleted():
+def test_standalone_cvss_mergers_were_deleted(monkeypatch):
     """PR #33 round 12: the 4 standalone vector_string-keyed CVSS mergers
     (merge_cvssv2/30/31/40) and their 8 helper companions were deleted.
     The canonical CVSS path is _merge_cvss_node, called from merge_cve,
@@ -1052,8 +1044,7 @@ def test_standalone_cvss_mergers_were_deleted():
     inline comment block; round 12 replaces it with a deletion guard."""
     import importlib
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     # The standalone mergers must NOT exist on Neo4jClient.
@@ -1104,7 +1095,7 @@ _VULN_HELPERS_FIXED = (
 )
 
 
-def test_vulnerability_helpers_match_by_cve_id_not_name():
+def test_vulnerability_helpers_match_by_cve_id_not_name(monkeypatch):
     """The 4 ResilMesh-side relationship helpers must MATCH Vulnerability by
     ``cve_id`` (canonical natural key) — not by ``name``. Vulnerability nodes
     are MERGEd by cve_id everywhere (merge_vulnerabilities_batch line 1724,
@@ -1113,8 +1104,7 @@ def test_vulnerability_helpers_match_by_cve_id_not_name():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     for fn_name in _VULN_HELPERS_FIXED:
@@ -1129,15 +1119,14 @@ def test_vulnerability_helpers_match_by_cve_id_not_name():
         assert "Vulnerability {cve_id:" in src, f"{fn_name} does not MATCH Vulnerability by cve_id"
 
 
-def test_vulnerability_helpers_stamp_endpoint_uuids():
+def test_vulnerability_helpers_stamp_endpoint_uuids(monkeypatch):
     """Now that the 4 helpers MATCH valid uuid-stamped endpoints, they must
     also stamp r.src_uuid / r.trg_uuid via Mechanism B (bound endpoint .uuid)
     so cross-environment delta sync covers these edges."""
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     for fn_name in _VULN_HELPERS_FIXED:
@@ -1161,7 +1150,7 @@ def test_vulnerability_helpers_stamp_endpoint_uuids():
 # ---------------------------------------------------------------------------
 
 
-def test_strawberry_optional_fields_have_explicit_default():
+def test_strawberry_optional_fields_have_explicit_default(monkeypatch):
     """Bugbot (round 11, LOW): a Strawberry @strawberry.type can mix
     Optional fields with and without defaults only because Strawberry uses
     ``kw_only=True`` on Python 3.10+. To not depend on framework-specific
@@ -1169,8 +1158,7 @@ def test_strawberry_optional_fields_have_explicit_default():
     default. Pin that the 9 production node types satisfy this."""
     import importlib
 
-    if "graphql_schema" in sys.modules:
-        del sys.modules["graphql_schema"]
+    drop_modules_for_test(monkeypatch, "graphql_schema")
     graphql_schema = importlib.import_module("graphql_schema")
 
     classes_to_check = (
@@ -1201,7 +1189,7 @@ def test_strawberry_optional_fields_have_explicit_default():
             )
 
 
-def test_vulnerability_helpers_are_keyword_only():
+def test_vulnerability_helpers_are_keyword_only(monkeypatch):
     """Bugbot (round 11, MED): the 4 vulnerability relationship helpers
     were given keyword-only signatures so the round-9 positional reorder
     cannot silently swap a stale caller's ``vuln_name`` into the ``cve_id``
@@ -1209,8 +1197,7 @@ def test_vulnerability_helpers_are_keyword_only():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     helpers = (
@@ -1231,7 +1218,7 @@ def test_vulnerability_helpers_are_keyword_only():
             )
 
 
-def test_misp_batch_uses_affects_for_vuln_cve_to_sector():
+def test_misp_batch_uses_affects_for_vuln_cve_to_sector(monkeypatch):
     """Bugbot (round 11, LOW): canonical schema is
     (Vulnerability|CVE)-[:AFFECTS]->(Sector). TARGETS is reserved for
     (Indicator)-[:TARGETS]->(Sector). The round-10 q_tgt_vuln/q_tgt_cve
@@ -1242,8 +1229,7 @@ def test_misp_batch_uses_affects_for_vuln_cve_to_sector():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.create_misp_relationships_batch)
@@ -1262,14 +1248,13 @@ def test_misp_batch_uses_affects_for_vuln_cve_to_sector():
     )
 
 
-def test_create_vulnerability_sector_relationship_uses_affects():
+def test_create_vulnerability_sector_relationship_uses_affects(monkeypatch):
     """The standalone helper must also emit AFFECTS for Vuln/CVE→Sector
     (mirrors the batched q_aff_vuln/q_aff_cve change above)."""
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.create_vulnerability_sector_relationship)
@@ -1289,7 +1274,7 @@ def test_create_vulnerability_sector_relationship_uses_affects():
 # test_misp_batch_uses_affects_for_vuln_cve_to_sector below.
 
 
-def test_merge_missiondependency_refuses_missing_dependency_id():
+def test_merge_missiondependency_refuses_missing_dependency_id(monkeypatch):
     """Audit (round 9, MED): merge_missiondependency previously used
     ``str(id(data))`` as a fallback for missing dependency_id — same anti-
     pattern eliminated from merge_device in round 8. Each call would produce
@@ -1303,8 +1288,7 @@ def test_merge_missiondependency_refuses_missing_dependency_id():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.merge_missiondependency)
@@ -1327,15 +1311,14 @@ def test_merge_missiondependency_refuses_missing_dependency_id():
 # ---------------------------------------------------------------------------
 
 
-def test_safe_run_batched_returns_false_on_apoc_errors():
+def test_safe_run_batched_returns_false_on_apoc_errors(monkeypatch):
     """PR #33 round 13: ``_safe_run_batched`` previously returned True even
     when apoc.periodic.iterate reported errorMessages — silent partial
     failure. Now: returns False so the caller's failures counter reflects
     the partial APOC error."""
     import importlib
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     build_relationships = importlib.import_module("build_relationships")
 
     from unittest.mock import MagicMock
@@ -1355,7 +1338,7 @@ def test_safe_run_batched_returns_false_on_apoc_errors():
     )
 
 
-def test_safe_run_batched_logs_skip_count_when_skip_query_returns_positive(caplog):
+def test_safe_run_batched_logs_skip_count_when_skip_query_returns_positive(caplog, monkeypatch):
     """PR #34 round 20: ``_safe_run_batched`` now takes ``skip_query`` (NOT
     ``expected_query``). The skip_query directly counts ORPHAN input rows
     (rows whose inner-MATCH target does NOT exist) — when > 0 an INFO
@@ -1371,8 +1354,7 @@ def test_safe_run_batched_logs_skip_count_when_skip_query_returns_positive(caplo
     import importlib
     import logging
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     build_relationships = importlib.import_module("build_relationships")
 
     from unittest.mock import MagicMock
@@ -1405,14 +1387,13 @@ def test_safe_run_batched_logs_skip_count_when_skip_query_returns_positive(caplo
     assert "30 input rows had no matching target" in logs, f"expected orphan-count phrasing in skip log; got: {logs}"
 
 
-def test_safe_run_batched_does_not_log_skip_when_skip_query_returns_zero(caplog):
+def test_safe_run_batched_does_not_log_skip_when_skip_query_returns_zero(caplog, monkeypatch):
     """When skip_query returns 0 (no orphans), the [SKIP] log MUST NOT fire.
     This guards against false-positive noise that would dilute the signal."""
     import importlib
     import logging
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     build_relationships = importlib.import_module("build_relationships")
 
     from unittest.mock import MagicMock
@@ -1440,7 +1421,7 @@ def test_safe_run_batched_does_not_log_skip_when_skip_query_returns_zero(caplog)
     assert "[SKIP]" not in logs, "[SKIP] log must NOT fire when skip_query returns 0"
 
 
-def test_build_relationships_link_queries_pass_skip_query():
+def test_build_relationships_link_queries_pass_skip_query(monkeypatch):
     """PR #34 round 20: link queries 3a, 3b, 5, 6, 8, 9, 10 in
     build_relationships() pass ``skip_query=`` (NOT the broken
     ``expected_query=`` from round 13). Each skip_query must use a
@@ -1448,8 +1429,7 @@ def test_build_relationships_link_queries_pass_skip_query():
     import importlib
     import inspect
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     build_relationships = importlib.import_module("build_relationships")
 
     src = inspect.getsource(build_relationships.build_relationships)
@@ -1482,15 +1462,14 @@ def test_build_relationships_link_queries_pass_skip_query():
     )
 
 
-def test_sync_to_neo4j_logs_when_items_empty(caplog):
+def test_sync_to_neo4j_logs_when_items_empty(caplog, monkeypatch):
     """PR #33 round 13: ``sync_to_neo4j`` previously returned silently on
     empty input. Now emits an INFO log so an operator can distinguish 'MISP
     returned 0 events' from 'sync_to_neo4j was never called'."""
     import importlib
     import inspect
 
-    if "run_misp_to_neo4j" in sys.modules:
-        del sys.modules["run_misp_to_neo4j"]
+    drop_modules_for_test(monkeypatch, "run_misp_to_neo4j")
     run_misp_to_neo4j = importlib.import_module("run_misp_to_neo4j")
 
     # Find sync_to_neo4j in the module — it's a method on MISPToNeo4jSync.
@@ -1500,15 +1479,14 @@ def test_sync_to_neo4j_logs_when_items_empty(caplog):
     )
 
 
-def test_dropped_rels_log_emits_even_when_zero():
+def test_dropped_rels_log_emits_even_when_zero(monkeypatch):
     """PR #33 round 13: ``create_misp_relationships_batch`` previously logged
     drops only when ``_dropped_rels > 0`` — invisible 'success' for the 0-drop
     path. Now logs INFO when 0 drops so the operator sees an explicit baseline."""
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.create_misp_relationships_batch)
@@ -1519,15 +1497,14 @@ def test_dropped_rels_log_emits_even_when_zero():
     )
 
 
-def test_drop_constraint_no_longer_uses_bare_pass():
+def test_drop_constraint_no_longer_uses_bare_pass(monkeypatch):
     """PR #33 round 13: silent ``except: pass`` on DROP CONSTRAINT replaced
     with a DEBUG log — operator running in verbose mode can see which
     legacy constraints were dropped vs which silently masked schema errors."""
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.create_constraints)
@@ -1573,7 +1550,7 @@ def test_misp_attributes_dropped_metric_exists_and_is_emitted():
 # ---------------------------------------------------------------------------
 
 
-def test_indicates_cooccurrence_query_sets_updated_at():
+def test_indicates_cooccurrence_query_sets_updated_at(monkeypatch):
     """Bugbot (round 14, MED): the round-7 SET clause for src_uuid/trg_uuid
     on the INDICATES co-occurrence query (#4) in build_relationships.py
     omitted ``r.updated_at = datetime()``. Every other relationship query
@@ -1588,8 +1565,7 @@ def test_indicates_cooccurrence_query_sets_updated_at():
     import importlib
     import inspect
 
-    if "build_relationships" in sys.modules:
-        del sys.modules["build_relationships"]
+    drop_modules_for_test(monkeypatch, "build_relationships")
     build_relationships = importlib.import_module("build_relationships")
 
     src = inspect.getsource(build_relationships.build_relationships)
@@ -1610,7 +1586,7 @@ def test_indicates_cooccurrence_query_sets_updated_at():
         )
 
 
-def test_alert_processor_zone_type_guard_present():
+def test_alert_processor_zone_type_guard_present(monkeypatch):
     """Bugbot (round 14, LOW): the round-12 cleanup removed the
     ``isinstance(zone, list)`` guard in alert_processor.py. ``zone`` comes
     from Neo4j via a Cypher read; if any node has a scalar string value
@@ -1620,8 +1596,7 @@ def test_alert_processor_zone_type_guard_present():
     import importlib
     import inspect
 
-    if "alert_processor" in sys.modules:
-        del sys.modules["alert_processor"]
+    drop_modules_for_test(monkeypatch, "alert_processor")
     try:
         alert_processor = importlib.import_module("alert_processor")
     except Exception:
@@ -1637,7 +1612,7 @@ def test_alert_processor_zone_type_guard_present():
     )
 
 
-def test_edge_endpoint_uuids_is_still_used_in_neo4j_client():
+def test_edge_endpoint_uuids_is_still_used_in_neo4j_client(monkeypatch):
     """Bugbot (round 14, LOW) flagged ``edge_endpoint_uuids`` as 'likely
     unused'. Verified false: it IS called by ``_upsert_sourced_relationship``
     in neo4j_client.py. Pin the call site so a future refactor doesn't
@@ -1645,8 +1620,7 @@ def test_edge_endpoint_uuids_is_still_used_in_neo4j_client():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client)
@@ -1665,7 +1639,7 @@ def test_edge_endpoint_uuids_is_still_used_in_neo4j_client():
 # ---------------------------------------------------------------------------
 
 
-def test_original_date_fields_were_deleted_from_writes():
+def test_original_date_fields_were_deleted_from_writes(monkeypatch):
     """User-driven cleanup (round 17): the ``n.original_published_date`` and
     ``n.original_modified_date`` Cypher SET clauses were removed from
     ``merge_node_with_source`` and ``merge_indicators_batch``. The fields
@@ -1687,8 +1661,7 @@ def test_original_date_fields_were_deleted_from_writes():
     import importlib
     from unittest.mock import MagicMock
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     # Capture every Cypher query sent via session.run().
@@ -1779,7 +1752,7 @@ def test_original_date_fields_were_deleted_from_writes():
 # ---------------------------------------------------------------------------
 
 
-def test_reference_urls_dead_write_was_removed():
+def test_reference_urls_dead_write_was_removed(monkeypatch):
     """Round 18 cleanup: ``CVE.reference_urls`` was stamped via merge_cve's
     extra_props but had ZERO production readers (no GraphQL, no STIX, no
     Cypher MATCH). Same dead-write pattern as round 17. Pin the deletion
@@ -1787,8 +1760,7 @@ def test_reference_urls_dead_write_was_removed():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.merge_cve)
@@ -1798,7 +1770,7 @@ def test_reference_urls_dead_write_was_removed():
     )
 
 
-def test_original_source_neo4j_property_writes_were_removed():
+def test_original_source_neo4j_property_writes_were_removed(monkeypatch):
     """Round 18 cleanup: ``n.original_source`` Neo4j property writes had
     zero production readers. The Python helper that EXTRACTS original_source
     from MISP tags is alive (it derives the canonical `source` field), but
@@ -1806,8 +1778,7 @@ def test_original_source_neo4j_property_writes_were_removed():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src_merge = inspect.getsource(neo4j_client.Neo4jClient.merge_node_with_source)
@@ -1854,7 +1825,7 @@ def test_misp_unmapped_attribute_type_metric_exists():
     )
 
 
-def test_bridge_vulnerability_cve_logs_orphan_count():
+def test_bridge_vulnerability_cve_logs_orphan_count(monkeypatch):
     """PR #34 round 20: bridge_vulnerability_cve now uses ``skip_query``
     that counts Vulnerabilities with cve_id but NO matching CVE (orphans),
     and logs directly when skip_count > 0.
@@ -1875,8 +1846,7 @@ def test_bridge_vulnerability_cve_logs_orphan_count():
     import importlib
     import inspect
 
-    if "enrichment_jobs" in sys.modules:
-        del sys.modules["enrichment_jobs"]
+    drop_modules_for_test(monkeypatch, "enrichment_jobs")
     enrichment_jobs = importlib.import_module("enrichment_jobs")
 
     src = inspect.getsource(enrichment_jobs.bridge_vulnerability_cve)
@@ -1890,15 +1860,14 @@ def test_bridge_vulnerability_cve_logs_orphan_count():
     assert "no matching CVE" in src, "operator-facing log must mention orphan CVE count"
 
 
-def test_bridge_vulnerability_cve_logs_orphan_count_runtime(caplog):
+def test_bridge_vulnerability_cve_logs_orphan_count_runtime(caplog, monkeypatch):
     """Behavioral pin: when the skip_query reports orphans, the log fires.
     Mocks the Neo4j session to return a non-zero orphan count and verifies
     the operator-facing message is emitted."""
     import importlib
     import logging
 
-    if "enrichment_jobs" in sys.modules:
-        del sys.modules["enrichment_jobs"]
+    drop_modules_for_test(monkeypatch, "enrichment_jobs")
     enrichment_jobs = importlib.import_module("enrichment_jobs")
 
     from unittest.mock import MagicMock
@@ -1944,7 +1913,7 @@ def test_bridge_vulnerability_cve_logs_orphan_count_runtime(caplog):
 # ---------------------------------------------------------------------------
 
 
-def test_vulnerability_resolver_normalizes_empty_misp_event_ids_to_none():
+def test_vulnerability_resolver_normalizes_empty_misp_event_ids_to_none(monkeypatch):
     """PR #34 round 21 (bugbot LOW): the Indicator resolver normalises an
     empty misp_event_ids[] to None via ``event_ids or None``, but the
     Vulnerability resolver passed the raw ``_neo4j_list(...)`` result
@@ -1958,8 +1927,7 @@ def test_vulnerability_resolver_normalizes_empty_misp_event_ids_to_none():
     import importlib
     import inspect
 
-    if "graphql_api" in sys.modules:
-        del sys.modules["graphql_api"]
+    drop_modules_for_test(monkeypatch, "graphql_api")
     graphql_api = importlib.import_module("graphql_api")
 
     src = inspect.getsource(graphql_api._resolve_vulnerabilities)
@@ -1971,7 +1939,7 @@ def test_vulnerability_resolver_normalizes_empty_misp_event_ids_to_none():
     )
 
 
-def test_build_campaign_nodes_filters_actors_to_precomputed_dict():
+def test_build_campaign_nodes_filters_actors_to_precomputed_dict(monkeypatch):
     """PR #34 round 21 (bugbot LOW): TOCTOU race between the pre-fetch of
     qualifying ThreatActor names (which builds the deterministic
     ``campaign_uuids`` dict) and the main MERGE query. If a NEW
@@ -1988,8 +1956,7 @@ def test_build_campaign_nodes_filters_actors_to_precomputed_dict():
     import importlib
     import inspect
 
-    if "enrichment_jobs" in sys.modules:
-        del sys.modules["enrichment_jobs"]
+    drop_modules_for_test(monkeypatch, "enrichment_jobs")
     enrichment_jobs = importlib.import_module("enrichment_jobs")
 
     src = inspect.getsource(enrichment_jobs.build_campaign_nodes)
@@ -2007,7 +1974,7 @@ def test_build_campaign_nodes_filters_actors_to_precomputed_dict():
     assert "[CAMPAIGN] backfilled c.uuid" in src, "operator-facing log must surface the backfill count when > 0"
 
 
-def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
+def test_build_campaign_nodes_backfill_heals_null_uuids_runtime(monkeypatch):
     """Behavioral pin: when the backfill query reports N healed Campaigns,
     the operator log fires with the count. Mocks the Neo4j session to
     return non-zero from the backfill query and verifies the message."""
@@ -2015,8 +1982,7 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
     import logging
     from unittest.mock import MagicMock
 
-    if "enrichment_jobs" in sys.modules:
-        del sys.modules["enrichment_jobs"]
+    drop_modules_for_test(monkeypatch, "enrichment_jobs")
     enrichment_jobs = importlib.import_module("enrichment_jobs")
 
     captured_logs = []
@@ -2135,7 +2101,7 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
 # ---------------------------------------------------------------------------
 
 
-def test_indicator_resolver_normalizes_empty_misp_attribute_ids_to_none():
+def test_indicator_resolver_normalizes_empty_misp_attribute_ids_to_none(monkeypatch):
     """PR #34 round 22 (bugbot LOW): round 21 applied ``or None`` to
     ``misp_event_ids`` in the Indicator resolver, AND to ``misp_event_ids``
     in the Vulnerability resolver — but missed the parallel
@@ -2148,8 +2114,7 @@ def test_indicator_resolver_normalizes_empty_misp_attribute_ids_to_none():
     import importlib
     import inspect
 
-    if "graphql_api" in sys.modules:
-        del sys.modules["graphql_api"]
+    drop_modules_for_test(monkeypatch, "graphql_api")
     graphql_api = importlib.import_module("graphql_api")
 
     src = inspect.getsource(graphql_api._resolve_indicators)
@@ -2163,7 +2128,7 @@ def test_indicator_resolver_normalizes_empty_misp_attribute_ids_to_none():
     )
 
 
-def test_sector_sdo_uuid_matches_compute_node_uuid():
+def test_sector_sdo_uuid_matches_compute_node_uuid(monkeypatch):
     """PR #34 round 22 (multi-agent UUID audit, HIGH): the Sector SDO's
     id UUID must equal ``compute_node_uuid("Sector", {"name": name})``.
     Before round 22 the exporter prepended ``sector|`` to the natural
@@ -2176,8 +2141,7 @@ def test_sector_sdo_uuid_matches_compute_node_uuid():
     in the bugbot-fixes regression suite too.)"""
     import importlib
 
-    if "stix_exporter" in sys.modules:
-        del sys.modules["stix_exporter"]
+    drop_modules_for_test(monkeypatch, "stix_exporter")
     stix_exporter = importlib.import_module("stix_exporter")
 
     # Behavioral pin (load-bearing): build an SDO and compare UUIDs end-to-end.
@@ -2222,7 +2186,7 @@ def test_user_and_alert_are_in_natural_keys_map():
     )
 
 
-def test_merge_resilmesh_user_stamps_uuid():
+def test_merge_resilmesh_user_stamps_uuid(monkeypatch):
     """Round 23 behavioral pin: ``merge_resilmesh_user`` must compute the
     deterministic uuid in Python and pass it as ``$node_uuid`` to the
     Cypher MERGE. Drives the actual production path against a fake driver
@@ -2231,8 +2195,7 @@ def test_merge_resilmesh_user_stamps_uuid():
     import importlib
     from unittest.mock import MagicMock
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
     from node_identity import compute_node_uuid
 
@@ -2276,14 +2239,13 @@ def test_merge_resilmesh_user_stamps_uuid():
     )
 
 
-def test_create_alert_node_stamps_uuid():
+def test_create_alert_node_stamps_uuid(monkeypatch):
     """Round 23 behavioral pin: ``create_alert_node`` must compute and
     stamp deterministic uuid via $node_uuid."""
     import importlib
     from unittest.mock import MagicMock
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
     from node_identity import compute_node_uuid
 
@@ -2333,15 +2295,14 @@ def test_create_alert_node_stamps_uuid():
     )
 
 
-def test_alert_node_refuses_missing_alert_id():
+def test_alert_node_refuses_missing_alert_id(monkeypatch):
     """Round 23 behavioral pin: like merge_device + merge_missiondependency
     (rounds 8/9), Alert must refuse to MERGE without its natural key. A
     missing alert_id has no deterministic uuid — better to fail loudly than
     to write a node with NULL uuid that breaks delta sync silently."""
     import importlib
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
@@ -2353,7 +2314,7 @@ def test_alert_node_refuses_missing_alert_id():
     )
 
 
-def test_role_user_edges_stamp_endpoint_uuids():
+def test_role_user_edges_stamp_endpoint_uuids(monkeypatch):
     """Round 23: the Role↔User ASSIGNED_TO edges (both directions) must
     stamp r.src_uuid + r.trg_uuid from the bound endpoint vars now that
     User has a deterministic n.uuid. Source-shape pin (positive) — drives
@@ -2362,8 +2323,7 @@ def test_role_user_edges_stamp_endpoint_uuids():
     import importlib
     from unittest.mock import MagicMock
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     captured: list = []
@@ -2420,15 +2380,14 @@ def test_role_user_edges_stamp_endpoint_uuids():
 # test_role_user_edges_stamp_endpoint_uuids above.
 
 
-def test_round23_uuid_indexes_are_created():
+def test_round23_uuid_indexes_are_created(monkeypatch):
     """Round 23: User.uuid and Alert.uuid indexes must be in
     create_indexes — without them, MERGE-by-uuid on the cloud receiver
     is O(n) instead of O(1) for these labels."""
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.create_indexes)
@@ -2443,14 +2402,13 @@ def test_round23_uuid_indexes_are_created():
 # ---------------------------------------------------------------------------
 
 
-def test_zone_override_global_clause_shape():
+def test_zone_override_global_clause_shape(monkeypatch):
     """PR #34 round 24: the helper that builds the Cypher SET clause for
     zone accumulation must produce a CASE expression that filters 'global'
     when at least one specific sector is present."""
     import importlib
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     clause = neo4j_client._zone_override_global_clause("n", "$zone")
@@ -2473,7 +2431,7 @@ def test_zone_override_global_clause_shape():
         neo4j_client._zone_override_global_clause("n; DROP", "$zone")
 
 
-def test_all_merge_sites_use_zone_override_helper():
+def test_all_merge_sites_use_zone_override_helper(monkeypatch):
     """The 5 MERGE sites that accumulate n.zone (or i.zone) must all route
     through ``_zone_override_global_clause``. A regression that re-adds a
     raw ``apoc.coll.toSet(coalesce(*.zone, ...))`` expression in the SET
@@ -2482,8 +2440,7 @@ def test_all_merge_sites_use_zone_override_helper():
     import importlib
     import inspect
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     # Scan the relevant method sources — strip comments so the helper's
@@ -2539,7 +2496,7 @@ def test_zone_override_enforced_at_write_time_no_migration_needed():
     )
 
 
-def test_zone_clause_semantic_matrix_via_ephemeral_cypher():
+def test_zone_clause_semantic_matrix_via_ephemeral_cypher(monkeypatch):
     """Behavioral pin via a pure-Python emulator of the CASE expression.
 
     The helper produces Cypher — we can't execute it without a live Neo4j —
@@ -2558,8 +2515,7 @@ def test_zone_clause_semantic_matrix_via_ephemeral_cypher():
     import importlib
     import re
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
 
     clause = neo4j_client._zone_override_global_clause("n", "$zone")
@@ -2679,7 +2635,7 @@ def test_zone_enum_derived_from_valid_zones(monkeypatch):
     assert query_api.ZoneEnum.healthcare == "healthcare"
 
 
-def test_debug_zone_check_uses_valid_zones():
+def test_debug_zone_check_uses_valid_zones(monkeypatch):
     """PR #34 round 24: scripts/debug_zone_check.py's
     ``_extract_zone_from_event_name`` used to hardcode a 4-element zone
     list. Pin the import so adding a 5th zone in config automatically
@@ -2691,8 +2647,7 @@ def test_debug_zone_check_uses_valid_zones():
     if scripts_path not in sys.path:
         sys.path.insert(0, scripts_path)
 
-    if "debug_zone_check" in sys.modules:
-        del sys.modules["debug_zone_check"]
+    drop_modules_for_test(monkeypatch, "debug_zone_check")
     dzc = importlib.import_module("debug_zone_check")
 
     src = inspect.getsource(dzc._extract_zone_from_event_name)
@@ -2764,7 +2719,7 @@ def test_adding_a_fifth_zone_propagates_through_all_derived_sources(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_merge_resilmesh_user_normalizes_domain_none_and_empty():
+def test_merge_resilmesh_user_normalizes_domain_none_and_empty(monkeypatch):
     """PR #34 round 25 (red-team, CRITICAL): ``merge_resilmesh_user`` used
     ``data.get("domain", "default")`` which returns ``"default"`` ONLY when
     the key is missing. If the caller passed ``domain=None`` or
@@ -2779,8 +2734,7 @@ def test_merge_resilmesh_user_normalizes_domain_none_and_empty():
     domain forms."""
     import importlib
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
     from node_identity import compute_node_uuid
 
@@ -2837,7 +2791,7 @@ def test_merge_resilmesh_user_normalizes_domain_none_and_empty():
         )
 
 
-def test_every_session_run_has_explicit_timeout():
+def test_every_session_run_has_explicit_timeout(monkeypatch):
     """PR #34 round 25 (bug hunter, CRITICAL): 40+ ``session.run(...)``
     calls in neo4j_client.py were missing the ``timeout=`` keyword argument.
     Without a timeout, a Neo4j-side stall (unresponsive cluster, long GC,
@@ -2851,8 +2805,7 @@ def test_every_session_run_has_explicit_timeout():
     import importlib
     import re
 
-    if "neo4j_client" in sys.modules:
-        del sys.modules["neo4j_client"]
+    drop_modules_for_test(monkeypatch, "neo4j_client")
     neo4j_client = importlib.import_module("neo4j_client")
     src_path = neo4j_client.__file__
     with open(src_path) as fh:

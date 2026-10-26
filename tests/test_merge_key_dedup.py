@@ -23,11 +23,6 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-# Drop stale cached modules so we always get fresh imports
-for _mod in ("neo4j_client", "run_misp_to_neo4j"):
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
 from neo4j_client import Neo4jClient  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
 

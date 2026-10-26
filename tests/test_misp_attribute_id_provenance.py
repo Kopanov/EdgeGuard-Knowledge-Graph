@@ -23,12 +23,6 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-# Force a clean import path — the parse_attribute path is cached aggressively
-# in some other test modules and we want the post-fix module here.
-for _mod in ("neo4j_client", "run_misp_to_neo4j"):
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
 from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
 
 

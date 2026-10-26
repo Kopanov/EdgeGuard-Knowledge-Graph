@@ -28,10 +28,6 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-for _mod in ("build_relationships", "neo4j_client"):
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
 import build_relationships  # noqa: E402
 from build_relationships import _safe_run_batched  # noqa: E402
 
