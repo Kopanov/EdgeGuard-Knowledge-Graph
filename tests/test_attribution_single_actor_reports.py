@@ -209,14 +209,15 @@ class TestTheCollector:
         def unavailable(*_a, **_k):
             raise cta.ReferenceUnavailable("test: not found")
 
-        monkeypatch.setattr(oc, "load_canonical_reference", unavailable)
-        items = _HARNESS._collect([_pulse("p-alias", ["X-Agent"], "APT28, Fancy Bear", ["203.0.113.9"])])
+        with monkeypatch.context() as patched:
+            patched.setattr(oc, "load_canonical_reference", unavailable)
+            items = _HARNESS._collect([_pulse("p-alias", ["X-Agent"], "APT28, Fancy Bear", ["203.0.113.9"])])
         ioc = next(i for i in items if i.get("value") == "203.0.113.9")
         assert ioc["pulse_malware_actor_pairs"] == [], "two names count as two actors without the reference"
         assert all(i["several_actor_pulses"] == [] for i in items)
         assert all(i["several_actor_pulses_by_name"] == ["p-alias"] for i in items)
-        # With the reference the same pulse names one actor: pairs, and no mark of either kind.
-        monkeypatch.undo()
+        # With the reference the same pulse names one actor: pairs, and no mark of either kind. (A context,
+        # not ``monkeypatch.undo()``, which would also undo the suite's autouse settings for the rest.)
         items = _HARNESS._collect([_pulse("p-alias", ["X-Agent"], "APT28, Fancy Bear", ["203.0.113.9"])])
         ioc = next(i for i in items if i.get("value") == "203.0.113.9")
         assert ioc["pulse_malware_actor_pairs"] == ["X-Agent::APT28::p-alias", "X-Agent::Fancy Bear::p-alias"]

@@ -1,15 +1,59 @@
-"""Tests for the ``sys.modules`` helpers in ``tests/stub_cleanup.py``."""
+"""Tests for the ``sys.modules`` helpers in ``tests/stub_cleanup.py``.
+
+``drop_modules_for_test`` puts ``sys.modules`` back as the test found it (2026-10-25). Its tests use a module
+written for the test: one loaded before the test, and one that was not.
+"""
 
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import sys
 import types
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
 import stub_cleanup
-from stub_cleanup import dag_module_import, sys_modules_restored
+from stub_cleanup import dag_module_import, drop_modules_for_test, sys_modules_restored
+
+
+@pytest.fixture
+def module_name(tmp_path, monkeypatch):
+    name = f"_stub_cleanup_probe_{uuid.uuid4().hex}"
+    (tmp_path / f"{name}.py").write_text("LOADED = object()\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    yield name
+    sys.modules.pop(name, None)
+
+
+def test_a_loaded_module_is_imported_anew_and_the_original_comes_back(module_name):
+    original = importlib.import_module(module_name)
+    with pytest.MonkeyPatch.context() as mp:
+        drop_modules_for_test(mp, module_name)
+        assert module_name not in sys.modules
+        fresh = importlib.import_module(module_name)
+        assert fresh is not original and fresh.LOADED is not original.LOADED
+    assert sys.modules[module_name] is original
+
+
+def test_a_module_not_loaded_before_is_removed_with_the_copy_the_test_imported(module_name):
+    assert module_name not in sys.modules
+    with pytest.MonkeyPatch.context() as mp:
+        drop_modules_for_test(mp, module_name)
+        importlib.import_module(module_name)
+        assert module_name in sys.modules
+    assert module_name not in sys.modules, "the test's copy must not stay behind for later importers"
+
+
+def test_a_name_passed_twice_still_restores_the_original(module_name):
+    original = importlib.import_module(module_name)
+    with pytest.MonkeyPatch.context() as mp:
+        drop_modules_for_test(mp, module_name)
+        importlib.import_module(module_name)
+        drop_modules_for_test(mp, module_name)
+        importlib.import_module(module_name)
+    assert sys.modules[module_name] is original
 
 
 def test_sys_modules_restored_puts_back_what_the_block_replaced_removed_or_added(monkeypatch):
@@ -23,6 +67,26 @@ def test_sys_modules_restored_puts_back_what_the_block_replaced_removed_or_added
         sys.modules["eg_stub_cleanup_kept"] = MagicMock()
         del sys.modules["eg_stub_cleanup_removed"]
         sys.modules["eg_stub_cleanup_added"] = MagicMock()
+
+    assert sys.modules["eg_stub_cleanup_kept"] is kept
+    assert sys.modules["eg_stub_cleanup_removed"] is removed
+    assert "eg_stub_cleanup_added" not in sys.modules
+
+
+def test_sys_modules_restored_puts_back_the_same_when_the_block_raises(monkeypatch):
+    """A failing import inside the ``test_graphql_api`` fixture must not leave its stand-ins behind."""
+    kept = types.ModuleType("eg_stub_cleanup_kept")
+    removed = types.ModuleType("eg_stub_cleanup_removed")
+    monkeypatch.setitem(sys.modules, "eg_stub_cleanup_kept", kept)
+    monkeypatch.setitem(sys.modules, "eg_stub_cleanup_removed", removed)
+    monkeypatch.delitem(sys.modules, "eg_stub_cleanup_added", raising=False)
+
+    with pytest.raises(RuntimeError, match="the block failed"):
+        with sys_modules_restored():
+            sys.modules["eg_stub_cleanup_kept"] = MagicMock()
+            del sys.modules["eg_stub_cleanup_removed"]
+            sys.modules["eg_stub_cleanup_added"] = MagicMock()
+            raise RuntimeError("the block failed")
 
     assert sys.modules["eg_stub_cleanup_kept"] is kept
     assert sys.modules["eg_stub_cleanup_removed"] is removed
@@ -79,3 +143,17 @@ def test_airflow_installed_ignores_a_stand_in_in_sys_modules(monkeypatch):
     expected = stub_cleanup.airflow_installed()
     monkeypatch.setitem(sys.modules, "airflow", MagicMock())
     assert stub_cleanup.airflow_installed() is expected
+
+
+def test_airflow_installed_is_false_without_airflow_on_the_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "path", [str(tmp_path)])
+    assert stub_cleanup.airflow_installed() is False
+
+
+def test_airflow_installed_is_true_where_airflow_is_installed():
+    """CI installs Airflow: a check that answered False there would turn every DAG import error into a skip."""
+    try:
+        importlib.metadata.distribution("apache-airflow")
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip("apache-airflow is not installed")
+    assert stub_cleanup.airflow_installed() is True

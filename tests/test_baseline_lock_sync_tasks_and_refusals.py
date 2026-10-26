@@ -77,17 +77,32 @@ def _context(run: dict, conf: dict | None = None) -> dict:
 
 @pytest.fixture
 def lock(tmp_path, monkeypatch):
-    """A real sentinel path; Airflow reports each DAG run as ``states[run_id]`` (default running)."""
+    """A real sentinel path; Airflow reports each DAG run as ``states[run_id]`` (default running); the
+    lookups are recorded in ``calls``."""
     path = tmp_path / "baseline_in_progress.lock"
     monkeypatch.setenv("EDGEGUARD_BASELINE_LOCK_PATH", str(path))
     monkeypatch.delenv("EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC", raising=False)
     states: dict = {}
+    calls: list = []
 
     def fake_get_dag_run(dag_id, run_id):
+        calls.append((dag_id, run_id))
         return {"dag_id": dag_id, "dag_run_id": run_id, "state": states.get(run_id, "running")}
 
     monkeypatch.setattr(airflow_client, "get_dag_run", fake_get_dag_run)
-    return SimpleNamespace(path=path, states=states)
+    return SimpleNamespace(path=path, states=states, calls=calls)
+
+
+def test_the_lock_reads_the_run_state_from_the_fake_airflow_lookup(lock):
+    """The tests below rely on ``lock.states``: a ``success`` state must prune the sentinel. Without the
+    fake (an ``airflow_client`` replaced in ``sys.modules``, 2026-10-25) the lock falls back to the
+    sentinel's age and the other tests here still pass, so this one fails instead."""
+    assert baseline_lock.acquire_baseline_lock(holder=BASELINE_A) is True
+    assert baseline_lock.baseline_skip_reason() is not None
+    lock.states[BASELINE_A["run_id"]] = "success"
+    assert baseline_lock.baseline_skip_reason() is None
+    assert not lock.path.exists()
+    assert (BASELINE_A["dag_id"], BASELINE_A["run_id"]) in lock.calls
 
 
 def _holder_on_disk(path: Path):
