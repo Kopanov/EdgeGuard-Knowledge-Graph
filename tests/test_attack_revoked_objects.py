@@ -335,8 +335,9 @@ class TestDeprecatedObjectsAreKeptAndMarked:
             for key in ("techniques", "tactics", "actors", "malware", "tools")
             for i in parsed[key]
         }
-        assert {k for k, v in flags.items() if v} == {"T1497.999", "Retired Group", "S9003"}
-        assert flags["T1059"] is False and flags["TA0002"] is False and flags["APT29"] is False
+        # Groups carry their ATT&CK id since 2026-11 (G9002 = "Retired Group", G0016 = APT29).
+        assert {k for k, v in flags.items() if v} == {"T1497.999", "G9002", "S9003"}
+        assert flags["T1059"] is False and flags["TA0002"] is False and flags["G0016"] is False
 
     def test_a_deprecated_technique_keeps_its_links(self):
         parsed = _parse()
@@ -364,7 +365,7 @@ class TestCollect:
         assert not {i.get("mitre_id") for i in items} & REVOKED_TECHNIQUES
         assert {i.get("mitre_id") or i["name"] for i in items if i["deprecated"]} == {
             "T1497.999",
-            "Retired Group",
+            "G9002",
             "S9003",
         }
         rels = collector.get_relationships()
@@ -433,17 +434,24 @@ class TestDeprecatedFlagReachesTheNode:
             ("merge_malware", {"name": "Retired Malware"}),
         ],
     )
-    def test_the_merge_sets_the_node_property_only_when_deprecated(self, merge, data):
+    def test_the_merge_writes_the_status_an_attack_record_states(self, merge, data):
+        """2026-11: an ATT&CK record sets the flag either way, so an active object clears it; another
+        source's record, or one that states no status, only ever sets it."""
         from neo4j_client import Neo4jClient
 
         client = Neo4jClient.__new__(Neo4jClient)
         client.merge_node_with_source = MagicMock(return_value=True)
-        assert getattr(client, merge)({**data, "deprecated": True}, source_id="mitre_attck")
-        assert client.merge_node_with_source.call_args.kwargs["extra_props"]["deprecated"] is True
-        for flag in (False, None):
+
+        def written(flag, source_id):
             client.merge_node_with_source.reset_mock()
-            getattr(client, merge)({**data, "deprecated": flag}, source_id="mitre_attck")
-            assert "deprecated" not in client.merge_node_with_source.call_args.kwargs["extra_props"]
+            assert getattr(client, merge)({**data, "deprecated": flag}, source_id=source_id)
+            return client.merge_node_with_source.call_args.kwargs["extra_props"].get("deprecated", "absent")
+
+        assert written(True, "mitre_attck") is True
+        assert written(False, "mitre_attck") is False
+        assert written(None, "mitre_attck") == "absent"
+        assert written(True, "alienvault_otx") is True
+        assert written(False, "alienvault_otx") == "absent"
 
     def test_merge_node_with_source_writes_the_flag(self):
         """End of the path: the property reaches the Cypher ``SET`` as a parameter."""

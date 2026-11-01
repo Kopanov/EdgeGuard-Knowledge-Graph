@@ -38,7 +38,7 @@ import urllib3
 from actor_name_hygiene import clean_actor_names
 from attack_revoked import load_revoked_ids
 from attack_software_names import split_attack_software_id
-from attack_values import AttackValue, looks_like_attack_value, parse_attack_value
+from attack_values import AttackValue, attack_object_id, looks_like_attack_value, parse_attack_value
 from canonical_threat_actors import (
     CanonicalReference,
     ReferenceUnavailable,
@@ -1185,11 +1185,13 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
         elif item.get("value"):
             # Indicators merge on (indicator_type, value) — no tag
             key = f"{item.get('indicator_type', 'unknown')}:{item['value']}"
+        elif item.get("type") in ("actor", "malware") and item.get("name"):
+            # Actors, malware merge on name only (2026-11: a MITRE one also carries its ATT&CK id)
+            key = f"{item['type']}:{item['name']}"
         elif item.get("mitre_id"):
             # Techniques, tactics, tools merge on mitre_id — check BEFORE name
             key = f"{item.get('type', 'technique')}:{item['mitre_id']}"
         elif item.get("name"):
-            # Actors, malware merge on name only
             key = f"{item['type']}:{item['name']}"
         else:
             logger.debug("Dedup: dropping item with no identifiable key (type=%s, tag=%s)", item.get("type"), tag)
@@ -1367,12 +1369,13 @@ def _neo4j_sync_item_sort_rank(item: Dict) -> int:
     t = item.get("type", "")
     if t == "tactic":
         return 0
-    if t == "technique" or item.get("mitre_id"):
-        return 1
+    # 2026-11: malware and actors before the ``mitre_id`` test, since a MITRE one carries its ATT&CK id.
     if t == "malware":
         return 2
     if t == "actor":
         return 3
+    if t == "technique" or item.get("mitre_id"):
+        return 1
     if _item_is_vulnerability_sync_bucket(item):
         return 4
     if item.get("indicator_type") and item.get("value"):
@@ -4414,6 +4417,7 @@ class MISPToNeo4jSync:
             actor_uses_tools: List[str] = []
             actor_otx_industries: List[str] = []
             actor_report_stated_zones: List[str] = []
+            actor_mitre_id = ""
             # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
             # (``_entity_comment_description``); the comment used to become the description when the
             # block did not parse.
@@ -4441,6 +4445,9 @@ class MISPToNeo4jSync:
                         # (``sector_evidence.stated_zones``, in ``_with_provenance``).
                         actor_otx_industries = [str(x).strip() for x in _meta_list(parsed, "ind") if str(x).strip()]
                         actor_report_stated_zones = _meta_report_stated_zones(parsed, "rsz", actor_report_ids)
+                        # 2026-11: the group's ATT&CK id ("aid"), taken from an ATT&CK attribute only.
+                        if canonical_source_id(source_id) == "mitre_attck":
+                            actor_mitre_id = attack_object_id("actor", parsed.get("aid"))
                     elif isinstance(parsed, list):
                         uses_techniques = _scalar_strings(parsed)
                 except (ValueError, IndexError):
@@ -4534,6 +4541,9 @@ class MISPToNeo4jSync:
                 item["otx_industries"] = actor_otx_industries
             if actor_report_stated_zones:
                 item["report_stated_zones"] = actor_report_stated_zones
+            if actor_mitre_id:
+                # 2026-11: n.mitre_id and the ``mitre_attck:<id>`` reference (``_item_source_refs``)
+                item["mitre_id"] = actor_mitre_id
             return self._with_provenance(item, relationships)
 
         # Handle malware
@@ -4559,6 +4569,7 @@ class MISPToNeo4jSync:
             malware_several_by_name: List[str] = []
             malware_otx_industries: List[str] = []
             malware_report_stated_zones: List[str] = []
+            malware_mitre_id = ""
             # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
             # (``_entity_comment_description``). The comment used to become the description when it was
             # only the block (``tail or description``: an OTX family from a pulse without a description
@@ -4582,6 +4593,9 @@ class MISPToNeo4jSync:
                     # 2026-10-18: the OTX pulse's own industries ("ind"), its sector statement.
                     malware_otx_industries = [str(x).strip() for x in _meta_list(meta, "ind") if str(x).strip()]
                     malware_report_stated_zones = _meta_report_stated_zones(meta, "rsz", malware_report_ids)
+                    # 2026-11: the software's ATT&CK id ("aid"), taken from an ATT&CK attribute only.
+                    if canonical_source_id(source_id) == "mitre_attck":
+                        malware_mitre_id = attack_object_id("malware", meta.get("aid"))
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
                         "Failed to parse MITRE_USES_TECHNIQUES for malware %r; no techniques taken", malware_name
@@ -4669,6 +4683,9 @@ class MISPToNeo4jSync:
                 item["otx_industries"] = malware_otx_industries
             if malware_report_stated_zones:
                 item["report_stated_zones"] = malware_report_stated_zones
+            if malware_mitre_id:
+                # 2026-11: n.mitre_id and the ``mitre_attck:<id>`` reference (``_item_source_refs``)
+                item["mitre_id"] = malware_mitre_id
             return self._with_provenance(item, relationships)
 
         # Handle MITRE technique (text "T1059.001 - PowerShell"; ``attack_values``)
@@ -5107,12 +5124,13 @@ class MISPToNeo4jSync:
                 tactics.append(item)
             elif item_type == "tool":
                 tools.append(item)
-            elif item_type == "technique" or item.get("mitre_id"):
-                techniques.append(item)
+            # 2026-11: malware and actors before the ``mitre_id`` test, since a MITRE one carries its ATT&CK id.
             elif item_type == "malware":
                 malware_items.append(item)
             elif item_type == "actor":
                 actors.append(item)
+            elif item_type == "technique" or item.get("mitre_id"):
+                techniques.append(item)
             elif item.get("indicator_type") and item.get("value"):
                 indicators.append(item)
             else:

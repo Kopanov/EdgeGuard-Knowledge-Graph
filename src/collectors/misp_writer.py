@@ -25,7 +25,7 @@ import requests
 import urllib3
 
 import source_registry  # noqa: E402  — single source of truth for source→MISP-tag mapping (chip 5a)
-from attack_values import attack_value_key, format_attack_value
+from attack_values import attack_object_id, attack_value_key, format_attack_value
 from collectors.collector_utils import TransientServerError, retry_after_sleep_seconds, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
@@ -518,9 +518,15 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
       ``rsz`` — ``report_stated_zones`` (2026-10-18): the zones the industries of the pulses in ``rids``
                 state, ``"<zone>|<pulse id>"`` (``_report_stated_zones``); an indicator carries them in
                 ``OTX_META.report_stated_zones``.
+      ``aid`` — the ATT&CK id of a MITRE group (``G0007``) or malware (``S0609``) (2026-11,
+                ``attack_object_id``), so the sync can set the node's ``mitre_id`` and cite
+                ``mitre_attck:<id>`` in ``source_refs``. A tool's id is in its value.
     Lists are capped so the comment stays within MISP field limits.
     """
     meta: Dict[str, Any] = {}
+    attack_id = attack_object_id(str(item.get("type") or ""), item.get("mitre_id"))
+    if attack_id:
+        meta["aid"] = attack_id
     uses = item.get("uses_techniques") or []
     if uses:
         meta["t"] = [str(x) for x in list(uses)[:400]]
@@ -980,12 +986,42 @@ def _dedup_key(attr_type: Any, value: Any) -> Tuple[Any, Any]:
     return (attr_type, value)
 
 
+# 2026-11: the attribute types whose value MISP changes in case on save (MISP 2.5,
+# ``AttributeValidationTool::modifyBeforeValidation``): hashes and other fingerprints, host names,
+# domains, e-mail addresses, IP addresses (an IPv6 address is written in lower case), MAC addresses,
+# UUIDs and booleans are lower-cased (of a ``filename|<hash>`` value, the hash part); CVE ids,
+# weaknesses, HTTP methods, hex, IBAN / BIC and AS numbers upper-cased. MISP stores every other value
+# (text, malware and threat-actor names, URLs, file names, registry keys, ...) in the case given. A
+# case-insensitive comparison of every type confirmed the active ATT&CK for ICS malware "Triton" because
+# the event held the deprecated "TRITON": MISP had not stored "Triton", and the loss went unreported.
+# The type names are lower-cased ("as" for MISP's "AS"): the comparison reads the type case-insensitively.
+_CASE_NORMALISED_TYPES = frozenset(
+    {
+        "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha512/224", "sha512/256",
+        "sha3-224", "sha3-256", "sha3-384", "sha3-512", "ja3-fingerprint-md5", "jarm-fingerprint",
+        "hassh-md5", "hasshserver-md5", "pehash", "authentihash", "vhash", "imphash", "telfhash", "tlsh",
+        "cdhash", "dom-hash", "anonymised", "uuid", "boolean",
+        "x509-fingerprint-md5", "x509-fingerprint-sha1", "x509-fingerprint-sha256",
+        "hostname", "hostname|port", "domain", "domain|ip", "onion-address",
+        "email", "email-src", "email-dst", "target-email", "whois-registrant-email",
+        "ip-src", "ip-dst", "ip-src|port", "ip-dst|port", "mac-address", "mac-eui-64",
+        "filename|md5", "filename|sha1", "filename|imphash", "filename|sha224", "filename|sha256",
+        "filename|sha384", "filename|sha512", "filename|sha512/224", "filename|sha512/256",
+        "filename|sha3-224", "filename|sha3-256", "filename|sha3-384", "filename|sha3-512",
+        "filename|authentihash", "filename|vhash", "filename|pehash", "filename|tlsh",
+        "vulnerability", "weakness", "http-method", "hex", "iban", "bic", "as",
+    }
+)  # fmt: skip
+
+
 def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     """``(type, value)`` key used to recognise a pushed attribute in a MISP event response.
 
-    MISP normalises some values on save (hashes, domains, hostnames and e-mail addresses are
-    lower-cased, surrounding whitespace is trimmed), so the comparison is case-insensitive
-    and whitespace-trimmed. Returns None when the attribute lacks a type or a value.
+    MISP trims surrounding whitespace on save and changes the case of some types' values (hashes,
+    domains, host names and e-mail addresses are lower-cased, CVE ids upper-cased:
+    ``_CASE_NORMALISED_TYPES``), so the comparison is whitespace-trimmed, and case-insensitive for
+    those types only: any other value that differs from the stored one in case only is a different
+    value. Returns None when the attribute lacks a type or a value.
     """
     if not isinstance(attribute, dict):
         return None
@@ -993,10 +1029,13 @@ def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     value = attribute.get("value")
     if attr_type is None or value is None:
         return None
-    value_norm = str(value).strip().lower()
+    type_norm = str(attr_type).strip().lower()
+    value_norm = str(value).strip()
+    if type_norm in _CASE_NORMALISED_TYPES:
+        value_norm = value_norm.lower()
     if not value_norm:
         return None
-    return (str(attr_type).strip().lower(), value_norm)
+    return (type_norm, value_norm)
 
 
 def _iso_epoch(raw: Any) -> Optional[float]:
@@ -1248,9 +1287,9 @@ def _make_attributes_storable(attributes: List[Dict]) -> List[Dict]:
 def _strict_push_accounting() -> bool:
     """``EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING`` truthy: attributes absent from the returned event
     count as failed pushes (they then feed ``EDGEGUARD_MISP_MIN_SUCCESS_RATE``). Off by default:
-    MISP normalises some values on save (case, whitespace are tolerated by the comparison; rarer
-    rewrites such as IPv6 compression are not), so the strict mode is meant to be enabled after a
-    live check shows no spurious unconfirmed attributes.
+    MISP normalises some values on save (whitespace, and the case of ``_CASE_NORMALISED_TYPES``, are
+    tolerated by the comparison; rarer rewrites such as IPv6 compression are not), so the strict
+    mode is meant to be enabled after a live check shows no spurious unconfirmed attributes.
     """
     return os.environ.get("EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING", "").strip().lower() in ("1", "true", "yes", "on")
 
