@@ -37,6 +37,7 @@ from config import (
     detect_zones_from_text,
     resolve_collection_limit,
 )
+from node_identity import canonicalize_merge_key
 from resilience import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,8 @@ ICS_KILL_CHAIN_NAME = "mitre-ics-attack"
 # retired object without a successor with ``x_mitre_deprecated: true``. ``_parse_bundle`` skips
 # revoked objects of every type (they become neither items nor relationship endpoints) and adds a
 # revoked group's or software's name and aliases to its successor's ``aliases``; deprecated objects
-# are kept with ``deprecated: True``. A feed that still names a revoked technique id is translated
+# are kept with ``deprecated: True``, except a group or software of the same name as an active one
+# (``_one_item_per_node_key``, 2026-11). A feed that still names a revoked technique id is translated
 # to the successor downstream (``attack_revoked``), so a revoked technique the map does not list yet
 # is kept, with a warning, until the map is rebuilt. Measured on the hosted graph (2026-10-15): 158
 # of 982 Technique nodes and 6 ThreatActor nodes were revoked ATT&CK objects.
@@ -174,6 +176,103 @@ def _attack_external_id(obj: dict) -> str:
         if isinstance(ext, dict) and ext.get("source_name") == "mitre-attack":
             return str(ext.get("external_id") or "")
     return ""
+
+
+# Lists that items of one node unite when they are kept as one (the same STIX object in both bundles).
+_UNION_LIST_KEYS = ("uses_techniques", "uses_malware", "uses_tools")
+
+
+def _node_key(item: dict, label: str) -> str:
+    """The key of the Neo4j node ``item`` becomes: a tool's ATT&CK id, else the name as ``canonicalize_merge_key``
+    reads it for ``label`` (lower-cased for ``ThreatActor`` and ``Malware``)."""
+    if label == "Tool" and item.get("mitre_id"):
+        return str(item["mitre_id"])
+    return canonicalize_merge_key(label, {"name": str(item.get("name") or "")})["name"]
+
+
+def _one_item_per_node_key(items: list, label: str) -> list:
+    """One item per Neo4j node; an active object wins over a deprecated one of the same name (2026-11).
+
+    ``ThreatActor`` and ``Malware`` nodes are keyed by the lower-cased name (``canonicalize_merge_key``),
+    and MISP stores only one of two values of one event that differ in case. ATT&CK publishes such
+    pairs: the deprecated Enterprise ``TRITON`` (S0609) beside the active ICS ``Triton`` (S1009), and
+    the ICS bundle keeps deprecated copies without an ATT&CK id of software it now shares with
+    Enterprise (``Killdisk`` beside ``KillDisk`` S0607, ``Stuxnet`` beside ``Stuxnet`` S0603). Both
+    reached MISP and the node: MISP kept ``TRITON`` and dropped ``Triton``, and the deprecated
+    ``Killdisk`` marked the active ``KillDisk`` node deprecated and replaced its description.
+
+    In each group of items of one node key (``_node_key``), the first active item is kept (Enterprise
+    comes first) and takes the ``_UNION_LIST_KEYS`` entries of the other active items; deprecated items
+    are left out when the group holds an active one. The deprecated copies ATT&CK publishes carry no
+    relationships; one with a link the kept item lacks is named in a warning, since it is not kept. A group of
+    deprecated items only keeps the first, as for active ones. Order is kept. ``Tool`` nodes are keyed
+    by their ATT&CK id, so a tool groups only with the same object from the other bundle.
+    """
+    groups: dict = {}
+    for item in items:
+        groups.setdefault(_node_key(item, label), []).append(item)
+    out = []
+    left_out = []
+    lists_lost = []
+    for group in groups.values():
+        active = [it for it in group if not it.get("deprecated")]
+        winners = active or group
+        kept = winners[0]
+        for other in winners[1:]:
+            for list_key in _UNION_LIST_KEYS:
+                have = list(kept.get(list_key) or [])
+                seen = set(have)
+                extra = []
+                for x in other.get(list_key) or []:
+                    if x not in seen:
+                        seen.add(x)
+                        extra.append(x)
+                if extra:
+                    kept = {**kept, list_key: have + extra}
+        out.append(kept)
+        for it in group:
+            if active and it.get("deprecated"):
+                note = (
+                    f"{it.get('name')!r} ({it.get('attack_domain')}, {it.get('mitre_id') or 'no ATT&CK id'}) "
+                    f"for {kept.get('name')!r} ({kept.get('attack_domain')}, {kept.get('mitre_id') or 'no ATT&CK id'})"
+                )
+                left_out.append(note)
+                # ``_parse_bundle`` looks a name's links up by name, so a copy of the same name shares the
+                # kept item's lists; only an entry the kept item lacks is lost.
+                if any(x not in (kept.get(k) or []) for k in _UNION_LIST_KEYS for x in it.get(k) or []):
+                    lists_lost.append(note)
+    if left_out:
+        logger.info(
+            "   → [ATTACK-SAME-NAME] %s: %d deprecated object(s) left out, an active one has the same name: %s",
+            label,
+            len(left_out),
+            "; ".join(left_out),
+        )
+    if lists_lost:
+        logger.warning(
+            "   → [ATTACK-SAME-NAME] %s: %d deprecated object(s) left out with a technique or software link "
+            "the kept item lacks; the link is not kept: %s",
+            label,
+            len(lists_lost),
+            "; ".join(lists_lost),
+        )
+    return out
+
+
+def _without_deprecated_groups_and_malware(parsed: dict) -> Tuple[dict, int]:
+    """``parsed`` without its deprecated groups and malware, and how many were held back (2026-11).
+
+    Used when the ATT&CK for ICS bundle failed: an active object of the same name may be in it
+    (``Triton`` S1009 for the deprecated Enterprise ``TRITON`` S0609), and only both bundles together
+    tell whether a deprecated one is the only object of its name (``_one_item_per_node_key``).
+    """
+    out = dict(parsed)
+    held = 0
+    for key in ("actors", "malware"):
+        kept = [it for it in parsed.get(key, []) if not it.get("deprecated")]
+        held += len(parsed.get(key, [])) - len(kept)
+        out[key] = kept
+    return out, held
 
 
 def _revoked_techniques_without_successor_in_map(objects: list, revoked_ids: set) -> Tuple[set, list]:
@@ -369,6 +468,7 @@ class MITRECollector:
             # Opt-in ATT&CK for ICS (2026-10): fetched AFTER Enterprise, parsed
             # with the same code path, merged by mitre_id / name. Failure is
             # isolated inside _collect_ics_bundle — Enterprise items survive.
+            ics_failed = False
             if ENABLE_MITRE_ICS:
                 ics_cap = None if rel_cap is None else max(0, rel_cap - len(parsed["relationships"]))
                 ics_parsed = self._collect_ics_bundle(max_relationships=ics_cap)
@@ -378,6 +478,16 @@ class MITRECollector:
                         f"[OK] MITRE ATT&CK for ICS: merged "
                         f"{len(ics_parsed['techniques'])} techniques, {len(ics_parsed['tactics'])} tactics, "
                         f"{len(ics_parsed['actors'])} actors, {len(ics_parsed['malware'])} malware"
+                    )
+                else:
+                    # 2026-11: without the ICS bundle no deprecated group or malware is pushed (its active
+                    # namesake may be an ICS object) and the ETag is not stored, so the next run reads both.
+                    ics_failed = True
+                    parsed, held_back = _without_deprecated_groups_and_malware(parsed)
+                    logger.warning(
+                        "[MITRE] ATT&CK for ICS failed: %d deprecated group(s) / malware held back, and the "
+                        "bundle's ETag is not stored, so the next run reads both bundles again",
+                        held_back,
                     )
 
             # Store relationships for Neo4j graph building (cap applied per bundle above).
@@ -403,7 +513,7 @@ class MITRECollector:
             # not store the bundle's ETag: a stored ETag makes every later run "not modified", so the
             # objects left out would never be read again.
             total_objects = len(tactics) + len(techniques) + len(actors) + len(malware) + len(tools)
-            store_etag = bool(new_etag) and len(all_items) == total_objects
+            store_etag = bool(new_etag) and len(all_items) == total_objects and not ics_failed
             if new_etag and not store_etag:
                 logger.warning(
                     "[MITRE] item limit %s kept %d of %d objects; the bundle's ETag is not stored, so the "
@@ -501,7 +611,9 @@ class MITRECollector:
         not list: feeds cite techniques by id and only the map translates them, so it is kept, with
         a ``[ATTACK-REVOKED]`` warning, until the map is rebuilt. Deprecated objects
         (``x_mitre_deprecated: true``) are kept and carry ``deprecated: True``; every other item
-        carries ``deprecated: False``.
+        carries ``deprecated: False``. A deprecated group or software of the same name as an active
+        one is left out, and items of one name are emitted once (``_one_item_per_node_key``, 2026-11).
+        Groups and malware carry their ATT&CK id (``mitre_id``) like techniques, tactics and tools.
 
         Returns:
             dict with keys ``techniques``, ``tactics``, ``actors``, ``malware``,
@@ -795,6 +907,8 @@ class MITRECollector:
                     {
                         "type": "actor",
                         "attack_domain": domain,
+                        # 2026-11: the group's ATT&CK id (G####), for the node and the links' source_refs.
+                        "mitre_id": _attack_external_id(obj),
                         "name": actor_name,
                         # 2026-10: plus the names of the groups ATT&CK revoked in its favour
                         # (UNC2452 → APT29), so lookups and the actor alias merge find it by them.
@@ -833,6 +947,8 @@ class MITRECollector:
                     {
                         "type": "malware",
                         "attack_domain": domain,
+                        # 2026-11: the software's ATT&CK id (S####); the deprecated ICS copies have none.
+                        "mitre_id": _attack_external_id(obj),
                         "name": obj.get("name", ""),
                         # ATT&CK malware SDOs carry aliases in the MITRE
                         # extension field ``x_mitre_aliases`` (the plain
@@ -929,6 +1045,10 @@ class MITRECollector:
                 alias_stats["no_successor"],
                 alias_stats["unresolved"],
             )
+        # 2026-11: one item per node key; an active object wins over a deprecated one of the same name.
+        actors = _one_item_per_node_key(actors, "ThreatActor")
+        malware = _one_item_per_node_key(malware, "Malware")
+        tools = _one_item_per_node_key(tools, "Tool")
         n_deprecated = sum(
             1 for items in (techniques, tactics, actors, malware, tools) for it in items if it["deprecated"]
         )
@@ -985,13 +1105,17 @@ class MITRECollector:
         - techniques / tactics: keyed by ``mitre_id``. ICS ids (T08xx / TA01xx)
           never collide with Enterprise (T1xxx / TA00xx); duplicates are skipped
           defensively.
-        - actors / malware / tools: keyed by ``name``. Groups and malware that
-          appear in both bundles (e.g. "Sandworm Team", "Stuxnet") are the SAME
-          STIX object published in both domain bundles (``x_mitre_domains`` lists
-          both). They are emitted ONCE, keeping the Enterprise item (so
+        - actors / malware / tools: keyed as their nodes are (``_one_item_per_node_key``:
+          the lower-cased name of actors and malware, a tool's ATT&CK id). Groups and
+          malware that appear in both bundles (e.g. "Sandworm Team", "Stuxnet") are
+          the SAME STIX object published in both domain bundles (``x_mitre_domains``
+          lists both). They are emitted ONCE, keeping the Enterprise item (so
           ``attack_domain`` stays "enterprise" — Enterprise is the canonical home
           and the downstream name-keyed Neo4j merge sees one node) with
           ``uses_techniques`` UNIONED so the ICS technique links are preserved.
+          An active object wins over a deprecated one of the same name (2026-11):
+          the active ICS "Triton" (S1009) replaces the deprecated Enterprise
+          "TRITON" (S0609).
         - relationships: concatenated (each carries its own ``attack_domain``).
         """
         merged = {k: list(v) for k, v in primary.items()}
@@ -1006,26 +1130,8 @@ class MITRECollector:
                 seen.add(mid)
                 merged[key].append(it)
 
-        for key in ("actors", "malware", "tools"):
-            by_name = {}
-            for it in merged[key]:
-                by_name.setdefault(it.get("name"), it)
-            for it in secondary.get(key, []):
-                existing = by_name.get(it.get("name"))
-                if existing is None:
-                    by_name[it.get("name")] = it
-                    merged[key].append(it)
-                    continue
-                for list_key in ("uses_techniques", "uses_malware", "uses_tools"):
-                    have = existing.get(list_key) or []
-                    seen_t = set(have)
-                    extra = []
-                    for t in it.get(list_key) or []:
-                        if t not in seen_t:
-                            seen_t.add(t)
-                            extra.append(t)
-                    if extra:
-                        existing[list_key] = list(have) + extra
+        for key, label in (("actors", "ThreatActor"), ("malware", "Malware"), ("tools", "Tool")):
+            merged[key] = _one_item_per_node_key(merged[key] + list(secondary.get(key, [])), label)
 
         # 2026-10 review fix: a group/malware present in BOTH bundles carries the same
         # STIX relationship objects twice; de-duplicate so the CLI relationship step

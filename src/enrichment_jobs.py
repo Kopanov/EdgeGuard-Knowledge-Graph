@@ -1880,10 +1880,10 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
 # folds the twins a graph built before that already holds, so no new baseline is needed.
 #
 # A non-MITRE node whose name, or an alias of its own name, ends with " - S####" folds into the
-# MITRE-sourced Malware node of that ATT&CK id. The MITRE node carries no ``mitre_id``: its id is
-# read from the record MITRE delivered (the ``raw_data`` of its SOURCED_FROM edge to the ATT&CK
-# source, as ``scripts/build_canonical_threat_actors.py`` reads group ids), and when it cannot be
-# read the node of the same base name is the target. A revoked software id is translated to its
+# MITRE-sourced Malware node of that ATT&CK id. The MITRE node's id is read from the record MITRE
+# delivered (the ``raw_data`` of its SOURCED_FROM edge to the ATT&CK source, as
+# ``scripts/build_canonical_threat_actors.py`` reads group ids; a node synced since 2026-11 also carries
+# it as ``mitre_id``), and when it cannot be read the node of the same base name is the target. A revoked software id is translated to its
 # successor first (``attack_revoked``). A twin whose id and name lead to two MITRE nodes is skipped
 # (``skipped_ambiguous``). ATT&CK software without a MITRE Malware node (chiefly the ATT&CK tools,
 # such as Mimikatz S0002, which are ``Tool`` nodes) has no merge target; since the collectors name a

@@ -145,6 +145,7 @@ Auth:    Configured via environment variables
 ```cypher
 (:Malware {
   name: STRING,             // Malware name, without an ATT&CK software id suffix ("Cobalt Strike - S0154" -> "cobalt strike")
+  mitre_id: STRING,         // ATT&CK software id (S####) of a MITRE record; not part of the key
   aliases: LIST,            // Other names, including a source's suffixed name ("Cobalt Strike - S0154")
   merged_from: LIST,        // ATT&CK-id twins the enrichment job merge_malware_attack_twins folded in (steps 9b / 2d resolve these names to this node)
   malware_types: LIST,      // Types (trojan, ransomware, etc.)
@@ -165,6 +166,7 @@ Auth:    Configured via environment variables
 ```cypher
 (:ThreatActor {
   name: STRING,             // Actor name
+  mitre_id: STRING,         // ATT&CK group id (G####) of a MITRE record; not part of the key
   aliases: LIST,            // Known aliases
   description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source
   description_source: STRING, // The source of description ("mitre_attck", ...)
@@ -188,7 +190,7 @@ Auth:    Configured via environment variables
   tactic_phases: LIST,      // Kill-chain phase shortnames (IN_TACTIC)
   attack_domain: STRING,    // enterprise / ics / mobile (default enterprise)
   detection: STRING,        // ATT&CK detection text
-  deprecated: BOOLEAN,      // Set when ATT&CK deprecated the object (never cleared)
+  deprecated: BOOLEAN,      // ATT&CK's status: set and cleared by an ATT&CK record; another source only sets it
   source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   confidence_score: FLOAT,  // 0.0-1.0
   first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
@@ -1018,6 +1020,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-11-01 — `Malware` and `ThreatActor` carry the ATT&CK id of a MITRE record (`mitre_id`); `deprecated` is cleared by an ATT&CK record of the active object (it was never cleared).
 - 2026-10-25 — `GET /indicators`: the `source` filter takes a source's canonical id or a variant (until then only the canonical id matched).
 - 2026-10-25 — Campaign `first_seen` / `last_seen` and the alert enrichment's `first_seen` / `last_updated`: the seen dates of the indicators (a source's claim, else its latest report; the first seen never after the first import), not EdgeGuard's import and update times for indicators without a claim.
 - 2026-10-23 — The GraphQL `/health` behaviour and body and the REST routes' connection check are described here; the page pointed to a README table, which this page replaces; the note on the NATS response points to ROADMAP.md, which lists the planned work (it pointed to a to-do list in RESILMESH_INTEROPERABILITY.md § 8.6).

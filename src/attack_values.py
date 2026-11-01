@@ -45,6 +45,11 @@ _ATTACK_LIKE_RE = re.compile(r"^(?:TA|T|S)\d{3}[\d%]", re.ASCII)
 
 _KIND_BY_PREFIX = (("TA", "tactic"), ("T", "technique"), ("S", "tool"))
 
+# The ATT&CK id of a group (``G0007``) or a piece of software (``S0609``) that MISPWriter carries for a
+# MITRE threat actor or malware in the ``aid`` key of its ``MITRE_USES_TECHNIQUES`` block (2026-11): their
+# MISP value is the name alone, which keys the node.
+_OBJECT_ID_RES = {"actor": re.compile(r"^G\d{4}$", re.ASCII), "malware": re.compile(r"^S\d{4}$", re.ASCII)}
+
 
 class AttackValue(NamedTuple):
     """An ATT&CK entry read from a MISP ``text`` value: ``kind`` is ``technique``, ``tactic`` or
@@ -78,6 +83,19 @@ def parse_attack_value(value: Any) -> Optional[AttackValue]:
     return AttackValue(kind, mitre_id, (match.group("name") or "").strip())
 
 
+def attack_object_id(kind: str, value: Any) -> str:
+    """``value`` trimmed and upper-cased when it is the ATT&CK id of a ``kind`` item, else ``""`` (2026-11).
+
+    ``kind`` is the item type: ``actor`` takes a group id (``G0007``), ``malware`` a software id
+    (``S0609``); any other kind takes none.
+    """
+    pattern = _OBJECT_ID_RES.get(kind)
+    if pattern is None or not isinstance(value, str):
+        return ""
+    candidate = value.strip().upper()
+    return candidate if pattern.match(candidate) else ""
+
+
 def looks_like_attack_value(value: Any) -> bool:
     """True when ``value`` starts like an ATT&CK id (see ``_ATTACK_LIKE_RE``), whether or not the id
     is valid: the sync reads such a value as an ATT&CK entry or skips it."""
@@ -101,6 +119,7 @@ def attack_value_key(value: Any) -> Any:
 __all__ = [
     "ATTACK_VALUE_SEPARATOR",
     "AttackValue",
+    "attack_object_id",
     "attack_value_key",
     "format_attack_value",
     "looks_like_attack_value",
