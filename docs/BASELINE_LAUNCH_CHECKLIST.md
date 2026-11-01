@@ -81,12 +81,14 @@ fails under STRICT=1) and checks only for running runs in check [5]. Specificall
   information: decide before the launch whether the baseline should run
   without it
 * `[13] Airflow components and metadata database` — reads
-  `${AIRFLOW_WEBSERVER_URL:-http://localhost:8082}/api/v2/monitor/health`:
-  a scheduler or metadata database that Airflow does not report healthy is
-  a failure on the DAG launch path (no baseline task would start; `airflow
-  standalone` keeps its API server up when the scheduler dies) and a
-  warning on the CLI path; a triggerer or DAG processor that is not healthy,
-  and an endpoint that does not answer, are warnings. The metadata database
+  `${AIRFLOW_WEBSERVER_URL:-http://localhost:8082}/api/v2/monitor/health`
+  (`/health` with `AIRFLOW_API_VERSION=v1`, Airflow 2): a scheduler or
+  metadata database that Airflow does not report healthy is a failure on
+  the DAG launch path (no baseline task would start; `airflow standalone`
+  keeps its API server up when the scheduler dies) and a warning on the CLI
+  path; a triggerer or DAG processor reported unhealthy, and an endpoint
+  that does not answer, are warnings; one listed without status runs no job
+  of its own and is information. The metadata database
   backend is read from `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` or, on the DAG
   path, from `docker compose exec -T airflow airflow config get-value
   database sql_alchemy_conn`; only its scheme is judged and the value
@@ -488,13 +490,15 @@ retries, and step 1 marks the runs still listed as running failed.
   `EdgeGuardMispFetchFallbackHardError` (critical) alerts. Both stay
   silent for the entire run when everything is healthy.
 * `EdgeGuardAirflowSchedulerDown` (critical) fires when the Airflow
-  scheduler has stopped while the API server keeps answering: no task
+  scheduler has stopped while the API server keeps answering: no new task
   starts and the run stays `running` without reaching its 32-hour
-  `dagrun_timeout`. Restart Airflow (`docker compose restart airflow`); the
-  run continues where it stopped, do not trigger it again, and the stalled
-  time counts against the timeout ([RUNBOOK.md](RUNBOOK.md), "Airflow
-  scheduler or triggerer stopped"). `edgeguard dag status` reports the same
-  and exits 1.
+  `dagrun_timeout`. Do not pause or trigger the DAG. Restore the metadata
+  database first when it is reported unhealthy; when a task of the run is
+  still running and the time allows, let it end (a restart runs it again
+  from its start); then restart Airflow (`docker compose restart airflow`).
+  Finished tasks are not run again, and the stalled time counts against
+  the timeout ([RUNBOOK.md](RUNBOOK.md), "Airflow scheduler or triggerer
+  stopped"). `edgeguard dag status` reports the same and exits 1.
 * Watch the three critical-chain tasks' durations (`full_neo4j_sync`,
   `build_relationships`, `run_enrichment_jobs`) in the Airflow UI (Gantt /
   task duration) against their limits (6 h / 5 h / 5 h). Prometheus records

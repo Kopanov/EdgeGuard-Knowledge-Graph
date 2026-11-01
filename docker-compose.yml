@@ -393,7 +393,8 @@ services:
         ) & )
         exec airflow standalone
     # Note: in Airflow 3.x `airflow standalone` runs the scheduler + API
-    # server + DAG processor + triggerer in one process, same as 2.x.
+    # server + DAG processor + triggerer in this one container, each in its
+    # own subprocess, same as 2.x.
     # For a split-process production deployment, switch to separate
     # `airflow scheduler` / `airflow api-server` services — out of scope
     # for this single-node compose stack.
@@ -577,7 +578,8 @@ services:
   # ------------------------------------------------------------------------------
   # Metrics exporter (2026-10) — aggregates the per-process metric files the Airflow
   # task processes write to PROMETHEUS_MULTIPROC_DIR and serves /metrics on 8001.
-  # Same image as airflow (the exporter only needs prometheus_client and src/).
+  # Same image as airflow (the exporter needs prometheus_client, requests and src/); it also
+  # reads Airflow's health endpoint at every scrape.
   # ------------------------------------------------------------------------------
   metrics:
     image: edgeguard-airflow:3.3.2-python3.12

@@ -236,7 +236,7 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 
 ### Airflow Component Health
 
-`airflow standalone` (the Compose `airflow` service, and the usual bare-metal setup) runs the scheduler,
+`airflow standalone` (the Compose `airflow` service, or a bare-metal install that runs it) runs the scheduler,
 triggerer, DAG processor and API server as subprocesses and neither restarts nor exits when one of
 them dies. Airflow's health endpoint (`/api/v2/monitor/health`; `/health` on Airflow 2) then answers
 HTTP 200 with `unhealthy` in its JSON body only, and no task process is left to record anything, so
@@ -245,14 +245,18 @@ the metrics exporter asks the endpoint at every scrape (5-second timeout) and se
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `edgeguard_airflow_health_up` | Gauge | — | `1` when the health endpoint answered with a JSON object, `0` when it did not answer (read by `EdgeGuardAirflowHealthUnreachable`) |
-| `edgeguard_airflow_component_healthy` | Gauge | `component` | `1` when Airflow reports the component `healthy`, `0` otherwise (also for a status of `null`, which Airflow reports for a triggerer or DAG processor that has never run); one series for each component the answer lists: `metadatabase`, `scheduler`, `triggerer`, `dag_processor`. Absent while the endpoint does not answer (read by `EdgeGuardAirflowSchedulerDown` and `EdgeGuardAirflowComponentUnhealthy`) |
+| `edgeguard_airflow_component_healthy` | Gauge | `component` | `1` when Airflow reports the component `healthy`, `0` otherwise. `metadatabase` and `scheduler` always have a series (`0` also without status or when the answer does not list them); `triggerer` and `dag_processor` have one when the answer gives them a status. Airflow reports a status of `null` for a triggerer or DAG processor of which it has recorded no job, one that does not run as a process of its own (Airflow 2 parses the DAG files inside the scheduler by default), so such a component has no series. Absent while the endpoint does not answer (read by `EdgeGuardAirflowSchedulerDown` and `EdgeGuardAirflowComponentUnhealthy`) |
 
 Airflow reports the scheduler unhealthy when its last heartbeat is older than
 `[scheduler] scheduler_health_check_threshold` (30 seconds by default). The gauges are served by
 `src/metrics_exporter.py` only: by the `metrics` compose service, which reaches the airflow
 service's API server at `http://airflow:8082` over `edgeguard_net`, and on a bare-metal install by
 `python -m src.metrics_exporter` (with `AIRFLOW_WEBSERVER_URL` pointing at the API server).
-`EDGEGUARD_METRICS_AIRFLOW_HEALTH=false` removes them.
+`EDGEGUARD_METRICS_AIRFLOW_HEALTH=false` removes them. The two alerts on
+`edgeguard_airflow_component_healthy` set no `component` label of their own, so each alert keeps
+the series' `component` and names the Airflow component; a rule label would overwrite it, and two
+components down at once would give two alerts with the same labels, which Prometheus refuses to
+evaluate.
 
 ### MISP Sync Event Accounting
 
@@ -586,8 +590,8 @@ list (including the disk, inode and `build_relationships` alerts), grep
 | `EdgeGuardSourceAccessDenied` | A collector was skipped with `reason_class=*_auth_denied` in the last 25 hours: the provider refuses the request (rejected or revoked API key, blocked client). The task is green and nothing is collected; check with `python src/source_key_check.py` | warning |
 | `EdgeGuardCircuitBreakerOpen` | Circuit open | critical |
 | `EdgeGuardServiceDown` | Health check fail | critical |
-| `EdgeGuardAirflowSchedulerDown` | `edgeguard_airflow_component_healthy{component="scheduler"} == 0` for 5m: Airflow reports its scheduler not healthy (no heartbeat within its health-check threshold). No task starts, and a DAG run shown as running neither progresses nor reaches its `dagrun_timeout`, which only the scheduler enforces. Restart Airflow; the run continues where it stopped ([RUNBOOK.md](RUNBOOK.md), "Airflow scheduler or triggerer stopped") | critical |
-| `EdgeGuardAirflowComponentUnhealthy` | `edgeguard_airflow_component_healthy{component!="scheduler"} == 0` for 10m: the triggerer, the DAG processor or the metadata database is not reported healthy, or has no status. No EdgeGuard DAG defers a task to the triggerer; a stopped DAG processor stops the parsing of the DAG files | warning |
+| `EdgeGuardAirflowSchedulerDown` | `edgeguard_airflow_component_healthy{component="scheduler"} == 0` for 5m: Airflow reports its scheduler not healthy: no heartbeat within its health-check threshold, or the API server cannot read the metadata database (`metadatabase` is then `0` too). No task starts, and a DAG run shown as running neither progresses nor reaches its `dagrun_timeout`, which only the scheduler enforces. Restore the metadata database first when it is down, then restart Airflow without triggering or pausing the DAG; a task still running at the restart runs again from its start ([RUNBOOK.md](RUNBOOK.md), "Airflow scheduler or triggerer stopped") | critical |
+| `EdgeGuardAirflowComponentUnhealthy` | `edgeguard_airflow_component_healthy{component!="scheduler"} == 0` for 10m: the triggerer, the DAG processor or the metadata database (the alert's `component` label) is reported unhealthy. No EdgeGuard DAG defers a task to the triggerer, and a stopped DAG processor stops the parsing of the DAG files: restart Airflow when no DAG run is in progress. An unhealthy metadata database is restored first | warning |
 | `EdgeGuardAirflowHealthUnreachable` | `edgeguard_airflow_health_up == 0` for 10m: the metrics service has no answer from Airflow's health endpoint (container or API server down, or not reachable), so the scheduler state is unknown and `EdgeGuardAirflowSchedulerDown` cannot fire | warning |
 | `EdgeGuardDAGRunFailures` | More than 3 failed collector or sync task attempts in one hour, across all DAGs (all counted under `dag_id="edgeguard_pipeline"`, see `edgeguard_dag_runs_total`) | warning |
 | `EdgeGuardDAGRunStuck` | A DAG run marked in progress longer than its `dagrun_timeout` plus 15 minutes (`edgeguard:dag_run_max_seconds`; pipeline 5 h 45 min, medium 5 h 15 min, low and daily 8 h 45 min, Neo4j sync 68 h 15 min, baseline 32 h 15 min). The scheduler fails a run at its timeout and its listener hook clears the mark; a run marked failed or successful by hand (UI, `PATCH dagRuns`, `edgeguard dag kill`) is cleared by the API server's hook. When the run that ends is not the DAG's run in progress (an older run marked failed by hand), the mark keeps the start of the run still running. The alert therefore means a run the scheduler did not end, a run deleted while in progress, or a listener plugin that is not loaded (see [DAG run in progress](#dag-run-in-progress)); a scheduler that has stopped is reported within minutes by `EdgeGuardAirflowSchedulerDown` | critical |
@@ -796,7 +800,7 @@ _Last updated: 2026-11-01_
 
 ## History
 
-- 2026-11-01 — Airflow component health: the metrics exporter reads Airflow's health endpoint at every scrape and serves `edgeguard_airflow_health_up` and `edgeguard_airflow_component_healthy{component}` (`EDGEGUARD_METRICS_AIRFLOW_HEALTH`), read by the new alerts `EdgeGuardAirflowSchedulerDown` (critical), `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable` (43 alert rules). Before, a scheduler that had stopped while the API server kept answering was reported only by `EdgeGuardDAGRunStuck`, after the run's `dagrun_timeout`.
+- 2026-11-01 — Airflow component health: the metrics exporter reads Airflow's health endpoint at every scrape and serves `edgeguard_airflow_health_up` and `edgeguard_airflow_component_healthy{component}` (`EDGEGUARD_METRICS_AIRFLOW_HEALTH`), read by the new alerts `EdgeGuardAirflowSchedulerDown` (critical), `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable` (43 alert rules); the two alerts on the component gauge keep its `component` label. Before, a scheduler that had stopped while the API server kept answering was reported only by `EdgeGuardDAGRunStuck`, after the run's `dagrun_timeout`.
 - 2026-10-25 — Sync accounting gauges: set by every run that passes the service check and connects; a run that stops earlier keeps the previous values.
 - 2026-10-25 — Gauge `edgeguard_sync_events_paged_incomplete` and warning `EdgeGuardSyncPagedFetchIncomplete` for events fetched in pages with fewer attribute rows than the MISP index lists (40 alert rules); gauge `edgeguard_neo4j_sync_task_limit_seconds`; a change that replaces `prometheus/alerts.yml` (a pull, a checkout) needs a restart of the prometheus container, because the file is mounted on its own and `/-/reload` reloads the previous rules.
 - 2026-10-25 — "Source label values": the two namings of the `source` label (collector and job metrics: the CLI name; writer metrics: the canonical id) and the test that keeps every collector and staleness-rule name a registered source; `edgeguard_merge_reject_placeholder_total` resolves a variant to the canonical id like the other writer metrics.
