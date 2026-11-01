@@ -498,8 +498,12 @@ def run_env(monkeypatch):
 
 
 def _run_sync(monkeypatch, events):
-    """The real ``run()`` and ``_process_single_event`` over index rows ``events``; MISP is faked below them."""
-    sync = MISPToNeo4jSync(neo4j_client=MagicMock())
+    """The real ``run()`` and ``_process_single_event`` over index rows ``events``; MISP is faked below them.
+    The Neo4j client is a mock whose writes succeed (2026-11: the CVEs through ``merge_cves_batch``, one result
+    per record)."""
+    neo4j = MagicMock()
+    neo4j.merge_cves_batch.side_effect = lambda records, **_kw: [True] * len(records)
+    sync = MISPToNeo4jSync(neo4j_client=neo4j)
     monkeypatch.setattr(sync, "check_services_available", lambda: (True, "ok"))
     monkeypatch.setattr(sync, "connect", lambda: True)
     monkeypatch.setattr(sync, "fetch_edgeguard_events", lambda since=None, sector=None: [dict(e) for e in events])

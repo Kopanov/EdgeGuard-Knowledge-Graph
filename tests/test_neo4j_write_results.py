@@ -261,13 +261,18 @@ class TestCveSubWrites:
         assert count(server.committed, CVE_SCORE_SET) == 1
 
     def test_the_sync_counts_the_cve_as_an_error(self, bolt, caplog):
+        """2026-11: the sync writes CVEs in batches (``merge_cves_batch``); the batch's CVSS statement fails,
+        its transaction writes nothing, and ``merge_cve`` writes the CVE alone and meets the same error."""
         import run_misp_to_neo4j as rm
 
-        server, client = bolt(fail(CVSS_MERGE, TYPE_ERROR))
+        server, client = bolt(fail(CVSS_MERGE, TYPE_ERROR, times=2))
         sync = rm.MISPToNeo4jSync(neo4j_client=client)
         with caplog.at_level(logging.WARNING):
             assert sync._sync_to_neo4j_chunk([_rich_cve()]) == (0, 1)
         assert sync.stats["vulnerabilities_synced"] == 0
+        assert count(server.failures, "UNWIND $rows AS row") == 1, "the batch's statement failed first"
+        assert count(server.failures, CVSS_MERGE) == 2
+        assert any("[CVE-BATCH-FALLBACK]" in r.getMessage() for r in caplog.records)
         (line,) = [r.getMessage() for r in caplog.records if "[MERGE-RETURNED-FALSE]" in r.getMessage()]
         assert "rich CVE CVE-2026-1000 source=nvd" in line
 

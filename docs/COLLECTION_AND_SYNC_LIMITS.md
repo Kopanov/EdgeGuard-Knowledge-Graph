@@ -67,6 +67,7 @@ VirusTotal stays within `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (60) lookups 
    Event **discovery** uses the **index + client filter** path first (see table above); **restSearch** is fallback only.  
    **Per event:** parse → dedupe within the event → **cross-item relationships** (same-event only) → merge nodes → create edges. On an **incremental** sync only the attributes whose MISP `timestamp` falls inside the window are written (**`EDGEGUARD_SYNC_ATTRIBUTE_FILTER`**, default `true`); unchanged items of the same OTX pulse join only the report-scoped link build, and an event without a changed attribute makes no Neo4j call. Report-scoped links take at most 2,000 indicators, 50 malware, 50 CVEs and 10 actors per OTX pulse, the first in event order (full and incremental syncs alike; an incremental sync rebuilds the links of the pulses of its changed items only).  
    **Chunk size** for Neo4j **node** writes is **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500** items; no pause between chunks unless `EDGEGUARD_QUERY_PAUSE_SECONDS` is set — default 0, at most 60; not forwarded by `docker-compose.yml`). **Relationship** batches use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions).
+   **CVEs** of a chunk are written in batches of up to 500 (`Neo4jClient.merge_cves_batch`, `CVE_BATCH_SIZE`): one transaction per batch, with one UNWIND statement for each write `merge_cve` makes for a CVE (the read before the write, the node, its `SOURCED_FROM` edge, the CVSS sub-nodes of each version, NVD's data, the score), so every CVE ends up as `merge_cve` leaves it and the sync counts each one as before (`[MERGE-RETURNED-FALSE]`). A record of a CVE the batch already holds starts the next batch. A batch whose transaction fails (a terminal error, or a retryable one that outlasts three retries) writes nothing; its CVEs are then written one at a time by `merge_cve`, which logs and counts each as it always did (`[CVE-BATCH-FALLBACK]` in the log). On a local Neo4j the 23,185 NVD CVEs of a real 18-day NVD sample were written at about 2,400 per second, against about 35 per second one at a time.
    **Large events** (>5000 attributes): the event's attribute list is fetched first (whole, or in pages of 5000 above **`EDGEGUARD_MISP_PAGED_FETCH_ABOVE`**, see the table above) and held in memory; it is then processed in **pages** of 5000 via `_process_large_event_paged()` — each page is parsed, synced to Neo4j, and its parsed items released before the next page is parsed (`gc.collect()` between pages, plus the `EDGEGUARD_QUERY_PAUSE_SECONDS` pause, default 0). After all pages complete, cross-item relationships (Malware→Actor, Indicator→Malware, Indicator→CVE etc.) are built using a lightweight accumulator (~100 bytes/item) that collects only relationship-relevant fields from each page. This bounds the parsed items held at once, not the attribute list, while preserving full relationship coverage.
 
 3. **Optional `MISPCollector`**  
@@ -98,10 +99,11 @@ VirusTotal stays within `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (60) lookups 
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — The sync writes the CVEs of a chunk in batches (`merge_cves_batch`) instead of one `merge_cve` call, five to nine statements, per CVE: NVD CVEs were synced at about 8 per second in the 7-day baseline of 2026-11-01, which put the full sync of a 730-day MISP at about 5.7 h against the 6 h limit of `full_neo4j_sync`.
 - 2026-10-25 — MISP event parts: a caller that gives the complete listing itself (the CISA KEV and NVD incremental pushes) writes to the parts found after a failed part lookup; the STIX flow reads a collector's event name, a tagged event's `source:*` tag.
 - 2026-10-25 — MISP event parts, Volumes: the URLhaus export lists the URLs added in the past 30 days (about 2,100 a day on average on 2026-10-24), and a run after a gap can spread over parts (the bullet gave about 1,130 a day, the rate of the keyless 30-day file).
 - 2026-10-25 — MISP event parts: an NVD baseline writes 8 parts (about 145,000 CVEs; the page said 7 from an older count of about 140,000).

@@ -1516,16 +1516,18 @@ class TestClearEdgeguardManaged:
 class TestOwnershipMarkerOnOtherWriters:
     def test_source_node_merge_marks_edgeguard_managed(self):
         text = _NEO4J_CLIENT.read_text()
-        idx = text.find("s.edgeguard_managed = true")
+        idx = text.find("MERGE (s:Source")
         assert idx > 0
-        assert "MERGE (s:Source" in text[idx - 1500 : idx]
+        assert "s.edgeguard_managed = true" in text[idx : idx + 300]
 
     def test_cvss_sub_node_edges_marked(self):
-        import inspect
-
-        src = inspect.getsource(Neo4jClient._merge_cvss_node)
-        assert "r1.edgeguard_managed = true" in src
-        assert "r2.edgeguard_managed = true" in src
+        """Both edges of a CVSS sub-node, as ``_merge_cvss_node`` and the batched CVE write (2026-11) build
+        the statement (``_cvss_sub_node_statement``)."""
+        nc = neo4j_client_mod
+        for p in (nc._statement_param, nc._batch_row_param):
+            statement = nc._cvss_sub_node_statement("CVSSv31", "HAS_CVSS_v31", "n.created = true", p)
+            assert "r1.edgeguard_managed = true" in statement
+            assert "r2.edgeguard_managed = true" in statement
 
     @pytest.mark.parametrize("method", ["create_vulnerability_refers_to_cve", "create_cve_refers_to_vulnerability"])
     def test_refers_to_bridges_marked(self, method):

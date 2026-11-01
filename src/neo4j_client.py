@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 
 # Add src to path if needed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1043,14 +1043,20 @@ def _cve_attack_vector_from_best_cypher() -> str:
 # after every ``merge_cve``, so the result does not depend on which source's record arrives last,
 # and a CVE without CVSS loses any score or attack vector an older run stored (null score and
 # attack vector, severity UNKNOWN).
-_CVE_SCORE_FROM_CVSS_QUERY = (
-    "MATCH (c:CVE {cve_id: $cve_id})\n"
-    f"{_cve_cvss_selection_cypher('c')}\n"
-    "SET c.cvss_score = best[0].base_score,\n"
-    "    c.cvss_version = best[1],\n"
-    f"    c.severity = {_cve_severity_from_best_cypher()},\n"
-    f"    c.attack_vector = {_cve_attack_vector_from_best_cypher()}"
-)
+def _cve_score_from_cvss_query(cve_id: str) -> str:
+    """The score derivation for the CVE whose id the Cypher expression ``cve_id`` gives: ``$cve_id`` for
+    one CVE, the UNWIND variable of a batch (``Neo4jClient.merge_cves_batch``, 2026-11)."""
+    return (
+        f"MATCH (c:CVE {{cve_id: {cve_id}}})\n"
+        f"{_cve_cvss_selection_cypher('c')}\n"
+        "SET c.cvss_score = best[0].base_score,\n"
+        "    c.cvss_version = best[1],\n"
+        f"    c.severity = {_cve_severity_from_best_cypher()},\n"
+        f"    c.attack_vector = {_cve_attack_vector_from_best_cypher()}"
+    )
+
+
+_CVE_SCORE_FROM_CVSS_QUERY = _cve_score_from_cvss_query("$cve_id")
 
 
 # 2026-10: what NVD's record supplies on a CVE node (``Neo4jClient._replace_nvd_owned_cve_data``):
@@ -1074,6 +1080,11 @@ _NVD_CVSS_VERSIONS = (
 _CVE_RECORD_DATE_PROPS = ("published", "last_modified")
 # 2026-10: the CVE properties a CISA KEV record sets and any other record only fills (``merge_cve``).
 _KEV_OWNED_CVE_PROPS = ("cisa_exploit_add", "cisa_action_due", "cisa_required_action", "cisa_vulnerability_name")
+# 2026-11: every property ``_cve_node_props`` may return, which the batched CVE write sets or fills per row
+# (``Neo4jClient.merge_cves_batch``); a record with any other property is written by ``merge_cve``.
+_CVE_NODE_PROPS = (
+    _KEV_OWNED_CVE_PROPS + ("known_ransomware_use",) + _CVE_RECORD_DATE_PROPS + _NVD_OWNED_CVE_LISTS + ("status",)
+)
 
 
 def _batch_record_date_clauses(node: str, row: str) -> List[str]:
@@ -1084,6 +1095,98 @@ def _batch_record_date_clauses(node: str, row: str) -> List[str]:
         f"ELSE {_set_if_absent_clause(f'{node}.{prop}', f'{row}.{prop}')} END"
         for prop in _CVE_RECORD_DATE_PROPS
     ]
+
+
+def _cve_node_props(data: Dict, source_id: str) -> Tuple[Dict, Dict]:
+    """The properties a CVE record sets on its node (``extra_props`` of ``merge_node_with_source``) and
+    those it only fills where the node has none (``fill_props``), for ``Neo4jClient.merge_cve`` and the
+    batched CVE write (``Neo4jClient.merge_cves_batch``, 2026-11). Every property it returns is in
+    ``_CVE_NODE_PROPS``."""
+    # Promote CISA KEV fields to queryable node properties so analysts
+    # can filter on e.g. "all CVEs on the CISA KEV list".
+    #
+    # PR #34 round 18: deleted ``reference_urls`` from extra_props.
+    # The NVD collector parses up to 10 advisory URLs per CVE and
+    # forwards them here, but ZERO consumers downstream
+    # (no GraphQL field, no STIX export, no Cypher query). Same
+    # dead-write pattern as round-17's ``original_*_date`` cleanup.
+    extra_props: Dict = {}
+    fill_props: Dict = {}
+    # 2026-10: the KEV record owns its four fields. A CISA KEV record sets them; any other record
+    # (NVD's carries the same four from its own KEV enrichment) only fills them where the node has
+    # none. Before, the record merged last set them, and NVD's copy can hold an older value: NVD did
+    # not move ``lastModified`` when CISA moved the due date of CVE-2022-0995 (2026-10-08), so NVD's
+    # MISP copy kept the old date and a sync that read it after the KEV record wrote it back.
+    kev_owned = extra_props if source_registry.canonical_source_id(source_id) == "cisa_kev" else fill_props
+    for prop in _KEV_OWNED_CVE_PROPS:
+        if data.get(prop):
+            kev_owned[prop] = data[prop]
+    # 2026-10: CISA's ``knownRansomwareCampaignUse`` ("Known" / "Unknown"), carried by the KEV
+    # collector's records only, so an NVD record never overwrites it.
+    if data.get("known_ransomware_use"):
+        extra_props["known_ransomware_use"] = str(data["known_ransomware_use"])
+    # 2026-10: ``cvss_score``, ``severity`` and ``attack_vector`` are not taken from the record —
+    # they are derived from the CVSS sub-nodes after the node (``_set_cve_score_from_cvss``). The record's
+    # values were whatever its source sent: a 0.0 placeholder read back as 3.0 / LOW, a
+    # ransomware-derived KEV value, "UNKNOWN" from a source without scores, a vector-string
+    # letter ("N") from NVD or an invented "NETWORK" from KEV and OTX, and the last record merged won.
+    # PR-N19 Fix #1 (post-baseline 2026-04-22, from Bravo's
+    # baseline-run audit): promote NVD ``published`` +
+    # ``last_modified`` to node properties. Pre-PR-N19 the data
+    # was correctly rehydrated from NVD_META into
+    # ``item["published"]`` / ``item["last_modified"]``
+    # (``run_misp_to_neo4j.py:2487-2488``) but this extra_props
+    # builder never included them — so ``c.published`` and
+    # ``c.last_modified`` stayed NULL on every NVD CVE. Only
+    # ``c.first_imported_at`` (the EdgeGuard DB-local fact) had
+    # a date. The ResilMesh-native ``merge_resilmesh_cve`` at
+    # L5051 correctly writes both; the MISP-sourced path (the
+    # one used for the 99,664 CVEs in the 2026-04-22 baseline)
+    # did not. Fixes the gap Bravo caught.
+    # 2026-10: ``published`` and ``last_modified`` are set by NVD's record only (``nvd_record``, set
+    # by the sync for an NVD attribute with NVD_META); any other record fills them where the node has
+    # none (``_CVE_RECORD_DATE_PROPS``). Before, the record merged last set them, and the description
+    # with them, so a CVE showed OTX's raw pulse JSON, a pulse name or CISA's short text instead of
+    # NVD's description depending on the order of the events in the sync. 2026-10-16: the description
+    # follows the source ranking (``description_ranking``), so on a CVE without NVD's record the
+    # KEV's text wins over CISA ICS's, and CISA ICS's over any other, in any order.
+    record_dates = extra_props if data.get("nvd_record") else fill_props
+    for prop in _CVE_RECORD_DATE_PROPS:
+        if data.get(prop):
+            record_dates[prop] = data[prop]
+    # 2026-10 (fresh-baseline PR, ResilMesh conformance finding F2): the four
+    # ResilMesh CVE properties ``cwe``, ``ref_tags``, ``cpe_type`` and
+    # ``result_impacts`` were rehydrated from NVD_META into the item but never
+    # promoted to the node by this path (only the batch Vulnerability path and
+    # ``merge_resilmesh_cve`` wrote them), so every CVE in the 2026-09 baseline
+    # had them only inside ``SOURCED_FROM.raw_data``. ``reference_urls`` and
+    # ``affected_products`` ride along for parity with the batch path (CPE
+    # strings are what a vendor/product sector rule needs).
+    # 2026-10: like the dates, NVD's record sets the lists and any other record only fills a list the
+    # node does not have. Before, the record merged last set them, so a CISA ICS record merged after
+    # NVD's replaced NVD's CPE strings with product names, NVD's references with the advisory's URL
+    # and NVD's CWE with CISA's. Of the other records only CISA ICS gives these lists, from one
+    # attribute per CVE in MISP, so the result does not depend on the order. An item of the NVD
+    # source without ``nvd_record`` counts as NVD's record (the lists come only with ``NVD_META``).
+    from_nvd = bool(data.get("nvd_record")) or source_registry.canonical_source_id(source_id) == "nvd"
+    record_lists = extra_props if from_nvd else fill_props
+    for _list_prop in ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products"):
+        _val = data.get(_list_prop)
+        if isinstance(_val, list) and _val:
+            _clean = [str(x) for x in _val if x is not None and str(x) != ""]
+            if _clean:  # never overwrite an existing list with an empty one
+                record_lists[_list_prop] = _clean
+    # 2026-10: NVD's record status (``["rejected"]`` or ``["active"]``, from ``NVD_META``) on the
+    # node, replaced on every write so a rejection that arrives with an update reaches the graph.
+    # Before, it stayed in ``SOURCED_FROM.raw_data`` only (0 of 141,730 CVE nodes had it on
+    # 2026-10-14; 3,963 were rejected). Written only when the item carries one: CISA and OTX CVE
+    # items do not, so they cannot reset it.
+    _status = data.get("status")
+    if isinstance(_status, list):
+        _status_clean = [str(x) for x in _status if x is not None and str(x) != ""]
+        if _status_clean:
+            extra_props["status"] = _status_clean
+    return extra_props, fill_props
 
 
 # 2026-10-16: properties written only through the description's source ranking (``description_ranking``),
@@ -1394,6 +1497,150 @@ def _cvss_legacy_sources_cypher(node: str) -> str:
     )
 
 
+def _statement_param(name: str) -> str:
+    """A statement parameter (``$name``): how a single-item write reads a value in the statement
+    builders shared with ``Neo4jClient.merge_cves_batch`` (2026-11)."""
+    return f"${name}"
+
+
+def _batch_row_param(name: str) -> str:
+    """A field of the UNWIND row (``row.name``): how ``Neo4jClient.merge_cves_batch`` reads a value in the
+    statement builders it shares with the single-item writes (2026-11)."""
+    return f"row.{name}"
+
+
+def _sourced_from_upsert_clauses(p: Callable[[str], str], *, refresh_raw_data: bool) -> str:
+    """The ``MERGE`` of the ``SOURCED_FROM`` edge ``r`` from ``n`` to ``s`` and its ``SET`` items, reading
+    each value through ``p`` (``_statement_param`` or ``_batch_row_param``): the statement of
+    ``Neo4jClient._upsert_sourced_relationship`` after its two ``MATCH`` clauses, and of the batched CVE
+    write (``merge_cves_batch``, 2026-11), so the two cannot differ. ``refresh_raw_data`` appends the
+    replacement of ``r.raw_data``; the caller may append further items after a comma."""
+    first, last = p("source_reported_first_at"), p("source_reported_last_at")
+    clauses = f"""MERGE (n)-[r:SOURCED_FROM]->(s)
+        ON CREATE SET r.imported_at = datetime(),
+            r.raw_data = {p("raw_data")},
+            r.src_uuid = {p("src_uuid")},
+            r.trg_uuid = {p("trg_uuid")},
+            r.source_reported_first_at = CASE WHEN {first} IS NULL THEN NULL ELSE datetime({first}) END,
+            r.source_reported_last_at = CASE WHEN {last} IS NULL THEN NULL ELSE datetime({last}) END
+        SET r.confidence = {p("confidence")},
+            r.source = {p("source_id")},
+            r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", p("misp_event_id"), require_nonempty_string=True)},
+            r.source_refs = {_dedup_concat_clause("r.source_refs", f"coalesce({p('source_refs')}, [])")},
+            {_sourced_zone_items("r", p("zones"), p("stated_zones"), p("stated_refs"))},
+            r.updated_at = datetime(),
+            r.edgeguard_managed = true,
+            r.src_uuid = coalesce(r.src_uuid, {p("src_uuid")}),
+            r.trg_uuid = coalesce(r.trg_uuid, {p("trg_uuid")}),
+            // PR (S5) (Red Team v2 M3 + Bug Hunter v2 #10):
+            // use NESTED CASE rather than ``AND``-combined predicate.
+            // Cypher's AND is a value operator, not short-circuit
+            // control flow — so ``$X IS NOT NULL AND datetime($X) < r.X``
+            // may evaluate ``datetime(NULL)`` (which returns NULL and
+            // makes the AND falsy, so behavior is correct today —
+            // but it's working by accident). Nested CASE makes the
+            // short-circuit explicit and survives future Cypher
+            // parser / optimizer changes.
+            r.source_reported_first_at = CASE
+                WHEN {first} IS NULL THEN r.source_reported_first_at
+                WHEN r.source_reported_first_at IS NULL THEN datetime({first})
+                WHEN datetime({first}) < r.source_reported_first_at
+                    THEN datetime({first})
+                ELSE r.source_reported_first_at
+            END,
+            r.source_reported_last_at = CASE
+                WHEN {last} IS NULL THEN r.source_reported_last_at
+                WHEN r.source_reported_last_at IS NULL THEN datetime({last})
+                WHEN datetime({last}) > r.source_reported_last_at
+                    THEN datetime({last})
+                ELSE r.source_reported_last_at
+            END"""
+    if refresh_raw_data:
+        clauses += f""",
+            r.raw_data = {p("raw_data")}"""
+    return clauses
+
+
+def _cvss_sub_node_statement(
+    label: str, rel_type: str, set_items: str, p: Callable[[str], str], *, carry: str = ""
+) -> str:
+    """The statement of one CVSS sub-node write (``Neo4jClient._merge_cvss_node``; 2026-11 also the batched
+    CVE write, ``merge_cves_batch``): the sub-node ``label`` of the CVE, its payload ``set_items`` (the
+    caller's, for the payload it has) and both ``rel_type`` edges, each value read through ``p``. ``carry``
+    names further variables the ``WITH`` clauses keep (``", row"`` in an UNWIND batch)."""
+    _validate_label(label)
+    _validate_rel_type(rel_type)
+    feed, misp_event_id = p("feed"), p("misp_event_id")
+    cve_uuid, cvss_uuid = p("cve_uuid"), p("cvss_uuid")
+    return f"""
+            MATCH (cve:CVE {{cve_id: {p("cve_id")}}})
+            MERGE (n:{label} {{cve_id: {p("cve_id")}}})
+            ON CREATE SET n.uuid = {cvss_uuid}, n.edgeguard_managed = true
+            ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
+            WITH cve, n{carry}, {_cvss_legacy_sources_cypher("n")} AS legacy_sources
+            WITH cve, n{carry}, legacy_sources, ({feed} <> 'nvd' AND EXISTS {{
+                MATCH (cve)-[x:{rel_type}]->(n) WHERE 'nvd' IN coalesce(x.sources, legacy_sources)
+            }}) AS nvd_owned
+            SET {set_items},
+                n.tag = coalesce(n.tag, {p("tag")}),
+                n.last_updated = datetime(),
+                n.uuid = coalesce(n.uuid, {cvss_uuid})
+            MERGE (cve)-[r1:{rel_type}]->(n)
+                ON CREATE SET r1.src_uuid = {cve_uuid}, r1.trg_uuid = {cvss_uuid}
+                ON MATCH SET r1.sources = coalesce(r1.sources, legacy_sources)
+            SET r1.src_uuid = coalesce(r1.src_uuid, {cve_uuid}),
+                r1.trg_uuid = coalesce(r1.trg_uuid, {cvss_uuid}),
+                r1.edgeguard_managed = true,
+                r1.sources = {_dedup_concat_clause("r1.sources", f"[{feed}]")},
+                r1.misp_event_ids = {_dedup_concat_optional_clause("r1.misp_event_ids", misp_event_id, require_nonempty_string=True)}
+            MERGE (n)-[r2:{rel_type}]->(cve)
+                ON CREATE SET r2.src_uuid = {cvss_uuid}, r2.trg_uuid = {cve_uuid}
+                ON MATCH SET r2.sources = coalesce(r2.sources, legacy_sources)
+            SET r2.src_uuid = coalesce(r2.src_uuid, {cvss_uuid}),
+                r2.trg_uuid = coalesce(r2.trg_uuid, {cve_uuid}),
+                r2.edgeguard_managed = true,
+                r2.sources = {_dedup_concat_clause("r2.sources", f"[{feed}]")},
+                r2.misp_event_ids = {_dedup_concat_optional_clause("r2.misp_event_ids", misp_event_id, require_nonempty_string=True)}
+            """
+
+
+def _cvss_payload_item(prop: str, value: str, *, may_be_absent: bool = False) -> str:
+    """The ``SET`` item of one CVSS payload property (``_merge_cvss_node``): set from ``value``, or only
+    filled where the sub-node lacks it once NVD has asserted the sub-node (``nvd_owned``). With
+    ``may_be_absent`` (a batch row whose payload lacks the property, 2026-11) a null ``value`` leaves the
+    property as it is, as a single write leaves a property its payload does not have."""
+    _validate_prop_name(prop)
+    absent = f"WHEN {value} IS NULL THEN n.{prop} " if may_be_absent else ""
+    return f"n.{prop} = CASE {absent}WHEN nvd_owned THEN {_set_if_absent_clause(f'n.{prop}', value)} ELSE {value} END"
+
+
+def _nvd_owned_cve_statement(p: Callable[[str], str], *, carry: str = "") -> str:
+    """The statement of ``Neo4jClient._replace_nvd_owned_cve_data`` (2026-11 also of the batched CVE
+    write, ``merge_cves_batch``), each value read through ``p``; ``carry`` as for
+    ``_cvss_sub_node_statement``."""
+    set_clause = ", ".join(
+        [f"c.{prop} = CASE WHEN nvd_only THEN {p(prop)} ELSE c.{prop} END" for prop in _NVD_OWNED_CVE_LISTS]
+        + [f"c.{prop} = {p(prop)}" for prop, _ in _NVD_SSVC_PROPERTIES.values()]
+    )
+    cve_id, absent = p("cve_id"), p("absent_rel_types")
+    return f"""
+        MATCH (c:CVE {{cve_id: {cve_id}}})
+        WITH c{carry}, (c.edgeguard_managed = true AND coalesce(c.source, []) = ['nvd']) AS nvd_only
+        SET {set_clause}
+        WITH c{carry}
+        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]->(s)
+        WHERE type(r) IN {absent} AND s.cve_id = {cve_id} AND s.edgeguard_managed = true
+          AND coalesce(r.sources, [s.tag]) = ['nvd']
+        DETACH DELETE s
+        WITH DISTINCT c{carry}
+        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]-(s)
+        WHERE type(r) IN {absent} AND s.cve_id = {cve_id}
+          AND 'nvd' IN r.sources AND any(feed IN r.sources WHERE feed <> 'nvd')
+        SET r.sources = [feed IN r.sources WHERE feed <> 'nvd'],
+            r.misp_event_ids = [event IN r.misp_event_ids WHERE event <> {p("nvd_event_id")}]
+        """
+
+
 def _cve_sub_write_failed(exc: Exception, what: str) -> bool:
     """The error handling of ``merge_cve``'s sub-writes: the CVSS sub-nodes, the NVD-owned data and
     the CVE score (2026-10). A retryable error (``_is_retryable_neo4j_error``) is raised again, so the
@@ -1495,6 +1742,250 @@ def _create_active(var: str) -> str:
     """``ON CREATE`` item of a node that does not age: active from its creation, never changed by a
     later EdgeGuard write."""
     return f"{var}.active = true"
+
+
+# --------------------------------------------------------------------------- #
+# Batched CVE writes (2026-11, ``Neo4jClient.merge_cves_batch``)
+# --------------------------------------------------------------------------- #
+#
+# ``merge_cve`` writes one CVE in five to nine auto-commit statements (the node with a read before it, its
+# ``SOURCED_FROM`` edge, each CVSS sub-node, NVD's data, the score). On 2026-11-01 a 7-day baseline on a
+# local Neo4j synced NVD CVEs at about 8 per second, which put the full sync of a 730-day MISP (about
+# 151,000 NVD CVEs) at about 5.7 h against the 6 h limit of ``full_neo4j_sync``. The batch runs the same
+# writes for up to ``CVE_BATCH_SIZE`` CVEs as one UNWIND statement each, in one transaction. Each row
+# gives the statement the values ``merge_cve`` gives its statements, so a CVE ends up as ``merge_cve``
+# leaves it; the SOURCED_FROM, CVSS, NVD-data and score statements are built by the builders above that
+# ``merge_cve``'s helpers use. A batch holds each CVE at most once, so its rows touch different nodes and
+# their order within it does not matter; a record whose CVE the batch already holds starts the next batch.
+
+# 2026-11: CVEs per batched write (one transaction). The sync passes at most a chunk's CVEs
+# (``EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE``, 500 by default).
+CVE_BATCH_SIZE = 500
+
+_CVE_BATCH_AUDIT_QUERY = """
+UNWIND $cve_ids AS cve_id
+MATCH (n:CVE {cve_id: cve_id})
+RETURN cve_id, n.confidence_score AS existing_confidence, n.source AS existing_source,
+       n.retired_at AS retired_at, n.retired_by AS retired_by
+"""
+
+
+def _cve_batch_node_prop_item(prop: str) -> str:
+    """The ``SET`` item of one ``_CVE_NODE_PROPS`` property in the batched CVE node write: the row sets it
+    (``set_props``, ``extra_props`` of a single write), fills it where the node has none (``fill_props``)
+    or, carrying neither, leaves it as it is (a single write has no clause for it)."""
+    _validate_prop_name(prop)
+    fill = _set_if_absent_clause(f"n.{prop}", f"row.fill_props.{prop}")
+    return (
+        f"n.{prop} = CASE WHEN row.set_props.{prop} IS NOT NULL THEN row.set_props.{prop} "
+        f"WHEN row.fill_props.{prop} IS NOT NULL THEN {fill} ELSE n.{prop} END"
+    )
+
+
+# The node write of ``merge_node_with_source`` for a CVE (not an Indicator: no aging, ``active`` on
+# create, max-wins confidence), with ``merge_cve``'s properties per row.
+_CVE_BATCH_NODE_QUERY = f"""
+UNWIND $rows AS row
+MERGE (n:CVE {{cve_id: row.cve_id}})
+ON CREATE SET n.first_imported_at = datetime(),
+              n.uuid = row.node_uuid,
+              n.edgeguard_managed = true,
+              {_create_active("n")}
+ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
+SET n.confidence_score = CASE
+        WHEN n.confidence_score IS NULL OR row.confidence > n.confidence_score
+        THEN row.confidence
+        ELSE n.confidence_score END,
+    n.source = {_dedup_concat_clause("n.source", "row.source_array")},
+    {_zone_override_global_clause("n", "row.zone")},
+    n.tags = {_dedup_concat_clause("n.tags", "row.tag_array")},
+    n.tag = coalesce(n.tag, row.tag_value),
+    n.last_updated = datetime(),
+    n.last_imported_from = row.source_id,
+    n.uuid = coalesce(n.uuid, row.node_uuid),
+    n.misp_event_ids = CASE WHEN row.misp_event_id IS NULL THEN n.misp_event_ids
+        ELSE {_dedup_concat_clause("n.misp_event_ids", "[row.misp_event_id]")} END,
+    n.misp_attribute_ids = CASE WHEN row.misp_attribute_id IS NULL THEN n.misp_attribute_ids
+        ELSE {_dedup_concat_clause("n.misp_attribute_ids", "[row.misp_attribute_id]")} END,
+    {",\n    ".join(_cve_batch_node_prop_item(prop) for prop in _CVE_NODE_PROPS)},
+    n.tlp = CASE WHEN row.tlp IS NULL THEN n.tlp ELSE {_tlp_most_restrictive_clause("n.tlp", "row.tlp")} END
+{CVE_DESCRIPTIONS.set_cypher("n", "n, row", "row.description", "row.description_source", "row.description_rank")}
+"""
+
+
+def _cve_batch_sourced_from_query(refresh_raw_data: bool) -> str:
+    """The ``SOURCED_FROM`` write of ``_upsert_sourced_relationship`` for a batch of CVEs."""
+    return f"""
+UNWIND $rows AS row
+MATCH (n:CVE)
+WHERE n.cve_id = row.cve_id
+MATCH (s:Source {{source_id: row.source_id}})
+{_sourced_from_upsert_clauses(_batch_row_param, refresh_raw_data=refresh_raw_data)}"""
+
+
+def _cve_batch_cvss_query(label: str, rel_type: str, rows: Sequence[Dict[str, Any]]) -> str:
+    """The ``_merge_cvss_node`` write of one CVSS version for a batch of CVEs. A row's payload
+    (``row.cvss``) may lack a property another row has: it then leaves it as it is, and a row without any
+    payload property sets ``n.created`` as a single write does."""
+    props = sorted({prop for row in rows for prop in row["cvss"]})
+    items = [_cvss_payload_item(prop, f"row.cvss.{prop}", may_be_absent=True) for prop in props]
+    if any(not row["cvss"] for row in rows):
+        items.append("n.created = CASE WHEN size(keys(row.cvss)) = 0 THEN true ELSE n.created END")
+    return "UNWIND $rows AS row" + _cvss_sub_node_statement(
+        label, rel_type, ", ".join(items), _batch_row_param, carry=", row"
+    )
+
+
+_CVE_BATCH_NVD_OWNED_QUERY = "UNWIND $rows AS row" + _nvd_owned_cve_statement(_batch_row_param, carry=", row")
+_CVE_BATCH_SCORE_QUERY = "UNWIND $cve_ids AS cve_id\n" + _cve_score_from_cvss_query("cve_id")
+
+# (label, relationship type, record key) of each CVSS version, in the order ``merge_cve`` writes them.
+_CVE_CVSS_SUB_NODES = (
+    ("CVSSv40", "HAS_CVSS_v40", "cvss_v40_data"),
+    ("CVSSv31", "HAS_CVSS_v31", "cvss_v31_data"),
+    ("CVSSv30", "HAS_CVSS_v30", "cvss_v30_data"),
+    ("CVSSv2", "HAS_CVSS_v2", "cvss_v2_data"),
+)
+
+
+def _prepare_cve_write(data: Dict, source_id: str) -> Optional[Dict[str, Any]]:
+    """The rows of one CVE record for ``Neo4jClient.merge_cves_batch``: the values ``merge_cve``,
+    ``merge_node_with_source``, ``_upsert_sourced_relationship``, ``_merge_cvss_node`` and
+    ``_replace_nvd_owned_cve_data`` compute from the record, as the parameters of the batch statements.
+
+    None when ``merge_cve`` would not write the record as the batch does: no resolvable CVE id, a property
+    outside ``_CVE_NODE_PROPS``, or a CVSS payload that is not a dict or names a property that is not a
+    valid name or collides with the sub-node write's own parameters (``CVSS_PAYLOAD_RESERVED_NAMES``; the
+    sync drops such entries). Such a record is written by ``merge_cve``, which returns or raises what it
+    always did for it.
+    """
+    cve_id = resolve_vulnerability_cve_id(data)
+    if not cve_id:
+        return None
+    data = dict(data)
+    data["cve_id"] = cve_id
+    key_props = {"cve_id": cve_id}
+    extra_props, fill_props = _cve_node_props(data, source_id)
+    description = CVE_DESCRIPTIONS.record(data.get("description"), source_id)
+
+    # merge_node_with_source
+    canonical = source_registry.canonical_source_id(source_id) or source_id
+    raw_data = {k: v for k, v in data.items() if k not in key_props}
+    if data.get("original_source"):
+        raw_data["original_source"] = data["original_source"]
+    claimed_confidence = data.get("confidence_score")
+    clamped = clamp_confidence_score(claimed_confidence)
+    confidence = clamped if clamped is not None else 0.5
+    zone = data.get("zone", ["global"])
+    tag_value = data.get("tag", canonical)
+    extra_props = dict(extra_props)
+    if data.get("tlp") and "tlp" not in extra_props:
+        extra_props["tlp"] = str(data["tlp"])
+    set_props: Dict[str, Any] = {}
+    tlp = None
+    for prop, value in extra_props.items():
+        if value is None or value == "":
+            continue
+        if prop == "tlp":
+            tlp = value
+        elif prop in _CVE_NODE_PROPS:
+            set_props[prop] = value
+        else:
+            return None
+    fill: Dict[str, Any] = {}
+    for prop, value in fill_props.items():
+        if prop in extra_props or value is None or value == "":
+            continue
+        if prop not in _CVE_NODE_PROPS:
+            return None
+        fill[prop] = value
+    misp_event_id = data.get("misp_event_id")
+    node_uuid = compute_node_uuid("CVE", key_props)
+    node_row = {
+        "cve_id": cve_id,
+        "node_uuid": node_uuid,
+        "confidence": confidence,
+        "source_array": _canonical_source_list(data.get("source", [canonical])),
+        "zone": zone,
+        "tag_array": [tag_value] if tag_value else [canonical],
+        "tag_value": tag_value,
+        "source_id": canonical,
+        "misp_event_id": misp_event_id or None,
+        "misp_attribute_id": data.get("misp_attribute_id") or None,
+        "set_props": set_props,
+        "fill_props": fill,
+        "tlp": tlp,
+        "description": description.text if description else None,
+        "description_source": description.source if description else None,
+        "description_rank": description.rank if description else None,
+    }
+
+    # _upsert_sourced_relationship
+    src_uuid, trg_uuid = edge_endpoint_uuids("CVE", key_props, "Source", {"source_id": canonical})
+    edge_row = {
+        "cve_id": cve_id,
+        "source_id": canonical,
+        "raw_data": json.dumps(raw_data, default=str),
+        "confidence": confidence,
+        "src_uuid": src_uuid,
+        "trg_uuid": trg_uuid,
+        "source_reported_first_at": data.get("first_seen_at_source"),
+        "source_reported_last_at": data.get("last_seen_at_source"),
+        "misp_event_id": str(misp_event_id) if misp_event_id else None,
+        "source_refs": [str(x) for x in (data.get("source_refs") or []) if x],
+        "zones": _zone_param(zone),
+        "stated_zones": _zone_param(data.get("stated_zones")) or [],
+        "stated_refs": _zone_param(data.get("stated_refs")) or [],
+    }
+
+    # _merge_cvss_node, per version
+    tag = data.get("tag", "default")
+    cvss_rows: Dict[str, Dict[str, Any]] = {}
+    for label, _rel_type, key in _CVE_CVSS_SUB_NODES:
+        payload = data.get(key)
+        if not payload:
+            continue
+        if not isinstance(payload, dict):
+            return None
+        filtered = {k: v for k, v in payload.items() if v is not None and v != ""}
+        if not all(isinstance(k, str) and _PROP_NAME_RE.match(k) for k in filtered) or (
+            CVSS_PAYLOAD_RESERVED_NAMES & set(filtered)
+        ):
+            return None
+        cvss_rows[label] = {
+            "cve_id": cve_id,
+            "tag": tag,
+            "cve_uuid": node_uuid,
+            "cvss_uuid": compute_node_uuid(label, {"cve_id": cve_id}),
+            "feed": (source_registry.canonical_source_id(tag) if tag != "default" else None) or "misp",
+            "misp_event_id": str(misp_event_id) if misp_event_id else None,
+            "cvss": filtered,
+        }
+
+    # _replace_nvd_owned_cve_data, for NVD's record
+    nvd_row = None
+    if data.get("nvd_record"):
+        nvd_row = {
+            "cve_id": cve_id,
+            "absent_rel_types": [rel_type for rel_type, key in _NVD_CVSS_VERSIONS if not data.get(key)],
+            "nvd_event_id": str(data.get("misp_event_id") or ""),
+            **_nvd_ssvc_values(data.get("ssvc")),
+        }
+        for prop in _NVD_OWNED_CVE_LISTS:
+            value = data.get(prop)
+            clean = [str(x) for x in value if x is not None and str(x) != ""] if isinstance(value, list) else []
+            nvd_row[prop] = clean or None
+
+    return {
+        "cve_id": cve_id,
+        "source_id": canonical,
+        "confidence": confidence,
+        "claimed_confidence": claimed_confidence,
+        "node": node_row,
+        "edge": edge_row,
+        "cvss": cvss_rows,
+        "nvd": nvd_row,
+    }
 
 
 def _statement_head(query: Any) -> str:
@@ -3246,48 +3737,7 @@ class Neo4jClient:
         MATCH (n:{label})
         WHERE {key_conditions}
         MATCH (s:Source {{source_id: $source_id}})
-        MERGE (n)-[r:SOURCED_FROM]->(s)
-        ON CREATE SET r.imported_at = datetime(),
-            r.raw_data = $raw_data,
-            r.src_uuid = $src_uuid,
-            r.trg_uuid = $trg_uuid,
-            r.source_reported_first_at = CASE WHEN $source_reported_first_at IS NULL THEN NULL ELSE datetime($source_reported_first_at) END,
-            r.source_reported_last_at = CASE WHEN $source_reported_last_at IS NULL THEN NULL ELSE datetime($source_reported_last_at) END
-        SET r.confidence = $confidence,
-            r.source = $source_id,
-            r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", "$misp_event_id", require_nonempty_string=True)},
-            r.source_refs = {_dedup_concat_clause("r.source_refs", "coalesce($source_refs, [])")},
-            {_sourced_zone_items("r", "$zones", "$stated_zones", "$stated_refs")},
-            r.updated_at = datetime(),
-            r.edgeguard_managed = true,
-            r.src_uuid = coalesce(r.src_uuid, $src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, $trg_uuid),
-            // PR (S5) (Red Team v2 M3 + Bug Hunter v2 #10):
-            // use NESTED CASE rather than ``AND``-combined predicate.
-            // Cypher's AND is a value operator, not short-circuit
-            // control flow — so ``$X IS NOT NULL AND datetime($X) < r.X``
-            // may evaluate ``datetime(NULL)`` (which returns NULL and
-            // makes the AND falsy, so behavior is correct today —
-            // but it's working by accident). Nested CASE makes the
-            // short-circuit explicit and survives future Cypher
-            // parser / optimizer changes.
-            r.source_reported_first_at = CASE
-                WHEN $source_reported_first_at IS NULL THEN r.source_reported_first_at
-                WHEN r.source_reported_first_at IS NULL THEN datetime($source_reported_first_at)
-                WHEN datetime($source_reported_first_at) < r.source_reported_first_at
-                    THEN datetime($source_reported_first_at)
-                ELSE r.source_reported_first_at
-            END,
-            r.source_reported_last_at = CASE
-                WHEN $source_reported_last_at IS NULL THEN r.source_reported_last_at
-                WHEN r.source_reported_last_at IS NULL THEN datetime($source_reported_last_at)
-                WHEN datetime($source_reported_last_at) > r.source_reported_last_at
-                    THEN datetime($source_reported_last_at)
-                ELSE r.source_reported_last_at
-            END"""
-        if refresh_raw_data:
-            query += """,
-            r.raw_data = $raw_data"""
+        {_sourced_from_upsert_clauses(_statement_param, refresh_raw_data=refresh_raw_data)}"""
         if report is not None:
             query += f""",
             {edge_report_items("r", "$report", "$source_id")}"""
@@ -3498,90 +3948,7 @@ class Neo4jClient:
         data["cve_id"] = cve_id
         key_props = {"cve_id": cve_id}
 
-        # Promote CISA KEV fields to queryable node properties so analysts
-        # can filter on e.g. "all CVEs on the CISA KEV list".
-        #
-        # PR #34 round 18: deleted ``reference_urls`` from extra_props.
-        # The NVD collector parses up to 10 advisory URLs per CVE and
-        # forwards them here, but ZERO consumers downstream
-        # (no GraphQL field, no STIX export, no Cypher query). Same
-        # dead-write pattern as round-17's ``original_*_date`` cleanup.
-        extra_props: Dict = {}
-        fill_props: Dict = {}
-        # 2026-10: the KEV record owns its four fields. A CISA KEV record sets them; any other record
-        # (NVD's carries the same four from its own KEV enrichment) only fills them where the node has
-        # none. Before, the record merged last set them, and NVD's copy can hold an older value: NVD did
-        # not move ``lastModified`` when CISA moved the due date of CVE-2022-0995 (2026-10-08), so NVD's
-        # MISP copy kept the old date and a sync that read it after the KEV record wrote it back.
-        kev_owned = extra_props if source_registry.canonical_source_id(source_id) == "cisa_kev" else fill_props
-        for prop in _KEV_OWNED_CVE_PROPS:
-            if data.get(prop):
-                kev_owned[prop] = data[prop]
-        # 2026-10: CISA's ``knownRansomwareCampaignUse`` ("Known" / "Unknown"), carried by the KEV
-        # collector's records only, so an NVD record never overwrites it.
-        if data.get("known_ransomware_use"):
-            extra_props["known_ransomware_use"] = str(data["known_ransomware_use"])
-        # 2026-10: ``cvss_score``, ``severity`` and ``attack_vector`` are not taken from the record —
-        # they are derived from the CVSS sub-nodes below (``_set_cve_score_from_cvss``). The record's
-        # values were whatever its source sent: a 0.0 placeholder read back as 3.0 / LOW, a
-        # ransomware-derived KEV value, "UNKNOWN" from a source without scores, a vector-string
-        # letter ("N") from NVD or an invented "NETWORK" from KEV and OTX, and the last record merged won.
-        # PR-N19 Fix #1 (post-baseline 2026-04-22, from Bravo's
-        # baseline-run audit): promote NVD ``published`` +
-        # ``last_modified`` to node properties. Pre-PR-N19 the data
-        # was correctly rehydrated from NVD_META into
-        # ``item["published"]`` / ``item["last_modified"]``
-        # (``run_misp_to_neo4j.py:2487-2488``) but this extra_props
-        # builder never included them — so ``c.published`` and
-        # ``c.last_modified`` stayed NULL on every NVD CVE. Only
-        # ``c.first_imported_at`` (the EdgeGuard DB-local fact) had
-        # a date. The ResilMesh-native ``merge_resilmesh_cve`` at
-        # L5051 correctly writes both; the MISP-sourced path (the
-        # one used for the 99,664 CVEs in the 2026-04-22 baseline)
-        # did not. Fixes the gap Bravo caught.
-        # 2026-10: ``published`` and ``last_modified`` are set by NVD's record only (``nvd_record``, set
-        # by the sync for an NVD attribute with NVD_META); any other record fills them where the node has
-        # none (``_CVE_RECORD_DATE_PROPS``). Before, the record merged last set them, and the description
-        # with them, so a CVE showed OTX's raw pulse JSON, a pulse name or CISA's short text instead of
-        # NVD's description depending on the order of the events in the sync. 2026-10-16: the description
-        # follows the source ranking (``description_ranking``), so on a CVE without NVD's record the
-        # KEV's text wins over CISA ICS's, and CISA ICS's over any other, in any order.
-        record_dates = extra_props if data.get("nvd_record") else fill_props
-        for prop in _CVE_RECORD_DATE_PROPS:
-            if data.get(prop):
-                record_dates[prop] = data[prop]
-        # 2026-10 (fresh-baseline PR, ResilMesh conformance finding F2): the four
-        # ResilMesh CVE properties ``cwe``, ``ref_tags``, ``cpe_type`` and
-        # ``result_impacts`` were rehydrated from NVD_META into the item but never
-        # promoted to the node by this path (only the batch Vulnerability path and
-        # ``merge_resilmesh_cve`` wrote them), so every CVE in the 2026-09 baseline
-        # had them only inside ``SOURCED_FROM.raw_data``. ``reference_urls`` and
-        # ``affected_products`` ride along for parity with the batch path (CPE
-        # strings are what a vendor/product sector rule needs).
-        # 2026-10: like the dates, NVD's record sets the lists and any other record only fills a list the
-        # node does not have. Before, the record merged last set them, so a CISA ICS record merged after
-        # NVD's replaced NVD's CPE strings with product names, NVD's references with the advisory's URL
-        # and NVD's CWE with CISA's. Of the other records only CISA ICS gives these lists, from one
-        # attribute per CVE in MISP, so the result does not depend on the order. An item of the NVD
-        # source without ``nvd_record`` counts as NVD's record (the lists come only with ``NVD_META``).
-        from_nvd = bool(data.get("nvd_record")) or source_registry.canonical_source_id(source_id) == "nvd"
-        record_lists = extra_props if from_nvd else fill_props
-        for _list_prop in ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products"):
-            _val = data.get(_list_prop)
-            if isinstance(_val, list) and _val:
-                _clean = [str(x) for x in _val if x is not None and str(x) != ""]
-                if _clean:  # never overwrite an existing list with an empty one
-                    record_lists[_list_prop] = _clean
-        # 2026-10: NVD's record status (``["rejected"]`` or ``["active"]``, from ``NVD_META``) on the
-        # node, replaced on every write so a rejection that arrives with an update reaches the graph.
-        # Before, it stayed in ``SOURCED_FROM.raw_data`` only (0 of 141,730 CVE nodes had it on
-        # 2026-10-14; 3,963 were rejected). Written only when the item carries one: CISA and OTX CVE
-        # items do not, so they cannot reset it.
-        _status = data.get("status")
-        if isinstance(_status, list):
-            _status_clean = [str(x) for x in _status if x is not None and str(x) != ""]
-            if _status_clean:
-                extra_props["status"] = _status_clean
+        extra_props, fill_props = _cve_node_props(data, source_id)
 
         ok = self.merge_node_with_source(
             "CVE",
@@ -3662,26 +4029,7 @@ class Neo4jClient:
             lists[prop] = clean or None
         absent = [rel_type for rel_type, key in _NVD_CVSS_VERSIONS if not data.get(key)]
         ssvc = _nvd_ssvc_values(data.get("ssvc"))
-        set_clause = ", ".join(
-            [f"c.{prop} = CASE WHEN nvd_only THEN ${prop} ELSE c.{prop} END" for prop in _NVD_OWNED_CVE_LISTS]
-            + [f"c.{prop} = ${prop}" for prop in ssvc]
-        )
-        query = f"""
-        MATCH (c:CVE {{cve_id: $cve_id}})
-        WITH c, (c.edgeguard_managed = true AND coalesce(c.source, []) = ['nvd']) AS nvd_only
-        SET {set_clause}
-        WITH c
-        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]->(s)
-        WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id AND s.edgeguard_managed = true
-          AND coalesce(r.sources, [s.tag]) = ['nvd']
-        DETACH DELETE s
-        WITH DISTINCT c
-        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]-(s)
-        WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id
-          AND 'nvd' IN r.sources AND any(feed IN r.sources WHERE feed <> 'nvd')
-        SET r.sources = [feed IN r.sources WHERE feed <> 'nvd'],
-            r.misp_event_ids = [event IN r.misp_event_ids WHERE event <> $nvd_event_id]
-        """
+        query = _nvd_owned_cve_statement(_statement_param)
         try:
             with self.driver.session() as session:
                 session.run(
@@ -3770,47 +4118,13 @@ class Neo4jClient:
             # Build SET clause dynamically from the cvss_data dict.
             # Filter out None/empty values to avoid setting properties to NULL.
             filtered_cvss = {k: v for k, v in cvss_data.items() if v is not None and v != ""}
-            prop_assignments = []
-            for k in filtered_cvss:
-                _validate_prop_name(k)
-                prop_assignments.append(
-                    f"n.{k} = CASE WHEN nvd_owned THEN {_set_if_absent_clause(f'n.{k}', f'${k}')} ELSE ${k} END"
-                )
+            prop_assignments = [_cvss_payload_item(k, f"${k}") for k in filtered_cvss]
             set_clause = ", ".join(prop_assignments) if prop_assignments else "n.created = true"
 
             cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
             cvss_uuid = compute_node_uuid(label, {"cve_id": cve_id})
 
-            query = f"""
-            MATCH (cve:CVE {{cve_id: $cve_id}})
-            MERGE (n:{label} {{cve_id: $cve_id}})
-            ON CREATE SET n.uuid = $cvss_uuid, n.edgeguard_managed = true
-            ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
-            WITH cve, n, {_cvss_legacy_sources_cypher("n")} AS legacy_sources
-            WITH cve, n, legacy_sources, ($feed <> 'nvd' AND EXISTS {{
-                MATCH (cve)-[x:{rel_type}]->(n) WHERE 'nvd' IN coalesce(x.sources, legacy_sources)
-            }}) AS nvd_owned
-            SET {set_clause},
-                n.tag = coalesce(n.tag, $tag),
-                n.last_updated = datetime(),
-                n.uuid = coalesce(n.uuid, $cvss_uuid)
-            MERGE (cve)-[r1:{rel_type}]->(n)
-                ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
-                ON MATCH SET r1.sources = coalesce(r1.sources, legacy_sources)
-            SET r1.src_uuid = coalesce(r1.src_uuid, $cve_uuid),
-                r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid),
-                r1.edgeguard_managed = true,
-                r1.sources = {_dedup_concat_clause("r1.sources", "[$feed]")},
-                r1.misp_event_ids = {_dedup_concat_optional_clause("r1.misp_event_ids", "$misp_event_id", require_nonempty_string=True)}
-            MERGE (n)-[r2:{rel_type}]->(cve)
-                ON CREATE SET r2.src_uuid = $cvss_uuid, r2.trg_uuid = $cve_uuid
-                ON MATCH SET r2.sources = coalesce(r2.sources, legacy_sources)
-            SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
-                r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid),
-                r2.edgeguard_managed = true,
-                r2.sources = {_dedup_concat_clause("r2.sources", "[$feed]")},
-                r2.misp_event_ids = {_dedup_concat_optional_clause("r2.misp_event_ids", "$misp_event_id", require_nonempty_string=True)}
-            """
+            query = _cvss_sub_node_statement(label, rel_type, set_clause, _statement_param)
             # NB (PR #33 round 8, bugbot MED): spread filtered_cvss FIRST so the
             # explicit cve_uuid / cvss_uuid / cve_id / tag entries below always
             # win on key collision. If cvss_data ever contained a key named
@@ -3840,6 +4154,165 @@ class Neo4jClient:
             return True
         except Exception as e:
             return _cve_sub_write_failed(e, f"Failed to merge {label} for CVE {cve_id}")
+
+    def merge_cves_batch(
+        self, records: Sequence[Tuple[Dict, str]], *, refresh_raw_data: bool = True
+    ) -> List[Union[bool, Exception]]:
+        """Write CVE records as ``merge_cve`` writes each, in batches (2026-11).
+
+        ``records`` are ``(data, source_id)`` pairs, written in their order. Returns, per record, what
+        ``merge_cve(data, source_id=source_id, refresh_raw_data=refresh_raw_data)`` returns (True or False)
+        or the exception it raises, so the caller keeps its accounting per CVE.
+
+        Up to ``CVE_BATCH_SIZE`` records of different CVEs are written together (``_write_cve_batch``): one
+        transaction of one UNWIND statement per write ``merge_cve`` makes, with the values ``merge_cve``
+        computes for each record (``_prepare_cve_write``). A record whose CVE the current batch already holds
+        is written in the next batch, after it, as ``merge_cve`` writes the second record after the first.
+        A record the batch does not write as ``merge_cve`` does (``_prepare_cve_write`` returns None, or the
+        node holds a ``confidence_score`` that is not a number) is written by ``merge_cve`` itself, in its
+        place in the order. A batch whose transaction fails (a terminal error, or a retryable one that
+        outlasts its retries) has written nothing; its records are then written one by one by
+        ``merge_cve``, so each gets the result and the log lines it always got.
+        """
+        results: List[Union[bool, Exception, None]] = [None] * len(records)
+
+        def write_one(index: int) -> None:
+            data, source_id = records[index]
+            try:
+                results[index] = self.merge_cve(data, source_id=source_id, refresh_raw_data=refresh_raw_data)
+            except Exception as exc:  # noqa: BLE001 - returned to the caller, as merge_cve raised it
+                results[index] = exc
+
+        batch: List[Tuple[int, Dict[str, Any]]] = []
+        batch_ids: set = set()
+
+        def flush() -> None:
+            if batch:
+                self._merge_cve_batch(batch, results, write_one, refresh_raw_data)
+                batch.clear()
+                batch_ids.clear()
+
+        for index, (data, source_id) in enumerate(records):
+            try:
+                prepared = _prepare_cve_write(data, source_id)
+            except Exception as exc:  # noqa: BLE001 - merge_cve meets the same and answers for it
+                logger.debug("CVE record %d not batched (%s: %s); written alone", index, type(exc).__name__, exc)
+                prepared = None
+            if prepared is None:
+                flush()
+                write_one(index)
+                continue
+            if prepared["cve_id"] in batch_ids or len(batch) >= CVE_BATCH_SIZE:
+                flush()
+            batch.append((index, prepared))
+            batch_ids.add(prepared["cve_id"])
+        flush()
+        return [False if r is None else r for r in results]
+
+    def _merge_cve_batch(
+        self,
+        batch: List[Tuple[int, Dict[str, Any]]],
+        results: List[Union[bool, Exception, None]],
+        write_one: Callable[[int], None],
+        refresh_raw_data: bool,
+    ) -> None:
+        """Write one batch of ``merge_cves_batch`` and record each record's result; on a failed
+        transaction, write its records one by one."""
+        try:
+            existing, diverted = self._write_cve_batch([p for _, p in batch], refresh_raw_data)
+        except Exception as exc:  # noqa: BLE001 - nothing of the batch was written; merge_cve writes each
+            logger.warning(
+                "[CVE-BATCH-FALLBACK] The batched write of %d CVEs failed (%s: %s) — nothing of it was "
+                "written; writing them one at a time",
+                len(batch),
+                type(exc).__name__,
+                exc,
+            )
+            for index, _ in batch:
+                write_one(index)
+            return
+        for index, prepared in batch:
+            if prepared["cve_id"] in diverted:
+                continue
+            # merge_node_with_source's log lines for the record, in its order.
+            claimed = prepared["claimed_confidence"]
+            if claimed is not None and clamp_confidence_score(claimed) is None:
+                logger.warning(
+                    "confidence_score rejected by clamp for %s/%s (claimed=%r) — "
+                    "falling back to 0.5. Compromised feed?",
+                    "CVE",
+                    prepared["source_id"],
+                    claimed,
+                )
+            record = existing.get(prepared["cve_id"])
+            if record is not None:
+                key_str = f"cve_id={prepared['cve_id']}"
+                existing_conf = record.get("existing_confidence")
+                if existing_conf is not None and prepared["confidence"] < existing_conf:
+                    logger.info(
+                        f"AUDIT: Keeping the higher confidence of CVE({key_str}): "
+                        f"existing={existing_conf} (source={record.get('existing_source')}), "
+                        f"new={prepared['confidence']} (source={prepared['source_id']})"
+                    )
+                if record.get("retired_at") is not None:
+                    logger.info(
+                        "AUDIT: Re-imported retired node %s(%s): retired_by=%s, retired_at=%s, source=%s — %s",
+                        "CVE",
+                        key_str,
+                        record.get("retired_by"),
+                        record.get("retired_at"),
+                        prepared["source_id"],
+                        "kept",
+                    )
+            results[index] = True
+        # Records of CVEs whose node merge_node_with_source would refuse: merge_cve writes them, after the
+        # batch (each is a CVE the batch holds once, and the next batch starts after it).
+        for index, prepared in batch:
+            if prepared["cve_id"] in diverted:
+                write_one(index)
+
+    @retry_with_backoff(max_retries=3)
+    def _write_cve_batch(
+        self, batch: List[Dict[str, Any]], refresh_raw_data: bool
+    ) -> Tuple[Dict[str, Dict[str, Any]], set]:
+        """One transaction for a batch of ``_prepare_cve_write`` results (different CVEs): the read
+        ``merge_node_with_source`` makes before its write, then the node, ``SOURCED_FROM``, CVSS sub-node,
+        NVD-data and score writes, each one UNWIND statement over the batch, in ``merge_cve``'s order.
+
+        Returns the existing node values by CVE id (for ``merge_node_with_source``'s audit lines) and the
+        CVE ids left out of the writes: a node whose ``confidence_score`` is not a number, on which
+        ``merge_node_with_source`` fails before it writes; ``merge_cve`` writes those afterwards. A failed
+        statement rolls the whole batch back and raises; a retryable error is retried
+        (``retry_with_backoff``), the batch being written again from the start.
+        """
+        existing: Dict[str, Dict[str, Any]] = {}
+        diverted: set = set()
+        with self.driver.session() as session:
+            with session.begin_transaction(timeout=float(NEO4J_READ_TIMEOUT)) as tx:
+                ids = [p["cve_id"] for p in batch]
+                for record in tx.run(_CVE_BATCH_AUDIT_QUERY, cve_ids=ids):
+                    existing[record["cve_id"]] = dict(record)
+                for prepared in batch:
+                    existing_conf = (existing.get(prepared["cve_id"]) or {}).get("existing_confidence")
+                    if existing_conf is not None:
+                        try:
+                            _ = prepared["confidence"] < existing_conf
+                        except TypeError:
+                            diverted.add(prepared["cve_id"])
+                written = [p for p in batch if p["cve_id"] not in diverted]
+                if written:
+                    tx.run(_CVE_BATCH_NODE_QUERY, rows=[p["node"] for p in written]).consume()
+                    tx.run(_cve_batch_sourced_from_query(refresh_raw_data), rows=[p["edge"] for p in written]).consume()
+                    for label, rel_type, _key in _CVE_CVSS_SUB_NODES:
+                        rows = [p["cvss"][label] for p in written if label in p["cvss"]]
+                        if rows:
+                            tx.run(_cve_batch_cvss_query(label, rel_type, rows), rows=rows).consume()
+                    nvd_rows = [p["nvd"] for p in written if p["nvd"] is not None]
+                    if nvd_rows:
+                        tx.run(_CVE_BATCH_NVD_OWNED_QUERY, rows=nvd_rows).consume()
+                    tx.run(_CVE_BATCH_SCORE_QUERY, cve_ids=[p["cve_id"] for p in written]).consume()
+                tx.commit()
+        return existing, diverted
 
     def merge_malware(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
         """MERGE a Malware node with source tracking.
