@@ -127,7 +127,7 @@ Target: complete before the next 730-day baseline.
 
 **Files covered:**
 - `src/edgeguard.py` (CLI entry points `cmd_baseline`, `cmd_fresh_baseline`)
-- `src/run_pipeline.py` (orchestration)
+- `dags/edgeguard_pipeline.py` (the `edgeguard_baseline` DAG: task chain and orchestration; the CLI entry points only trigger it)
 - `src/collectors/*_collector.py` (12 collectors — tier-1/2/3 sequencing)
 - `src/collectors/misp_writer.py` (write-side)
 - `src/run_misp_to_neo4j.py` (sync to Neo4j)
@@ -306,10 +306,11 @@ This keeps the cost of lying in a diagram at exactly "CI fails," which is the on
 
 ---
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — § 1 names the `edgeguard_baseline` DAG in `dags/edgeguard_pipeline.py` as the orchestration of a baseline (it named `src/run_pipeline.py`, which the DAG does not use).
 - 2026-10-18 — The pin-test is described as it runs: env vars, container names in `docker` commands, `src/*.py` paths and the removed `python -m` command forms; `edgeguard` subcommands are not checked.
 - 2026-10-17 — Rewritten as a guide to the current state: change notes and the delivery history of the plan moved to this history.
 - 2026-10-17 — Corrected against the code: 12 collectors (2 flag-guarded); § 3 names `sync_to_neo4j` and the merges it calls (`_sync_bulk` does not exist); § 4 the real DAG schedules and the sync's 1 h window overlap; the pin-test does not check function names.

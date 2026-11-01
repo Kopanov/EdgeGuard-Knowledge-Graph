@@ -356,7 +356,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 - `AIRFLOW__CORE__EXECUTOR=LocalExecutor`, `AIRFLOW__CORE__LOAD_EXAMPLES=false`, `AIRFLOW__LOGGING__LOGGING_LEVEL=INFO`.
 - `AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags` and `AIRFLOW__CORE__PLUGINS_FOLDER=/opt/airflow/plugins` (the repository's `plugins/`, with the listener plugin that marks each DAG run in progress).
 - `AIRFLOW__API__PORT=8082` and `AIRFLOW__API__BASE_URL=http://localhost:8082`; port 8082 avoids ResilMesh's Temporal on 8080. `AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8082` is the Airflow 2 name, which Airflow 3 does not read.
-- `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, built from the three `AIRFLOW_POSTGRES_*` values; a pip-installed Airflow sets its own.
+- `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, built from the three `AIRFLOW_POSTGRES_*` values; a pip-installed Airflow sets its own, to a PostgreSQL database (example in `.env.example`; SQLite is for development only, [AIRFLOW_DAGS.md § Troubleshooting](AIRFLOW_DAGS.md#dag-run-stuck-in-queued-scheduler-running-but-nothing-executes)).
 
 **Task heartbeat timeouts** (both can be set in `.env`):
 
@@ -422,7 +422,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `EDGEGUARD_MISP_EVENT_LOCK_PATH` | a file in `/tmp` | Lock of MISP event creation |
 | `EDGEGUARD_INSTALL_WAIT_SEC` | `300` | Seconds `./install.sh` waits for healthy services |
 | `EDGEGUARD_PREFLIGHT_STRICT` | `0` | `1`: preflight warnings fail the preflight script |
-| `EDGEGUARD_PREFLIGHT_LAUNCH_PATH` | unset | Default `--launch-path` of the preflight script |
+| `EDGEGUARD_PREFLIGHT_LAUNCH_PATH` | unset | Default `--launch-path` of the preflight script; unset, the script assumes `dag` with a warning |
 | `EDGEGUARD_DEPLOY_CHECK_LIVE` | unset | `1`: the deployment check also probes live services |
 | `EDGEGUARD_API_BASE` | `http://127.0.0.1:8000` | API address of the STIX smoke script |
 
@@ -460,6 +460,7 @@ _Last updated: 2026-11-01_
 ## History
 
 - 2026-11-01 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` (Airflow component health on `/metrics`) and the fixed Airflow address of the `metrics` service; the `AIRFLOW_WEBSERVER_URL` row names all its readers.
+- 2026-11-01 — `EDGEGUARD_PREFLIGHT_LAUNCH_PATH` unset: the preflight script assumes `dag` (it assumed `cli`); a pip-installed Airflow sets a PostgreSQL metadata database.
 - 2026-10-25 — Row for `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) in the MISP push table, with its range and the tiers it keeps parts out of: `MISPWriter` continues a source/date event in `-part2`, `-part3` ... of at most this many attributes, since the hosted MISP could neither view nor edit a 145k-attribute NVD event; a group with OTX report ids is not split (the sync links report items only within one event).
 - 2026-10-25 — Row for `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8): an incremental sync to a remote prod Neo4j took 8 h 37 min, over the fixed 8 h limit of `run_neo4j_sync`; whole hours from 1 to 22 (a larger value uses 22, an invalid one 8, both with a warning), and the row states the full-sync floor; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit through `edgeguard_neo4j_sync_task_limit_seconds`, so a larger limit needs no change of `prometheus/alerts.yml`.
 - 2026-10-25 — `NEO4J_HTTP` is read only by the host scripts and no service reads it: the sync DAG's `check_neo4j_quality` task counts nodes through `Neo4jClient` (`NEO4J_URI`), and Compose no longer passes `NEO4J_HTTP` (default `http://neo4j:7474`) to the containers.

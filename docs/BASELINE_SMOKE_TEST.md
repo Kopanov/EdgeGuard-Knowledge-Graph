@@ -2,6 +2,8 @@
 
 Use a **short** history window and optional **item cap** before running a full 1–2 year baseline.
 
+A smoke run is a baseline like the full one: it runs through the **`edgeguard_baseline`** DAG on every install. With Docker Compose use Option A or B; without Docker, Airflow runs with a PostgreSQL metadata database ([SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker)) and Option B applies. Option C does not test the baseline: it builds a reduced graph.
+
 **Where you are in the docs:** Step **3** of the operator path — after **[SETUP_GUIDE.md](SETUP_GUIDE.md)** and **[AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)**. Full order: [SETUP_GUIDE.md § Start here](SETUP_GUIDE.md#start-here--then-read-these-next-operator-path).
 
 ---
@@ -44,7 +46,7 @@ Starting the real run with `edgeguard fresh-baseline --days 730 --wipe-all`: the
 
 ---
 
-## Option B — Airflow Variables only (no `.env`)
+## Option B — Airflow Variables or run configuration (no `.env`; also without Docker)
 
 1. **Admin → Variables**
    - `BASELINE_DAYS` = `7`
@@ -52,9 +54,23 @@ Starting the real run with `edgeguard fresh-baseline --days 730 --wipe-all`: the
 2. Trigger **`edgeguard_baseline`**.
 3. Set variables back when done.
 
+Or skip the Variables and give the window and the cap to this run only, in the environment of your Airflow install (without Docker) or with `docker compose exec airflow` in front (Compose):
+
+```bash
+airflow dags trigger edgeguard_baseline --conf '{"baseline_days": 7, "collection_limit": 1000}'
+# a clean slate (wipes the EdgeGuard data in Neo4j and MISP and the checkpoints first; backup gate below):
+airflow dags trigger edgeguard_baseline --conf '{"fresh_baseline": true, "baseline_days": 7, "collection_limit": 1000}'
+```
+
+A clean slate runs the backup gate in the `baseline_clean` task. Unless Neo4j and MISP are empty, it needs `EDGEGUARD_LAST_BACKUP_AT` (a backup at most `EDGEGUARD_BACKUP_MAX_AGE_HOURS` old, 240 by default; [BACKUP.md](BACKUP.md)) in the environment of the Airflow processes: in `.env` followed by `docker compose up -d airflow` on Compose; without Docker, in the environment the Airflow processes start from, followed by their restart. Set only in the shell that runs `airflow dags trigger`, it does not reach the task. When the stores hold nothing but test data, add `"skip_backup_check": true` to the run configuration instead (the `--skip-backup-check` of Option A belongs to `edgeguard fresh-baseline`).
+
+The `baseline_start` task log prints the effective item limit and history window. The run configuration keys: [AIRFLOW_DAGS.md § `edgeguard_baseline` task chain](AIRFLOW_DAGS.md#edgeguard_baseline-task-chain--additive-vs-destructive).
+
 ---
 
-## Option C — CLI (`run_pipeline.py`, no Airflow)
+## Option C — in-process CLI (`run_pipeline.py`): development only
+
+`python src/run_pipeline.py --baseline` does not run the `edgeguard_baseline` DAG and builds a reduced graph: no ATT&CK tactic, software or technique-implementation links (`IN_TACTIC`, `USES_MALWARE`, `USES_TOOL`, `IMPLEMENTS_TECHNIQUE`), no `INDICATES` or `USES_TECHNIQUE` from indicators, few `EMPLOYS_TECHNIQUE` and `ATTRIBUTED_TO`, no campaigns and no CVSS scores ([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)). A smoke run of it says nothing about the baseline, and its graph is not one to query or validate. Use it only to work on the collectors or the in-process pipeline itself.
 
 From the repo root with `src` on `PYTHONPATH` and `.env` loaded:
 
@@ -64,13 +80,14 @@ export EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000   # optional cap per source
 python src/run_pipeline.py --baseline --baseline-days 7
 ```
 
-**For a true clean slate** (wipes Neo4j graph + MISP events + checkpoints, then re-collects):
+**For a true clean slate** (wipes Neo4j graph + MISP events + checkpoints, then re-collects; no backup gate, no confirmation):
 ```bash
 python src/run_pipeline.py --baseline --fresh-baseline --baseline-days 7
 ```
 
-> **Preferred:** `edgeguard fresh-baseline --days 7` — it triggers the `edgeguard_baseline` DAG (the path the hosted pipeline runs), enforces the backup-timestamp gate, and is what `scripts/verify_fresh_baseline.py` is written for. The in-process `run_pipeline.py` commands above serve development; they write some edges through a legacy direct path (see `Neo4jClient.create_malware_actor_relationship`).
- On a 7-day window the acceptance script reports the CVE-properties check as *informational*: NVD assigns reference tags and CPE configurations weeks after publication, so day-old CVEs legitimately lack them.
+> **For a smoke test of the baseline:** Option A or B, or `edgeguard fresh-baseline --days 7` on the Compose install — it triggers the `edgeguard_baseline` DAG (the path the hosted pipeline runs), enforces the backup-timestamp gate, and is what `scripts/verify_fresh_baseline.py` is written for. The in-process `run_pipeline.py` commands above serve development only.
+
+On a 7-day window the acceptance script reports the CVE-properties check as *informational*: NVD assigns reference tags and CPE configurations weeks after publication, so day-old CVEs legitimately lack them.
 
 Requires MISP/Neo4j (and API keys) as for a normal run.
 
@@ -84,10 +101,11 @@ Requires MISP/Neo4j (and API keys) as for a normal run.
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — A smoke run goes through the `edgeguard_baseline` DAG on every install; Option B covers installs without Docker, with a run configuration for `airflow dags trigger`; Option C (`run_pipeline.py`, offered as the route without Airflow) is development only and builds a reduced graph. The fresh trigger of Option B states where its backup gate reads `EDGEGUARD_LAST_BACKUP_AT`.
 - 2026-10-23 — The reading order points to SETUP_GUIDE.md; the README section it named was removed.
 - 2026-10-17 — Restated as a guide to the current behaviour, with the change history moved here.
 - 2026-10-17 — Option A: the MISP → Neo4j step lists events through the paginated MISP event index (`EDGEGUARD_MISP_PAGE_SIZE`, `EDGEGUARD_MISP_MAX_PAGES`) instead of a hardcoded page size of 1000; `source_key_check` named as the baseline's second task; the reading order points to README.md.

@@ -317,6 +317,15 @@ exit 2
         (failure,) = [line for line in out if line.startswith("FAIL|")]
         assert "edgeguard_neo4j_sync has 1 running run(s)" in failure
         assert "PASS|DAG edgeguard_daily has no running run" in out
+        # The lock facts stay; the path itself is development only (a reduced graph).
+        assert "PASS|The scheduled DAGs skip tasks that start while the baseline lock is held" in out
+        (reduced,) = [line for line in out if line.startswith("WARN|") and "reduced graph" in line]
+        assert "python src/run_pipeline.py --baseline is a development path" in reduced
+        assert "runs the edgeguard_baseline DAG (--launch-path=dag" in reduced
+
+    def test_the_dag_launch_path_has_no_reduced_graph_warning(self, tmp_path):
+        out, _calls = self._run_check(tmp_path)
+        assert not [line for line in out if "reduced graph" in line or "CLI launch path" in line]
 
     def test_the_docs_no_longer_say_pausing_stops_a_running_write(self):
         runbook = (_ROOT / "docs" / "RUNBOOK.md").read_text()

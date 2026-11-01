@@ -375,7 +375,8 @@ def cmd_doctor(args):
                     i for i in result.details.get("issues", []) if "compatible" in i.lower() or "pymisp" in i.lower()
                 ]
                 warn(f"MISP {version}: {issues[0] if issues else 'version mismatch detected'}")
-                warn("This may cause Airflow DAG parser to hang. Use 'python3 src/run_pipeline.py' as workaround.")
+                # No run_pipeline.py workaround: its STIX import builds a reduced graph (docs/AIRFLOW_DAGS.md).
+                warn("This may cause the Airflow DAG parser to hang; fix the version mismatch named above.")
             else:
                 ok(f"MISP server {version} compatible with PyMISP")
             # Capture for the version-compat report below — skips the redundant probe

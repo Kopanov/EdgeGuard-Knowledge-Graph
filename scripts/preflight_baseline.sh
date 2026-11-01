@@ -18,7 +18,7 @@
 #   [1] required env vars present (NEO4J_PASSWORD, MISP_API_KEY, MISP_URL)
 #   [2] Neo4j reachable + APOC available + baseline-critical indexes present
 #   [3] MISP API reachable + auth valid + server version ≥ 2.4
-#   [4] launch-path decision confirmed (CLI or DAG+pause) — see RUNBOOK
+#   [4] launch-path decision confirmed (DAG+pause, or the development-only CLI) — see RUNBOOK
 #   [5] IF DAG launch path: the 5 scheduled DAGs are PAUSED, none with a running run (Issue #57)
 #   [6] Airflow worker RAM ≥ 4 GB
 #   [7] Prometheus alerts.yml parses + edgeguard rule group loaded
@@ -34,8 +34,18 @@
 #        healthy when they run (warnings), metadata database not SQLite (a warning)
 #
 # Usage:
-#   ./scripts/preflight_baseline.sh [--launch-path cli|dag]
+#   ./scripts/preflight_baseline.sh [--launch-path dag|cli] [--strict]
 #   EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path dag
+#
+# Launch path: "dag" is the edgeguard_baseline DAG, the baseline path on every install (with or
+# without Docker). Without --launch-path (or EDGEGUARD_PREFLIGHT_LAUNCH_PATH) the script assumes
+# "dag" and warns that it assumed it. "cli" is the in-process `python src/run_pipeline.py --baseline`,
+# a development path that builds a reduced graph (docs/AIRFLOW_DAGS.md, "In-process CLI baseline");
+# it is checked for the lock and running runs only, with a warning.
+#
+# Without Docker, checks [5] and [6] cannot read Airflow or the container's memory limit and only
+# warn (so --strict cannot pass there): check the pause state, the running runs and the host memory
+# by hand, as the warnings say.
 #
 # See docs/RUNBOOK.md § "Baseline-day protocol" for manual equivalents.
 # -----------------------------------------------------------------------------
@@ -69,7 +79,7 @@ while [[ $# -gt 0 ]]; do
     --launch-path=*) LAUNCH_PATH="${1#*=}"; shift ;;
     --strict) STRICT=1; shift ;;
     -h|--help)
-      sed -n '3,39p' "$0"
+      sed -n '3,/^# See docs\/RUNBOOK.md/p' "$0"
       exit 0
       ;;
     *) fail "unknown flag: $1"; exit 1 ;;
@@ -77,8 +87,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${LAUNCH_PATH}" ]]; then
-  warn "no --launch-path given; assuming 'cli'. Use --launch-path=dag to enable the DAG-pause check."
-  LAUNCH_PATH="cli"
+  warn "no --launch-path given; assuming 'dag' (the edgeguard_baseline DAG, the baseline path on every install). Pass --launch-path=dag to confirm it."
+  LAUNCH_PATH="dag"
 fi
 
 case "$LAUNCH_PATH" in
@@ -230,7 +240,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# [4] + [5] launch-path decision (CLI assumed, or DAG+pause verification)
+# [4] + [5] launch-path decision (DAG+pause verification, the default; or the development-only CLI)
 # -----------------------------------------------------------------------------
 hdr "[4][5] launch-path = $LAUNCH_PATH"
 # Pausing stops new tasks and retries only, and on every launch path a task that is already running
@@ -270,8 +280,9 @@ print(len(runs) if isinstance(runs, list) else "?")
   fi
 }
 if [[ "$LAUNCH_PATH" == "cli" ]]; then
-  pass "CLI launch path — in-process baseline_lock will gate incrementals (src/run_pipeline.py:1093)"
+  pass "CLI launch path — in-process baseline_lock will gate incrementals (EdgeGuardPipeline.run in src/run_pipeline.py)"
   pass "The scheduled DAGs skip tasks that start while the baseline lock is held"
+  warn "CLI launch path: python src/run_pipeline.py --baseline is a development path and builds a reduced graph (no ATT&CK tactic, software or technique-implementation links, no indicator-malware links or campaigns, no CVSS scores); a baseline whose graph is queried or validated runs the edgeguard_baseline DAG (--launch-path=dag; docs/AIRFLOW_DAGS.md, \"In-process CLI baseline\")"
   if command -v docker >/dev/null 2>&1; then
     for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
       check_running_runs "$dag"
@@ -282,7 +293,9 @@ if [[ "$LAUNCH_PATH" == "cli" ]]; then
 else
   # DAG path — verify the 5 scheduled DAGs are paused and none of them has a running run
   if ! command -v docker >/dev/null 2>&1; then
-    warn "docker not found; cannot verify Airflow DAG pause state automatically"
+    # Without Docker (Airflow installed with pip) neither the pause state nor the running runs are
+    # read here; the operator checks both in the Airflow environment, so this stays a warning.
+    warn "docker not found; cannot verify that the 5 scheduled DAGs are paused and have no running run. Without Docker, check it in the Airflow environment for each of them: 'airflow dags details <dag>' shows is_paused True, and 'airflow dags list-runs <dag> --state running -o json' prints [] (docs/RUNBOOK.md Option A)"
   else
     # Service name is `airflow` (single standalone container, docker-compose.yml)
     # — the earlier worker-suffixed service name never existed in the shipped
@@ -322,7 +335,7 @@ if command -v docker >/dev/null 2>&1; then
     fail "edgeguard_airflow memory limit $(($MEM_BYTES / 1024 / 1024)) MB is below 4 GB baseline minimum"
   fi
 else
-  warn "docker not available; skipping memory check"
+  warn "docker not available; skipping the memory check of the edgeguard_airflow container (without Docker, check the memory of the host that runs Airflow: docs/MEMORY_TUNING.md)"
 fi
 
 # -----------------------------------------------------------------------------

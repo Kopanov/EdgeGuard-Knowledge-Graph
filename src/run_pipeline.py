@@ -80,6 +80,37 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# ``--baseline`` loads Neo4j through the STIX import of this module (``load_stix21_to_neo4j``), not through
+# the MISP -> Neo4j sync (``MISPToNeo4jSync.run``) of the ``edgeguard_baseline`` DAG. The nodes it writes
+# carry none of the lists build_relationships.py links by (tactic phases, technique and software lists,
+# attribution, malware family, OTX technique ids) and CVEs no CVSS data, so the graph is reduced
+# (docs/AIRFLOW_DAGS.md, "In-process CLI baseline"). The help text and the warning say so; the run itself
+# is unchanged.
+CLI_BASELINE_HELP_NOTE = (
+    "Development only: builds a reduced graph (no ATT&CK tactic, software or technique-implementation "
+    "links, no indicator-malware links or campaigns, no CVSS scores). A baseline whose graph is queried "
+    "or validated runs the edgeguard_baseline DAG."
+)
+CLI_BASELINE_WARNING_LINES = (
+    "[REDUCED-GRAPH] This in-process baseline (run_pipeline.py --baseline) is a development path and "
+    "builds a REDUCED graph.",
+    "[REDUCED-GRAPH] It loads Neo4j through the STIX import, whose nodes lack the ATT&CK tactic phases, "
+    "technique and software lists and attribution, the indicators' malware family and the CVSS data:",
+    "[REDUCED-GRAPH] no IN_TACTIC, IMPLEMENTS_TECHNIQUE, USES_MALWARE, USES_TOOL, USES_TECHNIQUE or "
+    "INDICATES links, few EMPLOYS_TECHNIQUE and ATTRIBUTED_TO links, no campaigns, no CVSS scores.",
+    "[REDUCED-GRAPH] Do not query or validate this graph. Full baselines run the edgeguard_baseline DAG "
+    "(airflow dags trigger edgeguard_baseline; docs/AIRFLOW_DAGS.md).",
+)
+
+
+def _log_cli_baseline_warning() -> None:
+    """Log, before anything is wiped or collected, that this baseline builds a reduced graph."""
+    logger.warning("=" * 60)
+    for line in CLI_BASELINE_WARNING_LINES:
+        logger.warning(line)
+    logger.warning("=" * 60)
+
+
 # Source ID mapping (tag -> source_id)
 SOURCE_ID_MAP = {
     "misp": "misp",
@@ -1174,6 +1205,8 @@ class EdgeGuardPipeline:
         # Log baseline mode
         if baseline:
             logger.info(f"BASELINE MODE: Collecting historical data (last {baseline_days} days)")
+            # Before the wipe of a fresh baseline and before any collector runs.
+            _log_cli_baseline_warning()
             if fresh_baseline:
                 # PR-C audit fix (Cross-Checker H3 + Prod Readiness HIGH): the
                 # previous inline 3-step clean (checkpoints, Neo4j, MISP) lived
@@ -1522,6 +1555,10 @@ class EdgeGuardPipeline:
         # nodes, no IOC decay, no Vulnerability↔CVE bridges. Fixed by
         # invoking both here, gated to ``baseline=True`` to avoid
         # surprising incremental-mode CLI users with extra latency.
+        # The steps match the DAG's, the graph does not: the STIX import of
+        # Step 3 writes nodes without the lists build_relationships links
+        # by, so most of its link steps find no input
+        # (``CLI_BASELINE_WARNING_LINES``).
         if baseline:
             # Step 5b: build_relationships (20 cross-entity link steps).
             # Subprocess-isolated to match the DAG's invocation shape.
@@ -1536,7 +1573,7 @@ class EdgeGuardPipeline:
             # error-context) and enforces the 5h timeout with a
             # SIGTERM-then-SIGKILL escalation so APOC transactions
             # get a chance to roll back cleanly.
-            logger.info("\n[TARGET] Step 5b: build_relationships (CLI parity with DAG)...")
+            logger.info("\n[TARGET] Step 5b: build_relationships (on the reduced graph of the STIX import)...")
             # PR-K3 Bugbot round-1 (Medium): import OUTSIDE the try block.
             # If the import itself fails (e.g. module missing from deployment),
             # a ModuleNotFoundError fires — but Python would then try to
@@ -1614,7 +1651,7 @@ class EdgeGuardPipeline:
             # run_all_enrichment_jobs, including the actor alias merge and,
             # 2026-10, the Malware ATT&CK-id twin merge). In-process because
             # each job is short-running and shares the existing Neo4jClient.
-            logger.info("\n[TARGET] Step 5c: post-sync enrichment_jobs (CLI parity with DAG)...")
+            logger.info("\n[TARGET] Step 5c: post-sync enrichment_jobs (on the reduced graph of the STIX import)...")
             try:
                 from enrichment_jobs import run_all_enrichment_jobs
 
@@ -1710,7 +1747,10 @@ def main():
         "--baseline",
         action="store_true",
         default=False,
-        help="Collect available, historical data (all not just latest). Default: False (latest updates only)",
+        help=(
+            "Collect available, historical data (all not just latest). Default: False (latest updates only). "
+            + CLI_BASELINE_HELP_NOTE
+        ),
     )
     # PR-C v2 audit fix (Maintainer H1 + Cross-Checker B1, comprehensive
     # 7-agent audit): the SSoT module ``baseline_config.resolve_baseline_days``

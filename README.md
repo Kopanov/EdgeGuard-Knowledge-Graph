@@ -246,7 +246,7 @@ Open `http://localhost:3000/visualization.html`, enter the API URL (`http://loca
 - **Host memory.** 16 GB is enough only for a short smoke test with lowered memory limits. A 730-day baseline needs the 730-day memory profile ([Steps](#steps), step 1) and about 48 GB of host RAM, more when MISP runs on the same host ([docs/MEMORY_TUNING.md](docs/MEMORY_TUNING.md)).
 - **Host-side tools.** `scripts/preflight_baseline.sh`, `edgeguard baseline`, `edgeguard fresh-baseline` and `edgeguard doctor --memory` run on the Compose host and need Python 3.12 or later with the project installed in the repository's `.venv`. `./install.sh --python` creates it; it starts no container and leaves the running stack as it is.
 
-Without Docker, Python 3.12 or later with Neo4j and APOC works too: [docs/SETUP_GUIDE.md § 4](docs/SETUP_GUIDE.md#4-path-b--python--venv-no-docker); conda and edge devices: [docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md).
+Without Docker, Python 3.12 or later with Neo4j and APOC works too, with Airflow on a PostgreSQL metadata database: every baseline runs through the `edgeguard_baseline` DAG on that install as well ([docs/SETUP_GUIDE.md § 4](docs/SETUP_GUIDE.md#4-path-b--python--venv-no-docker)); conda and edge devices: [docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md).
 
 ### Install
 
@@ -351,11 +351,11 @@ curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" "http://localhost:8000/indicators?zon
 
 ## Running the 730-day baseline
 
-The baseline loads about two years of history in one run of the `edgeguard_baseline` DAG, which may take up to 32 hours (its `dagrun_timeout`). The DAG runs `misp_health_check`, `source_key_check`, `baseline_acquire_lock`, `baseline_clean`, `baseline_start`, the collector groups `tier1_core` and `tier2_feeds`, `full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`, `baseline_postcheck`, `baseline_complete` and `baseline_release_lock`.
+The baseline loads about two years of history in one run of the `edgeguard_baseline` DAG, which may take up to 32 hours (its `dagrun_timeout`). Every baseline, smoke or 730-day, additive or fresh, runs through this DAG, with Docker or without it; without Docker, give the settings to the Airflow processes and run the `airflow` commands below in their environment, without `docker compose exec airflow`. The DAG runs `misp_health_check`, `source_key_check`, `baseline_acquire_lock`, `baseline_clean`, `baseline_start`, the collector groups `tier1_core` and `tier2_feeds`, `full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`, `baseline_postcheck`, `baseline_complete` and `baseline_release_lock`.
 
 ### How the baseline lock protects the run
 
-The `edgeguard_baseline` DAG holds a lock for the whole run: the `baseline_acquire_lock` task writes `checkpoints/baseline_in_progress.lock`, with the DAG run as holder, before the destructive `baseline_clean` step, and `baseline_release_lock` removes it after a successful run. The in-process `python src/run_pipeline.py --baseline` takes the same lock, so every launch path is protected.
+The `edgeguard_baseline` DAG holds a lock for the whole run: the `baseline_acquire_lock` task writes `checkpoints/baseline_in_progress.lock`, with the DAG run as holder, before the destructive `baseline_clean` step, and `baseline_release_lock` removes it after a successful run. The in-process `python src/run_pipeline.py --baseline` takes the same lock; it is a development path that builds a reduced graph (no ATT&CK tactic, software or technique-implementation links, no indicator-malware links or campaigns, few actor-technique or attribution links, no CVSS scores) and is not a way to run a baseline ([docs/AIRFLOW_DAGS.md § In-process CLI baseline](docs/AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)).
 
 - While the lock is held, the five scheduled DAGs skip at task start: a collector task succeeds with `skipped: true` (a green task, reason `baseline_in_progress`), and every writing task of `edgeguard_neo4j_sync` skips.
 - A failed run keeps the lock, so clearing the failed task resumes under it. A refusal of `baseline_clean` before the wipe (a misspelt `fresh_baseline` key, an invalid `wipe_scope`, the backup gate) releases it, so the corrected trigger is not refused.
@@ -400,6 +400,7 @@ set -a; . ./.env; set +a
 It runs checks `[1]` to `[13]`: settings, Neo4j and APOC, MISP, the pause state and running runs of the scheduled DAGs, worker memory, the alert rules and the Alertmanager wiring, a leftover lock, the operations-only switches, the test collection, the baseline invariants in the code, whether each provider accepts its source key, and whether Airflow's scheduler, triggerer and DAG processor are healthy and its metadata database is not SQLite. Exit 0 means ready; on exit 1, fix the items marked ✗. Check by check: [docs/BASELINE_LAUNCH_CHECKLIST.md](docs/BASELINE_LAUNCH_CHECKLIST.md).
 
 - Checks `[10]` to `[12]` use the repository's `.venv` ([Prerequisites](#prerequisites)). Without it, check `[11]` reports the three critical-chain tasks as missing `retries=0`, the test-collection check `[10]` is skipped, and the source-key check `[12]` falls back to the system `python3`.
+- Without Docker, checks `[5]` and `[6]` cannot read Airflow or the container's memory limit and only warn: run the pause and `airflow dags list-runs` commands of step 3 in the Airflow environment, and check the host memory ([docs/BASELINE_LAUNCH_CHECKLIST.md § 1](docs/BASELINE_LAUNCH_CHECKLIST.md#1-live-preflight-run--scriptspreflight_baselinesh)).
 - With the shipped `prometheus/alertmanager.yml`, check `[7b]` fails until its PagerDuty `service_key` is rendered with a real key or the PagerDuty receiver is removed ([docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md#alertmanager-notifications)).
 
 **3. Launch.** After a smoke test, remove `EDGEGUARD_BASELINE_DAYS` and `EDGEGUARD_BASELINE_COLLECTION_LIMIT` from `.env` and run `docker compose up -d airflow` first: a trigger without a run configuration takes the window and the item limit from them. Optionally pause the five scheduled DAGs, trigger the baseline, and unpause them once its `baseline_complete` task has succeeded:
