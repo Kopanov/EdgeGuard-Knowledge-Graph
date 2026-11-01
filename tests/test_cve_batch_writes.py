@@ -493,11 +493,16 @@ class TestRetryAndFallback:
 
     @pytest.mark.parametrize(
         "statement, code, times, reason",
-        [(BATCH_SCORE, TYPE_ERROR, 1, "non_retryable"), (BATCH_NODE, DEADLOCK, 4, "retries_exhausted")],
+        [
+            (BATCH_SCORE, TYPE_ERROR, 1, "non_retryable"),
+            (BATCH_NODE, DEADLOCK, 4, "retries_exhausted"),
+            (BATCH_NODE, TIMED_OUT, 1, "non_retryable"),
+        ],
     )
     def test_a_fallback_is_counted_with_its_reason(self, bolt, statement, code, times, reason):
         """2026-11: each batch that falls back adds one to ``edgeguard_neo4j_cve_batch_fallback_total{reason}`` and
-        reports its CVEs to the caller (``on_fallback``)."""
+        reports its CVEs to the caller (``on_fallback``). A batch at its transaction timeout is not retried and counts
+        as ``non_retryable`` (the RUNBOOK's failure mode 5 sends that case to its timeout section)."""
         assert nc._record_cve_batch_fallback is not None, "prometheus_client is a declared dependency"
         before = {r: _fallback_count(r) for r in FALLBACK_REASONS}
         _server, client = bolt(fail(statement, code, times=times))
@@ -597,6 +602,24 @@ class TestTheSyncWritesCvesInBatches:
         assert sync._merge_cves([_cve(1), _cve(2)]) == [True, True]
         assert sync.stats["cve_batch_fallbacks"] == 1 and sync.stats["cve_batch_fallback_cves"] == 2
 
+    def test_the_integration_tests_per_cve_writer_takes_the_syncs_call(self, bolt, caplog):
+        """``tests/test_cve_batch_sync_neo4j.py`` (a real Neo4j, in CI) compares the sync with ``merge_cves_batch``
+        replaced by ``_one_cve_at_a_time``, a loop of ``merge_cve``. The sync calls that stand-in as it calls the batch
+        writer; a stand-in without one of its arguments would raise, send the per-CVE pass down the sync's fallback
+        and fail that comparison on its stats and log lines, which a run without a Neo4j cannot show."""
+        from test_cve_batch_sync_neo4j import _one_cve_at_a_time
+
+        server, client = bolt()
+        sync = MISPToNeo4jSync(neo4j_client=client)
+        with (
+            patch.object(nc.Neo4jClient, "merge_cves_batch", _one_cve_at_a_time),
+            caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"),
+        ):
+            assert sync._merge_cves([_cve(1), _cve(2)]) == [True, True]
+        assert not [r for r in caplog.records if "[CVE-BATCH-FALLBACK]" in r.getMessage()]
+        assert sync.stats["cve_batch_fallbacks"] == 0 and sync.stats["cve_batch_fallback_cves"] == 0
+        assert count(server.runs, SINGLE_NODE) == 2 and count(server.runs, BATCH_NODE) == 0
+
     def test_an_exception_result_is_an_error_in_both_loops(self, caplog):
         """``_merge_cves`` returns the exception merge_cve raised for a CVE (2026-11); each loop raises it again where
         it counts and logs an error, so it is never counted as synced (an exception object is truthy). The other CVEs
@@ -691,7 +714,7 @@ class TestTheRunSummaryReportsFallbacks:
         assert sync.stats["cve_batch_fallbacks"] == 1 and sync.stats["cve_batch_fallback_cves"] == 5
         (line,) = self._summary(caplog)
         assert line.getMessage().startswith(
-            "CVE batches written one CVE at a time after a failed batched write: 1 (5 CVEs; grep '[CVE-BATCH-FALLBACK]'"
+            "CVE batches written one CVE at a time after a failed batched write: 1 (5 CVEs; grep -F '[CVE-BATCH-FALLBACK]'"
         )
         assert line.levelno == logging.WARNING
 

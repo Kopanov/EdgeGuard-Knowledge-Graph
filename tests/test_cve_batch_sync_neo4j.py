@@ -75,8 +75,12 @@ ODD_CONFIDENCE_CVE = "CVE-2013-0261"
 RETIRED_CVE = "CVE-2026-76418"
 
 
-def _one_cve_at_a_time(self, records, *, refresh_raw_data=True):
-    """The sync's CVE write before 2026-11: ``merge_cve`` per record, its result or the exception it raised."""
+def _one_cve_at_a_time(self, records, *, refresh_raw_data=True, on_fallback=None):
+    """The sync's CVE write before 2026-11: ``merge_cve`` per record, its result or the exception it raised.
+
+    Takes ``merge_cves_batch``'s arguments, as the sync calls it with them (``on_fallback`` is never called: no batch
+    falls back here). A missing one would make the sync's call raise and send the per-CVE pass down the sync's own
+    fallback (``tests/test_cve_batch_writes.py`` checks this without a Neo4j)."""
     results: List[Any] = []
     for data, source_id in records:
         try:
@@ -253,6 +257,7 @@ def test_the_sync_leaves_the_graph_the_per_cve_write_leaves(client, raw_driver, 
     assert not any("[CVE-BATCH-FALLBACK]" in m for m in batched_logs)
 
     assert batched_results == per_cve_results
+    assert per_cve_stats["cve_batch_fallbacks"] == batched_stats["cve_batch_fallbacks"] == 0, "neither pass fell back"
     assert batched_stats == per_cve_stats
     assert batched_logs == per_cve_logs
     assert batched_graph["nodes"] == per_cve_graph["nodes"]

@@ -527,9 +527,10 @@ NEO4J_BATCH_PERMANENT_FAILURES = Counter(
 # write failed, so that their CVEs were written one at a time by ``merge_cve`` ([CVE-BATCH-FALLBACK]).
 # Nothing is lost, but each such batch takes the per-CVE write time, so batches that keep falling back
 # slow the sync down. ``reason``: ``retries_exhausted`` (a retryable error outlasted the retries: Neo4j
-# overloaded), ``non_retryable`` (the server refused a statement, often one record of the batch) or
-# ``batch_writer_error`` (``merge_cves_batch`` itself raised). The run summary of the sync reports the same
-# fallbacks (``cve_batch_fallbacks``); no alert reads the counter.
+# overloaded), ``non_retryable`` (the server refused a statement, often one record of the batch, or the batch
+# reached its transaction timeout, logged as ``[NEO4J-TIMEOUT]``) or ``batch_writer_error`` (``merge_cves_batch``
+# itself raised). The run summary of the sync reports the same fallbacks (``cve_batch_fallbacks``); no alert
+# reads the counter.
 NEO4J_CVE_BATCH_FALLBACKS = Counter(
     "edgeguard_neo4j_cve_batch_fallback_total",
     "Batches of the MISP->Neo4j sync's CVE writes whose batched write failed, so that their CVEs were "

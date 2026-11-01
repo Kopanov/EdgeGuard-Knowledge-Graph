@@ -6638,7 +6638,7 @@ class MISPToNeo4jSync:
             # 2026-11: CVE batches written one CVE at a time (``_count_cve_batch_fallback``); 0 when none fell back.
             cve_batch_fallbacks = int(self.stats.get("cve_batch_fallbacks", 0) or 0)
             (logger.warning if cve_batch_fallbacks else logger.info)(
-                "CVE batches written one CVE at a time after a failed batched write: %d (%d CVEs; grep "
+                "CVE batches written one CVE at a time after a failed batched write: %d (%d CVEs; grep -F "
                 "'[CVE-BATCH-FALLBACK]'; nothing lost, not counted as errors)",
                 cve_batch_fallbacks,
                 int(self.stats.get("cve_batch_fallback_cves", 0) or 0),
