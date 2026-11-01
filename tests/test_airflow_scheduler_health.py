@@ -1,6 +1,6 @@
 """Detection of a dead Airflow scheduler.
 
-``airflow standalone`` (the Compose ``airflow`` service and the usual bare-metal setup) runs the
+``airflow standalone`` (the Compose ``airflow`` service, or a bare-metal install that runs it) runs the
 scheduler, triggerer, DAG processor and API server as subprocesses and neither restarts nor exits when
 one of them dies. ``/api/v2/monitor/health`` then answers HTTP 200 with ``unhealthy`` in its JSON body
 only, so every check that read the HTTP status or reachability alone reported Airflow as fine while no
@@ -11,9 +11,15 @@ and triggerer stopped on a metadata database error while the DAG processor kept 
 (``airflow_health_unhealthy_2026_11_01.json``), and the same install after a restart
 (``airflow_health_healthy_2026_11_01.json``).
 
+Two shapes are derived from Airflow 3.3.2's ``airflow/api/common/airflow_health.py``: a metadata database
+that the API server cannot read (every component then reports ``unhealthy``) and a deployment whose
+triggerer and DAG processor run no job of their own (``null`` status, as the DAG processor of Airflow 2
+by default).
+
 Covered: the shared reader ``airflow_client.component_health``, each caller end to end (``doctor``,
 ``dag status``, ``dag kill``, ``preflight``, the metrics exporter's collector, the Compose healthcheck,
-check ``[13]`` of ``scripts/preflight_baseline.sh``), and the alert rules that read the new gauges.
+check ``[13]`` of ``scripts/preflight_baseline.sh``, the probe of ``scripts/runtime_smoke_checklist.sh``),
+and the alert rules that read the new gauges.
 """
 
 from __future__ import annotations
@@ -44,6 +50,20 @@ _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 HEALTHY = json.loads((_FIXTURES / "airflow_health_healthy_2026_11_01.json").read_text())
 UNHEALTHY = json.loads((_FIXTURES / "airflow_health_unhealthy_2026_11_01.json").read_text())
 SCHEDULER_HEARTBEAT = "2026-11-01T08:32:14.421196+00:00"  # last heartbeat in UNHEALTHY
+# The API server's job queries fail: metadatabase "unhealthy", and every component keeps its "unhealthy"
+# default without a heartbeat (get_airflow_health sets nothing else when the queries raise).
+DATABASE_DOWN = {
+    "metadatabase": {"status": "unhealthy"},
+    "scheduler": {"status": "unhealthy", "latest_scheduler_heartbeat": None},
+    "triggerer": {"status": "unhealthy", "latest_triggerer_heartbeat": None},
+    "dag_processor": {"status": "unhealthy", "latest_dag_processor_heartbeat": None},
+}
+# No triggerer or DAG processor job recorded: Airflow reports a null status for both.
+WITHOUT_JOBS = dict(
+    HEALTHY,
+    triggerer={"status": None, "latest_triggerer_heartbeat": None},
+    dag_processor={"status": None, "latest_dag_processor_heartbeat": None},
+)
 RUNBOOK_SECTION = "Airflow scheduler or triggerer stopped"
 _AIRFLOW_ALERTS = (
     "EdgeGuardAirflowSchedulerDown",
@@ -81,20 +101,40 @@ class TestComponentHealth:
         assert health.not_healthy() == []
         assert list(health.statuses) == list(airflow_client.AIRFLOW_HEALTH_COMPONENTS)
 
-    def test_a_missing_component_is_not_healthy(self):
+    def test_a_missing_scheduler_is_not_healthy(self):
+        payload = {name: entry for name, entry in HEALTHY.items() if name != "scheduler"}
+        health = airflow_client.component_health(payload)
+        assert health.not_healthy() == ["scheduler"] and health.without_job() == []
+        assert "scheduler" not in health.statuses
+        assert health.describe("scheduler") == "scheduler not reported by Airflow"
+
+    def test_a_missing_triggerer_runs_no_job(self):
         payload = {name: entry for name, entry in HEALTHY.items() if name != "triggerer"}
         health = airflow_client.component_health(payload)
-        assert health.not_healthy() == ["triggerer"]
-        assert "triggerer" not in health.statuses
+        assert not health.is_healthy("triggerer")
+        assert health.not_healthy() == [] and health.without_job() == ["triggerer"]
         assert health.describe("triggerer") == "triggerer not reported by Airflow"
 
-    def test_a_null_status_is_not_healthy(self):
-        """Airflow 3 reports ``null`` for a triggerer or DAG processor that never ran (no job recorded)."""
-        payload = dict(HEALTHY, triggerer={"status": None, "latest_triggerer_heartbeat": None})
-        health = airflow_client.component_health(payload)
-        assert health.statuses["triggerer"] is None
-        assert health.not_healthy() == ["triggerer"]
-        assert health.describe("triggerer") == "triggerer without status (no triggerer job recorded)"
+    def test_a_null_scheduler_status_is_not_healthy(self):
+        health = airflow_client.component_health(dict(HEALTHY, scheduler={"status": None}))
+        assert health.statuses["scheduler"] is None
+        assert health.not_healthy() == ["scheduler"] and health.without_job() == []
+        assert health.describe("scheduler") == "scheduler without status (no scheduler job recorded)"
+
+    def test_a_null_triggerer_or_dag_processor_status_runs_no_job(self):
+        """Airflow reports ``null`` for a triggerer or DAG processor of which it has recorded no job."""
+        health = airflow_client.component_health(WITHOUT_JOBS)
+        assert health.statuses["triggerer"] is None and health.statuses["dag_processor"] is None
+        assert not health.is_healthy("triggerer") and not health.is_healthy("dag_processor")
+        assert health.not_healthy() == []
+        assert health.without_job() == ["triggerer", "dag_processor"]
+        assert health.describe("dag_processor") == "dag_processor without status (no dag_processor job recorded)"
+
+    def test_an_unreadable_metadata_database_makes_every_component_unhealthy(self):
+        health = airflow_client.component_health(DATABASE_DOWN)
+        assert health.not_healthy() == list(airflow_client.AIRFLOW_HEALTH_COMPONENTS)
+        assert health.without_job() == []
+        assert health.describe("scheduler") == "scheduler unhealthy"
 
     @pytest.mark.parametrize("entry", ["healthy", None, ["healthy"], {"status": True}, {}])
     def test_a_malformed_scheduler_entry_is_not_healthy(self, entry):
@@ -106,7 +146,7 @@ class TestComponentHealth:
         health = airflow_client.component_health({"error": "Cannot connect to Airflow at http://x:8082."})
         assert not health.reachable
         assert health.error == "Cannot connect to Airflow at http://x:8082."
-        assert health.statuses == {} and health.not_healthy() == list(airflow_client.AIRFLOW_HEALTH_COMPONENTS)
+        assert health.statuses == {} and health.not_healthy() == ["metadatabase", "scheduler"]
 
     @pytest.mark.parametrize("payload", [None, [], ["scheduler"], "healthy", 200])
     def test_an_answer_that_is_not_an_object_is_unreachable(self, payload):
@@ -181,6 +221,10 @@ def _line(lines, text):
     found = [ln for ln in lines if text in ln]
     assert found, f"no output line contains {text!r}"
     return found[0]
+
+
+def test_the_cli_errors_are_the_required_components():
+    assert edgeguard._AIRFLOW_ERROR_COMPONENTS == airflow_client.AIRFLOW_REQUIRED_COMPONENTS
 
 
 _DOCTOR_ENV_UNSET = (
@@ -267,18 +311,46 @@ class TestDoctor:
         assert "⚠" in triggerer
         assert "✓" in _line(lines, "Airflow components healthy: metadatabase, dag_processor")
         recover = _line(lines, "Recover: restart Airflow")
-        assert "continues where it stopped" in recover and "do not trigger it again" in recover
+        assert "ℹ" in recover and "do not trigger the DAG run again" in recover
+        # A restart stops a task still running, and the new scheduler runs it again from its start.
+        assert "runs again from its start" in recover and "let it end first" in recover
+        assert "states-for-dag-run" in recover
+        assert not any("restore the metadata database" in ln for ln in lines), "the database is healthy"
         assert "✗" in _line(lines, "EdgeGuard has issues")
         # The DAG list still runs: the API server answers.
         assert "✓" in _line(lines, "Active DAGs: edgeguard_baseline")
 
-    def test_a_dead_triggerer_alone_is_a_warning(self, run_doctor):
+    def test_a_dead_triggerer_alone_is_a_warning_without_a_restart_during_a_run(self, run_doctor):
         payload = dict(HEALTHY, triggerer=UNHEALTHY["triggerer"])
         code, lines, calls = run_doctor(payload)
         assert code == 0 and calls == 1
         assert "⚠" in _line(lines, "Airflow triggerer unhealthy")
-        assert "ℹ" in _line(lines, "Recover: restart Airflow")
+        later = _line(lines, "Recover: a DAG run in progress continues without the triggerer")
+        assert "ℹ" in later and "restart Airflow when no DAG run is in progress" in later
+        assert not any("Recover: restart Airflow" in ln for ln in lines)
         assert not any("✗" in ln for ln in lines)
+
+    def test_a_triggerer_and_dag_processor_without_job_are_information(self, run_doctor):
+        """Airflow 2 parses the DAG files in the scheduler: its DAG processor reports a null status."""
+        code, lines, calls = run_doctor(WITHOUT_JOBS)
+        assert code == 0 and calls == 1
+        assert "✓" in _line(lines, "Airflow components healthy: metadatabase, scheduler")
+        for name in ("triggerer", "dag_processor"):
+            line = _line(lines, f"Airflow {name} without status (no {name} job recorded)")
+            assert "ℹ" in line and "it does not run as a process of its own" in line
+        assert not any("⚠" in ln or "✗" in ln for ln in lines if "Airflow" in ln)
+        assert not any("Recover:" in ln for ln in lines)
+        assert "✓" in _line(lines, "EdgeGuard is healthy")
+
+    def test_an_unreadable_metadata_database_is_restored_before_the_restart(self, run_doctor):
+        code, lines, calls = run_doctor(DATABASE_DOWN)
+        assert code == 1 and calls == 2
+        assert "✗" in _line(lines, "Airflow metadatabase unhealthy: the API server cannot read")
+        assert "✗" in _line(lines, "Airflow scheduler unhealthy: no task starts")
+        assert "⚠" in _line(lines, "Airflow triggerer unhealthy")
+        database = _line(lines, "Recover: restore the metadata database first")
+        assert "docker compose ps airflow_postgres" in database
+        assert lines.index(database) < lines.index(_line(lines, "Recover: restart Airflow"))
 
 
 _RUN = {
@@ -316,7 +388,7 @@ class TestDagStatus:
         assert "running" in row and "2026-11-01T08:30:12" in row
         final = lines[[i for i, ln in enumerate(lines) if ln.strip()][-1]]
         assert "✗" in final and "runs shown as running or queued are not progressing" in final
-        assert "do not trigger it again" in final
+        assert "do not trigger the runs again" in final
         assert out.index("Airflow scheduler unhealthy") < out.index("edgeguard_baseline") < out.index("not progressing")
 
     def test_a_healthy_airflow_lists_the_runs_and_exits_0(self, run_status):
@@ -405,6 +477,18 @@ class TestPreflight:
         assert "NOT READY — 1 error(s), 1 warning(s)" in text
         assert summary["checks"]["airflow"]["scheduler"]["status"] == "unhealthy"
 
+    def test_a_triggerer_and_dag_processor_without_job_are_ready(self, run_preflight):
+        code, summary, text = run_preflight(WITHOUT_JOBS)
+        assert (code, summary["errors"], summary["warnings"]) == (0, 0, 0), text
+        assert "Airflow dag_processor without status (no dag_processor job recorded)" in text
+        code, _, _ = run_preflight(WITHOUT_JOBS, strict=True)
+        assert code == 0, "no warning, so --strict passes too"
+
+    def test_an_unreadable_metadata_database_counts_two_errors(self, run_preflight):
+        code, summary, text = run_preflight(DATABASE_DOWN)
+        assert (code, summary["errors"], summary["warnings"]) == (1, 2, 2), text
+        assert "Recover: restore the metadata database first" in text
+
     def test_a_dead_triggerer_alone_fails_only_under_strict(self, run_preflight):
         payload = dict(HEALTHY, triggerer=UNHEALTHY["triggerer"])
         code, summary, _ = run_preflight(payload)
@@ -472,11 +556,29 @@ class TestAirflowHealthCollector:
         assert self._component(registry, "metadatabase") == 1.0
         assert self._component(registry, "dag_processor") == 1.0
 
-    def test_only_the_listed_components_get_a_series_and_null_is_0(self, answer):
+    def test_a_scheduler_without_status_or_missing_is_0(self, answer):
         answer({"metadatabase": {"status": "healthy"}, "scheduler": {"status": None}})
         registry = self._registry()
+        assert self._component(registry, "metadatabase") == 1.0
         assert self._component(registry, "scheduler") == 0.0
+        answer({"metadatabase": {"status": "healthy"}})
+        assert self._component(self._registry(), "scheduler") == 0.0, "SchedulerDown fires on a missing scheduler"
+
+    def test_a_triggerer_or_dag_processor_without_job_has_no_series(self, answer):
+        answer(WITHOUT_JOBS)
+        registry = self._registry()
+        assert self._component(registry, "scheduler") == 1.0 and self._component(registry, "metadatabase") == 1.0
         assert self._component(registry, "triggerer") is None
+        assert self._component(registry, "dag_processor") is None
+        answer({name: entry for name, entry in HEALTHY.items() if name != "triggerer"})
+        assert self._component(self._registry(), "triggerer") is None
+
+    def test_an_unreadable_metadata_database_gives_every_component_0(self, answer):
+        answer(DATABASE_DOWN)
+        registry = self._registry()
+        assert registry.get_sample_value("edgeguard_airflow_health_up") == 1.0
+        for name in airflow_client.AIRFLOW_HEALTH_COMPONENTS:
+            assert self._component(registry, name) == 0.0, name
 
     def test_unreachable(self, answer):
         answer({"error": "Cannot connect to Airflow at http://airflow:8082."})
@@ -543,11 +645,37 @@ class TestAirflowHealthCollector:
 # ---------------------------------------------------------------------------
 
 
-def _alert(name):
+def _alert_rules():
     rules = yaml.safe_load((_ROOT / "prometheus" / "alerts.yml").read_text())
-    found = [r for g in rules["groups"] for r in g["rules"] if r.get("alert") == name]
+    return [r for g in rules["groups"] for r in g["rules"] if "alert" in r]
+
+
+def _alert(name):
+    found = [r for r in _alert_rules() if r["alert"] == name]
     assert len(found) == 1, name
     return found[0]
+
+
+def _collected(monkeypatch, payload):
+    """The samples ``AirflowHealthCollector`` serves for ``payload``: ``(name, labels, value)``."""
+    monkeypatch.setitem(sys.modules, "airflow_client", airflow_client)
+    monkeypatch.setattr(airflow_client, "airflow_health", lambda timeout=None: payload)
+    collector = metrics_exporter.AirflowHealthCollector()
+    return [(x.name, x.labels, x.value) for family in collector.collect() for x in family.samples]
+
+
+def _firing(rule, samples):
+    """The label sets of the alerts that ``rule`` (``<metric>{<label>="v"} == 0`` or ``!=``) raises for
+    ``samples``, after Prometheus applies the rule's labels, which overwrite a series label of the same
+    name."""
+    match = re.fullmatch(r'(\w+)\{(\w+)(!?=)"([^"]*)"\} == 0', rule["expr"].strip())
+    assert match, rule["expr"]
+    metric, label, op, value = match.groups()
+    return [
+        frozenset({**labels, **rule["labels"], "alertname": rule["alert"]}.items())
+        for name, labels, sample in samples
+        if name == metric and sample == 0 and (labels.get(label) == value) == (op == "=")
+    ]
 
 
 class TestAlerts:
@@ -555,16 +683,20 @@ class TestAlerts:
         rule = _alert("EdgeGuardAirflowSchedulerDown")
         assert rule["expr"].strip() == 'edgeguard_airflow_component_healthy{component="scheduler"} == 0'
         assert rule["for"] == "5m"
-        assert rule["labels"] == {"severity": "critical", "component": "airflow"}
+        assert rule["labels"] == {"severity": "critical"}, "the alert keeps the series' component label"
         description = rule["annotations"]["description"]
-        assert "do not trigger it again" in description and RUNBOOK_SECTION in description
+        assert "do not trigger the run again" in description and RUNBOOK_SECTION in description
+        assert "runs again from its start" in description and "restore the database first" in description
 
     def test_the_other_components_are_a_warning_after_10_minutes(self):
         rule = _alert("EdgeGuardAirflowComponentUnhealthy")
         assert rule["expr"].strip() == 'edgeguard_airflow_component_healthy{component!="scheduler"} == 0'
         assert rule["for"] == "10m"
-        assert rule["labels"] == {"severity": "warning", "component": "airflow"}
+        assert rule["labels"] == {"severity": "warning"}, "the alert keeps the series' component label"
         assert "$labels.component" in rule["annotations"]["summary"]
+        description = rule["annotations"]["description"]
+        assert "restart Airflow when no DAG run is in progress" in description
+        assert "restore the database first" in description
 
     def test_an_unanswered_health_endpoint_is_a_warning_after_10_minutes(self):
         rule = _alert("EdgeGuardAirflowHealthUnreachable")
@@ -579,6 +711,42 @@ class TestAlerts:
         for name in ("EdgeGuardAirflowSchedulerDown", "EdgeGuardAirflowComponentUnhealthy"):
             selected = re.findall(r'component!?="([a-z_]+)"', _alert(name)["expr"])
             assert selected == ["scheduler"], name
+
+    def test_no_rule_label_overwrites_a_label_of_the_component_gauge(self, monkeypatch):
+        gauge_labels = {
+            key
+            for name, labels, _ in _collected(monkeypatch, UNHEALTHY)
+            if name == "edgeguard_airflow_component_healthy"
+            for key in labels
+        }
+        assert gauge_labels == {"component"}
+        selecting = [r for r in _alert_rules() if "edgeguard_airflow_component_healthy" in r["expr"]]
+        assert {r["alert"] for r in selecting} == set(_AIRFLOW_ALERTS[:2])
+        for rule in selecting:
+            assert not gauge_labels & set(rule["labels"]), rule["alert"]
+
+    def test_components_down_at_once_give_one_alert_each(self, monkeypatch):
+        """A database outage reports every component unhealthy. Prometheus refuses to evaluate a rule
+        whose alerts share one label set after its rule labels are applied, so the warning would not
+        fire if a rule label overwrote ``component``."""
+        samples = _collected(monkeypatch, DATABASE_DOWN)
+        warnings = _firing(_alert("EdgeGuardAirflowComponentUnhealthy"), samples)
+        assert len(warnings) == len(set(warnings)) == 3
+        assert {dict(a)["component"] for a in warnings} == {"metadatabase", "triggerer", "dag_processor"}
+        critical = _firing(_alert("EdgeGuardAirflowSchedulerDown"), samples)
+        assert [dict(a)["component"] for a in critical] == ["scheduler"]
+        assert dict(critical[0])["severity"] == "critical"
+
+    def test_the_stalled_install_raises_the_critical_alert_and_one_warning(self, monkeypatch):
+        samples = _collected(monkeypatch, UNHEALTHY)
+        assert len(_firing(_alert("EdgeGuardAirflowSchedulerDown"), samples)) == 1
+        warnings = _firing(_alert("EdgeGuardAirflowComponentUnhealthy"), samples)
+        assert [dict(a)["component"] for a in warnings] == ["triggerer"]
+
+    def test_components_without_job_raise_no_alert(self, monkeypatch):
+        samples = _collected(monkeypatch, WITHOUT_JOBS)
+        for name in _AIRFLOW_ALERTS[:2]:
+            assert _firing(_alert(name), samples) == [], name
 
     def test_the_docs_name_the_alerts_and_the_metrics(self):
         table = (_ROOT / "docs" / "PROMETHEUS_SETUP.md").read_text().split("\n## History", 1)[0]
@@ -693,7 +861,7 @@ class TestPreflightScriptCheck13:
             'pass() { echo "PASS|$*"; }\nwarn() { echo "WARN|$*"; }\nfail() { echo "FAIL|$*"; }\nhdr() { :; }\n' + block
         )
 
-        def _run(payload, launch_path="dag", conn_env=None, docker_conn=None, url=None):
+        def _run(payload, launch_path="dag", conn_env=None, docker_conn=None, url=None, api_version=None):
             env = {
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                 "STUB_DIR": str(tmp_path),
@@ -709,6 +877,8 @@ class TestPreflightScriptCheck13:
                 env["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"] = conn_env
             if url is not None:
                 env["AIRFLOW_WEBSERVER_URL"] = url
+            if api_version is not None:
+                env["AIRFLOW_API_VERSION"] = api_version
             done = subprocess.run(
                 ["bash", "-c", harness], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60
             )
@@ -726,7 +896,9 @@ class TestPreflightScriptCheck13:
         lines = run_check(UNHEALTHY, conn_env=f"postgresql+psycopg2://airflow:{_SECRET}@airflow_postgres:5432/airflow")
         assert self._kinds(lines) == ["PASS", "FAIL", "WARN", "PASS", "PASS"]
         assert lines[1].startswith(f"FAIL|Airflow scheduler: unhealthy (last heartbeat {SCHEDULER_HEARTBEAT})")
-        assert "do not trigger it again" in lines[1]
+        assert "restart Airflow" in lines[1] and "before the launch" in lines[1]
+        assert '"Airflow scheduler or triggerer stopped"' in lines[1]
+        assert "restore the metadata database" not in lines[1]
         assert lines[2].startswith("WARN|Airflow triggerer: unhealthy")
         assert lines[4] == "PASS|Airflow metadata database is postgresql (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN)"
         assert (tmp_path / "curl_args").read_text().split() == [
@@ -749,11 +921,30 @@ class TestPreflightScriptCheck13:
         missing = {k: v for k, v in HEALTHY.items() if k != "scheduler"}
         assert run_check(missing)[1] == "FAIL|Airflow scheduler: unknown — " + (
             "no task starts and DAG runs do not progress; restart Airflow (docker compose restart airflow, "
-            "or restart airflow standalone); a DAG run in progress continues where it stopped, do not trigger "
-            'it again (docs/RUNBOOK.md, "Airflow scheduler or triggerer stopped")'
+            "or restart airflow standalone) before the launch; with a DAG run in progress, read "
+            'docs/RUNBOOK.md, "Airflow scheduler or triggerer stopped" first'
         )
         assert run_check(dict(HEALTHY, scheduler={"status": None}))[1].startswith("FAIL|Airflow scheduler: unknown")
-        assert run_check(dict(HEALTHY, triggerer={"status": None}))[2].startswith("WARN|Airflow triggerer: unknown")
+
+    def test_a_triggerer_or_dag_processor_without_job_is_information(self, run_check):
+        lines = run_check(WITHOUT_JOBS, conn_env="postgresql://airflow@db/airflow")
+        assert self._kinds(lines)[:2] == ["PASS", "PASS"]
+        assert lines[2] == (
+            "  - Airflow triggerer: unknown — no triggerer job recorded; it does not run as a process of its own"
+        )
+        assert lines[3].startswith("  - Airflow dag_processor: unknown — no dag_processor job recorded")
+        assert not any(line.startswith(("WARN|", "FAIL|")) for line in lines)
+
+    def test_an_unreadable_metadata_database_is_restored_first(self, run_check):
+        lines = run_check(DATABASE_DOWN, conn_env="postgresql://airflow@db/airflow")
+        assert self._kinds(lines)[:4] == ["FAIL", "FAIL", "WARN", "WARN"]
+        assert lines[0].startswith("FAIL|Airflow metadatabase: unhealthy — no task starts")
+        assert "restore the metadata database first (docker compose ps airflow_postgres" in lines[0]
+        assert "restore the metadata database" not in lines[1]
+
+    def test_airflow_2_is_asked_at_its_health_path(self, run_check, tmp_path):
+        run_check(WITHOUT_JOBS, api_version=" V1 ")
+        assert (tmp_path / "curl_args").read_text().split()[-1] == "http://localhost:8082/health"
 
     def test_unreachable_airflow_is_a_warning(self, run_check):
         lines = run_check(None)
@@ -796,3 +987,73 @@ class TestPreflightScriptCheck13:
         )
         assert "[13] Airflow components and metadata database" in done.stdout
         assert "# Usage:" in done.stdout
+
+
+# ---------------------------------------------------------------------------
+# scripts/runtime_smoke_checklist.sh optional probe
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeSmokeProbe:
+    @pytest.fixture
+    def run_probe(self, tmp_path):
+        """Run the script with a stub ``docker`` (a running ``edgeguard_airflow`` whose ``curl`` answers a
+        payload) and ``python3`` = this interpreter."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "docker").write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  info) exit 0 ;;\n"
+            "  ps) echo edgeguard_airflow ;;\n"
+            '  exec) echo "$*" >> "$STUB_DIR/exec_args"; [ -n "$STUB_BODY" ] || exit 22; cat "$STUB_BODY" ;;\n'
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        )
+        (bin_dir / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        for stub in bin_dir.iterdir():
+            stub.chmod(0o755)
+
+        def _run(payload):
+            env = {
+                "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                "STUB_DIR": str(tmp_path),
+                "STUB_BODY": "",
+            }
+            if payload is not None:
+                body = tmp_path / "body.json"
+                body.write_text(json.dumps(payload))
+                env["STUB_BODY"] = str(body)
+            done = subprocess.run(
+                ["bash", str(_ROOT / "scripts" / "runtime_smoke_checklist.sh")],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert done.returncode == 0, done.stderr
+            return done.stdout.splitlines()
+
+        return _run
+
+    def test_a_healthy_scheduler_is_ok(self, run_probe, tmp_path):
+        lines = run_probe(HEALTHY)
+        assert " Airflow OK (scheduler healthy)" in lines
+        assert not any("NOT healthy" in line for line in lines)
+        assert (tmp_path / "exec_args").read_text().split() == [
+            "exec",
+            "edgeguard_airflow",
+            "curl",
+            "-sf",
+            "http://localhost:8082/api/v2/monitor/health",
+        ]
+
+    def test_a_dead_scheduler_is_not_ok_although_the_endpoint_answers(self, run_probe):
+        lines = run_probe(UNHEALTHY)
+        assert any(line.startswith(" Airflow scheduler NOT healthy: restart Airflow") for line in lines)
+        assert " Airflow OK (scheduler healthy)" not in lines
+
+    def test_a_failed_request_is_reported(self, run_probe):
+        lines = run_probe(None)
+        assert " Airflow health check failed" in lines
+        assert not any("Airflow OK" in line for line in lines)

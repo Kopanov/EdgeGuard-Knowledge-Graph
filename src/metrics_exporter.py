@@ -223,9 +223,11 @@ class AirflowHealthCollector:
     (``airflow_client.airflow_health``, ``AIRFLOW_WEBSERVER_URL``):
 
     * ``edgeguard_airflow_health_up`` — 1 when the endpoint answered with a JSON object, else 0;
-    * ``edgeguard_airflow_component_healthy{component}`` — 1 or 0 for each component the answer lists
-      (``metadatabase``, ``scheduler``, ``triggerer``, ``dag_processor``); a component without status
-      is 0. Absent while the endpoint does not answer.
+    * ``edgeguard_airflow_component_healthy{component}`` — 1 when the component is reported healthy,
+      else 0: always for ``metadatabase`` and ``scheduler`` (0 also without status or when missing),
+      and for ``triggerer`` and ``dag_processor`` when the answer gives them a status (without one they
+      run no job of their own, as the DAG processor of Airflow 2 by default, and have no series).
+      Absent while the endpoint does not answer.
     """
 
     def __init__(self, timeout: float = AIRFLOW_HEALTH_TIMEOUT_SEC):
@@ -258,8 +260,9 @@ class AirflowHealthCollector:
         healthy = GaugeMetricFamily(
             AIRFLOW_COMPONENT_HEALTHY, "Airflow component reported healthy (1) or not (0)", labels=["component"]
         )
-        for name in components.statuses:
-            healthy.add_metric([name], 1.0 if components.is_healthy(name) else 0.0)
+        for name in client.AIRFLOW_HEALTH_COMPONENTS:
+            if name in client.AIRFLOW_REQUIRED_COMPONENTS or components.has_status(name):
+                healthy.add_metric([name], 1.0 if components.is_healthy(name) else 0.0)
         yield healthy
 
 

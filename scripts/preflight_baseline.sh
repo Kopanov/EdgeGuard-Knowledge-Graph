@@ -29,9 +29,9 @@
 #   [12] source API keys accepted by their providers (live check; a rejected key
 #        is a warning, a key state that would stop the baseline is a failure)
 #   [13] Airflow components and metadata database: scheduler (and metadata
-#        database) healthy per /api/v2/monitor/health (a failure on the DAG launch
-#        path, a warning on the CLI path), triggerer and DAG processor healthy
-#        (warnings), metadata database not SQLite (a warning)
+#        database) healthy per Airflow's health endpoint (a failure on the DAG
+#        launch path, a warning on the CLI path), triggerer and DAG processor
+#        healthy when they run (warnings), metadata database not SQLite (a warning)
 #
 # Usage:
 #   ./scripts/preflight_baseline.sh [--launch-path cli|dag]
@@ -540,10 +540,11 @@ fi
 # -----------------------------------------------------------------------------
 # [13] Airflow components and metadata database
 # -----------------------------------------------------------------------------
-# `airflow standalone` (the Compose airflow service, and the usual bare-metal
-# setup) keeps its API server up when the scheduler, triggerer or DAG processor
-# dies, and /api/v2/monitor/health then answers HTTP 200 with "unhealthy" in the
-# JSON body only. The scheduler alone starts tasks and enforces dagrun_timeout:
+# `airflow standalone` (the Compose airflow service, or a bare-metal install
+# that runs it) keeps its API server up when the scheduler, triggerer or DAG
+# processor dies, and /api/v2/monitor/health (/health on Airflow 2,
+# AIRFLOW_API_VERSION=v1) then answers HTTP 200 with "unhealthy" in the JSON
+# body only. The scheduler alone starts tasks and enforces dagrun_timeout:
 # with it stopped a DAG run stays "running" without progressing. A database
 # error that outlasts Airflow's retries stops the scheduler and the triggerer;
 # with SQLite a lock held a few seconds is enough. The metadata database is
@@ -551,12 +552,20 @@ fi
 # database password and is never printed.
 hdr "[13] Airflow components and metadata database"
 AF_HEALTH_URL="${AIRFLOW_WEBSERVER_URL:-http://localhost:8082}"
-AF_HEALTH_URL="${AF_HEALTH_URL%/}/api/v2/monitor/health"
+AF_API_VERSION=$(printf '%s' "${AIRFLOW_API_VERSION:-v2}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+if [[ "$AF_API_VERSION" == "v1" ]]; then
+  AF_HEALTH_URL="${AF_HEALTH_URL%/}/health"
+else
+  AF_HEALTH_URL="${AF_HEALTH_URL%/}/api/v2/monitor/health"
+fi
 AF_RESTART="restart Airflow (docker compose restart airflow, or restart airflow standalone)"
-AF_RECOVER="$AF_RESTART; a DAG run in progress continues where it stopped, do not trigger it again (docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\")"
+AF_RECOVER="$AF_RESTART before the launch; with a DAG run in progress, read docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\" first"
+AF_RESTORE_DB="restore the metadata database first (docker compose ps airflow_postgres, docker compose logs airflow_postgres), then"
 if AF_HEALTH=$(curl -fsS --max-time 15 "$AF_HEALTH_URL" 2>/dev/null); then
   # One line per component: "<name> <status> <last heartbeat>"; a component the
-  # answer does not list, or lists without status, reads "unknown".
+  # answer does not list, or lists without status, reads "unknown". An unknown
+  # triggerer or DAG processor runs no job of its own (Airflow 2 parses the DAG
+  # files in the scheduler by default) and is information only.
   AF_LINES=$(printf '%s' "$AF_HEALTH" | python3 -c '
 import json, sys
 try:
@@ -579,22 +588,26 @@ for name in ("metadatabase", "scheduler", "triggerer", "dag_processor"):
     while read -r af_name af_status af_heartbeat; do
       af_text="Airflow $af_name: $af_status"
       [[ "$af_heartbeat" != "-" ]] && af_text="$af_text (last heartbeat $af_heartbeat)"
+      af_recover="$AF_RECOVER"
+      [[ "$af_name" == "metadatabase" ]] && af_recover="$AF_RESTORE_DB $AF_RECOVER"
       if [[ "$af_status" == "healthy" ]]; then
         pass "$af_text"
       elif [[ "$af_name" == "scheduler" || "$af_name" == "metadatabase" ]]; then
         # Without a scheduler no baseline task starts and the run never reaches its timeout.
         if [[ "$LAUNCH_PATH" == "dag" ]]; then
-          fail "$af_text — no task starts and DAG runs do not progress; $AF_RECOVER"
+          fail "$af_text — no task starts and DAG runs do not progress; $af_recover"
         else
-          warn "$af_text — the scheduled DAGs do not run; $AF_RECOVER"
+          warn "$af_text — the scheduled DAGs do not run; $af_recover"
         fi
+      elif [[ "$af_status" == "unknown" ]]; then
+        printf '  - %s\n' "$af_text — no $af_name job recorded; it does not run as a process of its own"
       else
-        warn "$af_text — $AF_RESTART"
+        warn "$af_text — $AF_RESTART before the launch"
       fi
     done <<< "$AF_LINES"
   fi
 else
-  warn "Airflow health endpoint not reachable at $AF_HEALTH_URL; scheduler state not checked (set AIRFLOW_WEBSERVER_URL)"
+  warn "Airflow health endpoint not reachable at $AF_HEALTH_URL; scheduler state not checked (AIRFLOW_WEBSERVER_URL, AIRFLOW_API_VERSION)"
 fi
 
 # Metadata database backend: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN from this

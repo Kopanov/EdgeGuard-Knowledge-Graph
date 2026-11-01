@@ -254,14 +254,34 @@ _AIRFLOW_COMPONENT_EFFECT = {
     "triggerer": "deferred tasks do not resume (no EdgeGuard DAG defers a task)",
     "dag_processor": "DAG files are not parsed, so changes under dags/ are not picked up",
 }
+# Errors when not healthy; the same as airflow_client.AIRFLOW_REQUIRED_COMPONENTS.
 _AIRFLOW_ERROR_COMPONENTS = ("metadatabase", "scheduler")
+_AIRFLOW_RECOVER_DATABASE = (
+    "  Recover: restore the metadata database first (Compose: docker compose ps airflow_postgres, "
+    "docker compose logs airflow_postgres); Airflow does not start without it. Then restart Airflow."
+)
+# A restart stops a task that is still running, and the new scheduler resets it, so it runs again
+# from its start; tasks that finished are kept.
+_AIRFLOW_RECOVER_SCHEDULER = (
+    "  Recover: restart Airflow (Compose: docker compose restart airflow; otherwise restart "
+    "`airflow standalone`) and do not trigger the DAG run again: finished tasks are not run again, and "
+    "the stalled time counts against the run's dagrun_timeout. A task still running at the restart runs "
+    "again from its start: when one is running (Airflow UI, or airflow tasks states-for-dag-run <dag_id> "
+    "<run_id>) and the run's time allows, let it end first."
+)
+_AIRFLOW_RECOVER_LATER = (
+    "  Recover: a DAG run in progress continues without the triggerer and the DAG processor (no EdgeGuard "
+    "DAG defers a task, and DAG files parsed earlier stay registered); restart Airflow when no DAG run is "
+    "in progress."
+)
 
 
 def _report_airflow_components(components) -> tuple[int, int]:
     """Print the component status of an Airflow health answer; return ``(errors, warnings)``.
 
-    A metadata database or scheduler that is not reported healthy is an error, a triggerer or DAG
-    processor a warning (a missing component or one without status counts as not healthy).
+    A metadata database or scheduler that is not reported healthy (unhealthy, without status or
+    missing) is an error, a triggerer or DAG processor reported unhealthy a warning, and one that
+    Airflow lists without status (it does not run as a process of its own) is information.
     ``components`` is an ``airflow_client.AirflowComponentHealth``. ``airflow standalone`` keeps its
     API server up when the others die, so a reachable Airflow says nothing about them.
     """
@@ -269,7 +289,8 @@ def _report_airflow_components(components) -> tuple[int, int]:
     healthy = [name for name in components.statuses if components.is_healthy(name)]
     if healthy:
         ok(f"Airflow components healthy: {', '.join(healthy)}")
-    for name in components.not_healthy():
+    not_healthy = components.not_healthy()
+    for name in not_healthy:
         message = f"Airflow {components.describe(name)}: {_AIRFLOW_COMPONENT_EFFECT[name]}"
         if name in _AIRFLOW_ERROR_COMPONENTS:
             err(message)
@@ -277,12 +298,15 @@ def _report_airflow_components(components) -> tuple[int, int]:
         else:
             warn(message)
             warnings += 1
-    if errors or warnings:
-        info(
-            "  Recover: restart Airflow (Compose: docker compose restart airflow; otherwise restart "
-            "`airflow standalone`). A DAG run in progress continues where it stopped: do not trigger it "
-            "again. The stalled time counts against the run's dagrun_timeout."
-        )
+    for name in components.without_job():
+        note = ": it does not run as a process of its own" if name in components.statuses else ""
+        info(f"Airflow {components.describe(name)}{note}")
+    if "metadatabase" in not_healthy:
+        info(_AIRFLOW_RECOVER_DATABASE)
+    if errors:
+        info(_AIRFLOW_RECOVER_SCHEDULER)
+    elif warnings:
+        info(_AIRFLOW_RECOVER_LATER)
     return errors, warnings
 
 
@@ -1714,8 +1738,7 @@ def cmd_dag_status(args) -> int:
     if component_errors:
         err(
             "The Airflow scheduler or metadata database is not healthy (above): runs shown as running or "
-            "queued are not progressing. Restart Airflow; a run in progress continues where it stopped, "
-            "do not trigger it again."
+            "queued are not progressing. Recover as above; do not trigger the runs again."
         )
     return exit_code
 

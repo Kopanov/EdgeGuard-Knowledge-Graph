@@ -310,11 +310,15 @@ def airflow_health(timeout: Optional[float] = None) -> Dict[str, Any]:
     return payload
 
 
-# Components of the health answer, in report order. ``airflow standalone`` (the Compose service and the
-# usual bare-metal setup) runs the scheduler, triggerer, DAG processor and API server as subprocesses
-# and neither restarts nor exits when one of them dies, so the API server keeps answering while the
-# scheduler is gone.
+# Components of the health answer, in report order. ``airflow standalone`` (the Compose service, or a
+# bare-metal install that runs it) runs the scheduler, triggerer, DAG processor and API server as
+# subprocesses and neither restarts nor exits when one of them dies, so the API server keeps answering
+# while the scheduler is gone.
 AIRFLOW_HEALTH_COMPONENTS = ("metadatabase", "scheduler", "triggerer", "dag_processor")
+# Every Airflow deployment has these two. Airflow reports a ``null`` status for a triggerer or DAG
+# processor of which it has recorded no job, one that does not run as a process of its own (Airflow 2
+# parses the DAG files inside the scheduler unless ``[scheduler] standalone_dag_processor`` is set).
+AIRFLOW_REQUIRED_COMPONENTS = ("metadatabase", "scheduler")
 HEALTHY = "healthy"
 
 
@@ -325,7 +329,9 @@ class AirflowComponentHealth:
     ``statuses`` holds the components the answer lists, with the status it reports (``None`` for a
     ``null`` status or an entry that is not an object); ``heartbeats`` the ``latest_<component>_heartbeat``
     values. ``error`` is set when the answer is not a health payload; the component maps are then empty.
-    A component that is missing or has no status is never counted as healthy.
+    A component that is missing or has no status is never counted as healthy: a required one (metadata
+    database, scheduler) is not healthy, a triggerer or DAG processor runs no job of its own
+    (:meth:`without_job`).
     """
 
     error: Optional[str] = None
@@ -339,9 +345,27 @@ class AirflowComponentHealth:
     def is_healthy(self, component: str) -> bool:
         return self.statuses.get(component) == HEALTHY
 
+    def has_status(self, component: str) -> bool:
+        return self.statuses.get(component) is not None
+
     def not_healthy(self) -> List[str]:
-        """The known components that are not reported healthy (unhealthy, without status, or missing)."""
-        return [name for name in AIRFLOW_HEALTH_COMPONENTS if not self.is_healthy(name)]
+        """The components that are not reported healthy: a metadata database or scheduler that is
+        unhealthy, without status or missing, and a triggerer or DAG processor with a status other than
+        ``healthy``."""
+        return [
+            name
+            for name in AIRFLOW_HEALTH_COMPONENTS
+            if not self.is_healthy(name) and (name in AIRFLOW_REQUIRED_COMPONENTS or self.has_status(name))
+        ]
+
+    def without_job(self) -> List[str]:
+        """The triggerer or DAG processor when the answer gives it no status or does not list it:
+        Airflow has recorded no job of it, so it does not run as a process of its own."""
+        return [
+            name
+            for name in AIRFLOW_HEALTH_COMPONENTS
+            if name not in AIRFLOW_REQUIRED_COMPONENTS and not self.has_status(name)
+        ]
 
     def latest_heartbeat(self, component: str) -> Optional[str]:
         return self.heartbeats.get(component)

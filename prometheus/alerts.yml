@@ -262,25 +262,27 @@ groups:
       # HTTP 200 with "unhealthy" in its body only. The scheduler alone starts tasks and enforces
       # dagrun_timeout: with it stopped a run stays "running", and EdgeGuardDAGRunStuck fires only
       # after the run's dagrun_timeout (32 h 15 min for a baseline).
+      # The two rules on edgeguard_airflow_component_healthy set no `component` label: the alert keeps
+      # the series' own `component` (scheduler, metadatabase, triggerer, dag_processor). A rule label
+      # would overwrite it, and two components down at once would then give two alerts with one label
+      # set, which Prometheus refuses to evaluate.
       - alert: EdgeGuardAirflowSchedulerDown
         expr: edgeguard_airflow_component_healthy{component="scheduler"} == 0
         for: 5m
         labels:
           severity: critical
-          component: airflow
         annotations:
           summary: "Airflow scheduler is not healthy"
-          description: "Airflow has reported its scheduler not healthy for 5 minutes (no scheduler heartbeat within Airflow's health-check threshold): no task starts, and DAG runs shown as running do not progress or time out. Restart Airflow (`docker compose restart airflow`); a run in progress continues where it stopped, do not trigger it again. The stalled time counts against the run's dagrun_timeout. docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\"."
+          description: "Airflow has reported its scheduler not healthy for 5 minutes: no scheduler heartbeat within Airflow's health-check threshold, or the API server cannot read the metadata database (the metadatabase is then reported unhealthy too; restore the database first). No task starts, and DAG runs shown as running do not progress or time out. Restart Airflow (`docker compose restart airflow`) and do not trigger the run again: finished tasks are not run again, and the stalled time counts against the run's dagrun_timeout. A task still running at the restart runs again from its start; when one is running and the run's time allows, let it end first. docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\"."
 
       - alert: EdgeGuardAirflowComponentUnhealthy
         expr: edgeguard_airflow_component_healthy{component!="scheduler"} == 0
         for: 10m
         labels:
           severity: warning
-          component: airflow
         annotations:
           summary: "Airflow {{ $labels.component }} is not healthy"
-          description: "Airflow has reported its {{ $labels.component }} not healthy, or without status, for 10 minutes. A stopped triggerer leaves deferred tasks waiting (no EdgeGuard DAG defers a task); a stopped DAG processor stops the parsing of the DAG files; an unhealthy metadatabase means the API server cannot read the metadata database. Restart Airflow (`docker compose restart airflow`); a run in progress continues where it stopped. docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\"."
+          description: "Airflow has reported its {{ $labels.component }} not healthy for 10 minutes. A stopped triggerer leaves deferred tasks waiting, and no EdgeGuard DAG defers a task; a stopped DAG processor stops the parsing of the DAG files, and those parsed before stay registered: restart Airflow when no DAG run is in progress. An unhealthy metadatabase means the API server cannot read the metadata database: restore the database first (`docker compose ps airflow_postgres`, `docker compose logs airflow_postgres`), then restart Airflow. docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\"."
 
       - alert: EdgeGuardAirflowHealthUnreachable
         expr: edgeguard_airflow_health_up == 0
