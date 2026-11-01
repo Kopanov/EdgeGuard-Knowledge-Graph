@@ -2,8 +2,8 @@
 EdgeGuard — Airflow REST API client
 ====================================
 Thin wrapper around the Airflow REST API used by the ``edgeguard`` CLI
-(``dag status``, ``dag kill``, ``preflight``, ``doctor``) and by the
-orphan-process safeguard in ``parent_dag_liveness``.
+(``dag status``, ``dag kill``, ``preflight``, ``doctor``), by the metrics exporter
+(Airflow component health) and by the orphan-process safeguard in ``parent_dag_liveness``.
 
 API versions
 ------------
@@ -29,8 +29,9 @@ AIRFLOW_API_PASSWORD    Password. When unset, the client reads the password file
                         self-sufficient. Without credentials every ``v2`` call fails
                         with an explicit error instead of an unauthenticated request.
 
-Every public function returns parsed JSON or ``{"error": <message>}``; it never
-raises for transport or authentication failures.
+Every public function that calls Airflow returns parsed JSON or ``{"error": <message>}``; it
+never raises for transport or authentication failures. ``component_health`` reads the status of the
+scheduler, triggerer, DAG processor and metadata database from a health answer.
 """
 
 import json
@@ -38,6 +39,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -280,12 +282,14 @@ def _run_path(dag_id: str, dag_run_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def airflow_health() -> Dict[str, Any]:
-    """Check Airflow scheduler and metadatabase health.
+def airflow_health(timeout: Optional[float] = None) -> Dict[str, Any]:
+    """Airflow's health answer: the status of the metadatabase, scheduler, triggerer and DAG processor.
 
-    Returns dict with 'metadatabase' and 'scheduler' status, or 'error'.
-    Airflow 3.x exposes the check at ``/api/v2/monitor/health`` without
-    authentication; Airflow 2.x at ``/health``.
+    Returns the parsed JSON object, or ``{"error": ...}`` when Airflow does not answer with one.
+    Airflow 3.x exposes the check at ``/api/v2/monitor/health`` without authentication; Airflow 2.x
+    at ``/health``. Both answer HTTP 200 when a component is unhealthy: the state is in the body
+    only, so a caller reads it with :func:`component_health`. ``timeout`` defaults to the client's
+    request timeout.
     """
     if _api_version() == "v2":
         url = f"{_base_url()}/api/v2/monitor/health"
@@ -294,13 +298,115 @@ def airflow_health() -> Dict[str, Any]:
         url = f"{_base_url()}/health"
         auth = _auth()
     try:
-        resp = requests.request("GET", url, auth=auth, timeout=_TIMEOUT)
+        resp = requests.request("GET", url, auth=auth, timeout=_TIMEOUT if timeout is None else timeout)
         resp.raise_for_status()
-        return resp.json()
+        payload = resp.json()
     except requests.exceptions.ConnectionError:
         return {"error": f"Cannot connect to Airflow at {_base_url()}."}
     except Exception as e:
         return {"error": str(e)}
+    if not isinstance(payload, dict):
+        return {"error": f"Airflow health answer at {url} is not a JSON object."}
+    return payload
+
+
+# Components of the health answer, in report order. ``airflow standalone`` (the Compose service, or a
+# bare-metal install that runs it) runs the scheduler, triggerer, DAG processor and API server as
+# subprocesses and neither restarts nor exits when one of them dies, so the API server keeps answering
+# while the scheduler is gone.
+AIRFLOW_HEALTH_COMPONENTS = ("metadatabase", "scheduler", "triggerer", "dag_processor")
+# Every Airflow deployment has these two. Airflow reports a ``null`` status for a triggerer or DAG
+# processor of which it has recorded no job, one that does not run as a process of its own (Airflow 2
+# parses the DAG files inside the scheduler unless ``[scheduler] standalone_dag_processor`` is set).
+AIRFLOW_REQUIRED_COMPONENTS = ("metadatabase", "scheduler")
+HEALTHY = "healthy"
+
+
+@dataclass(frozen=True)
+class AirflowComponentHealth:
+    """What one :func:`airflow_health` answer says about each Airflow component.
+
+    ``statuses`` holds the components the answer lists, with the status it reports (``None`` for a
+    ``null`` status or an entry that is not an object); ``heartbeats`` the ``latest_<component>_heartbeat``
+    values. ``error`` is set when the answer is not a health payload; the component maps are then empty.
+    A component that is missing or has no status is never counted as healthy: a required one (metadata
+    database, scheduler) is not healthy, a triggerer or DAG processor runs no job of its own
+    (:meth:`without_job`).
+    """
+
+    error: Optional[str] = None
+    statuses: Dict[str, Optional[str]] = field(default_factory=dict)
+    heartbeats: Dict[str, Optional[str]] = field(default_factory=dict)
+
+    @property
+    def reachable(self) -> bool:
+        return self.error is None
+
+    def is_healthy(self, component: str) -> bool:
+        return self.statuses.get(component) == HEALTHY
+
+    def has_status(self, component: str) -> bool:
+        return self.statuses.get(component) is not None
+
+    def not_healthy(self) -> List[str]:
+        """The components that are not reported healthy: a metadata database or scheduler that is
+        unhealthy, without status or missing, and a triggerer or DAG processor with a status other than
+        ``healthy``."""
+        return [
+            name
+            for name in AIRFLOW_HEALTH_COMPONENTS
+            if not self.is_healthy(name) and (name in AIRFLOW_REQUIRED_COMPONENTS or self.has_status(name))
+        ]
+
+    def without_job(self) -> List[str]:
+        """The triggerer or DAG processor when the answer gives it no status or does not list it:
+        Airflow has recorded no job of it, so it does not run as a process of its own."""
+        return [
+            name
+            for name in AIRFLOW_HEALTH_COMPONENTS
+            if name not in AIRFLOW_REQUIRED_COMPONENTS and not self.has_status(name)
+        ]
+
+    def latest_heartbeat(self, component: str) -> Optional[str]:
+        return self.heartbeats.get(component)
+
+    def describe(self, component: str) -> str:
+        """``scheduler unhealthy, last heartbeat 2026-11-01T08:32:14+00:00 (3h 54m ago)``."""
+        if component not in self.statuses:
+            text = f"{component} not reported by Airflow"
+        elif self.statuses[component] is None:
+            text = f"{component} without status (no {component} job recorded)"
+        else:
+            text = f"{component} {self.statuses[component]}"
+        heartbeat = self.heartbeats.get(component)
+        if heartbeat:
+            age = format_duration(heartbeat)
+            text += f", last heartbeat {heartbeat}" + (f" ({age} ago)" if age != "—" else "")
+        return text
+
+
+def component_health(payload: Any) -> AirflowComponentHealth:
+    """Read the component statuses of an :func:`airflow_health` answer.
+
+    Airflow 3 (``/api/v2/monitor/health``) and Airflow 2 (``/health``) both answer
+    ``{"<component>": {"status": "healthy" | "unhealthy" | null, "latest_<component>_heartbeat": ...}}``;
+    Airflow 2 lists only the components it has. Never raises.
+    """
+    if not isinstance(payload, dict):
+        return AirflowComponentHealth(error="Airflow health answer is not a JSON object")
+    if "error" in payload:
+        return AirflowComponentHealth(error=str(payload["error"]))
+    statuses: Dict[str, Optional[str]] = {}
+    heartbeats: Dict[str, Optional[str]] = {}
+    for name in AIRFLOW_HEALTH_COMPONENTS:
+        if name not in payload:
+            continue
+        entry = payload[name]
+        status = entry.get("status") if isinstance(entry, dict) else None
+        statuses[name] = status if isinstance(status, str) else None
+        heartbeat = entry.get(f"latest_{name}_heartbeat") if isinstance(entry, dict) else None
+        heartbeats[name] = heartbeat if isinstance(heartbeat, str) and heartbeat else None
+    return AirflowComponentHealth(statuses=statuses, heartbeats=heartbeats)
 
 
 def get_dag_run(dag_id: str, dag_run_id: str) -> Dict[str, Any]:

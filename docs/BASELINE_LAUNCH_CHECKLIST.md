@@ -39,7 +39,7 @@ that a discovery is not short-cut.
 
 ### [1] Live preflight run — `scripts/preflight_baseline.sh`
 
-**What:** run the 12-check preflight in strict mode against the actual
+**What:** run the 13-check preflight in strict mode against the actual
 production environment. This is the single most important check: besides
 the environment and connectivity checks, it verifies the baseline hardening
 invariants (fallback sentinel class, retries=0, lock max-age, alert wiring).
@@ -50,7 +50,7 @@ invariants (fallback sentinel class, retries=0, lock max-age, alert wiring).
 EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path=dag
 ```
 
-**Pass criteria:** exit code 0, all 12 checks green. Without
+**Pass criteria:** exit code 0, all 13 checks green. Without
 `--launch-path=dag` the script assumes the in-process CLI path, warns (which
 fails under STRICT=1) and checks only for running runs in check [5]. Specifically:
 
@@ -80,6 +80,22 @@ fails under STRICT=1) and checks only for running runs in check [5]. Specificall
   rejected key, or switched off). A source without a key is listed as
   information: decide before the launch whether the baseline should run
   without it
+* `[13] Airflow components and metadata database` — reads
+  `${AIRFLOW_WEBSERVER_URL:-http://localhost:8082}/api/v2/monitor/health`
+  (`/health` with `AIRFLOW_API_VERSION=v1`, Airflow 2): a scheduler or
+  metadata database that Airflow does not report healthy is a failure on
+  the DAG launch path (no baseline task would start; `airflow standalone`
+  keeps its API server up when the scheduler dies) and a warning on the CLI
+  path; a triggerer or DAG processor reported unhealthy, and an endpoint
+  that does not answer, are warnings; one listed without status runs no job
+  of its own and is information. The metadata database
+  backend is read from `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` or, on the DAG
+  path, from `docker compose exec -T airflow airflow config get-value
+  database sql_alchemy_conn`; only its scheme is judged and the value
+  (which holds the database password) is never printed. SQLite is a
+  warning: it is for development only, and a lock can stop the scheduler and
+  the triggerer (use PostgreSQL; a SQLite setup should at least append
+  `?timeout=60` to the connection string)
 
 **If it fails:** the failing check names the exact remediation. Do
 **NOT** override `STRICT=1` to skip a fail — every fail in this script
@@ -473,6 +489,16 @@ retries, and step 1 marks the runs still listed as running failed.
 * Watch the `EdgeGuardMispFetchFallbackActive` (warning) and
   `EdgeGuardMispFetchFallbackHardError` (critical) alerts. Both stay
   silent for the entire run when everything is healthy.
+* `EdgeGuardAirflowSchedulerDown` (critical) fires when the Airflow
+  scheduler has stopped while the API server keeps answering: no new task
+  starts and the run stays `running` without reaching its 32-hour
+  `dagrun_timeout`. Do not pause or trigger the DAG. Restore the metadata
+  database first when it is reported unhealthy; when a task of the run is
+  still running and the time allows, let it end (a restart runs it again
+  from its start); then restart Airflow (`docker compose restart airflow`).
+  Finished tasks are not run again, and the stalled time counts against
+  the timeout ([RUNBOOK.md](RUNBOOK.md), "Airflow scheduler or triggerer
+  stopped"). `edgeguard dag status` reports the same and exits 1.
 * Watch the three critical-chain tasks' durations (`full_neo4j_sync`,
   `build_relationships`, `run_enrichment_jobs`) in the Airflow UI (Gantt /
   task duration) against their limits (6 h / 5 h / 5 h). Prometheus records
@@ -594,10 +620,11 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-26_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Check `[13]`: Airflow's scheduler, triggerer and DAG processor and the metadata database backend (13-check preflight); During the run: `EdgeGuardAirflowSchedulerDown` and the recovery of a stopped scheduler.
 - 2026-10-26 — `campaign_seen_dates_cover_members`: a campaign with members and no comparable stored `first_seen` fails, and so does one without a comparable `last_seen` while an edge gives a member a last date; the check passes only when an edge dates a member (`edge_dated_members`) and is informational without a defect otherwise; `campaigns_without_edge_dated_member` names the campaigns the import-time comparison does not reach; a sync after the build cannot make it fail (the row said it leaves the result as it is).
 - 2026-10-25 — Acceptance check `campaign_seen_dates_cover_members`: no campaign is first seen after an indicator member's first date or last seen before a member's latest dated report (a campaign build without the report dates fails it).
 - 2026-10-25 — During the run: `EdgeGuardSyncPagedFetchIncomplete` reports an event fetched in pages with fewer rows than the MISP index lists; step 0: restart Prometheus after an update that changes `prometheus/alerts.yml` (the file is mounted on its own).

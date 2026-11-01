@@ -220,9 +220,12 @@ def test_every_edgeguard_metric_in_alert_expressions_is_defined():
     os.environ.setdefault("MISP_API_KEY", "x")
     from prometheus_client import REGISTRY
 
+    import metrics_exporter
     import metrics_server  # noqa: F401
 
     defined = {getattr(c, "_name", None) for c in REGISTRY._names_to_collectors.values()}
+    # Served by the metrics exporter at scrape time (Airflow component health), not by a registered metric.
+    defined |= {family.name for family in metrics_exporter.AirflowHealthCollector().describe()}
     base = lambda n: re.sub(r"_(total|created|bucket|sum|count)$", "", n)  # noqa: E731
     defined_base = {base(n) for n in defined if n}
     referenced = set()

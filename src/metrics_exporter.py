@@ -4,7 +4,8 @@ Under Airflow's LocalExecutor every task is its own process, so metrics recorded
 registry Prometheus never scraped. With ``PROMETHEUS_MULTIPROC_DIR`` set, ``prometheus_client`` writes
 every metric value to memory-mapped files in that directory instead; this module
 
-* serves the aggregated view of those files (``serve`` — run as the ``metrics`` compose service), and
+* serves the aggregated view of those files (``serve`` — run as the ``metrics`` compose service), together
+  with Airflow's component health read at scrape time (``AirflowHealthCollector``), and
 * compacts the directory (``compact_multiproc_dir``): files left by processes that have exited are
   merged into one file per metric type — counters, histograms and summaries summed per series,
   ``mostrecent`` gauges keeping the newest sample — so the directory does not grow without bound.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import fcntl
 import glob
+import importlib
 import logging
 import os
 import time
@@ -190,12 +192,100 @@ def compact_multiproc_dir(
         }
 
 
+AIRFLOW_HEALTH_ENV = "EDGEGUARD_METRICS_AIRFLOW_HEALTH"
+# Below Prometheus' default scrape timeout (10 s), so an Airflow that does not answer costs one gauge,
+# not the whole scrape.
+AIRFLOW_HEALTH_TIMEOUT_SEC = 5.0
+AIRFLOW_HEALTH_UP = "edgeguard_airflow_health_up"
+AIRFLOW_COMPONENT_HEALTHY = "edgeguard_airflow_component_healthy"
+
+
+def _airflow_client():
+    """``airflow_client``; ``src.airflow_client`` when the exporter runs as ``python -m src.metrics_exporter``
+    from the repository root without ``src`` on the module path."""
+    try:
+        return importlib.import_module("airflow_client")
+    except ImportError:
+        return importlib.import_module("src.airflow_client")
+
+
+def airflow_health_enabled() -> bool:
+    """``EDGEGUARD_METRICS_AIRFLOW_HEALTH``: on unless set to 0, false, no or off."""
+    return os.getenv(AIRFLOW_HEALTH_ENV, "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+class AirflowHealthCollector:
+    """Airflow's component health, read from its health endpoint at scrape time.
+
+    ``airflow standalone`` keeps its API server up when the scheduler, triggerer or DAG processor
+    dies, and the health endpoint then answers HTTP 200 with ``unhealthy`` in the body only; no task
+    process is left to record that, so the exporter asks at every scrape
+    (``airflow_client.airflow_health``, ``AIRFLOW_WEBSERVER_URL``):
+
+    * ``edgeguard_airflow_health_up`` — 1 when the endpoint answered with a JSON object, else 0;
+    * ``edgeguard_airflow_component_healthy{component}`` — 1 when the component is reported healthy,
+      else 0: always for ``metadatabase`` and ``scheduler`` (0 also without status or when missing),
+      and for ``triggerer`` and ``dag_processor`` when the answer gives them a status (without one they
+      run no job of their own, as the DAG processor of Airflow 2 by default, and have no series).
+      Absent while the endpoint does not answer.
+    """
+
+    def __init__(self, timeout: float = AIRFLOW_HEALTH_TIMEOUT_SEC):
+        self._timeout = timeout
+
+    def describe(self):
+        from prometheus_client.core import GaugeMetricFamily
+
+        yield GaugeMetricFamily(AIRFLOW_HEALTH_UP, "Airflow health endpoint answered with a JSON object")
+        yield GaugeMetricFamily(
+            AIRFLOW_COMPONENT_HEALTHY, "Airflow component reported healthy (1) or not (0)", labels=["component"]
+        )
+
+    def collect(self):
+        from prometheus_client.core import GaugeMetricFamily
+
+        try:
+            client = _airflow_client()
+            components = client.component_health(client.airflow_health(timeout=self._timeout))
+        except Exception as exc:  # a failing collector would fail the whole scrape
+            logger.warning("Airflow health not read: %s", exc)
+            components = None
+        up = GaugeMetricFamily(AIRFLOW_HEALTH_UP, "Airflow health endpoint answered with a JSON object")
+        up.add_metric([], 1.0 if components is not None and components.reachable else 0.0)
+        yield up
+        if components is None or not components.reachable:
+            if components is not None:
+                logger.debug("Airflow health endpoint did not answer: %s", components.error)
+            return
+        healthy = GaugeMetricFamily(
+            AIRFLOW_COMPONENT_HEALTHY, "Airflow component reported healthy (1) or not (0)", labels=["component"]
+        )
+        for name in client.AIRFLOW_HEALTH_COMPONENTS:
+            if name in client.AIRFLOW_REQUIRED_COMPONENTS or components.has_status(name):
+                healthy.add_metric([name], 1.0 if components.is_healthy(name) else 0.0)
+        yield healthy
+
+
+def register_airflow_health(registry) -> bool:
+    """Add :class:`AirflowHealthCollector` to ``registry`` unless switched off; True when added."""
+    if not airflow_health_enabled():
+        logger.info("%s is off — Airflow component health is not exported", AIRFLOW_HEALTH_ENV)
+        return False
+    registry.register(AirflowHealthCollector())
+    return True
+
+
 def serve(host: str, port: int, directory: Optional[str] = None) -> None:
-    """Serve the aggregated ``/metrics`` endpoint for ``directory`` until interrupted."""
+    """Serve the aggregated ``/metrics`` endpoint for ``directory`` until interrupted.
+
+    The served registry is the multi-process aggregate plus the scrape-time Airflow health gauges
+    (:func:`register_airflow_health`).
+    """
     from prometheus_client import start_http_server
 
     directory = directory or multiproc_dir()
     registry = build_registry(directory)
+    register_airflow_health(registry)
     start_http_server(port, addr=host, registry=registry)
     logger.info("Multiprocess metrics exporter serving http://%s:%s/metrics from %s", host, port, directory)
     while True:

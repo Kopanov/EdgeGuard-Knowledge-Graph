@@ -334,7 +334,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `AIRFLOW_API_USER` | `admin` | User of the Airflow REST calls (CLI and tasks) |
 | `AIRFLOW_API_PASSWORD` | unset | Its password (required on the host) |
 | `AIRFLOW_API_VERSION` | `v2` | `v2` (Airflow 3) or `v1` (Airflow 2) |
-| `AIRFLOW_WEBSERVER_URL` | `http://localhost:8082` | Airflow API base URL for the CLI and tasks |
+| `AIRFLOW_WEBSERVER_URL` | `http://localhost:8082` | Airflow API base URL for the CLI, the tasks, check `[13]` of `scripts/preflight_baseline.sh` and a bare-metal metrics exporter (the Compose `metrics` service has its own) |
 | `AIRFLOW_MEMORY_LIMIT` | `12g` | Container memory limit of `airflow` |
 | `AIRFLOW_POSTGRES_USER` | `airflow` | Metadata database user (Compose) |
 | `AIRFLOW_POSTGRES_PASSWORD` | `airflow` | Its password; set a strong one |
@@ -374,6 +374,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `EDGEGUARD_ENABLE_METRICS` | `false` | In-process metrics server (bare-metal installs) |
 | `EDGEGUARD_METRICS_HOST` | `127.0.0.1` | Metrics bind address |
 | `EDGEGUARD_METRICS_PORT` | `8001` | Metrics port (fixed on Compose) |
+| `EDGEGUARD_METRICS_AIRFLOW_HEALTH` | `true` | The metrics exporter reads Airflow's health endpoint at every scrape and serves the Airflow component health ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#airflow-component-health)) |
 | `EDGEGUARD_VERSION` | `1.0.0` | `version` label of the in-process info metric |
 | `GRAFANA_ADMIN_USER` | `admin` | Grafana admin user |
 | `GRAFANA_ADMIN_PASSWORD` | required | Grafana admin password |
@@ -383,6 +384,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `NATS_URL` | unset | Address the `edgeguard doctor` NATS check probes |
 
 - On Compose, `PROMETHEUS_MULTIPROC_DIR` is `/opt/airflow/metrics_multiproc`: every task process writes its metrics there, and the `metrics` service aggregates and serves them on `127.0.0.1:8001`, binding `0.0.0.0` inside its container. A `.env` value of `EDGEGUARD_METRICS_HOST` does not reach that service.
+- The `metrics` service asks the airflow service's API server at `http://airflow:8082`, fixed in `docker-compose.yml`; the `AIRFLOW_WEBSERVER_URL` of `.env` names the port published on the host and does not reach that service. `EDGEGUARD_METRICS_AIRFLOW_HEALTH` is forwarded; `false`, `0`, `no` or `off` turns the Airflow health gauges off.
 - `EDGEGUARD_VERSION` applies only to a bare-metal single-process metrics server; in the multi-process mode of Compose the info metric is not exported. The APIs and logs take the version from `pyproject.toml`.
 - `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` and `GRAFANA_ROOT_URL` are passed to Grafana as `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD` and `GF_SERVER_ROOT_URL`; a `GF_*` value in `.env` is not read. Grafana keeps the admin password of its first start. `docker-compose.monitoring.yml` fixes `GF_USERS_ALLOW_SIGN_UP=false`, the plugin list and the home dashboard.
 - `AIRFLOW__SLACK__WEBHOOK_URL` is read like `SLACK_WEBHOOK_URL`.
@@ -453,10 +455,11 @@ When to set it, and when to lower `EDGEGUARD_EARLIEST_IOC_DATE` for historical c
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` (Airflow component health on `/metrics`) and the fixed Airflow address of the `metrics` service; the `AIRFLOW_WEBSERVER_URL` row names all its readers.
 - 2026-10-25 — Row for `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) in the MISP push table, with its range and the tiers it keeps parts out of: `MISPWriter` continues a source/date event in `-part2`, `-part3` ... of at most this many attributes, since the hosted MISP could neither view nor edit a 145k-attribute NVD event; a group with OTX report ids is not split (the sync links report items only within one event).
 - 2026-10-25 — Row for `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` (default 8): an incremental sync to a remote prod Neo4j took 8 h 37 min, over the fixed 8 h limit of `run_neo4j_sync`; whole hours from 1 to 22 (a larger value uses 22, an invalid one 8, both with a warning), and the row states the full-sync floor; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit through `edgeguard_neo4j_sync_task_limit_seconds`, so a larger limit needs no change of `prometheus/alerts.yml`.
 - 2026-10-25 — `NEO4J_HTTP` is read only by the host scripts and no service reads it: the sync DAG's `check_neo4j_quality` task counts nodes through `Neo4jClient` (`NEO4J_URI`), and Compose no longer passes `NEO4J_HTTP` (default `http://neo4j:7474`) to the containers.

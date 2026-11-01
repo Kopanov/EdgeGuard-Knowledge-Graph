@@ -62,7 +62,7 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 | [ ] | MISP + Neo4j | `python src/health_check.py` or `make health` | `overall_healthy`; APOC noted for Neo4j ([ENVIRONMENTS.md](ENVIRONMENTS.md)) |
 | [ ] | REST API health | `curl -sf http://<api-host>:8000/health` (or your URL) | **HTTP 200** with JSON `status: ok` and `neo4j_connected: true` when Neo4j ping + APOC pass; **503** with `status: degraded` otherwise (`curl -f` fails on 503) ([TECHNICAL_SPEC.md § API Endpoints](TECHNICAL_SPEC.md#api-endpoints)) |
 | [ ] | GraphQL health | `curl -sf http://<api-host>:4001/health` | **HTTP 200** when Neo4j is healthy; **503** if no driver or Neo4j/APOC unhealthy (`curl -f` fails on 503 — intended for “must be up” checks) |
-| [ ] | Airflow | Scheduler up; DAGs not paused; optional: [runtime_smoke_checklist.sh](../scripts/runtime_smoke_checklist.sh) | UI / health reachable |
+| [ ] | Airflow | Scheduler up; DAGs not paused; optional: [runtime_smoke_checklist.sh](../scripts/runtime_smoke_checklist.sh) | `python src/edgeguard.py dag status` exits 0 and `docker compose ps` shows `airflow` healthy: both read the scheduler status from the health answer, which answers HTTP 200 also while the scheduler is stopped |
 | [ ] | MISP from worker | Resolve `MISP_URL` from worker container | No mistaken `localhost` for remote MISP ([MISP_SOURCES.md](MISP_SOURCES.md)) |
 
 `deployment_wiring_check.sh` with `EDGEGUARD_DEPLOY_CHECK_LIVE=1` runs `health_check.py` and optional curls (see script header for env vars).
@@ -122,10 +122,11 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Layer 3 Airflow row: the pass criterion is a healthy scheduler (`edgeguard dag status` exit 0, the `airflow` service healthy), not a reachable UI or health endpoint.
 - 2026-10-23 — The settings and health references point to CONFIGURATION.md and TECHNICAL_SPEC.md, which hold what the README's settings and health sections held; `preflight_ci.sh`, `deployment_wiring_check.sh` and `make deploy-check` are stated to stop at the DagBag step on Airflow 3.3, and the DAG parse is checked with `airflow dags list-import-errors` (the gate asked for exit 0, which the script cannot reach).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Restated as a guide to the current behaviour: change history moved here, the Airflow upgrade and pre-2026-04 graph steps moved to the appendix.

@@ -17,7 +17,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
+import airflow_client  # noqa: E402
 import edgeguard  # noqa: E402
+
+# A health answer of a running Airflow 3.3 (all four components healthy).
+_HEALTHY = {name: {"status": "healthy"} for name in ("metadatabase", "scheduler", "triggerer", "dag_processor")}
 
 _ENV_UNSET = (
     "AIRFLOW_API_PASSWORD",
@@ -37,7 +41,7 @@ def run_doctor(monkeypatch, capsys):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(edgeguard, "test_misp_connection", lambda: (False, "MISP stub"))
     monkeypatch.setattr(edgeguard, "test_neo4j_connection", lambda: (False, "Neo4j stub"))
-    monkeypatch.setattr(edgeguard, "_doctor_airflow_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(edgeguard, "_doctor_airflow_health", lambda *a, **k: _HEALTHY)
     monkeypatch.setattr(edgeguard, "validate_api_keys", lambda: (True, "keys stub"))
     monkeypatch.setattr(edgeguard, "check_disk_space", lambda: (True, "disk stub"))
     monkeypatch.setattr(edgeguard, "check_last_sync", lambda: (True, "sync stub"))
@@ -55,7 +59,11 @@ def run_doctor(monkeypatch, capsys):
         # cmd_doctor imports airflow_client at call time; other tests replace that module in
         # sys.modules, so the fake goes there rather than onto one module object.
         monkeypatch.setitem(
-            sys.modules, "airflow_client", types.SimpleNamespace(get_registered_dags=get_registered_dags)
+            sys.modules,
+            "airflow_client",
+            types.SimpleNamespace(
+                get_registered_dags=get_registered_dags, component_health=airflow_client.component_health
+            ),
         )
         edgeguard.cmd_doctor(argparse.Namespace(memory=False))
         return capsys.readouterr().out.splitlines()

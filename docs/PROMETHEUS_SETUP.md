@@ -115,6 +115,8 @@ publish is for local access (`curl http://localhost:8001/metrics`).
 | `EDGEGUARD_METRICS_PORT` | Metrics server port | `8001` |
 | `EDGEGUARD_METRICS_HOST` | Metrics server bind host | `127.0.0.1` |
 | `EDGEGUARD_ENABLE_METRICS` | Enables Prometheus metrics in the DAG on a single-process install. Ignored when `PROMETHEUS_MULTIPROC_DIR` is set (the Compose deployment), where metrics are always on | `false` |
+| `EDGEGUARD_METRICS_AIRFLOW_HEALTH` | The metrics exporter (`src/metrics_exporter.py`) reads Airflow's health endpoint at every scrape and serves the Airflow component health ([Airflow Component Health](#airflow-component-health)); `false`, `0`, `no` or `off` turns it off | `true` |
+| `AIRFLOW_WEBSERVER_URL` | Airflow API server the exporter asks; the `metrics` compose service has `http://airflow:8082` | `http://localhost:8082` |
 | `EDGEGUARD_VERSION` | App version label | `1.0.0` |
 | `EDGEGUARD_ENV` | Environment label | `development` |
 | `GRAFANA_ADMIN_USER` | Grafana admin username | `admin` |
@@ -231,6 +233,30 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 | `edgeguard_dag_run_in_progress_start_timestamp` | Gauge | `dag_id` | Start time of the DAG run in progress, `0` when no run is in progress. Written by the Airflow listener plugin `plugins/edgeguard_dag_run_state.py` (see [DAG run in progress](#dag-run-in-progress)): the scheduler sets the run's start when it starts a run, and sets `0` (or the start of the DAG's other run still in progress) when it ends one (also at the `dagrun_timeout`); the API server does the same when a run is marked failed or successful by hand |
 | `edgeguard_dag_last_success_timestamp` | Gauge | `dag_id` | Time of the last successful task of the DAG |
 | `edgeguard_task_duration_seconds` | Histogram | `task_id`, `dag_id` | Duration of collector tasks and of `run_neo4j_sync`, recorded with `dag_id="edgeguard_pipeline"` whatever DAG ran the task (no alert) |
+
+### Airflow Component Health
+
+`airflow standalone` (the Compose `airflow` service, or a bare-metal install that runs it) runs the scheduler,
+triggerer, DAG processor and API server as subprocesses and neither restarts nor exits when one of
+them dies. Airflow's health endpoint (`/api/v2/monitor/health`; `/health` on Airflow 2) then answers
+HTTP 200 with `unhealthy` in its JSON body only, and no task process is left to record anything, so
+the metrics exporter asks the endpoint at every scrape (5-second timeout) and serves the answer:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `edgeguard_airflow_health_up` | Gauge | — | `1` when the health endpoint answered with a JSON object, `0` when it did not answer (read by `EdgeGuardAirflowHealthUnreachable`) |
+| `edgeguard_airflow_component_healthy` | Gauge | `component` | `1` when Airflow reports the component `healthy`, `0` otherwise. `metadatabase` and `scheduler` always have a series (`0` also without status or when the answer does not list them); `triggerer` and `dag_processor` have one when the answer gives them a status. Airflow reports a status of `null` for a triggerer or DAG processor of which it has recorded no job, one that does not run as a process of its own (Airflow 2 parses the DAG files inside the scheduler by default), so such a component has no series. Absent while the endpoint does not answer (read by `EdgeGuardAirflowSchedulerDown` and `EdgeGuardAirflowComponentUnhealthy`) |
+
+Airflow reports the scheduler unhealthy when its last heartbeat is older than
+`[scheduler] scheduler_health_check_threshold` (30 seconds by default). The gauges are served by
+`src/metrics_exporter.py` only: by the `metrics` compose service, which reaches the airflow
+service's API server at `http://airflow:8082` over `edgeguard_net`, and on a bare-metal install by
+`python -m src.metrics_exporter` (with `AIRFLOW_WEBSERVER_URL` pointing at the API server).
+`EDGEGUARD_METRICS_AIRFLOW_HEALTH=false` removes them. The two alerts on
+`edgeguard_airflow_component_healthy` set no `component` label of their own, so each alert keeps
+the series' `component` and names the Airflow component; a rule label would overwrite it, and two
+components down at once would give two alerts with the same labels, which Prometheus refuses to
+evaluate.
 
 ### MISP Sync Event Accounting
 
@@ -441,7 +467,8 @@ deployment runs `prometheus_client` in its multi-process mode:
   `MultiProcessCollector` and serves `/metrics` on port 8001. Prometheus scrapes it as `metrics:8001`
   over `edgeguard_net`; the `127.0.0.1:8001` host publish is for local access. Task
   processes start no HTTP server in this mode; the `edgeguard_metrics_server` DAG exits
-  immediately with a log line.
+  immediately with a log line. At every scrape the service also reads Airflow's health endpoint
+  ([Airflow Component Health](#airflow-component-health)).
 - Gauges are declared with `multiprocess_mode="mostrecent"`: one series per label set, carrying
   the newest value written by any process. Counters, histograms and summaries are summed across
   processes, including processes that have exited.
@@ -545,7 +572,7 @@ def ensure_metrics_server():
 ### Built-in Alert Rules
 
 `prometheus/alerts.yml` is the canonical source of truth; it
-defines **40 alert rules** and 3 recording rules in nine groups
+defines **43 alert rules** and 3 recording rules in nine groups
 (`edgeguard_collection`, `edgeguard_circuit_breaker`, `edgeguard_health`,
 `edgeguard_pipeline`, `edgeguard_containers`, `edgeguard_sync_integrity`,
 `edgeguard_neo4j`, `edgeguard_host_disk`,
@@ -563,8 +590,11 @@ list (including the disk, inode and `build_relationships` alerts), grep
 | `EdgeGuardSourceAccessDenied` | A collector was skipped with `reason_class=*_auth_denied` in the last 25 hours: the provider refuses the request (rejected or revoked API key, blocked client). The task is green and nothing is collected; check with `python src/source_key_check.py` | warning |
 | `EdgeGuardCircuitBreakerOpen` | Circuit open | critical |
 | `EdgeGuardServiceDown` | Health check fail | critical |
+| `EdgeGuardAirflowSchedulerDown` | `edgeguard_airflow_component_healthy{component="scheduler"} == 0` for 5m: Airflow reports its scheduler not healthy: no heartbeat within its health-check threshold, or the API server cannot read the metadata database (`metadatabase` is then `0` too). No task starts, and a DAG run shown as running neither progresses nor reaches its `dagrun_timeout`, which only the scheduler enforces. Restore the metadata database first when it is down, then restart Airflow without triggering or pausing the DAG; a task still running at the restart runs again from its start ([RUNBOOK.md](RUNBOOK.md), "Airflow scheduler or triggerer stopped") | critical |
+| `EdgeGuardAirflowComponentUnhealthy` | `edgeguard_airflow_component_healthy{component!="scheduler"} == 0` for 10m: the triggerer, the DAG processor or the metadata database (the alert's `component` label) is reported unhealthy. No EdgeGuard DAG defers a task to the triggerer, and a stopped DAG processor stops the parsing of the DAG files: restart Airflow when no DAG run is in progress. An unhealthy metadata database is restored first | warning |
+| `EdgeGuardAirflowHealthUnreachable` | `edgeguard_airflow_health_up == 0` for 10m: the metrics service has no answer from Airflow's health endpoint (container or API server down, or not reachable), so the scheduler state is unknown and `EdgeGuardAirflowSchedulerDown` cannot fire | warning |
 | `EdgeGuardDAGRunFailures` | More than 3 failed collector or sync task attempts in one hour, across all DAGs (all counted under `dag_id="edgeguard_pipeline"`, see `edgeguard_dag_runs_total`) | warning |
-| `EdgeGuardDAGRunStuck` | A DAG run marked in progress longer than its `dagrun_timeout` plus 15 minutes (`edgeguard:dag_run_max_seconds`; pipeline 5 h 45 min, medium 5 h 15 min, low and daily 8 h 45 min, Neo4j sync 68 h 15 min, baseline 32 h 15 min). The scheduler fails a run at its timeout and its listener hook clears the mark; a run marked failed or successful by hand (UI, `PATCH dagRuns`, `edgeguard dag kill`) is cleared by the API server's hook. When the run that ends is not the DAG's run in progress (an older run marked failed by hand), the mark keeps the start of the run still running. The alert therefore means a run the scheduler did not end, a run deleted while in progress, or a listener plugin that is not loaded (see [DAG run in progress](#dag-run-in-progress)) | critical |
+| `EdgeGuardDAGRunStuck` | A DAG run marked in progress longer than its `dagrun_timeout` plus 15 minutes (`edgeguard:dag_run_max_seconds`; pipeline 5 h 45 min, medium 5 h 15 min, low and daily 8 h 45 min, Neo4j sync 68 h 15 min, baseline 32 h 15 min). The scheduler fails a run at its timeout and its listener hook clears the mark; a run marked failed or successful by hand (UI, `PATCH dagRuns`, `edgeguard dag kill`) is cleared by the API server's hook. When the run that ends is not the DAG's run in progress (an older run marked failed by hand), the mark keeps the start of the run still running. The alert therefore means a run the scheduler did not end, a run deleted while in progress, or a listener plugin that is not loaded (see [DAG run in progress](#dag-run-in-progress)); a scheduler that has stopped is reported within minutes by `EdgeGuardAirflowSchedulerDown` | critical |
 | `EdgeGuardDAGLastSuccessStale` | No successful task for longer than one schedule interval plus the DAG's `dagrun_timeout` (`edgeguard:dag_max_success_gap_seconds`: `edgeguard_pipeline` 6 h, `edgeguard_medium_freq` 9 h, `edgeguard_low_freq` 16 h 30 min). The limits are per DAG because a single 6 h limit would fire about 1.5 h of every 8 h for `edgeguard_low_freq`. `edgeguard_daily` has `EdgeGuardDailyDAGStale` (25 h) | warning |
 | `EdgeGuardNeo4jSyncStale` | No MISP→Neo4j sync (scheduled or baseline) completed in 122 hours at the default 8-hour limit of `run_neo4j_sync` (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`): the longest gap between two sync starts plus the longest run of the next sync. `edgeguard_neo4j_sync` runs every 72 h and skips a run within 24 h of the last sync start, so scheduled syncs start 72 h apart and the first one after a baseline's or a forced sync starts less than 96 h after it; the next sync can then take 32 min of `check_sync_needed` / `neo4j_health_check` attempts and three attempts of `run_neo4j_sync` at its limit with two 5-minute retry delays (120 h 42 min in all at 8 hours). The threshold follows the limit: each attempt records it in `edgeguard_neo4j_sync_task_limit_seconds` when it starts, and each hour above 8 adds 3 hours (439200 + 10800 × (N − 8) seconds for a limit of N hours; 122 hours while no attempt has recorded a limit) | warning |
 | `EdgeGuardNeo4jFullSyncRequestPending` | A requested full MISP→Neo4j sync (Airflow Variable `NEO4J_FULL_SYNC=true`) failed on its last attempt in the last 3 days: `edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"}` rose, or appeared for the first time. The Variable stays set, so every scheduled run is a full sync again and no incremental sync runs until one succeeds. The alert clears 3 days after the last failure, also when the request was resolved earlier (silence it then); see [RUNBOOK.md](RUNBOOK.md), "Requesting a full MISP → Neo4j sync" | warning |
@@ -766,10 +796,11 @@ docker volume rm <project>_prometheus_data <project>_grafana_data <project>_aler
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Airflow component health: the metrics exporter reads Airflow's health endpoint at every scrape and serves `edgeguard_airflow_health_up` and `edgeguard_airflow_component_healthy{component}` (`EDGEGUARD_METRICS_AIRFLOW_HEALTH`), read by the new alerts `EdgeGuardAirflowSchedulerDown` (critical), `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable` (43 alert rules); the two alerts on the component gauge keep its `component` label. Before, a scheduler that had stopped while the API server kept answering was reported only by `EdgeGuardDAGRunStuck`, after the run's `dagrun_timeout`.
 - 2026-10-25 — Sync accounting gauges: set by every run that passes the service check and connects; a run that stops earlier keeps the previous values.
 - 2026-10-25 — Gauge `edgeguard_sync_events_paged_incomplete` and warning `EdgeGuardSyncPagedFetchIncomplete` for events fetched in pages with fewer attribute rows than the MISP index lists (40 alert rules); gauge `edgeguard_neo4j_sync_task_limit_seconds`; a change that replaces `prometheus/alerts.yml` (a pull, a checkout) needs a restart of the prometheus container, because the file is mounted on its own and `/-/reload` reloads the previous rules.
 - 2026-10-25 — "Source label values": the two namings of the `source` label (collector and job metrics: the CLI name; writer metrics: the canonical id) and the test that keeps every collector and staleness-rule name a registered source; `edgeguard_merge_reject_placeholder_total` resolves a variant to the canonical id like the other writer metrics.
