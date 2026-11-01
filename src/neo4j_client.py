@@ -665,15 +665,21 @@ def _validate_rel_type(name: str) -> str:
     return name
 
 
-def _mark_deprecated(data: Dict[str, Any], extra_props: Dict[str, Any]) -> None:
-    """``n.deprecated = true`` for an item ATT&CK deprecated (2026-10).
+def _mark_deprecated(data: Dict[str, Any], extra_props: Dict[str, Any], source_id: str) -> None:
+    """``n.deprecated`` from an item's ATT&CK status (2026-10; cleared since 2026-11).
 
     ATT&CK retires an object without a successor with ``x_mitre_deprecated: true``. The node and
     its links stay; the flag lets consumers filter (``WHERE coalesce(n.deprecated, false) = false``).
-    Set only, never cleared: another source's item about the same node says nothing about it.
+    An ATT&CK record that states the status (``deprecated`` True or False) sets it either way, so
+    an active object clears a flag a deprecated record of the same name left: the deprecated ICS
+    ``Killdisk`` marked the active ``KillDisk`` node, and the flag was never cleared. Another
+    source's item says nothing about ATT&CK's status: it can set the flag, never clear it.
     """
-    if data.get("deprecated") is True:
+    deprecated = data.get("deprecated")
+    if deprecated is True:
         extra_props["deprecated"] = True
+    elif deprecated is False and source_registry.canonical_source_id(source_id) == "mitre_attck":
+        extra_props["deprecated"] = False
 
 
 def _validate_prop_name(name: str) -> str:
@@ -3915,9 +3921,13 @@ class Neo4jClient:
             # Source-report provenance: every OTX pulse that mentioned this malware
             # (incl. the extra pulses de-duplication folded into ``report_ids``).
             extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
+        # 2026-11: the ATT&CK software id (S####) of a MITRE record, as on Tool nodes; the name stays the key.
+        attack_id = nonempty_graph_string(data.get("mitre_id"))
+        if attack_id:
+            extra_props["mitre_id"] = attack_id.upper()
         # 2026-10: the record merged last used to set the description (an OTX pulse's text or a raw JSON
         # block among them); 2026-10-16: the source ranking decides (``description_ranking``).
-        _mark_deprecated(data, extra_props)
+        _mark_deprecated(data, extra_props, source_id)
         return self.merge_node_with_source(
             "Malware",
             key_props,
@@ -3980,6 +3990,10 @@ class Neo4jClient:
         }
         if data.get("pulse_id"):
             extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
+        # 2026-11: the ATT&CK group id (G####) of a MITRE record; the name stays the key.
+        attack_id = nonempty_graph_string(data.get("mitre_id"))
+        if attack_id:
+            extra_props["mitre_id"] = attack_id.upper()
         if data.get("sophistication"):
             extra_props["sophistication"] = data["sophistication"]
         if data.get("primary_motivation"):
@@ -3987,7 +4001,7 @@ class Neo4jClient:
         if data.get("resource_level"):
             extra_props["resource_level"] = data["resource_level"]
         # 2026-10-16: as in merge_malware — the source ranking decides the description.
-        _mark_deprecated(data, extra_props)
+        _mark_deprecated(data, extra_props, source_id)
         return self.merge_node_with_source(
             "ThreatActor",
             key_props,
@@ -4071,7 +4085,7 @@ class Neo4jClient:
         if data.get("name"):
             extra_props["name"] = data["name"]
         # 2026-10-16: the source ranking decides the description (any record used to set it).
-        _mark_deprecated(data, extra_props)
+        _mark_deprecated(data, extra_props, source_id)
         return self.merge_node_with_source(
             "Technique",
             key_props,
@@ -4099,7 +4113,7 @@ class Neo4jClient:
         if data.get("name"):
             extra_props["name"] = data["name"]
         # 2026-10-16: the source ranking decides the description (any record used to set it).
-        _mark_deprecated(data, extra_props)
+        _mark_deprecated(data, extra_props, source_id)
         return self.merge_node_with_source(
             "Tactic",
             key_props,
@@ -4132,7 +4146,7 @@ class Neo4jClient:
         if data.get("aliases"):
             extra_props["aliases"] = data["aliases"]
         # 2026-10-16: as in merge_malware — the source ranking decides the description.
-        _mark_deprecated(data, extra_props)
+        _mark_deprecated(data, extra_props, source_id)
         return self.merge_node_with_source(
             "Tool",
             key_props,

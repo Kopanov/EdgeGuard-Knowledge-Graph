@@ -739,7 +739,9 @@ _SEARCH_RELATED_CYPHER = """
            WHEN 'Technique' THEN 3 WHEN 'Campaign' THEN 4 WHEN 'Sector' THEN 5 ELSE 6
          END AS priority
     ORDER BY priority, kind, relationship_type, direction,
-             coalesce(related.cve_id, related.mitre_id, related.name, related.value, related.source_id),
+             coalesce(related.cve_id,
+                      CASE WHEN related:Malware OR related:ThreatActor THEN null ELSE related.mitre_id END,
+                      related.name, related.value, related.source_id),
              related.uuid
     WITH priority, kind,
          collect({node: related, relationship_type: relationship_type, direction: direction})[..$per_kind] AS rows

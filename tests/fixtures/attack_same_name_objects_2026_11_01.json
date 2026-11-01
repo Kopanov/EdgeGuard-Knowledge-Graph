@@ -1,0 +1,1100 @@
+{
+ "_provenance": "Real STIX 2.1 objects, copied verbatim from the MITRE ATT&CK bundles of mitre/cti (master) as fetched on 2026-11-01: enterprise-attack/enterprise-attack.json and ics-attack/ics-attack.json (matrices modified 2026-07-31, ATT&CK spec 3.3.0). Each list holds objects of one bundle in bundle form; a relationship comes with both of its endpoints. Enterprise: the deprecated malware TRITON (S0609), the malware KillDisk (S0607), the group APT38 (G0082), APT38 uses KillDisk, KillDisk uses Data Destruction (T1485), TEMP.Veles (G0088) uses the tool Mimikatz (S0002). ATT&CK for ICS: the malware Triton (S1009), the same KillDisk object, the deprecated ICS copy 'Killdisk' (no ATT&CK id, no relationships), TEMP.Veles (G0088) uses Triton, Triton uses Loss of Safety (T0880), APT38 uses KillDisk, KillDisk uses Data Destruction (T0809).",
+ "enterprise": [
+  {
+   "modified": "2023-10-20T17:47:16.193Z",
+   "name": "TRITON",
+   "description": "This entry was deprecated as it was inadvertently added to Enterprise; a similar Software entry was created for ATT&CK for ICS.\n\n[TRITON](https://attack.mitre.org/software/S0609) is an attack framework built to interact with Triconex Safety Instrumented System (SIS) controllers. [TRITON](https://attack.mitre.org/software/S0609) was deployed against at least one target in the Middle East. (Citation: FireEye TRITON 2017)(Citation: FireEye TRITON 2018)(Citation: Dragos TRISIS)(Citation: CISA HatMan)(Citation: FireEye TEMP.Veles 2018)",
+   "x_mitre_platforms": [
+    "Windows"
+   ],
+   "x_mitre_deprecated": true,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_version": "1.0",
+   "x_mitre_aliases": [
+    "TRITON",
+    "HatMan",
+    "TRISIS"
+   ],
+   "type": "malware",
+   "id": "malware--93ae2edf-a598-4d2d-acd7-bcae0c021923",
+   "created": "2021-01-11T21:27:41.573Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S0609",
+     "external_id": "S0609"
+    },
+    {
+     "source_name": "CISA HatMan",
+     "description": "CISA. (2019, February 27). MAR-17-352-01 HatMan-Safety System Targeted Malware. Retrieved January 6, 2021.",
+     "url": "https://us-cert.cisa.gov/sites/default/files/documents/MAR-17-352-01%20HatMan%20-%20Safety%20System%20Targeted%20Malware%20%28Update%20B%29.pdf"
+    },
+    {
+     "source_name": "Dragos TRISIS",
+     "description": "Dragos. (2017, December 13). TRISIS Malware Analysis of Safety System Targeted Malware. Retrieved January 6, 2021.",
+     "url": "https://www.dragos.com/wp-content/uploads/TRISIS-01.pdf"
+    },
+    {
+     "source_name": "FireEye TEMP.Veles 2018",
+     "description": "FireEye Intelligence . (2018, October 23). TRITON Attribution: Russian Government-Owned Lab Most Likely Built Custom Intrusion Tools for TRITON Attackers. Retrieved April 16, 2019.",
+     "url": "https://www.fireeye.com/blog/threat-research/2018/10/triton-attribution-russian-government-owned-lab-most-likely-built-tools.html"
+    },
+    {
+     "source_name": "FireEye TRITON 2017",
+     "description": "Johnson, B, et. al. (2017, December 14). Attackers Deploy New ICS Attack Framework \"TRITON\" and Cause Operational Disruption to Critical Infrastructure. Retrieved January 6, 2021.",
+     "url": "https://www.fireeye.com/blog/threat-research/2017/12/attackers-deploy-new-ics-attack-framework-triton.html"
+    },
+    {
+     "source_name": "FireEye TRITON 2018",
+     "description": "Miller, S. Reese, E. (2018, June 7). A Totally Tubular Treatise on TRITON and TriStation. Retrieved January 6, 2021.",
+     "url": "https://www.fireeye.com/blog/threat-research/2018/06/totally-tubular-treatise-on-TRITON-and-tristation.html"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "labels": [
+    "malware"
+   ]
+  },
+  {
+   "modified": "2023-10-06T14:09:52.833Z",
+   "name": "KillDisk",
+   "description": "[KillDisk](https://attack.mitre.org/software/S0607) is a disk-wiping tool designed to overwrite files with random data to render the OS unbootable. It was first observed as a component of [BlackEnergy](https://attack.mitre.org/software/S0089) malware during cyber attacks against Ukraine in 2015. [KillDisk](https://attack.mitre.org/software/S0607) has since evolved into stand-alone malware used by a variety of threat actors against additional targets in Europe and Latin America; in 2016 a ransomware component was also incorporated into some [KillDisk](https://attack.mitre.org/software/S0607) variants.(Citation: KillDisk Ransomware)(Citation: ESEST Black Energy Jan 2016)(Citation: Trend Micro KillDisk 1)(Citation: Trend Micro KillDisk 2)",
+   "x_mitre_platforms": [
+    "Linux",
+    "Windows"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.2",
+   "x_mitre_aliases": [
+    "KillDisk",
+    "Win32/KillDisk.NBI",
+    "Win32/KillDisk.NBH",
+    "Win32/KillDisk.NBD",
+    "Win32/KillDisk.NBC",
+    "Win32/KillDisk.NBB"
+   ],
+   "type": "malware",
+   "id": "malware--e221eb77-1502-4129-af1d-fe1ad55e7ec6",
+   "created": "2021-01-20T18:05:07.059Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S0607",
+     "external_id": "S0607"
+    },
+    {
+     "source_name": "KillDisk Ransomware",
+     "description": "Catalin Cimpanu. (2016, December 29). KillDisk Disk-Wiping Malware Adds Ransomware Component. Retrieved January 12, 2021.",
+     "url": "https://www.bleepingcomputer.com/news/security/killdisk-disk-wiping-malware-adds-ransomware-component/"
+    },
+    {
+     "source_name": "ESEST Black Energy Jan 2016",
+     "description": "Cherepanov, A.. (2016, January 3). BlackEnergy by the SSHBearDoor: attacks against Ukrainian news media and electric industry. Retrieved May 18, 2016.",
+     "url": "http://www.welivesecurity.com/2016/01/03/blackenergy-sshbeardoor-details-2015-attacks-ukrainian-news-media-electric-industry/"
+    },
+    {
+     "source_name": "Trend Micro KillDisk 1",
+     "description": "Fernando Merces, Byron Gelera, Martin Co. (2018, June 7). KillDisk Variant Hits Latin American Finance Industry. Retrieved January 12, 2021.",
+     "url": "https://www.trendmicro.com/en_us/research/18/f/new-killdisk-variant-hits-latin-american-financial-organizations-again.html"
+    },
+    {
+     "source_name": "Trend Micro KillDisk 2",
+     "description": "Gilbert Sison, Rheniel Ramos, Jay Yaneza, Alfredo Oliveira. (2018, January 15). KillDisk Variant Hits Latin American Financial Groups. Retrieved January 12, 2021.",
+     "url": "https://www.trendmicro.com/en_us/research/18/a/new-killdisk-variant-hits-financial-organizations-in-latin-america.html"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "labels": [
+    "malware"
+   ]
+  },
+  {
+   "type": "intrusion-set",
+   "id": "intrusion-set--00f67a77-86a4-4adf-be26-1a54fc713340",
+   "created": "2019-01-29T21:27:24.793Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/groups/G0082",
+     "external_id": "G0082"
+    },
+    {
+     "source_name": "BeagleBoyz",
+     "description": "(Citation: CISA AA20-239A BeagleBoyz August 2020)"
+    },
+    {
+     "source_name": "Stardust Chollima",
+     "description": "(Citation: CrowdStrike Stardust Chollima Profile April 2018)(Citation: CrowdStrike GTR 2021 June 2021)"
+    },
+    {
+     "source_name": "APT38",
+     "description": "(Citation: FireEye APT38 Oct 2018)"
+    },
+    {
+     "source_name": "Bluenoroff",
+     "description": "(Citation: Kaspersky Lazarus Under The Hood Blog 2017)"
+    },
+    {
+     "source_name": "Sapphire Sleet",
+     "description": "(Citation: Microsoft Threat Actor Naming July 2023)"
+    },
+    {
+     "source_name": "COPERNICIUM",
+     "description": "(Citation: Microsoft Threat Actor Naming July 2023)"
+    },
+    {
+     "source_name": "NICKEL GLADSTONE",
+     "description": "(Citation: SecureWorks NICKEL GLADSTONE profile Sept 2021)"
+    },
+    {
+     "source_name": "CrowdStrike GTR 2021 June 2021",
+     "description": "CrowdStrike. (2021, June 7). CrowdStrike 2021 Global Threat Report. Retrieved September 29, 2021.",
+     "url": "https://go.crowdstrike.com/rs/281-OBQ-266/images/Report2021GTR.pdf"
+    },
+    {
+     "source_name": "DOJ North Korea Indictment Feb 2021",
+     "description": "Department of Justice. (2021, February 17). Three North Korean Military Hackers Indicted in Wide-Ranging Scheme to Commit Cyberattacks and Financial Crimes Across the Globe. Retrieved June 9, 2021.",
+     "url": "https://www.justice.gov/opa/pr/three-north-korean-military-hackers-indicted-wide-ranging-scheme-commit-cyberattacks-and"
+    },
+    {
+     "source_name": "CISA AA20-239A BeagleBoyz August 2020",
+     "description": "DHS/CISA. (2020, August 26). FASTCash 2.0: North Korea's BeagleBoyz Robbing Banks. Retrieved September 29, 2021.",
+     "url": "https://us-cert.cisa.gov/ncas/alerts/aa20-239a"
+    },
+    {
+     "source_name": "FireEye APT38 Oct 2018",
+     "description": "FireEye. (2018, October 03). APT38: Un-usual Suspects. Retrieved November 17, 2024.",
+     "url": "https://services.google.com/fh/files/misc/apt38-un-usual-suspects.pdf"
+    },
+    {
+     "source_name": "Kaspersky Lazarus Under The Hood Blog 2017",
+     "description": "GReAT. (2017, April 3). Lazarus Under the Hood. Retrieved April 17, 2019.",
+     "url": "https://securelist.com/lazarus-under-the-hood/77908/"
+    },
+    {
+     "source_name": "CrowdStrike Stardust Chollima Profile April 2018",
+     "description": "Meyers, Adam. (2018, April 6). Meet CrowdStrike’s Adversary of the Month for April: STARDUST CHOLLIMA. Retrieved September 29, 2021.",
+     "url": "https://www.crowdstrike.com/blog/meet-crowdstrikes-adversary-of-the-month-for-april-stardust-chollima/"
+    },
+    {
+     "source_name": "Microsoft Threat Actor Naming July 2023",
+     "description": "Microsoft . (2023, July 12). How Microsoft names threat actors. Retrieved November 17, 2023.",
+     "url": "https://learn.microsoft.com/en-us/microsoft-365/security/intelligence/microsoft-threat-actor-naming?view=o365-worldwide"
+    },
+    {
+     "source_name": "Microsoft Axios Compromise APR 2026",
+     "description": "Microsoft Threat Intelligence. (2026, April 1). Mitigating the Axios npm supply chain compromise. Retrieved September 30, 2026.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2026/04/01/mitigating-the-axios-npm-supply-chain-compromise/"
+    },
+    {
+     "source_name": "Microsoft Sapphire Sleet APR 2026",
+     "description": "Microsoft Threat Intelligence. (2026, April 16). Dissecting Sapphire Sleet’s macOS intrusion from lure to compromise. Retrieved September 30, 2026.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2026/04/16/dissecting-sapphire-sleets-macos-intrusion-from-lure-to-compromise/"
+    },
+    {
+     "source_name": "MIcrosoft Mastra npm Compromise JUN 2026",
+     "description": "Microsoft Threat Intelligence. (2026, June 17). From package to postinstall payload: Inside the Mastra npm supply chain compromise by Sapphire Sleet. Retrieved September 30, 2026.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2026/06/17/postinstall-payload-inside-mastra-npm-supply-chain-compromise/"
+    },
+    {
+     "source_name": "SecureWorks NICKEL GLADSTONE profile Sept 2021",
+     "description": "SecureWorks. (2021, September 29). NICKEL GLADSTONE Threat Profile. Retrieved September 29, 2021.",
+     "url": "https://www.secureworks.com/research/threat-profiles/nickel-gladstone"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-10-09T03:56:03.463Z",
+   "name": "APT38",
+   "description": "[APT38](https://attack.mitre.org/groups/G0082) is a North Korean state-sponsored threat group that specializes in financial cyber operations; it has been attributed to the Reconnaissance General Bureau.(Citation: CISA AA20-239A BeagleBoyz August 2020) Active since at least 2014, [APT38](https://attack.mitre.org/groups/G0082) has targeted banks, financial institutions, casinos, cryptocurrency exchanges, SWIFT system endpoints, and ATMs in at least 38 countries worldwide. Significant operations include the 2016 Bank of Bangladesh heist, Bancomext (Citation: FireEye APT38 Oct 2018) and Banco de Chile (Citation: FireEye APT38 Oct 2018), along with software supply chain compromises and destructive malware attacks.(Citation: CISA AA20-239A BeagleBoyz August 2020)(Citation: FireEye APT38 Oct 2018)(Citation: DOJ North Korea Indictment Feb 2021)(Citation: Kaspersky Lazarus Under The Hood Blog 2017)(Citation: Microsoft Axios Compromise APR 2026)(Citation: Microsoft Sapphire Sleet APR 2026)(Citation: MIcrosoft Mastra npm Compromise JUN 2026)\n\nNorth Korean group definitions are known to have significant overlap, and some security researchers report all North Korean state-sponsored cyber activity under the name [Lazarus Group](https://attack.mitre.org/groups/G0032) instead of tracking clusters or subgroups.",
+   "aliases": [
+    "APT38",
+    "NICKEL GLADSTONE",
+    "BeagleBoyz",
+    "Bluenoroff",
+    "Stardust Chollima",
+    "Sapphire Sleet",
+    "COPERNICIUM"
+   ],
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack"
+   ],
+   "x_mitre_version": "4.0",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Hiroki Nagahama, NEC Corporation",
+    "Manikantan Srinivasan, NEC Corporation India",
+    "Pooja Natarajan, NEC Corporation India"
+   ]
+  },
+  {
+   "type": "relationship",
+   "id": "relationship--cb1037c1-4b83-4a79-ba12-00558bb6b42b",
+   "created": "2021-10-04T20:52:20.304Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "ESET Lazarus KillDisk April 2018",
+     "description": "Kálnai, P., Cherepanov A. (2018, April 03). Lazarus KillDisks Central American casino. Retrieved May 17, 2018.",
+     "url": "https://www.welivesecurity.com/2018/04/03/lazarus-killdisk-central-american-casino/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:23.388Z",
+   "description": "(Citation: ESET Lazarus KillDisk April 2018)",
+   "relationship_type": "uses",
+   "source_ref": "intrusion-set--00f67a77-86a4-4adf-be26-1a54fc713340",
+   "target_ref": "malware--e221eb77-1502-4129-af1d-fe1ad55e7ec6",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  },
+  {
+   "type": "relationship",
+   "id": "relationship--e45c0080-ee1c-4ef1-813f-d58b83de4a8b",
+   "created": "2021-01-20T18:10:33.798Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "ESEST Black Energy Jan 2016",
+     "description": "Cherepanov, A.. (2016, January 3). BlackEnergy by the SSHBearDoor: attacks against Ukrainian news media and electric industry. Retrieved May 18, 2016.",
+     "url": "http://www.welivesecurity.com/2016/01/03/blackenergy-sshbeardoor-details-2015-attacks-ukrainian-news-media-electric-industry/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-04-29T14:23:06.236Z",
+   "description": "[KillDisk](https://attack.mitre.org/software/S0607) deletes system files to make the OS unbootable. [KillDisk](https://attack.mitre.org/software/S0607) also targets and deletes files with 35 different file extensions.(Citation: ESEST Black Energy Jan 2016)",
+   "relationship_type": "uses",
+   "source_ref": "malware--e221eb77-1502-4129-af1d-fe1ad55e7ec6",
+   "target_ref": "attack-pattern--d45a3d09-b3cf-48f4-9f0f-f521ee5cb05c",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  },
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--d45a3d09-b3cf-48f4-9f0f-f521ee5cb05c",
+   "created": "2019-03-14T18:47:17.701Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T1485",
+     "external_id": "T1485"
+    },
+    {
+     "source_name": "DOJ  - Cisco Insider",
+     "description": "DOJ. (2020, August 26). San Jose Man Pleads Guilty To Damaging Cisco’s Network. Retrieved December 15, 2020.",
+     "url": "https://www.justice.gov/usao-ndca/pr/san-jose-man-pleads-guilty-damaging-cisco-s-network"
+    },
+    {
+     "source_name": "Unit 42 Shamoon3 2018",
+     "description": "Falcone, R. (2018, December 13). Shamoon 3 Targets Oil and Gas Organization. Retrieved March 14, 2019.",
+     "url": "https://unit42.paloaltonetworks.com/shamoon-3-targets-oil-gas-organization/"
+    },
+    {
+     "source_name": "Palo Alto Shamoon Nov 2016",
+     "description": "Falcone, R.. (2016, November 30). Shamoon 2: Return of the Disttrack Wiper. Retrieved January 11, 2017.",
+     "url": "http://researchcenter.paloaltonetworks.com/2016/11/unit42-shamoon-2-return-disttrack-wiper/"
+    },
+    {
+     "source_name": "FireEye Shamoon Nov 2016",
+     "description": "FireEye. (2016, November 30). FireEye Responds to Wave of Destructive Cyber Attacks in Gulf Region. Retrieved November 17, 2024.",
+     "url": "https://web.archive.org/web/20210126065851/https://www.fireeye.com/blog/threat-research/2016/11/fireeye_respondsto.html"
+    },
+    {
+     "source_name": "Kaspersky StoneDrill 2017",
+     "description": "Kaspersky Lab. (2017, March 7). From Shamoon to StoneDrill: Wipers attacking Saudi organizations and beyond. Retrieved March 14, 2019.",
+     "url": "https://media.kasperskycontenthub.com/wp-content/uploads/sites/43/2018/03/07180722/Report_Shamoon_StoneDrill_final.pdf"
+    },
+    {
+     "source_name": "Talos Olympic Destroyer 2018",
+     "description": "Mercer, W. and Rascagneres, P. (2018, February 12). Olympic Destroyer Takes Aim At Winter Olympics. Retrieved March 14, 2019.",
+     "url": "https://blog.talosintelligence.com/2018/02/olympic-destroyer.html"
+    },
+    {
+     "source_name": "Data Destruction - Threat Post",
+     "description": "Mimoso, M.. (2014, June 18). Hacker Puts Hosting Service Code Spaces Out of Business. Retrieved December 15, 2020.",
+     "url": "https://threatpost.com/hacker-puts-hosting-service-code-spaces-out-of-business/106761/"
+    },
+    {
+     "source_name": "Symantec Shamoon 2012",
+     "description": "Symantec. (2012, August 16). The Shamoon Attacks. Retrieved March 14, 2019.",
+     "url": "https://www.symantec.com/connect/blogs/shamoon-attacks"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-05-12T15:12:00.717Z",
+   "name": "Data Destruction",
+   "description": "Adversaries may destroy data and files on specific systems or in large numbers on a network to interrupt availability to systems, services, and network resources. Data destruction is likely to render stored data irrecoverable by forensic techniques through overwriting files or data on local and remote drives.(Citation: Symantec Shamoon 2012)(Citation: FireEye Shamoon Nov 2016)(Citation: Palo Alto Shamoon Nov 2016)(Citation: Kaspersky StoneDrill 2017)(Citation: Unit 42 Shamoon3 2018)(Citation: Talos Olympic Destroyer 2018) Common operating system file deletion commands such as <code>del</code> and <code>rm</code> often only remove pointers to files without wiping the contents of the files themselves, making the files recoverable by proper forensic methodology. This behavior is distinct from [Disk Content Wipe](https://attack.mitre.org/techniques/T1561/001) and [Disk Structure Wipe](https://attack.mitre.org/techniques/T1561/002) because individual files are destroyed rather than sections of a storage disk or the disk's logical structure.\n\nAdversaries may attempt to overwrite files and directories with randomly generated data to make it irrecoverable.(Citation: Kaspersky StoneDrill 2017)(Citation: Unit 42 Shamoon3 2018) In some cases politically oriented image files have been used to overwrite data.(Citation: FireEye Shamoon Nov 2016)(Citation: Palo Alto Shamoon Nov 2016)(Citation: Kaspersky StoneDrill 2017)\n\nTo maximize impact on the target organization in operations where network-wide availability interruption is the goal, malware designed for destroying data may have worm-like features to propagate across a network by leveraging additional techniques like [Valid Accounts](https://attack.mitre.org/techniques/T1078), [OS Credential Dumping](https://attack.mitre.org/techniques/T1003), and [SMB/Windows Admin Shares](https://attack.mitre.org/techniques/T1021/002).(Citation: Symantec Shamoon 2012)(Citation: FireEye Shamoon Nov 2016)(Citation: Palo Alto Shamoon Nov 2016)(Citation: Kaspersky StoneDrill 2017)(Citation: Talos Olympic Destroyer 2018).\n\nIn cloud environments, adversaries may leverage access to delete cloud storage objects, machine images, database instances, and other infrastructure crucial to operations to damage an organization or their customers.(Citation: Data Destruction - Threat Post)(Citation: DOJ  - Cisco Insider) Similarly, they may delete virtual machines from on-prem virtualized environments.",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-attack",
+     "phase_name": "impact"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Brent Murphy, Elastic",
+    "David French, Elastic",
+    "Syed Ummar Farooqh, McAfee",
+    "Prasad Somasamudram, McAfee",
+    "Sekhar Sarukkai, McAfee",
+    "Varonis Threat Labs",
+    "Joey Lei"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Containers",
+    "ESXi",
+    "IaaS",
+    "Linux",
+    "macOS",
+    "Windows"
+   ],
+   "x_mitre_version": "1.4",
+   "x_mitre_impact_type": [
+    "Availability"
+   ]
+  },
+  {
+   "type": "relationship",
+   "id": "relationship--57216102-21aa-402b-b306-79e1dd548716",
+   "created": "2019-04-16T15:21:57.842Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "FireEye TRITON 2019",
+     "description": "Miller, S, et al. (2019, April 10). TRITON Actor TTP Profile, Custom Attack Tools, Detections, and ATT&CK Mapping. Retrieved April 16, 2019.",
+     "url": "https://www.fireeye.com/blog/threat-research/2019/04/triton-actor-ttp-profile-custom-attack-tools-detections.html"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:42.179Z",
+   "description": "(Citation: FireEye TRITON 2019)",
+   "relationship_type": "uses",
+   "source_ref": "intrusion-set--9538b1a4-4120-4e2d-bf59-3b11fcab05a4",
+   "target_ref": "tool--afc079f3-c0ea-4096-b75d-3f05338b7f60",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  },
+  {
+   "type": "intrusion-set",
+   "id": "intrusion-set--9538b1a4-4120-4e2d-bf59-3b11fcab05a4",
+   "created": "2019-04-16T15:14:38.533Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/groups/G0088",
+     "external_id": "G0088"
+    },
+    {
+     "source_name": "TEMP.Veles",
+     "description": "(Citation: FireEye TRITON 2019)"
+    },
+    {
+     "source_name": "Dragos Xenotime 2018",
+     "description": "Dragos, Inc.. (n.d.). Xenotime. Retrieved April 16, 2019.",
+     "url": "https://dragos.com/resource/xenotime/"
+    },
+    {
+     "source_name": "FireEye TEMP.Veles 2018",
+     "description": "FireEye Intelligence . (2018, October 23). TRITON Attribution: Russian Government-Owned Lab Most Likely Built Custom Intrusion Tools for TRITON Attackers. Retrieved April 16, 2019.",
+     "url": "https://www.fireeye.com/blog/threat-research/2018/10/triton-attribution-russian-government-owned-lab-most-likely-built-tools.html"
+    },
+    {
+     "source_name": "FireEye TRITON 2019",
+     "description": "Miller, S, et al. (2019, April 10). TRITON Actor TTP Profile, Custom Attack Tools, Detections, and ATT&CK Mapping. Retrieved April 16, 2019.",
+     "url": "https://www.fireeye.com/blog/threat-research/2019/04/triton-actor-ttp-profile-custom-attack-tools-detections.html"
+    },
+    {
+     "source_name": "FireEye TEMP.Veles JSON April 2019",
+     "description": "Miller, S., et al. (2019, April 10). TRITON Appendix C. Retrieved April 29, 2019.",
+     "url": "https://www.fireeye.com/content/dam/fireeye-www/blog/files/TRITON_Appendix_C.html"
+    },
+    {
+     "source_name": "Pylos Xenotime 2019",
+     "description": "Slowik, J.. (2019, April 12). A XENOTIME to Remember: Veles in the Wild. Retrieved April 16, 2019.",
+     "url": "https://pylos.co/2019/04/12/a-xenotime-to-remember-veles-in-the-wild/"
+    },
+    {
+     "source_name": "XENOTIME",
+     "description": "The activity group XENOTIME, as defined by Dragos, has overlaps with activity reported upon by FireEye about TEMP.Veles as well as the actors behind [TRITON](https://attack.mitre.org/software/S0609).(Citation: Dragos Xenotime 2018)(Citation: Pylos Xenotime 2019)(Citation: FireEye TRITON 2019)(Citation: FireEye TEMP.Veles 2018)"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:41.930Z",
+   "name": "TEMP.Veles",
+   "description": "[TEMP.Veles](https://attack.mitre.org/groups/G0088) is a Russia-based threat group that has targeted critical infrastructure. The group has been observed utilizing [TRITON](https://attack.mitre.org/software/S0609), a malware framework designed to manipulate industrial safety systems.(Citation: FireEye TRITON 2019)(Citation: FireEye TEMP.Veles 2018)(Citation: FireEye TEMP.Veles JSON April 2019)",
+   "aliases": [
+    "TEMP.Veles",
+    "XENOTIME"
+   ],
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.4",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Dragos Threat Intelligence"
+   ]
+  },
+  {
+   "type": "tool",
+   "id": "tool--afc079f3-c0ea-4096-b75d-3f05338b7f60",
+   "created": "2017-05-31T21:32:11.544Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S0002",
+     "external_id": "S0002"
+    },
+    {
+     "source_name": "Deply Mimikatz",
+     "description": "Deply, B. (n.d.). Mimikatz. Retrieved September 29, 2015.",
+     "url": "https://github.com/gentilkiwi/mimikatz"
+    },
+    {
+     "source_name": "Adsecurity Mimikatz Guide",
+     "description": "Metcalf, S. (2015, November 13). Unofficial Guide to Mimikatz & Command Reference. Retrieved December 23, 2015.",
+     "url": "https://adsecurity.org/?page_id=1821"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-05-12T15:12:00.740Z",
+   "name": "Mimikatz",
+   "description": "[Mimikatz](https://attack.mitre.org/software/S0002) is a credential dumper capable of obtaining plaintext Windows account logins and passwords, along with many other features that make it useful for testing the security of networks. (Citation: Deply Mimikatz) (Citation: Adsecurity Mimikatz Guide)",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_version": "1.11",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Vincent Le Toux"
+   ],
+   "x_mitre_aliases": [
+    "Mimikatz"
+   ],
+   "labels": [
+    "tool"
+   ]
+  }
+ ],
+ "ics": [
+  {
+   "type": "malware",
+   "id": "malware--80099a91-4c86-4bea-9ccb-dac55d61960e",
+   "created": "2019-03-26T15:02:14.907Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S1009",
+     "external_id": "S1009"
+    },
+    {
+     "source_name": "Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer December 2017",
+     "description": "Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer 2017, December 14 Attackers Deploy New ICS Attack Framework TRITON and Cause Operational Disruption to Critical Infrastructure Retrieved. 2018/01/12 ",
+     "url": "https://www.fireeye.com/blog/threat-research/2017/12/attackers-deploy-new-ics-attack-framework-triton.html"
+    },
+    {
+     "source_name": "DHS CISA February 2019",
+     "description": "DHS CISA 2019, February 27 MAR-17-352-01 HatManSafety System Targeted Malware (Update B) Retrieved. 2019/03/08 ",
+     "url": "https://ics-cert.us-cert.gov/sites/default/files/documents/MAR-17-352-01%20HatMan%20-%20Safety%20System%20Targeted%20Malware%20%28Update%20B%29.pdf"
+    },
+    {
+     "source_name": "Dragos December 2017",
+     "description": "Dragos 2017, December 13 TRISIS Malware Analysis of Safety System Targeted Malware Retrieved. 2018/01/12 ",
+     "url": "https://dragos.com/blog/trisis/TRISIS-01.pdf"
+    },
+    {
+     "source_name": "Jos Wetzels January 2018",
+     "description": "Jos Wetzels 2018, January 16 Analyzing the TRITON industrial malware Retrieved. 2019/10/22 ",
+     "url": "https://www.midnightbluelabs.com/blog/2018/1/16/analyzing-the-triton-industrial-malware"
+    },
+    {
+     "source_name": "Julian Gutmanis March 2019",
+     "description": "Julian Gutmanis 2019, March 11 Triton - A Report From The Trenches Retrieved. 2019/03/11 ",
+     "url": "https://www.youtube.com/watch?v=XwSJ8hloGvY"
+    },
+    {
+     "source_name": "Schneider December 2018",
+     "description": "Schneider 2018, December 14 Security Notification  EcoStruxure Triconex Tricon V3 Retrieved. 2019/03/08 ",
+     "url": "https://download.schneider-electric.com/files?p_enDocType=Technical+leaflet&p_File_Name=SEVD-2017-347-01+Triconex+V3.pdf&p_Doc_Ref=SEVD-2017-347-01"
+    },
+    {
+     "source_name": "Schneider Electric January 2018",
+     "description": "Schneider Electric 2018, January 23 TRITON - Schneider Electric Analysis and Disclosure Retrieved. 2019/03/14 ",
+     "url": "https://www.youtube.com/watch?v=f09E75bWvkk&index=3&list=PL8OWO1qWXF4qYG19p7An4Vw3N2YZ86aRS&t=0s"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-05-12T15:12:00.736Z",
+   "name": "Triton",
+   "description": "[Triton](https://attack.mitre.org/software/S1009) is an attack framework built to interact with Triconex Safety Instrumented System (SIS) controllers.(Citation: Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer December 2017)(Citation: Dragos December 2017)(Citation: DHS CISA February 2019)(Citation: Schneider Electric January 2018)(Citation: Julian Gutmanis March 2019)(Citation: Schneider December 2018)(Citation: Jos Wetzels January 2018)",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.2",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_aliases": [
+    "Triton",
+    "TRISIS",
+    "HatMan"
+   ],
+   "labels": [
+    "malware"
+   ]
+  },
+  {
+   "modified": "2023-10-06T14:09:52.833Z",
+   "name": "KillDisk",
+   "description": "[KillDisk](https://attack.mitre.org/software/S0607) is a disk-wiping tool designed to overwrite files with random data to render the OS unbootable. It was first observed as a component of [BlackEnergy](https://attack.mitre.org/software/S0089) malware during cyber attacks against Ukraine in 2015. [KillDisk](https://attack.mitre.org/software/S0607) has since evolved into stand-alone malware used by a variety of threat actors against additional targets in Europe and Latin America; in 2016 a ransomware component was also incorporated into some [KillDisk](https://attack.mitre.org/software/S0607) variants.(Citation: KillDisk Ransomware)(Citation: ESEST Black Energy Jan 2016)(Citation: Trend Micro KillDisk 1)(Citation: Trend Micro KillDisk 2)",
+   "x_mitre_platforms": [
+    "Linux",
+    "Windows"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.2",
+   "x_mitre_aliases": [
+    "KillDisk",
+    "Win32/KillDisk.NBI",
+    "Win32/KillDisk.NBH",
+    "Win32/KillDisk.NBD",
+    "Win32/KillDisk.NBC",
+    "Win32/KillDisk.NBB"
+   ],
+   "type": "malware",
+   "id": "malware--e221eb77-1502-4129-af1d-fe1ad55e7ec6",
+   "created": "2021-01-20T18:05:07.059Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S0607",
+     "external_id": "S0607"
+    },
+    {
+     "source_name": "KillDisk Ransomware",
+     "description": "Catalin Cimpanu. (2016, December 29). KillDisk Disk-Wiping Malware Adds Ransomware Component. Retrieved January 12, 2021.",
+     "url": "https://www.bleepingcomputer.com/news/security/killdisk-disk-wiping-malware-adds-ransomware-component/"
+    },
+    {
+     "source_name": "ESEST Black Energy Jan 2016",
+     "description": "Cherepanov, A.. (2016, January 3). BlackEnergy by the SSHBearDoor: attacks against Ukrainian news media and electric industry. Retrieved May 18, 2016.",
+     "url": "http://www.welivesecurity.com/2016/01/03/blackenergy-sshbeardoor-details-2015-attacks-ukrainian-news-media-electric-industry/"
+    },
+    {
+     "source_name": "Trend Micro KillDisk 1",
+     "description": "Fernando Merces, Byron Gelera, Martin Co. (2018, June 7). KillDisk Variant Hits Latin American Finance Industry. Retrieved January 12, 2021.",
+     "url": "https://www.trendmicro.com/en_us/research/18/f/new-killdisk-variant-hits-latin-american-financial-organizations-again.html"
+    },
+    {
+     "source_name": "Trend Micro KillDisk 2",
+     "description": "Gilbert Sison, Rheniel Ramos, Jay Yaneza, Alfredo Oliveira. (2018, January 15). KillDisk Variant Hits Latin American Financial Groups. Retrieved January 12, 2021.",
+     "url": "https://www.trendmicro.com/en_us/research/18/a/new-killdisk-variant-hits-financial-organizations-in-latin-america.html"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "labels": [
+    "malware"
+   ]
+  },
+  {
+   "type": "malware",
+   "id": "malware--736a3b71-eccc-48b7-b5ed-adb2b74ca830",
+   "created": "2017-05-31T21:33:21.973Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "external_references": [
+    {
+     "source_name": "mitre-ics-attack",
+     "url": "https://collaborate.mitre.org/attackics/index.php/Software/S0016",
+     "external_id": "S1005"
+    },
+    {
+     "source_name": "ESET BlackEnergy Jan 2016",
+     "description": "Anton Cherepanov. (n.d.). BlackEnergy by the SSHBearDoor: attacks against Ukrainian news media and electric industry. Retrieved October 29, 2019.",
+     "url": "https://www.welivesecurity.com/2016/01/03/blackenergy-sshbeardoor-details-2015-attacks-ukrainian-news-media-electric-industry/"
+    },
+    {
+     "source_name": "Booz Allen Hamilton",
+     "description": "Booz Allen Hamilton. (n.d.). When The Lights Went Out. Retrieved October 22, 2019.",
+     "url": "https://www.boozallen.com/content/dam/boozallen/documents/2016/09/ukraine-report-when-the-lights-went-out.pdf"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-04-18T18:00:55.503Z",
+   "name": "Killdisk",
+   "description": "In 2015 the BlackEnergy malware contained a component called KillDisk. KillDisk's main functionality is to overwrite files with random data, rendering the OS unbootable. (Citation: ESET BlackEnergy Jan 2016)",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows"
+   ],
+   "x_mitre_deprecated": true,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.0",
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_aliases": [
+    "Killdisk"
+   ],
+   "labels": [
+    "malware"
+   ]
+  },
+  {
+   "type": "relationship",
+   "id": "relationship--9b825e77-2b18-4bc8-8e1d-5f645d570dca",
+   "created": "2018-10-17T00:14:20.652Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "Dragos Xenotime 2018",
+     "description": "Dragos, Inc.. (n.d.). Xenotime. Retrieved April 16, 2019.",
+     "url": "https://dragos.com/resource/xenotime/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:42.187Z",
+   "description": "(Citation: Dragos Xenotime 2018)",
+   "relationship_type": "uses",
+   "source_ref": "intrusion-set--9538b1a4-4120-4e2d-bf59-3b11fcab05a4",
+   "target_ref": "malware--80099a91-4c86-4bea-9ccb-dac55d61960e",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  },
+  {
+   "type": "intrusion-set",
+   "id": "intrusion-set--9538b1a4-4120-4e2d-bf59-3b11fcab05a4",
+   "created": "2019-04-16T15:14:38.533Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/groups/G0088",
+     "external_id": "G0088"
+    },
+    {
+     "source_name": "TEMP.Veles",
+     "description": "(Citation: FireEye TRITON 2019)"
+    },
+    {
+     "source_name": "Dragos Xenotime 2018",
+     "description": "Dragos, Inc.. (n.d.). Xenotime. Retrieved April 16, 2019.",
+     "url": "https://dragos.com/resource/xenotime/"
+    },
+    {
+     "source_name": "FireEye TEMP.Veles 2018",
+     "description": "FireEye Intelligence . (2018, October 23). TRITON Attribution: Russian Government-Owned Lab Most Likely Built Custom Intrusion Tools for TRITON Attackers. Retrieved April 16, 2019.",
+     "url": "https://www.fireeye.com/blog/threat-research/2018/10/triton-attribution-russian-government-owned-lab-most-likely-built-tools.html"
+    },
+    {
+     "source_name": "FireEye TRITON 2019",
+     "description": "Miller, S, et al. (2019, April 10). TRITON Actor TTP Profile, Custom Attack Tools, Detections, and ATT&CK Mapping. Retrieved April 16, 2019.",
+     "url": "https://www.fireeye.com/blog/threat-research/2019/04/triton-actor-ttp-profile-custom-attack-tools-detections.html"
+    },
+    {
+     "source_name": "FireEye TEMP.Veles JSON April 2019",
+     "description": "Miller, S., et al. (2019, April 10). TRITON Appendix C. Retrieved April 29, 2019.",
+     "url": "https://www.fireeye.com/content/dam/fireeye-www/blog/files/TRITON_Appendix_C.html"
+    },
+    {
+     "source_name": "Pylos Xenotime 2019",
+     "description": "Slowik, J.. (2019, April 12). A XENOTIME to Remember: Veles in the Wild. Retrieved April 16, 2019.",
+     "url": "https://pylos.co/2019/04/12/a-xenotime-to-remember-veles-in-the-wild/"
+    },
+    {
+     "source_name": "XENOTIME",
+     "description": "The activity group XENOTIME, as defined by Dragos, has overlaps with activity reported upon by FireEye about TEMP.Veles as well as the actors behind [TRITON](https://attack.mitre.org/software/S0609).(Citation: Dragos Xenotime 2018)(Citation: Pylos Xenotime 2019)(Citation: FireEye TRITON 2019)(Citation: FireEye TEMP.Veles 2018)"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:41.930Z",
+   "name": "TEMP.Veles",
+   "description": "[TEMP.Veles](https://attack.mitre.org/groups/G0088) is a Russia-based threat group that has targeted critical infrastructure. The group has been observed utilizing [TRITON](https://attack.mitre.org/software/S0609), a malware framework designed to manipulate industrial safety systems.(Citation: FireEye TRITON 2019)(Citation: FireEye TEMP.Veles 2018)(Citation: FireEye TEMP.Veles JSON April 2019)",
+   "aliases": [
+    "TEMP.Veles",
+    "XENOTIME"
+   ],
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.4",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Dragos Threat Intelligence"
+   ]
+  },
+  {
+   "type": "relationship",
+   "id": "relationship--d8354850-bd4c-4bd9-a585-b107f5f1398f",
+   "created": "2018-04-18T17:59:24.739Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer December 2017",
+     "description": "Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer 2017, December 14 Attackers Deploy New ICS Attack Framework TRITON and Cause Operational Disruption to Critical Infrastructure Retrieved. 2018/01/12 ",
+     "url": "https://www.fireeye.com/blog/threat-research/2017/12/attackers-deploy-new-ics-attack-framework-triton.html"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-04-29T14:23:06.220Z",
+   "description": "[Triton](https://attack.mitre.org/software/S1009) has the capability to reprogram the SIS logic to allow unsafe conditions to persist or reprogram the SIS to allow an unsafe state  while using the DCS to create an unsafe state or hazard. (Citation: Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer December 2017)",
+   "relationship_type": "uses",
+   "source_ref": "malware--80099a91-4c86-4bea-9ccb-dac55d61960e",
+   "target_ref": "attack-pattern--5fa00fdd-4a55-4191-94a0-564181d7fec2",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  },
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--5fa00fdd-4a55-4191-94a0-564181d7fec2",
+   "created": "2020-05-21T17:43:26.506Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T0880",
+     "external_id": "T0880"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-04-16T21:26:14.990Z",
+   "name": "Loss of Safety",
+   "description": "Adversaries may compromise safety system functions designed to maintain safe operation of a process when unacceptable or dangerous conditions occur. Safety systems are often composed of the same elements as control systems but have the sole purpose of ensuring the process fails in a predetermined safe manner. \n\nMany unsafe conditions in process control happen too quickly for a human operator to react to. Speed is critical in correcting these conditions to limit serious impacts such as Loss of Control and Property Damage. \n\nAdversaries may target and disable safety system functions as a prerequisite to subsequent attack execution or to allow for future unsafe conditionals to go unchecked. Detection of a Loss of Safety by operators can result in the shutdown of a process due to strict policies regarding safety systems. This can cause a Loss of Productivity and Revenue and may meet the technical goals of adversaries seeking to cause process disruptions.",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-ics-attack",
+     "phase_name": "impact"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "None"
+   ],
+   "x_mitre_version": "1.0"
+  },
+  {
+   "type": "relationship",
+   "id": "relationship--cb1037c1-4b83-4a79-ba12-00558bb6b42b",
+   "created": "2021-10-04T20:52:20.304Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "ESET Lazarus KillDisk April 2018",
+     "description": "Kálnai, P., Cherepanov A. (2018, April 03). Lazarus KillDisks Central American casino. Retrieved May 17, 2018.",
+     "url": "https://www.welivesecurity.com/2018/04/03/lazarus-killdisk-central-american-casino/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:23.388Z",
+   "description": "(Citation: ESET Lazarus KillDisk April 2018)",
+   "relationship_type": "uses",
+   "source_ref": "intrusion-set--00f67a77-86a4-4adf-be26-1a54fc713340",
+   "target_ref": "malware--e221eb77-1502-4129-af1d-fe1ad55e7ec6",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  },
+  {
+   "type": "intrusion-set",
+   "id": "intrusion-set--00f67a77-86a4-4adf-be26-1a54fc713340",
+   "created": "2019-01-29T21:27:24.793Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/groups/G0082",
+     "external_id": "G0082"
+    },
+    {
+     "source_name": "BeagleBoyz",
+     "description": "(Citation: CISA AA20-239A BeagleBoyz August 2020)"
+    },
+    {
+     "source_name": "Stardust Chollima",
+     "description": "(Citation: CrowdStrike Stardust Chollima Profile April 2018)(Citation: CrowdStrike GTR 2021 June 2021)"
+    },
+    {
+     "source_name": "APT38",
+     "description": "(Citation: FireEye APT38 Oct 2018)"
+    },
+    {
+     "source_name": "Bluenoroff",
+     "description": "(Citation: Kaspersky Lazarus Under The Hood Blog 2017)"
+    },
+    {
+     "source_name": "Sapphire Sleet",
+     "description": "(Citation: Microsoft Threat Actor Naming July 2023)"
+    },
+    {
+     "source_name": "COPERNICIUM",
+     "description": "(Citation: Microsoft Threat Actor Naming July 2023)"
+    },
+    {
+     "source_name": "NICKEL GLADSTONE",
+     "description": "(Citation: SecureWorks NICKEL GLADSTONE profile Sept 2021)"
+    },
+    {
+     "source_name": "CrowdStrike GTR 2021 June 2021",
+     "description": "CrowdStrike. (2021, June 7). CrowdStrike 2021 Global Threat Report. Retrieved September 29, 2021.",
+     "url": "https://go.crowdstrike.com/rs/281-OBQ-266/images/Report2021GTR.pdf"
+    },
+    {
+     "source_name": "DOJ North Korea Indictment Feb 2021",
+     "description": "Department of Justice. (2021, February 17). Three North Korean Military Hackers Indicted in Wide-Ranging Scheme to Commit Cyberattacks and Financial Crimes Across the Globe. Retrieved June 9, 2021.",
+     "url": "https://www.justice.gov/opa/pr/three-north-korean-military-hackers-indicted-wide-ranging-scheme-commit-cyberattacks-and"
+    },
+    {
+     "source_name": "CISA AA20-239A BeagleBoyz August 2020",
+     "description": "DHS/CISA. (2020, August 26). FASTCash 2.0: North Korea's BeagleBoyz Robbing Banks. Retrieved September 29, 2021.",
+     "url": "https://us-cert.cisa.gov/ncas/alerts/aa20-239a"
+    },
+    {
+     "source_name": "FireEye APT38 Oct 2018",
+     "description": "FireEye. (2018, October 03). APT38: Un-usual Suspects. Retrieved November 17, 2024.",
+     "url": "https://services.google.com/fh/files/misc/apt38-un-usual-suspects.pdf"
+    },
+    {
+     "source_name": "Kaspersky Lazarus Under The Hood Blog 2017",
+     "description": "GReAT. (2017, April 3). Lazarus Under the Hood. Retrieved April 17, 2019.",
+     "url": "https://securelist.com/lazarus-under-the-hood/77908/"
+    },
+    {
+     "source_name": "CrowdStrike Stardust Chollima Profile April 2018",
+     "description": "Meyers, Adam. (2018, April 6). Meet CrowdStrike’s Adversary of the Month for April: STARDUST CHOLLIMA. Retrieved September 29, 2021.",
+     "url": "https://www.crowdstrike.com/blog/meet-crowdstrikes-adversary-of-the-month-for-april-stardust-chollima/"
+    },
+    {
+     "source_name": "Microsoft Threat Actor Naming July 2023",
+     "description": "Microsoft . (2023, July 12). How Microsoft names threat actors. Retrieved November 17, 2023.",
+     "url": "https://learn.microsoft.com/en-us/microsoft-365/security/intelligence/microsoft-threat-actor-naming?view=o365-worldwide"
+    },
+    {
+     "source_name": "Microsoft Axios Compromise APR 2026",
+     "description": "Microsoft Threat Intelligence. (2026, April 1). Mitigating the Axios npm supply chain compromise. Retrieved September 30, 2026.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2026/04/01/mitigating-the-axios-npm-supply-chain-compromise/"
+    },
+    {
+     "source_name": "Microsoft Sapphire Sleet APR 2026",
+     "description": "Microsoft Threat Intelligence. (2026, April 16). Dissecting Sapphire Sleet’s macOS intrusion from lure to compromise. Retrieved September 30, 2026.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2026/04/16/dissecting-sapphire-sleets-macos-intrusion-from-lure-to-compromise/"
+    },
+    {
+     "source_name": "MIcrosoft Mastra npm Compromise JUN 2026",
+     "description": "Microsoft Threat Intelligence. (2026, June 17). From package to postinstall payload: Inside the Mastra npm supply chain compromise by Sapphire Sleet. Retrieved September 30, 2026.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2026/06/17/postinstall-payload-inside-mastra-npm-supply-chain-compromise/"
+    },
+    {
+     "source_name": "SecureWorks NICKEL GLADSTONE profile Sept 2021",
+     "description": "SecureWorks. (2021, September 29). NICKEL GLADSTONE Threat Profile. Retrieved September 29, 2021.",
+     "url": "https://www.secureworks.com/research/threat-profiles/nickel-gladstone"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-10-09T03:56:03.463Z",
+   "name": "APT38",
+   "description": "[APT38](https://attack.mitre.org/groups/G0082) is a North Korean state-sponsored threat group that specializes in financial cyber operations; it has been attributed to the Reconnaissance General Bureau.(Citation: CISA AA20-239A BeagleBoyz August 2020) Active since at least 2014, [APT38](https://attack.mitre.org/groups/G0082) has targeted banks, financial institutions, casinos, cryptocurrency exchanges, SWIFT system endpoints, and ATMs in at least 38 countries worldwide. Significant operations include the 2016 Bank of Bangladesh heist, Bancomext (Citation: FireEye APT38 Oct 2018) and Banco de Chile (Citation: FireEye APT38 Oct 2018), along with software supply chain compromises and destructive malware attacks.(Citation: CISA AA20-239A BeagleBoyz August 2020)(Citation: FireEye APT38 Oct 2018)(Citation: DOJ North Korea Indictment Feb 2021)(Citation: Kaspersky Lazarus Under The Hood Blog 2017)(Citation: Microsoft Axios Compromise APR 2026)(Citation: Microsoft Sapphire Sleet APR 2026)(Citation: MIcrosoft Mastra npm Compromise JUN 2026)\n\nNorth Korean group definitions are known to have significant overlap, and some security researchers report all North Korean state-sponsored cyber activity under the name [Lazarus Group](https://attack.mitre.org/groups/G0032) instead of tracking clusters or subgroups.",
+   "aliases": [
+    "APT38",
+    "NICKEL GLADSTONE",
+    "BeagleBoyz",
+    "Bluenoroff",
+    "Stardust Chollima",
+    "Sapphire Sleet",
+    "COPERNICIUM"
+   ],
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack"
+   ],
+   "x_mitre_version": "4.0",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Hiroki Nagahama, NEC Corporation",
+    "Manikantan Srinivasan, NEC Corporation India",
+    "Pooja Natarajan, NEC Corporation India"
+   ]
+  },
+  {
+   "type": "relationship",
+   "id": "relationship--b252a076-6d4e-49f5-95ac-16264ef05b1d",
+   "created": "2017-12-14T16:46:06.044Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "Anton Cherepanov",
+     "description": "Anton Cherepanov   BlackEnergy by the SSHBearDoor: attacks against Ukrainian news media and electric industry Retrieved. 2019/10/29 ",
+     "url": "https://www.welivesecurity.com/2016/01/03/blackenergy-sshbeardoor-details-2015-attacks-ukrainian-news-media-electric-industry/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-04-29T14:23:06.168Z",
+   "description": "[KillDisk](https://attack.mitre.org/software/S0607) is able to delete system files to make the system unbootable and targets 35 different types of files for deletion. (Citation: Anton Cherepanov)",
+   "relationship_type": "uses",
+   "source_ref": "malware--e221eb77-1502-4129-af1d-fe1ad55e7ec6",
+   "target_ref": "attack-pattern--493832d9-cea6-4b63-abe7-9a65a6473675",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  },
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--493832d9-cea6-4b63-abe7-9a65a6473675",
+   "created": "2020-05-21T17:43:26.506Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T0809",
+     "external_id": "T0809"
+    },
+    {
+     "source_name": "Enterprise ATT&CK January 2018",
+     "description": "Enterprise ATT&CK 2018, January 11 File Deletion Retrieved. 2018/05/17 ",
+     "url": "https://attack.mitre.org/wiki/Technique/T1107"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-10-13T17:48:43.027Z",
+   "name": "Data Destruction",
+   "description": "Adversaries may perform data destruction over the course of an operation. The adversary may drop or create malware, tools, or other non-native files on a target system to accomplish this, potentially leaving behind traces of malicious activities. Such non-native files and other data may be removed over the course of an intrusion to maintain a small footprint or as a standard part of the post-intrusion cleanup process. (Citation: Enterprise ATT&CK January 2018)\n\nData destruction may also be used to render operator interfaces unable to respond and to disrupt response functions from occurring as expected. An adversary may also destroy data backups that are vital to recovery after an incident.\n\nStandard file deletion commands are available on most operating system and device interfaces to perform cleanup, but adversaries may use other tools as well. Two examples are Windows Sysinternals SDelete and Active@ Killdisk.",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-ics-attack",
+     "phase_name": "inhibit-response-function"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Matan Dobrushin - Otorio"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Embedded",
+    "Windows",
+    "Linux",
+    "Network Devices"
+   ],
+   "x_mitre_version": "1.0"
+  }
+ ]
+}

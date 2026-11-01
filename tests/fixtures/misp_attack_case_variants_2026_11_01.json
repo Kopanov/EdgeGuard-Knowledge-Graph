@@ -1,0 +1,368 @@
+{
+ "_provenance": "Real MISP attributes: the three 'malware-type' attributes named TRITON, KillDisk and Killdisk of the MITRE ATT&CK event of a local test MISP (2.5) after a 7-day edgeguard_baseline DAG run on 2026-11-01 (EdgeGuard 883fda5, ATT&CK for ICS on), as the read-only restSearch listing returned them, copied verbatim. MISP stored 1,890 of the 1,891 MITRE attributes the collector pushed: it kept TRITON (the deprecated Enterprise S0609, pushed in an earlier batch) and both KillDisk and Killdisk (pushed in one batch), and did not store the active ATT&CK for ICS Triton (S1009).",
+ "attributes": [
+  {
+   "id": "487447",
+   "event_id": "40",
+   "object_id": "0",
+   "object_relation": null,
+   "category": "Payload delivery",
+   "type": "malware-type",
+   "to_ids": false,
+   "uuid": "a3384887-c808-4bb2-8e80-d82f65c02c81",
+   "timestamp": "1793515385",
+   "distribution": "5",
+   "sharing_group_id": "0",
+   "comment": "This entry was deprecated as it was inadvertently added to Enterprise; a similar Software entry was created for ATT&CK for ICS.\n\n[TRITON](https://attack.mitre.org/software/S0609) is an attack framework built to interact with Triconex Safety Instrumented System (SIS) controllers. [TRITON](https://attack.mitre.org/software/S0609) was deployed against at least one target in the Middle East. (Citat...",
+   "deleted": false,
+   "disable_correlation": false,
+   "first_seen": "2021-01-11T21:27:41.573000+00:00",
+   "last_seen": "2023-10-20T17:47:16.193000+00:00",
+   "value": "TRITON",
+   "Event": {
+    "id": "40",
+    "info": "EdgeGuard-mitre_attck-2026-11-01",
+    "org_id": "1",
+    "orgc_id": "1",
+    "uuid": "6bfa35a2-a383-4a17-afe1-4a004d6cbc7d",
+    "user_id": "1",
+    "threat_level_id": "3",
+    "distribution": "1",
+    "analysis": "0",
+    "date": "2026-11-01",
+    "timestamp": "1793515407",
+    "publish_timestamp": "0",
+    "Org": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+    },
+    "Orgc": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+    },
+    "ThreatLevel": {
+     "id": "4",
+     "name": "Undefined"
+    }
+   },
+   "Tag": [
+    {
+     "id": "76",
+     "name": "zone:Global",
+     "colour": "#a11edb",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "238",
+     "name": "source:MITRE-ATT&CK",
+     "colour": "#4c7625",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "78",
+     "name": "tlp:white",
+     "colour": "#d78943",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "2069",
+     "name": "malware-type:malware",
+     "colour": "#de6469",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7226",
+     "name": "alias:TRITON",
+     "colour": "#4776e6",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7227",
+     "name": "alias:HatMan",
+     "colour": "#610f18",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7228",
+     "name": "alias:TRISIS",
+     "colour": "#bf4982",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7229",
+     "name": "misp-galaxy:malware=\"TRITON\"",
+     "colour": "#50132d",
+     "numerical_value": null,
+     "is_galaxy": true,
+     "local": false
+    },
+    {
+     "id": "702",
+     "name": "attack-status:deprecated",
+     "colour": "#8d3eb3",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    }
+   ]
+  },
+  {
+   "id": "487659",
+   "event_id": "40",
+   "object_id": "0",
+   "object_relation": null,
+   "category": "Payload delivery",
+   "type": "malware-type",
+   "to_ids": false,
+   "uuid": "d6c301d7-9c0d-4217-b614-c26e01ef8372",
+   "timestamp": "1793515407",
+   "distribution": "5",
+   "sharing_group_id": "0",
+   "comment": "MITRE_USES_TECHNIQUES:{\"t\":[\"T1083\",\"T1106\",\"T1680\",\"T1129\",\"T1057\",\"T1685.005\",\"T1027\",\"T1489\",\"T1529\",\"T1561.002\",\"T1486\",\"T1070.004\",\"T1036.004\",\"T1134\",\"T1485\",\"T0829\",\"T0872\",\"T0809\",\"T0881\"]}\n[KillDisk](https://attack.mitre.org/software/S0607) is a disk-wiping tool designed to overwrite files with random data to render the OS unbootable. It was first observed as a component of [BlackEnergy](https://attack.mitre.org/software/S0089) malware during cyber attacks against Ukraine in 2015. [KillDisk](https://attack.mitre.org/software/S0607) has since evolved into stand-alone malware used ...",
+   "deleted": false,
+   "disable_correlation": false,
+   "first_seen": "2021-01-20T18:05:07.059000+00:00",
+   "last_seen": "2023-10-06T14:09:52.833000+00:00",
+   "value": "KillDisk",
+   "Event": {
+    "id": "40",
+    "info": "EdgeGuard-mitre_attck-2026-11-01",
+    "org_id": "1",
+    "orgc_id": "1",
+    "uuid": "6bfa35a2-a383-4a17-afe1-4a004d6cbc7d",
+    "user_id": "1",
+    "threat_level_id": "3",
+    "distribution": "1",
+    "analysis": "0",
+    "date": "2026-11-01",
+    "timestamp": "1793515407",
+    "publish_timestamp": "0",
+    "Org": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+    },
+    "Orgc": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+    },
+    "ThreatLevel": {
+     "id": "4",
+     "name": "Undefined"
+    }
+   },
+   "Tag": [
+    {
+     "id": "76",
+     "name": "zone:Global",
+     "colour": "#a11edb",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "238",
+     "name": "source:MITRE-ATT&CK",
+     "colour": "#4c7625",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "78",
+     "name": "tlp:white",
+     "colour": "#d78943",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "2069",
+     "name": "malware-type:malware",
+     "colour": "#de6469",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7672",
+     "name": "alias:KillDisk",
+     "colour": "#d257e0",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7673",
+     "name": "alias:Win32/KillDisk.NBI",
+     "colour": "#525e55",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7674",
+     "name": "alias:Win32/KillDisk.NBH",
+     "colour": "#5f447e",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7675",
+     "name": "alias:Win32/KillDisk.NBD",
+     "colour": "#74c551",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7676",
+     "name": "alias:Win32/KillDisk.NBC",
+     "colour": "#134557",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7677",
+     "name": "alias:Win32/KillDisk.NBB",
+     "colour": "#08596a",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7678",
+     "name": "misp-galaxy:malware=\"KillDisk\"",
+     "colour": "#68b500",
+     "numerical_value": null,
+     "is_galaxy": true,
+     "local": false
+    }
+   ]
+  },
+  {
+   "id": "487760",
+   "event_id": "40",
+   "object_id": "0",
+   "object_relation": null,
+   "category": "Payload delivery",
+   "type": "malware-type",
+   "to_ids": false,
+   "uuid": "26791e3a-5ac4-4b89-bd4b-764932debd87",
+   "timestamp": "1793515407",
+   "distribution": "5",
+   "sharing_group_id": "0",
+   "comment": "In 2015 the BlackEnergy malware contained a component called KillDisk. KillDisk's main functionality is to overwrite files with random data, rendering the OS unbootable. (Citation: ESET BlackEnergy Jan 2016)",
+   "deleted": false,
+   "disable_correlation": false,
+   "first_seen": "2017-05-31T21:33:21.973000+00:00",
+   "last_seen": "2025-04-18T18:00:55.503000+00:00",
+   "value": "Killdisk",
+   "Event": {
+    "id": "40",
+    "info": "EdgeGuard-mitre_attck-2026-11-01",
+    "org_id": "1",
+    "orgc_id": "1",
+    "uuid": "6bfa35a2-a383-4a17-afe1-4a004d6cbc7d",
+    "user_id": "1",
+    "threat_level_id": "3",
+    "distribution": "1",
+    "analysis": "0",
+    "date": "2026-11-01",
+    "timestamp": "1793515407",
+    "publish_timestamp": "0",
+    "Org": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+    },
+    "Orgc": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+    },
+    "ThreatLevel": {
+     "id": "4",
+     "name": "Undefined"
+    }
+   },
+   "Tag": [
+    {
+     "id": "76",
+     "name": "zone:Global",
+     "colour": "#a11edb",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "238",
+     "name": "source:MITRE-ATT&CK",
+     "colour": "#4c7625",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "78",
+     "name": "tlp:white",
+     "colour": "#d78943",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "2069",
+     "name": "malware-type:malware",
+     "colour": "#de6469",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7672",
+     "name": "alias:KillDisk",
+     "colour": "#d257e0",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    },
+    {
+     "id": "7678",
+     "name": "misp-galaxy:malware=\"KillDisk\"",
+     "colour": "#68b500",
+     "numerical_value": null,
+     "is_galaxy": true,
+     "local": false
+    },
+    {
+     "id": "702",
+     "name": "attack-status:deprecated",
+     "colour": "#8d3eb3",
+     "numerical_value": null,
+     "is_galaxy": false,
+     "local": false
+    }
+   ]
+  }
+ ]
+}

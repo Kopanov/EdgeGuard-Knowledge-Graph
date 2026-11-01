@@ -19,7 +19,8 @@ This module holds what every site needs to treat such a name as the family it na
   check that mirrors 9b) find the ``Malware`` node of a family name: as given, without the id, and
   through the names the twin merge folded into a node (``merged_from``);
 * ``attack_software_id`` — the ATT&CK id of a MITRE ``Malware`` node, read from the record MITRE
-  delivered (its ``SOURCED_FROM`` edge's ``raw_data``; the node has no ``mitre_id``);
+  delivered (its ``SOURCED_FROM`` edge's ``raw_data``, which every MITRE node has; a node synced since
+  2026-11 also carries the id as ``mitre_id``);
 * ``plan_twin_folds`` — which non-MITRE node folds into which node: the MITRE node of its id or base
   name, else the non-MITRE node of its base name (the enrichment job ``merge_malware_attack_twins`` and
   ``scripts/verify_fresh_baseline.py``).
