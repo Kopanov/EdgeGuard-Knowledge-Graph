@@ -775,9 +775,9 @@ def assert_misp_preflight() -> None:
             compat_issues = [i for i in issues if "compatible" in i.lower() or "pymisp" in i.lower()]
             if compat_issues:
                 logger.warning(f"MISP VERSION WARNING: {compat_issues[0]}")
+                # No run_pipeline.py workaround: its STIX import builds a reduced graph (docs/AIRFLOW_DAGS.md).
                 logger.warning(
-                    "Pipeline may work but Airflow DAG scheduler could hang. "
-                    "Consider using 'python3 src/run_pipeline.py' directly."
+                    "Pipeline may work but Airflow DAG scheduler could hang; fix the version mismatch named above."
                 )
     except Exception as e:
         logger.debug("Advisory version compatibility check failed: %s", e, exc_info=True)

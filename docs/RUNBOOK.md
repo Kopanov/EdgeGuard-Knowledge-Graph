@@ -809,14 +809,22 @@ pause the scheduled DAGs and mark each run they still have failed (Airflow UI
 or `edgeguard dag kill --dag-id <dag>`) until none of them has a running run
 (Option A).
 
-**Every launch path takes the lock:** the DAG, whether it is triggered from
-the Airflow UI, the API or the CLI wrappers, and the in-process
-`python src/run_pipeline.py --baseline`. Pausing the scheduled DAGs stops
-new tasks and retries only; a task that is already running keeps running.
+**A baseline runs through the DAG on every install**, with Docker or
+without it: triggered from the Airflow UI, the API, `airflow dags trigger`
+(the form an install without Docker uses) or the CLI wrappers (Compose
+only), the DAG takes the lock. The in-process
+`python src/run_pipeline.py --baseline` takes it too, but it is a
+development path that builds a reduced graph (no ATT&CK tactic, software
+or technique-implementation links, no indicator-malware links or
+campaigns, few actor-technique or attribution links, no CVSS scores) and
+is not a way to run a baseline
+([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)).
+Pausing the scheduled DAGs stops new tasks and retries only; a task that
+is already running keeps running.
 
 > **Note:** the `baseline_in_progress.lock` sentinel is written by the
-> baseline DAG itself (`baseline_acquire_lock`) and by the legacy
-> in-process `python src/run_pipeline.py --baseline` path. The
+> baseline DAG itself (`baseline_acquire_lock`) and by the in-process
+> `python src/run_pipeline.py --baseline` (development only). The
 > `edgeguard baseline` / `edgeguard fresh-baseline` wrappers trigger the
 > DAG and add safety UX; they do not pause anything.
 
@@ -835,7 +843,9 @@ scheduler starts none of them, so waiting does not end it: mark each run
 the command lists failed in the Airflow UI (`edgeguard dag kill --dag-id
 <dag>` does the same through the REST API). Airflow fails a task of it that
 is still running and stops it. Wait until the task log shows that the task
-has stopped and each of the 5 DAGs prints `[]`:
+has stopped and each of the 5 DAGs prints `[]`. The commands are for the
+Compose install; without Docker, run the same `airflow` commands in the
+environment of your Airflow install, without `docker compose exec [-T] airflow`:
 
 ```bash
 docker compose exec airflow airflow dags pause edgeguard_daily
@@ -886,9 +896,11 @@ Exit non-zero = do NOT launch. Exit zero + green summary = safe to trigger.
 `edgeguard baseline --days N` (additive) and `edgeguard fresh-baseline`
 (destructive — typed confirmation + backup-timestamp gate) trigger the
 same `edgeguard_baseline` DAG; they add safety UX, not a mutex of their
-own. The `baseline_in_progress.lock` sentinel is held by the DAG
-(`baseline_acquire_lock`) and by the legacy in-process
-`python src/run_pipeline.py --baseline` run.
+own, and they run `docker compose exec`, so they work on the Compose
+install only. The `baseline_in_progress.lock` sentinel is held by the DAG
+(`baseline_acquire_lock`) and by the in-process
+`python src/run_pipeline.py --baseline` run, a development path that
+builds a reduced graph.
 
 ---
 
@@ -1293,7 +1305,9 @@ need the source's record without a round-trip to MISP. On a `CVE` the
 edge holds the source's latest record, replaced on every write from a MISP
 attribute; on other labels, the record that created the edge. The
 STIX import of the `run_pipeline.py` CLI (always on there; the Airflow DAGs
-do not use it) writes a reduced record under the MISP event's source id only
+do not use it; a development path,
+[AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only))
+writes a reduced record under the MISP event's source id only
 when it creates the edge, never over the record the sync wrote.
 
 ```cypher
@@ -1371,6 +1385,7 @@ _Last updated: 2026-11-01_
 ## History
 
 - 2026-11-01 — New section "Airflow scheduler or triggerer stopped": `airflow standalone` keeps the API server up when the scheduler dies, so the run stays `running`; detection through `EdgeGuardAirflowSchedulerDown`, `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable`, the `airflow` service healthcheck, `edgeguard dag status` / `doctor` / `preflight` and check `[13]` of `scripts/preflight_baseline.sh`; recovery: restore the metadata database first when it is unhealthy, let a running task end when the time allows (a restart runs it again from its start), restart Airflow and do not pause the DAG; a triggerer or DAG processor alone waits until no run is in progress.
+- 2026-11-01 — Baseline launch path: a baseline runs through the DAG on every install (`airflow dags trigger` without Docker; the `edgeguard` wrappers need Compose); the in-process `run_pipeline.py --baseline` still takes the lock but is a development path that builds a reduced graph (the section listed it among the launch paths).
 - 2026-10-25 — Baseline-day protocol: the short procedures mark the runs of the paused DAGs failed too; the paged-fetch gauge is set again by every later sync run that connects (the missed rows need a full sync).
 - 2026-10-25 — Baseline-day protocol: pausing the scheduled DAGs stops new tasks and retries only, and a task that is already running keeps running (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); before a fresh baseline, wait until `airflow dags list-runs <dag> --state running -o json` prints `[]` for each of the 5 DAGs, and preflight check `[5]` fails while one has a running run.
 - 2026-10-25 — Fresh-baseline wipe: the OTX event of a 730-day baseline is the one of about 150,000 attributes; other sources' events hold at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (20,000) each (the text said the NVD event too).

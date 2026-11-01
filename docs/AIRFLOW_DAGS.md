@@ -166,17 +166,30 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 
 **Unknown keys:** Airflow's conf-passing mechanism ignores unknown keys silently, so the DAG emits a `WARNING [BASELINE_CONF]` log line for each unrecognized key, with a "did you mean?" suggestion for common typos (e.g. `days` → `baseline_days`). Without it, a trigger with `{"days": 730}` (missing the `baseline_` prefix) falls through to defaults — additive mode with the wrong window depth, no visible error. Grep your DAG logs for `[BASELINE_CONF]` to spot misconfigured triggers. Exception: a typo of the destructive key with a truthy value (`fresh`, `destructive`, `wipe`) and no `fresh_baseline` key fails `baseline_clean` before anything is wiped.
 
-**CLI vs DAG equivalence:** the operator commands `edgeguard fresh-baseline --days <N>` and `edgeguard baseline --days <N>` shell out to the Airflow CLI to trigger this DAG with the appropriate `dag_run.conf` — they do NOT run a local pipeline. The destructive command (`edgeguard fresh-baseline`) prompts for typed `FRESH-BASELINE` confirmation before triggering; the additive command (`edgeguard baseline`) does not.
-
-**CLI-only `python src/run_pipeline.py --baseline` direct execution:** this legacy path runs the pipeline IN-PROCESS rather than triggering the DAG. It has one operator-visible asymmetry — `build_relationships` failures log a `WARN` and continue (so Step 5c enrichment still runs); the DAG raises `AirflowException` on the same failure. The CLI's degraded-mode behavior is documented in source comments at `src/run_pipeline.py:1565+`. Operators running the legacy CLI path should grep logs for `DEGRADED MODE` to detect missing link edges. The `edgeguard fresh-baseline` and `edgeguard baseline` wrappers inherit DAG semantics — no asymmetry there.
+**CLI vs DAG equivalence:** the operator commands `edgeguard fresh-baseline --days <N>` and `edgeguard baseline --days <N>` shell out to the Airflow CLI to trigger this DAG with the appropriate `dag_run.conf` — they do NOT run a local pipeline. The destructive command (`edgeguard fresh-baseline`) prompts for typed `FRESH-BASELINE` confirmation before triggering; the additive command (`edgeguard baseline`) does not. Both run `docker compose exec airflow airflow dags trigger`, so they work on the Compose install only; without Docker, trigger the DAG with `airflow dags trigger edgeguard_baseline` (with `--conf`) in the Airflow environment or from the Airflow UI. The in-process `python src/run_pipeline.py --baseline`, which builds a reduced graph, is not one of these paths ([In-process CLI baseline](#in-process-cli-baseline-development-only)).
 
 **Metrics (optional):** `edgeguard_metrics_server` (+ `…_scheduled`) and **`edgeguard_metrics_helpers`** in `dags/edgeguard_metrics_server.py` — default scrape URL `http://127.0.0.1:8001/metrics` (`EDGEGUARD_METRICS_HOST` / `EDGEGUARD_METRICS_PORT`).
 
-**Note:** “Items/Run” figures below are **order-of-magnitude defaults**; effective limits come from `get_effective_limit()` (`EDGEGUARD_INCREMENTAL_LIMIT`, `EDGEGUARD_MAX_ENTRIES`, baseline Airflow Variables).
+#### In-process CLI baseline (development only)
+
+Every baseline, a 7-day smoke run or the 730-day run, additive or fresh, runs through the `edgeguard_baseline` DAG, on an install with Docker and on one without it. An install without Docker runs Airflow with a PostgreSQL metadata database ([SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker); SQLite is for development only, see [Troubleshooting](#dag-run-stuck-in-queued-scheduler-running-but-nothing-executes)) and triggers the DAG with `airflow dags trigger edgeguard_baseline` or from the Airflow UI ([BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md), Option B).
+
+`python src/run_pipeline.py --baseline` runs the collectors and the Neo4j load in its own process. It is a development path and builds a reduced graph: it loads Neo4j through its STIX 2.1 import (always on), not through the MISP → Neo4j sync the DAG runs in `full_neo4j_sync`, and the nodes that import writes lack what `build_relationships.py` links by:
+
+- techniques have no ATT&CK tactic phases (and tactics no short name);
+- threat actors, malware and tools have no ATT&CK technique or software lists, and malware no attribution;
+- indicators have no malware family and no OTX technique ids;
+- CVEs have no CVSS data (no score, severity `UNKNOWN`, no CVSS sub-nodes) and no KEV fields.
+
+The graph therefore has no `IN_TACTIC`, `IMPLEMENTS_TECHNIQUE`, `USES_MALWARE`, `USES_TOOL`, `USES_TECHNIQUE` or `INDICATES` relationships and no campaigns, and no CVE has a CVSS score. Of ATT&CK's actor-technique (`EMPLOYS_TECHNIQUE`) and malware-actor (`ATTRIBUTED_TO`) pairs, the run links only those whose names equal the stored node names exactly, which are few. File hashes, email addresses and certificate fingerprints are not loaded, a curated package's event is skipped, and each MISP event is fetched whole, so an event MISP cannot return in one response (OTX's, on a long window) is skipped.
+
+The run still ends with "Pipeline completed successfully": a `build_relationships.py` step without input does not fail, and a failure of `build_relationships.py` itself is logged as `DEGRADED MODE` while the run continues (the DAG fails on it). `--fresh-baseline` wipes Neo4j, MISP and the checkpoints without the backup-timestamp gate and the typed confirmation of `edgeguard fresh-baseline`. The run takes the baseline lock (`checkpoints/baseline_in_progress.lock`) like the DAG, and logs a `[REDUCED-GRAPH]` warning before it wipes or collects anything. Do not use it for a graph that will be queried or validated.
 
 ---
 
 ## Source Schedules
+
+**Note:** “Items/Run” figures below are **order-of-magnitude defaults**; effective limits come from `get_effective_limit()` (`EDGEGUARD_INCREMENTAL_LIMIT`, `EDGEGUARD_MAX_ENTRIES`, baseline Airflow Variables).
 
 ### By Frequency
 
@@ -369,7 +382,7 @@ Device, NetworkService, SoftwareVersion, Application, Role and User carry **no**
 - `on_failure_callback` / `on_success_callback` for alerting and metrics; the listener plugin `plugins/edgeguard_dag_run_state.py` marks the DAG run in progress
 - `ShortCircuitOperator` gates the Neo4j sync: it skips while a baseline holds the baseline lock or within 24 h of the last sync start, and runs on a corrupted state file
 - Pipeline lock file (`checkpoints/pipeline.lock`) for CLI runs to prevent concurrent `run_pipeline.py` invocations
-- `--fresh-baseline` performs a true clean slate: clears Neo4j graph data + MISP EdgeGuard events + checkpoints, incremental cursors included (`reset_baseline_data`), then re-collects from scratch. After it, a baseline whose NVD push succeeded stores its start as the NVD incremental cursor; the other scheduled collectors start from their first-run lookback (for example `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS` for OTX).
+- `--fresh-baseline` of the in-process CLI (development only, [In-process CLI baseline](#in-process-cli-baseline-development-only)) performs a true clean slate: clears Neo4j graph data + MISP EdgeGuard events + checkpoints, incremental cursors included (`reset_baseline_data`), then re-collects from scratch. After it, a baseline whose NVD push succeeded stores its start as the NVD incremental cursor; the other scheduled collectors start from their first-run lookback (for example `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS` for OTX).
 - MISP dedup logging: `[DEDUP] All N items were already present` only when nothing failed and no item was dropped in conversion, N being the attributes found present, `[CONVERT]` for items no attribute could be built from (counted as failed only when they are all or at least half of a source's items in the push), `[SKIP]` when nothing new to push
 
 ### Metrics Exported
@@ -455,7 +468,7 @@ airflow logs <task_id> <dag_run_id>
 |---------|----------|
 | DAG runs stuck in "queued" | Run `edgeguard dag status`. When it reports the scheduler as not healthy, recover Airflow and keep the runs ([Scheduler or triggerer stopped](#scheduler-or-triggerer-stopped)). Otherwise check whether the DAG is paused, and only then consider killing stuck runs with `edgeguard dag kill` |
 | Collectors failing repeatedly | Find the cause in the task log and `edgeguard_collection_failures_total`, fix it and clear the failed task; each Airflow task starts with every circuit breaker CLOSED ([RESILIENCE_CONFIG.md](RESILIENCE_CONFIG.md)), and `edgeguard heal` resets only the breakers of its own CLI process |
-| Need a completely fresh start | `edgeguard fresh-baseline --days N` — enforces the backup-timestamp gate + requires typed `FRESH-BASELINE` confirmation. See [`docs/BACKUP.md`](BACKUP.md) for the backup prerequisite. (The legacy `python src/run_pipeline.py --baseline --fresh-baseline` path has NO backup gate and NO typed confirmation — **do not use** unless you understand you're bypassing both.) |
+| Need a completely fresh start | `edgeguard fresh-baseline --days N` — enforces the backup-timestamp gate + requires typed `FRESH-BASELINE` confirmation. See [`docs/BACKUP.md`](BACKUP.md) for the backup prerequisite. Without Docker, trigger `airflow dags trigger edgeguard_baseline --conf '{"fresh_baseline": true}'` in the Airflow environment; the gate runs in the `baseline_clean` task, so `EDGEGUARD_LAST_BACKUP_AT` goes into the environment of the Airflow processes, which then need a restart (set only in the shell that triggers, it does not reach the task); on stores that hold only test data, add `"skip_backup_check": true` to the conf instead. (The in-process `python src/run_pipeline.py --baseline --fresh-baseline` has neither the backup gate nor the typed confirmation and builds a reduced graph — **do not use** it for a graph that will be queried or validated; see [In-process CLI baseline](#in-process-cli-baseline-development-only).) |
 | Airflow not reachable | `edgeguard doctor` retries after 10s; check container: `docker compose ps airflow` |
 | Runs stay "running" and no task starts | The scheduler has stopped while the API server still answers: `edgeguard dag status` lists the runs, names the scheduler as not healthy and exits 1. Restart Airflow (`docker compose restart airflow`) without triggering or pausing the DAG; finished tasks are not run again, and a task still running at the restart runs again from its start ([Scheduler or triggerer stopped](#scheduler-or-triggerer-stopped)) |
 | `edgeguard dag` reports 401 or rejected credentials | The CLI speaks the Airflow 3 API (`/api/v2`, bearer token from `POST /auth/token`). Set `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` in `.env` (the `admin` password is in `/opt/airflow/simple_auth_manager_passwords.json.generated` inside the container); for an Airflow 2 deployment set `AIRFLOW_API_VERSION=v1`. |
@@ -517,7 +530,7 @@ export EDGEGUARD_ENABLE_MALWAREBAZAAR=true    # MalwareBazaar (edgeguard_daily �
 
 **Recovery:** when the metadata database is unhealthy, restore it first (`docker compose ps airflow_postgres`): Airflow does not start without it. A restart stops a task that is still running, and the new scheduler runs it again from its start, so when a task of the run is running and the run's time allows, let it end first. Then restart Airflow (`docker compose restart airflow`; bare metal: stop and start `airflow standalone`). Tasks that finished are not run again; do not trigger the DAG again and do not pause it. The stalled time counts against the run's `dagrun_timeout`. A triggerer or DAG processor alone does not stop a run: restart Airflow when no run is in progress. Details: [RUNBOOK.md](RUNBOOK.md), "Airflow scheduler or triggerer stopped".
 
-**Metadata database:** the Compose stack uses PostgreSQL (`airflow_postgres`). On a bare-metal install, set **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`** to PostgreSQL or MySQL; when neither it nor `airflow.cfg` names a backend, Airflow uses SQLite, which is for development only: a lock held a few seconds can stop the scheduler and the triggerer. A SQLite setup should at least append `?timeout=60` to the connection string. Check `[13]` of `scripts/preflight_baseline.sh` warns on SQLite and never prints the connection string (it holds the database password).
+**Metadata database:** the Compose stack uses PostgreSQL (`airflow_postgres`). A SQLite metadata database, Airflow's default on a bare-metal install without `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, is for development only: a lock held a few seconds can stop the scheduler and the triggerer (the bare-metal setting and the `?timeout=60` fallback: [§ DAG run stuck in queued](#dag-run-stuck-in-queued-scheduler-running-but-nothing-executes)). Check `[13]` of `scripts/preflight_baseline.sh` warns on SQLite and never prints the connection string (it holds the database password).
 
 ### DAG run stuck in **queued** (scheduler “running” but nothing executes)
 
@@ -534,7 +547,7 @@ docker compose down && docker compose up -d
 
 On first start, grab the Airflow UI bootstrap credentials from `docker compose logs airflow`.
 
-**Bare-metal / pip Airflow:** set **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`** to **PostgreSQL** or **MySQL** (see [Apache Airflow database docs](https://airflow.apache.org/docs/apache-airflow/stable/howto/set-up-database.html)). Keep **`AIRFLOW__CORE__EXECUTOR`** aligned with your deployment (e.g. `LocalExecutor` with a proper metadata backend).
+**Bare-metal / pip Airflow:** set **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`** to **PostgreSQL** (`postgresql+psycopg2://…`, example in `.env.example`; the `[postgres]` extra installs its driver) or **MySQL** (see [Apache Airflow database docs](https://airflow.apache.org/docs/apache-airflow/stable/howto/set-up-database.html)), in the environment of every Airflow process. SQLite, Airflow's default without this setting, is for development only (Apache Airflow says it must never be used in production): a lock one process holds can stop the scheduler, and a running baseline then stays `running` without progress, because only the scheduler enforces its timeouts. If you use SQLite anyway, append `?timeout=60` to its URL (`sqlite:////absolute/path/to/airflow.db?timeout=60`) so a connection waits up to 60 seconds for the lock. Keep **`AIRFLOW__CORE__EXECUTOR`** aligned with your deployment (e.g. `LocalExecutor` with a proper metadata backend).
 
 **Scaling:** for multi-worker production layouts, prefer the [official Airflow compose](https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html) or your platform’s chart — still with Postgres/MySQL metadata.
 
@@ -711,7 +724,7 @@ EdgeGuard-Knowledge-Graph/
 │   │   ├── global_feed_collector.py
 │   │   ├── finance_feed_collector.py
 │   │   └── misp_writer.py
-│   ├── run_pipeline.py           # Manual pipeline run
+│   ├── run_pipeline.py           # In-process pipeline run (development; reduced graph)
 │   └── run_misp_to_neo4j.py      # Manual sync
 └── docs/
     └── AIRFLOW_DAGS.md           # This guide (CLI, env, troubleshooting)
@@ -738,6 +751,7 @@ _Last updated: 2026-11-01_
 - 2026-11-01 — The Airflow image upgrades `libbrotli1` and `Authlib` past the advisories CVE-2026-111497 and CVE-2026-96760.
 - 2026-11-01 — MISP push accounting: case is ignored only for the types whose case MISP changes on save (a value the event held in another case had counted as stored).
 - 2026-11-01 — Troubleshooting: "Scheduler or triggerer stopped" (`airflow standalone` keeps the API server up when the scheduler dies; how `edgeguard dag status`, `doctor`, `preflight`, the `airflow` healthcheck, the Airflow alerts and preflight check `[13]` report it; recovery: the metadata database first, a running task runs again from its start after a restart, no new trigger and no pause; SQLite metadata database for development only, `?timeout=60`). The queued-runs row checks the scheduler before `edgeguard dag kill`. "DAG Not Running" checks the scheduler with `edgeguard dag status` instead of starting `airflow scheduler`.
+- 2026-11-01 — New § In-process CLI baseline: every baseline runs through the `edgeguard_baseline` DAG, also without Docker (Airflow with a PostgreSQL metadata database, triggered with `airflow dags trigger`, since the `edgeguard` wrappers need Compose); `python src/run_pipeline.py --baseline` is a development path whose STIX import builds a reduced graph, listed link by link (the page called it a legacy path with one asymmetry, the `DEGRADED MODE` handling). The bare-metal metadata database: PostgreSQL, SQLite for development only, `?timeout=60` with SQLite. A fresh baseline without Docker: `EDGEGUARD_LAST_BACKUP_AT` in the environment of the Airflow processes, or `skip_backup_check` on test data.
 - 2026-10-25 — Node table: one `Source` node per registered source, keyed by its canonical id (the row counted a node per registry alias).
 - 2026-10-25 — MISP event names: a source/date event continues in `-part2`, `-part3`, ... past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, OTX events excepted (the page said partitioning MISP events is not implemented).
 - 2026-10-25 — `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` sets the `run_neo4j_sync` limit (default 8 h, at most 22 h); the `dagrun_timeout` table, the skip guard and the stale alert state that their 8 h is the default limit; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit through `edgeguard_neo4j_sync_task_limit_seconds`, which each attempt sets when it starts; the mode line of the task log ends with the limit of the attempt.

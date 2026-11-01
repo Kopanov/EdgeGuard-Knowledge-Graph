@@ -66,13 +66,9 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
    - Start Neo4j with the expected constraints/indexes (EdgeGuard’s `neo4j_client.create_constraints()` / `.create_indexes()`).
    - Ensure MISP is reachable and configured with an API key.
 
-2. **Run the EdgeGuard pipeline**
+2. **Fill the graph through the EdgeGuard DAGs**
 
-   ```bash
-   # From repository root; env vars: MISP_URL, MISP_API_KEY, NEO4J_*, etc.
-   python src/run_pipeline.py
-   ```
-   (Prefer **Airflow DAGs** for production — see [SETUP_GUIDE.md](SETUP_GUIDE.md). Use `run_pipeline.py` for direct testing.)
+   Run a 7-day smoke baseline of the `edgeguard_baseline` DAG ([BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)), on Compose or on an install without Docker ([SETUP_GUIDE.md](SETUP_GUIDE.md)). `python src/run_pipeline.py` loads Neo4j through its STIX import and builds a reduced graph, without the ATT&CK, attribution and indicator-malware links ([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)), so an integration test on it checks a graph EdgeGuard does not produce.
    - (Optionally) trigger any integration logic you add that maps TI into ResilMesh nodes.
 
 3. **Call the ResilMesh merge/bridge methods**
@@ -147,10 +143,11 @@ ResilMesh then works on a Neo4j graph that holds **both**:
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — End-to-end test: the graph is filled by a smoke baseline of the `edgeguard_baseline` DAG (the step ran `python src/run_pipeline.py`, whose STIX import builds a reduced graph).
 - 2026-10-25 — `merge_resilmesh_cve` example: `stix_import` is a registered source without a description rank (`ranked_for_descriptions=False`), so `resilmesh`, whose id sorts first, still replaces its text.
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: `tests/test_resilmesh_schema.py` is a pytest module that needs no Neo4j (as a plain script it checks nothing) and the methods and labels it checks are listed; the recommended split follows RESILMESH_INTEROPERABILITY.md §4 and §6 (ResilMesh writes its topology, mission and scanner data, EdgeGuard the threat intelligence and `CVE` + `CVSSv*`); no indicator- or CVE-to-asset bridge exists yet.
 - 2026-10-16 — `merge_resilmesh_cve` example: the description follows the sync's source ranking with `description_source` `resilmesh`, below every registered feed.

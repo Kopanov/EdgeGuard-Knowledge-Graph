@@ -307,11 +307,11 @@ export NEO4J_URI="bolt://localhost:7687"
 export NEO4J_USER="neo4j"
 export NEO4J_PASSWORD="your-neo4j-password"
 
-# Airflow (optional)
+# Airflow (the scheduled DAGs and every baseline, with Docker or without it; docs/SETUP_GUIDE.md § 4)
 export AIRFLOW__CORE__EXECUTOR=LocalExecutor
 export EDGEGUARD_BASE_DIR="/path/to/EdgeGuard"
-# Metadata DB: use PostgreSQL or MySQL for Airflow state (repo Compose: service `airflow_postgres`).
-# Example bare-metal: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://user:pass@host:5432/airflow
+# Metadata DB: PostgreSQL (repo Compose: service `airflow_postgres`); SQLite is for development only.
+export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://<airflow_user>:<airflow_password>@localhost:5432/<airflow_db>"
 # See docs/AIRFLOW_DAGS.md and https://airflow.apache.org/docs/apache-airflow/stable/howto/set-up-database.html
 ```
 
@@ -355,10 +355,11 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Environment variables: Airflow runs the scheduled DAGs and every baseline, also without Docker (the block called it optional); the block sets a PostgreSQL metadata database with placeholder credentials and names SQLite as development only.
 - 2026-10-25 — URLhaus: the export is regenerated every 5 minutes (the table said hourly); the recent export lists the URLs added in the past 30 days; the full dump is a v2 export with the Auth-Key of the URLs active or added in the past 90 days (the keyless `downloads/csv_all/` answers HTTP 410).
 - 2026-10-25 — The setup checklist names URLhaus and MalwareBazaar among the sources skipped without their key.
 - 2026-10-25 — URLhaus: the export needs the abuse.ch Auth-Key in its URL path and a free abuse.ch account (the keyless `downloads/csv_recent/` answers HTTP 410 since 2026-10); about 63,000 URLs per export on 2026-10-24.

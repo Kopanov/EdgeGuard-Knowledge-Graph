@@ -139,10 +139,11 @@ export NEO4J_USER="neo4j"
 export NEO4J_PASSWORD="your-strong-password"
 export EDGEGUARD_SSL_VERIFY=true
 
-# 4. Start the API / pipeline as needed
+# 4. Start the API as needed
 python src/query_api.py   # via uvicorn in production
-python src/run_pipeline.py --stix-flow
 ```
+
+Wherever the pipeline runs, on the device or on a server, it runs as the Airflow DAGs (the scheduled collection, the MISP → Neo4j sync and every baseline): there, install the `airflow` extra and give Airflow a PostgreSQL metadata database ([SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker)). `python src/run_pipeline.py` loads Neo4j through its STIX import and builds a reduced graph; it is for development only ([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)).
 
 For production, you would typically run these via a process manager (systemd, Docker, Kubernetes) and inject the environment variables there instead of exporting them manually.
 
@@ -173,7 +174,7 @@ EdgeGuard does **not** require Docker. The same Python code paths read **`NEO4J_
 1. **Reachability**: If Airflow runs in Docker but MISP is on the host, `https://localhost:8443` from *inside* the container is wrong — use the host gateway, ingress URL, or service name your platform documents.
 2. **Neo4j custom CA / mTLS**: The client uses `GraphDatabase.driver(self.uri, auth=…)` without extra SSL config. Standard `neo4j+s://` with a **public** CA works; **private CAs** may require JVM/Python trust store configuration on the host; there are no env flags for explicit trust material.
 3. **NATS**: The `NATSClient` helper exists for ResilMesh-style messaging; callers pass server URLs in code. No single **`NATS_SERVERS`** env var is wired through all entrypoints, so treat NATS as integration-specific.
-4. **Airflow**: DAG tasks use the same env as the Airflow worker/scheduler container; ensure **`MISP_URL` / `NEO4J_*`** are set there, not only on your laptop shell. With **EdgeGuard `docker-compose.yml`**, Airflow’s metadata DB is **PostgreSQL** (`airflow_postgres`); override defaults via **`AIRFLOW_POSTGRES_*`** in `.env` if needed. **`EDGEGUARD_SSL_VERIFY`** is passed via **`x-common-env`** so Airflow, API, and GraphQL all see the same value; if it were missing from the Airflow service, `config.SSL_VERIFY` would default to **`true`** even when `.env` had `false` for other tooling.
+4. **Airflow**: DAG tasks use the same env as the Airflow worker/scheduler container; ensure **`MISP_URL` / `NEO4J_*`** are set there, not only on your laptop shell. With **EdgeGuard `docker-compose.yml`**, Airflow’s metadata DB is **PostgreSQL** (`airflow_postgres`); override defaults via **`AIRFLOW_POSTGRES_*`** in `.env` if needed. Outside Compose, set **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`** to a PostgreSQL database as well; SQLite is for development only ([AIRFLOW_DAGS.md § Troubleshooting](AIRFLOW_DAGS.md#dag-run-stuck-in-queued-scheduler-running-but-nothing-executes)). **`EDGEGUARD_SSL_VERIFY`** is passed via **`x-common-env`** so Airflow, API, and GraphQL all see the same value; if it were missing from the Airflow service, `config.SSL_VERIFY` would default to **`true`** even when `.env` had `false` for other tooling.
 5. **MISP→Neo4j sync RAM**: The sync uses **Python-side chunked merges** (default **500** items per chunk via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**). Inter-batch throttling is the separate **`EDGEGUARD_MISP_BATCH_THROTTLE_SEC`** (default **5.0s**) on the MISP-push side; there is no inter-chunk pause on the Neo4j-merge side. Large events are deferred end-of-sync at **`EDGEGUARD_MAX_EVENT_ATTRIBUTES`** (default **50000**). With Docker Compose, the **airflow** service has a **memory limit** (**`AIRFLOW_MEMORY_LIMIT`**, default **12g** in `docker-compose.yml`). Events with 100K+ attributes are sized at **8-12GB**: the sync holds an event's attribute list in memory (events with up to **`EDGEGUARD_MISP_PAGED_FETCH_ABOVE`** attributes, default **20000**, are fetched whole with PyMISP `get_event`, REST `/events/view` as fallback; larger ones as `/events/restSearch` metadata plus `/attributes/restSearch` pages of **5000** joined into one list), then parses and writes it in pages of 5000. Lower to 4g only for small test deployments. **`0`** or **`all`** for chunk size forces a **single pass** (OOM risk).
 
 ---
@@ -188,7 +189,7 @@ should know them. All four are in `.env.example`.
 |---|---|---|
 | `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | `500` | Attributes per MISP push batch (`MISPWriter.push_items` default; the adaptive scaling lowers it on large events). Lower on memory-constrained MISP hosts that answer HTTP 500 on large batches. |
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Seconds between failed-event retry passes. Gives MISP time to recover from transient 5xx. |
-| `EDGEGUARD_BASELINE_LOCK_PATH` | `checkpoints/baseline_in_progress.lock` | Sentinel held by a running baseline: the `edgeguard_baseline` DAG run (from `baseline_acquire_lock`; `edgeguard baseline` triggers that DAG) or an in-process `run_pipeline.py --baseline`. While another run holds it, the scheduled collectors and the sync DAG's `run_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` skip. |
+| `EDGEGUARD_BASELINE_LOCK_PATH` | `checkpoints/baseline_in_progress.lock` | Sentinel held by a running baseline: the `edgeguard_baseline` DAG run (from `baseline_acquire_lock`; `edgeguard baseline` triggers that DAG) or an in-process `run_pipeline.py --baseline` (a development path). While another run holds it, the scheduled collectors and the sync DAG's `run_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` skip. |
 | `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `172800` (48 h, above the baseline DAG's 32 h `dagrun_timeout`) | Max age before a stale lock is auto-cleared (e.g. after a crash on a different host — the PID-liveness check only works on the same host). |
 
 See [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) for the wider set of Airflow-related
@@ -205,11 +206,12 @@ references the baseline lock.
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
 - 2026-11-01 — Pinned versions list the Airflow image's `Authlib`, upgraded past CVE-2026-96760.
+- 2026-11-01 — The edge recipe no longer starts `python src/run_pipeline.py --stix-flow` as the pipeline: the pipeline runs as the Airflow DAGs with a PostgreSQL metadata database, also outside Compose; `run_pipeline.py` builds a reduced graph (development only).
 - 2026-10-25 — Sync RAM: events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000) attributes are fetched as metadata plus attribute pages of 5000 joined into one list, not as one PyMISP event JSON.
 - 2026-10-23 — The conda setup exports `.env` and checks the setup with `edgeguard doctor`; new § 2.3 on direnv (`layout python` creates `.direnv/python-3.x`, not `.venv`); § 4 states that the code loads no `.env`; link to CONFIGURATION.md. The conda, multi-environment and direnv text came from the README.
 - 2026-10-22 — Pinned versions list the CA bundle `certifi` (`>=2026.10.19`) and the Airflow image's `pip` and `uv`, upgraded past the emSign CA advisories.

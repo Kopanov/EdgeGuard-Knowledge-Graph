@@ -51,13 +51,25 @@ EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path=dag
 ```
 
 **Pass criteria:** exit code 0, all 13 checks green. Without
-`--launch-path=dag` the script assumes the in-process CLI path, warns (which
-fails under STRICT=1) and checks only for running runs in check [5]. Specifically:
+`--launch-path` the script assumes `dag` and warns that it did (which fails
+under STRICT=1). `--launch-path=cli`, the in-process
+`python src/run_pipeline.py --baseline`, checks only for running runs in
+check [5] and warns that this path builds a reduced graph: it is a
+development path, not a launch path for this checklist. Without Docker,
+checks [5] and [6] cannot read Airflow or the container's memory limit
+(they use `docker compose exec` and `docker inspect`) and only warn, so
+STRICT=1 cannot pass there: check them by hand in the Airflow environment
+(for each of the 5 scheduled DAGs, `airflow dags details <dag>` shows
+`is_paused` True and `airflow dags list-runs <dag> --state running -o json`
+prints `[]`; the host that runs Airflow has the memory of
+[MEMORY_TUNING.md § 730-day baseline profile](MEMORY_TUNING.md#730-day-baseline-profile)),
+run the preflight without STRICT=1, and pass it when those two warnings
+are the only ones. Specifically:
 
 * `[1] required env vars present` — NEO4J_PASSWORD, MISP_API_KEY, MISP_URL
 * `[2] Neo4j reachable + APOC + indexes` — through `docker compose exec neo4j cypher-shell` when the Compose neo4j service runs, else `cypher-shell -a $NEO4J_URL` (default bolt://localhost:7687; the script reads NEO4J_URL, not NEO4J_URI, and logs in as user `neo4j`)
 * `[3] MISP API reachable + auth valid`
-* `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; `--launch-path=cli` refers only to the in-process `run_pipeline.py --baseline` path)
+* `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; `--launch-path=cli` refers only to the in-process `run_pipeline.py --baseline`, a development path that builds a reduced graph: [AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only))
 * `[5] DAG path: 5 scheduled DAGs PAUSED, none with a running run; CLI path: none with a running run` (an unpaused DAG is a warning, a failure under STRICT=1: the baseline lock makes scheduled tasks skip when they start, and pausing stops new tasks and retries. A running run of one of the 5 DAGs is a failure: pausing does not stop a task that is already running, and a `run_neo4j_sync` attempt can last up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Running runs that cannot be queried are a warning)
 * `[6] Airflow worker RAM ≥ 4 GB`
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
@@ -443,9 +455,11 @@ clearing:
 ## Launch decision
 
 If the items above pass, the baseline is cleared to run `edgeguard_baseline`.
-Every launch flow goes through the DAG — `edgeguard baseline` /
+Every launch flow goes through the DAG, on every install — `edgeguard baseline` /
 `edgeguard fresh-baseline` are wrappers that trigger it; they add
-confirmation + backup-gate UX, **not** a mutex.
+confirmation + backup-gate UX, **not** a mutex, and run `docker compose exec`
+(without Docker, trigger with `airflow dags trigger edgeguard_baseline` in the
+Airflow environment).
 See RUNBOOK § "Baseline launch path" for the full procedure:
 
 1. Pause the 5 scheduled DAGs (`edgeguard_daily`, `edgeguard_medium_freq`,
@@ -625,6 +639,7 @@ _Last updated: 2026-11-01_
 ## History
 
 - 2026-11-01 — Check `[13]`: Airflow's scheduler, triggerer and DAG processor and the metadata database backend (13-check preflight); During the run: `EdgeGuardAirflowSchedulerDown` and the recovery of a stopped scheduler.
+- 2026-11-01 — Preflight without `--launch-path` assumes `dag` (it assumed the in-process CLI path); `--launch-path=cli` warns that the in-process baseline builds a reduced graph; the launch decision names the trigger without Docker; without Docker, checks [5] and [6] only warn and are done by hand.
 - 2026-10-26 — `campaign_seen_dates_cover_members`: a campaign with members and no comparable stored `first_seen` fails, and so does one without a comparable `last_seen` while an edge gives a member a last date; the check passes only when an edge dates a member (`edge_dated_members`) and is informational without a defect otherwise; `campaigns_without_edge_dated_member` names the campaigns the import-time comparison does not reach; a sync after the build cannot make it fail (the row said it leaves the result as it is).
 - 2026-10-25 — Acceptance check `campaign_seen_dates_cover_members`: no campaign is first seen after an indicator member's first date or last seen before a member's latest dated report (a campaign build without the report dates fails it).
 - 2026-10-25 — During the run: `EdgeGuardSyncPagedFetchIncomplete` reports an event fetched in pages with fewer rows than the MISP index lists; step 0: restart Prometheus after an update that changes `prometheus/alerts.yml` (the file is mounted on its own).
