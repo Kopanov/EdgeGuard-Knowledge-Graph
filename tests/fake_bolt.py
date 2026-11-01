@@ -19,7 +19,7 @@ import re
 import socket
 import struct
 import threading
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from neo4j._codec.packstream.v1 import PackableBuffer, Packer, UnpackableBuffer, Unpacker
 
@@ -72,7 +72,10 @@ class FakeBolt:
     A rule with ``"drop": True`` closes the connection instead, as a network failure would.
     ``runs`` holds every statement received, in order, and ``parameters`` the parameters of each, as
     the driver packed them; ``failures`` and ``committed`` the statements whose result was answered with
-    ``FAILURE`` and with ``SUCCESS``.
+    ``FAILURE`` and with ``SUCCESS``. ``events`` (2026-11) holds the transaction messages and statements in
+    the order received: ``("BEGIN", extra)`` (``extra`` carries ``tx_timeout`` in ms), ``("RUN", query)``,
+    ``("COMMIT", None)``, ``("ROLLBACK", None)`` and ``("RESET", None)``, so a test can tell a statement of
+    an explicit transaction from an auto-commit one and see how the transaction ended.
     """
 
     def __init__(self, fail_rules: Optional[List[Dict]] = None):
@@ -81,6 +84,7 @@ class FakeBolt:
         self.parameters: List[Dict] = []
         self.failures: List[str] = []
         self.committed: List[str] = []
+        self.events: List[Tuple[str, Any]] = []
         self._lock = threading.Lock()
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -135,6 +139,9 @@ class FakeBolt:
                 if tag == b"\x01":  # HELLO
                     conn.sendall(_pack(SUCCESS, [{"server": "Neo4j/5.26.0", "connection_id": "bolt-1"}]))
                 elif tag in (b"\x6a", b"\x0f"):  # LOGON, RESET
+                    if tag == b"\x0f":
+                        with self._lock:
+                            self.events.append(("RESET", None))
                     conn.sendall(_pack(SUCCESS, [{}]))
                 elif tag == b"\x02":  # GOODBYE
                     return
@@ -143,6 +150,7 @@ class FakeBolt:
                     with self._lock:
                         self.runs.append(last_query)
                         self.parameters.append(fields[1] if len(fields) > 1 else {})
+                        self.events.append(("RUN", last_query))
                     conn.sendall(_pack(SUCCESS, [{"fields": self._fields_for(last_query), "t_first": 1}]))
                 elif tag in (b"\x3f", b"\x2f"):  # PULL, DISCARD
                     rule = self._rule_for(last_query or "")
@@ -164,6 +172,10 @@ class FakeBolt:
                     )
                     conn.sendall(out)
                 else:  # BEGIN, COMMIT, ROLLBACK, TELEMETRY, ...
+                    name = {b"\x11": "BEGIN", b"\x12": "COMMIT", b"\x13": "ROLLBACK"}.get(tag)
+                    if name is not None:
+                        with self._lock:
+                            self.events.append((name, dict(fields[0]) if name == "BEGIN" and fields else None))
                     conn.sendall(_pack(SUCCESS, [{}]))
         except (ConnectionError, OSError):
             return

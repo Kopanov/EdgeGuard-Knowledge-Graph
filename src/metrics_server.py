@@ -523,6 +523,30 @@ NEO4J_BATCH_PERMANENT_FAILURES = Counter(
     ["label", "source", "reason"],
 )
 
+# 2026-11: batches of the MISP→Neo4j sync's CVE writes (``Neo4jClient.merge_cves_batch``) whose batched
+# write failed, so that their CVEs were written one at a time by ``merge_cve`` ([CVE-BATCH-FALLBACK]).
+# Nothing is lost, but each such batch takes the per-CVE write time, so batches that keep falling back
+# slow the sync down. ``reason``: ``retries_exhausted`` (a retryable error outlasted the retries: Neo4j
+# overloaded), ``non_retryable`` (the server refused a statement, often one record of the batch) or
+# ``batch_writer_error`` (``merge_cves_batch`` itself raised). The run summary of the sync reports the same
+# fallbacks (``cve_batch_fallbacks``); no alert reads the counter.
+NEO4J_CVE_BATCH_FALLBACKS = Counter(
+    "edgeguard_neo4j_cve_batch_fallback_total",
+    "Batches of the MISP->Neo4j sync's CVE writes whose batched write failed, so that their CVEs were "
+    "written one at a time ([CVE-BATCH-FALLBACK]; nothing lost, each such batch takes the per-CVE write time). "
+    "reason: retries_exhausted, non_retryable or batch_writer_error.",
+    ["reason"],
+)
+
+_CVE_BATCH_FALLBACK_REASONS = frozenset({"retries_exhausted", "non_retryable", "batch_writer_error"})
+
+
+def record_cve_batch_fallback(reason: str) -> None:
+    """Count one CVE batch written one CVE at a time after its batched write failed (``reason`` one of
+    ``retries_exhausted`` / ``non_retryable`` / ``batch_writer_error``; any other value counts as ``other``)."""
+    NEO4J_CVE_BATCH_FALLBACKS.labels(reason=reason if reason in _CVE_BATCH_FALLBACK_REASONS else "other").inc()
+
+
 # PR-N18 (2026-04-22): placeholder-name MERGE reject counter. PR-N11
 # promised this counter but it was deferred. Landing now so the
 # RUNBOOK's failure mode 6 (placeholder-name MERGE spike) detection step switches from log-grep

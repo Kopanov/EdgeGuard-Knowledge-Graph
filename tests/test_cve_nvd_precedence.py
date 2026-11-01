@@ -307,6 +307,7 @@ class TestMalformedCvssPayload:
             "big": 2**64,  # beyond Neo4j's integer range
             "uuid": "attacker-chosen",  # the sub-node's identity, which the writer sets
             "timeout": 1,  # an argument of ``session.run``: the write failed with a TypeError
+            "self": "x",  # the first argument of ``session.run`` (2026-11), as ``timeout``
         }
         item, warnings = self._read(caplog, cvss_v30_data=payload)
         expected = {k: v for k, v in self._real_v30().items() if k != "attack_complexity"}
@@ -314,7 +315,7 @@ class TestMalformedCvssPayload:
         (line,) = warnings
         assert line.endswith(
             "of CVE-2025-7223: entries that are not CVSS properties dropped: "
-            "attack_complexity, bad key, big, refs, timeout, uuid"
+            "attack_complexity, bad key, big, refs, self, timeout, uuid"
         )
 
     @pytest.mark.parametrize("base_score", [{"value": 7.8}, ["7.8"], None, ""])
