@@ -291,7 +291,7 @@ docker compose exec airflow python /opt/airflow/src/edgeguard.py doctor
 curl -s http://localhost:8000/health
 ```
 
-`preflight` checks the settings and source keys, Neo4j and APOC, MISP, Airflow, disk space and checkpoints, and exits 1 when a check fails; `doctor` diagnoses connectivity, the Neo4j schema and version compatibility; the memory check runs on the host ([Backup and sizing](#backup-and-sizing)). From a host shell, export the settings first and use the published ports:
+`preflight` checks the settings and source keys, Neo4j and APOC, MISP, Airflow and the state of its scheduler, disk space and checkpoints, and exits 1 when a check fails; `doctor` diagnoses connectivity, the Airflow scheduler, the Neo4j schema and version compatibility; the memory check runs on the host ([Backup and sizing](#backup-and-sizing)). From a host shell, export the settings first and use the published ports:
 
 ```bash
 set -a; . ./.env; set +a
@@ -397,7 +397,7 @@ set -a; . ./.env; set +a
 ./scripts/preflight_baseline.sh --launch-path=dag
 ```
 
-It runs checks `[1]` to `[12]`: settings, Neo4j and APOC, MISP, the pause state and running runs of the scheduled DAGs, worker memory, the alert rules and the Alertmanager wiring, a leftover lock, the operations-only switches, the test collection, the baseline invariants in the code, and whether each provider accepts its source key. Exit 0 means ready; on exit 1, fix the items marked ✗. Check by check: [docs/BASELINE_LAUNCH_CHECKLIST.md](docs/BASELINE_LAUNCH_CHECKLIST.md).
+It runs checks `[1]` to `[13]`: settings, Neo4j and APOC, MISP, the pause state and running runs of the scheduled DAGs, worker memory, the alert rules and the Alertmanager wiring, a leftover lock, the operations-only switches, the test collection, the baseline invariants in the code, whether each provider accepts its source key, and whether Airflow's scheduler, triggerer and DAG processor are healthy and its metadata database is not SQLite. Exit 0 means ready; on exit 1, fix the items marked ✗. Check by check: [docs/BASELINE_LAUNCH_CHECKLIST.md](docs/BASELINE_LAUNCH_CHECKLIST.md).
 
 - Checks `[10]` to `[12]` use the repository's `.venv` ([Prerequisites](#prerequisites)). Without it, check `[11]` reports the three critical-chain tasks as missing `retries=0`, the test-collection check `[10]` is skipped, and the source-key check `[12]` falls back to the system `python3`.
 - With the shipped `prometheus/alertmanager.yml`, check `[7b]` fails until its PagerDuty `service_key` is rendered with a real key or the PagerDuty receiver is removed ([docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md#alertmanager-notifications)).
@@ -428,7 +428,7 @@ done
 
 For a fresh baseline triggered this way, set `EDGEGUARD_LAST_BACKUP_AT` in `.env` and run `docker compose up -d airflow` first, unless Neo4j and MISP are empty. The run configuration also takes `baseline_days` and `wipe_scope` ([docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md)).
 
-**4. Monitor.** Watch the `edgeguard` alert groups in Prometheus at `http://localhost:9090` (40 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume. Logs:
+**4. Monitor.** Watch the `edgeguard` alert groups in Prometheus at `http://localhost:9090` (43 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume. Logs:
 
 ```bash
 docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'
@@ -479,7 +479,7 @@ docker compose exec airflow python /opt/airflow/src/edgeguard.py <command>
 | `preflight` | Readiness check; exit 0 when ready |
 | `doctor` | Connectivity, schema and version diagnosis |
 | `stats` | Node counts and the last sync |
-| `dag status` | Airflow DAG run states |
+| `dag status` | Airflow DAG run states; exit 1 when the scheduler is not healthy |
 | `checkpoint status` | Baseline progress and incremental cursors |
 | `baseline --days N` | Trigger an additive baseline |
 | `fresh-baseline --days N` | Trigger a destructive baseline |
@@ -499,7 +499,7 @@ This starts Prometheus (`http://localhost:9090`) and Grafana (`http://localhost:
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml --profile alerts up -d
 ```
 
-The alert rules in `prometheus/alerts.yml` cover staleness and stuck runs per DAG, MISP and Neo4j write failures and the sync's MISP fetch. Once `prometheus/secrets/slack_api_url` holds a webhook URL, Slack receives the critical alerts and the collector alerts, PagerDuty the circuit-breaker alerts, and the default e-mail receiver every other alert. The e-mail and PagerDuty receivers are placeholders, so the alerts routed only to them reach no one until they are configured. Setup and the metric list: [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md).
+The alert rules in `prometheus/alerts.yml` cover staleness and stuck runs per DAG, a stopped Airflow scheduler, triggerer or DAG processor, MISP and Neo4j write failures and the sync's MISP fetch. `airflow standalone` keeps the Airflow API server up when the scheduler dies, so the `metrics` service reads Airflow's health endpoint at every scrape, and the `airflow` service's healthcheck reads the scheduler status: `docker compose ps` shows it `unhealthy` when the scheduler has stopped, and Docker does not restart it ([docs/RUNBOOK.md](docs/RUNBOOK.md), "Airflow scheduler or triggerer stopped"). Once `prometheus/secrets/slack_api_url` holds a webhook URL, Slack receives the critical alerts and the collector alerts, PagerDuty the circuit-breaker alerts, and the default e-mail receiver every other alert. The e-mail and PagerDuty receivers are placeholders, so the alerts routed only to them reach no one until they are configured. Setup and the metric list: [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md).
 
 ### Backup and sizing
 
@@ -616,4 +616,4 @@ EdgeGuard is developed by IICT-BAS and Ratio1 and financed by ResilMesh Open Cal
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_

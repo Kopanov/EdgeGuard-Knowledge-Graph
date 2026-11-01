@@ -23,7 +23,17 @@ echo ""
 if docker info >/dev/null 2>&1; then
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^edgeguard_airflow$'; then
     echo "Optional: probing edgeguard_airflow health..."
-    docker exec edgeguard_airflow curl -sf http://localhost:8082/api/v2/monitor/health && echo " Airflow OK" || echo " Airflow health check failed"
+    # The endpoint answers HTTP 200 also when the scheduler is unhealthy; the status is in the body.
+    if health=$(docker exec edgeguard_airflow curl -sf http://localhost:8082/api/v2/monitor/health); then
+      echo "$health"
+      if printf '%s' "$health" | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["scheduler"]["status"] == "healthy" else 1)' 2>/dev/null; then
+        echo " Airflow OK (scheduler healthy)"
+      else
+        echo " Airflow scheduler NOT healthy: restart Airflow (docker compose restart airflow) before the smoke run"
+      fi
+    else
+      echo " Airflow health check failed"
+    fi
   else
     echo "(edgeguard_airflow not running — skipping docker probes)"
   fi

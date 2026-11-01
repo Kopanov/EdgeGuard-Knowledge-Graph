@@ -256,6 +256,42 @@ groups:
           summary: "Source {{ $labels.source }} ({{ $labels.zone }}) is unhealthy"
           description: "Data source {{ $labels.source }} in zone {{ $labels.zone }} is marked as unhealthy."
 
+      # Airflow component health, read by the metrics service from Airflow's health endpoint at every
+      # scrape (src/metrics_exporter.py, AIRFLOW_WEBSERVER_URL). `airflow standalone` keeps its API
+      # server up when the scheduler, triggerer or DAG processor dies, and the endpoint then answers
+      # HTTP 200 with "unhealthy" in its body only. The scheduler alone starts tasks and enforces
+      # dagrun_timeout: with it stopped a run stays "running", and EdgeGuardDAGRunStuck fires only
+      # after the run's dagrun_timeout (32 h 15 min for a baseline).
+      - alert: EdgeGuardAirflowSchedulerDown
+        expr: edgeguard_airflow_component_healthy{component="scheduler"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: airflow
+        annotations:
+          summary: "Airflow scheduler is not healthy"
+          description: "Airflow has reported its scheduler not healthy for 5 minutes (no scheduler heartbeat within Airflow's health-check threshold): no task starts, and DAG runs shown as running do not progress or time out. Restart Airflow (`docker compose restart airflow`); a run in progress continues where it stopped, do not trigger it again. The stalled time counts against the run's dagrun_timeout. docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\"."
+
+      - alert: EdgeGuardAirflowComponentUnhealthy
+        expr: edgeguard_airflow_component_healthy{component!="scheduler"} == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: airflow
+        annotations:
+          summary: "Airflow {{ $labels.component }} is not healthy"
+          description: "Airflow has reported its {{ $labels.component }} not healthy, or without status, for 10 minutes. A stopped triggerer leaves deferred tasks waiting (no EdgeGuard DAG defers a task); a stopped DAG processor stops the parsing of the DAG files; an unhealthy metadatabase means the API server cannot read the metadata database. Restart Airflow (`docker compose restart airflow`); a run in progress continues where it stopped. docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\"."
+
+      - alert: EdgeGuardAirflowHealthUnreachable
+        expr: edgeguard_airflow_health_up == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: airflow
+        annotations:
+          summary: "Airflow health endpoint does not answer"
+          description: "The metrics service has had no answer from Airflow's health endpoint for 10 minutes (AIRFLOW_WEBSERVER_URL; http://airflow:8082 on Docker Compose): the airflow container or its API server is down, or the metrics service cannot reach it. The state of the scheduler is then unknown and EdgeGuardAirflowSchedulerDown cannot fire. Check `docker compose ps airflow` and `docker compose logs airflow`."
+
   # ================================================================================
   # Pipeline Alerts
   # ================================================================================

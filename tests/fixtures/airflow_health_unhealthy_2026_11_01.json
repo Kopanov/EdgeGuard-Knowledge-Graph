@@ -1,0 +1,2 @@
+{"metadatabase":{"status":"healthy"},"scheduler":{"status":"unhealthy","latest_scheduler_heartbeat":"2026-11-01T08:32:14.421196+00:00"},"triggerer":{"status":"unhealthy","latest_triggerer_heartbeat":"2026-11-01T08:32:16.883439+00:00"},"dag_processor":{"status":"healthy","latest_dag_processor_heartbeat":"2026-11-01T11:41:23.020147+00:00"}}
+

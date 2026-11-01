@@ -82,6 +82,9 @@ the change to take effect. Revert by unsetting the variable and recreating the s
 | `EdgeGuardNeo4jFullSyncRequestPending` | warning | `edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"}` rose in the last 3 days, or appeared for the first time: a requested full sync (`NEO4J_FULL_SYNC=true`) failed on its last attempt and the request stands, so no incremental sync runs; it clears 3 days after the last failure, also when the request was resolved earlier (silence it then); see "Requesting a full MISP → Neo4j sync" |
 | `EdgeGuardSyncPagedFetchIncomplete` | warning | `edgeguard_sync_events_paged_incomplete > 0` for 10m: the last MISP→Neo4j sync fetched an event in pages and received fewer attribute rows than the MISP index lists; the run is green; see "Large MISP events fetched in pages" |
 | `EdgeGuardSourceAccessDenied` | warning | `edgeguard_collector_skips_total{reason_class=~".+_auth_denied"}` rose in the last 25 h, or appeared for the first time. The provider refuses the source's requests (HTTP 401/403) and the task stays green while nothing is collected: run `python src/source_key_check.py`, renew the key, or check whether the provider blocks this host |
+| `EdgeGuardAirflowSchedulerDown` | **critical** | `edgeguard_airflow_component_healthy{component="scheduler"} == 0` for 5m: Airflow reports its scheduler not healthy; no task starts and runs shown as running do not progress; see "Airflow scheduler or triggerer stopped" |
+| `EdgeGuardAirflowComponentUnhealthy` | warning | `edgeguard_airflow_component_healthy{component!="scheduler"} == 0` for 10m: the triggerer, the DAG processor or the metadata database is not reported healthy; see "Airflow scheduler or triggerer stopped" |
+| `EdgeGuardAirflowHealthUnreachable` | warning | `edgeguard_airflow_health_up == 0` for 10m: the metrics service has no answer from Airflow's health endpoint, so the scheduler state is unknown |
 
 Verify alerts load cleanly on baseline day:
 
@@ -552,6 +555,23 @@ Each entry: symptom → detection signal → remediation.
   - **The statement is expected to run longer on a large graph** (a baseline build step or an enrichment job): raise `EDGEGUARD_NEO4J_READ_TIMEOUT` in `.env`, recreate the Airflow containers and clear the failed task.
   - **The statement stalls without progress:** this points to lock contention or memory pressure; see § 5 above and the memory posture below.
 
+## Airflow scheduler or triggerer stopped
+
+- **What applies.** `airflow standalone` (the Compose `airflow` service, and the usual bare-metal setup) runs the scheduler, triggerer, DAG processor and API server as subprocesses. When one of them dies, it is not restarted and standalone does not exit. A metadata database error that outlasts Airflow's retries (`[database] max_db_retries`, 3) stops the scheduler and the triggerer; with SQLite a lock held a few seconds is enough (the default busy wait is 5 seconds). The API server keeps answering, and `/api/v2/monitor/health` answers HTTP 200 with `"unhealthy"` in its JSON body only.
+- **Symptom.** No task starts. A DAG run in progress stays `running` without progressing, its tasks stay `queued` or `scheduled`, and the Airflow UI still loads. The scheduler alone enforces `dagrun_timeout` and the task heartbeat timeout, so nothing fails the run either.
+- **Detection.**
+  - `EdgeGuardAirflowSchedulerDown` (critical) after 5 minutes; `EdgeGuardAirflowComponentUnhealthy` (warning) for the triggerer, the DAG processor or the metadata database after 10 minutes; `EdgeGuardAirflowHealthUnreachable` (warning) when the metrics service has had no answer for 10 minutes ([PROMETHEUS_SETUP.md § Airflow Component Health](PROMETHEUS_SETUP.md#airflow-component-health)).
+  - `docker compose ps` shows the `airflow` service `unhealthy`: its healthcheck reads the scheduler status, and five failed checks 30 seconds apart mark it. Docker does not restart an unhealthy container.
+  - `edgeguard dag status` still lists the runs and exits 1 with "runs shown as running or queued are not progressing"; `edgeguard doctor` and `edgeguard preflight` count a scheduler or metadata database that is not healthy as an error and a triggerer or DAG processor as a warning; check `[13]` of `scripts/preflight_baseline.sh` fails on the DAG launch path.
+  - By hand: `docker compose exec airflow curl -s http://localhost:8082/api/v2/monitor/health` gives each component's `status` and last heartbeat; `docker compose exec airflow airflow jobs check --job-type SchedulerJob` exits non-zero when no scheduler is alive.
+- **Log probe.** `airflow standalone` prefixes every line with the subprocess name (`scheduler`, `triggerer`, `dag-processor`, `api-server`); the cause is near the last scheduler heartbeat:
+  ```bash
+  docker compose logs --tail 5000 airflow 2>&1 | grep -E "scheduler +\||triggerer +\|" | grep -iE "error|exception|locked" | tail -20
+  ```
+- **Recovery.** Restart Airflow: `docker compose restart airflow` (bare metal: stop and start `airflow standalone`). The new scheduler takes over the DAG runs in progress, and a run continues where it stopped: tasks that finished are not run again (a baseline does not repeat `baseline_clean`). Do not trigger the DAG again and do not clear the run. The alerts clear once the new scheduler heartbeats.
+- **Time budget.** A restart does not move the run's start time, so the stalled time counts against its `dagrun_timeout` (32 hours for `edgeguard_baseline`); `edgeguard dag status` shows how long the run has been going.
+- **Prevention.** The Compose stack keeps the metadata database in PostgreSQL (`airflow_postgres`). A bare-metal install should do the same ([AIRFLOW_DAGS.md § Scheduler or triggerer stopped](AIRFLOW_DAGS.md#scheduler-or-triggerer-stopped)); SQLite is for development only, and a SQLite setup should at least append `?timeout=60` to `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, so that a lock waits 60 seconds instead of 5. Check `[13]` of `scripts/preflight_baseline.sh` warns on a SQLite metadata database. EdgeGuard restarts nothing by itself.
+
 ## MISP → Neo4j sync schedule
 
 - **When it runs.** `edgeguard_neo4j_sync` runs every 72 hours, a fixed interval (`schedule=timedelta(days=3)`). A run is due 72 h after the previous scheduled run; a manual run does not move the schedule. A run that fell due while the DAG was paused or Airflow was down starts once when it resumes, and the next one is due 72 h after it. The Airflow UI shows the next run under *Next Run*.
@@ -882,7 +902,9 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    Check `[12]` asks every provider whether it accepts the configured API
    key; a rejected key means that source is skipped for the whole baseline
    (a rejected NVD key stops it). The baseline DAG repeats the check in its
-   `source_key_check` task, before the lock and the wipe.
+   `source_key_check` task, before the lock and the wipe. Check `[13]` fails
+   while Airflow does not report its scheduler healthy, and warns on a SQLite
+   metadata database.
 3. **Smoke test.** Run a 7-day window first:
    `docker compose exec airflow airflow dags trigger edgeguard_baseline --conf '{"baseline_days": 7}'`
    (add `"fresh_baseline": true` for a wiped store). Success criteria: no ERROR lines, all
@@ -935,7 +957,9 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
   `EdgeGuardMispFetchFallbackHardError`) should be SILENT for the entire
   run if everything is healthy.
 - Any **critical** alert → pause the DAG, triage, then resume. Do NOT let
-  it continue silently.
+  it continue silently. `EdgeGuardAirflowSchedulerDown` is the exception:
+  pausing needs no scheduler and helps nothing; restart Airflow and the run
+  continues ("Airflow scheduler or triggerer stopped").
 - Any **warning** alert → investigate, continue unless you see compounding.
 - Heartbeat log: `docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'`
 
@@ -1337,10 +1361,11 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — New section "Airflow scheduler or triggerer stopped": `airflow standalone` keeps the API server up when the scheduler dies, so the run stays `running`; detection through `EdgeGuardAirflowSchedulerDown`, `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable`, the `airflow` service healthcheck, `edgeguard dag status` / `doctor` / `preflight` and check `[13]` of `scripts/preflight_baseline.sh`; recovery is a restart of Airflow, and the run continues.
 - 2026-10-25 — Baseline-day protocol: the short procedures mark the runs of the paused DAGs failed too; the paged-fetch gauge is set again by every later sync run that connects (the missed rows need a full sync).
 - 2026-10-25 — Baseline-day protocol: pausing the scheduled DAGs stops new tasks and retries only, and a task that is already running keeps running (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`); before a fresh baseline, wait until `airflow dags list-runs <dag> --state running -o json` prints `[]` for each of the 5 DAGs, and preflight check `[5]` fails while one has a running run.
 - 2026-10-25 — Fresh-baseline wipe: the OTX event of a 730-day baseline is the one of about 150,000 attributes; other sources' events hold at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (20,000) each (the text said the NVD event too).

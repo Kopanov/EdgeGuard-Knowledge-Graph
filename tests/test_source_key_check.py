@@ -998,7 +998,7 @@ def test_nvd_collector_keeps_the_outage_message_for_everything_else(monkeypatch,
 def test_launch_script_maps_the_command_output(tmp_path) -> None:
     """Check [12] of preflight_baseline.sh: REJECTED is a warning, BLOCKER a failure, the rest is information."""
     script = (ROOT / "scripts" / "preflight_baseline.sh").read_text()
-    block = script[script.index('hdr "[12]') : script.index("# Summary\n")]
+    block = script[script.index('hdr "[12]') : script.index("# [13] Airflow components and metadata database\n")]
     block = block[: block.rindex("fi\n") + 3]
     (tmp_path / "src").mkdir()
     stub = tmp_path / "python3"

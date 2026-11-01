@@ -221,12 +221,14 @@ def check_circuit_breakers():
     return True, "Circuit breakers: OK (in-memory, reset on restart)"
 
 
-def _doctor_airflow_reachable(retry_delay: float = 10) -> bool:
-    """True when Airflow answers its health check; one retry after ``retry_delay`` seconds.
+def _doctor_airflow_health(retry_delay: float = 10) -> Optional[dict]:
+    """Airflow's health answer, or None when Airflow does not answer; one retry after ``retry_delay`` seconds.
 
     Goes through ``airflow_client.airflow_health``, which uses ``/api/v2/monitor/health`` on
     Airflow 3 and ``/health`` on Airflow 2 (``AIRFLOW_API_VERSION``). Airflow 3 answers 404 on
-    ``/health``, so probing that path directly reported a healthy Airflow as unreachable.
+    ``/health``, so probing that path directly reported a healthy Airflow as unreachable. The retry
+    also covers an answer whose scheduler is not healthy: right after a restart the API server answers
+    before the new scheduler's first heartbeat.
     """
     import time
 
@@ -234,12 +236,54 @@ def _doctor_airflow_reachable(retry_delay: float = 10) -> bool:
 
     for attempt in range(2):
         health = ac.airflow_health()
-        if "error" not in health:
-            return True
+        if "error" not in health and ac.component_health(health).is_healthy("scheduler"):
+            return health
         if attempt == 0:
-            info(f"Airflow health check failed ({health['error']}) — retrying in {retry_delay:g}s (may be starting)...")
+            reason = health["error"] if "error" in health else "scheduler not healthy"
+            info(f"Airflow health check: {reason} — retrying in {retry_delay:g}s (may be starting)...")
             time.sleep(retry_delay)
-    return False
+    return None if "error" in health else health
+
+
+# What a component that is not healthy stops. The scheduler alone starts tasks and enforces
+# dagrun_timeout, so with it stopped a run stays "running" without progressing; no EdgeGuard DAG
+# defers a task to the triggerer.
+_AIRFLOW_COMPONENT_EFFECT = {
+    "metadatabase": "the API server cannot read the metadata database, and the scheduler stops on database errors",
+    "scheduler": "no task starts and no DAG run progresses or reaches its dagrun_timeout",
+    "triggerer": "deferred tasks do not resume (no EdgeGuard DAG defers a task)",
+    "dag_processor": "DAG files are not parsed, so changes under dags/ are not picked up",
+}
+_AIRFLOW_ERROR_COMPONENTS = ("metadatabase", "scheduler")
+
+
+def _report_airflow_components(components) -> tuple[int, int]:
+    """Print the component status of an Airflow health answer; return ``(errors, warnings)``.
+
+    A metadata database or scheduler that is not reported healthy is an error, a triggerer or DAG
+    processor a warning (a missing component or one without status counts as not healthy).
+    ``components`` is an ``airflow_client.AirflowComponentHealth``. ``airflow standalone`` keeps its
+    API server up when the others die, so a reachable Airflow says nothing about them.
+    """
+    errors = warnings = 0
+    healthy = [name for name in components.statuses if components.is_healthy(name)]
+    if healthy:
+        ok(f"Airflow components healthy: {', '.join(healthy)}")
+    for name in components.not_healthy():
+        message = f"Airflow {components.describe(name)}: {_AIRFLOW_COMPONENT_EFFECT[name]}"
+        if name in _AIRFLOW_ERROR_COMPONENTS:
+            err(message)
+            errors += 1
+        else:
+            warn(message)
+            warnings += 1
+    if errors or warnings:
+        info(
+            "  Recover: restart Airflow (Compose: docker compose restart airflow; otherwise restart "
+            "`airflow standalone`). A DAG run in progress continues where it stopped: do not trigger it "
+            "again. The stalled time counts against the run's dagrun_timeout."
+        )
+    return errors, warnings
 
 
 def cmd_doctor(args):
@@ -360,12 +404,19 @@ def cmd_doctor(args):
         except Exception as e:
             warn(f"Could not verify Neo4j constraints: {e}")
 
-    # Test Airflow (retry once after 5s if first attempt fails — handles restarts)
+    # Test Airflow (retry once after 10s when it does not answer or its scheduler is not healthy —
+    # handles restarts)
     info("Testing Airflow webserver...")
     airflow_url = os.getenv("AIRFLOW_WEBSERVER_URL", "http://localhost:8082")
-    airflow_ok = _doctor_airflow_reachable()
-    if airflow_ok:
+    airflow_health = _doctor_airflow_health()
+    airflow_ok = airflow_health is not None
+    if airflow_health is not None:
+        import airflow_client as ac
+
         ok(f"Airflow webserver reachable at {airflow_url}")
+        airflow_errors, _ = _report_airflow_components(ac.component_health(airflow_health))
+        if airflow_errors:
+            all_ok = False
     else:
         err(f"Airflow webserver not reachable at {airflow_url} after retry — scheduled DAGs will not run")
         info("  Common causes:")
@@ -1608,6 +1659,10 @@ def cmd_dag_status(args) -> int:
         err(f"Airflow: {health['error']}")
         return 1
     ok("Airflow is reachable")
+    # The API server answers while the scheduler is dead (``airflow standalone``); the run states it
+    # lists then stay as they were, so a stopped scheduler or metadata database is an error here.
+    component_errors, _ = _report_airflow_components(ac.component_health(health))
+    exit_code = 1 if component_errors else 0
 
     dag_ids = [args.dag_id] if getattr(args, "dag_id", None) else ac.get_edgeguard_dag_ids()
     state_filter = getattr(args, "state", None)
@@ -1628,11 +1683,11 @@ def cmd_dag_status(args) -> int:
         import json as _json
 
         print(_json.dumps(all_runs, indent=2, default=str))
-        return 0
+        return exit_code
 
     if not all_runs:
         info("No DAG runs found.")
-        return 0
+        return exit_code
 
     # Table header
     print(f"\n  {'DAG':<28} {'State':<10} {'Start':<20} {'Duration':<12}")
@@ -1656,7 +1711,13 @@ def cmd_dag_status(args) -> int:
         print(f"  {dag_id:<28} {state_str:<22} {start:<20} {duration:<12}")
 
     print()
-    return 0
+    if component_errors:
+        err(
+            "The Airflow scheduler or metadata database is not healthy (above): runs shown as running or "
+            "queued are not progressing. Restart Airflow; a run in progress continues where it stopped, "
+            "do not trigger it again."
+        )
+    return exit_code
 
 
 def _release_killed_baseline_lock(run_id: str) -> None:
@@ -2909,6 +2970,12 @@ def cmd_preflight(args) -> int:
             warnings += 1
         else:
             ok("Airflow: reachable")
+            # A reachable API server says nothing about the scheduler (``airflow standalone`` keeps it
+            # up when the scheduler dies): a scheduler or metadata database that is not healthy is an
+            # error, a triggerer or DAG processor a warning.
+            af_errors, af_warnings = _report_airflow_components(ac.component_health(af_health))
+            errors += af_errors
+            warnings += af_warnings
             dags = ac.get_registered_dags()
             if dags and "error" not in dags[0]:
                 ok(f"  {len(dags)} EdgeGuard DAG(s) registered")

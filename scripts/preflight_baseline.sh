@@ -28,6 +28,10 @@
 #   [11] baseline hardening invariants still present in the source
 #   [12] source API keys accepted by their providers (live check; a rejected key
 #        is a warning, a key state that would stop the baseline is a failure)
+#   [13] Airflow components and metadata database: scheduler (and metadata
+#        database) healthy per /api/v2/monitor/health (a failure on the DAG launch
+#        path, a warning on the CLI path), triggerer and DAG processor healthy
+#        (warnings), metadata database not SQLite (a warning)
 #
 # Usage:
 #   ./scripts/preflight_baseline.sh [--launch-path cli|dag]
@@ -65,7 +69,7 @@ while [[ $# -gt 0 ]]; do
     --launch-path=*) LAUNCH_PATH="${1#*=}"; shift ;;
     --strict) STRICT=1; shift ;;
     -h|--help)
-      sed -n '3,35p' "$0"
+      sed -n '3,39p' "$0"
       exit 0
       ;;
     *) fail "unknown flag: $1"; exit 1 ;;
@@ -532,6 +536,105 @@ else
     esac
   done <<< "$KEY_OUT"
 fi
+
+# -----------------------------------------------------------------------------
+# [13] Airflow components and metadata database
+# -----------------------------------------------------------------------------
+# `airflow standalone` (the Compose airflow service, and the usual bare-metal
+# setup) keeps its API server up when the scheduler, triggerer or DAG processor
+# dies, and /api/v2/monitor/health then answers HTTP 200 with "unhealthy" in the
+# JSON body only. The scheduler alone starts tasks and enforces dagrun_timeout:
+# with it stopped a DAG run stays "running" without progressing. A database
+# error that outlasts Airflow's retries stops the scheduler and the triggerer;
+# with SQLite a lock held a few seconds is enough. The metadata database is
+# judged by the scheme of its connection string only: the value holds the
+# database password and is never printed.
+hdr "[13] Airflow components and metadata database"
+AF_HEALTH_URL="${AIRFLOW_WEBSERVER_URL:-http://localhost:8082}"
+AF_HEALTH_URL="${AF_HEALTH_URL%/}/api/v2/monitor/health"
+AF_RESTART="restart Airflow (docker compose restart airflow, or restart airflow standalone)"
+AF_RECOVER="$AF_RESTART; a DAG run in progress continues where it stopped, do not trigger it again (docs/RUNBOOK.md, \"Airflow scheduler or triggerer stopped\")"
+if AF_HEALTH=$(curl -fsS --max-time 15 "$AF_HEALTH_URL" 2>/dev/null); then
+  # One line per component: "<name> <status> <last heartbeat>"; a component the
+  # answer does not list, or lists without status, reads "unknown".
+  AF_LINES=$(printf '%s' "$AF_HEALTH" | python3 -c '
+import json, sys
+try:
+    health = json.load(sys.stdin)
+except ValueError:
+    health = None
+if not isinstance(health, dict):
+    print("invalid")
+    sys.exit(0)
+for name in ("metadatabase", "scheduler", "triggerer", "dag_processor"):
+    entry = health.get(name)
+    entry = entry if isinstance(entry, dict) else {}
+    status = entry.get("status")
+    heartbeat = entry.get("latest_%s_heartbeat" % name)
+    print(name, status if isinstance(status, str) and status else "unknown", heartbeat if isinstance(heartbeat, str) and heartbeat else "-")
+' 2>/dev/null || echo "invalid")
+  if [[ "$AF_LINES" == "invalid" || -z "$AF_LINES" ]]; then
+    warn "Airflow health answer at $AF_HEALTH_URL is not a JSON object; scheduler state not checked"
+  else
+    while read -r af_name af_status af_heartbeat; do
+      af_text="Airflow $af_name: $af_status"
+      [[ "$af_heartbeat" != "-" ]] && af_text="$af_text (last heartbeat $af_heartbeat)"
+      if [[ "$af_status" == "healthy" ]]; then
+        pass "$af_text"
+      elif [[ "$af_name" == "scheduler" || "$af_name" == "metadatabase" ]]; then
+        # Without a scheduler no baseline task starts and the run never reaches its timeout.
+        if [[ "$LAUNCH_PATH" == "dag" ]]; then
+          fail "$af_text — no task starts and DAG runs do not progress; $AF_RECOVER"
+        else
+          warn "$af_text — the scheduled DAGs do not run; $AF_RECOVER"
+        fi
+      else
+        warn "$af_text — $AF_RESTART"
+      fi
+    done <<< "$AF_LINES"
+  fi
+else
+  warn "Airflow health endpoint not reachable at $AF_HEALTH_URL; scheduler state not checked (set AIRFLOW_WEBSERVER_URL)"
+fi
+
+# Metadata database backend: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN from this
+# shell, else, on the DAG launch path, the value the airflow service uses. The
+# value reaches python3 on standard input (printf is a shell builtin, so it is
+# not in any process's argument list), and only its scheme is printed.
+AF_DB_SCHEME_PY='
+import re, sys
+scheme = ""
+for line in sys.stdin.read().splitlines():
+    match = re.match(r"\s*([A-Za-z][A-Za-z0-9+.-]*)://", line)
+    if match:
+        scheme = match.group(1).split("+")[0].lower()
+print(scheme)
+'
+AF_DB_SCHEME=""
+AF_DB_FROM=""
+if [[ -n "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-}" ]]; then
+  AF_DB_SCHEME=$(printf '%s\n' "$AIRFLOW__DATABASE__SQL_ALCHEMY_CONN" | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
+  AF_DB_FROM="AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"
+elif [[ "$LAUNCH_PATH" == "dag" ]] && command -v docker >/dev/null 2>&1; then
+  AF_DB_SCHEME=$(docker compose exec -T airflow airflow config get-value database sql_alchemy_conn 2>/dev/null \
+    | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
+  AF_DB_FROM="airflow config get-value database sql_alchemy_conn"
+fi
+case "$AF_DB_SCHEME" in
+  sqlite)
+    warn "Airflow metadata database is SQLite ($AF_DB_FROM): SQLite is for development only; a lock held a few seconds can stop the scheduler and the triggerer. Use PostgreSQL (docker-compose.yml runs airflow_postgres); a SQLite setup should at least append ?timeout=60 to the connection string"
+    ;;
+  "")
+    if [[ -n "$AF_DB_FROM" ]]; then
+      warn "Airflow metadata database backend not determined ($AF_DB_FROM gave no connection string)"
+    else
+      printf '  - %s\n' "Airflow metadata database backend not checked (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN not set in this shell; the DAG launch path asks the airflow service)"
+    fi
+    ;;
+  *)
+    pass "Airflow metadata database is $AF_DB_SCHEME ($AF_DB_FROM)"
+    ;;
+esac
 
 # -----------------------------------------------------------------------------
 # Summary
