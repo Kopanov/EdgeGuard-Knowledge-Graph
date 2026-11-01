@@ -45,3 +45,11 @@ def test_dockerfile_has_no_redundant_gitpython_override():
     df = (_ROOT / "Dockerfile.airflow").read_text()
     assert "GitPython" not in df
     assert "FROM apache/airflow:3.3.2-python3.12" in df
+
+
+def test_airflow_image_upgrades_the_base_packages_with_critical_advisories():
+    # The apache/airflow:3.3.2 base ships libbrotli1 1.0.9-2+b6 (CVE-2026-111497) and Authlib 1.8.0
+    # (CVE-2026-96760); the CI image scan fails on both until the image upgrades them in place.
+    df = (_ROOT / "Dockerfile.airflow").read_text()
+    assert "--only-upgrade libbrotli1" in df
+    assert 'pip install --no-cache-dir --upgrade "authlib>=1.9.0"' in df

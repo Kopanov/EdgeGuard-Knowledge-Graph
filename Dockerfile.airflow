@@ -70,6 +70,9 @@ RUN apt-get update \
  # 2026-10: Trivy CRITICAL CVE-2026-13221 in perl 5.36.0-7+deb12u3 (image) — fixed in deb12u4,
  # already in the bookworm archive. Same upgrade-in-place pattern as openssl above.
  && apt-get install -y --no-install-recommends --only-upgrade perl-base perl perl-modules-5.36 libperl5.36 \
+ # 2026-11: Trivy CRITICAL CVE-2026-111497 (out-of-bounds write in the Brotli decoder) in libbrotli1
+ # 1.0.9-2+b6 (image) — fixed in 1.0.9-2+deb12u1, in bookworm-security. Same upgrade-in-place pattern.
+ && apt-get install -y --no-install-recommends --only-upgrade libbrotli1 \
  && rm -rf /var/lib/apt/lists/*
 
 # Multi-process metrics directory (docker-compose mounts the named volume here). Created and
@@ -92,6 +95,10 @@ RUN pip install --no-cache-dir -r /tmp/requirements-airflow-docker.txt
 RUN uv tool uninstall prek \
  && pip install --no-cache-dir --upgrade "pip>=26.2.2" \
  && pip install --no-cache-dir --upgrade "certifi>=2026.10.19" "uv>=0.13.4"
+
+# 2026-11: Trivy CRITICAL CVE-2026-96760 (signature verification bypass) in Authlib 1.8.0 of the base;
+# fixed in 1.9.0. Same upgrade-in-place pattern.
+RUN pip install --no-cache-dir --upgrade "authlib>=1.9.0"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["airflow", "standalone"]

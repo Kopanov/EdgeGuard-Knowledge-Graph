@@ -51,7 +51,7 @@ To keep dependencies clean and reproducible, use a dedicated environment per pro
 | PyMISP | `requirements.txt`, `requirements-airflow-docker.txt` | `~=2.4` | `edgeguard doctor` |
 | MISP server | (operator-controlled deploy) | `2.4.x` | `edgeguard doctor` |
 | CA bundle `certifi` | `requirements.txt`, `requirements-airflow-docker.txt`, `pyproject.toml`, `Dockerfile.airflow` | `>=2026.10.19` (earlier releases bundle emSign roots whose intermediate CA keys were compromised, GHSA-6q48-6c7w-9gw2) | `tests/test_pre_refeed_audit.py::test_every_dependency_list_sets_the_certifi_floor`; CI image scan (Trivy) |
-| `pip`, `uv` in the Airflow image | `Dockerfile.airflow` (upgraded on top of the base; the base's `prek` hook runner is removed) | `pip>=26.2.2` (it vendors certifi 2026.10.19, GHSA-6q48-6c7w-9gw2), `uv>=0.13.4` (its bundled CA store, GHSA-hq85-5cpj-mr62) | CI image scan (Trivy) |
+| `pip`, `uv`, `Authlib` in the Airflow image | `Dockerfile.airflow` (upgraded on top of the base; the base's `prek` hook runner is removed) | `pip>=26.2.2` (it vendors certifi 2026.10.19, GHSA-6q48-6c7w-9gw2), `uv>=0.13.4` (its bundled CA store, GHSA-hq85-5cpj-mr62), `authlib>=1.9.0` (CVE-2026-96760) | CI image scan (Trivy) |
 
 The single source of truth for the comparison logic is `src/version_compatibility.py::RECOMMENDED_VERSIONS`. `edgeguard doctor` and `edgeguard validate` capture the actual running versions and warn on drift. A regression test (`tests/test_version_compatibility.py::test_recommended_*_matches_*_pin`) fails CI when a pin file and the recommended-versions table disagree. The last two rows are not in `RECOMMENDED_VERSIONS`: their test and the CI image scan check them.
 
@@ -209,6 +209,7 @@ _Last updated: 2026-10-25_
 
 ## History
 
+- 2026-11-01 — Pinned versions add `Authlib` in the Airflow image (`>=1.9.0`, CVE-2026-96760).
 - 2026-10-25 — Sync RAM: events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000) attributes are fetched as metadata plus attribute pages of 5000 joined into one list, not as one PyMISP event JSON.
 - 2026-10-23 — The conda setup exports `.env` and checks the setup with `edgeguard doctor`; new § 2.3 on direnv (`layout python` creates `.direnv/python-3.x`, not `.venv`); § 4 states that the code loads no `.env`; link to CONFIGURATION.md. The conda, multi-environment and direnv text came from the README.
 - 2026-10-22 — Pinned versions list the CA bundle `certifi` (`>=2026.10.19`) and the Airflow image's `pip` and `uv`, upgraded past the emSign CA advisories.
