@@ -115,7 +115,7 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
 
 **EdgeGuard responsibilities:**
 
-- Ingest and normalize threat intelligence; write the threat-intelligence layer and `CVE` + `CVSSv*` into the shared database. CVSS sub-nodes + `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` edges (`HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`) are created internally by `merge_cve()` via `_merge_cvss_node` — not via standalone helpers.
+- Ingest and normalize threat intelligence; write the threat-intelligence layer and `CVE` + `CVSSv*` into the shared database. CVSS sub-nodes + `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` edges (`HAS_CVSS_v2` / `HAS_CVSS_v30` / `HAS_CVSS_v31` / `HAS_CVSS_v40`) are created internally: by `merge_cve()` via `_merge_cvss_node`, and in the sync by the CVSS statement of its CVE batches (`merge_cves_batch`, each CVE as `merge_cve` writes it) — not via standalone helpers.
 - `REFERS_TO` between a ResilMesh `Vulnerability` that carries `cve_id` and its `CVE`, through the automatic `enrichment_jobs.bridge_vulnerability_cve()` (the helpers `create_vulnerability_refers_to_cve` / `create_cve_refers_to_vulnerability` write the same edge from custom code).
 - Not yet: `Indicator` → `IP` / `Host` — **planned** via `create_indicator_resolves_to_ip` (planned `INDICATOR_RESOLVES_TO` edge) and `create_malware_targets_host`. Not implemented in `neo4j_client.py`; do not require these in smoke tests.
 
@@ -147,6 +147,7 @@ _Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Who should run what: the CVSS sub-nodes and their edges are written by `merge_cve()` and, in the sync, by the CVSS statement of its CVE batches (`merge_cves_batch`); the text named `merge_cve()` alone.
 - 2026-11-01 — End-to-end test: the graph is filled by a smoke baseline of the `edgeguard_baseline` DAG (the step ran `python src/run_pipeline.py`, whose STIX import builds a reduced graph).
 - 2026-10-25 — `merge_resilmesh_cve` example: `stix_import` is a registered source without a description rank (`ranked_for_descriptions=False`), so `resilmesh`, whose id sorts first, still replaces its text.
 - 2026-10-17 — Rewritten as a guide to current behaviour and checked against the code: `tests/test_resilmesh_schema.py` is a pytest module that needs no Neo4j (as a plain script it checks nothing) and the methods and labels it checks are listed; the recommended split follows RESILMESH_INTEROPERABILITY.md §4 and §6 (ResilMesh writes its topology, mission and scanner data, EdgeGuard the threat intelligence and `CVE` + `CVSSv*`); no indicator- or CVE-to-asset bridge exists yet.

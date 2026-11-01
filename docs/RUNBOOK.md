@@ -211,6 +211,7 @@ Each entry: symptom → detection signal → remediation.
   ```bash
   docker logs edgeguard_airflow 2>&1 | grep "\[BATCH-PERMANENT-FAILURE\]" | tail -20
   docker logs edgeguard_airflow 2>&1 | grep "\[BATCH-RETRY\]" | tail -20  # see retry attempts preceding
+  docker logs edgeguard_airflow 2>&1 | grep "\[CVE-BATCH-FALLBACK\]" | tail -20  # CVE batches written one at a time
   ```
 - **Root cause by reason label.**
   - `retries_exhausted` → Neo4j overloaded. Three retries (2s→4s→8s) didn't recover. GC pause, lock contention, cluster failover.
@@ -277,10 +278,14 @@ Each entry: symptom → detection signal → remediation.
      time, so batches that keep falling back bring the sync back to that speed against its task limit
      (§ *Requesting a full MISP → Neo4j sync*, Duration). By the counter's `reason`:
      `retries_exhausted` → Neo4j is overloaded, as in 1. `non_retryable` → read the server error in
-     the `_write_cve_batch failed with non-retryable error` line; when a CVE of the batch then fails in
+     the `_write_cve_batch failed with non-retryable error` line. When a `[NEO4J-TIMEOUT] …
+     [CVE-BATCH] batched write of N CVEs` line comes before it, the batch reached its transaction
+     timeout (a timeout is not retried): see § *Neo4j statement timeouts* (Neo4j load or memory, or
+     raise `EDGEGUARD_NEO4J_READ_TIMEOUT`). Otherwise, when a CVE of the batch then fails in
      `merge_cve` too, its own lines name it, and the record sends its whole batch to the per-CVE path
-     at every sync until its attribute is corrected in MISP or the cause is fixed; when none fails,
-     the batch statement itself is at fault: file an issue with the logged error.
+     at every sync that writes its attribute (every full sync, and an incremental sync when the
+     attribute changed in its window) until its attribute is corrected in MISP or the cause is fixed;
+     when none fails, the batch statement itself is at fault: file an issue with the logged error.
      `batch_writer_error` → a defect of the batch writer: file an issue with the logged exception.
 
 ### 6. Placeholder-name MERGE spike (feed regression or attack)
@@ -1412,7 +1417,7 @@ _Last updated: 2026-11-01_
 
 ## History
 
-- 2026-11-01 — Failure mode 5: the sync's CVE batches (`merge_cves_batch`) and their lines: `_write_cve_batch` at ERROR and `[CVE-BATCH-FALLBACK]` at WARNING (it was an ERROR when the batch writer itself raised), the run summary's count of batches written one CVE at a time, the counter `edgeguard_neo4j_cve_batch_fallback_total{reason}` and what to do when batches keep falling back. Neo4j statement timeouts: a CVE batch is one transaction and its `[NEO4J-TIMEOUT]` line names it (a batch at its timeout had logged only the `_write_cve_batch` error).
+- 2026-11-01 — Failure mode 5: the sync's CVE batches (`merge_cves_batch`) and their lines: `_write_cve_batch` at ERROR and `[CVE-BATCH-FALLBACK]` at WARNING (it was an ERROR when the batch writer itself raised), the run summary's count of batches written one CVE at a time, the counter `edgeguard_neo4j_cve_batch_fallback_total{reason}`, a log probe for `[CVE-BATCH-FALLBACK]` and what to do when batches keep falling back (a batch at its transaction timeout counts as `non_retryable` and is handled as in § Neo4j statement timeouts). Neo4j statement timeouts: a CVE batch is one transaction and its `[NEO4J-TIMEOUT]` line names it (a batch at its timeout had logged only the `_write_cve_batch` error).
 - 2026-11-01 — Requesting a full sync, Duration: a full sync of a 730-day MISP has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run. The section had given it as about 6 hours, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs.
 - 2026-11-01 — New section "Airflow scheduler or triggerer stopped": `airflow standalone` keeps the API server up when the scheduler dies, so the run stays `running`; detection through `EdgeGuardAirflowSchedulerDown`, `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable`, the `airflow` service healthcheck, `edgeguard dag status` / `doctor` / `preflight` and check `[13]` of `scripts/preflight_baseline.sh`; recovery: restore the metadata database first when it is unhealthy, let a running task end when the time allows (a restart runs it again from its start), restart Airflow and do not pause the DAG; a triggerer or DAG processor alone waits until no run is in progress.
 - 2026-11-01 — Baseline launch path: a baseline runs through the DAG on every install (`airflow dags trigger` without Docker; the `edgeguard` wrappers need Compose); the in-process `run_pipeline.py --baseline` still takes the lock but is a development path that builds a reduced graph (the section listed it among the launch paths).

@@ -90,7 +90,7 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Baseline collectors OTX / NVD (unlimited)            | 5 hours each |
 | Baseline collectors CISA / MITRE / Tier 2 feeds      | 2 hours each |
 | Baseline wipe (`baseline_clean`) | 60 minutes |
-| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, whole hours, at most 22; a full sync of a 730-day MISP has to fit the baseline full sync's limit of 6 hours, and the duration of such a sync with batched CVE writes is to be measured on the next 730-day run; plus a third, because a requested full sync stands until it succeeds) |
+| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, whole hours, at most 22; a full sync of a 730-day MISP has to fit the baseline full sync's limit of 6 hours, and the 8 hours are that limit plus a third, because a requested full sync stands until it succeeds; the duration of such a sync with batched CVE writes is to be measured on the next 730-day run) |
 | Neo4j full sync (baseline) | 6 hours |
 | build_relationships | 5 hours |
 | run_enrichment_jobs | 5 hours |

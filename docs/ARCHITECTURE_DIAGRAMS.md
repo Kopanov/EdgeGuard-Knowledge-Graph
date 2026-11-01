@@ -155,7 +155,8 @@ graph TB
     %% indicator's own CVE tag (cve_tag), which no collector writes.
     %%
     %% HAS_CVSS_v* expands to four concrete edge types written by
-    %% _merge_cvss_node inside merge_cve(): HAS_CVSS_v2, HAS_CVSS_v30,
+    %% _merge_cvss_node inside merge_cve() and, in the sync, by the CVSS
+    %% statement of its CVE batches (merge_cves_batch): HAS_CVSS_v2, HAS_CVSS_v30,
     %% HAS_CVSS_v31, HAS_CVSS_v40 (per neo4j_client.py — note the
     %% underscore + lowercase v + version), each in both directions
     %% (CVE to CVSS and CVSS to CVE), as in the ResilMesh model.
@@ -344,10 +345,11 @@ campaign builder and 6/6 FIRST EPSS. Jobs 2/6, 3/6 and 6/6 are not drawn above.
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — § 3: the `HAS_CVSS_v*` edges are written by `merge_cve` and, in the sync, by the CVSS statement of its CVE batches (`merge_cves_batch`); the note named `merge_cve` alone.
 - 2026-10-25 — The sync chain labels the `run_neo4j_sync` limit as the default 8 h (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`).
 - 2026-10-25 — § 5: `check_neo4j_quality` is labelled with node counts, the only counts it logs (it was labelled node/edge counts).
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
