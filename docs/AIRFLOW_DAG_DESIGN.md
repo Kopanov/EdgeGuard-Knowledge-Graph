@@ -90,7 +90,7 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Baseline collectors OTX / NVD (unlimited)            | 5 hours each |
 | Baseline collectors CISA / MITRE / Tier 2 feeds      | 2 hours each |
 | Baseline wipe (`baseline_clean`) | 60 minutes |
-| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, whole hours, at most 22; a full sync of a 730-day MISP takes about 6 hours, the baseline full sync's limit; plus a third, because a requested full sync stands until it succeeds) |
+| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, whole hours, at most 22; a full sync of a 730-day MISP has to fit the baseline full sync's limit of 6 hours, and the 8 hours are that limit plus a third, because a requested full sync stands until it succeeds; the duration of such a sync with batched CVE writes is to be measured on the next 730-day run) |
 | Neo4j full sync (baseline) | 6 hours |
 | build_relationships | 5 hours |
 | run_enrichment_jobs | 5 hours |
@@ -513,10 +513,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Timeouts: a full sync of a 730-day MISP has to fit the 6 hours of the baseline full sync, and its duration with batched CVE writes is to be measured on the next 730-day run. The table had given it as about 6 hours, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs.
 - 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (tier 2 and the per-source limit gave about 1,130 and 1,100 a day, the rate of the keyless 30-day file); a run after a gap of failed runs can spread over parts.
 - 2026-10-25 — The per-event size cost is bounded by the writer's event split (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, `-partN` events, not OTX); tier 2: URLhaus's first push after a wipe spreads over about 4 parts, and a daily run writes the about 1,130 URLs MISP does not hold into one event (the text said partitioning was not implemented, and that URLhaus writes one event).
 - 2026-10-25 — The timeout table gives the `run_neo4j_sync` limit as 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, at most 22).

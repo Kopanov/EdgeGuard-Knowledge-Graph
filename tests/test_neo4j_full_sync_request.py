@@ -5,7 +5,7 @@
 the task (``retries=2``); the retry found the flag cleared, ran incrementally, stamped the state
 file, and the repair the operator asked for was silently incomplete. The flag is now cleared only
 after a successful full sync. Because it then persists until a full sync succeeds, the task's
-limit is 8 h (was 4 h; a full sync of a 730-day MISP takes about 6 h), the DAG run's limit covers
+limit is 8 h (was 4 h; a full sync has to fit the 6 h of the baseline's full sync), the DAG run's limit covers
 every task failing on all attempts, and the last failed attempt alerts that incremental syncs are
 suspended while the flag stays set. The 8 h limit is the default of ``EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS``.
 
@@ -199,8 +199,8 @@ def test_an_incremental_run_never_touches_the_flag(dag_module, env):
 
 
 def test_the_sync_task_limit_leaves_margin_above_the_full_sync_estimate(dag_module):
-    """About 6 h for a full sync of a 730-day MISP (the baseline task's limit). A requested full sync
-    keeps its flag until it succeeds, so a limit at the estimate could fail every attempt of every run."""
+    """A full sync of a 730-day MISP has to fit the baseline task's 6 h limit. A requested full sync keeps its
+    flag until it succeeds, so a limit at the full sync's duration could fail every attempt of every run."""
     assert dag_module.run_neo4j_sync_task.execution_timeout == timedelta(hours=8)
     assert dag_module.run_neo4j_sync_task.execution_timeout > dag_module.baseline_full_sync_task.execution_timeout
 

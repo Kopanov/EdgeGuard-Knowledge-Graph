@@ -2217,15 +2217,17 @@ def _neo4j_sync_timeout_hours() -> int:
 run_neo4j_sync_task = PythonOperator(
     task_id="run_neo4j_sync",
     python_callable=run_neo4j_sync,
-    # 2026-10: 8 h (was 4 h). This task runs a full sync too (first run, or NEO4J_FULL_SYNC=true),
-    # estimated at about 6 h on a 730-day MISP (the baseline DAG's ``full_neo4j_sync`` has 6 h, see the
-    # baseline dagrun_timeout comment). At 4 h such a sync timed out and its retries ran incrementally;
-    # now the request is kept until a full sync succeeds, so a limit at the estimate itself could fail
-    # every attempt of every scheduled run. 8 h is the estimate plus a third. An incremental run takes
-    # minutes on a local Neo4j, but hours against a remote one with many changed events (a prod sync at
-    # about 0.9 NVD CVE/s, one event with 21,887 changed CVEs, took 8 h 37 min), so the limit is
-    # EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger value uses 22, an invalid one
-    # 8, both with a warning). The 68 h arithmetic is derived from the default 8 h (the stale-sync alert
+    # 2026-10: 8 h (was 4 h). This task runs a full sync too (first run, or NEO4J_FULL_SYNC=true), which
+    # has to fit the 6 h of the baseline DAG's ``full_neo4j_sync`` (see the baseline dagrun_timeout
+    # comment). At 4 h such a sync timed out and its retries ran incrementally; now the request is kept
+    # until a full sync succeeds, so a limit at the full sync's duration could fail every attempt of every
+    # scheduled run. 8 h is the 6 h plus a third. 2026-11: the sync writes CVEs in batches; with one
+    # ``merge_cve`` call per CVE the full sync of a 730-day MISP was estimated at about 5.7 h from the
+    # 7-day baseline of 2026-11-01, and its duration with the batches is to be measured on the next
+    # 730-day run. An incremental run against a remote Neo4j with many changed events took hours with
+    # per-CVE writes (a prod sync at about 0.9 NVD CVE/s, one event with 21,887 changed CVEs, took
+    # 8 h 37 min), so the limit is EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, whole hours, at most 22 (a larger
+    # value uses 22, an invalid one 8, both with a warning). The 68 h arithmetic is derived from the default 8 h (the stale-sync alert
     # follows the limit); above 12 h a run in which every task of the chain fails on all attempts exceeds 68 h, so a
     # late build_relationships or run_enrichment_jobs is then cut (marked skipped, without a failure
     # callback), while the 22 h cap keeps all three sync attempts and the 24 h guard inside the limits.
@@ -3086,8 +3088,8 @@ def run_baseline_full_sync(**context):
     _record_successful_sync_metrics((datetime.now(timezone.utc) - sync_started_at).total_seconds(), node_counts=False)
     # 2026-10: the scheduled sync derives its window from this file. Without a stamp it ran a full
     # sync after the baseline (no file) or treated every attribute since the previous baseline as
-    # changed (a stale file): the baseline's full sync (about 6 h) again, within the scheduled task's
-    # own limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, 8 h by default; 4 h before 2026-10).
+    # changed (a stale file): the baseline's full sync (up to the 6 h of full_neo4j_sync) again, within the
+    # scheduled task's own limit (EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS, 8 h by default; 4 h before 2026-10).
     import json
 
     state_file = get_state_file()

@@ -147,12 +147,20 @@ try:
     except ImportError:
         _MERGE_REJECT_PLACEHOLDER = None  # type: ignore[assignment]
 
+    # 2026-11: CVE batches written one CVE at a time after their batched write failed
+    # (``Neo4jClient._merge_cve_batch``).
+    try:
+        from metrics_server import record_cve_batch_fallback as _record_cve_batch_fallback
+    except ImportError:
+        _record_cve_batch_fallback = None  # type: ignore[assignment]
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
     _NEO4J_MERGE_INEFFECTIVE_BATCH = None  # type: ignore[assignment]
     _NEO4J_BATCH_PERMANENT_FAILURES = None  # type: ignore[assignment]
     _MERGE_REJECT_PLACEHOLDER = None  # type: ignore[assignment]
+    _record_cve_batch_fallback = None  # type: ignore[assignment]
 
 
 def _record_batch_counters(
@@ -405,6 +413,18 @@ def _emit_batch_permanent_failure(*, label: str, source_id: str, reason: str) ->
             _metric_err,
             exc_info=True,
         )
+
+
+def _emit_cve_batch_fallback(reason: str) -> None:
+    """2026-11: count a CVE batch written one CVE at a time after its batched write failed
+    (``edgeguard_neo4j_cve_batch_fallback_total``). None-guarded like ``_emit_batch_permanent_failure``;
+    ``reason`` is ``non_retryable``, ``retries_exhausted`` or ``batch_writer_error``."""
+    if _record_cve_batch_fallback is None:
+        return
+    try:
+        _record_cve_batch_fallback(reason)
+    except Exception as _metric_err:
+        logger.debug("cve-batch-fallback metric increment failed: %s", _metric_err, exc_info=True)
 
 
 # Configuration constants
@@ -1465,8 +1485,11 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
 # ``Neo4jClient._merge_cvss_node`` sets the sub-node's identity and bookkeeping itself, passes its own
 # statement parameters beside the payload's, and gives ``session.run`` its query, parameters and timeout,
 # so such an entry replaced the sub-node's ``uuid`` or made the write fail. No collector writes one.
+# 2026-11: ``self`` too, the first argument of ``_TimeoutSession.run``: ``merge_cve`` failed on it, while the
+# batched write (``merge_cves_batch``), which nests the payload in its rows, wrote it.
 CVSS_PAYLOAD_RESERVED_NAMES = frozenset(
     {
+        "self",
         "cve_id",
         "uuid",
         "tag",
@@ -1749,14 +1772,17 @@ def _create_active(var: str) -> str:
 # --------------------------------------------------------------------------- #
 #
 # ``merge_cve`` writes one CVE in five to nine auto-commit statements (the node with a read before it, its
-# ``SOURCED_FROM`` edge, each CVSS sub-node, NVD's data, the score). On 2026-11-01 a 7-day baseline on a
-# local Neo4j synced NVD CVEs at about 8 per second, which put the full sync of a 730-day MISP (about
-# 151,000 NVD CVEs) at about 5.7 h against the 6 h limit of ``full_neo4j_sync``. The batch runs the same
-# writes for up to ``CVE_BATCH_SIZE`` CVEs as one UNWIND statement each, in one transaction. Each row
-# gives the statement the values ``merge_cve`` gives its statements, so a CVE ends up as ``merge_cve``
-# leaves it; the SOURCED_FROM, CVSS, NVD-data and score statements are built by the builders above that
-# ``merge_cve``'s helpers use. A batch holds each CVE at most once, so its rows touch different nodes and
-# their order within it does not matter; a record whose CVE the batch already holds starts the next batch.
+# ``SOURCED_FROM`` edge, each CVSS sub-node, NVD's data, the score). Written that way, NVD CVEs were synced at
+# about 8 per second in the 7-day baseline of 2026-11-01 on the test instance (about 35 per second on a local
+# Neo4j), which put the full sync of a 730-day MISP (about 151,000 NVD CVEs) at about 5.7 h against the 6 h
+# limit of ``full_neo4j_sync``; the duration of that full sync with the batch is to be measured on the next
+# 730-day run. The batch runs the same writes for up to ``CVE_BATCH_SIZE`` CVEs as one UNWIND statement
+# each, in one transaction. Each row gives the statement the values ``merge_cve`` gives its statements, so a
+# CVE ends up as ``merge_cve`` leaves it; the SOURCED_FROM, CVSS, NVD-data and score statements are built by
+# the builders above that ``merge_cve``'s helpers use. A batch holds each CVE at most once, so its rows touch
+# different nodes and their order within it does not matter; a record whose CVE the batch already holds
+# starts the next batch. A batch whose transaction fails is written one CVE at a time by ``merge_cve``
+# ([CVE-BATCH-FALLBACK], ``edgeguard_neo4j_cve_batch_fallback_total``), at the per-CVE rate.
 
 # 2026-11: CVEs per batched write (one transaction). The sync passes at most a chunk's CVEs
 # (``EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE``, 500 by default).
@@ -4156,13 +4182,19 @@ class Neo4jClient:
             return _cve_sub_write_failed(e, f"Failed to merge {label} for CVE {cve_id}")
 
     def merge_cves_batch(
-        self, records: Sequence[Tuple[Dict, str]], *, refresh_raw_data: bool = True
+        self,
+        records: Sequence[Tuple[Dict, str]],
+        *,
+        refresh_raw_data: bool = True,
+        on_fallback: Optional[Callable[[int], None]] = None,
     ) -> List[Union[bool, Exception]]:
         """Write CVE records as ``merge_cve`` writes each, in batches (2026-11).
 
         ``records`` are ``(data, source_id)`` pairs, written in their order. Returns, per record, what
         ``merge_cve(data, source_id=source_id, refresh_raw_data=refresh_raw_data)`` returns (True or False)
-        or the exception it raises, so the caller keeps its accounting per CVE.
+        or the exception it raises, so the caller keeps its accounting per CVE. ``on_fallback`` is called
+        with the number of CVEs of each batch whose transaction failed, before they are written one by one
+        (the sync's ``cve_batch_fallbacks`` statistics).
 
         Up to ``CVE_BATCH_SIZE`` records of different CVEs are written together (``_write_cve_batch``): one
         transaction of one UNWIND statement per write ``merge_cve`` makes, with the values ``merge_cve``
@@ -4172,7 +4204,8 @@ class Neo4jClient:
         node holds a ``confidence_score`` that is not a number) is written by ``merge_cve`` itself, in its
         place in the order. A batch whose transaction fails (a terminal error, or a retryable one that
         outlasts its retries) has written nothing; its records are then written one by one by
-        ``merge_cve``, so each gets the result and the log lines it always got.
+        ``merge_cve``, so each gets the result and the log lines it always got; the batch is logged as
+        ``[CVE-BATCH-FALLBACK]`` and counted in ``edgeguard_neo4j_cve_batch_fallback_total``.
         """
         results: List[Union[bool, Exception, None]] = [None] * len(records)
 
@@ -4188,7 +4221,7 @@ class Neo4jClient:
 
         def flush() -> None:
             if batch:
-                self._merge_cve_batch(batch, results, write_one, refresh_raw_data)
+                self._merge_cve_batch(batch, results, write_one, refresh_raw_data, on_fallback)
                 batch.clear()
                 batch_ids.clear()
 
@@ -4215,9 +4248,10 @@ class Neo4jClient:
         results: List[Union[bool, Exception, None]],
         write_one: Callable[[int], None],
         refresh_raw_data: bool,
+        on_fallback: Optional[Callable[[int], None]] = None,
     ) -> None:
         """Write one batch of ``merge_cves_batch`` and record each record's result; on a failed
-        transaction, write its records one by one."""
+        transaction, count the fallback and write its records one by one."""
         try:
             existing, diverted = self._write_cve_batch([p for _, p in batch], refresh_raw_data)
         except Exception as exc:  # noqa: BLE001 - nothing of the batch was written; merge_cve writes each
@@ -4228,6 +4262,9 @@ class Neo4jClient:
                 type(exc).__name__,
                 exc,
             )
+            _emit_cve_batch_fallback("retries_exhausted" if _is_retryable_neo4j_error(exc) else "non_retryable")
+            if on_fallback is not None:
+                on_fallback(len(batch))
             for index, _ in batch:
                 write_one(index)
             return
@@ -4284,34 +4321,49 @@ class Neo4jClient:
         ``merge_node_with_source`` fails before it writes; ``merge_cve`` writes those afterwards. A failed
         statement rolls the whole batch back and raises; a retryable error is retried
         (``retry_with_backoff``), the batch being written again from the start.
+
+        The transaction's statements reach the driver without the session proxy (``_TimeoutSession``
+        logs ``[NEO4J-TIMEOUT]`` for ``session.run`` only), so a batch that reaches the transaction
+        timeout, which covers all its statements together, names itself here.
         """
         existing: Dict[str, Dict[str, Any]] = {}
         diverted: set = set()
-        with self.driver.session() as session:
-            with session.begin_transaction(timeout=float(NEO4J_READ_TIMEOUT)) as tx:
-                ids = [p["cve_id"] for p in batch]
-                for record in tx.run(_CVE_BATCH_AUDIT_QUERY, cve_ids=ids):
-                    existing[record["cve_id"]] = dict(record)
-                for prepared in batch:
-                    existing_conf = (existing.get(prepared["cve_id"]) or {}).get("existing_confidence")
-                    if existing_conf is not None:
-                        try:
-                            _ = prepared["confidence"] < existing_conf
-                        except TypeError:
-                            diverted.add(prepared["cve_id"])
-                written = [p for p in batch if p["cve_id"] not in diverted]
-                if written:
-                    tx.run(_CVE_BATCH_NODE_QUERY, rows=[p["node"] for p in written]).consume()
-                    tx.run(_cve_batch_sourced_from_query(refresh_raw_data), rows=[p["edge"] for p in written]).consume()
-                    for label, rel_type, _key in _CVE_CVSS_SUB_NODES:
-                        rows = [p["cvss"][label] for p in written if label in p["cvss"]]
-                        if rows:
-                            tx.run(_cve_batch_cvss_query(label, rel_type, rows), rows=rows).consume()
-                    nvd_rows = [p["nvd"] for p in written if p["nvd"] is not None]
-                    if nvd_rows:
-                        tx.run(_CVE_BATCH_NVD_OWNED_QUERY, rows=nvd_rows).consume()
-                    tx.run(_CVE_BATCH_SCORE_QUERY, cve_ids=[p["cve_id"] for p in written]).consume()
-                tx.commit()
+        try:
+            with self.driver.session() as session:
+                with session.begin_transaction(timeout=float(NEO4J_READ_TIMEOUT)) as tx:
+                    ids = [p["cve_id"] for p in batch]
+                    for record in tx.run(_CVE_BATCH_AUDIT_QUERY, cve_ids=ids):
+                        existing[record["cve_id"]] = dict(record)
+                    for prepared in batch:
+                        existing_conf = (existing.get(prepared["cve_id"]) or {}).get("existing_confidence")
+                        if existing_conf is not None:
+                            try:
+                                _ = prepared["confidence"] < existing_conf
+                            except TypeError:
+                                diverted.add(prepared["cve_id"])
+                    written = [p for p in batch if p["cve_id"] not in diverted]
+                    if written:
+                        tx.run(_CVE_BATCH_NODE_QUERY, rows=[p["node"] for p in written]).consume()
+                        tx.run(
+                            _cve_batch_sourced_from_query(refresh_raw_data), rows=[p["edge"] for p in written]
+                        ).consume()
+                        for label, rel_type, _key in _CVE_CVSS_SUB_NODES:
+                            rows = [p["cvss"][label] for p in written if label in p["cvss"]]
+                            if rows:
+                                tx.run(_cve_batch_cvss_query(label, rel_type, rows), rows=rows).consume()
+                        nvd_rows = [p["nvd"] for p in written if p["nvd"] is not None]
+                        if nvd_rows:
+                            tx.run(_CVE_BATCH_NVD_OWNED_QUERY, rows=nvd_rows).consume()
+                        tx.run(_CVE_BATCH_SCORE_QUERY, cve_ids=[p["cve_id"] for p in written]).consume()
+                    tx.commit()
+        except Exception as exc:
+            _log_if_timed_out(
+                exc,
+                float(NEO4J_READ_TIMEOUT),
+                f"[CVE-BATCH] batched write of {len(batch)} CVEs (the read and the node, SOURCED_FROM, CVSS, "
+                "NVD-data and score statements in one transaction)",
+            )
+            raise
         return existing, diverted
 
     def merge_malware(self, data: Dict, source_id: str = "alienvault_otx") -> bool:

@@ -211,6 +211,7 @@ Each entry: symptom → detection signal → remediation.
   ```bash
   docker logs edgeguard_airflow 2>&1 | grep "\[BATCH-PERMANENT-FAILURE\]" | tail -20
   docker logs edgeguard_airflow 2>&1 | grep "\[BATCH-RETRY\]" | tail -20  # see retry attempts preceding
+  docker logs edgeguard_airflow 2>&1 | grep "\[CVE-BATCH-FALLBACK\]" | tail -20  # CVE batches written one at a time
   ```
 - **Root cause by reason label.**
   - `retries_exhausted` → Neo4j overloaded. Three retries (2s→4s→8s) didn't recover. GC pause, lock contention, cluster failover.
@@ -247,6 +248,22 @@ Each entry: symptom → detection signal → remediation.
     in the JSON), reads a payload left without a base score as absent, and logs
     `[META] NVD_META.<payload> of <CVE> ...` at WARNING; the CVE counts as synced. Correct the
     attribute's comment in MISP if the payload should be there.
+  - The sync writes the CVEs of a chunk in batches of up to 500 (`merge_cves_batch`), each batch in one
+    transaction. A batch whose transaction fails (a terminal error on one of its statements, often
+    caused by one record of the batch, or a retryable error that persists through three retries) has
+    written nothing, and its CVEs are then written one at a time by `merge_cve`, with the lines and the
+    accounting above. The batch logs `_write_cve_batch failed with non-retryable error: <server error>`
+    or `_write_cve_batch failed after 4 attempts` at ERROR, then `[CVE-BATCH-FALLBACK] The batched
+    write of N CVEs failed (<error>) — nothing of it was written; writing them one at a time` at
+    WARNING; `[CVE-BATCH-FALLBACK] merge_cves_batch raised …` (WARNING) means the batch writer itself
+    raised, and the CVEs of the list are written one at a time the same way. These lines alone lose
+    nothing: a CVE that fails in `merge_cve` as well gets its own line (`[MERGE-RETURNED-FALSE]`,
+    `merge_cve error for`, `Error syncing plain CVE`) and counts as an error. The sync logs those lines
+    after the writes of the whole list (the CVEs with CVSS, then the others), so match them to the
+    client's lines by CVE id. The run summary reports `CVE batches written one CVE at a time after a
+    failed batched write: N (M CVEs; …)`, 0 when no batch fell back, and
+    `edgeguard_neo4j_cve_batch_fallback_total{reason}` counts the batches (`retries_exhausted`,
+    `non_retryable` or `batch_writer_error`; no alert reads it).
 - **Remediation.**
   1. If `retries_exhausted`: pause the DAG, let Neo4j recover, manually
      re-trigger the sync task once load drops. Consider raising the Neo4j
@@ -256,6 +273,20 @@ Each entry: symptom → detection signal → remediation.
   2. If `non_retryable`: check Neo4j logs for the actual error:
      `docker logs edgeguard_neo4j --tail=200 | grep -iE "error|exception"`.
      This is a code bug: file an issue and ship a hotfix.
+  3. If CVE batches fall back on more than an occasional run (the run summary's count above 0, or
+     `edgeguard_neo4j_cve_batch_fallback_total` rising): each such batch takes the per-CVE write
+     time, so batches that keep falling back bring the sync back to that speed against its task limit
+     (§ *Requesting a full MISP → Neo4j sync*, Duration). By the counter's `reason`:
+     `retries_exhausted` → Neo4j is overloaded, as in 1. `non_retryable` → read the server error in
+     the `_write_cve_batch failed with non-retryable error` line. When a `[NEO4J-TIMEOUT] …
+     [CVE-BATCH] batched write of N CVEs` line comes before it, the batch reached its transaction
+     timeout (a timeout is not retried): see § *Neo4j statement timeouts* (Neo4j load or memory, or
+     raise `EDGEGUARD_NEO4J_READ_TIMEOUT`). Otherwise, when a CVE of the batch then fails in
+     `merge_cve` too, its own lines name it, and the record sends its whole batch to the per-CVE path
+     at every sync that writes its attribute (every full sync, and an incremental sync when the
+     attribute changed in its window) until its attribute is corrected in MISP or the cause is fixed;
+     when none fails, the batch statement itself is at fault: file an issue with the logged error.
+     `batch_writer_error` → a defect of the batch writer: file an issue with the logged exception.
 
 ### 6. Placeholder-name MERGE spike (feed regression or attack)
 
@@ -546,6 +577,8 @@ Each entry: symptom → detection signal → remediation.
   A driver opened directly by a CLI command or a script carries none.
 
   The actor alias merge and the Malware twin merge run each batch (the merge, the two uuid re-stamps and the list normalisation) in one transaction, so `EDGEGUARD_NEO4J_READ_TIMEOUT` limits the four statements together; at that limit the batch rolls back whole and the `[NEO4J-TIMEOUT]` line names it (`[ACTOR-ALIAS-MERGE] merge batch i/n …` or `[MALWARE-TWIN-MERGE] merge batch i/n …`).
+
+  The sync's CVE batches (`merge_cves_batch`) run the read and the node, `SOURCED_FROM`, CVSS, NVD-data and score statements of up to 500 CVEs in one transaction, which `EDGEGUARD_NEO4J_READ_TIMEOUT` limits as a whole; at that limit the batch rolls back, the `[NEO4J-TIMEOUT]` line names it (`[CVE-BATCH] batched write of N CVEs …`), and its CVEs are written one at a time (§ 5).
 - **Symptom.** A task fails with `[NEO4J-TIMEOUT] the server aborted a statement at its N s transaction timeout: <statement>`.
 - **Log probe.**
   ```bash
@@ -600,7 +633,7 @@ Each entry: symptom → detection signal → remediation.
   ```bash
   docker compose exec airflow airflow variables set NEO4J_FULL_SYNC false
   ```
-- **Duration.** A full sync of a 730-day MISP takes about 6 hours (the baseline DAG's `full_neo4j_sync` limit). The task's limit is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, 8 hours by default: the estimate plus a third, because a limit at the estimate could fail every attempt of a request, and a request stands until it succeeds; below about 6 hours a requested full sync can fail every attempt of every run. It takes whole hours up to 22 (a larger value uses 22, an invalid one 8, both with a warning). When a remote Neo4j with many changed events needs more, raise it in `.env` and recreate the airflow container between runs (`docker compose up -d airflow`). The DAG run's limit of 68 hours covers every task of the chain failing on all three attempts, plus 20%, as for the other DAGs, and is sized for the default limit; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit (§ *MISP → Neo4j sync schedule*).
+- **Duration.** A full sync of a 730-day MISP has to fit the 6-hour limit of the baseline DAG's `full_neo4j_sync`. The sync writes CVEs in batches (§ 5); the duration of such a full sync is to be measured on the next 730-day run (the sync's `Duration:` line), and every batch written one CVE at a time (the run summary's `CVE batches written one CVE at a time` line) adds the per-CVE write time. The task's limit is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, 8 hours by default: the 6 hours plus a third, because a limit at the duration of a full sync could fail every attempt of a request, and a request stands until it succeeds; a limit below the duration of a full sync makes a requested full sync fail every attempt of every run. It takes whole hours up to 22 (a larger value uses 22, an invalid one 8, both with a warning). When a remote Neo4j with many changed events needs more, raise it in `.env` and recreate the airflow container between runs (`docker compose up -d airflow`). The DAG run's limit of 68 hours covers every task of the chain failing on all three attempts, plus 20%, as for the other DAGs, and is sized for the default limit; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit (§ *MISP → Neo4j sync schedule*).
 
 ## AbuseIPDB daily blacklist quota (429)
 
@@ -1384,6 +1417,8 @@ _Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Failure mode 5: the sync's CVE batches (`merge_cves_batch`) and their lines: `_write_cve_batch` at ERROR and `[CVE-BATCH-FALLBACK]` at WARNING (it was an ERROR when the batch writer itself raised), the run summary's count of batches written one CVE at a time, the counter `edgeguard_neo4j_cve_batch_fallback_total{reason}`, a log probe for `[CVE-BATCH-FALLBACK]` and what to do when batches keep falling back (a batch at its transaction timeout counts as `non_retryable` and is handled as in § Neo4j statement timeouts). Neo4j statement timeouts: a CVE batch is one transaction and its `[NEO4J-TIMEOUT]` line names it (a batch at its timeout had logged only the `_write_cve_batch` error).
+- 2026-11-01 — Requesting a full sync, Duration: a full sync of a 730-day MISP has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run. The section had given it as about 6 hours, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs.
 - 2026-11-01 — New section "Airflow scheduler or triggerer stopped": `airflow standalone` keeps the API server up when the scheduler dies, so the run stays `running`; detection through `EdgeGuardAirflowSchedulerDown`, `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable`, the `airflow` service healthcheck, `edgeguard dag status` / `doctor` / `preflight` and check `[13]` of `scripts/preflight_baseline.sh`; recovery: restore the metadata database first when it is unhealthy, let a running task end when the time allows (a restart runs it again from its start), restart Airflow and do not pause the DAG; a triggerer or DAG processor alone waits until no run is in progress.
 - 2026-11-01 — Baseline launch path: a baseline runs through the DAG on every install (`airflow dags trigger` without Docker; the `edgeguard` wrappers need Compose); the in-process `run_pipeline.py --baseline` still takes the lock but is a development path that builds a reduced graph (the section listed it among the launch paths).
 - 2026-10-25 — Baseline-day protocol: the short procedures mark the runs of the paused DAGs failed too; the paged-fetch gauge is set again by every later sync run that connects (the missed rows need a full sync).

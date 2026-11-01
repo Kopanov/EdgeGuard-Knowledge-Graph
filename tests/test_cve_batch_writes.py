@@ -1,19 +1,23 @@
 """The batched CVE write (2026-11): ``Neo4jClient.merge_cves_batch`` and the sync's use of it.
 
 Until 2026-11 the sync wrote each CVE with ``merge_cve``: a read and five to nine auto-commit statements per CVE
-(about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01, so about 5.7 h for the CVEs of a 730-day MISP
-against the 6 h limit of ``full_neo4j_sync``). ``merge_cves_batch`` writes up to ``CVE_BATCH_SIZE`` CVEs in one
-transaction of one UNWIND statement per write, from rows holding the values ``merge_cve`` gives its statements.
+(about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance, which put the full sync of a
+730-day MISP at about 5.7 h, about 5.2 h of it CVEs, against the 6 h limit of ``full_neo4j_sync``).
+``merge_cves_batch`` writes up to ``CVE_BATCH_SIZE`` CVEs in one transaction of one UNWIND statement per write, from
+rows holding the values ``merge_cve`` gives its statements.
 
 This module checks, without a database, that each row holds exactly those values for every real record of the
-fixtures (``TestRowsAreMergeCveParameters``), the statements and transactions a batch sends, its retry and its
-fallback to ``merge_cve`` (``tests/fake_bolt.py``), and the sync's accounting. That the statements leave the graph
-as ``merge_cve`` leaves it is shown on a real Neo4j by ``tests/test_cve_batch_sync_neo4j.py``.
+fixtures (``TestRowsAreMergeCveParameters``), that the node statement assigns each property in the clause the single
+write uses, the statements and the one explicit transaction a batch sends, its retry and its fallback to ``merge_cve``
+(``tests/fake_bolt.py``), how a fallback is counted and logged (stats, metric, ``[NEO4J-TIMEOUT]``), and the sync's
+accounting and run summary. That the statements leave the graph as ``merge_cve`` leaves it is shown on a real Neo4j
+by ``tests/test_cve_batch_sync_neo4j.py``.
 """
 
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import logging
 import re
@@ -43,6 +47,8 @@ TYPE_ERROR = "Neo.ClientError.Statement.TypeError"  # terminal
 BATCH_NODE = "MERGE (n:CVE {cve_id: row.cve_id})"
 SINGLE_NODE = "MERGE (n:CVE {cve_id: $cve_id})"
 BATCH_SCORE = "UNWIND $cve_ids AS cve_id\nMATCH (c:CVE"
+BATCH_AUDIT = "MATCH (n:CVE {cve_id: cve_id})\nRETURN"
+BATCH_SOURCED_FROM = "MERGE (n)-[r:SOURCED_FROM]->(s)"
 
 
 # ---------------------------------------------------------------------------------------------- real records
@@ -146,6 +152,37 @@ def _merge_cve_parameters(data: Dict[str, Any], source_id: str) -> Dict[str, Any
     return found
 
 
+def _single_node_statements(real_items: List[Dict[str, Any]], source_id: str) -> Tuple[str, str]:
+    """The node statement and the read before it that ``merge_cve`` sends for a real record given every property
+    ``merge_cve`` writes (TLP, a MISP attribute id, a description and each of ``_CVE_NODE_PROPS``)."""
+    data = dict(real_items[0], tlp="amber", misp_attribute_id="9", description="text", known_ransomware_use="Known")
+    for prop in nc._CVE_NODE_PROPS:
+        if not data.get(prop):
+            data[prop] = ["x"] if prop in nc._NVD_OWNED_CVE_LISTS + ("status",) else "2026-10-01"
+    client = nc.Neo4jClient.__new__(nc.Neo4jClient)
+    client.driver = _Recorder()
+    client.merge_cve(data, source_id=source_id)
+    (single,) = [q for q, _ in client.driver.calls if SINGLE_NODE in q]
+    (read,) = [q for q, _ in client.driver.calls if "as existing_confidence" in q]
+    return single, read
+
+
+def _assignment_clauses(statement: str) -> Dict[str, set]:
+    """For each node property a statement assigns (``n.<prop> = …`` as an item of a ``SET`` list), the clauses
+    that assign it: ``ON CREATE SET``, ``ON MATCH SET`` or ``SET`` (every write; the ``SET`` after ``WITH`` too).
+    A comparison inside an expression (``n.cwe = ''``) is not an item, so it is not counted."""
+    text = re.sub(r"//[^\n]*", "", statement)  # comments
+    keywords = list(re.finditer(r"ON CREATE SET|ON MATCH SET|\bSET\b|\bWITH\b", text))
+    clauses: Dict[str, set] = {}
+    for keyword, following in zip(keywords, keywords[1:] + [None], strict=True):
+        if keyword.group() == "WITH":
+            continue
+        segment = text[keyword.start() : following.start() if following else len(text)]
+        for prop in re.findall(r"(?:\bSET\s+|,\s*)n\.(\w+)\s*=", segment):
+            clauses.setdefault(prop, set()).add(keyword.group())
+    return clauses
+
+
 class TestRowsAreMergeCveParameters:
     """For every real record, the batch's rows (``_prepare_cve_write``) hold the values ``merge_cve`` passes its
     statements: the node's (its set and filled properties, TLP and ranked description included), the
@@ -207,15 +244,7 @@ class TestRowsAreMergeCveParameters:
         clause per record), so a property the single write gains must reach it too: for a record carrying every
         property ``merge_cve`` writes, both statements assign the same node properties, and the read before the
         write returns the same ones."""
-        data = dict(real_items[0], tlp="amber", misp_attribute_id="9", description="text", known_ransomware_use="Known")
-        for prop in nc._CVE_NODE_PROPS:
-            if not data.get(prop):
-                data[prop] = ["x"] if prop in nc._NVD_OWNED_CVE_LISTS + ("status",) else "2026-10-01"
-        client = nc.Neo4jClient.__new__(nc.Neo4jClient)
-        client.driver = _Recorder()
-        client.merge_cve(data, source_id=source_id)
-        (single,) = [q for q, _ in client.driver.calls if SINGLE_NODE in q]
-        (read,) = [q for q, _ in client.driver.calls if "as existing_confidence" in q]
+        single, read = _single_node_statements(real_items, source_id)
 
         def assigned(statement: str) -> set:
             return set(re.findall(r"\bn\.(\w+)\s*=", statement))
@@ -224,12 +253,35 @@ class TestRowsAreMergeCveParameters:
         assert {"tlp", "misp_attribute_ids", "description", *nc._CVE_NODE_PROPS} <= assigned(single)
         assert set(re.findall(r"\bn\.(\w+)", nc._CVE_BATCH_AUDIT_QUERY)) == set(re.findall(r"\bn\.(\w+)", read))
 
+    @pytest.mark.parametrize("source_id", ["nvd", "cisa_kev", "alienvault_otx"])
+    def test_each_property_is_assigned_in_the_clause_the_single_write_uses(self, real_items, source_id):
+        """2026-11: where a property is assigned matters as much as that it is: ``first_imported_at`` is set when
+        the node is created only, ``last_updated`` on every write. Both statements give each property the same
+        clauses (``ON CREATE SET``, ``ON MATCH SET`` or ``SET``, which runs on every write)."""
+        single, _read = _single_node_statements(real_items, source_id)
+        batch = _assignment_clauses(nc._CVE_BATCH_NODE_QUERY)
+        assert batch == _assignment_clauses(single)
+        # The write-time stamps of the node, named: what the parity test on a real Neo4j compares by presence only.
+        assert batch["first_imported_at"] == {"ON CREATE SET"}
+        assert batch["last_updated"] == {"SET"}
+        # Not vacuous: the split finds the create-only, match-only and every-write items of the statement.
+        assert {p for p, c in batch.items() if c == {"ON CREATE SET"}} == {
+            "first_imported_at",
+            "edgeguard_managed",
+            "active",
+        }
+        assert batch["edgeguard_enriched"] == {"ON MATCH SET"} and batch["uuid"] == {"ON CREATE SET", "SET"}
+        assert {"confidence_score", "source", "tlp", "description", *nc._CVE_NODE_PROPS} <= {
+            p for p, c in batch.items() if c == {"SET"}
+        }
+
     @pytest.mark.parametrize(
         "change",
         [
             {"cve_id": None, "value": None, "type": "vulnerability"},  # no resolvable CVE id
             {"cvss_v31_data": "CVSS:3.1/AV:N"},  # a payload that is not a dict
             {"cvss_v31_data": {"base_score": 9.8, "uuid": "x"}},  # a payload naming a parameter
+            {"cvss_v31_data": {"base_score": 9.8, "self": "x"}},  # an argument of session.run (2026-11)
             {"cvss_v31_data": {"base score": 9.8}},  # not a property name
         ],
     )
@@ -279,6 +331,38 @@ def _records(*items: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
     return [(item, item.get("tag", "misp")) for item in items]
 
 
+def _transactions(events: List[Tuple[str, Any]]) -> Tuple[List[Tuple[Dict[str, Any], List[str], str]], List[str]]:
+    """The explicit transactions in ``FakeBolt.events``, each as ``(BEGIN's extra, its statements, how it ended)``
+    (``COMMIT``, ``ROLLBACK``, or ``RESET``, with which the driver ends a transaction a statement of which failed),
+    and the statements run outside a transaction (auto-commit)."""
+    transactions: List[Tuple[Dict[str, Any], List[str], str]] = []
+    auto_commit: List[str] = []
+    current = None
+    for name, payload in events:
+        if name == "BEGIN":
+            current = (payload or {}, [])
+        elif name == "RUN" and current is not None:
+            current[1].append(payload)
+        elif name == "RUN":
+            auto_commit.append(payload)
+        elif current is not None:  # COMMIT, ROLLBACK, RESET
+            transactions.append((current[0], current[1], name))
+            current = None
+    assert current is None, "a transaction was left open"
+    return transactions, auto_commit
+
+
+def _fallback_count(reason: str) -> float:
+    """``edgeguard_neo4j_cve_batch_fallback_total{reason}`` as the metrics endpoint reports it."""
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value("edgeguard_neo4j_cve_batch_fallback_total", {"reason": reason}) or 0.0
+
+
+FALLBACK_REASONS = ("non_retryable", "retries_exhausted", "batch_writer_error")
+TIMED_OUT = "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+
+
 class TestOneTransactionPerBatch:
     def test_a_batch_is_one_statement_per_write(self, bolt):
         server, client = bolt()
@@ -291,6 +375,21 @@ class TestOneTransactionPerBatch:
         assert count(server.runs, SINGLE_NODE) == 0, "no CVE was written alone"
         nvd = next(p for q, p in zip(server.runs, server.parameters, strict=True) if "AS nvd_only" in q)
         assert [r["cve_id"] for r in nvd["rows"]] == ["CVE-2026-1001", "CVE-2026-1002"]  # NVD's records only
+
+    def test_the_statements_of_a_batch_are_one_explicit_transaction(self, bolt):
+        """2026-11: one BEGIN, every statement of the batch, one COMMIT; the transaction carries the timeout, which
+        covers its statements together. Nothing is written in auto-commit statements."""
+        server, client = bolt()
+        start = len(server.events)  # after the connection check
+        assert client.merge_cves_batch(_records(_cve(1), _cve(2, nvd_record=False))) == [True, True]
+        transactions, auto_commit = _transactions(server.events[start:])
+        assert auto_commit == []
+        ((begin, statements, end),) = transactions
+        assert end == "COMMIT"
+        assert begin.get("tx_timeout") == nc.NEO4J_READ_TIMEOUT * 1000  # milliseconds
+        # The read, the node, SOURCED_FROM, CVSS v3.1, NVD's data and the score, in merge_cve's order.
+        heads = [BATCH_AUDIT, BATCH_NODE, BATCH_SOURCED_FROM, "MERGE (n:CVSSv31", "AS nvd_only", BATCH_SCORE]
+        assert [next(h for h in heads if h in s) for s in statements] == heads
 
     def test_batches_hold_at_most_cve_batch_size(self, bolt, monkeypatch):
         monkeypatch.setattr(nc, "CVE_BATCH_SIZE", 2)
@@ -325,6 +424,19 @@ class TestOneTransactionPerBatch:
         order = [q for q in server.runs if BATCH_NODE in q or SINGLE_NODE in q]
         assert [BATCH_NODE in q for q in order] == [True, False, True]
 
+    def test_a_payload_entry_named_like_an_argument_of_session_run_gets_merge_cves_result(self, bolt):
+        """2026-11: ``merge_cve`` passes a CVSS payload to ``session.run`` as keyword arguments, so an entry named
+        ``self`` fails its CVSS write (False); the batch nests the payload in its rows and had written it. Such a
+        record is now written by ``merge_cve``, so both give the same result. The sync drops the entry when it reads
+        the attribute (``_meta_cvss_payload``), so only a direct caller meets it."""
+        _server, client = bolt()
+        odd = _cve(2, cvss_v31_data={"base_score": 9.8, "self": "x"})
+        assert client.merge_cves_batch(_records(odd)) == [client.merge_cve(copy.deepcopy(odd), source_id="nvd")]
+        named = inspect.signature(nc._TimeoutSession.run).parameters.values()
+        arguments = {p.name for p in named if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)}
+        assert arguments == {"self", "query", "parameters", "timeout"}
+        assert arguments <= nc.CVSS_PAYLOAD_RESERVED_NAMES
+
 
 class TestRetryAndFallback:
     def test_a_deadlock_retries_the_whole_batch(self, bolt):
@@ -341,8 +453,78 @@ class TestRetryAndFallback:
         with caplog.at_level(logging.WARNING, logger="neo4j_client"):
             assert client.merge_cves_batch(_records(_cve(1), _cve(2))) == [True, True]
         assert count(server.runs, SINGLE_NODE) == 2
-        (line,) = [r.getMessage() for r in caplog.records if "[CVE-BATCH-FALLBACK]" in r.getMessage()]
-        assert "batched write of 2 CVEs failed" in line
+        (line,) = [r for r in caplog.records if "[CVE-BATCH-FALLBACK]" in r.getMessage()]
+        assert "batched write of 2 CVEs failed" in line.getMessage()
+        assert line.levelno == logging.WARNING, "every CVE is still written: a warning, as the sync's own marker"
+
+    def test_a_failed_statement_rolls_the_whole_batch_back(self, bolt):
+        """2026-11: the node statement succeeded and the SOURCED_FROM statement after it failed: the transaction
+        ends without a COMMIT (the driver resets the connection, which rolls it back), so neither statement's
+        writes stay, and merge_cve then writes each CVE in auto-commit statements of its own."""
+        server, client = bolt(fail(BATCH_SOURCED_FROM, TYPE_ERROR))
+        start = len(server.events)
+        assert client.merge_cves_batch(_records(_cve(1), _cve(2))) == [True, True]
+        transactions, auto_commit = _transactions(server.events[start:])
+        ((_begin, statements, end),) = transactions
+        assert end in ("ROLLBACK", "RESET"), end
+        assert [BATCH_NODE in s for s in statements[1:]] == [True, False] and BATCH_SOURCED_FROM in statements[2]
+        assert count(server.committed, BATCH_NODE) == 1, "the node statement itself succeeded"
+        assert count(auto_commit, SINGLE_NODE) == 2 and count(auto_commit, BATCH_NODE) == 0
+
+    def test_a_batch_at_its_transaction_timeout_logs_the_timeout_line(self, bolt, caplog):
+        """2026-11: the batch's statements bypass the session proxy that logs ``[NEO4J-TIMEOUT]``, so the batch
+        names itself: once, with its size and the setting that limits it; its CVEs are then written alone."""
+        server, client = bolt(fail(BATCH_NODE, TIMED_OUT))
+        with caplog.at_level(logging.WARNING, logger="neo4j_client"):
+            assert client.merge_cves_batch(_records(_cve(1), _cve(2))) == [True, True]
+        (timeout,) = [r for r in caplog.records if "[NEO4J-TIMEOUT]" in r.getMessage()]
+        assert timeout.levelno == logging.ERROR
+        assert "[CVE-BATCH] batched write of 2 CVEs" in timeout.getMessage()
+        assert f"{nc.NEO4J_READ_TIMEOUT} s transaction timeout" in timeout.getMessage()
+        assert "EDGEGUARD_NEO4J_READ_TIMEOUT" in timeout.getMessage()
+        assert count(server.runs, BATCH_NODE) == 1, "a timeout is not retried"
+        assert count(server.runs, SINGLE_NODE) == 2
+
+    def test_a_batch_that_does_not_time_out_logs_no_timeout_line(self, bolt, caplog):
+        _server, client = bolt(fail(BATCH_NODE, TYPE_ERROR))
+        with caplog.at_level(logging.WARNING, logger="neo4j_client"):
+            assert client.merge_cves_batch(_records(_cve(1))) == [True]
+        assert not [r for r in caplog.records if "[NEO4J-TIMEOUT]" in r.getMessage()]
+
+    @pytest.mark.parametrize(
+        "statement, code, times, reason",
+        [
+            (BATCH_SCORE, TYPE_ERROR, 1, "non_retryable"),
+            (BATCH_NODE, DEADLOCK, 4, "retries_exhausted"),
+            (BATCH_NODE, TIMED_OUT, 1, "non_retryable"),
+        ],
+    )
+    def test_a_fallback_is_counted_with_its_reason(self, bolt, statement, code, times, reason):
+        """2026-11: each batch that falls back adds one to ``edgeguard_neo4j_cve_batch_fallback_total{reason}`` and
+        reports its CVEs to the caller (``on_fallback``). A batch at its transaction timeout is not retried and counts
+        as ``non_retryable`` (the RUNBOOK's failure mode 5 sends that case to its timeout section)."""
+        assert nc._record_cve_batch_fallback is not None, "prometheus_client is a declared dependency"
+        before = {r: _fallback_count(r) for r in FALLBACK_REASONS}
+        _server, client = bolt(fail(statement, code, times=times))
+        reported: List[int] = []
+        assert client.merge_cves_batch(_records(_cve(1), _cve(2), _cve(3)), on_fallback=reported.append) == [True] * 3
+        assert reported == [3]
+        after = {r: _fallback_count(r) for r in FALLBACK_REASONS}
+        assert {r: after[r] - before[r] for r in FALLBACK_REASONS} == {
+            r: (1.0 if r == reason else 0.0) for r in FALLBACK_REASONS
+        }
+
+    def test_batches_that_are_written_count_nothing(self, bolt, monkeypatch):
+        """Control: a retried deadlock that clears, and batches that commit, are no fallback."""
+        monkeypatch.setattr(nc, "CVE_BATCH_SIZE", 2)
+        before = {r: _fallback_count(r) for r in FALLBACK_REASONS}
+        _server, client = bolt(fail(BATCH_NODE, DEADLOCK))
+        reported: List[int] = []
+        assert (
+            client.merge_cves_batch(_records(*(_cve(i) for i in range(5))), on_fallback=reported.append) == [True] * 5
+        )
+        assert reported == []
+        assert {r: _fallback_count(r) for r in FALLBACK_REASONS} == before
 
     def test_merge_cve_results_and_exceptions_are_returned_per_record(self, bolt):
         """After a failed batch: a CVE whose retries run out returns the exception merge_cve raised, one whose
@@ -375,23 +557,173 @@ class TestTheSyncWritesCvesInBatches:
         assert sync._sync_to_neo4j_chunk([_cve(1), _cve(2), plain]) == (3, 0)
         assert sync.stats["vulnerabilities_synced"] == 3
         assert count(server.runs, BATCH_NODE) == 2 and count(server.runs, SINGLE_NODE) == 0
+        assert sync.stats["cve_batch_fallbacks"] == 0 and sync.stats["cve_batch_fallback_cves"] == 0
+
+    def test_a_batch_that_falls_back_is_counted_in_the_sync_stats(self, bolt):
+        """2026-11: the rich CVEs' batch fails on the server and is written one CVE at a time; the plain CVEs' batch
+        is written. The stats count one fallback of two CVEs; the CVEs count as synced, not as errors."""
+        server, client = bolt(fail("MERGE (n:CVSSv31 {cve_id: row.cve_id})", TYPE_ERROR))
+        sync = MISPToNeo4jSync(neo4j_client=client)
+        plain = {k: v for k, v in _cve(3).items() if k != "cvss_v31_data"}
+        assert sync._sync_to_neo4j_chunk([_cve(1), _cve(2), plain]) == (3, 0)
+        assert sync.stats["vulnerabilities_synced"] == 3
+        assert sync.stats["cve_batch_fallbacks"] == 1 and sync.stats["cve_batch_fallback_cves"] == 2
+        assert count(server.runs, SINGLE_NODE) == 2 and count(server.committed, BATCH_NODE) == 2
 
     def test_a_batch_that_raises_is_written_one_cve_at_a_time(self, caplog):
-        """The rest of the chunk is written whatever ``merge_cves_batch`` meets; each CVE gets merge_cve's result."""
+        """The rest of the chunk is written whatever ``merge_cves_batch`` meets; each CVE gets merge_cve's result.
+        2026-11: logged at WARNING like the client's fallback, counted in the stats and the metric."""
         neo4j = MagicMock()
         neo4j.merge_cves_batch.side_effect = RuntimeError("unexpected")
         neo4j.merge_cve.side_effect = [True, False, nc.neo4j_exceptions.TransientError("lock")]
         sync = MISPToNeo4jSync(neo4j_client=neo4j)
-        with caplog.at_level(logging.ERROR, logger="run_misp_to_neo4j"):
+        before = _fallback_count("batch_writer_error")
+        with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
             results = sync._merge_cves([_cve(1), _cve(2), _cve(3)])
         assert results[:2] == [True, False] and isinstance(results[2], nc.neo4j_exceptions.TransientError)
         assert [c.kwargs["source_id"] for c in neo4j.merge_cve.call_args_list] == ["nvd"] * 3
-        assert any(
-            "[CVE-BATCH-FALLBACK] merge_cves_batch raised RuntimeError" in r.getMessage() for r in caplog.records
-        )
+        (line,) = [r for r in caplog.records if "[CVE-BATCH-FALLBACK]" in r.getMessage()]
+        assert "merge_cves_batch raised RuntimeError" in line.getMessage() and "the 3 CVEs" in line.getMessage()
+        assert line.levelno == logging.WARNING
+        assert sync.stats["cve_batch_fallbacks"] == 1 and sync.stats["cve_batch_fallback_cves"] == 3
+        assert _fallback_count("batch_writer_error") == before + 1
+
+    def test_the_sync_hands_its_counter_to_the_batch_writer(self):
+        """The client's fallbacks reach the stats through ``on_fallback``: a batch writer reporting one fallback of
+        two CVEs is counted once."""
+        neo4j = MagicMock()
+
+        def batch(records, on_fallback=None, **_kw):
+            on_fallback(2)
+            return [True] * len(records)
+
+        neo4j.merge_cves_batch.side_effect = batch
+        sync = MISPToNeo4jSync(neo4j_client=neo4j)
+        assert sync._merge_cves([_cve(1), _cve(2)]) == [True, True]
+        assert sync.stats["cve_batch_fallbacks"] == 1 and sync.stats["cve_batch_fallback_cves"] == 2
+
+    def test_the_integration_tests_per_cve_writer_takes_the_syncs_call(self, bolt, caplog):
+        """``tests/test_cve_batch_sync_neo4j.py`` (a real Neo4j, in CI) compares the sync with ``merge_cves_batch``
+        replaced by ``_one_cve_at_a_time``, a loop of ``merge_cve``. The sync calls that stand-in as it calls the batch
+        writer; a stand-in without one of its arguments would raise, send the per-CVE pass down the sync's fallback
+        and fail that comparison on its stats and log lines, which a run without a Neo4j cannot show."""
+        from test_cve_batch_sync_neo4j import _one_cve_at_a_time
+
+        server, client = bolt()
+        sync = MISPToNeo4jSync(neo4j_client=client)
+        with (
+            patch.object(nc.Neo4jClient, "merge_cves_batch", _one_cve_at_a_time),
+            caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"),
+        ):
+            assert sync._merge_cves([_cve(1), _cve(2)]) == [True, True]
+        assert not [r for r in caplog.records if "[CVE-BATCH-FALLBACK]" in r.getMessage()]
+        assert sync.stats["cve_batch_fallbacks"] == 0 and sync.stats["cve_batch_fallback_cves"] == 0
+        assert count(server.runs, SINGLE_NODE) == 2 and count(server.runs, BATCH_NODE) == 0
+
+    def test_an_exception_result_is_an_error_in_both_loops(self, caplog):
+        """``_merge_cves`` returns the exception merge_cve raised for a CVE (2026-11); each loop raises it again where
+        it counts and logs an error, so it is never counted as synced (an exception object is truthy). The other CVEs
+        of the chunk are counted as before: True synced, False an error with [MERGE-RETURNED-FALSE]."""
+        rich = [_cve(1), _cve(2), _cve(3)]
+        plain = [{k: v for k, v in _cve(n).items() if k != "cvss_v31_data"} for n in (4, 5, 6)]
+        neo4j = MagicMock()
+        neo4j.merge_cves_batch.side_effect = [
+            [True, False, nc.neo4j_exceptions.TransientError("rich lock")],
+            [True, nc.neo4j_exceptions.TransientError("plain lock"), False],
+        ]
+        sync = MISPToNeo4jSync(neo4j_client=neo4j)
+        with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
+            assert sync._sync_to_neo4j_chunk(rich + plain) == (2, 4)
+        assert sync.stats["vulnerabilities_synced"] == 2
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m for m in messages if m.startswith("merge_cve error for")] == [
+            "merge_cve error for CVE-2026-1003: rich lock"
+        ]
+        assert [m for m in messages if "Error syncing plain CVE" in m] == [
+            "[WARN] Error syncing plain CVE (CVE-2026-1005): TransientError: plain lock"
+        ]
+        assert [m.split(" source=")[0] for m in messages if "[MERGE-RETURNED-FALSE]" in m] == [
+            "[MERGE-RETURNED-FALSE] rich CVE CVE-2026-1002",
+            "[MERGE-RETURNED-FALSE] plain CVE CVE-2026-1006",
+        ]
 
     def test_a_client_with_the_wrong_number_of_results_fails_the_chunk(self):
         neo4j = MagicMock()
         neo4j.merge_cves_batch.return_value = [True]
         with pytest.raises(RuntimeError, match="returned 1 results for 2 CVEs"):
             MISPToNeo4jSync(neo4j_client=neo4j)._merge_cves([_cve(1), _cve(2)])
+
+
+# ---------------------------------------------------------------------------------------------- 4. the run summary
+# The CVE attributes of event 138 ("EdgeGuard-nvd-2026-10-13") as the hosted MISP held them on 2026-10-14: 5 with CVSS,
+# 2 without.
+_EVENT_138 = [
+    {k: v for k, v in attribute.items() if k != "_event"}
+    for attribute in json.loads((TESTS / "test_cvss_real_payloads.json").read_text())["misp"].values()
+    if attribute["event_id"] == "138"
+]
+
+
+class TestTheRunSummaryReportsFallbacks:
+    """2026-11: the real ``run()`` over the real event, MISP faked below the event fetch, Neo4j a fake server. The run
+    summary always reports the CVE batches written one CVE at a time (0 when none fell back); a fallback leaves the
+    run green, since every CVE is written."""
+
+    @pytest.fixture
+    def run_sync(self, bolt, monkeypatch):
+        import run_misp_to_neo4j
+
+        monkeypatch.setenv("EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC", "0")
+        monkeypatch.setattr(run_misp_to_neo4j.time, "sleep", lambda *_a, **_k: None)
+        outcomes: Dict[str, Any] = {"success": 0, "failure": []}
+        monkeypatch.setattr(
+            run_misp_to_neo4j, "record_collection_success", lambda *_a, **_k: outcomes.__setitem__("success", 1)
+        )
+        monkeypatch.setattr(
+            run_misp_to_neo4j, "record_collection_failure", lambda _s, msg=None: outcomes["failure"].append(msg)
+        )
+        monkeypatch.setitem(run_misp_to_neo4j.INDEX_FETCH_STATE, "truncated", False)
+
+        def run(*rules) -> Tuple[MISPToNeo4jSync, bool, Dict[str, Any]]:
+            _server, client = bolt(*rules)
+            sync = MISPToNeo4jSync(neo4j_client=client)
+            monkeypatch.setattr(sync, "check_services_available", lambda: (True, "ok"))
+            monkeypatch.setattr(sync, "connect", lambda: True)
+            info = "EdgeGuard-nvd-2026-10-13"
+            monkeypatch.setattr(
+                sync,
+                "fetch_edgeguard_events",
+                lambda since=None, sector=None: [{"id": "138", "info": info, "attribute_count": str(len(_EVENT_138))}],
+            )
+            monkeypatch.setattr(
+                sync, "fetch_event_details", lambda _id: {"id": "138", "info": info, "Attribute": _EVENT_138, "Tag": []}
+            )
+            return sync, sync.run(incremental=False), outcomes
+
+        return run
+
+    @staticmethod
+    def _summary(caplog) -> List[logging.LogRecord]:
+        return [r for r in caplog.records if r.getMessage().startswith("CVE batches written one CVE at a time")]
+
+    def test_a_fallback_is_in_the_run_summary(self, run_sync, caplog):
+        with caplog.at_level(logging.INFO):
+            sync, ok, outcomes = run_sync(fail(BATCH_NODE, TYPE_ERROR))  # the first batch: the 5 CVEs with CVSS
+        assert ok is True and outcomes == {"success": 1, "failure": []}
+        assert sync.stats["vulnerabilities_synced"] == 7 and sync.stats["errors"] == 0
+        assert sync.stats["cve_batch_fallbacks"] == 1 and sync.stats["cve_batch_fallback_cves"] == 5
+        (line,) = self._summary(caplog)
+        assert line.getMessage().startswith(
+            "CVE batches written one CVE at a time after a failed batched write: 1 (5 CVEs; grep -F '[CVE-BATCH-FALLBACK]'"
+        )
+        assert line.levelno == logging.WARNING
+
+    def test_a_run_without_fallbacks_reports_zero(self, run_sync, caplog):
+        with caplog.at_level(logging.INFO):
+            sync, ok, _outcomes = run_sync()
+        assert ok is True and sync.stats["vulnerabilities_synced"] == 7
+        (line,) = self._summary(caplog)
+        assert line.getMessage().startswith(
+            "CVE batches written one CVE at a time after a failed batched write: 0 (0 CVEs"
+        )
+        assert line.levelno == logging.INFO

@@ -734,7 +734,7 @@ from a small driver script — both code paths re-compute the uuid via
 
 EdgeGuard maintains TWO Neo4j labels for the same logical CVE:
 
-- `(:CVE)` — NVD-canonical, ResilMesh-shared. Created by the MISP → Neo4j sync (`Neo4jClient.merge_cve`) from the CVE attributes in MISP; NVD's record takes precedence for the fields it supplies. The label belongs to the ResilMesh schema, which the shared database also uses.
+- `(:CVE)` — NVD-canonical, ResilMesh-shared. Created by the MISP → Neo4j sync (`Neo4jClient.merge_cves_batch`, which writes each CVE as `merge_cve` writes it) from the CVE attributes in MISP; NVD's record takes precedence for the fields it supplies. The label belongs to the ResilMesh schema, which the shared database also uses.
 - `(:Vulnerability)` — EdgeGuard-managed, MISP-derived. Created by the MISP sync.
 
 Both use `cve_id` as the natural key, and both are deliberately mapped to STIX
@@ -785,10 +785,11 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — `(:CVE)`: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the text named `merge_cve`.
 - 2026-10-23 — The re-stamp recipe states that `clear_neo4j.py --force` deletes the nodes EdgeGuard created (`edgeguard_managed = true`), not every node of the EdgeGuard labels.
 - 2026-10-19 — Recipe 2 seeds on the `CVE` node and takes both links from an indicator, `INDICATES` (named in the same OTX report) and `EXPLOITS` (the indicator's own CVE tag), kept apart by the edge type; it seeded on the `Vulnerability` twin and took `EXPLOITS` only.
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

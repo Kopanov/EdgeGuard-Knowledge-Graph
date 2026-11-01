@@ -66,6 +66,7 @@ from neo4j_client import (
     CURATED_MISSING_SAMPLE,
     CVSS_PAYLOAD_RESERVED_NAMES,
     Neo4jClient,
+    _emit_cve_batch_fallback,
     clamp_cvss_score,
     normalize_cve_id_for_graph,
     resolve_vulnerability_cve_id,
@@ -2013,6 +2014,10 @@ class MISPToNeo4jSync:
             # index lists ([PAGED-FETCH-INCOMPLETE]), each event once per run however often it is
             # fetched (``_paged_incomplete_ids``); reported in the run summary, not an error.
             "events_paged_incomplete": 0,
+            # 2026-11: CVE batches written one CVE at a time after their batched write failed
+            # ([CVE-BATCH-FALLBACK]), and the CVEs they held; reported in the run summary, not errors.
+            "cve_batch_fallbacks": 0,
+            "cve_batch_fallback_cves": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None,
@@ -5082,20 +5087,25 @@ class MISPToNeo4jSync:
 
         2026-11: written by ``Neo4jClient.merge_cves_batch``, which writes the CVEs of a chunk in batches
         and leaves each CVE as ``merge_cve`` leaves it; before, the loops below called ``merge_cve`` once
-        per item (about 8 NVD CVEs per second on a local Neo4j on 2026-11-01). Each item's source is its
-        ``tag`` (``misp`` without one), as before. Should ``merge_cves_batch`` itself raise, the CVEs are written
-        one at a time by ``merge_cve``, so an error never stops the rest of the chunk (its other items).
+        per item (about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance,
+        about 35 per second on a local Neo4j). Each item's source is its ``tag`` (``misp`` without one).
+        Should ``merge_cves_batch`` itself raise, the CVEs are written one at a time by ``merge_cve``, so an
+        error never stops the rest of the chunk (its other items). Either fallback, a batch whose transaction
+        failed or the whole list, is logged as ``[CVE-BATCH-FALLBACK]`` at WARNING (every CVE is still
+        written) and counted in the run summary (``cve_batch_fallbacks``, ``cve_batch_fallback_cves``).
         """
         records = [(v, v.get("tag", "misp")) for v in vulns]
         try:
-            results = list(self.neo4j.merge_cves_batch(records))
+            results = list(self.neo4j.merge_cves_batch(records, on_fallback=self._count_cve_batch_fallback))
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 "[CVE-BATCH-FALLBACK] merge_cves_batch raised %s: %s — writing the %d CVEs one at a time",
                 type(exc).__name__,
                 exc,
                 len(records),
             )
+            self._count_cve_batch_fallback(len(records))
+            _emit_cve_batch_fallback("batch_writer_error")
             results = []
             for data, source_id in records:
                 try:
@@ -5105,6 +5115,14 @@ class MISPToNeo4jSync:
         if len(results) != len(vulns):
             raise RuntimeError(f"merge_cves_batch returned {len(results)} results for {len(vulns)} CVEs")
         return results
+
+    def _count_cve_batch_fallback(self, cves: int) -> None:
+        """Count one batch of ``cves`` CVEs written one at a time after its batched write failed (2026-11).
+
+        Nothing is lost, but such a batch takes the per-CVE write time; the run summary reports both counts,
+        0 when no batch fell back."""
+        self.stats["cve_batch_fallbacks"] = int(self.stats.get("cve_batch_fallbacks", 0) or 0) + 1
+        self.stats["cve_batch_fallback_cves"] = int(self.stats.get("cve_batch_fallback_cves", 0) or 0) + int(cves)
 
     def _sync_to_neo4j_chunk(self, items: List[Dict]) -> Tuple[int, int]:
         """
@@ -6617,6 +6635,14 @@ class MISPToNeo4jSync:
                 logger.warning(f"Events failed (skipped): {events_failed}")
             logger.info(f"Indicators synced: {self.stats['indicators_synced']}")
             logger.info(f"Vulnerabilities synced: {self.stats['vulnerabilities_synced']}")
+            # 2026-11: CVE batches written one CVE at a time (``_count_cve_batch_fallback``); 0 when none fell back.
+            cve_batch_fallbacks = int(self.stats.get("cve_batch_fallbacks", 0) or 0)
+            (logger.warning if cve_batch_fallbacks else logger.info)(
+                "CVE batches written one CVE at a time after a failed batched write: %d (%d CVEs; grep -F "
+                "'[CVE-BATCH-FALLBACK]'; nothing lost, not counted as errors)",
+                cve_batch_fallbacks,
+                int(self.stats.get("cve_batch_fallback_cves", 0) or 0),
+            )
             logger.info(f"Malware synced: {self.stats['malware_synced']}")
             logger.info(f"Actors synced: {self.stats['actors_synced']}")
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")

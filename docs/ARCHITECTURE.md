@@ -223,7 +223,7 @@ When data is pushed to MISP, it gets tagged with:
 
 ### Nodes
 - **Indicator** - IP, domain, URL, hash, certificate fingerprint
-- **CVE** - vulnerabilities, written by the sync (`merge_cve`); `Vulnerability` comes from ResilMesh's path (`merge_resilmesh_vulnerability`) and the sync's single-item fallback, and is linked to the CVE by `REFERS_TO`
+- **CVE** - vulnerabilities, written by the sync in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); `Vulnerability` comes from ResilMesh's path (`merge_resilmesh_vulnerability`) and the sync's single-item fallback, and is linked to the CVE by `REFERS_TO`
 - **CVSSv2 / CVSSv30 / CVSSv31 / CVSSv40** - score sub-nodes of a CVE
 - **Malware**, **ThreatActor**, **Technique**, **Tactic**, **Tool** - ATT&CK and feed entities
 - **Campaign** - built by enrichment
@@ -519,6 +519,7 @@ _Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Node list: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the list named `merge_cve`.
 - 2026-11-01 — The `run_pipeline.py` CLI is development only (it was "optional"): its STIX import writes nodes without the lists `build_relationships.py` links by, so its baseline is a reduced graph; Airflow is the baseline path on every install.
 - 2026-10-25 — The STIX flow states how each loaded object's source is named: `x_edgeguard_source`, resolved to the canonical id, or `stix_import` for an object without it; an object whose `x_edgeguard_source` the registry does not know reaches no `Source` node (the text said every imported record does). An event's own `source:*` tag names its source before its name does, and the event of a curated package is skipped (its objects were loaded as nodes attributed to `misp`, the source its name gave). An event name that gives no registered source is attributed to `misp` (until then to `"unknown"`, which reached no `Source` node).
 - 2026-10-25 — MISP event names: the `-part2`, `-part3`, ... events past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (OTX events are not split).
