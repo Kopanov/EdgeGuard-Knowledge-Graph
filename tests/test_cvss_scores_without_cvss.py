@@ -103,16 +103,22 @@ def _recording_client():
     session.run.return_value = result
     client.driver.session.return_value.__enter__ = MagicMock(return_value=session)
     client.driver.session.return_value.__exit__ = MagicMock(return_value=False)
+    # 2026-11: the statements of a transaction (the batched CVE write) are recorded with the others.
+    session.begin_transaction.return_value.__enter__ = MagicMock(return_value=session)
+    session.begin_transaction.return_value.__exit__ = MagicMock(return_value=False)
     return client, session
 
 
 def _score_derivations(session) -> list:
-    """cve_id of every ``_set_cve_score_from_cvss`` statement, in order."""
-    return [
-        c.kwargs.get("cve_id")
-        for c in session.run.call_args_list
-        if c.args and c.args[0] == neo4j_client._CVE_SCORE_FROM_CVSS_QUERY
-    ]
+    """cve_id of every ``_set_cve_score_from_cvss`` statement and of every CVE of a batched one
+    (``_CVE_BATCH_SCORE_QUERY``, 2026-11), in order."""
+    derived = []
+    for c in session.run.call_args_list:
+        if c.args and c.args[0] == neo4j_client._CVE_SCORE_FROM_CVSS_QUERY:
+            derived.append(c.kwargs.get("cve_id"))
+        elif c.args and c.args[0] == neo4j_client._CVE_BATCH_SCORE_QUERY:
+            derived.extend(c.kwargs.get("cve_ids"))
+    return derived
 
 
 # ---------------------------------------------------------------- 1. the rule

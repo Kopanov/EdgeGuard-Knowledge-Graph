@@ -978,12 +978,17 @@ def test_upsert_sourced_relationship_writes_source_reported_with_min_max_case():
     NULL short-circuit + datetime() wrapper (Red Team v2 M3 +
     Bug Hunter v2 #10 — Cypher AND is not guaranteed short-circuit
     so we use nested CASE for explicit control-flow)."""
-    path = os.path.join(_SRC, "neo4j_client.py")
-    with open(path) as fh:
-        src = fh.read()
-    start = src.find("def _upsert_sourced_relationship")
-    end = src.find("\n    def ", start + 1)
-    block = src[start:end]
+    # 2026-11: the statement is built by ``_sourced_from_upsert_clauses``, shared with the batched CVE
+    # write; checked here as ``_upsert_sourced_relationship`` sends it.
+    from unittest.mock import MagicMock
+
+    import neo4j_client
+
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = MagicMock()
+    session = client.driver.session.return_value.__enter__.return_value
+    assert client._upsert_sourced_relationship("Malware", {"name": "x"}, "alienvault_otx", "{}", 0.5) is True
+    block = session.run.call_args.args[0]
     assert "r.source_reported_first_at" in block
     assert "r.source_reported_last_at" in block
     # MIN / MAX comparisons with datetime() wrapper for type safety

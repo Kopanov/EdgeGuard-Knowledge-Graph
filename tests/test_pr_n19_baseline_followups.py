@@ -196,8 +196,10 @@ class TestFix3PerEntityMergeFalseLogging:
             "rich CVE branch must now check merge_cve return + emit "
             "[MERGE-RETURNED-FALSE] on false (PR-N19 Fix #3 follow-up)"
         )
-        # Confirm it uses if-check (the specific fix shape).
-        assert "if self.neo4j.merge_cve(vuln, source_id=src):" in src
+        # Confirm it checks the result of each CVE (the specific fix shape). 2026-11: the results come from
+        # the batched write (``_merge_cves``), one per CVE, True / False or the exception merge_cve raised.
+        assert "for vuln, outcome in zip(rich_vulns, self._merge_cves(rich_vulns), strict=True):" in src
+        assert "if outcome:" in src
 
     def test_tactic_technique_tool_log_on_false(self):
         src = self._src()

@@ -174,7 +174,7 @@ Target: complete before the next 730-day baseline.
 
 > 🚧 **To be written.** Tier 1. Covers the highest-traffic path; answers ~40% of "why does my data look like this?" questions.
 
-**Scope:** A single IOC's journey from collector output (dict with `indicator_type` + `value` + zone hints) through `MISPWriter.push_items` (dedup, tag resolution, event creation) through `MISPToNeo4jSync.sync_to_neo4j` (Python chunks: `Neo4jClient.merge_indicators_batch` for indicators, `merge_cve` for CVEs, the per-label merges for ATT&CK entities, malware and actors, `_sync_single_item` for any other item) to the final `:Indicator` / `:CVE` / `:Malware` node with `SOURCED_FROM` edges.
+**Scope:** A single IOC's journey from collector output (dict with `indicator_type` + `value` + zone hints) through `MISPWriter.push_items` (dedup, tag resolution, event creation) through `MISPToNeo4jSync.sync_to_neo4j` (Python chunks: `Neo4jClient.merge_indicators_batch` for indicators, `merge_cves_batch` for CVEs (batches of up to 500, each CVE written as `merge_cve` writes it), the per-label merges for ATT&CK entities, malware and actors, `_sync_single_item` for any other item) to the final `:Indicator` / `:CVE` / `:Malware` node with `SOURCED_FROM` edges.
 
 **Files covered:**
 - `src/collectors/collector_utils.py` (shared validation)
@@ -310,6 +310,7 @@ _Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — The sync writes the CVEs of a chunk with `merge_cves_batch` (in batches) instead of one `merge_cve` call per CVE.
 - 2026-11-01 — § 1 names the `edgeguard_baseline` DAG in `dags/edgeguard_pipeline.py` as the orchestration of a baseline (it named `src/run_pipeline.py`, which the DAG does not use).
 - 2026-10-18 — The pin-test is described as it runs: env vars, container names in `docker` commands, `src/*.py` paths and the removed `python -m` command forms; `edgeguard` subcommands are not checked.
 - 2026-10-17 — Rewritten as a guide to the current state: change notes and the delivery history of the plan moved to this history.

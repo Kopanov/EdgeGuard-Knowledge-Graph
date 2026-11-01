@@ -35,7 +35,7 @@ ORDER BY count DESC
 
 ## Vulnerabilities
 
-> **Label note:** the MISP→Neo4j sync routes every CVE through `merge_cve()` → the **`:CVE`** label (`MISPToNeo4jSync._sync_to_neo4j_chunk` in `src/run_misp_to_neo4j.py`: CVEs with and without CVSS sub-nodes alike). The **`:Vulnerability`** label is **empty** on current baselines (the production snapshot of 2026-05-25 held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may hold `:Vulnerability` nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
+> **Label note:** the MISP→Neo4j sync writes every CVE as `merge_cve()` writes it, in batches (`merge_cves_batch`) → the **`:CVE`** label (`MISPToNeo4jSync._sync_to_neo4j_chunk` in `src/run_misp_to_neo4j.py`: CVEs with and without CVSS sub-nodes alike). The **`:Vulnerability`** label is **empty** on current baselines (the production snapshot of 2026-05-25 held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may hold `:Vulnerability` nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
 
 > **Scores:** `c.cvss_score` / `c.severity` are the base score and rating of the CVE's first CVSS in the order v3.1 → v3.0 → v2 → v4.0, and `c.cvss_version` names the version. A CVE without any CVSS (rejected, or awaiting NVD analysis without a CNA score) has a null score and severity `UNKNOWN`.
 >
@@ -367,10 +367,11 @@ LIMIT 25
 
 *Save queries to test the prototype*
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Label note: the sync writes CVEs in batches (`merge_cves_batch`), each as `merge_cve()` writes it.
 - 2026-10-25 — The shared-event pivot: a source/date past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes continues in `-part<N>` events, so a shared event means the same part of a split day.
 - 2026-10-18 — Sample query: the CVEs named in the same OTX report as an indicator (`INDICATES` to a `CVE`).
 - 2026-10-18 — Sector links: OTX's industries statement (`otx_industries`) and a query of who targets a sector by evidence.

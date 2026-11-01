@@ -5077,6 +5077,35 @@ class MISPToNeo4jSync:
 
             return self._with_provenance(item, relationships)
 
+    def _merge_cves(self, vulns: List[Dict]) -> List[Any]:
+        """``merge_cve``'s result for each CVE item, in order: True, False or the exception it raised.
+
+        2026-11: written by ``Neo4jClient.merge_cves_batch``, which writes the CVEs of a chunk in batches
+        and leaves each CVE as ``merge_cve`` leaves it; before, the loops below called ``merge_cve`` once
+        per item (about 8 NVD CVEs per second on a local Neo4j on 2026-11-01). Each item's source is its
+        ``tag`` (``misp`` without one), as before. Should ``merge_cves_batch`` itself raise, the CVEs are written
+        one at a time by ``merge_cve``, so an error never stops the rest of the chunk (its other items).
+        """
+        records = [(v, v.get("tag", "misp")) for v in vulns]
+        try:
+            results = list(self.neo4j.merge_cves_batch(records))
+        except Exception as exc:
+            logger.error(
+                "[CVE-BATCH-FALLBACK] merge_cves_batch raised %s: %s — writing the %d CVEs one at a time",
+                type(exc).__name__,
+                exc,
+                len(records),
+            )
+            results = []
+            for data, source_id in records:
+                try:
+                    results.append(self.neo4j.merge_cve(data, source_id=source_id))
+                except Exception as item_exc:  # noqa: BLE001 - counted per CVE by the caller, as before
+                    results.append(item_exc)
+        if len(results) != len(vulns):
+            raise RuntimeError(f"merge_cves_batch returned {len(results)} results for {len(vulns)} CVEs")
+        return results
+
     def _sync_to_neo4j_chunk(self, items: List[Dict]) -> Tuple[int, int]:
         """
         Merge one chunk of parsed items to Neo4j (partition by type, same order as before).
@@ -5199,15 +5228,17 @@ class MISPToNeo4jSync:
 
             if rich_vulns:
                 logger.info(f"  Processing {len(rich_vulns)} NVD-rich CVEs (with CVSS sub-nodes)...")
-                for vuln in rich_vulns:
+                for vuln, outcome in zip(rich_vulns, self._merge_cves(rich_vulns), strict=True):
                     src = vuln.get("tag", "misp")
                     try:
+                        if isinstance(outcome, Exception):
+                            raise outcome
                         # PR-N19 Fix #3 follow-up: pre-PR-N19 this loop
                         # did not check merge_cve's return value —
                         # CVEs that silently failed via return-False
                         # (e.g. unresolvable cve_id) were counted as
                         # success. Mirrors the plain_vulns loop below.
-                        if self.neo4j.merge_cve(vuln, source_id=src):
+                        if outcome:
                             success += 1
                             self.stats["vulnerabilities_synced"] += 1
                         else:
@@ -5236,10 +5267,12 @@ class MISPToNeo4jSync:
                 # consistency. Previously used merge_vulnerabilities_batch() which created
                 # :Vulnerability nodes — wrong label for CVEs.
                 logger.info(f"  Processing {len(plain_vulns)} plain CVEs (no CVSS sub-nodes)...")
-                for vuln in plain_vulns:
+                for vuln, outcome in zip(plain_vulns, self._merge_cves(plain_vulns), strict=True):
                     src = vuln.get("tag", "misp")
                     try:
-                        if self.neo4j.merge_cve(vuln, source_id=src):
+                        if isinstance(outcome, Exception):
+                            raise outcome
+                        if outcome:
                             self.stats["vulnerabilities_synced"] += 1
                             success += 1
                         else:
