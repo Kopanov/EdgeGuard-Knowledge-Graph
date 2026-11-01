@@ -138,9 +138,10 @@ ORDER BY n.confidence_score DESC
 MATCH (n)
 WHERE (n:Vulnerability OR n:CVE) AND n.cve_id IS NOT NULL
 // The MISP → Neo4j sync writes :CVE nodes, which carry the score, the
-// severity and the CISA KEV fields (merge_cve); :Vulnerability nodes come
-// only from the per-item fallback and the alert path. Both labels are read
-// and grouped by cve_id, so a CVE / Vulnerability pair is one node.
+// severity and the CISA KEV fields (merge_cves_batch, each as merge_cve
+// writes it); :Vulnerability nodes come only from the per-item fallback
+// and the alert path. Both labels are read and grouped by cve_id, so a
+// CVE / Vulnerability pair is one node.
 ```
 
 ---
@@ -248,10 +249,11 @@ All Cytoscape.js styles are defined inline in the `cy` initialization. Node colo
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — Vulnerability query comment: the sync writes `:CVE` nodes in batches (`merge_cves_batch`, each as `merge_cve` writes it); the comment named `merge_cve`.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
 - 2026-10-17 — The CVE view states `description` (first 200 characters) and `description_source` (of a CVE's twins, the text the source ranking keeps); the Cypher pattern comments use `//`, because `--` is not a Cypher comment.
 - 2026-10-15 — Quick Start serves the page from an origin the default CORS allowlist accepts (a page opened from disk is refused), says how to add a presenter's origin, and gives port 3001 when Grafana holds port 3000; `limit` caps the rows each view reads, not the nodes; the CVE view names `:CVE` as the label that carries the score and KEV fields.

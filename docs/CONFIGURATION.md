@@ -252,7 +252,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Pause before retrying events that failed |
 | `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | `500` | Parsed items merged per chunk |
 | `EDGEGUARD_REL_BATCH_SIZE` | `500` | Relationships per Neo4j write batch |
-| `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` | `8` | Hours before Airflow stops the `run_neo4j_sync` task (per attempt), whole hours from 1 to 22: a larger value uses 22, an invalid one 8, both with a warning. Below about 6 h (the full-sync estimate) a requested `NEO4J_FULL_SYNC` can fail every attempt of every run. The 68 h `dagrun_timeout` of `edgeguard_neo4j_sync` and the margin of the 24 h skip guard are derived from the default: above 12 h a run in which every task fails on all attempts exceeds the 68 h, which then cuts the late tasks. The threshold of `EdgeGuardNeo4jSyncStale` follows the limit (122 h at 8 h, 3 h more for each hour above 8): each attempt records its limit in `edgeguard_neo4j_sync_task_limit_seconds` when it starts |
+| `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` | `8` | Hours before Airflow stops the `run_neo4j_sync` task (per attempt), whole hours from 1 to 22: a larger value uses 22, an invalid one 8, both with a warning. A full sync has to fit the 6 h of the baseline's `full_neo4j_sync` (its duration with batched CVE writes is to be measured on the next 730-day run); below the duration of a full sync a requested `NEO4J_FULL_SYNC` fails every attempt of every run. The 68 h `dagrun_timeout` of `edgeguard_neo4j_sync` and the margin of the 24 h skip guard are derived from the default: above 12 h a run in which every task fails on all attempts exceeds the 68 h, which then cuts the late tasks. The threshold of `EdgeGuardNeo4jSyncStale` follows the limit (122 h at 8 h, 3 h more for each hour above 8): each attempt records its limit in `edgeguard_neo4j_sync_task_limit_seconds` when it starts |
 | `EDGEGUARD_NEO4J_READ_TIMEOUT` | `3600` | Transaction timeout of pipeline statements (s) |
 | `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` | `900` | Read timeout of one MISP event delete |
 | `EDGEGUARD_QUERY_PAUSE_SECONDS` | `0` | Pause between Neo4j chunks (at most 60) |
@@ -265,7 +265,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 - A listing that reaches `EDGEGUARD_MISP_MAX_PAGES` with a full last page is incomplete: the run is reported as failed and keeps its cursor. Raise the cap when the index holds more rows than pages × page size.
 - A value longer than `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` (UTF-8 bytes) is skipped with a warning; values below 64 count as 64.
 - Lower `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (for example to 250) when the worker is killed for memory after the parse; `0` or `all` merges everything in one pass, with a high risk of running out of memory. Lower `EDGEGUARD_REL_BATCH_SIZE` when Neo4j transactions time out on very large events ([HEARTBEAT.md](HEARTBEAT.md)).
-- `EDGEGUARD_NEO4J_READ_TIMEOUT` lets the server abort a statement that hangs (`[NEO4J-TIMEOUT]` in the task log); relationship batch writes use 600 s and the REST and STIX queries 300 s.
+- `EDGEGUARD_NEO4J_READ_TIMEOUT` lets the server abort a statement that hangs (`[NEO4J-TIMEOUT]` in the task log); for a transaction of several statements (a CVE batch of the sync, an alias or twin merge batch) it limits them together. Relationship batch writes use 600 s and the REST and STIX queries 300 s.
 - `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` applies to the fresh-baseline wipe, `edgeguard clear misp` and `scripts/clear_misp.py`.
 
 ---
@@ -459,6 +459,7 @@ _Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`: a full sync has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run; the row had named about 6 h as the full-sync estimate, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs. `EDGEGUARD_NEO4J_READ_TIMEOUT` limits the statements of a multi-statement transaction together, the sync's CVE batches included.
 - 2026-11-01 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` (Airflow component health on `/metrics`) and the fixed Airflow address of the `metrics` service; the `AIRFLOW_WEBSERVER_URL` row names all its readers.
 - 2026-11-01 — `EDGEGUARD_PREFLIGHT_LAUNCH_PATH` unset: the preflight script assumes `dag` (it assumed `cli`); a pip-installed Airflow sets a PostgreSQL metadata database.
 - 2026-10-25 — Row for `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) in the MISP push table, with its range and the tiers it keeps parts out of: `MISPWriter` continues a source/date event in `-part2`, `-part3` ... of at most this many attributes, since the hosted MISP could neither view nor edit a 145k-attribute NVD event; a group with OTX report ids is not split (the sync links report items only within one event).

@@ -455,7 +455,8 @@ Auth:    Configured via environment variables
   cvss_score: FLOAT,        // null without CVSS
   cvss_version: STRING,     // "3.1", "3.0", "2.0" or "4.0"; null without CVSS
   severity: STRING,         // rating of that score; UNKNOWN without CVSS
-  // Further EdgeGuard properties written by merge_cve (the MISP → Neo4j sync path):
+  // Further EdgeGuard properties written by merge_cve (the MISP → Neo4j sync writes CVEs in batches,
+  // merge_cves_batch, each as merge_cve writes it):
   status: LIST,             // NVD record status, ["active"] or ["rejected"]
   reference_urls: LIST,     // NVD reference URLs
   affected_products: LIST,  // CPE URIs (up to 10)
@@ -1016,10 +1017,11 @@ other type is compared as given.
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-01_
 
 ## History
 
+- 2026-11-01 — `CVE` properties: the MISP → Neo4j sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the comment named `merge_cve` as the sync's path.
 - 2026-11-01 — `Malware` and `ThreatActor` carry the ATT&CK id of a MITRE record (`mitre_id`); `deprecated` is cleared by an ATT&CK record of the active object (it was never cleared).
 - 2026-10-25 — `GET /indicators`: the `source` filter takes a source's canonical id or a variant (until then only the canonical id matched).
 - 2026-10-25 — Campaign `first_seen` / `last_seen` and the alert enrichment's `first_seen` / `last_updated`: the seen dates of the indicators (a source's claim, else its latest report; the first seen never after the first import), not EdgeGuard's import and update times for indicators without a claim.
