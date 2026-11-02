@@ -334,7 +334,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `AIRFLOW_API_USER` | `admin` | User of the Airflow REST calls (CLI and tasks) |
 | `AIRFLOW_API_PASSWORD` | unset | Its password (required on the host) |
 | `AIRFLOW_API_VERSION` | `v2` | `v2` (Airflow 3) or `v1` (Airflow 2) |
-| `AIRFLOW_WEBSERVER_URL` | `http://localhost:8082` | Airflow API base URL for the CLI, the tasks, check `[13]` of `scripts/preflight_baseline.sh` and a bare-metal metrics exporter (the Compose `metrics` service has its own) |
+| `AIRFLOW_WEBSERVER_URL` | `http://localhost:8082` | Airflow API base URL for the CLI, the tasks, check `[13]` of `scripts/preflight_baseline.sh` and a bare-metal metrics server (`src/metrics_exporter.py` or `src/metrics_server.py`; the Compose `metrics` service has its own) |
 | `AIRFLOW_MEMORY_LIMIT` | `12g` | Container memory limit of `airflow` |
 | `AIRFLOW_POSTGRES_USER` | `airflow` | Metadata database user (Compose) |
 | `AIRFLOW_POSTGRES_PASSWORD` | `airflow` | Its password; set a strong one |
@@ -374,7 +374,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `EDGEGUARD_ENABLE_METRICS` | `false` | In-process metrics server (bare-metal installs) |
 | `EDGEGUARD_METRICS_HOST` | `127.0.0.1` | Metrics bind address |
 | `EDGEGUARD_METRICS_PORT` | `8001` | Metrics port (fixed on Compose) |
-| `EDGEGUARD_METRICS_AIRFLOW_HEALTH` | `true` | The metrics exporter reads Airflow's health endpoint at every scrape and serves the Airflow component health ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#airflow-component-health)) |
+| `EDGEGUARD_METRICS_AIRFLOW_HEALTH` | `true` | The metrics servers (`src/metrics_exporter.py`, `src/metrics_server.py`) read Airflow's health endpoint at every scrape and serve the Airflow component health ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#airflow-component-health)) |
 | `EDGEGUARD_VERSION` | `1.0.0` | `version` label of the in-process info metric |
 | `GRAFANA_ADMIN_USER` | `admin` | Grafana admin user |
 | `GRAFANA_ADMIN_PASSWORD` | required | Grafana admin password |
@@ -455,10 +455,11 @@ When to set it, and when to lower `EDGEGUARD_EARLIEST_IOC_DATE` for historical c
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` and `AIRFLOW_WEBSERVER_URL`: `src/metrics_server.py` reads Airflow's health endpoint as well, as the exporter does.
 - 2026-11-01 — `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`: a full sync has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run; the row had named about 6 h as the full-sync estimate, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs. `EDGEGUARD_NEO4J_READ_TIMEOUT` limits the statements of a multi-statement transaction together, the sync's CVE batches included.
 - 2026-11-01 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` (Airflow component health on `/metrics`) and the fixed Airflow address of the `metrics` service; the `AIRFLOW_WEBSERVER_URL` row names all its readers.
 - 2026-11-01 — `EDGEGUARD_PREFLIGHT_LAUNCH_PATH` unset: the preflight script assumes `dag` (it assumed `cli`); a pip-installed Airflow sets a PostgreSQL metadata database.

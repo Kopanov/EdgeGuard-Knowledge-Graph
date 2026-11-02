@@ -2,8 +2,9 @@
 EdgeGuard — Airflow REST API client
 ====================================
 Thin wrapper around the Airflow REST API used by the ``edgeguard`` CLI
-(``dag status``, ``dag kill``, ``preflight``, ``doctor``, ``baseline``, ``fresh-baseline``), by the metrics exporter
-(Airflow component health) and by the orphan-process safeguard in ``parent_dag_liveness``.
+(``dag status``, ``dag kill``, ``preflight``, ``doctor``, ``baseline``, ``fresh-baseline``), by the Airflow
+component health collector of ``metrics_exporter.py``, which both metrics servers (``metrics_exporter.py`` and
+``metrics_server.py``) serve, and by the orphan-process safeguard in ``parent_dag_liveness``.
 
 API versions
 ------------

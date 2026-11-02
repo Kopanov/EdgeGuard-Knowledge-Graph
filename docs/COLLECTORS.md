@@ -1254,7 +1254,7 @@ either spelling resolve identically; an alias is never a ``Source``
 node: the graph has one per ``canonical_id``, and the ``SOURCED_FROM``
 writers resolve an alias to it), ``cli_id`` / ``api_key_env`` /
 ``rate_limit`` / ``cli_default_enabled`` / ``cli_description`` (the
-``edgeguard sources`` CLI listing), ``cli_display_name`` (only needed
+``edgeguard source list`` CLI listing), ``cli_display_name`` (only needed
 when the CLI label differs from the Neo4j ``Source.name`` — currently
 only NVD).
 
@@ -1326,6 +1326,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Adding a source: the CLI listing is `edgeguard source list` (the text named `edgeguard sources`, a command that does not exist).
 - 2026-11-02 — OTX: both fetch paths keep the first copy of each pulse id (offset paging can return a pulse on two pages; the rows were appended as they came, so a repeated pulse was processed twice and, in a scheduled run, took a slot of the limit); the baseline logs the distinct pulses beside the rows read (it logged the rows as `N total pulses collected`), the repeated pulse ids and the pulses that yielded no item, and the status carries `pulse_counts`; the page-ceiling warning counts distinct pulses (it counted the rows).
 - 2026-11-01 — NVD, CVEs MISP holds: the sync updates the `CVE` node as `merge_cve` writes it, in batches (`merge_cves_batch`); the text named `merge_cve` as the sync's writer.
 - 2026-11-01 — MITRE ATT&CK: one item per group / malware name (lower-cased), an active object winning over a deprecated one (`[ATTACK-SAME-NAME]`); a failed ICS bundle holds back the deprecated groups and malware and leaves the ETag unstored (it was stored, so ICS waited for the next Enterprise release); group and malware items carry their ATT&CK id (`aid` in MISP); the push confirmation ignores case only for the attribute types whose case MISP changes on save (a value the event held only in another case had been confirmed).

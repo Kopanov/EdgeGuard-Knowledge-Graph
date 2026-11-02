@@ -44,8 +44,10 @@ The metrics server exposes all Prometheus metrics on port **8001** (port 8000 is
 
 Set `PROMETHEUS_MULTIPROC_DIR` to a directory shared by every Airflow task process and by this
 server; `python src/metrics_server.py` or `python -m src.metrics_exporter` then serves the
-aggregate. Without it, the server exposes only its own process and none of the pipeline's
-metrics, because each Airflow task process keeps its metrics in its own memory (Method 0 below).
+aggregate, and both serve Airflow's component health, read from Airflow's health endpoint at every
+scrape (`AIRFLOW_WEBSERVER_URL`, [Airflow Component Health](#airflow-component-health)). Without
+the directory, the server exposes only its own process and none of the pipeline's metrics, because
+each Airflow task process keeps its metrics in its own memory (Method 0 below).
 
 ```bash
 # From the EdgeGuard directory
@@ -65,7 +67,7 @@ triggered.
 **Option C: Via Dedicated Airflow DAG (bare-metal installs without `PROMETHEUS_MULTIPROC_DIR`)**
 
 The metrics server runs as a long-lived task in the `edgeguard_metrics_server` DAG; in the Compose
-deployment this DAG exits immediately because the multi-process mode is active. This avoids side effects during DAG parsing — never start the HTTP server at module level. Without `PROMETHEUS_MULTIPROC_DIR` the task serves only its own process's registry, so it exposes none of the pipeline's metrics (see *Methods 1 and 2* below).
+deployment this DAG exits immediately because the multi-process mode is active. This avoids side effects during DAG parsing — never start the HTTP server at module level. Without `PROMETHEUS_MULTIPROC_DIR` the task serves only its own process's registry, so it exposes none of the pipeline's metrics (see *Methods 1 and 2* below); it does serve Airflow's component health, which it reads at every scrape.
 
 ```bash
 # Trigger the metrics server DAG
@@ -115,8 +117,8 @@ publish is for local access (`curl http://localhost:8001/metrics`).
 | `EDGEGUARD_METRICS_PORT` | Metrics server port | `8001` |
 | `EDGEGUARD_METRICS_HOST` | Metrics server bind host | `127.0.0.1` |
 | `EDGEGUARD_ENABLE_METRICS` | Enables Prometheus metrics in the DAG on a single-process install. Ignored when `PROMETHEUS_MULTIPROC_DIR` is set (the Compose deployment), where metrics are always on | `false` |
-| `EDGEGUARD_METRICS_AIRFLOW_HEALTH` | The metrics exporter (`src/metrics_exporter.py`) reads Airflow's health endpoint at every scrape and serves the Airflow component health ([Airflow Component Health](#airflow-component-health)); `false`, `0`, `no` or `off` turns it off | `true` |
-| `AIRFLOW_WEBSERVER_URL` | Airflow API server the exporter asks; the `metrics` compose service has `http://airflow:8082` | `http://localhost:8082` |
+| `EDGEGUARD_METRICS_AIRFLOW_HEALTH` | The metrics servers (`src/metrics_exporter.py`, `src/metrics_server.py`) read Airflow's health endpoint at every scrape and serve the Airflow component health ([Airflow Component Health](#airflow-component-health)); `false`, `0`, `no` or `off` turns it off | `true` |
+| `AIRFLOW_WEBSERVER_URL` | Airflow API server the metrics servers ask; the `metrics` compose service has `http://airflow:8082` | `http://localhost:8082` |
 | `EDGEGUARD_VERSION` | App version label | `1.0.0` |
 | `EDGEGUARD_ENV` | Environment label | `development` |
 | `GRAFANA_ADMIN_USER` | Grafana admin username | `admin` |
@@ -189,7 +191,7 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 | `edgeguard_misp_push_backoff_triggered_total` | Counter | `source` | Times `MISPWriter` entered its extended cooldown after consecutive HTTP 5xx batch failures (`EDGEGUARD_MISP_BACKOFF_THRESHOLD`; read by `EdgeGuardMispSustainedBackoff`) |
 | `edgeguard_misp_honest_null_violation_total` | Counter | `source`, `field` | Items whose `first_seen` / `last_seen` lies within 5 minutes of the current time, a sign that the collector substituted the current time for a missing value (read by `EdgeGuardMispHonestNullViolation`) |
 | `edgeguard_misp_fetch_fallback_active_total` | Counter | `branch`, `outcome` | The sync's event listing fell back to PyMISP or restSearch (`branch` = `pymisp` / `rest_search`; `outcome` = `engaged` / `hard_error`; read by `EdgeGuardMispFetchFallbackActive` and `EdgeGuardMispFetchFallbackHardError`) |
-| `edgeguard_misp_event_attributes_truncated_total` | Counter | `source` | Events `MISPCollector.collect` (CLI pipeline `src/run_pipeline.py`) sliced to 500 attributes (read by `EdgeGuardMispEventAttributesTruncated`) |
+| `edgeguard_misp_event_attributes_truncated_total` | Counter | `source` | Events `MISPCollector.collect` sliced to 500 attributes (read by `EdgeGuardMispEventAttributesTruncated`). No pipeline path runs `MISPCollector`: `src/run_pipeline.py` leaves it out of its collectors and no DAG uses it, so only a manual `python src/collectors/misp_collector.py` writes the counter (always absent otherwise) |
 | `edgeguard_misp_attributes_dropped_total` | Counter | `reason` | MISP attributes the sync dropped while parsing or de-duplicating them, by reason: `missing_cve_id`, `missing_key`, `attack_id_invalid` (a `text` value that starts like an ATT&CK id but holds no valid one, such as a value a MISP Import Regexp rule rewrote; logged as `[ATTACK-VALUE]`) (no alert) |
 | `edgeguard_misp_unmapped_attribute_types_total` | Counter | `attr_type` | MISP attribute types outside EdgeGuard's mapping (no alert) |
 | `edgeguard_misp_unmapped_source_tags_total` | Counter | `source_tag` | MISP `source:*` tags outside EdgeGuard's source mapping (no alert) |
@@ -241,7 +243,7 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 triggerer, DAG processor and API server as subprocesses and neither restarts nor exits when one of
 them dies. Airflow's health endpoint (`/api/v2/monitor/health`; `/health` on Airflow 2) then answers
 HTTP 200 with `unhealthy` in its JSON body only, and no task process is left to record anything, so
-the metrics exporter asks the endpoint at every scrape (5-second timeout) and serves the answer:
+the metrics server asks the endpoint at every scrape (5-second timeout) and serves the answer:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -249,11 +251,14 @@ the metrics exporter asks the endpoint at every scrape (5-second timeout) and se
 | `edgeguard_airflow_component_healthy` | Gauge | `component` | `1` when Airflow reports the component `healthy`, `0` otherwise. `metadatabase` and `scheduler` always have a series (`0` also without status or when the answer does not list them); `triggerer` and `dag_processor` have one when the answer gives them a status. Airflow reports a status of `null` for a triggerer or DAG processor of which it has recorded no job, one that does not run as a process of its own (Airflow 2 parses the DAG files inside the scheduler by default), so such a component has no series. Absent while the endpoint does not answer (read by `EdgeGuardAirflowSchedulerDown` and `EdgeGuardAirflowComponentUnhealthy`) |
 
 Airflow reports the scheduler unhealthy when its last heartbeat is older than
-`[scheduler] scheduler_health_check_threshold` (30 seconds by default). The gauges are served by
-`src/metrics_exporter.py` only: by the `metrics` compose service, which reaches the airflow
-service's API server at `http://airflow:8082` over `edgeguard_net`, and on a bare-metal install by
-`python -m src.metrics_exporter` (with `AIRFLOW_WEBSERVER_URL` pointing at the API server).
-`EDGEGUARD_METRICS_AIRFLOW_HEALTH=false` removes them. The two alerts on
+`[scheduler] scheduler_health_check_threshold` (30 seconds by default). Every EdgeGuard metrics
+server serves the gauges: the `metrics` compose service (`src/metrics_exporter.py`), which reaches
+the airflow service's API server at `http://airflow:8082` over `edgeguard_net`; on a bare-metal
+install `python -m src.metrics_exporter` or `python src/metrics_server.py` (Option A); and the
+server of `src/metrics_server.py` that a single-process install starts in a task or in the
+`edgeguard_metrics_server` DAG (Option C). Outside Compose, `AIRFLOW_WEBSERVER_URL` points them at
+the API server. `src/metrics_server.py` adds the gauges when its server starts, not when a DAG file
+imports it. `EDGEGUARD_METRICS_AIRFLOW_HEALTH=false` removes them. The two alerts on
 `edgeguard_airflow_component_healthy` set no `component` label of their own, so each alert keeps
 the series' `component` and names the Airflow component; a rule label would overwrite it, and two
 components down at once would give two alerts with the same labels, which Prometheus refuses to
@@ -606,7 +611,7 @@ list (including the disk, inode and `build_relationships` alerts), grep
 | `EdgeGuardNeo4jLabelDropBig` | Per-label node count dropped >50% against the same label a day earlier (`offset 1d`); fed by the node counts recorded after every sync (the Grafana panel "Neo4j Node Count Change (24 h) by Label" shows the same comparison) | critical |
 | `EdgeGuardMispBatchPermanentFailure` | MISP push 5xx exhausted retries | critical |
 | `EdgeGuardMispSustainedBackoff` | MISP push backoff fired >1× in 15m | warning |
-| `EdgeGuardMispEventAttributesTruncated` | `MISPCollector.collect` (the CLI pipeline `src/run_pipeline.py`, not the Airflow sync) sliced an event to `MAX_ATTRIBUTES_PER_EVENT` (500) attributes, and the rest of the event is lost. The sync's deferral of events above `EDGEGUARD_MAX_EVENT_ATTRIBUTES` does not fire it | warning |
+| `EdgeGuardMispEventAttributesTruncated` | `MISPCollector.collect` sliced an event to `MAX_ATTRIBUTES_PER_EVENT` (500) attributes, and the rest of the event is lost. No pipeline path runs `MISPCollector` (`src/run_pipeline.py` leaves it out, no DAG uses it), so the rule does not fire; the sync's deferral of events above `EDGEGUARD_MAX_EVENT_ATTRIBUTES` does not fire it either | warning |
 | `EdgeGuardBuildRelationshipsSilentDeath` | A MISP→Neo4j sync completed between 15 h 25 min and 36 h ago (`edgeguard_neo4j_sync_last_success_timestamp`) and no build_relationships completion has been stamped since (`edgeguard_build_relationships_last_completion_timestamp`). build_relationships runs after the sync in both the scheduled sync DAG and the baseline; every attempt is limited to 5 h and the scheduled DAG retries twice, 5 min apart, so the rule waits until every attempt has ended (15 h 10 min) plus 15 min. The sync DAG's build_relationships skips while a baseline holds the baseline lock, so a sync that started before the lock is followed by no completion: the rule is silent while an `edgeguard_baseline` run is in progress (`edgeguard_dag_run_in_progress_start_timestamp{dag_id="edgeguard_baseline"} > 0`) and fires after a baseline that ended before its own full sync and build_relationships | critical |
 | `EdgeGuardApocBatchPartial` | apoc.periodic.iterate reported per-row errors | warning |
 | `EdgeGuardMispFetchFallbackActive` | `sum by (branch) (rate(...{outcome="engaged"}[10m])) > 0` for 10m. Sustained engagement of the PyMISP / requests-restSearch fallback signals the primary `/events/index` is broken. | warning |
@@ -616,7 +621,7 @@ What the sync-integrity, build_relationships and MISP-fallback alerts catch:
 - **`SyncEventsFailed` / `SyncCoverageGap` / `Neo4jLabelDropBig`** — catch MISP events the MISP→Neo4j sync skips silently, and large drops in a label's node count.
 - **`SyncPagedFetchIncomplete`** — reports events fetched in pages with fewer attribute rows than the MISP index lists, which leave the run green.
 - **`BuildRelationshipsSilentDeath` / `ApocBatchPartial`** — surface a `build_relationships` run that dies silently after the sync, and APOC partial-batch responses.
-- **`MispEventAttributesTruncated`** — surfaces events the CLI pipeline's `MISPCollector` sliced to 500 attributes.
+- **`MispEventAttributesTruncated`** — surfaces events `MISPCollector` sliced to 500 attributes; no pipeline path runs `MISPCollector`, so it does not fire.
 - **`MispFetchFallbackActive` / `MispFetchFallbackHardError`** — see § "MISP fetch fallback" in [`docs/RUNBOOK.md`](RUNBOOK.md) § 8 for triage.
 
 The invariant the `EdgeGuardSyncCoverageGap` alert guards and the count `EdgeGuardSyncPagedFetchIncomplete` reads are set by `record_sync_event_accounting` (`src/metrics_server.py`), which `MISPToNeo4jSync.run` calls on every exit path once it has connected (see *MISP Sync Event Accounting* above).
@@ -797,10 +802,11 @@ docker volume rm <project>_prometheus_data <project>_grafana_data <project>_aler
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `src/metrics_server.py` serves the Airflow component health as well (`python src/metrics_server.py`, the in-task server, the `edgeguard_metrics_server` DAG); before, only `src/metrics_exporter.py` served it, and on the other servers the alerts on the gauges could not fire. `EdgeGuardMispEventAttributesTruncated` and its counter: no pipeline path runs `MISPCollector` (the text said the CLI pipeline does).
 - 2026-11-01 — Counter `edgeguard_neo4j_cve_batch_fallback_total{reason}`: CVE batches of the MISP→Neo4j sync written one CVE at a time after their transaction failed (no alert).
 - 2026-11-01 — Airflow component health: the metrics exporter reads Airflow's health endpoint at every scrape and serves `edgeguard_airflow_health_up` and `edgeguard_airflow_component_healthy{component}` (`EDGEGUARD_METRICS_AIRFLOW_HEALTH`), read by the new alerts `EdgeGuardAirflowSchedulerDown` (critical), `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable` (43 alert rules); the two alerts on the component gauge keep its `component` label. Before, a scheduler that had stopped while the API server kept answering was reported only by `EdgeGuardDAGRunStuck`, after the run's `dagrun_timeout`.
 - 2026-10-25 — Sync accounting gauges: set by every run that passes the service check and connects; a run that stops earlier keeps the previous values.

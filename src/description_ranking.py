@@ -54,8 +54,9 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from source_registry import all_sources, canonical_source_id, curated_source_ids
 
-# Source ids are inlined into Cypher as string literals; the registry only holds lowercase ASCII ids.
-_SOURCE_ID_RE = re.compile(r"^[a-z0-9_.-]+$")
+# Source ids are inlined into Cypher as string literals; the registry only holds lowercase ASCII ids. ``\Z``,
+# not ``$``, which also matches before a final newline (2026-11).
+_SOURCE_ID_RE = re.compile(r"^[a-z0-9_.-]+\Z")
 
 # The variable the ranked SET binds the decision to (``set_cypher``).
 _REPLACES_VAR = "description_replaces"

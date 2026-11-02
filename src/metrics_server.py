@@ -42,6 +42,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 2026-10: multi-process exposure (Airflow LocalExecutor). Importing metrics_exporter BEFORE
 # prometheus_client prepares PROMETHEUS_MULTIPROC_DIR (created, writability-probed, or the mode is
 # disabled for this process) — prometheus_client reads the variable when it is first imported.
+from metrics_exporter import AIRFLOW_HEALTH_ENV as _AIRFLOW_HEALTH_ENV
+from metrics_exporter import AirflowHealthCollector as _AirflowHealthCollector
+from metrics_exporter import airflow_health_enabled as _airflow_health_enabled
 from metrics_exporter import build_registry as _build_multiproc_registry
 from metrics_exporter import multiprocess_mode_active as _multiprocess_mode_active
 
@@ -1230,10 +1233,53 @@ def record_apoc_batch_partial(step: str) -> None:
     APOC_BATCH_PARTIAL.labels(step=safe_step).inc()
 
 
+# 2026-11: Airflow's component health (``metrics_exporter.AirflowHealthCollector``: the gauges
+# ``edgeguard_airflow_health_up`` and ``edgeguard_airflow_component_healthy``, read from Airflow's health
+# endpoint at every scrape), served by this server as by the exporter. Decided when the first
+# ``MetricsServer`` of the process starts, not at import: a DAG file imports this module. ``None`` until
+# then; False when ``EDGEGUARD_METRICS_AIRFLOW_HEALTH`` turns it off.
+_airflow_health_lock = threading.Lock()
+_airflow_health_served: Optional[bool] = None
+# The collector on the default registry (single-process mode); the multi-process registry of each scrape
+# gets one of its own.
+_airflow_health_collector: Optional[_AirflowHealthCollector] = None
+
+
+def _serve_airflow_health() -> None:
+    """Serve Airflow's component health from now on (once per process; later calls do nothing).
+
+    In single-process mode the collector is registered on the default registry, which raises on a second
+    registration of the same series; in multi-process mode ``get_all_metrics`` registers one on the registry
+    it builds for each scrape.
+    """
+    global _airflow_health_served, _airflow_health_collector
+    with _airflow_health_lock:
+        if _airflow_health_served is not None:
+            return
+        if not _airflow_health_enabled():
+            logger.info("%s is off — Airflow component health is not exported", _AIRFLOW_HEALTH_ENV)
+            _airflow_health_served = False
+            return
+        if not _multiprocess_mode_active():
+            collector = _AirflowHealthCollector()
+            try:
+                registry.register(collector)
+            except ValueError as exc:
+                logger.warning("Airflow component health not served: %s", exc)
+                _airflow_health_served = False
+                return
+            _airflow_health_collector = collector
+        _airflow_health_served = True
+
+
 def get_all_metrics() -> bytes:
-    """All metrics in Prometheus format — aggregated across processes in multiprocess mode."""
+    """All metrics in Prometheus format — aggregated across processes in multiprocess mode — with Airflow's
+    component health once a ``MetricsServer`` serves them (``_serve_airflow_health``)."""
     if _multiprocess_mode_active():
-        return generate_latest(_build_multiproc_registry())
+        served = _build_multiproc_registry()
+        if _airflow_health_served:
+            served.register(_AirflowHealthCollector())
+        return generate_latest(served)
     return generate_latest(registry)
 
 
@@ -1337,6 +1383,7 @@ class MetricsServer:
             logger.error("Port may be in use. Pipeline will continue without metrics.")
             return
         self._running = True
+        _serve_airflow_health()
         logger.info(f"Prometheus metrics server starting on http://{self.host}:{self.port}")
         logger.info(f"  - Metrics: http://{self.host}:{self.port}/metrics")
         logger.info(f"  - Health:  http://{self.host}:{self.port}/health")
@@ -1356,6 +1403,7 @@ class MetricsServer:
             logger.error("Port may be in use. Pipeline will continue without metrics.")
             return None
         self._running = True
+        _serve_airflow_health()
 
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()

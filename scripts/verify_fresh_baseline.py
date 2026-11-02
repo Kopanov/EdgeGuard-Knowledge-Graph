@@ -310,7 +310,7 @@ _MANGLED_TECHNIQUES = (
     "T1686.003",
 )
 _MANGLED_TOOLS_HINT = (
-    "the sync skips an ATT&CK value with no valid ATT&CK id: grep '[ATTACK-VALUE]' in the sync log and "
+    "the sync skips an ATT&CK value with no valid ATT&CK id: grep -F '[ATTACK-VALUE]' in the sync log and "
     "check the value MISP stored and its Import Regexp rules (docs/BASELINE_LAUNCH_CHECKLIST.md § [6], step 1)"
 )
 # NVD analysis lag: reference tags + CPE configurations appear weeks after publication.

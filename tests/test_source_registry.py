@@ -751,8 +751,8 @@ def test_audit2_post_init_rejects_non_ascii_canonical_id():
 
 
 def test_audit2_to_cli_sources_dict_preserves_legacy_iteration_order():
-    """PR #43 audit-2 (LOW — bugbot): the legacy ``DEFAULT_SOURCES``
-    dict had a hand-curated key order driving the ``edgeguard sources``
+    """PR #43 audit-2 (LOW): the legacy ``DEFAULT_SOURCES``
+    dict had a hand-curated key order driving the ``edgeguard source list``
     CLI listing. After the refactor that order MUST be preserved
     byte-for-byte (operators iterating the listing depend on it)."""
     from edgeguard import DEFAULT_SOURCES

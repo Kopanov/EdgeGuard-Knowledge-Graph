@@ -1637,8 +1637,9 @@ def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[
     that is not an object counts as absent, so the record has no CVSS of that version (an NVD record then
     removes the sub-node only NVD asserted, as a rebuild from the same record gives), and an entry that is
     not a property, or has a name the writer keeps for itself (``CVSS_PAYLOAD_RESERVED_NAMES``: the sub-node's
-    ``uuid``, ``timeout`` …), is dropped; both are logged with the CVE. The payloads the collectors write pass
-    unchanged.
+    ``uuid``, ``timeout`` …), is dropped; both are logged with the CVE, each dropped name as its ``repr()``
+    (2026-11-02: written raw, a name such as ``"x\\n[MERGE-REJECT] …"`` would start a second, forged marker
+    line in a plain-text log). The payloads the collectors write pass unchanged.
 
     A number that is not finite (``Infinity``, ``-Infinity``, ``NaN`` or ``1e309`` in the JSON, which
     ``json.loads`` reads as such floats) is dropped as well, as a missing value (2026-10-17): the sub-node
@@ -1681,7 +1682,7 @@ def _meta_cvss_payload(meta: Dict[str, Any], key: str, cve_id: str) -> Optional[
         if valid_name and valid_value:
             payload[name] = entry
         else:
-            dropped.append(str(name)[:40])
+            dropped.append(repr(str(name)[:40]))
     if (payload or dropped) and payload.get("base_score") in (None, ""):
         logger.warning(
             "[META] NVD_META.%s of %s has no base score%s — the CVE is read without it",
@@ -6651,7 +6652,7 @@ class MISPToNeo4jSync:
             if several_actors:
                 logger.info(
                     "Reports naming several actors, whose malware was attributed to none of them: %d "
-                    "(grep '[ATTRIBUTION]')",
+                    "(grep -F '[ATTRIBUTION]')",
                     several_actors,
                 )
             curated_attached = int(self.stats.get("curated_claims_attached", 0) or 0)
@@ -6659,7 +6660,7 @@ class MISPToNeo4jSync:
             if curated_attached or curated_unattached:
                 logger.info(
                     "Curated package claims: %d attached, %d not attached (subject or object not in the graph; "
-                    "grep '[CURATED]' for the missing names)",
+                    "grep -F '[CURATED]' for the missing names)",
                     curated_attached,
                     curated_unattached,
                 )
@@ -6674,14 +6675,14 @@ class MISPToNeo4jSync:
             if items_unroutable:
                 logger.warning(
                     "Items not synced because no merge path accepted them: %d "
-                    "(grep '[ITEM-UNROUTABLE]'; counted neither as success nor as error)",
+                    "(grep -F '[ITEM-UNROUTABLE]'; counted neither as success nor as error)",
                     items_unroutable,
                 )
             # 2026-10-20: ATT&CK values with no valid ATT&CK id (``_skip_unreadable_attack_value``).
             attack_values_skipped = int(self.stats.get("attack_values_skipped", 0) or 0)
             if attack_values_skipped:
                 logger.warning(
-                    "ATT&CK values skipped because they hold no valid ATT&CK id: %d (grep '[ATTACK-VALUE]'; "
+                    "ATT&CK values skipped because they hold no valid ATT&CK id: %d (grep -F '[ATTACK-VALUE]'; "
                     "a MISP Import Regexp rule may have rewritten them; not counted as errors)",
                     attack_values_skipped,
                 )
@@ -6691,7 +6692,7 @@ class MISPToNeo4jSync:
             if events_paged_incomplete:
                 logger.warning(
                     "Events fetched in pages with fewer attributes than the MISP index lists: %d "
-                    "(grep '[PAGED-FETCH-INCOMPLETE]'; the rows received were synced; not counted as errors)",
+                    "(grep -F '[PAGED-FETCH-INCOMPLETE]'; the rows received were synced; not counted as errors)",
                     events_paged_incomplete,
                 )
             # PR-N28: surface placeholder rejections separately so operators
@@ -6704,7 +6705,7 @@ class MISPToNeo4jSync:
             if placeholder_rejections > 0:
                 logger.info(
                     "Placeholder-name rejections (PR-N10 defensive, NOT errors): %d "
-                    "— grep '[MERGE-PLACEHOLDER-REJECTED]' for per-entity detail. "
+                    "— grep -F '[MERGE-PLACEHOLDER-REJECTED]' for per-entity detail. "
                     "These do NOT fail the sync.",
                     placeholder_rejections,
                 )
@@ -6752,13 +6753,13 @@ class MISPToNeo4jSync:
                     # only for thrown exceptions.
                     reasons.append(
                         f"sync_to_neo4j reported {merge_errors} merge/load error(s); "
-                        "grep '[MERGE-RETURNED-FALSE]' or '[MERGE-REJECT]' in the logs above for "
+                        "grep -F -e '[MERGE-RETURNED-FALSE]' -e '[MERGE-REJECT]' in the logs above for "
                         "per-entity detail (CVE id / Malware name / Actor name / MITRE id)"
                     )
                 if relationships_failed:
                     reasons.append(
                         f"{relationships_failed} relationship row(s) were not written "
-                        "(permanent Neo4j batch failures; grep '[BATCH-PERMANENT-FAILURE]')"
+                        "(permanent Neo4j batch failures; grep -F '[BATCH-PERMANENT-FAILURE]')"
                     )
                 self._last_sync_failure_reason = "; ".join(reasons)
                 record_collection_failure("misp_to_neo4j", self._last_sync_failure_reason)

@@ -24,7 +24,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -283,6 +283,7 @@ class TestRowsAreMergeCveParameters:
             {"cvss_v31_data": {"base_score": 9.8, "uuid": "x"}},  # a payload naming a parameter
             {"cvss_v31_data": {"base_score": 9.8, "self": "x"}},  # an argument of session.run (2026-11)
             {"cvss_v31_data": {"base score": 9.8}},  # not a property name
+            {"cvss_v31_data": {"base_score": 9.8, "base_severity\n": "CRITICAL"}},  # a name ending in a newline
         ],
     )
     def test_a_record_the_batch_does_not_write_as_merge_cve_gets_no_row(self, real_items, change):
@@ -684,9 +685,10 @@ class TestTheRunSummaryReportsFallbacks:
         )
         monkeypatch.setitem(run_misp_to_neo4j.INDEX_FETCH_STATE, "truncated", False)
 
-        def run(*rules) -> Tuple[MISPToNeo4jSync, bool, Dict[str, Any]]:
+        def run(*rules, stats: Optional[Dict[str, int]] = None) -> Tuple[MISPToNeo4jSync, bool, Dict[str, Any]]:
             _server, client = bolt(*rules)
             sync = MISPToNeo4jSync(neo4j_client=client)
+            sync.stats.update(stats or {})  # counts the summary reports, as if the run had met them
             monkeypatch.setattr(sync, "check_services_available", lambda: (True, "ok"))
             monkeypatch.setattr(sync, "connect", lambda: True)
             info = "EdgeGuard-nvd-2026-10-13"
@@ -727,3 +729,76 @@ class TestTheRunSummaryReportsFallbacks:
             "CVE batches written one CVE at a time after a failed batched write: 0 (0 CVEs"
         )
         assert line.levelno == logging.INFO
+
+    def test_every_grep_hint_of_the_summary_finds_its_marker(self, run_sync, caplog, tmp_path):
+        """2026-11: each grep the run summary and the failure reason print, run with the system grep over a log of
+        real lines of the 730-day baseline's sync (``tests/test_grep_hints.py``) holding a line of every marker,
+        prints exactly the lines of its own markers. Without ``-F`` each hint printed every line of the log, and
+        ``[BATCH-PERMANENT-FAILURE]`` stopped grep with an error. Every CVE write fails here (merge/load errors),
+        and the other counts the summary reports are set before the run."""
+        from test_grep_hints import REAL_MARKER_LINES, assert_finds_exactly, attack_value_line, grep_commands, log_line
+
+        stats = {
+            "reports_with_several_actors": 27,
+            "curated_claims_unattached": 1,
+            "items_unroutable": 1,
+            "attack_values_skipped": 1,
+            "events_paged_incomplete": 1,
+            "placeholder_rejections": 2,
+            "relationships_failed": 3,
+        }
+        with caplog.at_level(logging.INFO):
+            sync, ok, outcomes = run_sync(
+                fail(BATCH_NODE, TYPE_ERROR), fail(SINGLE_NODE, TYPE_ERROR, times=7), stats=stats
+            )
+        assert ok is False and sync.stats["vulnerabilities_synced"] == 2, "the 5 CVEs with CVSS failed"
+        messages = [r.getMessage() for r in caplog.records]
+        (reason,) = outcomes["failure"]
+        hints = [cmd for text in [*messages, reason] for cmd in grep_commands(text)]
+        markers = {arg for cmd in hints for arg in cmd[1:] if not arg.startswith("-")}
+        assert markers == {
+            "[ATTRIBUTION]",
+            "[CURATED]",
+            "[ITEM-UNROUTABLE]",
+            "[ATTACK-VALUE]",
+            "[PAGED-FETCH-INCOMPLETE]",
+            "[MERGE-PLACEHOLDER-REJECTED]",
+            "[MERGE-RETURNED-FALSE]",
+            "[MERGE-REJECT]",
+            "[BATCH-PERMANENT-FAILURE]",
+            "[CVE-BATCH-FALLBACK]",
+        }, "the run printed every hint"
+
+        def emitted(marker: str) -> str:
+            line = next(m for m in messages if m.startswith(f"[{marker}]"))
+            return log_line(line, "warning", "neo4j_client")
+
+        lines = {marker: list(found) for marker, found in REAL_MARKER_LINES.items()}
+        lines["CVE-BATCH-FALLBACK"] = [emitted("CVE-BATCH-FALLBACK")]
+        lines["MERGE-RETURNED-FALSE"] = [emitted("MERGE-RETURNED-FALSE")]
+        lines["ATTACK-VALUE"] = [attack_value_line()]
+        lines["CURATED"] = [
+            log_line(
+                "[CURATED] 117 of 118 curated claim(s) attached; 1 did not: subject or object not in the graph by exact name or id, nothing written for them. Missing (sample): example"
+            )
+        ]
+        lines["ITEM-UNROUTABLE"] = [
+            log_line("[ITEM-UNROUTABLE] Item not synced (unknown, example): no merge path accepted it")
+        ]
+        lines["PAGED-FETCH-INCOMPLETE"] = [
+            log_line(
+                "[PAGED-FETCH-INCOMPLETE] Event 145: /attributes/restSearch returned 99 attribute rows (top-level and object), the MISP index lists 100."
+            )
+        ]
+        lines["BATCH-PERMANENT-FAILURE"] = [
+            log_line(
+                "[BATCH-PERMANENT-FAILURE] MISP relationship batch INDICATES (3 rows) — non-retryable TypeError: example",
+                "error",
+                "neo4j_client",
+            )
+        ]
+        for command in hints:
+            named = [arg.strip("[]") for arg in command[1:] if not arg.startswith("-")]
+            wanted = [line for marker in named for line in lines[marker]]
+            others = [line for marker, found in lines.items() if marker not in named for line in found]
+            assert_finds_exactly(command, wanted, others, tmp_path)

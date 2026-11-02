@@ -1187,7 +1187,7 @@ def run_collector_with_metrics(
             try:
                 send_slack_alert(
                     f"Collector {collector_name} SKIPPED (transient: {type(e).__name__}). "
-                    f"Pipeline continued. Full triage in Airflow logs (grep '[{collector_name}] SKIPPED')."
+                    f"Pipeline continued. Full triage in Airflow logs (grep -F '[{collector_name}] SKIPPED')."
                 )
             except Exception as se:  # noqa: BLE001 - alerter must never block the skip path
                 logger.debug(f"slack alert emit failed (transient skip): {se}")
@@ -1212,7 +1212,7 @@ def run_collector_with_metrics(
         try:
             send_slack_alert(
                 f"[CRITICAL] Collector {collector_name} HARD-FAILED ({type(e).__name__}). "
-                f"Downstream tasks blocked. Full triage in Airflow logs (grep '[{collector_name}] FAILED')."
+                f"Downstream tasks blocked. Full triage in Airflow logs (grep -F '[{collector_name}] FAILED')."
             )
         except Exception as se:  # noqa: BLE001 - alerter must never mask the original exception
             logger.debug(f"slack alert emit failed (catastrophic): {se}")

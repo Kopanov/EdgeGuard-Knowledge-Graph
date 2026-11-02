@@ -157,7 +157,7 @@ class TestPropRefValidation:
             _dedup_concat_clause("", "[]")
 
     def test_rejects_var_with_leading_digit(self):
-        # _PROP_NAME_RE = ^[A-Za-z_][A-Za-z0-9_]*$ — leading digit must fail.
+        # _PROP_NAME_RE = ^[A-Za-z_][A-Za-z0-9_]*\Z — leading digit must fail.
         with pytest.raises(ValueError, match="invalid var"):
             _dedup_concat_clause("9var.source", "[]")
 
