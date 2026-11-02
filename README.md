@@ -554,7 +554,7 @@ Set a flag in `.env` and run `docker compose up -d airflow`. On an existing grap
 
 - **CI** (GitHub Actions) runs Ruff lint and format checks, Mypy on `src/` and `scripts/`, the unit tests with a 30% coverage floor, the Neo4j integration tests, both Docker image builds with Trivy scans, and `pip-audit`.
 - **Documentation is pinned to the code** by tests: every `EDGEGUARD_*` variable, `src/*.py` path and container name in a `docker` command that the README, CONTRIBUTING or a page directly under `docs/` names must exist ([docs/ARCHITECTURE_FLOW.md](docs/ARCHITECTURE_FLOW.md)), and the README's launch commands and GraphQL example are checked by the test suite.
-- **Acceptance.** `scripts/verify_fresh_baseline.py` checks a loaded graph: provenance on every source-built relationship, the sector evidence, the description sources and the indicator aging properties.
+- **Acceptance.** `scripts/verify_fresh_baseline.py` checks a loaded graph: the links the writers build from the claims on the nodes (ATT&CK tactics and techniques, sectors) and the share of NVD's non-rejected CVEs with a CVSS sub-node, provenance on every source-built relationship, the sector evidence, the description sources and the indicator aging properties.
 - **Resilience.** Circuit breakers guard the feed fetches and the sync's MISP and Neo4j connection checks; VirusTotal, AbuseIPDB, FIRST EPSS and the collectors' MISP writes have none ([docs/RESILIENCE_CONFIG.md](docs/RESILIENCE_CONFIG.md)). MISP pushes retry with backoff and adapt their batch size to large events.
 - **Versions** are calendar versions (`YYYY.M.D`, [docs/VERSIONING.md](docs/VERSIONING.md)).
 

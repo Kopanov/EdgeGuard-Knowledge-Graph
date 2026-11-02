@@ -49,10 +49,9 @@ class TestSectorEdgesNeverTargetGlobalAndAreInferences:
 
     def test_acceptance_script_polices_global_edges(self):
         script = (_REPO / "scripts" / "verify_fresh_baseline.py").read_text()
-        assert (
-            "(g:Sector {name: 'global'})" in script
-            and 'rep.add("no_global_sector_edges", r.get("c") == 0, r)' in script
-        )
+        # mandatory, judged by the count of links to ``global`` (the detail also reports the sector links judged)
+        assert "(g:Sector {name: 'global'})" in script
+        assert 'rep.add("no_global_sector_edges", r.get("c") == 0, {**r, "judged_edges": ' in script
 
 
 # --------------------------------------------------------------------------- A1: per-property array caps

@@ -46,7 +46,7 @@ the pipeline.
 
 | Script | Mode | What it does |
 |--------|------|--------------|
-| [`scripts/verify_fresh_baseline.py`](../scripts/verify_fresh_baseline.py) | **Read-only** (HTTP Query API v2) | Fresh-baseline acceptance check: provenance properties, campaign and sector evidence, CVE scores, revoked ATT&CK ids, the ResilMesh-facing schema (see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § Fresh-baseline acceptance). Reads `NEO4J_HTTP_URL` (or `NEO4J_HTTP`), not `NEO4J_URI`; without either it checks the Compose Neo4j at `http://127.0.0.1:7474`. |
+| [`scripts/verify_fresh_baseline.py`](../scripts/verify_fresh_baseline.py) | **Read-only** (HTTP Query API v2) | Fresh-baseline acceptance check: completeness of the links built from the claims on the nodes, provenance properties, campaign and sector evidence, CVE scores and their coverage, revoked ATT&CK ids, the ResilMesh-facing schema (see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § Fresh-baseline acceptance). Reads `NEO4J_HTTP_URL` (or `NEO4J_HTTP`), not `NEO4J_URI`; without either it checks the Compose Neo4j at `http://127.0.0.1:7474`. |
 
 ---
 
@@ -88,10 +88,11 @@ run from a clean slate".
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `scripts/verify_fresh_baseline.py` also checks the completeness of the links built from the claims on the nodes and the share of NVD's non-rejected CVEs with a CVSS sub-node.
 - 2026-10-25 — Heal path: after pausing, every run the five scheduled DAGs still have is marked failed before the wipe (a task already running keeps writing).
 - 2026-10-23 — `scripts/verify_fresh_baseline.py` checks the Compose Neo4j at `http://127.0.0.1:7474` when neither `NEO4J_HTTP_URL` nor `NEO4J_HTTP` is set (it checked a built-in remote instance); the heal path's verify step runs without `NEO4J_HTTP_URL`.
 - 2026-10-23 — The heal path states that `scripts/clear_neo4j.py --force` deletes the nodes EdgeGuard created (`edgeguard_managed = true`) and that `--full-wipe` asks for a typed confirmation.

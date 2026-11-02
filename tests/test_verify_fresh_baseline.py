@@ -323,10 +323,96 @@ _INDICATOR_CVE_ROW = {
 # (the graph as built had the 433 sector-zoned campaigns without; see TestSectorLabelsFollowZones).
 _SECTOR_LABELS_ROW = {"nodes": 433284, "missing_label": 0, "stray_label": 0, "examples": []}
 
+# 2026-11-02, the shape checks (``graph_shape_checks``): what each statement returned on the iMac 730-day graph
+# of 1 Nov 2026 (read-only, 2 Nov 2026), and the sizes of the sets the older checks judge on that graph.
+_GRAPH_SIZE = {"nodeCount": 625335, "relCount": 2934851}
+_IN_TACTIC_COMPLETE_ROW = {
+    "techniques": 824,
+    "with_phases": 824,
+    "claims_with_target": 1024,
+    "edge_missing": 0,
+    "tactic_missing": 0,
+    "examples": [],
+}
+_EMPLOYS_ROW = {
+    "claims": 4854,
+    "claiming_actors": 177,
+    "target_missing": 0,
+    "claims_with_target": 4854,
+    "edge_missing": 0,
+    "examples": [],
+    "mitre_nodes": 189,
+}
+_IMPLEMENTS_ROWS = {
+    "Malware": {
+        "claims": 10895,
+        "claiming_malware": 752,
+        "target_missing": 0,
+        "claims_with_target": 10895,
+        "edge_missing": 0,
+        "examples": [],
+        "mitre_nodes": 754,
+    },
+    "Tool": {
+        "claims": 869,
+        "claiming_tools": 95,
+        "target_missing": 0,
+        "claims_with_target": 869,
+        "edge_missing": 0,
+        "examples": [],
+        "mitre_nodes": 95,
+    },
+}
+# 21,207 claims name a technique the graph does not hold (the step 8 [SKIP] count of that run): not a defect.
+_USES_TECHNIQUE_ROW = {
+    "claims": 1587886,
+    "claiming_indicators": 130419,
+    "target_missing": 21207,
+    "claims_with_target": 1566679,
+    "edge_missing": 0,
+    "examples": [],
+}
+_SECTOR_LINKS_COMPLETE_ROW = {"zoned_nodes": 61538, "node_sectors": 78262, "sector_link_missing": 0, "examples": []}
+_CVE_CVSS_COVERAGE_ROW = {"nvd_cves_not_rejected": 146858, "nvd_cves_with_cvss": 142236}
+_SECTOR_LINK_COUNT_ROW = {"sector_links": 78262, "managed_sector_links": 78262}
+_CVSS_NODES = {"CVSSv2": 13475, "CVSSv30": 2397, "CVSSv31": 134295, "CVSSv40": 41865}
+
+
+def _shape_rows(s: str, params: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """The healthy answer to a statement of the 2026-11-02 checks, or None for any other statement. Asked first,
+    and keyed on the column only that statement returns: they name relationship types (USES_TECHNIQUE,
+    IN_TACTIC) and properties (``mitre_attck`` sources) that older matchers below key on."""
+    if "AS tactic_missing" in s:
+        return [dict(_IN_TACTIC_COMPLETE_ROW)]
+    if "AS claiming_actors" in s:
+        return [dict(_EMPLOYS_ROW)]
+    if "AS claiming_malware" in s:
+        return [dict(_IMPLEMENTS_ROWS["Malware"])]
+    if "AS claiming_tools" in s:
+        return [dict(_IMPLEMENTS_ROWS["Tool"])]
+    if "AS claiming_indicators" in s:
+        return [dict(_USES_TECHNIQUE_ROW)]
+    if "AS sector_link_missing" in s:
+        return [dict(_SECTOR_LINKS_COMPLETE_ROW)]
+    if "AS nvd_cves_not_rejected" in s:
+        return [dict(_CVE_CVSS_COVERAGE_ROW)]
+    if "AS managed_sector_links" in s:
+        return [dict(_SECTOR_LINK_COUNT_ROW)]
+    return None
+
+
+def _sized(statement: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """``row`` without the size columns (``judged_edges`` / ``judged_nodes``) the statement does not compute, so a
+    size a check reports comes from its statement, not from the test's row."""
+    return {k: v for k, v in row.items() if not k.startswith("judged_") or f"AS {k}" in statement}
+
 
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
+    shape_rows = _shape_rows(s, params)
+    if shape_rows is not None:
+        return shape_rows
     sector_rows = _sector_evidence_rows(s)
     if sector_rows is not None:
         return sector_rows
@@ -374,15 +460,17 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     if "AS revoked_software" in s:
         return _revoked_software_rows(params)
     if "apoc.meta.stats" in s:
-        return [{"nodeCount": 10, "relCount": 10, "labels": {}, "relTypesCount": {}}]
+        return [{**_GRAPH_SIZE, "labels": {}, "relTypesCount": {}}]
     if "misp_cooccurrence" in s:
         return [{"c": 0}]
+    # 2026-11-02: the size of each judged set (17,124 mitre_explicit links, 2,609 ATTRIBUTED_TO, 1,878
+    # attributed malware on the 730-day graph of 1 Nov 2026)
     if "match_type: 'mitre_explicit'" in s:
-        return [{"c": 0}]
+        return [_sized(s, {"judged_edges": 17124, "c": 0})]
     if "r.match_type IS NULL" in s:
-        return [{"c": 0}]
+        return [_sized(s, {"judged_edges": 2609, "c": 0})]
     if "percentileCont" in s:
-        return [{"malware_with_attribution": 50, "median_actors": 1.0, "max_actors": 4}]
+        return [{"malware_with_attribution": 1878, "median_actors": 1.0, "max_actors": 34}]
     if "RETURN type(r) AS rel, r.match_type AS match_type" in s:
         return [{"rel": "INDICATES", "match_type": "otx_pulse", "c": 5}]
     if "AS result_impacts" in s:
@@ -392,7 +480,7 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     if "OPTIONAL MATCH (t:Tool {mitre_id: id})" in s:
         return [{"id": i, "present": True} for i in params["ids"]]
     if "a.name CONTAINS ','" in s:
-        return [{"c": 0, "examples": []}]
+        return [_sized(s, {"judged_nodes": 762, "c": 0, "examples": []})]
     if "n.tlp IS NULL" in s:
         return [{"total": 500, "missing": 0}]
     if "n.edgeguard_managed IS NULL AND n.edgeguard_enriched IS NULL" in s:
@@ -400,7 +488,7 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     if "r.edgeguard_managed IS NULL RETURN type(r)" in s:
         return [{"type": "ON", "c": 3}]
     if "coalesce(t.attack_domain, 'enterprise') <> coalesce(tc.attack_domain, 'enterprise')" in s:
-        return [{"c": 0}]
+        return [_sized(s, {"judged_edges": 1024, "c": 0})]
     if "Technique {attack_domain: 'ics'}" in s:
         return [{"c": 0}]
     if "source_id: 'cisa_ics'" in s:
@@ -425,7 +513,9 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
             {"sector": "energy", "label": "ThreatActor", "nodes": 2},
         ]
     if "bidirectional" in s:
-        return [{"label": lbl, "total": 7, "bidirectional": 7} for lbl in ("CVSSv30", "CVSSv31", "CVSSv40")]
+        return [
+            {"label": lbl, "total": _CVSS_NODES[lbl], "bidirectional": _CVSS_NODES[lbl]} for lbl in params["labels"]
+        ]
     if "size(coalesce(r.sources, [])) = 0" in s:
         return []
     if "apoc.meta.cypher.type(r.sources)" in s:
@@ -744,7 +834,12 @@ class TestRealBreakageStillFails:
             ),
         )
         assert [c["check"] for c in rep.failed] == ["provenance_lists_are_lists"]
-        assert _check(rep, "provenance_lists_are_lists")["detail"] == {"edges": 21, "nodes": 11}
+        assert _check(rep, "provenance_lists_are_lists")["detail"] == {
+            "edges": 21,
+            "nodes": 11,
+            "judged_edges": _GRAPH_SIZE["relCount"],
+            "judged_nodes": _GRAPH_SIZE["nodeCount"],
+        }
 
 
 # --------------------------------------------------------------------------- 2026-10 data contracts
@@ -1075,6 +1170,7 @@ class TestSourceNodesCanonical:
             "alias_source_nodes": [],
             "unregistered_source_nodes": [],
             "canonical_source_nodes": len(_SOURCE_ROWS),
+            "judged_nodes": len(_SOURCE_ROWS),
             "variants": {s.canonical_id: list(s.aliases) for s in all_sources()},
         }
 
@@ -2640,3 +2736,502 @@ class TestSectorLabelsFollowZones:
         row = {"nodes": 0, "missing_label": 0, "stray_label": 0, "examples": []}
         rep = _run(vfb, monkeypatch, self._with(row))
         assert _check(rep, "sector_labels_follow_zones")["ok"] is None and rep.failed == []
+
+
+# --------------------------------------------------------------------------- 2026-11-02 graph shape
+# What the 2026-11-02 statements returned on the iMac 730-day graph of 1 Nov 2026 with IN_TACTIC,
+# EMPLOYS_TECHNIQUE, IMPLEMENTS_TECHNIQUE and every HAS_CVSS_* read as absent (the statements rewritten,
+# read-only), with their first examples: the shape of a run that lost those writer steps. Before these checks
+# the acceptance passed that graph with the verdicts of the real one (49 PASS / 11 INFO, no failure).
+_MASKED_SHAPE = {
+    "AS tactic_missing": dict(_IN_TACTIC_COMPLETE_ROW, edge_missing=1024, examples=["T1055.011", "T1053.005"]),
+    "AS claiming_actors": dict(_EMPLOYS_ROW, edge_missing=4854, examples=["apt38 -> T1486", "apt38 -> T1055"]),
+    "AS claiming_malware": dict(
+        _IMPLEMENTS_ROWS["Malware"], edge_missing=10895, examples=["hdoor -> T1046", "trickbot -> T1082"]
+    ),
+    "AS claiming_tools": dict(_IMPLEMENTS_ROWS["Tool"], edge_missing=869, examples=["Net -> T1201", "Net -> T1124"]),
+    "AS nvd_cves_not_rejected": {"nvd_cves_not_rejected": 146858, "nvd_cves_with_cvss": 0},
+    # the IN_TACTIC domain check judges no link on that graph
+    "coalesce(t.attack_domain, 'enterprise') <>": {"judged_edges": 0, "c": 0},
+}
+# The reduced graph the in-process CLI baseline built on 31 Oct 2026 (its log: 'Techniques: 718, Actors: 187,
+# Malware: 748, Tools: 95'): the ATT&CK nodes came through the STIX path without their claims, and none of its
+# 152,359 CVEs had a CVSS sub-node.
+_CLI_SHAPE = {
+    "AS tactic_missing": {
+        "techniques": 718,
+        "with_phases": 0,
+        "claims_with_target": 0,
+        "edge_missing": 0,
+        "tactic_missing": 0,
+        "examples": [],
+    },
+    "AS claiming_actors": {
+        "claims": 0,
+        "claiming_actors": 0,
+        "target_missing": 0,
+        "claims_with_target": 0,
+        "edge_missing": 0,
+        "examples": [],
+        "mitre_nodes": 187,
+    },
+    "AS claiming_malware": {
+        "claims": 0,
+        "claiming_malware": 0,
+        "target_missing": 0,
+        "claims_with_target": 0,
+        "edge_missing": 0,
+        "examples": [],
+        "mitre_nodes": 748,
+    },
+    "AS claiming_tools": {
+        "claims": 0,
+        "claiming_tools": 0,
+        "target_missing": 0,
+        "claims_with_target": 0,
+        "edge_missing": 0,
+        "examples": [],
+        "mitre_nodes": 95,
+    },
+    "AS nvd_cves_not_rejected": {"nvd_cves_not_rejected": 152359, "nvd_cves_with_cvss": 0},
+}
+# The first examples of check 10o on the 730-day graph with TARGETS and AFFECTS read as absent.
+_SECTOR_LINK_EXAMPLES = ["Indicator wizardexpensive.com -> energy", "Indicator 96.62.218.59 -> energy"]
+_SHAPE_CHECKS = (
+    "in_tactic_complete",
+    "employs_technique_complete",
+    "implements_technique_complete",
+    "uses_technique_complete",
+    "sector_links_complete",
+    "cve_cvss_coverage",
+)
+
+
+def _answer(rows_by_fragment):
+    """Override for ``_run``: the statement containing a fragment returns its row."""
+
+    def override(statement, rows):
+        for fragment, row in rows_by_fragment.items():
+            if fragment in statement:
+                return [dict(row)]
+        return rows
+
+    return override
+
+
+class TestGraphShape:
+    """2026-11-02: the links the writers build from the claims on the nodes, judged against those claims
+    (``graph_shape_checks``), and the CVE score coverage."""
+
+    def test_the_730_day_graph_passes_every_shape_check(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        for name in _SHAPE_CHECKS:
+            c = _check(rep, name)
+            assert c["ok"] is True and c["mandatory"] is True, name
+        assert rep.failed == []
+
+    def test_a_graph_that_lost_the_writer_links_fails(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, _answer(_MASKED_SHAPE))
+        assert [c["check"] for c in rep.failed] == [
+            "in_tactic_complete",
+            "employs_technique_complete",
+            "implements_technique_complete",
+            "cve_cvss_coverage",
+        ]
+        # what passed that graph before: the domain check now judges nothing and says so
+        assert _check(rep, "in_tactic_same_domain")["ok"] is None
+        assert _check(rep, "employs_technique_complete")["detail"]["examples"] == ["apt38 -> T1486", "apt38 -> T1055"]
+
+    def test_the_cli_shaped_graph_fails(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, _answer(_CLI_SHAPE))
+        assert [c["check"] for c in rep.failed] == [
+            "in_tactic_complete",
+            "employs_technique_complete",
+            "implements_technique_complete",
+            "cve_cvss_coverage",
+        ]
+
+    def test_the_script_runs_the_shared_statements_with_their_parameters(self, vfb, monkeypatch):
+        import graph_shape_checks as gsc
+        from attack_revoked import technique_successors
+
+        seen: Dict[str, Any] = {}
+
+        def fake_post(statement, params=None, timeout=180):
+            seen[statement] = params
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        vfb.run_checks(False, False, False, False)
+        revoked = {"revoked": technique_successors()}
+        assert revoked["revoked"], "the committed map lists revoked techniques"
+        assert seen[gsc.IN_TACTIC_COMPLETE_QUERY] in (None, {})
+        assert seen[gsc.EMPLOYS_TECHNIQUE_COMPLETE_QUERY] == revoked
+        assert seen[gsc.IMPLEMENTS_TECHNIQUE_COMPLETE_QUERIES["Malware"]] == revoked
+        assert seen[gsc.IMPLEMENTS_TECHNIQUE_COMPLETE_QUERIES["Tool"]] == revoked
+        assert seen[gsc.USES_TECHNIQUE_COMPLETE_QUERY] == revoked
+        assert seen[gsc.SECTOR_LINKS_COMPLETE_QUERY] == {"sector_zones": ["energy", "finance", "healthcare"]}
+        assert seen[gsc.CVE_CVSS_COVERAGE_QUERY] in (None, {})
+
+
+class TestInTacticComplete:
+    def test_a_phase_without_its_link_fails_and_names_the_technique(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, _answer({"AS tactic_missing": _MASKED_SHAPE["AS tactic_missing"]}))
+        c = _check(rep, "in_tactic_complete")
+        assert [x["check"] for x in rep.failed] == ["in_tactic_complete"]
+        assert c["detail"]["examples"] == ["T1055.011", "T1053.005"]
+
+    def test_techniques_whose_phases_reach_no_tactic_fail(self, vfb, monkeypatch):
+        # the 730-day techniques with the Tactic nodes gone
+        row = dict(_IN_TACTIC_COMPLETE_ROW, claims_with_target=0, tactic_missing=824)
+        rep = _run(vfb, monkeypatch, _answer({"AS tactic_missing": row}))
+        assert [x["check"] for x in rep.failed] == ["in_tactic_complete"]
+
+    def test_informational_without_a_technique(self, vfb, monkeypatch):
+        row = {"techniques": 0, "with_phases": 0, "claims_with_target": 0, "edge_missing": 0, "tactic_missing": 0}
+        rep = _run(vfb, monkeypatch, _answer({"AS tactic_missing": dict(row, examples=[])}))
+        assert _check(rep, "in_tactic_complete")["ok"] is None and rep.failed == []
+
+
+class TestTechniqueClaimsComplete:
+    """Checks 10a7-10a9: EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE ``mitre_explicit`` from the MITRE claims
+    (``uses_techniques``), USES_TECHNIQUE from an indicator's OTX ``attack_ids``."""
+
+    def test_claims_without_their_technique_are_counted_not_failed(self, vfb, monkeypatch):
+        # 21,207 of the indicator claims name a technique the 730-day graph does not hold
+        c = _check(_run(vfb, monkeypatch), "uses_technique_complete")
+        assert c["ok"] is True and c["detail"]["target_missing"] == 21207
+
+    @pytest.mark.parametrize(
+        "fragment, check",
+        [
+            ("AS claiming_actors", "employs_technique_complete"),
+            ("AS claiming_malware", "implements_technique_complete"),
+            ("AS claiming_tools", "implements_technique_complete"),
+            ("AS claiming_indicators", "uses_technique_complete"),
+        ],
+    )
+    def test_a_claim_whose_technique_exists_without_its_link_fails(self, vfb, monkeypatch, fragment, check):
+        healthy = _shape_rows(fragment, {})
+        assert healthy is not None
+        rep = _run(vfb, monkeypatch, _answer({fragment: dict(healthy[0], edge_missing=3)}))
+        assert [x["check"] for x in rep.failed] == [check]
+
+    def test_mitre_nodes_without_a_claim_fail(self, vfb, monkeypatch):
+        cli = _CLI_SHAPE["AS claiming_actors"]
+        rep = _run(vfb, monkeypatch, _answer({"AS claiming_actors": cli}))
+        assert [x["check"] for x in rep.failed] == ["employs_technique_complete"]
+
+    @pytest.mark.parametrize(
+        "fragment, check",
+        [
+            ("AS claiming_actors", "employs_technique_complete"),
+            ("AS claiming_malware", "implements_technique_complete"),
+            ("AS claiming_tools", "implements_technique_complete"),
+            ("AS claiming_indicators", "uses_technique_complete"),
+        ],
+    )
+    def test_claims_none_of_which_reaches_a_technique_judge_nothing(self, vfb, monkeypatch, fragment, check):
+        """Every claim names a Technique the graph does not hold (the 730-day claims without their Technique
+        nodes): no link is judged, so informational, not a PASS; ``claims_with_target`` says so."""
+        healthy = _shape_rows(fragment, {})
+        assert healthy is not None
+        row = dict(healthy[0], target_missing=healthy[0]["claims"], claims_with_target=0)
+        rows = {fragment: row}
+        if check == "implements_technique_complete":  # the other label's statement judges nothing either
+            other = "AS claiming_tools" if fragment == "AS claiming_malware" else "AS claiming_malware"
+            other_row = _shape_rows(other, {})
+            assert other_row is not None
+            rows[other] = dict(other_row[0], target_missing=other_row[0]["claims"], claims_with_target=0)
+        c = _check(_run(vfb, monkeypatch, _answer(rows)), check)
+        assert c["ok"] is None
+        details = (
+            [c["detail"][k] for k in ("Malware", "Tool")] if check == "implements_technique_complete" else [c["detail"]]
+        )
+        assert all(d["claims_with_target"] == 0 and d["claims"] > 0 for d in details)
+        # one claim reaching its Technique is judged again
+        rows[fragment] = dict(row, target_missing=row["claims"] - 1, claims_with_target=1)
+        assert _check(_run(vfb, monkeypatch, _answer(rows)), check)["ok"] is True
+
+    def test_informational_without_mitre_nodes_and_claims(self, vfb, monkeypatch):
+        none = {"claims": 0, "target_missing": 0, "edge_missing": 0, "examples": [], "mitre_nodes": 0}
+        rows = {
+            "AS claiming_actors": dict(none, claiming_actors=0),
+            "AS claiming_malware": dict(none, claiming_malware=0),
+            "AS claiming_tools": dict(none, claiming_tools=0),
+            "AS claiming_indicators": {"claims": 0, "claiming_indicators": 0, "target_missing": 0, "edge_missing": 0},
+        }
+        rep = _run(vfb, monkeypatch, _answer(rows))
+        for name in ("employs_technique_complete", "implements_technique_complete", "uses_technique_complete"):
+            assert _check(rep, name)["ok"] is None, name
+        assert rep.failed == []
+
+    def test_one_label_judged_is_enough_for_implements(self, vfb, monkeypatch):
+        # a graph without MITRE tools: the Tool statement judges nothing, the Malware one passes
+        tools = {"claims": 0, "claiming_tools": 0, "target_missing": 0, "edge_missing": 0, "mitre_nodes": 0}
+        c = _check(_run(vfb, monkeypatch, _answer({"AS claiming_tools": tools})), "implements_technique_complete")
+        assert c["ok"] is True and set(c["detail"]) == {"Malware", "Tool", "revoked_map"}
+
+    def test_an_unreadable_map_translates_nothing_and_says_so(self, vfb, monkeypatch, tmp_path):
+        import attack_revoked
+
+        missing = tmp_path / "attack_revoked_ids.json"
+        monkeypatch.setattr(vfb, "load_revoked_ids", lambda: attack_revoked.load_revoked_ids(missing))
+        seen = []
+
+        def capture(statement, rows):
+            if "AS claiming_" in statement:
+                seen.append(seen_params.get(statement))
+            return rows
+
+        seen_params: Dict[str, Any] = {}
+
+        def fake_post(statement, params=None, timeout=180):
+            seen_params[statement] = params
+            return capture(statement, _healthy_rows(statement, params or {}))
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        rep = vfb.run_checks(False, False, False, False)
+        assert seen == [{"revoked": {}}] * 4
+        assert _check(rep, "employs_technique_complete")["detail"]["revoked_map"] == "unavailable (file not found)"
+
+
+class TestSectorLinksComplete:
+    def test_a_node_sector_without_its_link_fails(self, vfb, monkeypatch):
+        row = dict(_SECTOR_LINKS_COMPLETE_ROW, sector_link_missing=2, examples=_SECTOR_LINK_EXAMPLES)
+        rep = _run(vfb, monkeypatch, _answer({"AS sector_link_missing": row}))
+        assert [x["check"] for x in rep.failed] == ["sector_links_complete"]
+        assert _check(rep, "sector_links_complete")["detail"]["examples"] == _SECTOR_LINK_EXAMPLES
+
+    def test_informational_without_a_node_sector(self, vfb, monkeypatch):
+        row = {"zoned_nodes": 0, "node_sectors": 0, "sector_link_missing": 0, "examples": []}
+        rep = _run(vfb, monkeypatch, _answer({"AS sector_link_missing": row}))
+        assert _check(rep, "sector_links_complete")["ok"] is None and rep.failed == []
+
+
+class TestCveCvssCoverage:
+    """Check 14c: of NVD's non-rejected CVEs at least half have a CVSS sub-node; informational under 100."""
+
+    @pytest.mark.parametrize(
+        "judged, scored, ok",
+        [
+            (146858, 142236, True),  # the 730-day graph of 1 Nov 2026: 0.969
+            (5228, 4439, True),  # the 7-day graph of 31 Oct 2026: 0.849
+            (81, 49, None),  # the CVEs of the newest day of the 730-day graph alone: too few to judge
+            (99, 0, None),
+            (100, 50, True),
+            (100, 49, False),
+            (152359, 0, False),  # the CLI graph of 31 Oct 2026
+        ],
+    )
+    def test_the_share_decides(self, vfb, monkeypatch, judged, scored, ok):
+        row = {"nvd_cves_not_rejected": judged, "nvd_cves_with_cvss": scored}
+        rep = _run(vfb, monkeypatch, _answer({"AS nvd_cves_not_rejected": row}))
+        c = _check(rep, "cve_cvss_coverage")
+        assert c["ok"] is ok and c["mandatory"] is True
+        assert c["detail"]["share_with_cvss"] == round(scored / judged, 3)
+
+    def test_the_score_check_alone_passes_an_unscored_graph(self, vfb, monkeypatch):
+        # the masked 730-day graph: every CVE unscored and consistently so
+        unscored = {
+            "cves": 152530,
+            "with_cvss": 0,
+            "scored_without_score": 0,
+            "score_not_from_cvss": 0,
+            "unscored_with_score": 0,
+        }
+        rows = {
+            "AS unscored_with_score": unscored,
+            "AS nvd_cves_not_rejected": _MASKED_SHAPE["AS nvd_cves_not_rejected"],
+        }
+        rep = _run(vfb, monkeypatch, _answer(rows))
+        assert _check(rep, "cve_score_from_cvss")["ok"] is True
+        assert [x["check"] for x in rep.failed] == ["cve_cvss_coverage"]
+
+
+class TestEmptySetsAreInformational:
+    """2026-11-02: a check that looks for defects in a set a correct graph may leave empty reports the set's
+    size and is informational on an empty set without a defect; a defect fails whatever the size. A check for
+    what must never exist passes on an empty set and reports its size."""
+
+    @pytest.mark.parametrize(
+        "fragment, empty, check",
+        [
+            ("match_type: 'mitre_explicit'", {"judged_edges": 0, "c": 0}, "mitre_explicit_only_from_mitre_nodes"),
+            ("r.match_type IS NULL", {"judged_edges": 0, "c": 0}, "attributed_to_has_match_type"),
+            (
+                "percentileCont",
+                {"malware_with_attribution": 0, "median_actors": None, "max_actors": None},
+                "attributed_to_fanout_plausible",
+            ),
+            ("coalesce(t.attack_domain, 'enterprise') <>", {"judged_edges": 0, "c": 0}, "in_tactic_same_domain"),
+        ],
+    )
+    def test_an_empty_set_is_informational(self, vfb, monkeypatch, fragment, empty, check):
+        rep = _run(vfb, monkeypatch, _answer({fragment: empty}))
+        assert _check(rep, check)["ok"] is None and rep.failed == []
+
+    @pytest.mark.parametrize(
+        "check, judged",
+        [
+            ("mitre_explicit_only_from_mitre_nodes", 17124),
+            ("attributed_to_has_match_type", 2609),
+            ("in_tactic_same_domain", 1024),
+        ],
+    )
+    def test_a_judged_set_passes_and_reports_its_size(self, vfb, monkeypatch, check, judged):
+        c = _check(_run(vfb, monkeypatch), check)
+        assert c["ok"] is True and c["detail"]["judged_edges"] == judged
+
+    @pytest.mark.parametrize(
+        "fragment, check",
+        [
+            ("match_type: 'mitre_explicit'", "mitre_explicit_only_from_mitre_nodes"),
+            ("r.match_type IS NULL", "attributed_to_has_match_type"),
+            ("coalesce(t.attack_domain, 'enterprise') <>", "in_tactic_same_domain"),
+        ],
+    )
+    def test_a_defect_fails_whatever_the_size_says(self, vfb, monkeypatch, fragment, check):
+        rep = _run(vfb, monkeypatch, _answer({fragment: {"judged_edges": 0, "c": 3}}))
+        assert [x["check"] for x in rep.failed] == [check]
+
+    def test_a_missing_defect_count_fails(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, _answer({"r.match_type IS NULL": {"judged_edges": 2609}}))
+        assert [x["check"] for x in rep.failed] == ["attributed_to_has_match_type"]
+
+    def test_cvss_bidirectional_covers_every_version_and_judges_none_without_sub_nodes(self, vfb, monkeypatch):
+        seen = {}
+
+        def fake_post(statement, params=None, timeout=180):
+            if "bidirectional" in statement:
+                seen["params"] = params
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        c = _check(vfb.run_checks(False, False, False, False), "cvss_bidirectional")
+        assert seen["params"] == {"labels": ["CVSSv2", "CVSSv30", "CVSSv31", "CVSSv40"]}
+        assert c["ok"] is True and c["detail"]["judged_nodes"] == sum(_CVSS_NODES.values())
+
+        def rows(totals):
+            return lambda st, r: (
+                [{"label": lbl, "total": t, "bidirectional": b} for lbl, (t, b) in totals.items()]
+                if "bidirectional" in st
+                else r
+            )
+
+        none = {lbl: (0, 0) for lbl in _CVSS_NODES}
+        assert _check(_run(vfb, monkeypatch, rows(none)), "cvss_bidirectional")["ok"] is None
+        # a version a short window did not deliver leaves the others judged
+        no_v30 = {lbl: (n, n) for lbl, n in _CVSS_NODES.items()} | {"CVSSv30": (0, 0)}
+        assert _check(_run(vfb, monkeypatch, rows(no_v30)), "cvss_bidirectional")["ok"] is True
+        one_way_v2 = {lbl: (n, n) for lbl, n in _CVSS_NODES.items()} | {"CVSSv2": (13475, 13474)}
+        rep = _run(vfb, monkeypatch, rows(one_way_v2))
+        assert [x["check"] for x in rep.failed] == ["cvss_bidirectional"]
+
+    def test_the_sector_provenance_checks_judge_nothing_without_a_sector_link(self, vfb, monkeypatch):
+        none = {"sector_links": 0, "managed_sector_links": 0}
+        rep = _run(vfb, monkeypatch, _answer({"AS managed_sector_links": none}))
+        for name in (
+            "sector_links_name_only_feeds_that_gave_the_sector",
+            "sector_links_cite_only_records_that_gave_the_sector",
+        ):
+            assert _check(rep, name)["ok"] is None, name
+        # with them: judged, and the size reported
+        rep = _run(vfb, monkeypatch)
+        c = _check(rep, "sector_links_name_only_feeds_that_gave_the_sector")
+        assert c["ok"] is True and c["detail"]["judged_edges"] == 78262
+        # never on a graph whose links name a feed that did not give the sector, whatever the count says
+        wrong = [{"type": "TARGETS", "label": "Indicator", "source": "threatfox", "c": 4}]
+
+        def override(st, rows):
+            if "AS managed_sector_links" in st:
+                return [dict(none)]
+            return wrong if "NOT s.name IN" in st and "AS source, count(*) AS c" in st else rows
+
+        rep = _run(vfb, monkeypatch, override)
+        assert [x["check"] for x in rep.failed] == ["sector_links_name_only_feeds_that_gave_the_sector"]
+
+    def test_the_cited_records_check_judges_nothing_without_a_sector_link(self, vfb, monkeypatch):
+        # the CISA ICS edges of the 730-day graph record their references per sector (3,002 edges)
+        stating = {
+            "edges": 439346,
+            "with_zones": 439346,
+            "with_stated_zones": 39270,
+            "with_stated_refs": 39270,
+            "stating_feed_edges_with_stated_refs": 3002,
+        }
+        name = "sector_links_cite_only_records_that_gave_the_sector"
+        assert _check(_run(vfb, monkeypatch, _answer({"AS with_stated_zones": stating})), name)["ok"] is True
+        none = {"sector_links": 0, "managed_sector_links": 0}
+        rows = {"AS with_stated_zones": stating, "AS managed_sector_links": none}
+        assert _check(_run(vfb, monkeypatch, _answer(rows)), name)["ok"] is None
+
+    def test_each_statement_counts_the_set_it_judges(self, vfb, monkeypatch):
+        """The defect is counted inside the set (a CASE), not by filtering it away, so the set's size comes back."""
+        seen: Dict[str, str] = {}
+        keys = {
+            "match_type: 'mitre_explicit'": "RETURN count(r) AS judged_edges, sum(CASE WHEN NOT 'mitre_attck' IN",
+            "r.match_type IS NULL": "RETURN count(r) AS judged_edges, sum(CASE WHEN r.match_type IS NULL",
+            "coalesce(t.attack_domain, 'enterprise') <>": "RETURN count(*) AS judged_edges, sum(CASE WHEN coalesce(",
+            "a.name CONTAINS ','": "RETURN count(a) AS judged_nodes, sum(CASE WHEN composite THEN 1 ELSE 0 END) AS c",
+            "AS managed_sector_links": "MATCH ()-[r:AFFECTS|TARGETS]->(:Sector) RETURN count(r) AS sector_links, ",
+        }
+
+        def capture(statement, rows):
+            for key in keys:
+                if key in statement:
+                    seen[key] = statement
+            return rows
+
+        _run(vfb, monkeypatch, capture)
+        for key, counted in keys.items():
+            assert counted in seen[key], key
+            assert " WHERE " not in seen[key].split("RETURN")[0].split("MATCH", 2)[1], key
+
+    def test_the_checks_for_what_must_never_exist_pass_and_report_their_set(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        # the edges of EdgeGuard's types: the scan's rows without ResilMesh's ``ON`` (3 edges)
+        edgeguard_edges = sum(r["edges"] for r in _healthy_scan() if r["type"] in vfb.EDGEGUARD_REL_TYPES)
+        assert edgeguard_edges == sum(r["edges"] for r in _healthy_scan()) - 3
+        sizes = {
+            "no_cooccurrence_edges": ("judged_edges", _GRAPH_SIZE["relCount"]),
+            # every node is scanned, EdgeGuard's labels are judged
+            "ownership_marker_on_nodes": ("examined_nodes", _GRAPH_SIZE["nodeCount"]),
+            "ownership_marker_on_edges": ("judged_edges", edgeguard_edges),
+            "no_composite_actor_names": ("judged_nodes", 762),
+            "no_global_sector_edges": ("judged_edges", 78262),
+            "relationships_name_their_source": (
+                "judged_edges",
+                sum(r["managed"] for r in _healthy_scan() if r["type"] in vfb.PROVENANCE_REL_TYPES),
+            ),
+            "provenance_lists_are_lists": ("judged_edges", _GRAPH_SIZE["relCount"]),
+            "no_legacy_relationship_properties": ("judged_edges", edgeguard_edges),
+            "source_nodes_canonical": ("judged_nodes", len(_SOURCE_ROWS)),
+        }
+        for name, (key, size) in sizes.items():
+            c = _check(rep, name)
+            assert c["ok"] is True and c["detail"][key] == size, name
+        assert "judged_nodes" not in _check(rep, "ownership_marker_on_nodes")["detail"]
+        # an empty set: still a pass (nothing that must not exist)
+        rep = _run(
+            vfb, monkeypatch, _answer({"AS managed_sector_links": {"sector_links": 0, "managed_sector_links": 0}})
+        )
+        assert _check(rep, "no_global_sector_edges")["ok"] is True
+
+    def test_the_relationship_types_list_the_edgeguard_types_absent(self, vfb, monkeypatch):
+        detail = _check(_run(vfb, monkeypatch), "relationship_types")["detail"]
+        present = {"SOURCED_FROM", "INDICATES", "INVOLVES"}
+        assert detail["edgeguard_types_absent"] == sorted(t for t in vfb.EDGEGUARD_REL_TYPES if t not in present)
+
+    def test_informational_checks_leave_the_exit_code_at_zero(self, vfb, monkeypatch, capsys):
+        empty = {
+            "match_type: 'mitre_explicit'": {"judged_edges": 0, "c": 0},
+            "coalesce(t.attack_domain, 'enterprise') <>": {"judged_edges": 0, "c": 0},
+        }
+        rep = _run(vfb, monkeypatch, _answer(empty))
+        monkeypatch.setattr(vfb, "run_checks", lambda *a, **k: rep)
+        monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py"])
+        assert vfb.main() == 0
+        out = capsys.readouterr().out
+        assert "[INFO] in_tactic_same_domain:" in out and "[INFO] mitre_explicit_only_from_mitre_nodes:" in out
+        assert out.rstrip().endswith("RESULT: PASS")
