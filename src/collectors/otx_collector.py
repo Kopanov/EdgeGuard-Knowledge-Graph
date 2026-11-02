@@ -324,6 +324,58 @@ def _dedupe_pulse_items(processed: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return unique
 
 
+# Pulse ids a run names in its pulse-count log lines (repeated page rows, pulses that yielded no item).
+_MAX_LOGGED_PULSE_IDS = 20
+
+
+def _first_copy_of_each_pulse(rows: List[Dict]) -> Tuple[List[Dict], List[str]]:
+    """The page rows with the first copy of each pulse id kept, and the ids of the rows left out, in order.
+
+    2026-11-02: ``/api/v1/pulses/subscribed`` is paged by offset (``page`` and ``limit``) and the request
+    names no sort order, so the order can shift between two page requests (a pulse modified while the
+    pages are read, or pulses that share a ``modified`` time): a pulse can come back on a later page and
+    another be passed over. A row without an id is kept as it is.
+    """
+    seen: Set[str] = set()
+    kept: List[Dict] = []
+    repeated: List[str] = []
+    for pulse in rows:
+        pid = pulse.get("id")
+        if not pid:
+            kept.append(pulse)
+            continue
+        key = str(pid)
+        if key in seen:
+            repeated.append(key)
+            continue
+        seen.add(key)
+        kept.append(pulse)
+    return kept, repeated
+
+
+def _pulse_ids_for_log(ids: List[str]) -> str:
+    """The first ``_MAX_LOGGED_PULSE_IDS`` distinct ids of *ids*, in order, and how many more there are."""
+    distinct = list(dict.fromkeys(ids))
+    shown = ", ".join(distinct[:_MAX_LOGGED_PULSE_IDS])
+    more = len(distinct) - _MAX_LOGGED_PULSE_IDS
+    return f"{shown}, … ({more} more)" if more > 0 else shown
+
+
+def _pulses_without_item(pulses: List[Dict], items: List[Dict[str, Any]]) -> List[str]:
+    """The ids of *pulses* that no item names, as its pulse (``pulse_id``) or as a later pulse that listed it
+    (``report_ids``, the same-run fold): the pulses that yielded nothing to push (2026-11-02).
+
+    A pulse without an id is never among them: it has no id to match or to name. The run still counts it
+    among the pulses processed, so an id-less pulse that yielded no item is in the processed count of the
+    ``[PULSES] … processed`` line but not in its no-item count (OTX gives every pulse an id)."""
+    named: Set[str] = set()
+    for item in items:
+        for pid in [item.get("pulse_id"), *(item.get("report_ids") or [])]:
+            if pid:
+                named.add(str(pid))
+    return [str(p.get("id")) for p in pulses if p.get("id") and str(p.get("id")) not in named]
+
+
 class OTXCollector:
     """
     AlienVault OTX Collector.
@@ -538,7 +590,9 @@ class OTXCollector:
             baseline_days: How many days back to collect in baseline mode
 
         Returns:
-            Dict with status and counts if push_to_misp=True, else list of processed items
+            Dict with status and counts if push_to_misp=True, else list of processed items. After a fetch the
+            dict carries ``pulse_counts``: the page rows read, the distinct pulses, the rows that repeated a
+            pulse already read, the pulses processed and those that yielded no item.
         """
         limit = resolve_collection_limit(limit, "otx", baseline=baseline)
 
@@ -601,14 +655,16 @@ class OTXCollector:
                     page += 1
                     time.sleep(2)  # OTX free tier: 30 req/min → 2 s between page fetches
 
-                pulses = all_pulses
+                # 2026-11-02: one copy per pulse id (offset paging can return a pulse twice).
+                pulses, repeated_rows = _first_copy_of_each_pulse(all_pulses)
+                rows_read = len(all_pulses)
                 if page > max_pages and consecutive_empty == 0:
                     # 2026-10: the last page was full, so older pulses of the window were not read.
                     logger.warning(
                         "OTX baseline stopped at its page ceiling (EDGEGUARD_OTX_BASELINE_MAX_PAGES=%d, %d pulses): "
                         "pulses older than the last page read were not collected; raise the ceiling to read them",
                         max_pages,
-                        len(all_pulses),
+                        len(pulses),
                     )
                 if not pulses:
                     logger.warning(
@@ -617,7 +673,10 @@ class OTXCollector:
                     )
                 reported = getattr(self, "_otx_reported_total", None)
                 of_reported = f" of {reported} that OTX reported for the window" if reported is not None else ""
-                logger.info(f"   Baseline complete: {len(pulses)} total pulses collected{of_reported}")
+                logger.info(
+                    f"   Baseline complete: {len(pulses)} distinct pulses collected{of_reported} "
+                    f"({rows_read} rows read, {len(repeated_rows)} of them repeating a pulse already read)"
+                )
             else:
                 # Incremental: only pulses modified since last successful run (checkpoint + overlap).
                 inc = get_source_incremental("otx")
@@ -667,7 +726,25 @@ class OTXCollector:
                     all_incr.extend(page_pulses)
                     page_i += 1
                     time.sleep(2)
-                pulses = all_incr
+                # 2026-11-02: one copy per pulse id, before the per-run limit (a repeated row took a slot).
+                pulses, repeated_rows = _first_copy_of_each_pulse(all_incr)
+                rows_read = len(all_incr)
+                reported = getattr(self, "_otx_reported_total", None)
+                of_reported = f" of {reported} that OTX reported for the window" if reported is not None else ""
+                logger.info(
+                    f"OTX incremental: {len(pulses)} distinct pulses read{of_reported} "
+                    f"({rows_read} rows read, {len(repeated_rows)} of them repeating a pulse already read)"
+                )
+
+            if repeated_rows:
+                logger.warning(
+                    "[PULSES] OTX: %d page row(s) repeated %d pulse(s) already read (repeated ids: %s); the first "
+                    "copy of each is kept. If the page order shifted between requests, as many other pulses may "
+                    "have been passed over.",
+                    len(repeated_rows),
+                    len(set(repeated_rows)),
+                    _pulse_ids_for_log(repeated_rows),
+                )
 
             # Process pulses
             processed = []
@@ -953,6 +1030,24 @@ class OTXCollector:
             unique = _dedupe_pulse_items(processed)
 
             logger.info(f"[OK] OTX: Processed {len(unique)} unique items")
+            # 2026-11-02: the pulses of the run that yielded no item (no collected indicator, malware family,
+            # CVE or adversary), so a pulse count above the graph's is told apart from items lost later.
+            without_item = _pulses_without_item(to_process, unique)
+            logger.info(
+                "[PULSES] OTX: %d pulse(s) processed, %d of them yielded no item%s",
+                len(to_process),
+                len(without_item),
+                f" (no collected indicator, malware family, CVE or adversary): {_pulse_ids_for_log(without_item)}"
+                if without_item
+                else "",
+            )
+            pulse_counts = {
+                "rows_read": rows_read,
+                "distinct": len(pulses),
+                "repeated_rows": len(repeated_rows),
+                "processed": len(to_process),
+                "without_item": len(without_item),
+            }
             if adversaries_named_as_family:
                 logger.info(
                     "[ACTOR-NAMES] OTX: %d distinct adversary name(s) in %d pulse(s), which the same pulse lists "
@@ -1019,6 +1114,7 @@ class OTXCollector:
                     _advance_otx_incremental_cursor()
                     st = make_status("otx", True, count=0, failed=0)
                     st["circuit_breaker_state"] = self.circuit_breaker.state.name
+                    st["pulse_counts"] = pulse_counts
                     return st
 
                 success, failed = self.misp_writer.push_items(unique)
@@ -1063,6 +1159,7 @@ class OTXCollector:
                 self.circuit_breaker.record_success()
                 st = status_after_misp_push("otx", len(unique), success, failed)
                 st["circuit_breaker_state"] = self.circuit_breaker.state.name
+                st["pulse_counts"] = pulse_counts
                 return st
             else:
                 record_collection_success(self.source_name)

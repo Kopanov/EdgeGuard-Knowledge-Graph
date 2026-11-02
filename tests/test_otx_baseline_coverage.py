@@ -2,8 +2,8 @@
 
 OTX answers every page of ``/api/v1/pulses/subscribed`` with ``count``, the number of pulses that match
 the request. The baseline logs it after the first page, warns at once when the page ceiling cannot read
-them all, and states the share it read at the end, so the coverage of a run is stated rather than
-inferred from attribute counts.
+them all, and states the share it read at the end (distinct pulses, beside the page rows read), so the
+coverage of a run is stated rather than inferred from attribute counts.
 """
 
 from __future__ import annotations
@@ -82,7 +82,9 @@ def test_the_reported_total_and_the_ceiling_are_logged(caplog):
         for m in messages
     )
     assert any(
-        "Baseline complete: 1 total pulses collected of 120 that OTX reported for the window" in m for m in messages
+        "Baseline complete: 1 distinct pulses collected of 120 that OTX reported for the window "
+        "(1 rows read, 0 of them repeating a pulse already read)" in m
+        for m in messages
     )
     assert not [r for r in records if r.levelname == "WARNING" and "page ceiling stops" in r.getMessage()]
 
@@ -96,4 +98,9 @@ def test_a_ceiling_below_the_total_warns_at_the_start(caplog):
 def test_an_answer_without_a_count_logs_no_coverage(caplog):
     messages = [r.getMessage() for r in _run(caplog, count=None, max_pages=200)]
     assert not any("OTX reports" in m for m in messages)
-    assert any(m.endswith("Baseline complete: 1 total pulses collected") for m in messages)
+    assert any(
+        m.endswith(
+            "Baseline complete: 1 distinct pulses collected (1 rows read, 0 of them repeating a pulse already read)"
+        )
+        for m in messages
+    )
