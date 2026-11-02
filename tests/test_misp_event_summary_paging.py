@@ -7,6 +7,8 @@ first 500 events. It now pages until a short page and reports when it stopped at
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -26,8 +28,12 @@ class _Response:
         return self._payload
 
 
-def _events(source: str, count: int, attributes: int = 2) -> List[Dict[str, Any]]:
-    return [{"info": f"EdgeGuard-{source}-2026-01-{n:04d}", "attribute_count": attributes} for n in range(count)]
+def _events(source: str, count: int, attributes: int = 2, first_id: int = 1) -> List[Dict[str, Any]]:
+    """``count`` index rows with the event ids ``first_id`` onwards (every MISP index row has an id)."""
+    return [
+        {"id": str(first_id + n), "info": f"EdgeGuard-{source}-2026-01-{n:04d}", "attribute_count": attributes}
+        for n in range(count)
+    ]
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, pages: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -54,7 +60,10 @@ def _install(monkeypatch: pytest.MonkeyPatch, pages: List[List[Dict[str, Any]]])
 
 def test_every_page_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     size = edgeguard._MISP_SUMMARY_PAGE_SIZE
-    sent = _install(monkeypatch, [_events("nvd", size), _events("otx", size), _events("cisa", 7)])
+    sent = _install(
+        monkeypatch,
+        [_events("nvd", size), _events("otx", size, first_id=size + 1), _events("cisa", 7, first_id=2 * size + 1)],
+    )
     summary = edgeguard._fetch_misp_event_summary()
     assert [p["page"] for p in sent] == [1, 2, 3]
     assert all(p["limit"] == size and p["searchall"] == "EdgeGuard" for p in sent)
@@ -76,7 +85,10 @@ def test_a_full_last_page_reads_the_next(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_the_page_cap_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(edgeguard, "_MISP_SUMMARY_MAX_PAGES", 2)
     size = edgeguard._MISP_SUMMARY_PAGE_SIZE
-    sent = _install(monkeypatch, [_events("nvd", size), _events("nvd", size), _events("nvd", size)])
+    sent = _install(
+        monkeypatch,
+        [_events("nvd", size), _events("nvd", size, first_id=size + 1), _events("nvd", size, first_id=2 * size + 1)],
+    )
     summary = edgeguard._fetch_misp_event_summary()
     assert [p["page"] for p in sent] == [1, 2]
     assert summary["total_events"] == 2 * size and summary["truncated"] is True
@@ -85,7 +97,7 @@ def test_the_page_cap_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_cli_names_a_stop_at_the_cap(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(edgeguard, "_MISP_SUMMARY_MAX_PAGES", 1)
     size = edgeguard._MISP_SUMMARY_PAGE_SIZE
-    _install(monkeypatch, [_events("nvd", size), _events("nvd", 1)])
+    _install(monkeypatch, [_events("nvd", size), _events("nvd", 1, first_id=size + 1)])
     warnings: List[str] = []
     monkeypatch.setattr(edgeguard, "warn", lambda msg: warnings.append(msg))
     summary = edgeguard._fetch_misp_event_summary()
@@ -94,3 +106,28 @@ def test_the_cli_names_a_stop_at_the_cap(monkeypatch: pytest.MonkeyPatch, capsys
     out = capsys.readouterr().out
     assert f"MISP Events: {size} events" in out
     assert any("stopped after 1 page(s)" in w for w in warnings)
+
+
+# 2026-11-02: MISP 2.5.45 ignores the query-string ``limit`` and ``page`` of ``/events/index`` and answers
+# the whole listing on every page. Rows of the real answer after the 730-day baseline of 2026-11-01
+# (``tests/fixtures/misp_events_index_2026_11_01.json``), with the ids of 600 or 500 events.
+_INDEX_ROWS = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "misp_events_index_2026_11_01.json").read_text()
+)
+
+
+def _real_rows(count: int) -> List[Dict[str, Any]]:
+    return [dict(_INDEX_ROWS[n % len(_INDEX_ROWS)], id=str(n + 1)) for n in range(count)]
+
+
+@pytest.mark.parametrize("count, gets", [(600, 1), (500, 2), (21, 1)])
+def test_a_listing_repeated_on_every_page_counts_each_event_once(monkeypatch, count, gets):
+    """600 rows (more than the limit): the whole listing, one GET; 500 rows: the second page brings no
+    new id. Before, both read the listing again on every page up to the cap of 200 pages."""
+    rows = _real_rows(count)
+    sent = _install(monkeypatch, [rows] * edgeguard._MISP_SUMMARY_MAX_PAGES)
+    summary = edgeguard._fetch_misp_event_summary()
+    assert len(sent) == gets
+    assert summary["total_events"] == count and summary["truncated"] is False
+    expected = sum(int(r["attribute_count"]) for r in rows)
+    assert summary["total_attributes"] == expected

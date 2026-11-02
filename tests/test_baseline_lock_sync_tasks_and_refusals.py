@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -259,8 +260,18 @@ def clean(lock, monkeypatch):
         if box.wipe_error is not None:
             raise box.wipe_error
         box.wipes.append({"holder": _holder_on_disk(lock.path), **kwargs})
-        return SimpleNamespace(
-            before=SimpleNamespace(neo4j_count=350_000, misp_count=8_000, checkpoint_count=3), duration_seconds=0.1
+        state = baseline_clean.BaselineState(
+            neo4j_count=350_000, neo4j_ok=True, misp_count=8_000, misp_ok=True, checkpoint_count=3, checkpoint_ok=True
+        )
+        return baseline_clean.CleanResult(
+            before=state,
+            after=state,
+            duration_seconds=0.1,
+            verify_attempts=1,
+            # What the wipe reported deleting differs from the pre-wipe probe (as on the 730-day run of
+            # 2026-11-01: the probe counted 700 MISP events, the wipe deleted 14).
+            neo4j_nodes_deleted=350_000,
+            misp_events_deleted=14,
         )
 
     monkeypatch.setattr(baseline_clean, "reset_baseline_data", reset_baseline_data)
@@ -309,6 +320,16 @@ def test_baseline_clean_cleared_after_an_environment_fix_wipes_under_the_lock(da
     clean.gate_error = None  # the backup is recorded and the container recreated; baseline_clean is cleared
     dag._baseline_clean(**_context(BASELINE_A, conf))
     assert clean.wipes == [{"holder": BASELINE_A["run_id"], "wipe_scope": "edgeguard"}]
+
+
+def test_baseline_clean_logs_what_the_wipe_deleted(dag, lock, clean, caplog):
+    """2026-11-02: the line names the wipe's counts, not the pre-wipe probe's (8,000 MISP events here)."""
+    conf = {"fresh_baseline": True, "skip_backup_check": True}
+    dag._baseline_acquire_lock(**_context(BASELINE_A, conf))
+    with caplog.at_level(logging.INFO):
+        dag._baseline_clean(**_context(BASELINE_A, conf))
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("BASELINE_CLEAN: deleted")]
+    assert lines == ["BASELINE_CLEAN: deleted 350000 Neo4j nodes, 14 MISP events, 3 checkpoint entries (0.1s)"]
 
 
 def test_baseline_clean_does_not_wipe_while_another_run_holds_the_lock(dag, lock, clean):

@@ -62,17 +62,17 @@ RETURN z as zone, count(DISTINCT n) as count
 
 ### Relationship building with exact matching
 
-`build_relationships.py` matches names exactly, never with a substring test such as `CONTAINS`, because a substring match creates false positives (e.g. "APT" would match "AP"). The attribution step compares the malware's own `attributed_to` claim with the actor's name and aliases:
+`build_relationships.py` matches names exactly, never with a substring test such as `CONTAINS`, because a substring match creates false positives (e.g. "APT" would match "AP"). The family step (Q9) compares the indicator's family label with the malware's name and aliases:
 
 ```cypher
-// Exact match (simplified: Q2 compares trimmed, lower-cased values and also matches a.aliases)
-WHERE m.attributed_to = a.name OR a.name = m.attributed_to
+// Exact match (simplified: Q9 compares trimmed, lower-cased values and also matches m.aliases)
+WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family))
 ```
 
 **Confidence scoring** (current evidence labels, `r.match_type`; no partial or fuzzy matching exists):
 | Evidence label | Confidence | Basis |
 |----------------|------------|-------|
-| `exact` | 1.0 | The malware's `attributed_to` equals an actor's name or alias (Q2, `ATTRIBUTED_TO`) |
+| `exact` | 1.0 | The malware's own `attributed_to` claim equals an actor's name or alias (Q2, `ATTRIBUTED_TO`); no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label |
 | `cve_tag` | 1.0 | A CVE tag on the indicator (`EXPLOITS`) |
 | `kill_chain_phase` | 1.0 | The technique's tactic phase equals the tactic's short name (`IN_TACTIC`) |
 | `mitre_explicit` | 0.95 (1.0 on `SUBTECHNIQUE_OF`) | MITRE ATT&CK's explicit `uses` relationship, or the dotted sub-technique id |
@@ -123,10 +123,11 @@ At the end of a run, `build_relationships.py` reports the count and the average 
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `exact` (Q2): no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label; the exact-match example is the family step's (Q9).
 - 2026-10-23 — The chunking reference points to CONFIGURATION.md, which holds the settings the README listed.
 - 2026-10-18 — `otx_pulse` also labels `INDICATES` from an indicator to a CVE named in the same OTX pulse.
 - 2026-10-18 — `otx_industries` (0.6): the sectors an OTX pulse's own industries name, on `TARGETS` (they were `zone_classification`, 0.5).

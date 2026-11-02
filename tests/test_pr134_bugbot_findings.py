@@ -407,7 +407,7 @@ class TestMitreExplicitUpgradesExistingEdges:
         return out
 
     def test_every_mitre_explicit_step_upgrades_in_the_unconditional_set(self):
-        explicit = [q for q in self._inner_strings() if "uses_techniques AS tid" in q]
+        explicit = [q for q in self._inner_strings() if "uses_techniques AS _cited" in q]
         assert len(explicit) == 3, "Q5 actor, Q6 malware, Q10 tool"
         for q in explicit:
             on_create, after = _split_on_create(q)
@@ -415,7 +415,7 @@ class TestMitreExplicitUpgradesExistingEdges:
             assert 'r.match_type = "mitre_explicit"' in after and "r.confidence_score = 0.95" in after
 
     def test_reported_steps_never_downgrade_a_mitre_edge(self):
-        reported = [q for q in self._inner_strings() if "reported_techniques AS tid" in q]
+        reported = [q for q in self._inner_strings() if "reported_techniques AS _cited" in q]
         assert len(reported) == 2, "Q5b actor, Q6b malware"
         for q in reported:
             on_create, after = _split_on_create(q)

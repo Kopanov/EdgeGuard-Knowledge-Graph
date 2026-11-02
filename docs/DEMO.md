@@ -240,7 +240,9 @@ Next to the graph's node counts, prints the number of EdgeGuard events and attri
 a table of events and attributes per source, parsed from the event names
 (`EdgeGuard-<source>-<date>`; a `-part<N>` event counts under its source). The summary reads every page of MISP's `/events/index`
 (`searchall=EdgeGuard`, 500 events a page, at most 200 pages; it warns when it stops at that cap,
-and `--json` then carries `"truncated": true`). `--json` prints the same as JSON. The closing
+and `--json` then carries `"truncated": true`) and counts each event once: a MISP that ignores the
+query-string paging (2.5.45) answers the whole listing on every page, and the summary stops at the
+page that brings no new event or is not full. `--json` prints the same as JSON. The closing
 "Last sync" line reads the sync state file of the host it runs on
 (`state/edgeguard_last_neo4j_sync.json`, which the Airflow sync writes); on any other host, or when
 the file cannot be read or parsed, it is a warning, `Last sync: no readable sync state file on this
@@ -337,10 +339,11 @@ lines were written, how many keys were skipped (URL and IPv6 keys contain `:`) a
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `edgeguard stats --misp` counts each event once on a MISP that answers the whole listing on every page (with 500 or more EdgeGuard events it would have counted the listing once per page, up to 200 pages).
 - 2026-10-25 — `edgeguard stats --misp`: a `-part<N>` event (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`) counts under its source.
 - 2026-10-25 — `first_seen` and `last_updated` of the alert enrichment are the indicator's seen dates: per source the claim, else the source's latest report (an indicator only OTX reported, which has no claim, had shown its import time and its last write).
 - 2026-10-18 — The alert enrichment lists the CVEs named in the same OTX report as the indicator (`INDICATES`, `otx_pulse`), each with its `evidence`; the guide states when an alert shows them (the indicator has the link; per-event build and per-pulse caps) and how to pick such an indicator, and the STIX step names the indicators and CVEs of the bundles (those the graph links as named in the same OTX report, if any).

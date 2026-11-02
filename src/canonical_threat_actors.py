@@ -171,12 +171,16 @@ def canonical_actor_names(reference: Optional[CanonicalReference]) -> Dict[str, 
 
 def attribution_reports_cypher(rel: str) -> str:
     """Cypher list of the OTX pulse ids a same-pulse attribution ``rel`` rests on: its OTX entries of
-    ``source_refs`` (reads ``$otx_ref_prefix``), and its ``report_ids`` on graphs built before
-    2026-10-14. A list stored as a plain string is read as one entry (``as_list``). No single quotes,
-    so it fits a statement ``apoc.periodic.iterate`` wraps in them."""
+    ``source_refs`` (reads ``$otx_ref_prefix``). A list stored as a plain string is read as one entry
+    (``as_list``). No single quotes, so it fits a statement ``apoc.periodic.iterate`` wraps in them.
+
+    2026-11-02: ``report_ids`` is not read. It is a property dropped from relationships in 2026-10
+    (the acceptance check ``no_legacy_relationship_properties`` fails an edge that carries it), and
+    reading a property key the database does not hold makes Neo4j return a notice that the task log
+    shows as a WARNING."""
     return (
         f"[x IN {as_list(rel + '.source_refs')} WHERE x STARTS WITH $otx_ref_prefix "
-        f"| substring(x, size($otx_ref_prefix))] + {as_list(rel + '.report_ids')}"
+        "| substring(x, size($otx_ref_prefix))]"
     )
 
 

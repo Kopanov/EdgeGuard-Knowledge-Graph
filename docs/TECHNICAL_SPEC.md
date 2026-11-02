@@ -573,7 +573,7 @@ Auth:    Configured via environment variables
 |--------------|------|-----|------------|
 | `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` + `match_type` per evidence: `mitre_explicit` (0.95, `uses_techniques`) or `otx_pulse` (0.6, `reported_techniques`); curated-package claims: see below the table; `created_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` (`build_relationships.py` Q5/Q5b). |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; `mitre_explicit` (0.95) via `uses_techniques`, `otx_pulse` (0.6) via `reported_techniques` (`build_relationships.py` Q6/Q6b/Q10); curated-package claims: see below the table. |
-| `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path and Q2d, the pulse in `source_refs[]`; only from a pulse whose actors are one actor); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
+| `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='otx_pulse'` (0.6, sync path and Q2d, the pulse in `source_refs[]`; only from a pulse whose actors are one actor); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
 | `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. No code path writes the `misp_cooccurrence` level (0.5) |
 | `INDICATES` | Indicator | `CVE` | `match_type='otx_pulse'` (0.6): indicator and CVE named in the same OTX pulse (sync path, the pulse in `source_refs[]`; at most 50 CVEs and 2,000 indicators per pulse); "named in the same report", never an exploitation claim; the `CVE` node is matched by `cve_id`, never created; `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` (the indicator's own CVE tag; no collector writes one) |
@@ -1017,10 +1017,11 @@ other type is compared as given.
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `ATTRIBUTED_TO`: `match_type='exact'` (Q2) is on no link: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label.
 - 2026-11-01 — `CVE` properties: the MISP → Neo4j sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the comment named `merge_cve` as the sync's path.
 - 2026-11-01 — `Malware` and `ThreatActor` carry the ATT&CK id of a MITRE record (`mitre_id`); `deprecated` is cleared by an ATT&CK record of the active object (it was never cleared).
 - 2026-10-25 — `GET /indicators`: the `source` filter takes a source's canonical id or a variant (until then only the canonical id matched).

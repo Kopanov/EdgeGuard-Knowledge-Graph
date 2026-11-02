@@ -135,11 +135,29 @@ class TestActorIdentities:
         assert cta.reports_naming_several_actors(rows, reference) == ["p-groups"]
         assert cta.reports_naming_several_actors(rows, None) == ["p-alias", "p-groups"]
 
-    def test_the_report_ids_fragment_has_no_single_quote(self):
+    def test_the_reports_fragment_has_no_single_quote(self):
         # It is used inside statements apoc.periodic.iterate wraps in single quotes.
         fragment = cta.attribution_reports_cypher("r")
         assert "'" not in fragment
-        assert "r.source_refs" in fragment and "r.report_ids" in fragment and "$otx_ref_prefix" in fragment
+        assert "r.source_refs" in fragment and "$otx_ref_prefix" in fragment
+
+    def test_no_statement_reads_the_dropped_report_ids(self):
+        """2026-11-02: ``report_ids`` was dropped from relationships in 2026-10 (the acceptance check
+        ``no_legacy_relationship_properties`` fails an edge that carries it). Step 2d still read it as a
+        fallback, and each read of a property key the database does not hold made Neo4j return an
+        ``UnknownPropertyKeyWarning`` notice: 8 per run of the 730-day baseline of 2026-11-01 (4 in the
+        count of each of the removal and the trim), WARNING lines in the task log."""
+        for name in (
+            "_q2d_outer",
+            "_q2d_inner",
+            "_q2d_remove_outer",
+            "_q2d_remove_inner",
+            "_q2d_trim_outer",
+            "_q2d_trim_inner",
+        ):
+            assert "report_ids" not in assigned_query(name), name
+        assert "report_ids" not in cta.attribution_reports_cypher("r")
+        assert "report_ids" not in cta.ATTRIBUTION_CHECK_QUERY
 
     def test_lists_stored_as_a_string_are_read_as_one_entry(self):
         # The actor alias merge's APOC combine stores two equal one-element lists as a string until
@@ -147,7 +165,7 @@ class TestActorIdentities:
         from relationship_provenance import as_list
 
         fragment = cta.attribution_reports_cypher("r")
-        assert as_list("r.source_refs") in fragment and as_list("r.report_ids") in fragment
+        assert as_list("r.source_refs") in fragment
         assert ("UNWIND " + as_list("a.pulse_ids") + " AS pid") in cta.REPORT_ACTORS_QUERY
         assert ("all(s IN " + as_list("r.sources") + " WHERE s IN $feeds)") in cta.ATTRIBUTION_CHECK_QUERY
         assert ("all(s IN " + as_list("r.sources") + " WHERE s IN $report_feeds)") in assigned_query(
@@ -155,7 +173,9 @@ class TestActorIdentities:
         )
         trim = assigned_query("_q2d_trim_inner")
         assert ("[x IN " + as_list("r.source_refs") + " WHERE NOT x IN $several_actor_refs]") in trim
-        assert ("[p IN " + as_list("r.report_ids") + " WHERE NOT p IN $several_actor_reports]") in trim
+        assert ("any(x IN " + as_list("r.source_refs") + " WHERE x IN $several_actor_refs)") in assigned_query(
+            "_q2d_trim_outer"
+        )
 
 
 # --------------------------------------------------------------------------- the collector and MISP
@@ -800,8 +820,6 @@ class TestStep2d:
             assert fragment in remove
         assert assigned_query("_q2d_remove_inner") == "WITH $r AS r DELETE r"
         trim = assigned_query("_q2d_trim_inner")
-        assert (
-            "CASE WHEN r.source_refs IS NULL THEN null" in trim and "CASE WHEN r.report_ids IS NULL THEN null" in trim
-        )
+        assert "CASE WHEN r.source_refs IS NULL THEN null" in trim
         for name in ("_q2d_inner", "_q2d_remove_outer", "_q2d_remove_inner", "_q2d_trim_outer", "_q2d_trim_inner"):
             assert "'" not in assigned_query(name), f"{name}: apoc.periodic.iterate wraps it in single quotes"

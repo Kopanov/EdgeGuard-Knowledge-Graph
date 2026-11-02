@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -2225,25 +2225,44 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
 
     # PR #33 round 13: explicit aggregated summary so an operator scanning logs
     # sees totals from all 6 jobs without grepping each function's output.
-    def _sum(d):
-        if isinstance(d, dict):
-            return sum(v for v in d.values() if isinstance(v, (int, float)))
-        return d if isinstance(d, (int, float)) else 0
-
-    logger.info(
-        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s malware_twin_merge=%s campaigns=%s decay=%s epss=%s",
-        _sum(summary.get("bridge")),
-        _sum(summary.get("actor_alias_merge")),
-        # The twins merged, not a sum of its counts (candidates and twins without a target are no work).
-        _sum({"merged": (summary.get("malware_twin_merge") or {}).get("merged", 0)}),
-        _sum(summary.get("campaigns")),
-        # 2026-10-16: the Indicators whose aging changed, not a sum of its counts (tier counts are state).
-        _sum({"changed": (summary.get("decay") or {}).get("changed", 0)}),
-        # The CVE nodes EPSS updated, not a sum of its counts: the feed's row count is not work done.
-        _sum({"cves_updated": (summary.get("epss") or {}).get("cves_updated", 0)}),
-    )
+    logger.info("[ENRICHMENT SUMMARY] %s", enrichment_summary_line(summary))
     logger.info("[DONE] All enrichment jobs complete")
     return summary
+
+
+# The numbers of the [ENRICHMENT SUMMARY] line, in order: (job, key of its result, name in the line).
+# 2026-11-02: one named number per job (two for the campaign builder). Until then the line added up every
+# number of a job's result for the bridge, the alias merge and the campaign builder: the 730-day baseline
+# of 2026-11-01 logged actor_alias_merge=2265 for 79 merges (candidates, merges, restamped edges and
+# reference candidates added up) and campaigns=44595 for 533 campaigns and 44,062 links.
+_SUMMARY_NUMBERS = (
+    ("bridge", "linked", "bridge_linked"),
+    ("actor_alias_merge", "merged", "actor_alias_merged"),
+    ("malware_twin_merge", "merged", "malware_twins_merged"),
+    # ``campaigns_created`` counts every campaign the run built, new or existing.
+    ("campaigns", "campaigns_created", "campaigns_built"),
+    ("campaigns", "links_created", "campaign_links"),
+    ("decay", "changed", "decay_changed"),
+    ("epss", "cves_updated", "epss_cves_updated"),
+)
+_SUMMARY_JOBS = ("bridge", "actor_alias_merge", "malware_twin_merge", "decay", "campaigns", "epss")
+
+
+def _summary_number(result: Any, key: str) -> int:
+    """``result[key]`` when the job's result is a dict holding an int there, else 0."""
+    value = result.get(key) if isinstance(result, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def enrichment_summary_line(summary: Dict) -> str:
+    """The text of the ``[ENRICHMENT SUMMARY]`` line: one named number per job (``_SUMMARY_NUMBERS``),
+    then ``<job>_errors=N`` for each job whose result counts errors (only when N is not 0)."""
+    parts = [f"{name}={_summary_number(summary.get(job), key)}" for job, key, name in _SUMMARY_NUMBERS]
+    for job in _SUMMARY_JOBS:
+        errors = _summary_number(summary.get(job), "errors")
+        if errors:
+            parts.append(f"{job}_errors={errors}")
+    return " ".join(parts)
 
 
 if __name__ == "__main__":

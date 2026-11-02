@@ -9,7 +9,7 @@ to prevent false positives (e.g., "APT" matching "AP").
 
 import os
 import sys
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +29,8 @@ from query_pause import query_pause
 # nodes in the graph from before PR-N10 that carry placeholder names.
 # Embed the rejected set as a Cypher literal list so Q2/Q9 also filter
 # at query time. Sorted for stable generated Cypher across Python runs
-# (frozenset iteration order is implementation-defined).
+# (frozenset iteration order is implementation-defined). Since 2026-11-02 step 2
+# (Q2) runs no query, so Q9 is the step that reads the list.
 #
 # PR-N10 follow-up (cursor-bugbot 2026-04-21, Low): escape ``"`` and
 # ``\`` in each entry before embedding into the double-quoted Cypher
@@ -215,6 +216,56 @@ _SKIP_REASONS: Dict[str, str] = {
     key: _SECTOR_SKIP_REASON
     for key in ("indicator_targets_sector", "vuln_affects_sector", "actor_targets_sector", "malware_targets_sector")
 }
+
+
+class _StepStats(dict):
+    """What the steps of one run reported, for the summary line and the gauge.
+
+    The dict holds, per step key, APOC's ``total``: the outer rows the step processed (the values of
+    the gauge ``edgeguard_neo4j_relationships``). ``created`` holds, per step key, the relationships
+    the step's statement created (APOC's ``updateStatistics.relationshipsCreated``); ``partial`` the
+    step keys whose ``created`` count includes rolled-back batches (``[PARTIAL]``). A plain dict passed
+    to ``_safe_run_batched`` (a test) records only the rows."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.created: Dict[str, int] = {}
+        self.partial: Set[str] = set()
+
+
+def _record_created(stats: dict, stat_key: str, created: Any, partial: bool) -> None:
+    """Record a step's created-relationship count on a ``_StepStats`` (see there); a count APOC did not
+    report (``None``, an older APOC) is left out."""
+    if not isinstance(stats, _StepStats):
+        return
+    if isinstance(created, int) and not isinstance(created, bool):
+        stats.created[stat_key] = created
+    if partial:
+        stats.partial.add(stat_key)
+
+
+# Step 2d's removals and trims change existing links; their outer rows are not counted in ``outer_rows``.
+_NOT_LINK_STEPS = frozenset(
+    {"attributed_to_several_actor_pulses_removed", "attributed_to_several_actor_pulses_trimmed"}
+)
+
+
+def _summary_counts(stats: dict) -> Tuple[int, int, str]:
+    """``(relationships_created, outer_rows, per_query)`` of the ``[BUILD_RELATIONSHIPS SUMMARY]`` line.
+
+    ``relationships_created`` adds up the relationships the steps' statements created; ``outer_rows``
+    the outer rows of the link steps (the removals and trims of step 2d are not links and are left
+    out, as before). ``per_query`` names each step as ``key=<outer rows>/<created>``, ``-`` for a
+    created count APOC did not report, and ``[PARTIAL]`` after a step whose created count includes
+    rolled-back batches."""
+    created: Dict[str, int] = getattr(stats, "created", {})
+    partial: Set[str] = getattr(stats, "partial", set())
+    outer_rows = sum(v for k, v in stats.items() if k not in _NOT_LINK_STEPS)
+    relationships_created = sum(created.values())
+    per_query = ", ".join(
+        f"{k}={v}/{created.get(k, '-')}{'[PARTIAL]' if k in partial else ''}" for k, v in sorted(stats.items())
+    )
+    return relationships_created, outer_rows, per_query
 
 
 def _sector_link_statements(node_var: str, outer_match: str, rel_type: str) -> _SectorLinkStatements:
@@ -421,9 +472,16 @@ def _safe_run_batched(
             if skip_result:
                 skip_count = skip_result[0].get("c", 0)
         except Exception as exp_err:
-            logger.debug("skip_query failed for %s — skip-count log will be omitted: %s", label, exp_err)
+            # 2026-11-02: WARNING (it was DEBUG), so a [SKIP] line that is missing because its count
+            # failed is visible.
+            logger.warning(
+                "  [SKIP] %s: the count of input rows without a target failed (%s: %s); no [SKIP] line for this step",
+                label,
+                type(exp_err).__name__,
+                exp_err,
+            )
 
-    # PR-N7 (2026-04-21 on-call from Bravo Vanko): pre-log the outer
+    # PR-N7 (2026-04-21 on-call report): pre-log the outer
     # row count BEFORE starting apoc.periodic.iterate so operators
     # can see the scale of work. Pre-fix the pipeline sat silent for
     # 5+ hours during step 4 (144K-indicator co-occurrence); the
@@ -478,6 +536,7 @@ def _safe_run_batched(
             errors = _apoc_iterate_failures(row)
             created = (row.get("updateStatistics") or {}).get("relationshipsCreated")
             stats[stat_key] = count
+            _record_created(stats, stat_key, created, partial=bool(errors))
             if errors:
                 logger.warning(
                     # updateStatistics also counts work done in failed (rolled-back)
@@ -487,7 +546,7 @@ def _safe_run_batched(
                     f"elapsed {_elapsed:.1f}s, failures: {errors[:3]}"
                     f"{' (+more)' if len(errors) > 3 else ''}"
                 )
-                # PR-N21 Bravo-ops: fire the partial-batch counter so the
+                # PR-N21 (operations follow-up): fire the partial-batch counter so the
                 # ``EdgeGuardApocBatchPartial`` P2 alert can catch mid-run
                 # Neo4j OOM / MemoryLimitExceededException inside the APOC
                 # transaction (which the streaming helper from PR-K3
@@ -638,8 +697,9 @@ def _attribution_params(several_actor_reports: List[str], reference: Optional[Ca
 
 # Step 2d, second part (2026-10): the same-pulse attributions resting only on pulses that name several
 # actors are removed (a graph built before the rule holds them), unless another feed asserts the link
-# too; such pulses are then dropped from the provenance of the links that remain. Both provenance
-# forms are read (``canonical_threat_actors.attribution_reports_cypher``).
+# too; such pulses are then dropped from the provenance of the links that remain. A link's pulses are
+# its OTX ``source_refs`` (``canonical_threat_actors.attribution_reports_cypher``); 2026-11-02: the
+# dropped ``report_ids`` property is no longer read or written.
 _q2d_remove_outer = (
     "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
     'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
@@ -652,8 +712,7 @@ _q2d_remove_inner = "WITH $r AS r DELETE r"
 _q2d_trim_outer = (
     "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
     'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
-    "AND (any(x IN " + _as_list("r.source_refs") + " WHERE x IN $several_actor_refs) "
-    "OR any(p IN " + _as_list("r.report_ids") + " WHERE p IN $several_actor_reports)) "
+    "AND any(x IN " + _as_list("r.source_refs") + " WHERE x IN $several_actor_refs) "
     "RETURN r"
 )
 # A list stored as a plain string (the actor alias merge's APOC ``combine`` before its normalising
@@ -661,9 +720,7 @@ _q2d_trim_outer = (
 _q2d_trim_inner = (
     "WITH $r AS r "
     "SET r.source_refs = CASE WHEN r.source_refs IS NULL THEN null "
-    "ELSE [x IN " + _as_list("r.source_refs") + " WHERE NOT x IN $several_actor_refs] END, "
-    "r.report_ids = CASE WHEN r.report_ids IS NULL THEN null "
-    "ELSE [p IN " + _as_list("r.report_ids") + " WHERE NOT p IN $several_actor_reports] END"
+    "ELSE [x IN " + _as_list("r.source_refs") + " WHERE NOT x IN $several_actor_refs] END"
 )
 
 
@@ -701,7 +758,7 @@ def build_relationships():
         logger.error("Failed to connect to Neo4j")
         return False
 
-    stats = {}
+    stats = _StepStats()
     failures = 0
     # 2026-10: ``$revoked`` for the steps that MATCH a Technique by id (1b, 5, 5b, 6, 6b, 8, 10).
     # A missing or invalid map is an empty map: ids are matched as given, the run goes on.
@@ -768,125 +825,21 @@ def build_relationships():
             failures += 1
         query_pause()
 
-        # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
-        #
-        # PR-N8 HIGH (audit Bug Hunter M5, 2026-04-21): apply trim()+
-        # toLower() canonicalization parity. Pre-fix ``a.name`` was
-        # NFC+strip+lower'd at ingest via ``canonicalize_merge_key``
-        # (PR #37) while ``m.attributed_to`` was stored RAW. A MITRE
-        # source emitting ``"APT29"`` on Malware.attributed_to
-        # silently missed the actor stored as ``"apt29"``. Same class
-        # of bug as Q9 / Fix #4 above — canonicalization parity
-        # between ingest-time and relationship-time Cypher.
-        # PR-N8 R1 Bugbot LOW (2026-04-21): the first cut of Fix #4
-        # used ``coalesce(m.attributed_to, "")`` inside the comparison,
-        # which converted NULL to empty-string. A whitespace-only
-        # ``i.malware_family``/``m.attributed_to`` would pass the
-        # ``size(x) > 0`` outer filter (whitespace has positive length)
-        # but then ``trim → ""`` on both sides, and ``"" = ""`` creates
-        # spurious edges to every counterpart node with a NULL field
-        # (or a whitespace-only alias). Bugbot's proposed fix is
-        # correct: drop the coalesce. Cypher's ``trim(NULL)`` returns
-        # NULL, which propagates through ``toLower`` and ``=`` so the
-        # comparison is universally falsy — the desired semantic.
-        #
-        # Belt-and-suspenders: harden the outer filter to also reject
-        # whitespace-only values via ``size(trim(x)) > 0``, so the
-        # inner comparison never sees a post-trim empty string at all.
-        logger.info("[LINK] 2/20 Malware → ThreatActor (exact name match)...")
-        # PR-N9 (follow-up to PR-N8 R1 Bugbot): list comprehensions
-        # filter out NULL/whitespace-only alias entries before
-        # comparing. Without the filter, a single whitespace-only
-        # entry in ``a.aliases`` (e.g. ``["foo", "  ", "bar"]``)
-        # would trim to ``""`` inside the comprehension. Combined
-        # with a whitespace-only ``m.attributed_to`` (which can
-        # reach the inner via the aliases-leg of the OR outer),
-        # the check ``"" IN ["foo", "", "bar"]`` → TRUE → spurious
-        # ATTRIBUTED_TO edge to every ThreatActor with a malformed
-        # alias. Unlikely in clean data but observable on noisy
-        # threat-intel feeds. Filter restores robustness.
-        # PR-N10 defense-in-depth: filter pre-existing placeholder-named
-        # Malware/Actor nodes (created before the merge-time reject
-        # shipped in neo4j_client.py). The placeholder check for
-        # ``m.attributed_to`` lives INSIDE the attributed_to OR-branch
-        # (not at the end with an AND) so that a row with NULL
-        # attributed_to but non-empty ``m.aliases`` still passes the
-        # outer via the aliases branch. Putting the NOT IN check at
-        # the end with AND would make NULL-propagation kill those
-        # legitimate rows (NULL IN […] → NULL → falsy → AND … → falsy).
-        # Inner separately rejects placeholder ``a.name``.
-        # Branch 3 removal (2026-06): the outer no longer needs the
-        # alias-only ``OR size(m.aliases) > 0`` arm — every remaining inner
-        # branch (1 + 2) reads ``m.attributed_to``, so a malware with only
-        # aliases and no attributed_to can never match. Dropping that arm
-        # avoids fanning the inner over malware rows that produce zero edges.
-        _outer = (
-            "MATCH (m:Malware) "
-            "WHERE m.attributed_to IS NOT NULL "
-            "  AND size(trim(m.attributed_to)) > 0 "
-            f"  AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "RETURN m"
+        # 2. Malware → ThreatActor (ATTRIBUTED_TO) by the malware's own ``attributed_to`` claim, matched
+        # exactly to an actor's name or alias (``match_type = "exact"``, 1.0). 2026-11-02: no query runs.
+        # No collector, sync path or merge writes ``Malware.attributed_to``: ``merge_malware`` keeps no
+        # such property, the sync sets ``attributed_to`` only on indicator items (OTX_META / TF_META),
+        # and no collector fills it there. On the 730-day baseline of 2026-11-01 the database had no
+        # such property key; the step matched 0 rows and Neo4j logged 3 UnknownPropertyKeyWarnings on
+        # every run. The slot keeps its number so the other steps and the /20 count stay as they are;
+        # the attributions EdgeGuard writes come from the sync (same OTX pulse, attribute tags) and
+        # step 2d. Branch 3 of the former statement (an actor's name among the malware's aliases) was
+        # removed in 2026-06 (Red-Team BLOCK #19) as an attribution-forgery vector once aliases
+        # round-trip from MISP; a statement for this step must not bring it back.
+        logger.info(
+            "[LINK] 2/20 Malware → ThreatActor (exact name match): [SKIP] no writer produces "
+            "Malware.attributed_to; no query runs"
         )
-        # PR-N10 follow-up (cursor-bugbot 2026-04-21, Medium): placeholder
-        # filter for ``m.attributed_to`` must be scoped to branches 1 + 2
-        # (the ones that READ attributed_to), not at the top level — a
-        # top-level guard would filter out rows with NULL attributed_to
-        # even when branch 3 (alias-only path) should still match. The
-        # PR-N8 R1 pin forbids ``coalesce(m.attributed_to, '')`` because
-        # it breaks NULL propagation (NULL trim/compare → NULL → falsy
-        # is the correct filter behaviour for the outer).
-        #
-        # So: attr_present gate applied INSIDE branches 1+2 and nowhere
-        # else. Alias comprehensions on both sides additionally drop
-        # placeholder entries as defense-in-depth.
-        _inner = (
-            "WITH $m AS m " + _prov_with("m", _node_feeds("m")) + "MATCH (a:ThreatActor) "
-            # PR-N10: reject placeholder actor names at the inner.
-            f"WHERE NOT toLower(trim(a.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "AND ("
-            # Branch 1: m.attributed_to = a.name — requires non-placeholder attributed_to
-            "   (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0 "
-            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "       AND toLower(trim(m.attributed_to)) = toLower(trim(a.name))) "
-            # Branch 2: m.attributed_to ∈ actor.aliases — same gate,
-            # plus aliases comprehension drops placeholder entries. This is
-            # the load-bearing alias path (e.g. malware attributed_to
-            # "Cozy Bear" matches ThreatActor APT29 whose aliases include
-            # "Cozy Bear"): it keys on the MALWARE's OWN attributed_to claim
-            # against the ACTOR's OWN aliases — both authored by the same
-            # MISP attribute as the malware, so it carries no cross-entity
-            # spoofing surface.
-            "   OR (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0 "
-            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            f"       AND toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]) "
-            # Branch 3 (a.name ∈ malware.aliases) was REMOVED 2026-06
-            # (Red-Team BLOCK #19, proactive PR #126 audit). It attributed a
-            # malware to an actor whenever the actor's name appeared in the
-            # MALWARE's aliases — a cross-entity match with no legitimate
-            # signal (ATT&CK malware aliases are alternate malware NAMES,
-            # never actor names, so it created ~0 real edges) but a live
-            # forgery vector once the alias round-trip began rehydrating
-            # MISP ``alias:`` tags into m.aliases: an untrusted/federated
-            # MISP writer could ship ``Malware{name:"benign", alias:"APT29"}``
-            # and forge ``(benign)-[:ATTRIBUTED_TO {confidence 1.0,
-            # match_type:"exact"}]->(APT29)`` into the GraphRAG dataset. The
-            # PR-N14 sanitizer drops placeholders but NOT real actor names,
-            # and the EDGEGUARD_TRUSTED_MISP_ORG_UUIDS allowlist is fail-open
-            # and never gated this path. Removal closes the vector outright
-            # while preserving every legitimate attribution path (Branches
-            # 1+2 above, which key on the malware's OWN attributed_to claim).
-            # Malware-alias signal is still used — safely — by Q9 INDICATES
-            # (indicator.malware_family ∈ m.aliases) at its own confidence (0.8).
-            ") "
-            "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
-            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() '
-            "SET r.updated_at = datetime(), r.edgeguard_managed = true, "
-            + _prov_set()
-            + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
-        )
-        if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
-            failures += 1
-        query_pause()
 
         # 2b / 2c. ThreatActor → Malware (USES_MALWARE), ThreatActor → Tool (USES_TOOL) — 2026-10 R6.
         # MITRE's explicit STIX ``uses`` relationships from a group to software, carried on the
@@ -1187,7 +1140,7 @@ def build_relationships():
         _inner = (
             "WITH $a AS a "
             + _prov_with("a", _MITRE_FEEDS)
-            + "UNWIND a.uses_techniques AS tid WITH a, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND a.uses_techniques AS _cited WITH a, _cited, coalesce($revoked[toString(_cited)], _cited) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1196,8 +1149,8 @@ def build_relationships():
         )
         _q5_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 "
-            "UNWIND a.uses_techniques AS tid "
-            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "UNWIND a.uses_techniques AS _cited "
+            "WITH coalesce($revoked[toString(_cited)], _cited) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -1225,7 +1178,7 @@ def build_relationships():
         _inner = (
             "WITH $a AS a "
             + _prov_with("a", _OTX_FEEDS)
-            + "UNWIND a.reported_techniques AS tid WITH a, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND a.reported_techniques AS _cited WITH a, _cited, coalesce($revoked[toString(_cited)], _cited) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1234,8 +1187,8 @@ def build_relationships():
         )
         _q5b_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.reported_techniques, [])) > 0 "
-            "UNWIND a.reported_techniques AS tid "
-            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "UNWIND a.reported_techniques AS _cited "
+            "WITH coalesce($revoked[toString(_cited)], _cited) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -1260,7 +1213,7 @@ def build_relationships():
         _inner = (
             "WITH $m AS m "
             + _prov_with("m", _MITRE_FEEDS)
-            + "UNWIND m.uses_techniques AS tid WITH m, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND m.uses_techniques AS _cited WITH m, _cited, coalesce($revoked[toString(_cited)], _cited) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1269,8 +1222,8 @@ def build_relationships():
         )
         _q6_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 "
-            "UNWIND m.uses_techniques AS tid "
-            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "UNWIND m.uses_techniques AS _cited "
+            "WITH coalesce($revoked[toString(_cited)], _cited) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -1294,7 +1247,7 @@ def build_relationships():
         _inner = (
             "WITH $m AS m "
             + _prov_with("m", _OTX_FEEDS)
-            + "UNWIND m.reported_techniques AS tid WITH m, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND m.reported_techniques AS _cited WITH m, _cited, coalesce($revoked[toString(_cited)], _cited) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1303,8 +1256,8 @@ def build_relationships():
         )
         _q6b_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.reported_techniques, [])) > 0 "
-            "UNWIND m.reported_techniques AS tid "
-            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "UNWIND m.reported_techniques AS _cited "
+            "WITH coalesce($revoked[toString(_cited)], _cited) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -1400,7 +1353,7 @@ def build_relationships():
         _q8_inner = (
             "WITH $i AS i "
             + _prov_with("i", _OTX_FEEDS)
-            + "UNWIND i.attack_ids AS tech_id WITH i, tech_id AS _cited, coalesce($revoked[toString(tech_id)], tech_id) AS tech_id, "
+            + "UNWIND i.attack_ids AS _cited WITH i, _cited, coalesce($revoked[toString(_cited)], _cited) AS tech_id, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1409,8 +1362,8 @@ def build_relationships():
         )
         _q8_skip = (
             "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 "
-            "UNWIND i.attack_ids AS tech_id "
-            "WITH coalesce($revoked[toString(tech_id)], tech_id) AS tech_id "
+            "UNWIND i.attack_ids AS _cited "
+            "WITH coalesce($revoked[toString(_cited)], _cited) AS tech_id "
             "WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tech_id}) } "
             "RETURN count(*) AS c"
         )
@@ -1485,11 +1438,11 @@ def build_relationships():
             # hub false edges here.
             f"WHERE NOT toLower(trim(m.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "AND (toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
-            # PR-N9: filter NULL/whitespace aliases (see Q2 comment for
-            # rationale). Q9's outer filter already ensures
+            # PR-N9: filter NULL/whitespace aliases (a whitespace-only
+            # alias trims to ""). Q9's outer filter already ensures
             # trim(i.malware_family) is non-empty so the LHS can't
-            # produce a false-match via "" = "", but defense-in-depth
-            # keeps the shape symmetric with Q2.
+            # produce a false-match via "" = ""; the filter is
+            # defense-in-depth.
             "   OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
             "   OR toLower(trim(m.family)) = toLower(trim(i.malware_family))) "
             "MERGE (i)-[r:INDICATES]->(m) "
@@ -1610,7 +1563,7 @@ def build_relationships():
         _inner = (
             "WITH $tool AS tool "
             + _prov_with("tool", _MITRE_FEEDS)
-            + "UNWIND tool.uses_techniques AS tid WITH tool, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND tool.uses_techniques AS _cited WITH tool, _cited, coalesce($revoked[toString(_cited)], _cited) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1619,8 +1572,8 @@ def build_relationships():
         )
         _q10_skip = (
             "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 "
-            "UNWIND tool.uses_techniques AS tid "
-            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "UNWIND tool.uses_techniques AS _cited "
+            "WITH coalesce($revoked[toString(_cited)], _cited) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -1663,25 +1616,24 @@ def build_relationships():
         # Always emitted (even on full success) so absence in logs is a clear
         # "build_relationships didn't reach the end" signal rather than just
         # "no failures, must have worked."
-        # Counts that are not edges written: indicators in several zones, and the attributions step 2d
-        # removed or trimmed (2026-10).
-        total_rels = sum(
-            v
-            for k, v in stats.items()
-            if k
-            not in (
-                "multi_zone_indicators",
-                "attributed_to_several_actor_pulses_removed",
-                "attributed_to_several_actor_pulses_trimmed",
-            )
-        )
-        per_query = ", ".join(f"{k}={v}" for k, v in sorted(stats.items()) if k != "multi_zone_indicators")
+        # 2026-11-02: ``relationships_created`` is what the steps' statements created (APOC's
+        # updateStatistics); ``outer_rows`` the input rows the link steps processed (logged as
+        # ``total_edges`` until then, which a step like 8, 130,419 rows and 1,565,094 links on the
+        # 730-day baseline, does not measure). A step marked [PARTIAL] counts rolled-back batches too.
+        relationships_created, outer_rows, per_query = _summary_counts(stats)
         logger.info(
-            "[BUILD_RELATIONSHIPS SUMMARY] total_edges=%d failures=%d/20 per_query=[%s]",
-            total_rels,
+            "[BUILD_RELATIONSHIPS SUMMARY] relationships_created=%d outer_rows=%d failures=%d/20 "
+            "per_query=[%s] (per step: outer rows/relationships created)",
+            relationships_created,
+            outer_rows,
             failures,
             per_query,
         )
+        if stats.partial:
+            logger.warning(
+                "relationships_created includes rolled-back batches of the [PARTIAL] step(s): %s",
+                ", ".join(sorted(stats.partial)),
+            )
         if failures:
             logger.warning("Relationship types failed: %d/20 — partial success", failures)
 
@@ -1690,7 +1642,7 @@ def build_relationships():
                 record_neo4j_relationships(stats)
             except Exception:
                 logger.debug("Metrics recording failed", exc_info=True)
-            # PR-N21 Bravo-ops: fire the completion counter so the Prometheus
+            # PR-N21 (operations follow-up): fire the completion counter so the Prometheus
             # ``EdgeGuardBuildRelationshipsSilentDeath`` alert can detect a
             # silent subprocess death (exit 137 OOM, SIGKILL). The counter is
             # incremented ONLY if we reach this line — i.e. the summary log
@@ -1717,6 +1669,12 @@ def build_relationships():
 
 
 if __name__ == "__main__":
+    # 2026-11-02: the line format the parent reads each record's level from (``subprocess_streaming``),
+    # set here whatever an imported module configured first (``metrics_server`` sets the same format at
+    # import; without it the default ``LEVEL:name:message`` format applied).
+    from subprocess_streaming import CHILD_LOG_FORMAT
+
+    logging.basicConfig(level=logging.INFO, format=CHILD_LOG_FORMAT, force=True)
     print("=" * 50)
     print("EdgeGuard - Building Graph Relationships")
     print("=" * 50)

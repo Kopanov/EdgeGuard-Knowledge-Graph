@@ -337,7 +337,8 @@ class TestWriters:
 class TestBuildSteps:
     def test_every_step_writes_all_three_lists(self, monkeypatch):
         steps = _render_build_steps(monkeypatch)
-        assert len(steps) == 20
+        # 19: step 2 (Malware.attributed_to, which no writer produces) runs no query (2026-11-02).
+        assert len(steps) == 19
         for label, _outer, inner in steps:
             assert ".sources = apoc.coll.toSet(" in inner, label
             assert ".source_refs = apoc.coll.toSet(" in inner, label
@@ -364,8 +365,8 @@ class TestBuildSteps:
         for k in otx:
             assert '["alienvault_otx"]' in steps[k] and "AS _feeds" in steps[k], k
         assert rp.FAMILY_LABEL_FEEDS in steps["Indicator → Malware (family match)"]
-        for k in ("Indicator → Vulnerability (EXPLOITS)", "Indicator → CVE (EXPLOITS)", "Malware → ThreatActor"):
-            assert "i.source" in steps[k] or "m.source" in steps[k], k
+        for k in ("Indicator → Vulnerability (EXPLOITS)", "Indicator → CVE (EXPLOITS)"):
+            assert "i.source" in steps[k], k
 
     def test_event_cap_matches_the_build_constant(self):
         assert rp.MAX_EVENT_IDS_PER_EDGE == build_relationships.CRITICAL_MAX_EVENT_IDS_PER_EDGE

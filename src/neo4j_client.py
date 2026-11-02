@@ -488,12 +488,20 @@ class RelationshipBatchResult(int):
     templates' ``count(r)``), and only the matched ones count in the ``int`` value.
     ``curated_missing`` is a bounded sample of the ends that were not found, as
     ``"<Label> '<name or id>'"``.
+
+    2026-11-02: rows replayed against two labels (``AFFECTS`` and an indicator's ``EXPLOITS``,
+    to ``Vulnerability`` and to ``CVE``) count once, in the ``int`` value when both statements
+    were written and in ``failed`` when either failed (they counted once per statement, so a
+    batch of AFFECTS rows reported twice its rows). ``created`` is what Neo4j reports the
+    groups' statements created (``relationships_created`` of each result's counters), every
+    group included: a row whose edge already existed, or whose end is missing, creates none.
     """
 
     failed: int
     curated_sent: int
     curated_matched: int
     curated_missing: Tuple[str, ...]
+    created: int
 
     def __new__(
         cls,
@@ -502,17 +510,26 @@ class RelationshipBatchResult(int):
         curated_sent: int = 0,
         curated_matched: int = 0,
         curated_missing: Sequence[str] = (),
+        created: int = 0,
     ) -> "RelationshipBatchResult":
         obj = super().__new__(cls, int(written))
         obj.failed = int(failed)
         obj.curated_sent = int(curated_sent)
         obj.curated_matched = int(curated_matched)
         obj.curated_missing = tuple(curated_missing)
+        obj.created = int(created)
         return obj
 
 
 # 2026-10 (curated packages): how many names of missing ends one batch reports.
 CURATED_MISSING_SAMPLE = 20
+
+
+def _relationships_created(summary: Any) -> int:
+    """``relationships_created`` of a result summary's counters (2026-11-02); 0 when the summary carries
+    no such count (a test double)."""
+    value = getattr(getattr(summary, "counters", None), "relationships_created", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def _curated_matched_count(result: Any, sent: int) -> int:
@@ -2185,6 +2202,12 @@ class _TimeoutDriver:
 class Neo4jClient:
     """Production-ready Neo4j client with retry logic and batch processing."""
 
+    # Nodes deleted by ``clear_all`` / ``clear_edgeguard_managed`` since a caller last set it to 0
+    # (2026-11-02): every attempt adds what it deleted, a failed one and each one ``@retry_with_backoff``
+    # runs again included, so after a retried clear it holds the clear's whole count.
+    # ``baseline_clean._wipe_neo4j`` resets it and reports it.
+    clear_nodes_deleted: int = 0
+
     def __init__(self, uri: str = None, user: str = None, password: str = None):
         from config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER
 
@@ -2528,11 +2551,13 @@ class Neo4jClient:
 
             logger.info(f"Cleared {progress.nodes} nodes and {progress.relationships} relationships")
             record_destructive_op("clear_all", target="neo4j", affected=progress.nodes, scope="every node")
+            self.clear_nodes_deleted += progress.nodes
             return True
 
         except Exception as e:
             # A delete that fails part-way is recorded with what it deleted, before a retry or the
             # False return.
+            self.clear_nodes_deleted += progress.nodes
             self._record_failed_clear("clear_all", "every node", progress, e)
             if isinstance(e, _CLEAR_RETRYABLE_ERRORS):
                 raise  # let @retry_with_backoff handle transient errors
@@ -2641,10 +2666,12 @@ class Neo4jClient:
                 scope=scope,
                 details=details,
             )
+            self.clear_nodes_deleted += progress.nodes
             return True
 
         except Exception as e:
             # Recorded with what this attempt deleted, before a retry or the False return.
+            self.clear_nodes_deleted += progress.nodes
             self._record_failed_clear("clear_edgeguard_managed", scope, progress, e, details)
             if isinstance(e, _CLEAR_RETRYABLE_ERRORS):
                 raise  # let @retry_with_backoff handle transient errors
@@ -3043,7 +3070,9 @@ class Neo4jClient:
         (``sector_labels``).
 
         Returns:
-            Number of nodes that received at least one new sector label.
+            Number of nodes with a sector zone (a zone other than ``global``) whose sector labels were
+            passed to ``apoc.create.addLabels``: every such node, also one that carried its labels
+            already (2026-11-02: the text said "received at least one new sector label").
         """
         if not self.driver:
             logger.error("Cannot apply sector labels: no connection")
@@ -3070,7 +3099,10 @@ class Neo4jClient:
                     result = session.run(per_label_query.format(label=lbl), timeout=NEO4J_READ_TIMEOUT)
                     record = result.single()
                     total_labeled += record["labeled"] if record else 0
-            logger.info(f"Applied sector labels to {total_labeled} nodes")
+            logger.info(
+                "Sector labels applied to %d nodes with a sector zone (labels they already carried included)",
+                total_labeled,
+            )
             return total_labeled
         except (
             neo4j_exceptions.ServiceUnavailable,
@@ -6236,6 +6268,9 @@ class Neo4jClient:
         curated_sent = 0
         curated_matched = 0
         curated_missing: List[str] = []
+        # 2026-11-02: relationships the statements created, from Neo4j's counters
+        # (``RelationshipBatchResult.created``).
+        created = 0
 
         # Canonical SET clause shared by every batch-relationship template
         # below. Eleven queries used to duplicate the same r.sources /
@@ -6536,10 +6571,14 @@ class Neo4jClient:
                 )
             del curated_missing[CURATED_MISSING_SAMPLE:]
 
-        def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
-            nonlocal total, failed
+        def _run_rows(
+            session: Any, label: str, query: str, rows: List[Dict[str, Any]], *, count_rows: bool = True
+        ) -> bool:
+            """Run one group; True when it was written. ``count_rows=False`` (a replayed group,
+            counted by ``_count_replayed``) leaves ``total`` / ``failed`` to the caller."""
+            nonlocal total, failed, created
             if not rows:
-                return
+                return True
             # PR-N16 Fix #4 (HIGH, 2026-04-22 pre-baseline merge-audit):
             # retry on transient errors instead of silently logging a
             # WARN + dropping the batch. Sibling bug-class to PR-N15
@@ -6566,16 +6605,18 @@ class Neo4jClient:
                         # unread, its execution error was raised by the next group's run() (and
                         # retried or counted as that group's) or, for the last group, logged by the
                         # session's close and the rows counted as written.
-                        result.consume()
-                        total += len(rows)
-                        return
+                        created += _relationships_created(result.consume())
+                        if count_rows:
+                            total += len(rows)
+                        return True
                     # 2026-10 (curated packages): a curated row whose subject or object is not in
                     # the graph matches nothing, so the template's count(r), not the rows sent,
                     # is what was written.
                     matched = _curated_matched_count(result, len(rows))
+                    created += _relationships_created(result.consume() if hasattr(result, "consume") else None)
                     total += matched
                     _record_curated(session, label, rows, matched)
-                    return
+                    return True
                 except Exception as e:
                     last_exc = e
                     if not _is_retryable_neo4j_error(e):
@@ -6587,8 +6628,9 @@ class Neo4jClient:
                             e,
                         )
                         _emit_batch_permanent_failure(label=label, source_id=source_id, reason="non_retryable")
-                        failed += len(rows)
-                        return
+                        if count_rows:
+                            failed += len(rows)
+                        return False
                     if attempt >= max_retries:
                         break
                     delay = base_delay * (2**attempt)
@@ -6615,7 +6657,17 @@ class Neo4jClient:
                 last_exc,
             )
             _emit_batch_permanent_failure(label=label, source_id=source_id, reason="retries_exhausted")
-            failed += len(rows)
+            if count_rows:
+                failed += len(rows)
+            return False
+
+        def _count_replayed(rows: List[Dict[str, Any]], written: bool) -> None:
+            """Count rows replayed against two labels once: written when both statements were."""
+            nonlocal total, failed
+            if written:
+                total += len(rows)
+            else:
+                failed += len(rows)
 
         with self.driver.session() as session:
             _run_rows(session, "EMPLOYS_TECHNIQUE_actor", q_actor_employs, actor_employs_rows)
@@ -6649,17 +6701,20 @@ class Neo4jClient:
                 # No per-label uuid swap is needed anymore — each template's SET
                 # reads its MATCHed node's bound .uuid directly (Mechanism B), so
                 # the same row dict works for both queries.
+                # 2026-11-02: the rows count once (``_count_replayed``), not once per label.
                 query_pause()
-                _run_rows(session, "AFFECTS_vulnerability", q_aff_vuln, tgt_vuln_rows)
+                aff_vuln_ok = _run_rows(session, "AFFECTS_vulnerability", q_aff_vuln, tgt_vuln_rows, count_rows=False)
                 query_pause()
-                _run_rows(session, "AFFECTS_cve", q_aff_cve, tgt_vuln_rows)
+                aff_cve_ok = _run_rows(session, "AFFECTS_cve", q_aff_cve, tgt_vuln_rows, count_rows=False)
+                _count_replayed(tgt_vuln_rows, aff_vuln_ok and aff_cve_ok)
             if expl_rows:
                 # Same as TARGETS_vuln/cve — Mechanism B uuids mean one row dict
                 # serves both EXPLOITS templates without any precomputed swap.
                 query_pause()
-                _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
+                expl_vuln_ok = _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows, count_rows=False)
                 query_pause()
-                _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
+                expl_cve_ok = _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows, count_rows=False)
+                _count_replayed(expl_rows, expl_vuln_ok and expl_cve_ok)
             for _label, _query, _rows in (
                 ("EMPLOYS_TECHNIQUE_curated", q_actor_employs_exact, actor_employs_exact_rows),
                 ("IMPLEMENTS_TECHNIQUE_curated", q_malware_implements_exact, malware_implements_exact_rows),
@@ -6680,7 +6735,7 @@ class Neo4jClient:
                 total + failed + curated_sent - curated_matched,
                 source_id,
             )
-        return RelationshipBatchResult(total, failed, curated_sent, curated_matched, curated_missing)
+        return RelationshipBatchResult(total, failed, curated_sent, curated_matched, curated_missing, created=created)
 
     def count_nodes_by_label(self, labels: Sequence[str] = NODE_COUNT_LABELS) -> Dict[str, int]:
         """Node count per label, in one read-only query (2026-10, for the ``edgeguard_neo4j_nodes`` gauge).

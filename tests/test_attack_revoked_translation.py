@@ -127,10 +127,17 @@ class TestBuildRelationships:
         translated = [(n, v, b) for n, v, b in sites if n != "_q1b_inner"]
         assert len(translated) == 12
         for name, var, before in translated:
-            # toString: a map lookup by a number raises and would fail the whole batch
-            assert f"coalesce($revoked[toString({var})], {var}) AS {var}" in before, f"{name}: {var} is not translated"
+            # toString: a map lookup by a number raises and would fail the whole batch. 2026-11-02: the
+            # UNWIND variable is ``_cited`` and the translated id gets its own name, so a subquery in the
+            # WHERE of the same WITH reads the translated id (``tests/test_build_relationships_skip_counts.py``).
+            assert f"coalesce($revoked[toString(_cited)], _cited) AS {var}" in before, (
+                f"{name}: {var} is not translated"
+            )
+            assert f"toString({var})], {var}) AS {var}" not in before, f"{name}: {var} re-bound to itself"
             if not name.endswith("_skip"):  # a link step keeps the cited id for r.cited_ids
-                assert f"{var} AS _cited, coalesce($revoked" in before, f"{name}: the cited id is not kept"
+                assert f", _cited, coalesce($revoked[toString(_cited)], _cited) AS {var}" in before, (
+                    f"{name}: the cited id is not kept"
+                )
         ((_n, parent_var, before_parent),) = [(n, v, b) for n, v, b in sites if n == "_q1b_inner"]
         assert parent_var == "parent_id" and "$revoked" not in before_parent, "step 1b must not translate the parent"
         assert sorted(n for n, _v, _b in sites if n.endswith("_skip")) == [

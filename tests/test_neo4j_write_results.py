@@ -407,6 +407,18 @@ class TestRelationshipGroups:
         result = client.create_misp_relationships_batch(_relationships(), source_id="alienvault_otx")
         assert (int(result), result.failed) == (2, 1)
 
+    def test_created_is_read_from_each_group_s_counters(self, bolt):
+        """2026-11-02: the fake server reports one relationship created per statement, so the two groups
+        (three rows) created 2; the ``int`` value stays the rows written."""
+        _server, client = bolt()
+        result = client.create_misp_relationships_batch(_relationships(), source_id="alienvault_otx")
+        assert (int(result), result.failed, result.created) == (3, 0, 2)
+
+    def test_a_failed_group_creates_nothing(self, bolt):
+        _server, client = bolt(fail(ATTRIBUTED_TO_GROUP, TYPE_ERROR))
+        result = client.create_misp_relationships_batch(_relationships(), source_id="alienvault_otx")
+        assert (int(result), result.failed, result.created) == (1, 2, 1)
+
 
 class TestOtherWrites:
     """The same reading at every other write whose caller handles its error."""

@@ -44,11 +44,31 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
 from collections import deque
 from typing import List, Sequence, Tuple
+
+# The line format a child sets for its log records (``build_relationships.py``'s ``__main__``), and
+# the pattern that reads a record's level back from such a line (2026-11-02). The parent re-logs a
+# child line at that level, so a child's WARNING or ERROR is a WARNING or ERROR in the Airflow task
+# log and to level-based checks; until then every child line was logged at INFO. The pattern is
+# anchored to the format's prefix (time stamp, logger name), so a message or ``print`` output that
+# contains `` - ERROR - `` keeps INFO; a line without the prefix (``print`` output, a traceback
+# line) is logged at INFO.
+CHILD_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+_CHILD_LEVEL_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - \S+ - (DEBUG|INFO|WARNING|ERROR|CRITICAL) - "
+)
+
+
+def child_line_level(line: str) -> int:
+    """The level of a child's line written in ``CHILD_LOG_FORMAT``; ``logging.INFO`` for any other line."""
+    match = _CHILD_LEVEL_PATTERN.match(line)
+    return getattr(logging, match.group(1)) if match else logging.INFO
+
 
 # Default: keep the last 2000 lines of child output for error-context
 # logging if the child exits non-zero.  At ~200 bytes/line average this
@@ -120,8 +140,9 @@ def _drain_output(
     child_logger: logging.Logger,
     line_prefix: str,
 ) -> None:
-    """Read child stdout line-by-line (merged stderr), log each at INFO,
-    retain last N in the bounded deque.
+    """Read child stdout line-by-line (merged stderr), log each at the
+    child's own level (``child_line_level``; INFO for a line without the
+    ``CHILD_LOG_FORMAT`` prefix), retain last N in the bounded deque.
 
     Runs in a daemon thread so the main thread can continue waiting
     on the child's exit while output streams in parallel. ``bufsize=1``
@@ -134,7 +155,7 @@ def _drain_output(
             line = raw.rstrip()
             if not line:
                 continue
-            child_logger.info("%s%s", line_prefix, line)
+            child_logger.log(child_line_level(line), "%s%s", line_prefix, line)
             tail_buf.append(line)
     finally:
         try:
@@ -172,7 +193,8 @@ def run_with_streaming_output(
       helper then raises :class:`SubprocessStreamTimeout` so the
       caller can distinguish this from a clean non-zero exit.
     - ``child_logger``: every line emitted by the child is logged at
-      INFO level. Pass the caller's module logger so Airflow's
+      the child's level when the line carries the ``CHILD_LOG_FORMAT``
+      prefix, else at INFO. Pass the caller's module logger so Airflow's
       task-log routing works naturally.
     - ``tail_lines``: bound on the retained-line buffer for
       error-context. Capped even on successful runs — caller can

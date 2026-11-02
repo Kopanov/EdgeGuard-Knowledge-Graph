@@ -562,6 +562,7 @@ def fake_baseline_clean(monkeypatch):
         return SimpleNamespace(
             before=SimpleNamespace(neo4j_count=1, misp_count=2, checkpoint_count=3),
             duration_seconds=0.1,
+            deleted_summary=lambda: "deleted 1 Neo4j nodes, 2 MISP events, 3 checkpoint entries (0.1s)",
         )
 
     fake.check_recent_backup_timestamp = check_recent_backup_timestamp

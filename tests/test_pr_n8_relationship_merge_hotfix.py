@@ -267,22 +267,16 @@ class TestFix4CanonicalizationParity:
         assert "toLower(trim(m.name))" in block, "Q9 skip m.name must use trim()+toLower()"
         assert "toLower(trim(i.malware_family))" in block, "Q9 skip i.malware_family must use trim()+toLower()"
 
-    def test_q2_uses_trim_and_lower_on_both_sides(self):
-        """Q2 Malware.attributed_to vs ThreatActor.name comparison
-        must also use trim()+toLower().
-
-        Post-Bugbot-R1 (2026-04-21): the coalesce-to-empty-string
-        wrapper has been removed; the bare ``trim(m.attributed_to)``
-        form is now the correct shape (NULL propagates as falsy)."""
+    def test_q2_runs_no_query(self):
+        """Q2 (Malware.attributed_to vs ThreatActor.name) runs no query since 2026-11-02: no writer
+        produces ``Malware.attributed_to`` (``tests/test_build_relationships_skip_counts.py``). Its
+        trim()+toLower() pins went with it."""
         src = self._src()
-        # Find the step 2 block
         step2_idx = _link(src, "2")
         assert step2_idx != -1
-        step3_idx = _link(src, "3a", step2_idx)
-        block = src[step2_idx:step3_idx]
-        # Post-R1 form: no coalesce wrapper around the field
-        assert "toLower(trim(m.attributed_to))" in block, "Q2 m.attributed_to side must use trim()+toLower()"
-        assert "toLower(trim(a.name))" in block, "Q2 a.name side must use trim()+toLower()"
+        block = src[step2_idx : src.index("# 2b / 2c.", step2_idx)]
+        assert "_safe_run_batched(" not in block and "client.run(" not in block
+        assert "m.attributed_to" not in block
 
     def test_r1_no_coalesce_to_empty_string_in_q2_or_q9_comparisons(self):
         """Bugbot PR-N8 R1 LOW (2026-04-21): ``coalesce(m.family, '')``
@@ -333,13 +327,7 @@ class TestFix4CanonicalizationParity:
         Belt-and-suspenders against the same bug class the coalesce
         removal prevents."""
         src = self._src()
-        # Q2 outer
-        step2_idx = _link(src, "2")
-        step3_idx = _link(src, "3a", step2_idx)
-        q2_block = src[step2_idx:step3_idx]
-        assert "size(trim(m.attributed_to)) > 0" in q2_block, (
-            "Q2 outer must filter with size(trim(m.attributed_to)) > 0"
-        )
+        # Q2 runs no query since 2026-11-02 (no writer produces Malware.attributed_to).
 
         # Q9 outer + skip
         q9_start = _link(src, "9")

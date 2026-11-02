@@ -2437,14 +2437,16 @@ def _fetch_misp_event_summary() -> dict:
     """Query MISP for event/attribute counts grouped by source tag.
 
     Reads every page of ``/events/index`` matching ``EdgeGuard`` (2026-10), up to
-    ``_MISP_SUMMARY_MAX_PAGES`` pages of ``_MISP_SUMMARY_PAGE_SIZE`` events; ``truncated`` is true
-    when the last allowed page was full, so the counts may miss events beyond the cap.
+    ``_MISP_SUMMARY_MAX_PAGES`` pages of ``_MISP_SUMMARY_PAGE_SIZE`` events, each event once (by its id,
+    2026-11-02); ``truncated`` is true when the last allowed page was full and brought new events, so
+    the counts may miss events beyond the cap.
     """
     import warnings
 
     import requests as _requests
     import urllib3
 
+    from baseline_clean import misp_index_row_id
     from config import apply_misp_http_host_header
 
     session = _requests.Session()
@@ -2458,7 +2460,13 @@ def _fetch_misp_event_summary() -> dict:
     apply_misp_http_host_header(session)
 
     # Fetch EdgeGuard events index (lightweight — no attributes), page by page.
+    # 2026-11-02: each event counts once. MISP 2.5.45 ignores ``limit`` and ``page`` in the query string
+    # of ``/events/index`` and answers the whole listing on every page; with ``_MISP_SUMMARY_PAGE_SIZE``
+    # or more events the loop would have counted the listing once per page up to the cap. The walk stops
+    # at a page that brings no new event id, or that holds fewer rows than the limit (the last page) or
+    # more (the server ignored the limit).
     events: list = []
+    seen_ids: set = set()
     truncated = False
     for page in range(1, _MISP_SUMMARY_MAX_PAGES + 1):
         with warnings.catch_warnings():
@@ -2474,8 +2482,20 @@ def _fetch_misp_event_summary() -> dict:
         batch = resp.json()
         if not isinstance(batch, list) or not batch:
             break
-        events.extend(batch)
-        if len(batch) < _MISP_SUMMARY_PAGE_SIZE:
+        new_rows = []
+        brought_new_id = False
+        for row in batch:
+            event_id = misp_index_row_id(row)
+            if event_id is None:
+                new_rows.append(row)
+            elif event_id not in seen_ids:
+                seen_ids.add(event_id)
+                new_rows.append(row)
+                brought_new_id = True
+        if page > 1 and not brought_new_id:
+            break
+        events.extend(new_rows)
+        if len(batch) != _MISP_SUMMARY_PAGE_SIZE:
             break
         if page == _MISP_SUMMARY_MAX_PAGES:
             truncated = True

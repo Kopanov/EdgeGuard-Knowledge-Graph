@@ -129,7 +129,8 @@ class TestPRN30CrossCheckerH2EventIdCap:
         # ``zone_prov_with`` (one builder: its inner statement and its count), cut by the same constant.
         zone_sites = text.count("_zone_prov_with(")
         assert zone_sites == 2, "the sector step builder: inner statement and skip count"
-        assert text.count("_prov_with(") - zone_sites == 15, "every other step except 2d binds its events via prov_with"
+        # 14: step 2 runs no query since 2026-11-02 (no writer produces Malware.attributed_to).
+        assert text.count("_prov_with(") - zone_sites == 14, "every other step except 2d binds its events via prov_with"
         assert f")[0..{relationship_provenance.MAX_EVENT_IDS_PER_EDGE}]][0] AS _prov_events" in (
             relationship_provenance.zone_prov_with("v", '["energy"]')
         )

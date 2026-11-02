@@ -113,6 +113,30 @@ class TestCliBaselineSaysItIsReduced:
         # The refused clean stops the run before anything is collected or loaded.
         pipeline.neo4j.connect.assert_not_called()
 
+    def test_fresh_baseline_logs_what_the_wipe_deleted(self, monkeypatch, pipeline_log):
+        """2026-11-02: the counts the wipe reported (the 730-day run of 2026-11-01: 14 MISP events deleted,
+        700 counted by the pre-wipe probe), not the probe's."""
+        import baseline_clean
+
+        before = baseline_clean.BaselineState(
+            neo4j_count=145_429, neo4j_ok=True, misp_count=700, misp_ok=True, checkpoint_count=2, checkpoint_ok=True
+        )
+        after = baseline_clean.BaselineState(neo4j_ok=True, misp_ok=True, checkpoint_ok=True)
+        result = baseline_clean.CleanResult(
+            before=before,
+            after=after,
+            duration_seconds=117.7,
+            verify_attempts=1,
+            neo4j_nodes_deleted=145_429,
+            misp_events_deleted=14,
+        )
+        monkeypatch.setattr(baseline_clean, "reset_baseline_data", lambda **_kw: result)
+        assert _bare_pipeline()._run_pipeline_inner(baseline=True, fresh_baseline=True, baseline_days=7) is False
+        assert (
+            "Fresh-baseline clean complete: deleted 145429 Neo4j nodes, 14 MISP events, 2 checkpoint entries (117.7s)"
+            in pipeline_log
+        )
+
     def test_additive_baseline_logs_the_warning_before_it_collects(self, monkeypatch, pipeline_log):
         import baseline_checkpoint
         import run_pipeline

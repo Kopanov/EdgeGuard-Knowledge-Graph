@@ -1,7 +1,7 @@
 """
 PR-N7 — build_relationships hotfix.
 
-Triggered by on-call report from Bravo Vanko on 2026-04-21: the
+Triggered by an on-call report on 2026-04-21: the
 730-day baseline pipeline deadlocked for 5+ hours on
 ``build_relationships.py`` step 4 with no progress logs. Root-cause
 investigation found THREE distinct bugs at three layers:
@@ -94,47 +94,15 @@ class TestFix1QuoteEscapeBugEliminated:
     def _src(self) -> str:
         return (SRC / "build_relationships.py").read_text()
 
-    def test_step2_malware_threatactor_no_unsafe_literal(self):
-        """Step 2: Malware → ThreatActor ATTRIBUTED_TO. Outer query
-        must not contain ``<> ''`` anywhere.
-
-        PR-N10 refactored ``_outer`` to a multi-line tuple-of-strings
-        shape (to accommodate the placeholder NOT IN filter inline
-        with the OR branches). AST-extract the full resolved string
-        rather than the source-file line."""
-        import ast
+    def test_step2_malware_threatactor_runs_no_query(self):
+        """Step 2: Malware → ThreatActor ATTRIBUTED_TO by ``m.attributed_to``. Since 2026-11-02 it
+        runs no query (no writer produces the property), so no step-2 outer query exists to carry
+        ``<> ''``; no assigned outer query reads ``m.attributed_to``."""
+        from build_rel_queries import assigned_queries
 
         src = self._src()
-        # Scan a window around step 2 to find the _outer assignment.
-        step2_idx = _link(src, "2")
-        step3_idx = _link(src, "3a", step2_idx)
-        assert step2_idx != -1 and step3_idx != -1
-        # Parse the full module so AST walker covers all assignments.
-        tree = ast.parse(src)
-        outer_value = None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                for t in node.targets:
-                    if isinstance(t, ast.Name) and t.id == "_outer":
-                        # Collect all string Constant values from the RHS
-                        parts: list = []
-                        for sub in ast.walk(node.value):
-                            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                                parts.append(sub.value)
-                        candidate = "".join(parts)
-                        # Is this the step-2 _outer? Step 2 MATCH is (m:Malware).
-                        if "MATCH (m:Malware)" in candidate and "m.attributed_to" in candidate:
-                            outer_value = candidate
-                            break
-                if outer_value:
-                    break
-
-        assert outer_value is not None, "could not locate step-2 _outer via AST"
-        assert "<> ''" not in outer_value, f"Step 2 outer still has unsafe `<> ''`: {outer_value}"
-        assert "size(m.attributed_to) > 0" in outer_value or "size(trim(m.attributed_to)) > 0" in outer_value, (
-            "Step 2 must use a size()-based length check (PR-N8 R1 hardened "
-            "to size(trim(...))); PR-N10 kept this shape."
-        )
+        assert _link(src, "2") != -1, "step 2 keeps its slot"
+        assert not [q for q in assigned_queries("_outer") if "m.attributed_to" in q]
 
     def test_step3a_3b_cve_no_unsafe_literal(self):
         """Steps 3a and 3b: Indicator → Vulnerability/CVE. Both
@@ -342,7 +310,7 @@ class TestFix2Step4Removed:
 
         inners = assigned_queries("_inner")
         for list_prop in ("a.reported_techniques", "m.reported_techniques"):
-            matching = [q for q in inners if f"UNWIND {list_prop} AS tid" in q]
+            matching = [q for q in inners if f"UNWIND {list_prop} AS _cited" in q]
             assert len(matching) == 1, f"missing reported-technique UNWIND on {list_prop}"
             inner = matching[0]
             assert 'r.match_type = "otx_pulse"' in inner, f"{list_prop} query must stamp otx_pulse"
