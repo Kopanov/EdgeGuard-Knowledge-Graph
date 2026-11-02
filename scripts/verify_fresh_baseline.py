@@ -55,7 +55,21 @@ campaign is first seen later than the first date of one of its indicator members
 claim, else its latest report, never after the member's first import) or last seen earlier than a
 member's latest dated report. Since 2026-11-02 it fails when an EdgeGuard node lacks the sector label of
 one of its zones (``:Finance`` for ``finance``) or carries a sector label its zones do not give
-(``src/sector_labels.py``).
+(``src/sector_labels.py``). Since 2026-11-02 it also judges the shape of the graph against the claims stored
+on the nodes (``src/graph_shape_checks.py``): it fails when a technique's kill-chain phase whose Tactic
+exists has no ``IN_TACTIC``, when a technique MITRE says a group, a malware or a tool uses has no
+``EMPLOYS_TECHNIQUE`` / ``IMPLEMENTS_TECHNIQUE`` labelled ``mitre_explicit`` while the Technique exists (or
+MITRE nodes carry no such claim at all), when an ATT&CK id of an indicator's OTX report has no
+``USES_TECHNIQUE`` to its existing Technique, when a sector a feed gave a node has no ``TARGETS`` /
+``AFFECTS`` link to its Sector, and when fewer than half of NVD's non-rejected CVEs have a CVSS sub-node.
+
+A check that judges a set of edges or nodes reports the size of that set (``judged_edges`` /
+``judged_nodes``); the ownership check of the nodes, which scans every node and judges EdgeGuard's labels
+only, reports the nodes it scanned (``examined_nodes``). A check that looks for defects in a set that may be
+empty on a correct graph (a short window, a source left out) is informational (``INFO``) when the set is
+empty and nothing is wrong, so a PASS always means something was judged; a defect fails whatever the set's
+size. A check that looks for something that must never exist (co-occurrence edges, a link to ``global``)
+passes on an empty set and reports its size.
 
 Env (``src/neo4j_http_endpoint.py``):
   NEO4J_HTTP_URL   base URL, then NEO4J_HTTP; neither set: the local Compose Neo4j
@@ -132,6 +146,24 @@ from canonical_threat_actors import (  # noqa: E402
 # the sector evidence table and the per-sector provenance rule of build_relationships steps 7a-7d
 # (checks 10d-10k). Standard library and ``source_registry`` only, like the modules above.
 from description_ranking import ranking_for_label  # noqa: E402
+
+# 2026-11-02: the completeness of the links the writers build from the claims on the nodes, and the CVE score
+# coverage (checks 9c, 10a7-10a9, 10o and 14c). Standard library and ``relationship_provenance`` only.
+from graph_shape_checks import (  # noqa: E402
+    CVE_CVSS_COVERAGE_QUERY,
+    EMPLOYS_TECHNIQUE_COMPLETE_QUERY,
+    IMPLEMENTS_TECHNIQUE_COMPLETE_QUERIES,
+    IN_TACTIC_COMPLETE_QUERY,
+    SECTOR_LINKS_COMPLETE_QUERY,
+    USES_TECHNIQUE_COMPLETE_QUERY,
+    combined_verdict,
+    cvss_coverage_verdict,
+    in_tactic_verdict,
+    sector_links_verdict,
+    sector_params,
+    technique_claims_verdict,
+    technique_params,
+)
 from relationship_provenance import as_list as _as_list  # noqa: E402
 from relationship_provenance import zone_prov_with  # noqa: E402
 from sector_evidence import (  # noqa: E402
@@ -404,6 +436,17 @@ def _one(statement: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, A
     return rows[0] if rows else {}
 
 
+def _judged(defects: Any, judged: Any) -> Optional[bool]:
+    """The verdict of a check that looks for defects in a set that may be empty on a correct graph (2026-11-02):
+    fails on a defect whatever the set's size, is informational (None) on an empty set without one, and else
+    passes when the defect count is 0 (a missing count fails)."""
+    if defects:
+        return False
+    if not judged:
+        return None
+    return defects == 0
+
+
 def _malware_twin_verdict(
     twins: List[Dict[str, Any]],
     attack_ids: Dict[str, Optional[str]],
@@ -448,15 +491,19 @@ _OTX_INDUSTRIES_FEEDS = sorted(f for f, label in STATEMENT_LABELS["TARGETS"].ite
 _TARGETS_START = "(n:Indicator OR n:ThreatActor OR n:Malware)"
 
 
-def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, require_otx_industries: bool = False) -> None:
+def _sector_evidence_checks(
+    rep: Report, require_cisa_ics: bool, require_otx_industries: bool = False, *, managed_sector_links: int
+) -> None:
     """Checks 10d-10m (2026-10-16): each link to a Sector names only the feeds that gave its sector and
     cites only the records that gave it, its label and confidence follow the table (``sector_evidence``),
     CISA's ICS statements are linked as ``advisory_sector`` on AFFECTS only and (2026-10-18) an OTX
     report's industries as ``otx_industries`` on TARGETS only. The per-source zones are on the
     ``SOURCED_FROM`` edges (``zones``, ``stated_zones``, ``stated_refs``); a graph written before them has
-    none, so the judged checks report instead of passing vacuously."""
+    none, and a graph may have no EdgeGuard link to a Sector (``managed_sector_links``), so the judged checks
+    report instead of passing vacuously."""
     # 10d. A link to a Sector names only the feeds whose SOURCED_FROM zones give the sector. An edge
-    #      without ``zones`` (written before 2026-10-16, or by a path that records none) is not judged.
+    #      without ``zones`` (written before 2026-10-16, or by a path that records none) is not judged, and
+    #      (2026-11-02) a graph without a sector link is not judged either.
     zoned = _one(
         "MATCH ()-[sf:SOURCED_FROM]->(src) RETURN count(sf) AS edges, "
         "sum(CASE WHEN sf.zones IS NOT NULL THEN 1 ELSE 0 END) AS with_zones, "
@@ -475,8 +522,12 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, require_otx_ind
     )
     rep.add(
         "sector_links_name_only_feeds_that_gave_the_sector",
-        None if not zoned.get("with_zones") else not wrong,
-        {"naming_a_feed_that_did_not_give_the_sector": wrong, "sourced_from": zoned},
+        _judged(len(wrong), zoned.get("with_zones") and managed_sector_links),
+        {
+            "naming_a_feed_that_did_not_give_the_sector": wrong,
+            "sourced_from": zoned,
+            "judged_edges": managed_sector_links,
+        },
     )
 
     # 10e. ``advisory_sector`` only on AFFECTS from a CVE / Vulnerability to a Sector that CISA's ICS
@@ -551,9 +602,10 @@ def _sector_evidence_checks(rep: Report, require_cisa_ics: bool, require_otx_ind
     )
     rep.add(
         "sector_links_cite_only_records_that_gave_the_sector",
-        None if not zoned.get("stating_feed_edges_with_stated_refs") else not other_refs,
+        _judged(len(other_refs), zoned.get("stating_feed_edges_with_stated_refs") and managed_sector_links),
         {
             "citing_a_record_of_another_sector": other_refs,
+            "judged_edges": managed_sector_links,
             "sourced_from_with_stated_refs": zoned.get("with_stated_refs"),
             "judged_sourced_from_with_stated_refs": zoned.get("stating_feed_edges_with_stated_refs"),
             "judged_feeds": sorted(STATING_FEEDS),
@@ -729,30 +781,46 @@ def run_checks(
         "CALL apoc.meta.stats() YIELD nodeCount, relCount, labels, relTypesCount RETURN nodeCount, relCount, labels, relTypesCount"
     )
     rep.add("inventory", None, stats)
+    # The size of the whole graph: the set the checks for what must never exist judge (2026-11-02).
+    all_nodes = {"judged_nodes": stats.get("nodeCount")}
+    all_edges = {"judged_edges": stats.get("relCount")}
+    # One pass over the relationships, one row per type (checks 12b and 12c), read once; its edge counts
+    # of the EdgeGuard types are the set checks 8 and 12c judge (2026-11-02).
+    rel_rows = _post(_REL_PROVENANCE_SCAN)
+    edgeguard_edges = {
+        "judged_edges": sum(x.get("edges") or 0 for x in rel_rows if x.get("type") in EDGEGUARD_REL_TYPES)
+    }
 
     # 1. No whole-event co-occurrence edges.
     r = _one(
         "MATCH ()-[r]->() WHERE r.source_id = 'misp_cooccurrence' OR r.match_type = 'misp_cooccurrence' "
         "OR any(s IN coalesce(r.source_ids, []) WHERE s = 'misp_cooccurrence') RETURN count(r) AS c"
     )
-    rep.add("no_cooccurrence_edges", r.get("c") == 0, r)
+    rep.add("no_cooccurrence_edges", r.get("c") == 0, {**r, **all_edges})
 
-    # 2. ``mitre_explicit`` only from MITRE-sourced nodes.
+    # 2. ``mitre_explicit`` only from MITRE-sourced nodes. 2026-11-02: informational without a
+    #    ``mitre_explicit`` link (``judged_edges``); whether the links exist is judged by 10a7 / 10a8.
     r = _one(
         "MATCH (n)-[r {match_type: 'mitre_explicit'}]->(:Technique) "
-        "WHERE NOT 'mitre_attck' IN coalesce(n.source, []) RETURN count(r) AS c"
+        "RETURN count(r) AS judged_edges, "
+        "sum(CASE WHEN NOT 'mitre_attck' IN coalesce(n.source, []) THEN 1 ELSE 0 END) AS c"
     )
-    rep.add("mitre_explicit_only_from_mitre_nodes", r.get("c") == 0, r)
+    rep.add("mitre_explicit_only_from_mitre_nodes", _judged(r.get("c"), r.get("judged_edges")), r)
 
-    # 3. Attribution edges state their evidence; fan-out is plausible.
-    r = _one("MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) WHERE r.match_type IS NULL RETURN count(r) AS c")
-    rep.add("attributed_to_has_match_type", r.get("c") == 0, r)
+    # 3. Attribution edges state their evidence; fan-out is plausible. 2026-11-02: informational without an
+    #    ATTRIBUTED_TO link (``judged_edges``) / without an attributed malware (``malware_with_attribution``).
+    r = _one(
+        "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
+        "RETURN count(r) AS judged_edges, sum(CASE WHEN r.match_type IS NULL THEN 1 ELSE 0 END) AS c"
+    )
+    rep.add("attributed_to_has_match_type", _judged(r.get("c"), r.get("judged_edges")), r)
     r = _one(
         "MATCH (m:Malware) WITH m, COUNT { (m)-[:ATTRIBUTED_TO]->() } AS d WHERE d > 0 "
         "RETURN count(*) AS malware_with_attribution, percentileCont(d, 0.5) AS median_actors, max(d) AS max_actors"
     )
     median = r.get("median_actors")
-    rep.add("attributed_to_fanout_plausible", (median is None) or (median <= 10), r)
+    implausible = 1 if median is not None and median > 10 else 0
+    rep.add("attributed_to_fanout_plausible", _judged(implausible, r.get("malware_with_attribution")), r)
     breakdown = _post(
         "MATCH ()-[r:ATTRIBUTED_TO|INDICATES|EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|EXPLOITS]->() "
         "RETURN type(r) AS rel, r.match_type AS match_type, count(*) AS c ORDER BY rel, c DESC"
@@ -809,8 +877,10 @@ def run_checks(
 
     # 6. Actor names are clean.
     r = _one(
-        "MATCH (a:ThreatActor) WHERE a.name CONTAINS ',' OR a.name CONTAINS ' and ' OR a.name CONTAINS ' & ' "
-        "RETURN count(a) AS c, collect(a.name)[..10] AS examples"
+        "MATCH (a:ThreatActor) "
+        "WITH a, a.name CONTAINS ',' OR a.name CONTAINS ' and ' OR a.name CONTAINS ' & ' AS composite "
+        "RETURN count(a) AS judged_nodes, sum(CASE WHEN composite THEN 1 ELSE 0 END) AS c, "
+        "collect(CASE WHEN composite THEN a.name END)[..10] AS examples"
     )
     rep.add("no_composite_actor_names", r.get("c") == 0, r)
 
@@ -839,21 +909,34 @@ def run_checks(
         "UNWIND labels(n) AS l RETURN l AS label, count(*) AS c ORDER BY c DESC"
     )
     eg_nodes_missing = [x for x in nodes if x["label"] in EDGEGUARD_LABELS]
-    rep.add("ownership_marker_on_nodes", not eg_nodes_missing, {"missing_by_label": nodes})
+    # 2026-11-02: every node is scanned, EdgeGuard's labels are judged (a node may carry several labels).
+    rep.add(
+        "ownership_marker_on_nodes",
+        not eg_nodes_missing,
+        {"missing_by_label": nodes, "examined_nodes": stats.get("nodeCount")},
+    )
     edges = _post(
         "MATCH ()-[r]->() WHERE r.edgeguard_managed IS NULL RETURN type(r) AS type, count(*) AS c ORDER BY c DESC"
     )
     eg_edges_missing = [x for x in edges if x["type"] in EDGEGUARD_REL_TYPES]
-    rep.add("ownership_marker_on_edges", not eg_edges_missing, {"missing_by_type": edges})
+    rep.add("ownership_marker_on_edges", not eg_edges_missing, {"missing_by_type": edges, **edgeguard_edges})
 
-    # 9. ATT&CK for ICS: domain-consistent tactic links (always); presence (opt-in).
+    # 9. ATT&CK for ICS: domain-consistent tactic links (always); presence (opt-in). 2026-11-02: informational
+    #    without an IN_TACTIC link (``judged_edges``); whether the links exist is judged by 9c.
     r = _one(
-        "MATCH (t:Technique)-[:IN_TACTIC]->(tc:Tactic) "
-        "WHERE coalesce(t.attack_domain, 'enterprise') <> coalesce(tc.attack_domain, 'enterprise') RETURN count(*) AS c"
+        "MATCH (t:Technique)-[:IN_TACTIC]->(tc:Tactic) RETURN count(*) AS judged_edges, "
+        "sum(CASE WHEN coalesce(t.attack_domain, 'enterprise') <> coalesce(tc.attack_domain, 'enterprise') "
+        "THEN 1 ELSE 0 END) AS c"
     )
-    rep.add("in_tactic_same_domain", r.get("c") == 0, r)
+    rep.add("in_tactic_same_domain", _judged(r.get("c"), r.get("judged_edges")), r)
     r = _one("MATCH (t:Technique {attack_domain: 'ics'}) RETURN count(t) AS c")
     rep.add("ics_techniques_present", (r.get("c") or 0) > 0 if require_ics else None, r, mandatory=require_ics)
+
+    # 9c. IN_TACTIC complete (2026-11-02, build_relationships step 1): every kill-chain phase of a technique
+    #     whose Tactic exists in the technique's ATT&CK domain has its IN_TACTIC, and a technique with phases
+    #     reaches a Tactic (``graph_shape_checks``). Informational without a Technique.
+    r = _one(IN_TACTIC_COMPLETE_QUERY)
+    rep.add("in_tactic_complete", in_tactic_verdict(r), r)
 
     # 9b. Revoked ATT&CK objects (2026-10). The MITRE collector skips objects ATT&CK revoked, and a
     #     revoked technique id a feed names is translated to its successor, so no Technique node
@@ -1016,6 +1099,30 @@ def run_checks(
     r["mitre_actors"] = mitre_actors
     rep.add("uses_tool_complete", _uses_ok(r), r)
 
+    # 10a7-10a9. Group / software / indicator → technique (2026-11-02, build_relationships steps 5, 6, 10, 8):
+    #       every technique a node claims (``uses_techniques`` of an actor, a malware or a tool; ``attack_ids``
+    #       of an indicator), translated through the revoked-id map as the writer translates it, has its link
+    #       to the Technique once the Technique exists: EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE labelled
+    #       ``mitre_explicit``, USES_TECHNIQUE. A claim without its Technique (a limited collection, an id the
+    #       map does not translate) is counted, not failed. MITRE nodes of a label without a single claim fail
+    #       (the claims were lost on the way to the node); informational without MITRE nodes and claims of the
+    #       label, USES_TECHNIQUE without an indicator claim, and claims none of which reaches an existing
+    #       Technique (``claims_with_target`` 0: no link judged). Malware and Tool are read by two statements
+    #       (one over both labels took 54 s on the 730-day graph). A map that cannot be read leaves revoked ids
+    #       untranslated (its maps are empty): they count as claims without a Technique, never as missing links.
+    technique_map = technique_params(revoked.techniques)
+    map_version = revoked.version if revoked.loaded else f"unavailable ({revoked.problem})"
+    r = _one(EMPLOYS_TECHNIQUE_COMPLETE_QUERY, technique_map)
+    rep.add("employs_technique_complete", technique_claims_verdict(r), {**r, "revoked_map": map_version})
+    by_label = {label: _one(st, technique_map) for label, st in IMPLEMENTS_TECHNIQUE_COMPLETE_QUERIES.items()}
+    rep.add(
+        "implements_technique_complete",
+        combined_verdict(tuple(technique_claims_verdict(x) for x in by_label.values())),
+        {**by_label, "revoked_map": map_version},
+    )
+    r = _one(USES_TECHNIQUE_COMPLETE_QUERY, technique_map)
+    rep.add("uses_technique_complete", technique_claims_verdict(r), {**r, "revoked_map": map_version})
+
     # 10a4. Pulse-scoped INDICATES (2026-10, regular-update linking): every family a pulse named on an
     #       indicator, whose Malware node exists, has its INDICATES edge (Q9b). Informational only
     #       while no indicator carries pulse families (pre-change data). A family is looked up as Q9b
@@ -1095,10 +1202,16 @@ def run_checks(
                 base_nodes[row["name"]] = row.get("aliases")
     rep.add("malware_attack_twins_folded", *_malware_twin_verdict(twins, attack_ids, revoked.software, base_nodes))
 
+    # The links to a Sector (2026-11-02): the set 10a3 judges, and of them EdgeGuard's, the set 10d / 10k judge.
+    sector_links = _one(
+        "MATCH ()-[r:AFFECTS|TARGETS]->(:Sector) RETURN count(r) AS sector_links, "
+        "sum(CASE WHEN r.edgeguard_managed = true THEN 1 ELSE 0 END) AS managed_sector_links"
+    )
+
     # 10a3. `global` is the "no sector" marker: no TARGETS / AFFECTS edge may point at it (2026-10 audit:
     #       the old graph carried ~270k such edges at confidence 1.0).
     r = _one("MATCH ()-[r:TARGETS|AFFECTS]->(g:Sector {name: 'global'}) RETURN count(r) AS c")
-    rep.add("no_global_sector_edges", r.get("c") == 0, r)
+    rep.add("no_global_sector_edges", r.get("c") == 0, {**r, "judged_edges": sector_links.get("sector_links")})
 
     # 10b. Sector coverage (informational; the "measure" input for demo day): how many nodes of
     #      each EdgeGuard label are linked to each Sector. 2026-10 sector-focus build adds
@@ -1108,7 +1221,12 @@ def run_checks(
         "RETURN s.name AS sector, labels(n)[0] AS label, count(DISTINCT n) AS nodes ORDER BY sector, label"
     )
     rep.add("sector_coverage", None, cov)
-    _sector_evidence_checks(rep, require_cisa_ics, require_otx_industries)
+    _sector_evidence_checks(
+        rep,
+        require_cisa_ics,
+        require_otx_industries,
+        managed_sector_links=sector_links.get("managed_sector_links") or 0,
+    )
 
     # 10n. Sector labels follow the zones (2026-11-02): every EdgeGuard node of the kinds the sync labels
     #      carries the label of each sector zone it has (``:Finance`` for ``finance``) and no sector label
@@ -1118,30 +1236,59 @@ def run_checks(
     r = _one(SECTOR_LABELS_CHECK_QUERY, sector_labels_check_params())
     rep.add("sector_labels_follow_zones", sector_labels_verdict(r), r)
 
-    # 11. ResilMesh-facing schema unchanged.
+    # 10o. Sector links complete (2026-11-02, build_relationships steps 7a-7d): every sector of a node's zone
+    #      that one of its feeds gave (the writers' rule; 10j reports the others) has its TARGETS (Indicator,
+    #      ThreatActor, Malware) or AFFECTS (CVE, Vulnerability) link to the Sector. Informational without such
+    #      a node sector.
+    r = _one(SECTOR_LINKS_COMPLETE_QUERY, sector_params())
+    rep.add("sector_links_complete", sector_links_verdict(r), r)
+
+    # 11. ResilMesh-facing schema unchanged. The EdgeGuard types the graph does not hold are listed (2026-11-02,
+    #     informational: some come only with a source or a flow a baseline may not have).
     types = [x["t"] for x in _post("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t")]
     unexpected = sorted(t for t in types if t not in EDGEGUARD_REL_TYPES)
-    rep.add("relationship_types", None, {"present": sorted(types), "not_written_by_edgeguard": unexpected})
+    rep.add(
+        "relationship_types",
+        None,
+        {
+            "present": sorted(types),
+            "not_written_by_edgeguard": unexpected,
+            "edgeguard_types_absent": sorted(t for t in EDGEGUARD_REL_TYPES if t not in types),
+        },
+    )
+    # Every CVSS sub-node, CVSSv2 included (2026-11-02), has one edge from and one edge to a CVE.
+    # Informational while the graph holds no CVSS sub-node of any version (a version may be absent).
     cvss = _post(
-        "UNWIND ['CVSSv30', 'CVSSv31', 'CVSSv40'] AS label "
+        "UNWIND $labels AS label "
         "CALL { WITH label MATCH (s) WHERE label IN labels(s) "
         "  WITH s, label, COUNT { (s)<-[]-(:CVE) } AS inc, COUNT { (s)-[]->(:CVE) } AS out "
         "  RETURN count(s) AS total, sum(CASE WHEN inc = 1 AND out = 1 THEN 1 ELSE 0 END) AS bidirectional } "
-        "RETURN label, total, bidirectional"
+        "RETURN label, total, bidirectional",
+        {"labels": sorted(label for _rel, label, _version in _CVSS_SELECTION_ORDER)},
     )
-    rep.add("cvss_bidirectional", all(x["total"] == x["bidirectional"] for x in cvss), cvss)
+    cvss_nodes = sum(x.get("total") or 0 for x in cvss)
+    one_way = sum(1 for x in cvss if x.get("total") != x.get("bidirectional"))
+    rep.add("cvss_bidirectional", _judged(one_way, cvss_nodes), {"by_label": cvss, "judged_nodes": cvss_nodes})
 
     # 12. Relationship provenance (2026-10): every relationship built from the sources names
     #     them, and the provenance lists are lists. A list stored as a plain string (APOC's
     #     ``combine`` does that for equal values in the actor alias merge) breaks ``IN`` and
-    #     ``size()`` for every consumer.
+    #     ``size()`` for every consumer. The per-type scan of 12b / 12c (read before check 8) also gives
+    #     the size of the judged set (2026-11-02).
     unsourced = _post(
         "MATCH ()-[r]->() WHERE type(r) IN $types AND r.edgeguard_managed = true "
         "AND size(coalesce(r.sources, [])) = 0 "
         "RETURN type(r) AS type, count(*) AS c ORDER BY c DESC",
         {"types": list(PROVENANCE_REL_TYPES)},
     )
-    rep.add("relationships_name_their_source", not unsourced, {"without_sources_by_type": unsourced})
+    rep.add(
+        "relationships_name_their_source",
+        not unsourced,
+        {
+            "without_sources_by_type": unsourced,
+            "judged_edges": sum(x.get("managed") or 0 for x in rel_rows if x.get("type") in PROVENANCE_REL_TYPES),
+        },
+    )
     scalar_edges = _one(
         "MATCH ()-[r]->() WHERE "
         "(r.sources IS NOT NULL AND NOT apoc.meta.cypher.type(r.sources) STARTS WITH 'LIST') "
@@ -1160,7 +1307,11 @@ def run_checks(
         "RETURN count(n) AS nodes"
     )
     scalars = {"edges": scalar_edges.get("edges"), "nodes": scalar_nodes.get("nodes")}
-    rep.add("provenance_lists_are_lists", scalars["edges"] == 0 and scalars["nodes"] == 0, scalars)
+    rep.add(
+        "provenance_lists_are_lists",
+        scalars["edges"] == 0 and scalars["nodes"] == 0,
+        {**scalars, **all_edges, **all_nodes},
+    )
     by_source = _post(
         "MATCH ()-[r]->() WHERE r.sources IS NOT NULL AND type(r) <> 'SOURCED_FROM' "
         "UNWIND r.sources AS s RETURN type(r) AS type, s AS source, count(*) AS c ORDER BY type, c DESC"
@@ -1173,7 +1324,6 @@ def run_checks(
     #      INVOLVES, PART_OF) is not judged. Presence is judged, not content: an empty
     #      ``misp_event_ids`` list is legitimate (a same-pulse ATTRIBUTED_TO whose malware and actor
     #      records share no MISP event, a campaign link built on such links) and only counted.
-    rel_rows = _post(_REL_PROVENANCE_SCAN)
     missing = [
         {"type": x["type"], "property": p, "edges": (x.get("managed") or 0) - (x.get(f"with_{p}") or 0)}
         for x in rel_rows
@@ -1208,7 +1358,12 @@ def run_checks(
     rep.add(
         "no_legacy_relationship_properties",
         not [x for x in legacy if x["type"] in EDGEGUARD_REL_TYPES] and keyless == 0,
-        {"legacy_keys_by_type": legacy, "source_nodes_without_source_id": keyless, "source_nodes": len(source_rows)},
+        {
+            "legacy_keys_by_type": legacy,
+            "source_nodes_without_source_id": keyless,
+            "source_nodes": len(source_rows),
+            **edgeguard_edges,
+        },
     )
 
     # 12d. One ``Source`` node per registered source, keyed by its canonical id (2026-10-25). An alias
@@ -1238,6 +1393,7 @@ def run_checks(
             "alias_source_nodes": alias_nodes,
             "unregistered_source_nodes": unregistered,
             "canonical_source_nodes": sum(1 for x in source_rows if x.get("source_id") in canonical_ids),
+            "judged_nodes": len(source_rows),
             "variants": {s.canonical_id: list(s.aliases) for s in all_sources()},
         },
     )
@@ -1353,6 +1509,15 @@ def run_checks(
     )
     defects = ("scored_without_score", "score_not_from_cvss", "unscored_with_score")
     rep.add("cve_score_from_cvss", None if not r.get("cves") else all(r.get(k) == 0 for k in defects), r)
+
+    # 14c. CVE score coverage (2026-11-02): check 14 judges the score of each CVE against its CVSS sub-nodes
+    #      and passes a graph where no CVE has one. Of the EdgeGuard CVEs NVD delivered that are not REJECTED,
+    #      at least half have a CVSS sub-node (``graph_shape_checks``; 0.969 on the 730-day graph of
+    #      2026-11-01, 0.60 in its newest day). Informational under 100 such CVEs.
+    r = _one(CVE_CVSS_COVERAGE_QUERY)
+    judged = r.get("nvd_cves_not_rejected") or 0
+    r["share_with_cvss"] = round((r.get("nvd_cves_with_cvss") or 0) / judged, 3) if judged else None
+    rep.add("cve_cvss_coverage", cvss_coverage_verdict(r), r)
 
     # 14b. FIRST EPSS and CISA's SSVC on CVE nodes (2026-10). EPSS comes from the enrichment job, which
     #      skips an unavailable feed without failing the run: CVE nodes without any EPSS are a warning.
