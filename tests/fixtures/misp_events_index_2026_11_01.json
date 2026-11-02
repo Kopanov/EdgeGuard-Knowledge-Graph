@@ -1,0 +1,1010 @@
+[
+ {
+  "id": "53",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-cisa_kev-2026-11-01",
+  "uuid": "8d702766-600d-4762-ae66-4b8b7aab88a7",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "1766",
+  "orgc_id": "1",
+  "timestamp": "1793536020",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "53",
+    "event_id": "53",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "54",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-mitre_attck-2026-11-01",
+  "uuid": "2f8e262a-a6f1-4656-958f-14b077e8fc2e",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "1890",
+  "orgc_id": "1",
+  "timestamp": "1793536098",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "54",
+    "event_id": "54",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "55",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-alienvault_otx-2026-11-01",
+  "uuid": "db11aab5-b816-4ba6-b962-a55527a3fddf",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "150683",
+  "orgc_id": "1",
+  "timestamp": "1793543948",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "55",
+    "event_id": "55",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "56",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01",
+  "uuid": "7524681e-b298-494c-817e-5c9083cf6a73",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793545189",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "56",
+    "event_id": "56",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "57",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01-part2",
+  "uuid": "042d27e5-7436-4ce2-b0d9-ca885fb1048f",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793545716",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "57",
+    "event_id": "57",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "58",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01-part3",
+  "uuid": "eb6b1bb4-2ef4-481b-bae4-901120d05ff6",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793546236",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "58",
+    "event_id": "58",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "59",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01-part4",
+  "uuid": "77ef21b1-7775-47b6-82d8-27361f573216",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793546797",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "59",
+    "event_id": "59",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "60",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01-part5",
+  "uuid": "f8708051-b856-49e8-a8fa-ea68a2219959",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793547361",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "60",
+    "event_id": "60",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "61",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01-part6",
+  "uuid": "6b571795-6907-40fa-b69d-a084a12e87f2",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793547949",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "61",
+    "event_id": "61",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "62",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01-part7",
+  "uuid": "00aa584a-f3ef-4203-b11f-b4132f24f436",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793548522",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "62",
+    "event_id": "62",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "63",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-nvd-2026-11-01-part8",
+  "uuid": "0b4d8bf6-c798-46c4-9085-72ba7a866e9a",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "11186",
+  "orgc_id": "1",
+  "timestamp": "1793548844",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "63",
+    "event_id": "63",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "64",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-threatfox-2026-11-01",
+  "uuid": "9fc5093f-a07f-4eb4-ac5c-4ed173745883",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "9774",
+  "orgc_id": "1",
+  "timestamp": "1793549112",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "64",
+    "event_id": "64",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "65",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-feodo_tracker-2026-11-01",
+  "uuid": "4f3c9f5c-9f97-42be-89b0-823f807ee59a",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "7607",
+  "orgc_id": "1",
+  "timestamp": "1793549059",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "65",
+    "event_id": "65",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "66",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-ssl_blacklist-2026-11-01",
+  "uuid": "46827e0e-4602-414c-912d-69824dea5f88",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "11120",
+  "orgc_id": "1",
+  "timestamp": "1793549161",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "66",
+    "event_id": "66",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "67",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-urlhaus-2026-11-01",
+  "uuid": "19c7ec83-35ce-4a83-aab1-6a045c9bd8c5",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793549431",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "67",
+    "event_id": "67",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "68",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-malwarebazaar-2026-11-01",
+  "uuid": "8fdfa3bf-343d-40cf-91d4-6c16ed22e83a",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "824",
+  "orgc_id": "1",
+  "timestamp": "1793549141",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "68",
+    "event_id": "68",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "69",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-cisa_ics-2026-11-01",
+  "uuid": "c6431265-f1c2-4b9f-a1fa-e38e95b1e036",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "4577",
+  "orgc_id": "1",
+  "timestamp": "1793549495",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "69",
+    "event_id": "69",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "70",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-urlhaus-2026-11-01-part2",
+  "uuid": "a663ee24-0d77-4c7f-91d9-fa48d98518b9",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793549941",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "70",
+    "event_id": "70",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "71",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-urlhaus-2026-11-01-part3",
+  "uuid": "110d3385-fd35-43c4-88cb-f48ea9697d3e",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793550425",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "71",
+    "event_id": "71",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "72",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-urlhaus-2026-11-01-part4",
+  "uuid": "43cb2dd2-bec1-4b88-83a1-b7ae3755fb68",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "20000",
+  "orgc_id": "1",
+  "timestamp": "1793550926",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "72",
+    "event_id": "72",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ },
+ {
+  "id": "73",
+  "org_id": "1",
+  "date": "2026-11-01",
+  "info": "EdgeGuard-urlhaus-2026-11-01-part5",
+  "uuid": "3023d4ac-965e-4abd-bad2-da54d70773c7",
+  "published": false,
+  "analysis": "0",
+  "attribute_count": "19988",
+  "orgc_id": "1",
+  "timestamp": "1793551425",
+  "distribution": "1",
+  "sharing_group_id": "0",
+  "proposal_email_lock": false,
+  "locked": false,
+  "threat_level_id": "3",
+  "publish_timestamp": "0",
+  "sighting_timestamp": "0",
+  "disable_correlation": false,
+  "extends_uuid": "",
+  "protected": null,
+  "first_publication": "0",
+  "Org": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "Orgc": {
+   "id": "1",
+   "name": "ADMIN",
+   "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7"
+  },
+  "EventTag": [
+   {
+    "id": "73",
+    "event_id": "73",
+    "tag_id": "75",
+    "local": false,
+    "relationship_type": "",
+    "Tag": {
+     "id": "75",
+     "name": "EdgeGuard",
+     "colour": "#c31642",
+     "is_galaxy": false
+    }
+   }
+  ]
+ }
+]

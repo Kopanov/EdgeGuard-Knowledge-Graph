@@ -162,29 +162,13 @@ class TestFix1PlaceholderNameReject:
 
     # -- Cypher defense-in-depth in Q2/Q9 --
 
-    def test_q2_outer_filters_placeholders(self):
-        """Q2 outer's attributed_to OR-branch must include placeholder
-        NOT IN filter. The filter lives INSIDE the branch (not at the
-        end with AND) so that aliases-only rows with NULL attributed_to
-        still pass. See _outer docstring for the NULL-propagation
-        rationale."""
+    def test_q2_runs_no_query(self):
+        """Q2 (Malware.attributed_to → ThreatActor) runs no query since 2026-11-02: no writer produces
+        ``Malware.attributed_to``. Its placeholder filters went with it; Q9 keeps its own below."""
         src = (SRC / "build_relationships.py").read_text()
         step2_idx = _link(src, "2")
-        step3_idx = _link(src, "3a", step2_idx)
-        block = src[step2_idx:step3_idx]
-        # Must filter placeholder attributed_to in outer (no coalesce —
-        # the branch has already asserted IS NOT NULL so coalesce would
-        # be redundant and would also create a false-match of NULL→"").
-        assert "NOT toLower(trim(m.attributed_to)) IN" in block, (
-            "Q2 outer must filter placeholder attributed_to via NOT IN list"
-        )
-
-    def test_q2_inner_filters_placeholder_actor_names(self):
-        src = (SRC / "build_relationships.py").read_text()
-        step2_idx = _link(src, "2")
-        step3_idx = _link(src, "3a", step2_idx)
-        block = src[step2_idx:step3_idx]
-        assert "NOT toLower(trim(a.name)) IN" in block, "Q2 inner must filter placeholder ThreatActor names"
+        block = src[step2_idx : src.index("# 2b / 2c.", step2_idx)]
+        assert "_safe_run_batched(" not in block and "m.attributed_to" not in block
 
     def test_q9_outer_filters_placeholder_malware_family(self):
         src = (SRC / "build_relationships.py").read_text()
@@ -364,61 +348,15 @@ class TestBugbotFollowupGenericCategoryBlocklist:
             assert client.merge_actor({"name": name}) is False, f"must reject generic-category actor name {name!r}"
 
 
-class TestBugbotFollowupQ2InnerAttributedToFilter:
-    """Medium — Q2 inner must reject placeholder m.attributed_to so
-    branch 2 (attributed_to ∈ actor aliases) can't fire on a placeholder
-    alias match. Alias comprehensions on both sides also drop placeholder
-    entries as defense-in-depth."""
+class TestQ2InnerAttributedToFilter:
+    """Medium — Q2 inner had to reject placeholder m.attributed_to. Since 2026-11-02 no step runs a
+    statement that reads ``m.attributed_to`` (no writer produces it), so no placeholder can match
+    through it."""
 
-    def _q2_block(self) -> str:
-        import ast
+    def test_no_inner_statement_reads_m_attributed_to(self):
+        from build_rel_queries import assigned_queries
 
-        src = (SRC / "build_relationships.py").read_text()
-        tree = ast.parse(src)
-        # Find `_inner` assignment under the function scope that contains
-        # the "[LINK] 2/<total> Malware → ThreatActor" log line.
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
-                continue
-            if not (
-                len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "_inner"
-            ):
-                continue
-            rendered = ast.unparse(node)
-            if "ATTRIBUTED_TO" in rendered and "a:ThreatActor" in rendered:
-                return rendered
-        raise AssertionError("Q2 inner _inner = ... not found")
-
-    def test_q2_inner_rejects_placeholder_attributed_to(self):
-        """Branches 1 and 2 (the ones that READ attributed_to) must each
-        gate on ``NOT toLower(trim(m.attributed_to)) IN [...]``. Scoped
-        per-branch (not at the top level) so branch 3 (alias-only) can
-        still fire when attributed_to is NULL. The PR-N8 R1 pin forbids
-        ``coalesce(m.attributed_to, '')`` here — NULL-propagation is the
-        correct filter behaviour for the outer."""
-        inner = self._q2_block()
-        # At least two occurrences of the attributed_to placeholder guard
-        # (one per branch that reads attributed_to).
-        count = inner.count("NOT toLower(trim(m.attributed_to)) IN")
-        assert count >= 2, f"both attributed_to-reading branches must filter placeholders; found {count}, expected >=2"
-        # And must NOT use coalesce — PR-N8 R1 invariant.
-        assert "coalesce(m.attributed_to" not in inner, (
-            "PR-N8 R1 forbids coalesce(m.attributed_to, ...); use IS NOT NULL + per-branch gate"
-        )
-
-    def test_q2_inner_alias_comprehension_filters_placeholders(self):
-        """The remaining Q2 alias comprehension (Branch 2, actor.aliases)
-        drops placeholder entries before matching. Branch 3's malware.aliases
-        comprehension was removed 2026-06 (attribution-forgery vector), so
-        exactly one such guard is expected."""
-        inner = self._q2_block()
-        comprehension_guard = "AND NOT toLower(trim(x)) IN"
-        count = inner.count(comprehension_guard)
-        assert count >= 1, f"the actor.aliases comprehension must filter placeholders; found {count}"
-        # Branch 3 (malware.aliases) must stay removed.
-        assert "coalesce(m.aliases, [])" not in inner, (
-            "Q2 must NOT read m.aliases — Branch 3 was removed as an attribution-forgery vector"
-        )
+        assert not [q for q in assigned_queries("_inner") if "m.attributed_to" in q]
 
 
 class TestBugbotFollowupCypherStringEscaping:

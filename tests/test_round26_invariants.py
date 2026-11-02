@@ -423,8 +423,9 @@ def test_build_relationships_summary_denominator_matches_query_count(monkeypatch
     USES_TOOL), so there are now 20 batched link steps (2d / 9b pulse-scoped, 2026-10) (1, 1b, 2, 2b, 2c, 3a,
     3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10). Step 2d also removes the same-pulse attributions
     resting only on pulses that name several actors and trims the others (2026-10); that runs in
-    ``_remove_several_actor_attributions`` and counts with the step. The SUMMARY / partial-success
-    denominators must follow that count.
+    ``_remove_several_actor_attributions`` and counts with the step. Since 2026-11-02 step 2 keeps its
+    number and runs no query (19 batched calls). The SUMMARY / partial-success denominators count the
+    20 numbered steps.
 
     Pin by counting _safe_run_batched calls in build_relationships() and
     asserting the SUMMARY log uses the right denominator."""
@@ -435,13 +436,17 @@ def test_build_relationships_summary_denominator_matches_query_count(monkeypatch
     br = importlib.import_module("build_relationships")
     src = inspect.getsource(br.build_relationships)
 
+    # 2026-11-02: step 2 keeps its slot and number and runs no query (no writer produces
+    # Malware.attributed_to), so 19 batched calls make the 20 numbered steps.
     call_count = src.count("_safe_run_batched(")
-    assert call_count == 20, (
-        f"expected 20 _safe_run_batched calls in build_relationships() (1, 1b, 2, 2b, 2c, 2d, 3a, 3b, 5, 5b, 6, "
-        f"6b, 7a, 7b, 7c, 7d, 8, 9, 9b, 10); "
+    assert call_count == 19, (
+        f"expected 19 _safe_run_batched calls in build_relationships() (1, 1b, 2b, 2c, 2d, 3a, 3b, 5, 5b, 6, "
+        f"6b, 7a, 7b, 7c, 7d, 8, 9, 9b, 10; step 2 runs no query); "
         f"got {call_count}. If you added/removed a link query, also update the denominators below."
     )
-    assert f"failures=%d/{call_count}" in src, (
-        f"[BUILD_RELATIONSHIPS SUMMARY] format must use /{call_count} denominator (not a stale number)"
+    steps = call_count + 1
+    assert "[LINK] 2/20 Malware → ThreatActor (exact name match): [SKIP]" in src, "step 2 keeps its slot"
+    assert f"failures=%d/{steps}" in src, (
+        f"[BUILD_RELATIONSHIPS SUMMARY] format must use /{steps} denominator (not a stale number)"
     )
-    assert f"%d/{call_count} — partial success" in src, f"warning format must use /{call_count}"
+    assert f"%d/{steps} — partial success" in src, f"warning format must use /{steps}"

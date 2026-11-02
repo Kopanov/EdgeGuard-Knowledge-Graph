@@ -137,15 +137,36 @@ class CleanResult:
 
     On failure the helper raises ``BaselineCleanError`` instead — callers
     only see this dataclass on the all-clean path. ``before`` is the
-    pre-wipe snapshot (operator wants the actual counts that were
-    deleted); ``after`` is the post-verify snapshot (always all-zeros if
-    we reach this point).
+    pre-wipe snapshot (what the probes saw); ``after`` is the post-verify
+    snapshot (always all-zeros if we reach this point).
+
+    ``neo4j_nodes_deleted`` and ``misp_events_deleted`` (2026-11-02) are what
+    the wipe itself reported: the nodes the Neo4j clear deleted (every node
+    under ``wipe_scope="all"``, the EdgeGuard-managed ones otherwise) and the
+    events ``_wipe_misp_events`` deleted. ``None`` when not reported (a result
+    built without them). ``deleted_summary`` renders them for the
+    ``BASELINE_CLEAN`` line of the DAG task and the CLI.
     """
 
     before: BaselineState
     after: BaselineState
     duration_seconds: float
     verify_attempts: int
+    neo4j_nodes_deleted: Optional[int] = None
+    misp_events_deleted: Optional[int] = None
+
+    def deleted_summary(self) -> str:
+        """``deleted <N> Neo4j nodes, <M> MISP events, <K> checkpoint entries (<s>s)``, from what the wipe
+        reported (``unknown`` for a count it did not report); the checkpoint entries are the pre-wipe
+        count, since the checkpoint wipe clears every entry."""
+
+        def _count(value: Optional[int]) -> str:
+            return "unknown" if value is None else str(value)
+
+        return (
+            f"deleted {_count(self.neo4j_nodes_deleted)} Neo4j nodes, {_count(self.misp_events_deleted)} MISP events, "
+            f"{self.before.checkpoint_count} checkpoint entries ({self.duration_seconds:.1f}s)"
+        )
 
 
 class BaselineCleanError(RuntimeError):
@@ -319,13 +340,14 @@ def _probe_neo4j_total(client: Any) -> int:
 def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int, Optional[str]]:
     """Probe MISP for EdgeGuard-tagged event count via /events/index.
 
-    Returns ``(count, error)``. PAGINATED — walks all pages with
-    ``searchall=EdgeGuard&limit=500`` until exhausted (capped at 50 rounds
-    = 25K events). The post-clean verify-poll relies on this returning
-    the TRUE count, not just the first page; without pagination, a MISP
-    holding >page-size EdgeGuard events would let verify succeed even
-    though stale events remain past page 1 (Bugbot MED on PR #50 commit
-    1b0f91e).
+    Returns ``(count, error)``. PAGINATED — walks the pages
+    with ``searchall=EdgeGuard&limit=500`` until exhausted (capped at 50 rounds
+    = 25K events), counting each event id once (2026-11-02: a MISP that ignores
+    the query-string paging answers the whole listing on every page). The
+    post-clean verify-poll relies on this returning the TRUE count, not just
+    the first page; without pagination, a MISP holding >page-size EdgeGuard
+    events would let verify succeed even though stale events remain past
+    page 1 (PR #50).
 
     Server-side ``searchall=EdgeGuard`` filters MISP-side so we don't
     paginate the entire MISP event corpus on the verify path. Client-side
@@ -375,14 +397,16 @@ def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int
             sess.headers["Host"] = host_override
 
     total_eg_events = 0
+    page_size = 500
     max_rounds = 50  # 50 × 500 = 25K events; far above any realistic deployment
+    seen_ids: set = set()
     page = 1
     for _ in range(max_rounds):
         try:
             with warnings.catch_warnings():
                 if not ssl_verify:
                     warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-                params: dict[str, str | int] = {"searchall": "EdgeGuard", "limit": 500, "page": page}
+                params: dict[str, str | int] = {"searchall": "EdgeGuard", "limit": page_size, "page": page}
                 resp = sess.get(
                     f"{misp_url}/events/index",
                     params=params,
@@ -415,15 +439,55 @@ def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int
         if not events:
             break  # Done — no more events on this page = pagination exhausted.
 
+        # 2026-11-02: each event counts once. MISP 2.5.45 ignores ``limit`` and ``page`` in the query
+        # string of ``/events/index`` and answers the whole listing on every page (measured on the
+        # hosted MISP 2026-10-16; ``run_misp_to_neo4j._fetch_edgeguard_events_via_requests_index``).
+        # The probe added up every page until its 50-round cap: the 730-day baseline of 2026-11-01
+        # logged 700 EdgeGuard events before the wipe, which deleted 14 (14 x 50). Rows are now
+        # counted once per event id, and the walk stops at a page that brings no new id, or that holds
+        # fewer rows than the limit (the last page) or more (the server ignored the limit).
+        new_rows = []
+        brought_new_id = False
+        for row in events:
+            event_id = misp_index_row_id(row)
+            if event_id is None:
+                new_rows.append(row)
+            elif event_id not in seen_ids:
+                seen_ids.add(event_id)
+                new_rows.append(row)
+                brought_new_id = True
+        if page > 1 and not brought_new_id:
+            break
+
         # Client-side filter: events whose `info` contains "EdgeGuard"
         # (defense-in-depth; server's searchall is best-effort).
-        eg_on_page = sum(
-            1 for e in events if "EdgeGuard" in str(e.get("info", "") or e.get("Event", {}).get("info", ""))
-        )
-        total_eg_events += eg_on_page
+        total_eg_events += sum(1 for row in new_rows if "EdgeGuard" in _misp_index_row_info(row))
+        if len(events) != page_size:
+            break
         page += 1
 
     return total_eg_events, None
+
+
+def misp_index_row_id(row: Any) -> Optional[str]:
+    """The event id of one ``/events/index`` row, ``row["id"]`` or ``row["Event"]["id"]`` (2026-11-02);
+    ``None`` for a row without one."""
+    if not isinstance(row, dict):
+        return None
+    event = row.get("Event")
+    value = row.get("id")
+    if value is None and isinstance(event, dict):
+        value = event.get("id")
+    return None if value is None else str(value)
+
+
+def _misp_index_row_info(row: Any) -> str:
+    """The ``info`` of one ``/events/index`` row, ``row["info"]`` or ``row["Event"]["info"]``; ``""`` without one."""
+    if not isinstance(row, dict):
+        return ""
+    event = row.get("Event")
+    info = row.get("info") or (event.get("info") if isinstance(event, dict) else "")
+    return str(info or "")
 
 
 def _probe_checkpoint() -> tuple[int, Optional[str]]:
@@ -535,7 +599,7 @@ WIPE_SCOPE_ALL = "all"
 VALID_WIPE_SCOPES = frozenset({WIPE_SCOPE_EDGEGUARD, WIPE_SCOPE_ALL})
 
 
-def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD, *, label: Optional[str] = None) -> None:
+def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD, *, label: Optional[str] = None) -> Optional[int]:
     """Step 2: wipe Neo4j graph data. Also the delete of ``scripts/clear_neo4j.py``.
 
     ``scope="edgeguard"`` (default) calls ``Neo4jClient.clear_edgeguard_managed()`` — only the
@@ -543,6 +607,9 @@ def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD, *, label: Option
     the EdgeGuard-created nodes of one label. ``scope="all"`` calls ``Neo4jClient.clear_all()`` and
     takes no label. Constraints and indexes are preserved by both, and both write the
     destructive-operations audit line. Caller is responsible for the open connection.
+
+    Returns the nodes the clear deleted (2026-11-02), every attempt of a retried clear included
+    (``Neo4jClient.clear_nodes_deleted``); ``None`` for a client that does not count them.
     """
     if scope not in VALID_WIPE_SCOPES:
         raise ValueError(f"wipe scope must be one of {sorted(VALID_WIPE_SCOPES)}, got {scope!r}")
@@ -550,12 +617,14 @@ def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD, *, label: Option
         raise ValueError("a label narrows the EdgeGuard-managed wipe only; the 'all' scope deletes every node")
     if not client.driver:
         raise RuntimeError("Neo4jClient is not connected — cannot wipe")
+    client.clear_nodes_deleted = 0
     if scope == WIPE_SCOPE_ALL:
         if not client.clear_all():
             raise RuntimeError("Neo4jClient.clear_all() returned False")
-        return
-    if not client.clear_edgeguard_managed(label=label):
+    elif not client.clear_edgeguard_managed(label=label):
         raise RuntimeError("Neo4jClient.clear_edgeguard_managed() returned False")
+    deleted = getattr(client, "clear_nodes_deleted", None)
+    return deleted if isinstance(deleted, int) and not isinstance(deleted, bool) else None
 
 
 def misp_delete_read_timeout_sec() -> int:
@@ -754,6 +823,11 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
     return deleted
 
 
+def _reported_count(value: Any) -> Optional[int]:
+    """A count a wipe step returned, or ``None`` when it returned none (a test double)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
@@ -888,7 +962,7 @@ def reset_baseline_data(
                 max(0, before.neo4j_total_count - before.neo4j_count),
             )
         try:
-            _wipe_neo4j(client, wipe_scope)
+            neo4j_deleted = _wipe_neo4j(client, wipe_scope)
         except Exception as e:
             raise BaselineCleanError(
                 f"Neo4j wipe failed: {type(e).__name__}: {e}",
@@ -959,6 +1033,8 @@ def reset_baseline_data(
             after=after,
             duration_seconds=duration,
             verify_attempts=attempt,
+            neo4j_nodes_deleted=_reported_count(neo4j_deleted),
+            misp_events_deleted=_reported_count(deleted),
         )
     finally:
         try:

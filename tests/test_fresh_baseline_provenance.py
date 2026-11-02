@@ -495,7 +495,9 @@ class TestCreateRelationshipsRouting:
         # 2026-10 (relationship provenance): every row names its own feed (``source``), so the
         # cross-item rows go out in one call; ``misp`` is only the fallback for a row without one.
         assert source_ids_used == [("misp", 2), ("misp", 2)]
-        assert syncer.stats["relationships_created"] == 4
+        # 2026-11-02: rows written; a plain int result reports no created relationships
+        assert syncer.stats["relationship_rows_written"] == 4
+        assert syncer.stats["relationships_created"] == 0
 
     def test_no_call_site_uses_misp_cooccurrence_any_more(self):
         text = _RUN_MISP.read_text()
@@ -609,7 +611,7 @@ class TestPagedPathKeepsReportProvenance:
             ("INDICATES", "MalB", "p2", "99", "alienvault_otx", ("alienvault_otx:p2",)),
         }
         assert syncer.stats["events_processed"] == 1
-        assert syncer.stats["relationships_created"] == 2
+        assert syncer.stats["relationship_rows_written"] == 2
 
 
 # ===========================================================================
@@ -1071,7 +1073,7 @@ class TestBuildRelationshipsSource:
         assert indicates == ["_q9_inner", "_q9b_inner"], "IOC-level family match (Q9) + pulse-scoped (Q9b) only"
 
     def test_5b_actor_reported_techniques(self):
-        bodies = [body for _, _, body in _inner_queries() if "UNWIND a.reported_techniques AS tid" in body]
+        bodies = [body for _, _, body in _inner_queries() if "UNWIND a.reported_techniques AS _cited" in body]
         assert len(bodies) == 1
         body = bodies[0]
         assert "MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)" in body
@@ -1084,7 +1086,7 @@ class TestBuildRelationshipsSource:
         assert re.search(r"\[LINK\] 5b/\d+", text)
 
     def test_6b_malware_reported_techniques(self):
-        bodies = [body for _, _, body in _inner_queries() if "UNWIND m.reported_techniques AS tid" in body]
+        bodies = [body for _, _, body in _inner_queries() if "UNWIND m.reported_techniques AS _cited" in body]
         assert len(bodies) == 1
         body = bodies[0]
         assert "MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t)" in body
@@ -1105,7 +1107,7 @@ class TestBuildRelationshipsSource:
         assert "MERGE (i)-[r:USES_TECHNIQUE]->(t)" in q8
         assert 'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_attack_ids"' in q8
         assert "0.85" not in q8
-        reported = [body for _, _, body in _inner_queries() if "reported_techniques AS tid" in body]
+        reported = [body for _, _, body in _inner_queries() if "reported_techniques AS _cited" in body]
         assert len(reported) == 2 and all("r.confidence_score = 0.6" in body for body in reported)
 
     def test_reported_queries_run_after_their_mitre_explicit_sibling(self):
@@ -1123,7 +1125,9 @@ class TestBuildRelationshipsSource:
             idx = text.find(f"{var} = (")
             assert idx > 0, f"{var} missing"
             block = text[idx : idx + 400]
-            assert f"UNWIND {prop} AS tid" in block
+            # 2026-11-02: the UNWIND variable is ``_cited``, so the subquery reads the translated ``tid``
+            assert f"UNWIND {prop} AS _cited" in block
+            assert "coalesce($revoked[toString(_cited)], _cited) AS tid" in block
             assert "NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) }" in block
 
     def test_every_link_inner_query_sets_edgeguard_managed(self):
@@ -1131,6 +1135,8 @@ class TestBuildRelationshipsSource:
         steps = re.findall(r"\[LINK\] (\w+)/\d+", text)
         assert steps, "no [LINK] step banners found"
         assert "4" not in steps and {"5b", "6b"} <= set(steps)
+        # 2026-11-02: step 2 keeps its banner and runs no query (no writer produces Malware.attributed_to)
+        steps.remove("2")
         merges = [(n, ln, b) for n, ln, b in _inner_queries() if "MERGE (" in b and "-[r:" in b]
         assert len(merges) == len(steps), (
             f"{len(steps)} [LINK] steps but {len(merges)} MERGE inner queries — "

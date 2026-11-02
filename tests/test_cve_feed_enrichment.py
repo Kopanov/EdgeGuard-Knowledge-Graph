@@ -341,8 +341,8 @@ class TestRunner:
         }
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "[1/6]" in text and "[6/6] EPSS" in text and "/7]" not in text and "/5]" not in text
-        # The CVE nodes EPSS updated, not the sum of its counts.
-        assert "campaigns=1 decay=1 epss=5" in text and "calibration=" not in text
+        # The CVE nodes EPSS updated, not the sum of its counts (2026-11-02: one named number per job).
+        assert "decay_changed=1 epss_cves_updated=5" in text and "calibration=" not in text
 
     def test_the_flag_off_makes_no_network_call(self, monkeypatch):
         _patch_other_jobs(monkeypatch)

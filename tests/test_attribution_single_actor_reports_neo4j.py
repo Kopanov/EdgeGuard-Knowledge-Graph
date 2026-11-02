@@ -3,9 +3,10 @@ the campaign membership that rests on it.
 
 A graph as an earlier run left it: same-pulse attributions from a pulse that names one actor
 (``p1``), from one that names two groups (``p2``, Gamaredon and Turla) and from one that names two
-names of one actor (``p3``, The Gentlemen and Storm-2697), in the current provenance form
-(``r.source_refs``) and in the form of graphs built before 2026-10-14 (``r.sources = ['otx_pulse']``,
-``r.report_ids``). The indicators carry pairs in both forms: ``family::adversary::pulse`` (the OTX
+names of one actor (``p3``, The Gentlemen and Storm-2697), with the pulses in ``r.source_refs``
+(2026-11-02: step 2d no longer reads ``r.report_ids``, the form of graphs built before 2026-10-14, a
+property dropped from relationships that no current graph carries). The indicators carry pairs in both
+forms: ``family::adversary::pulse`` (the OTX
 collector since 2026-10, which writes them only for a pulse naming one actor; ``p5`` is a later pulse
 the nodes do not record, naming Turla as Venomous Bear, a name the actor alias merge folds into Turla)
 and ``family::adversary`` (written before). ``snake`` is a name of Turla the alias merge has not
@@ -79,14 +80,15 @@ CREATE (ptero)-[:SOURCED_FROM {{source_refs: ['alienvault_otx:p2']}}]->(otx)
 CREATE (kaz)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p1', 'alienvault_otx:p2']}}]->(turla)
 CREATE (kaz)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p2']}}]->(gam)
 CREATE (ptero)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p2']}}]->(gam)
-CREATE (ptero)-[:ATTRIBUTED_TO {OTX}, sources: ['otx_pulse'], report_ids: ['p2']}}]->(turla)
+CREATE (ptero)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p2']}}]->(turla)
 CREATE (lb)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx', 'threatfox'],
         source_refs: ['alienvault_otx:p2', 'threatfox:1']}}]->(gam)
 CREATE (gent)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p3']}}]->(tg)
 CREATE (gent)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p3']}}]->(st)
 CREATE (norefs)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: []}}]->(gam)
 CREATE (partner)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', source_refs: ['alienvault_otx:p2']}}]->(gam)
-CREATE (carbon)-[:ATTRIBUTED_TO {OTX}, sources: ['otx_pulse'], report_ids: ['p1', 'p2']}}]->(turla)
+CREATE (carbon)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'],
+        source_refs: ['alienvault_otx:p1', 'alienvault_otx:p2']}}]->(turla)
 CREATE (ptero)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p2']}}]->(unc)
 CREATE (strmal)-[:ATTRIBUTED_TO {OTX}, sources: 'alienvault_otx', source_refs: 'alienvault_otx:p2'}}]->(gam)
 CREATE (strmal2)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx', 'threatfox'], source_refs: 'alienvault_otx:p2'}}]->(gam)
@@ -156,12 +158,13 @@ def _step_2d(client) -> dict:
 
 
 def _attributions(driver) -> dict:
+    """``source_refs`` of each attribution, sorted (``None`` when the link has none)."""
     with driver.session() as session:
         return {
-            (r["m"], r["a"]): (sorted(r["refs"]) if r["refs"] is not None else None, r["report_ids"])
+            (r["m"], r["a"]): sorted(r["refs"]) if r["refs"] is not None else None
             for r in session.run(
                 "MATCH (m:Malware)-[r:ATTRIBUTED_TO]->(a:ThreatActor) "
-                "RETURN m.name AS m, a.name AS a, r.source_refs AS refs, r.report_ids AS report_ids"
+                "RETURN m.name AS m, a.name AS a, r.source_refs AS refs"
             )
         }
 
@@ -239,8 +242,8 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     assert first["several"] == several
     assert (first["removed"], first["trimmed"]) == (6, 4)
     links = _attributions(raw_driver)
-    # p2 names two groups: its attributions go, in both provenance forms; so does the link resting on
-    # p6, which only the indicator mark shows to name several actors ...
+    # p2 names two groups: its attributions go; so does the link resting on p6, which only the
+    # indicator mark shows to name several actors ...
     for gone in (
         ("kazuar", "gamaredon group"),
         ("pterolnk", "gamaredon group"),
@@ -253,23 +256,22 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     # ... and p6's pair on the indicator is not linked.
     assert ("crutch", "turla") not in links
     # A list stored as a string is trimmed as a one-entry list and written back as a list.
-    assert links[("strmal2", "gamaredon group")] == ([], None)
+    assert links[("strmal2", "gamaredon group")] == []
     # The unmerged alias: 'loader::snake' is judged by snake's pulses (p2 only), so nothing links;
     # judged by Turla's (p1 too), it would have linked loader to Turla with no provenance.
     assert not any(m == "loader" for m, _a in links)
     # ... and leave the provenance of the links a pulse naming one actor supports (p1).
-    assert links[("kazuar", "turla")] == (["alienvault_otx:p1"], None)
+    assert links[("kazuar", "turla")] == ["alienvault_otx:p1"]
     # A pair with its pulse: linked to the canonical actor, the pair's pulse as provenance.
-    assert links[("lockbit", "turla")] == (["alienvault_otx:p5"], None)
-    # The older provenance form is trimmed too.
-    assert links[("carbon", "turla")] == (None, ["p1"])
+    assert links[("lockbit", "turla")] == ["alienvault_otx:p5"]
+    assert links[("carbon", "turla")] == ["alienvault_otx:p1"]
     # Kept: another feed asserts it (p2 dropped from its provenance), two names of one actor, no
     # pulse recorded, a partner's link.
-    assert links[("lockbit", "gamaredon group")] == (["threatfox:1"], None)
-    assert links[("gentlemen", "the gentlemen")] == (["alienvault_otx:p3"], None)
-    assert links[("gentlemen", "storm-2697")] == (["alienvault_otx:p3"], None)
-    assert links[("norefs", "gamaredon group")] == ([], None)
-    assert links[("partner tool", "gamaredon group")] == (["alienvault_otx:p2"], None)
+    assert links[("lockbit", "gamaredon group")] == ["threatfox:1"]
+    assert links[("gentlemen", "the gentlemen")] == ["alienvault_otx:p3"]
+    assert links[("gentlemen", "storm-2697")] == ["alienvault_otx:p3"]
+    assert links[("norefs", "gamaredon group")] == []
+    assert links[("partner tool", "gamaredon group")] == ["alienvault_otx:p2"]
 
     second = _step_2d(client)
     # Nothing to remove the second time: the pairs written before whose recorded pulses all name

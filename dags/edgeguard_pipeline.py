@@ -3889,13 +3889,10 @@ def _baseline_clean(**context):
                 "other producers on a shared database"
             )
         result = reset_baseline_data(wipe_scope=wipe_scope)
-        logger.info(
-            "BASELINE_CLEAN: deleted %d Neo4j nodes, %d MISP events, %d checkpoint entries (%.1fs)",
-            result.before.neo4j_count,
-            result.before.misp_count,
-            result.before.checkpoint_count,
-            result.duration_seconds,
-        )
+        # 2026-11-02: the counts the wipe reported (the Neo4j clear of the scope, the MISP deletes), not
+        # the pre-wipe probe's, which counted the EdgeGuard-managed nodes only (also under
+        # wipe_scope=all) and every MISP event once per index page.
+        logger.info("BASELINE_CLEAN: %s", result.deleted_summary())
     except BaselineCleanError as e:
         # Fail the DAG hard — collectors MUST NOT run on a half-cleaned state.
         # The downstream tasks (baseline_start + tier1_core onward) will be

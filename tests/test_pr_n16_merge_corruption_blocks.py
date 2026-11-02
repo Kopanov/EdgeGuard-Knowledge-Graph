@@ -352,7 +352,7 @@ class TestFix4RunRowsRetry:
         """Helper: extract the nested ``_run_rows`` function body from
         ``create_misp_relationships_batch``."""
         src = (SRC / "neo4j_client.py").read_text()
-        idx = src.find("def _run_rows(session")
+        idx = src.find("def _run_rows(")
         assert idx != -1, "_run_rows not found"
         # _run_rows is a nested def — scan for its next sibling def at
         # same indent or any return to outer scope.

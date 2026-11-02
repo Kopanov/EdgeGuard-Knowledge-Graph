@@ -88,23 +88,15 @@ class TestFixANullEmptyAliasFilter:
     def _src(self) -> str:
         return (SRC / "build_relationships.py").read_text()
 
-    def test_q2_inner_list_comprehension_filters_null_and_whitespace(self):
-        """Q2 inner has ONE alias list comprehension since Branch 3
-        (a.name ∈ m.aliases) was removed 2026-06 as a forgery vector — only
-        Branch 2's a.aliases comprehension remains, and it must carry the
-        ``WHERE x IS NOT NULL AND size(trim(x)) > 0`` filter."""
+    def test_q2_runs_no_query(self):
+        """Q2 (the alias comprehension over ``a.aliases`` matched against ``m.attributed_to``) runs no
+        query since 2026-11-02: no writer produces ``Malware.attributed_to``. The step-2 slot holds no
+        statement, so no alias comprehension of it can match."""
         src = self._src()
-        # Find Q2 block
         step2_idx = _link(src, "2")
-        step3_idx = _link(src, "3a", step2_idx)
-        block = src[step2_idx:step3_idx]
-
-        a_alias_filter = "x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0"
-        assert a_alias_filter in block, "Q2 a.aliases comprehension must filter NULL/whitespace entries"
-        # Branch 3's m.aliases comprehension must stay REMOVED (forgery vector).
-        assert "coalesce(m.aliases, [])" not in block, (
-            "Q2 must NOT read m.aliases — Branch 3 was removed as an attribution-forgery vector"
-        )
+        block = src[step2_idx : src.index("# 2b / 2c.", step2_idx)]
+        assert "coalesce(a.aliases, [])" not in block and "coalesce(m.aliases, [])" not in block
+        assert "_safe_run_batched(" not in block
 
     def test_q9_inner_list_comprehension_filters_null_and_whitespace(self):
         """Q9 inner has one list comprehension (m.aliases). Must carry

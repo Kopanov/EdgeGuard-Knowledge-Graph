@@ -571,7 +571,10 @@ class _GraphSession:
             return missing[: params["limit"]]
         result = MagicMock()
         matched = sum(1 for hits in found if len(hits) == 2 and all(hits))
-        result.single.return_value = {"matched": matched} if "RETURN count(r) AS matched" in query else None
+        template = "RETURN count(r) AS matched" in query
+        result.single.return_value = {"matched": matched} if template else None
+        # Neo4j's counters: a matched claim creates its link (none of them exists yet in this graph).
+        result.consume.return_value.counters.relationships_created = matched if template else 0
         return result
 
 
@@ -687,6 +690,9 @@ class TestClaimsThatDoNotAttach:
         sync = MISPToNeo4jSync(neo4j_client=client)
         with caplog.at_level(logging.INFO, logger="run_misp_to_neo4j"):
             sync._process_event_attributes("41", full_event, attributes)
+        # 2026-11-02: rows written and relationships created are counted apart; neither counts a claim
+        # that did not attach.
+        assert sync.stats["relationship_rows_written"] == 1, "unattached claims are not written links"
         assert sync.stats["relationships_created"] == 1, "unattached claims are not created links"
         assert (sync.stats["curated_claims_attached"], sync.stats["curated_claims_unattached"]) == (1, 3)
         (line,) = [r for r in caplog.records if r.getMessage().startswith("[CURATED]")]

@@ -66,6 +66,7 @@ from neo4j_client import (
     CURATED_MISSING_SAMPLE,
     CVSS_PAYLOAD_RESERVED_NAMES,
     Neo4jClient,
+    RelationshipBatchResult,
     _emit_cve_batch_fallback,
     clamp_cvss_score,
     normalize_cve_id_for_graph,
@@ -1994,6 +1995,11 @@ class MISPToNeo4jSync:
             "malware_synced": 0,
             "actors_synced": 0,
             "techniques_synced": 0,
+            # 2026-11-02: relationship rows the sync wrote (one per relationship definition that
+            # reached Neo4j; a curated claim only when it found both ends), and the relationships
+            # Neo4j reports those writes created (a re-sync that refreshes existing edges creates
+            # few). Until then ``relationships_created`` held the rows, AFFECTS rows twice.
+            "relationship_rows_written": 0,
             "relationships_created": 0,
             # Relationship rows dropped by permanent Neo4j batch failures
             # (``RelationshipBatchResult.failed``); non-zero fails the run.
@@ -5655,8 +5661,7 @@ class MISPToNeo4jSync:
 
             # Now create relationships for this item
             if relationships:
-                rels_created = self._create_relationships(relationships, source_id)
-                self.stats["relationships_created"] += rels_created
+                self._count_relationship_writes(self._create_relationships(relationships, source_id))
 
             return True
 
@@ -5677,19 +5682,35 @@ class MISPToNeo4jSync:
             return 0
         return self._create_relationships(cross_rels, "misp")
 
-    def _create_relationships(self, relationships: List[Dict], source_id: str) -> int:
+    def _count_relationship_writes(self, written: int) -> None:
+        """Add one ``_create_relationships`` result to the run's counts (2026-11-02): its ``int`` value to
+        ``relationship_rows_written`` and its ``created`` (0 for a plain ``int``) to
+        ``relationships_created``."""
+        self.stats["relationship_rows_written"] = int(self.stats.get("relationship_rows_written", 0) or 0) + int(
+            written
+        )
+        created = getattr(written, "created", 0)
+        if isinstance(created, int) and not isinstance(created, bool) and created > 0:
+            self.stats["relationships_created"] = int(self.stats.get("relationships_created", 0) or 0) + created
+
+    def _create_relationships(self, relationships: List[Dict], source_id: str) -> RelationshipBatchResult:
         """
         Create relationships in Neo4j using batched UNWIND (``Neo4jClient.create_misp_relationships_batch``).
 
         Chunk size: ``EDGEGUARD_REL_BATCH_SIZE`` (default ``_RELATIONSHIP_BATCH_DEFAULT``).
+
+        Returns a ``RelationshipBatchResult`` over all chunks (2026-11-02): as an ``int`` the
+        relationship rows written, ``created`` the relationships Neo4j reports created and ``failed``
+        the rows of permanently failed batches. Callers add it to the run's counts with
+        ``_count_relationship_writes``.
         """
         if not relationships:
             logger.debug("No relationships to create")
-            return 0
+            return RelationshipBatchResult(0)
 
         if not self.neo4j or not hasattr(self.neo4j, "create_misp_relationships_batch"):
             logger.error("Neo4j client missing create_misp_relationships_batch — cannot create relationships")
-            return 0
+            return RelationshipBatchResult(0)
 
         raw = os.environ.get("EDGEGUARD_REL_BATCH_SIZE", str(_RELATIONSHIP_BATCH_DEFAULT)).strip()
         try:
@@ -5706,6 +5727,7 @@ class MISPToNeo4jSync:
         )
 
         created_count = 0
+        relationships_created = 0
         failed_rows = 0
         curated_sent = curated_matched = 0
         curated_missing: List[str] = []
@@ -5720,6 +5742,10 @@ class MISPToNeo4jSync:
             chunk_failed = getattr(result, "failed", 0)
             if isinstance(chunk_failed, int) and chunk_failed > 0:
                 failed_rows += chunk_failed
+            # 2026-11-02: the relationships Neo4j reports the chunk's statements created.
+            chunk_created = getattr(result, "created", 0)
+            if isinstance(chunk_created, int) and not isinstance(chunk_created, bool) and chunk_created > 0:
+                relationships_created += chunk_created
             # 2026-10 (curated packages): the result counts only the curated claims that found
             # both ends; the writer reports how many it sent and names some missing ends.
             chunk_curated = getattr(result, "curated_sent", 0)
@@ -5731,7 +5757,7 @@ class MISPToNeo4jSync:
                         curated_missing.append(name)
             if total_chunks > 1 and (idx + 1) % 10 == 0:
                 logger.info(
-                    "  Relationship batch progress: %s/%s chunks (%s%%), %s created so far",
+                    "  Relationship batch progress: %s/%s chunks (%s%%), %s rows written so far",
                     idx + 1,
                     total_chunks,
                     int((idx + 1) / total_chunks * 100),
@@ -5755,7 +5781,7 @@ class MISPToNeo4jSync:
         if curated_sent:
             self._log_curated_claims(curated_sent, curated_matched, curated_missing)
 
-        return created_count
+        return RelationshipBatchResult(created_count, failed_rows, created=relationships_created)
 
     def _log_curated_claims(self, sent: int, matched: int, missing: List[str]) -> None:
         """Record and log how many curated claims attached (2026-10).
@@ -5973,13 +5999,11 @@ class MISPToNeo4jSync:
         self.stats["events_processed"] += 1
 
         if event_embedded_rels:
-            rels_created = self._create_relationships(event_embedded_rels, "misp")
-            self.stats["relationships_created"] += rels_created
+            self._count_relationship_writes(self._create_relationships(event_embedded_rels, "misp"))
         if cross_rels:
             # Every row names its own feed and record ids (``source`` / ``source_refs``):
             # report-scoped rows the OTX pulse, zone rows the item's feed.
-            rels_created = self._write_cross_item_relationships(cross_rels)
-            self.stats["relationships_created"] += rels_created
+            self._count_relationship_writes(self._write_cross_item_relationships(cross_rels))
 
         return len(event_items), len(cross_rels), ev_errors
 
@@ -5995,7 +6019,11 @@ class MISPToNeo4jSync:
         import gc
 
         total_parsed = 0
-        total_cross_rels = 0
+        # 2026-11-02: the cross-item relationship definitions (what the small-event path returns), and
+        # separately the relationship rows they wrote; this path returned the rows, so ``run()``'s
+        # "Sync totals" added rows of paged events to definitions of the others.
+        cross_rel_defs = 0
+        cross_rows_written = 0
         total_errors = 0
         page_size = self._ATTR_PAGE_SIZE
 
@@ -6074,8 +6102,7 @@ class MISPToNeo4jSync:
                     _rel_items.append({k: _item.get(k) for k in _REL_KEYS if _item.get(k) is not None})
 
                 if page_rels:
-                    rels_created = self._create_relationships(page_rels, "misp")
-                    self.stats["relationships_created"] += rels_created
+                    self._count_relationship_writes(self._create_relationships(page_rels, "misp"))
 
                 # Release page memory and pause before next page
                 # PR #40: env-gated via EDGEGUARD_QUERY_PAUSE_SECONDS (default 0).
@@ -6118,22 +6145,25 @@ class MISPToNeo4jSync:
                 logger.info(
                     "Event %s: building %s report-scoped relationships from all pages...", event_id, len(cross_rels)
                 )
-                rels_created = self._write_cross_item_relationships(cross_rels)
-                self.stats["relationships_created"] += rels_created
-                total_cross_rels += rels_created
+                written = self._write_cross_item_relationships(cross_rels)
+                self._count_relationship_writes(written)
+                cross_rel_defs = len(cross_rels)
+                cross_rows_written = int(written)
             del _rel_items
             gc.collect()
 
         self.stats["events_processed"] += 1
         logger.info(
-            "Event %s: large-event streaming complete — %s total items, %s cross rels, %s errors",
+            "Event %s: large-event streaming complete — %s total items, %s cross-item rel defs "
+            "(%s relationship rows written), %s errors",
             event_id,
             total_parsed,
-            total_cross_rels,
+            cross_rel_defs,
+            cross_rows_written,
             total_errors,
         )
 
-        return total_parsed, total_cross_rels, total_errors
+        return total_parsed, cross_rel_defs, total_errors
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """
@@ -6594,9 +6624,9 @@ class MISPToNeo4jSync:
             )
 
             # Apply secondary sector labels (:Finance, :Healthcare, etc.) to all
-            # nodes that carry a non-'global' zone value.
-            labeled = self.neo4j.apply_sector_labels()
-            logger.info(f"Applied sector labels to {labeled} nodes")
+            # nodes that carry a non-'global' zone value. ``apply_sector_labels`` logs its own count
+            # (2026-11-02: this line logged it a second time).
+            self.neo4j.apply_sector_labels()
 
             # Print summary
             duration = (datetime.now(timezone.utc) - datetime.fromisoformat(self.stats["start_time"])).total_seconds()
@@ -6647,7 +6677,17 @@ class MISPToNeo4jSync:
             logger.info(f"Malware synced: {self.stats['malware_synced']}")
             logger.info(f"Actors synced: {self.stats['actors_synced']}")
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")
-            logger.info(f"Relationships created: {self.stats['relationships_created']}")
+            # 2026-11-02: rows written and relationships created, two numbers (one line had shown the rows,
+            # AFFECTS rows twice, as "Relationships created").
+            logger.info(
+                "Relationship rows written: %d (relationship definitions that reached Neo4j, each counted once)",
+                int(self.stats.get("relationship_rows_written", 0) or 0),
+            )
+            logger.info(
+                "Relationships created: %d (new edges, from Neo4j's counters; a re-sync that refreshes "
+                "existing edges creates few)",
+                int(self.stats.get("relationships_created", 0) or 0),
+            )
             several_actors = int(self.stats.get("reports_with_several_actors", 0) or 0)
             if several_actors:
                 logger.info(

@@ -747,7 +747,7 @@ When `EdgeGuardApocBatchPartial` fires:
    - `MemoryLimitExceededException` → Neo4j TX memory cap hit. Raise `NEO4J_TX_MEMORY_MAX` (8g is the baseline value) and keep `NEO4J_CONTAINER_MEMORY_LIMIT` above heap + pagecache + overhead, or lower the batch size of that step.
    - `DeadlockDetected` → transient, re-run the step.
    - Schema / constraint error → code bug, file an issue, do NOT re-run blindly.
-3. Option A — re-trigger the whole `edgeguard_baseline` DAG from `build_relationships` task in Airflow UI (Graph view → click `build_relationships` → "Clear" → confirm). It re-runs all 20 sub-steps, but the early-step MERGEs are idempotent so only the failed step's edges are re-created. There is no per-step CLI flag: `src/build_relationships.py` runs all 20 steps as a single Python program, so the full-task re-run is the supported path.
+3. Option A — re-trigger the whole `edgeguard_baseline` DAG from `build_relationships` task in Airflow UI (Graph view → click `build_relationships` → "Clear" → confirm). It re-runs all 20 sub-steps (step 2 runs no query: no writer produces `Malware.attributed_to`), but the early-step MERGEs are idempotent so only the failed step's edges are re-created. There is no per-step CLI flag: `src/build_relationships.py` runs all 20 steps as a single Python program, so the full-task re-run is the supported path.
 4. Option B — accept the partial step. In the baseline run, mark `build_relationships` as success (Airflow UI: the task → Mark state as → success). Then clear `run_enrichment_jobs` with its downstream tasks. The failed run still holds the baseline lock, so the enrichment, the postcheck and `baseline_release_lock` run. A cleared `run_enrichment_jobs` alone turns `upstream_failed` again while `build_relationships` is failed. If the failed run is left as it is, it keeps the baseline lock for up to 48 h (`EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`), and every scheduled DAG skips meanwhile, the MISP → Neo4j sync included. The edges of the failed step are created by the next `build_relationships` that completes. Flag for follow-up.
 
 ### Post-run summary grep
@@ -756,11 +756,31 @@ A successful baseline should always emit this line:
 
 ```bash
 docker logs edgeguard_airflow 2>&1 | grep -E '\[BUILD_RELATIONSHIPS SUMMARY\]'
-# expected: total_edges=N failures=0/20 per_query=[...]
+# expected: relationships_created=N outer_rows=M failures=0/20 per_query=[...] (per step: outer rows/relationships created)
 ```
 
 Absence of this line = silent subprocess death (the exact scenario the
 `EdgeGuardBuildRelationshipsSilentDeath` alert guards against).
+
+`relationships_created` adds up the relationships the steps' statements created
+(APOC's `updateStatistics`); a scheduled re-run that finds its links in place
+creates few. `outer_rows` adds up the input rows the link steps processed: it is
+not a number of edges (one indicator row can create many links). In `per_query`, `-` is a created
+count APOC did not report, and `[PARTIAL]` marks a step whose created count
+includes rolled-back batches (a WARNING line names those steps). Each `[SKIP]`
+line counts the input rows of its step without a target node; for the technique
+steps these are ids the graph holds no technique for (ATT&CK tactic ids, ATT&CK
+Mobile ids, a revoked id whose successor is missing), after the revoked-id
+translation. A `[SKIP]` count that fails is logged at WARNING and the step's
+`[SKIP]` line is then missing.
+
+`build_relationships.py` runs as a child process; the task log shows each of its
+lines with the prefix `[build_relationships] ` at the child's own level (a
+child WARNING or ERROR is a WARNING or ERROR in the task log), and `print`
+output and traceback lines at INFO. A notice Neo4j returns with a statement is
+such a WARNING too (logger `neo4j.notifications`, e.g.
+`UnknownPropertyKeyWarning` for a statement that reads a property key the
+database does not hold).
 
 Every collector run also emits one grep-able push summary:
 
@@ -1456,6 +1476,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Post-run summary grep: the `[BUILD_RELATIONSHIPS SUMMARY]` line reports `relationships_created` and `outer_rows` (it reported the outer rows as `total_edges`), `per_query` gives both per step and marks `[PARTIAL]` steps; the technique steps' `[SKIP]` counts are taken after the revoked-id translation (they counted a revoked id whose successor exists, 44,268 instead of 21,207 for step 8 on the 730-day baseline); a failed `[SKIP]` count is a WARNING; child lines keep their level in the task log; step 2 runs no query; step 2d no longer reads the dropped relationship property `report_ids` (the 730-day baseline of 2026-11-01 logged 8 `UnknownPropertyKeyWarning` notices for it). On the 730-day baseline of 2026-11-01, step 8 processed 130,419 indicator rows and created 1,565,094 links.
 - 2026-11-02 — Baseline launch path: the `edgeguard baseline` / `fresh-baseline` wrappers refuse to trigger while the scheduler or metadata database is not healthy, while an `edgeguard_baseline` run is queued or running (a second fresh run would wipe the first one's graph), or when Airflow cannot be read (`--skip-airflow-check`), and trigger through the Airflow REST API without a running Compose `airflow` service (they needed Compose); a timed-out trigger is not repeated. On the Compose host they read in the `airflow` container what the REST API does not give, so they need no API credentials there. Scheduler recovery step 3 names the refusal.
 - 2026-11-02 — Failure mode 2: `[STORED-AFTER-5XX]` warnings (a batch MISP stored although it answered HTTP 5xx) are no loss; raise MISP's `memory_limit`.
 - 2026-11-01 — Failure mode 5: the sync's CVE batches (`merge_cves_batch`) and their lines: `_write_cve_batch` at ERROR and `[CVE-BATCH-FALLBACK]` at WARNING (it was an ERROR when the batch writer itself raised), the run summary's count of batches written one CVE at a time, the counter `edgeguard_neo4j_cve_batch_fallback_total{reason}`, a log probe for `[CVE-BATCH-FALLBACK]` and what to do when batches keep falling back (a batch at its transaction timeout counts as `non_retryable` and is handled as in § Neo4j statement timeouts). Neo4j statement timeouts: a CVE batch is one transaction and its `[NEO4J-TIMEOUT]` line names it (a batch at its timeout had logged only the `_write_cve_batch` error).

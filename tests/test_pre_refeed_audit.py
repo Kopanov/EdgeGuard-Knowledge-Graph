@@ -302,18 +302,20 @@ class TestBuildRelationshipsWiring:
         return ok, calls
 
     def test_twenty_distinct_steps_in_order_with_skip_queries_where_designed(self):
+        # 2026-11-02: step 2 (Malware.attributed_to, which no writer produces) keeps its slot and runs no
+        # query, so 19 of the 20 numbered steps call the batch runner.
         ok, calls = self._run()
         assert ok is not False
         keys = [k for _, k, _ in calls]
-        assert len(calls) == 20 and len(set(keys)) == 20, keys
-        assert keys[:6] == [
+        assert len(calls) == 19 and len(set(keys)) == 19, keys
+        assert "attributed_to" not in keys
+        assert keys[:5] == [
             "in_tactic",
             "subtechnique_of",
-            "attributed_to",
             "uses_malware",
             "uses_tool",
             "attributed_to_pulse",
-        ], keys[:6]
+        ], keys[:5]
         assert keys.index("indicates_family") + 1 == keys.index("indicates_pulse"), "9b runs right after 9"
         skip = {k: s for _, k, s in calls}
         assert skip["uses_malware"] and skip["uses_tool"], "R6 steps skip when no claim is pending"

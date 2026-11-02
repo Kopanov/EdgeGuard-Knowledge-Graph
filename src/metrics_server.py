@@ -244,9 +244,12 @@ NEO4J_NODES = Gauge(
     "edgeguard_neo4j_nodes", "Number of nodes in Neo4j by label", ["label", "zone"], multiprocess_mode="mostrecent"
 )
 
+# 2026-11-02: the help said "Number of relationships in Neo4j by type"; the values are, and were, the
+# input rows of each build_relationships step (``rel_type`` is the step key), not a graph size.
 NEO4J_RELATIONSHIPS = Gauge(
     "edgeguard_neo4j_relationships",
-    "Number of relationships in Neo4j by type",
+    "Input rows (APOC outer rows) each build_relationships step processed in its last run, by step key "
+    "(rel_type); not the number of relationships in Neo4j",
     ["rel_type"],
     multiprocess_mode="mostrecent",
 )
@@ -1127,7 +1130,7 @@ def record_neo4j_sync_task_limit(seconds: float) -> None:
 
 
 def record_neo4j_relationships(rel_counts: Dict[str, int]):
-    """Record Neo4j relationship counts."""
+    """Record the input rows each ``build_relationships`` step processed, by step key (``NEO4J_RELATIONSHIPS``)."""
     for rel_type, count in rel_counts.items():
         NEO4J_RELATIONSHIPS.labels(rel_type=rel_type).set(count)
 

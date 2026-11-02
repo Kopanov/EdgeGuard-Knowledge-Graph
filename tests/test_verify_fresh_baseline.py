@@ -1074,8 +1074,9 @@ class TestContractIsWhatTheWritersWrite:
         client._connection_healthy = True
         writer = "sync"
         written = client.create_misp_relationships_batch([dict(r) for r in _SYNC_ROWS], source_id="misp")
-        # every row reached its query (AFFECTS and the indicator EXPLOITS row run against two labels)
-        assert (written, written.failed) == (len(_SYNC_ROWS) + 2, 0)
+        # every row reached its query; the AFFECTS and the indicator EXPLOITS row run against two labels and
+        # count once (2026-11-02)
+        assert (written, written.failed) == (len(_SYNC_ROWS), 0)
         writer = "enrichment"
         enrichment_jobs.build_campaign_nodes(client)
         enrichment_jobs.bridge_vulnerability_cve(client)
@@ -1110,7 +1111,8 @@ class TestContractIsWhatTheWritersWrite:
     def test_every_writer_path_was_recorded(self, monkeypatch):
         by_writer = self._writer_queries(monkeypatch)
         merged = {w: set(self._assignments(q)) for w, q in by_writer.items()}
-        assert len(by_writer["build_relationships"]) == 20
+        # 19 of the 20 steps send a statement: step 2 runs none (no writer produces Malware.attributed_to)
+        assert len(by_writer["build_relationships"]) == 19
         assert merged["build_relationships"] >= {"IN_TACTIC", "SUBTECHNIQUE_OF", "USES_TECHNIQUE", "TARGETS"}
         assert merged["sync"] == {
             "EMPLOYS_TECHNIQUE",

@@ -1222,14 +1222,8 @@ class EdgeGuardPipeline:
 
                 try:
                     clean_result = reset_baseline_data()
-                    logger.info(
-                        "Fresh-baseline clean complete: deleted %d Neo4j nodes, "
-                        "%d MISP events, %d checkpoint entries (%.1fs)",
-                        clean_result.before.neo4j_count,
-                        clean_result.before.misp_count,
-                        clean_result.before.checkpoint_count,
-                        clean_result.duration_seconds,
-                    )
+                    # 2026-11-02: what the wipe reported deleting (``CleanResult.deleted_summary``).
+                    logger.info("Fresh-baseline clean complete: %s", clean_result.deleted_summary())
                 except BaselineCleanError as e:
                     logger.error("Fresh-baseline clean FAILED: %s", e)
                     return False  # Refuse to run collectors on a half-cleaned state.
