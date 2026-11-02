@@ -104,18 +104,28 @@ def _pulse_name_key(name: Any) -> str:
     return name_key(" ".join(name.split()))
 
 
+# The types of ``_CASE_NORMALISED_TYPES`` that MISP upper-cases on save (CVE ids, weaknesses, ...); it
+# lower-cases the others.
+_UPPER_CASED_TYPES = frozenset({"vulnerability", "weakness", "http-method", "hex", "iban", "bic", "as"})
+assert _UPPER_CASED_TYPES <= _CASE_NORMALISED_TYPES
+
+
 def _pulse_value_key(indicator_type: Any, value: Any) -> str:
     """The same-run key of an indicator value, compared as MISP compares it on the type MISPWriter sends
-    (2026-11): a value of a type MISP changes in case on save (hashes, domains, IP and e-mail addresses,
-    CVE ids: ``_CASE_NORMALISED_TYPES``) lower-cased; a URL with its scheme and host lower-cased
-    (``fold_url_scheme_and_host``, the graph's ``url`` key); any other value as given. NFC-normalised and
-    trimmed, as the graph keys it; a defanged value stays as it is."""
+    (2026-11): a value of a type MISP changes in case on save (``_CASE_NORMALISED_TYPES``) in the case MISP
+    stores it: CVE ids and the other ``_UPPER_CASED_TYPES`` upper-cased, hashes, domains, IP and e-mail
+    addresses lower-cased; a URL with its scheme and host lower-cased (``fold_url_scheme_and_host``, the
+    graph's ``url`` key); any other value as given. NFC-normalised and trimmed, as the graph keys it; a
+    defanged value stays as it is. A CVE indicator and a pulse's CVE reference therefore share the key
+    ``cve:CVE-...`` and fold into one item."""
     if not isinstance(value, str):
         return str(value)
     text = unicodedata.normalize("NFC", value).strip()
     misp_type = MISPWriter.TYPE_MAPPING.get(str(indicator_type))
     if misp_type == "url":
         return fold_url_scheme_and_host(text)
+    if misp_type in _UPPER_CASED_TYPES:
+        return text.upper()
     if misp_type in _CASE_NORMALISED_TYPES:
         return text.lower()
     return text
@@ -136,7 +146,8 @@ def _pulse_item_key(item: Dict[str, Any]) -> str:
     if item.get("type") == "malware":
         return f"malware:{_pulse_name_key(item.get('name'))}"
     if item.get("type") == "vulnerability":
-        return f"cve:{item.get('cve_id')}"
+        # The key of a CVE indicator of the same id (``_pulse_value_key``): the two fold into one item.
+        return f"cve:{_pulse_value_key('cve', item.get('cve_id'))}"
     if item.get("type") == "actor":
         return f"actor:{_pulse_name_key(item.get('name'))}"
     return str(item)

@@ -172,6 +172,14 @@ class TestItemKey:
     def test_a_cve_reference_keeps_its_key(self):
         assert oc._pulse_item_key({"type": "vulnerability", "cve_id": "CVE-2026-48710"}) == "cve:CVE-2026-48710"
 
+    @pytest.mark.parametrize("value", ["CVE-2026-48710", "cve-2026-48710", " CVE-2026-48710 "])
+    def test_a_cve_indicator_shares_the_key_of_a_cve_reference(self, value):
+        """MISP stores CVE ids upper-cased: an OTX CVE indicator and a pulse's CVE reference of the same id are
+        one item (they shared ``cve:CVE-...`` before the case rule; a lower-cased indicator key split them)."""
+        reference = oc._pulse_item_key({"type": "vulnerability", "cve_id": "CVE-2026-48710"})
+        assert oc._pulse_item_key({"indicator_type": "cve", "value": value}) == reference == "cve:CVE-2026-48710"
+        assert oc._pulse_item_key({"type": "vulnerability", "cve_id": value.upper()}) == reference
+
 
 # --------------------------------------------------------------------------- the run's items
 
@@ -301,3 +309,33 @@ def test_a_family_spelling_pushed_after_its_stored_twin_is_still_reported_unconf
     pushed = MISPWriter.__new__(MISPWriter).create_malware_attribute(later)
     stored = [{"type": "malware-type", "value": FIXTURE["dcrat_stored"]}]
     assert mw._confirm_pushed_attributes([pushed], stored) == (0, [("malware-type", "DCRAT")])
+
+
+class TestCveIndicatorAndReference:
+    def test_a_later_pulse_s_reference_folds_into_the_earlier_cve_indicator(self):
+        """One pulse lists the CVE as an indicator, a later one names it among its CVE references: one item,
+        the later pulse in its report ids."""
+        first = {
+            "id": "6900000000000000000000a1",
+            "name": "Exploitation of CVE-2026-48710",
+            "malware_families": [],
+            "adversary": "",
+            "indicators": [{"type": "CVE", "indicator": "CVE-2026-48710"}],
+        }
+        later = {
+            "id": "6900000000000000000000a2",
+            "name": "Campaign naming CVE-2026-48710",
+            "malware_families": [],
+            "adversary": "",
+            "indicators": [],
+            "cve_references": ["cve-2026-48710"],
+        }
+        items = _collect(*_pulses([first, later]))
+        cves = [
+            i
+            for i in items
+            if i.get("indicator_type") == "cve" or (i.get("type") == "vulnerability" and i.get("cve_id"))
+        ]
+        assert len(cves) == 1, cves
+        assert cves[0]["pulse_id"] == first["id"]
+        assert cves[0].get("report_ids") == [later["id"]]
