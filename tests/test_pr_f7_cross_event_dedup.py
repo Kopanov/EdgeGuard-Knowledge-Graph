@@ -171,10 +171,11 @@ class TestCrossEventPrefetchHelper:
         from collectors.misp_writer import MISPWriter
 
         keys = MISPWriter._get_existing_source_attribute_keys(w, "source:nvd")
+        # 2026-11: keyed as MISP compares values (``_dedup_key``): a CVE id's case is folded.
         assert keys == {
-            ("vulnerability", "CVE-2024-0001"),
-            ("vulnerability", "CVE-2024-0002"),
-            ("vulnerability", "CVE-2024-0003"),
+            ("vulnerability", "cve-2024-0001"),
+            ("vulnerability", "cve-2024-0002"),
+            ("vulnerability", "cve-2024-0003"),
         }
 
     def test_degrades_to_empty_on_http_error(self, monkeypatch):
@@ -315,8 +316,9 @@ class TestCrossEventPrefetchHelper:
             f"expected partial keyset of {2 * page_limit} keys from pages 1+2; got {len(result)}"
         )
         # Spot-check specific keys are present
-        assert ("vulnerability", "CVE-2024-0001-0000") in result, "page 1 keys should be preserved"
-        assert ("vulnerability", "CVE-2024-0002-0099") in result, "page 2 keys should be preserved"
+        # 2026-11: keyed as MISP compares values (``_dedup_key``): a CVE id's case is folded.
+        assert ("vulnerability", "cve-2024-0001-0000") in result, "page 1 keys should be preserved"
+        assert ("vulnerability", "cve-2024-0002-0099") in result, "page 2 keys should be preserved"
 
         # WARN log must explicitly mention the partial-keyset preservation
         # so operators can distinguish partial from full prefetch in grep

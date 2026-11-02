@@ -4797,8 +4797,9 @@ class Neo4jClient:
                     # is computed case-insensitively at node_identity.py:340)
                     # but landed as TWO Cypher nodes (MERGE matches case-
                     # sensitively). Canonicalization is per-type — IPs/hashes/
-                    # domains lowercased; URLs/emails/file-paths left as-is
-                    # (case is meaningful there). See node_identity.py
+                    # domains lowercased; a URL's scheme and host lowercased,
+                    # its path, emails and file paths left as-is (case is
+                    # meaningful there). See node_identity.py
                     # ``canonicalize_merge_key`` for the full rules.
                     # PR #37 commit X (bugbot LOW): import is hoisted to
                     # module level (line 36) so it doesn't re-resolve

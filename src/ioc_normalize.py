@@ -21,7 +21,11 @@ strict superset of it that converges to the same canonical form:
   table the write-side placeholder filter uses).
 * Case-folding for indicator values reuses
   ``node_identity._CASE_INSENSITIVE_INDICATOR_TYPES`` — the same set
-  ``canonicalize_merge_key`` consults before lowercasing a MERGE key.
+  ``canonicalize_merge_key`` consults before lowercasing a MERGE key — and,
+  for a ``url``, ``node_identity.fold_url_scheme_and_host`` (scheme and host
+  lowercased, the path as given), the function ``canonicalize_merge_key``
+  applies to a ``url`` key; a value without a type gets it whenever it reads
+  as ``scheme://host``.
 * NFC-normalize + strip mirrors ``canonicalize_merge_key`` /
   ``canonicalize_field_value`` exactly.
 
@@ -43,6 +47,7 @@ from typing import Optional
 from node_identity import (
     _CASE_INSENSITIVE_INDICATOR_TYPES,
     _ZERO_WIDTH_AND_BIDI_TRANSLATE,
+    fold_url_scheme_and_host,
 )
 
 # Conservative defang vocabulary only — exotic schemes (``meow://`` etc.)
@@ -244,7 +249,11 @@ def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     the graph type is in ``node_identity._CASE_INSENSITIVE_INDICATOR_TYPES``
     (the exact set ``canonicalize_merge_key`` consults — the write-side
     parity guarantee: the value bound into a read-side ``MATCH`` equals the
-    value the write side used as its MERGE key).
+    value the write side used as its MERGE key); a ``url`` gets its scheme
+    and host lowercased (``node_identity.fold_url_scheme_and_host``, as the
+    write side) and keeps the case of its path. Without a type (``None``,
+    blank or ``"unknown"``) every value that reads as ``scheme://host`` gets
+    the same fold, whatever its scheme and whatever type is inferred.
 
     Resolving the graph type FIRST is what keeps e.g. a ``btc`` alert
     (write side stores ``bitcoin``, case-SENSITIVE Base58) from being
@@ -263,6 +272,14 @@ def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     out = unicodedata.normalize("NFC", base).strip()
     if gtype in _CASE_INSENSITIVE_INDICATOR_TYPES:
         return out.lower()
+    if gtype == "url":
+        # 2026-11: the scheme and the host lower-cased, as the write side keys a url.
+        return fold_url_scheme_and_host(out)
+    if _blank_type_to_none(indicator_type) is None:
+        # 2026-11: a value given without a type that reads as ``scheme://host`` gets the url fold
+        # too, whatever the scheme: the write side folds every value typed url, while
+        # infer_indicator_type types only http, https and ftp. Any other value is returned unchanged.
+        out = fold_url_scheme_and_host(out)
     if gtype is None or gtype not in _KNOWN_CASE_SENSITIVE_INDICATOR_TYPES:
         if len(out) in _HEX_HASH_LENGTHS and _HEX_VALUE_RE.fullmatch(out):
             return out.lower()

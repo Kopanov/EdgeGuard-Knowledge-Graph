@@ -180,9 +180,9 @@ class TestNormalizeIndicatorValue:
     def test_md5_type_lowercases(self):
         assert normalize_indicator_value("md5", "A" * 32) == "a" * 32
 
-    def test_url_preserves_case(self):
-        # url is case-sensitive on the write side — must not be folded
-        assert normalize_indicator_value("url", "hxxp://EVIL[.]com/Path") == "http://EVIL.com/Path"
+    def test_url_folds_scheme_and_host_and_keeps_the_path_case(self):
+        # url: the write side lower-cases the scheme and the host and keeps the path's case
+        assert normalize_indicator_value("url", "hxxp://EVIL[.]com/Path") == "http://evil.com/Path"
 
     def test_email_preserves_case(self):
         assert normalize_indicator_value("email", "Admin[@]Example.com") == "Admin@Example.com"

@@ -57,6 +57,7 @@ modify them without a coordinated migration of the entire graph.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 import uuid as _uuid_mod
 from typing import Any, Dict, Tuple
@@ -397,11 +398,14 @@ def compute_node_uuid(label: str, key_dict: Dict[str, Any]) -> str:
 #    x509-fingerprint-sha1, ssdeep, imphash, ja3, ja3s, jarm, mutex}:
 #   lowercase (RFC + standard convention says these are case-insensitive;
 #   the cryptocurrency types are excluded, see the set below)
-# * Indicator value with type in {url, email, filename, regkey, cmdline}:
-#   LEFT AS-IS — case is meaningful (URL path, file path, regkey path
-#   are all case-sensitive on most systems; email local-part is
-#   technically case-sensitive per RFC even though usually treated
-#   case-insensitively)
+# * Indicator value with type url: the scheme and the host lowercased, the
+#   rest (path, query, fragment, user information) left as given
+#   (``fold_url_scheme_and_host``; RFC 3986 makes the scheme and the host
+#   case-insensitive, a server may treat the path's case as meaningful)
+# * Indicator value with type in {email, filename, regkey, cmdline}:
+#   LEFT AS-IS — case is meaningful (file path, regkey path are
+#   case-sensitive on most systems; email local-part is technically
+#   case-sensitive per RFC even though usually treated case-insensitively)
 #
 # Pre-release framework — no production graph carries case-duplicate
 # nodes. The write-time canonicalization below prevents case-duplicates
@@ -414,7 +418,8 @@ _CASE_INSENSITIVE_NAME_LABELS = frozenset({"malware", "threatactor", "campaign"}
 
 # Indicator types where case is semantically irrelevant (RFC + de-facto
 # convention). Lowercase the ``value`` for these. Excluded explicitly:
-# ``url`` (path is case-sensitive), ``email`` (local-part technically is),
+# ``url`` (the path is case-sensitive; only the scheme and the host are
+# lowercased, ``fold_url_scheme_and_host``), ``email`` (local-part technically is),
 # ``filename``, ``filepath``, ``regkey``, ``cmdline`` (file/registry/CLI
 # paths are case-sensitive on most systems).
 _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
@@ -457,6 +462,43 @@ _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
         "mutex",
     }
 )
+
+
+# 2026-11: the identity of a ``url`` value. RFC 3986 makes a URL's scheme and host case-insensitive
+# (§3.1, §3.2.2; §6.2.2.1 normalises both to lower case) and leaves the case of the rest to the
+# server, so ``http://Setseta.com/set.exe`` and ``http://setseta.com/set.exe`` are one URL while
+# ``http://twizt.net/Installed`` and ``http://twizt.net/installed`` may not be. A value is folded
+# only when it reads as ``scheme://authority`` followed by the path, query and fragment, the host
+# being a host name or IPv4 address (letters, digits, ``-._~!$&'*+,;=``) or an IPv6 address in
+# brackets, with an optional ``:port`` of digits. Anything else stays as given: a value without
+# ``scheme://``, a defanged scheme (``hxxp``, ``hxxps``) or host (``evil[.]com``, ``evil(.)com``),
+# a host with percent-encoding or a zone id, a port that is not a number. The user information
+# before an ``@`` keeps its case.
+_URL_SPLIT_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*)://(?P<authority>[^/?#]*)(?P<rest>.*)", re.DOTALL)
+_URL_HOST_RE = re.compile(r"(?:[\w\-.~!$&'*+,;=]*|\[[0-9A-Fa-f:.]+\])(?::[0-9]*)?")
+_DEFANGED_URL_SCHEMES = frozenset({"hxxp", "hxxps"})
+
+
+def fold_url_scheme_and_host(value: Any) -> Any:
+    """``value`` with its URL scheme and host lower-cased, the rest as given (see ``_URL_SPLIT_RE``).
+
+    ``"HTTP://Setseta.COM:8080/Set.exe?A=B#C"`` → ``"http://setseta.com:8080/Set.exe?A=B#C"``. A value
+    that does not read as ``scheme://host...`` (no scheme, a defanged form, a host that is not a plain
+    host name or address) is returned unchanged, and so is any non-string. Never raises. The caller
+    strips and NFC-normalises first (``canonicalize_merge_key``, ``ioc_normalize``).
+    """
+    if not isinstance(value, str):
+        return value
+    match = _URL_SPLIT_RE.fullmatch(value)
+    if match is None:
+        return value
+    scheme = match.group("scheme").lower()
+    if scheme in _DEFANGED_URL_SCHEMES:
+        return value
+    userinfo, at, host = match.group("authority").rpartition("@")
+    if _URL_HOST_RE.fullmatch(host) is None:
+        return value
+    return f"{scheme}://{userinfo}{at}{host.lower()}{match.group('rest')}"
 
 
 # PR-N10 (2026-04-21 7-agent pre-baseline audit): placeholder strings
@@ -645,7 +687,9 @@ def canonicalize_merge_key(label: str, key_dict: Dict[str, Any]) -> Dict[str, An
     Pure function — never raises. If the (label, type) is NOT in the
     case-insensitive set, the dict is returned essentially unchanged
     (still NFC + strip applied so trailing-whitespace duplicates collapse,
-    matching what ``compute_node_uuid`` does on its hash input).
+    matching what ``compute_node_uuid`` does on its hash input). A ``url``
+    value has its scheme and host lowercased and keeps the case of its path
+    (``fold_url_scheme_and_host``).
 
     Returns a NEW dict — caller's dict is never mutated.
 
@@ -669,6 +713,9 @@ def canonicalize_merge_key(label: str, key_dict: Dict[str, Any]) -> Dict[str, An
             normalized = unicodedata.normalize("NFC", value).strip()
             if isinstance(indicator_type, str) and indicator_type.lower() in _CASE_INSENSITIVE_INDICATOR_TYPES:
                 out["value"] = normalized.lower()
+            elif isinstance(indicator_type, str) and indicator_type.lower() == "url":
+                # 2026-11: the scheme and the host lower-cased, the path as given.
+                out["value"] = fold_url_scheme_and_host(normalized)
             else:
                 # Still strip + NFC even when not lowercased — at minimum
                 # collapses trailing-whitespace duplicates.

@@ -1,0 +1,674 @@
+{
+ "description": "Real OTX pulses of the 730-day baseline of 2026-11-01, rebuilt in the shape the OTX API returns from the attributes MISP stored in the OTX event (event 55): pulse ids, names, the family names each pulse gave (OTX_META.mf of its own indicators, in the pulse's order), its adversary names (OTX_META.pa), and indicator values with the OTX type of their MISP type. The pulses are listed in the order the run processed them (MISP id order of their first attribute). The Aurora pulse's malware_families is the order of its malware-type attributes, both 'Hydraq' and 'HydraQ' included. The url pulses list their URL indicators in MISP id order. 'defanged_url' is the value the task log reports as unconfirmed (lower-cased by the confirmation key of that run) and 'defanged_url_twin' the value MISP stored.",
+ "dcrat_pulses": [
+  {
+   "id": "6a9226b8695b02a09a6160ef",
+   "name": "Still Circling: Inside the Operator Behind the GitHub Loader",
+   "malware_families": [
+    "AsyncRAT",
+    "DcRat",
+    "Remcos",
+    "XWorm",
+    "AutoIt backdoor"
+   ],
+   "adversary": "APT-C-36",
+   "indicators": [
+    {
+     "type": "domain",
+     "indicator": "config.data"
+    },
+    {
+     "type": "domain",
+     "indicator": "data-encoder.com"
+    },
+    {
+     "type": "domain",
+     "indicator": "dccomicrat81.duckdns.org"
+    }
+   ]
+  },
+  {
+   "id": "6aa18179c7eb1a5f0426ed7a",
+   "name": "Grand Theft Auto VI hype leads to malware",
+   "malware_families": [
+    "njRAT",
+    "Njw0rm",
+    "LV",
+    "Bladabindi",
+    "DCRAT",
+    "Mercurial Grabber",
+    "Chaos"
+   ],
+   "adversary": "",
+   "indicators": [
+    {
+     "type": "FileHash-MD5",
+     "indicator": "ea991bc9334b36a6b958f564ee716776"
+    },
+    {
+     "type": "FileHash-MD5",
+     "indicator": "0e39e8d7b641bcda4376ebbfeff7b12e"
+    },
+    {
+     "type": "FileHash-MD5",
+     "indicator": "15eca4a3f7350423cf4db0b4c30d1968"
+    }
+   ]
+  },
+  {
+   "id": "6a5dec09c0c4b7d2a00d7b2c",
+   "name": "Unpacking \"Cruciferra\": An Analysis of a Sophisticated Crypter Service",
+   "malware_families": [
+    "Cruciferra",
+    "zgRAT",
+    "AgentTesla",
+    "AsyncRAT",
+    "XLoader",
+    "XWorm",
+    "Phantom Stealer",
+    "Formbook",
+    "Remcos",
+    "DarkCloud Stealer",
+    "DCRAT",
+    "Snake Keylogger",
+    "ValleyRAT",
+    "Winos4.0",
+    "AdaptixC2"
+   ],
+   "adversary": "TA4922",
+   "indicators": [
+    {
+     "type": "FileHash-SHA256",
+     "indicator": "09bedbf7a41e0f8dabe4f41d331db58373ce15b2e9204540873a1884f38bdde1"
+    },
+    {
+     "type": "domain",
+     "indicator": "gatuso.duckdns.org"
+    },
+    {
+     "type": "FileHash-MD5",
+     "indicator": "4f1773a1228e2c009cbcf61e9e550e01"
+    }
+   ]
+  },
+  {
+   "id": "6a7deb5d13e63e6a0ff237b2",
+   "name": "Illegal Streaming Fronts a $7M Dropcatch Domain Operation",
+   "malware_families": [
+    "Quasar RAT",
+    "AsyncRAT",
+    "DCRat",
+    "NanoCore",
+    "Remcos",
+    "njRAT",
+    "Njw0rm",
+    "LV",
+    "Bladabindi",
+    "HiddenTear"
+   ],
+   "adversary": "Sable Squirrel",
+   "indicators": [
+    {
+     "type": "domain",
+     "indicator": "xoilacz.com"
+    },
+    {
+     "type": "domain",
+     "indicator": "bind.bestresulttostart.com"
+    },
+    {
+     "type": "domain",
+     "indicator": "colascore.com"
+    }
+   ]
+  },
+  {
+   "id": "6a3e75975494e990e7421b4d",
+   "name": "Operation DragonReturn: China-Nexus Cyber Espionage Campaign Targeting Govt. of India/MoF Tax Infras",
+   "malware_families": [
+    "DcRAT"
+   ],
+   "adversary": "Void Arachne",
+   "indicators": [
+    {
+     "type": "FileHash-MD5",
+     "indicator": "7ec462f138432f4da43d942488d3d428"
+    },
+    {
+     "type": "FileHash-MD5",
+     "indicator": "b26c01dfcc0cdcb30f4a9058f880fb80"
+    },
+    {
+     "type": "FileHash-MD5",
+     "indicator": "dda082a12bb43eb34b9b37bf9e62d5f0"
+    }
+   ]
+  }
+ ],
+ "dcrat_stored": "DcRat",
+ "qilin_pulses": [
+  {
+   "id": "6ae185cf23690a9648c6f503",
+   "name": "Inside Qilin ransomware: ESXi attacks, affiliate networks and double extortion",
+   "malware_families": [
+    "Qilin",
+    "Agenda"
+   ],
+   "adversary": "qilin",
+   "indicators": [
+    {
+     "type": "domain",
+     "indicator": "wikileaks2.site"
+    },
+    {
+     "type": "FileHash-MD5",
+     "indicator": "2c36a2a36a747ee8e1393724c2558b14"
+    },
+    {
+     "type": "FileHash-MD5",
+     "indicator": "40cbef44d0ac78fae7c23803b0873cbe"
+    }
+   ]
+  },
+  {
+   "id": "6a90b73a3cf4e349584c8d6d",
+   "name": "Attacks on AI Infrastructure: 90-Day Honeypot Telemetry",
+   "malware_families": [
+    "XMRig"
+   ],
+   "adversary": "Qilin",
+   "indicators": [
+    {
+     "type": "CVE",
+     "indicator": "CVE-2026-48710"
+    },
+    {
+     "type": "CVE",
+     "indicator": "CVE-2026-59822"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://185.62.1.8/mon/mon.zip'"
+    }
+   ]
+  }
+ ],
+ "qilin_stored_actor": "qilin",
+ "aurora_pulse": {
+  "id": "6ae386434a2934ca4f48754d",
+  "name": "Aurora ransomware targets ESXi abuses Cursor Agent for exploitation",
+  "malware_families": [
+   "Hydraq",
+   "Roarur",
+   "MdmBot",
+   "HomeUnix",
+   "Homux",
+   "HidraQ",
+   "HydraQ",
+   "McRat",
+   "Aurora",
+   "9002 RAT"
+  ],
+  "adversary": "",
+  "indicators": [
+   {
+    "type": "IPv4",
+    "indicator": "146.19.125.36"
+   },
+   {
+    "type": "domain",
+    "indicator": "ijexszhscln27nl263lmcd7tx3jttkhm4wjhd4e3y6r4csdbfyeprvid.onion"
+   },
+   {
+    "type": "URL",
+    "indicator": "http://ijexszhscln27nl263lmcd7tx3jttkhm4wjhd4e3y6r4csdbfyeprvid.onion"
+   },
+   {
+    "type": "IPv4",
+    "indicator": "81.177.215.15"
+   },
+   {
+    "type": "FileHash-SHA256",
+    "indicator": "a4af136d159a8eb96b54924fa80355ca52874913301300f55af7d67ae97edcfe"
+   },
+   {
+    "type": "IPv4",
+    "indicator": "89.106.83.49"
+   },
+   {
+    "type": "FileHash-MD5",
+    "indicator": "a607384ce68144f2061a8b30cc65a6b8"
+   },
+   {
+    "type": "IPv4",
+    "indicator": "157.173.29.133"
+   },
+   {
+    "type": "IPv4",
+    "indicator": "23.246.128.3"
+   },
+   {
+    "type": "IPv4",
+    "indicator": "45.142.31.17"
+   },
+   {
+    "type": "IPv4",
+    "indicator": "93.157.139.115"
+   },
+   {
+    "type": "IPv4",
+    "indicator": "93.157.139.123"
+   },
+   {
+    "type": "domain",
+    "indicator": "exposedrecords.io"
+   }
+  ]
+ },
+ "url_pulses": [
+  {
+   "id": "5d8dcf197ec3aea4d3e338df",
+   "name": "Magecarts fifth team began using KPOT for stealing activities",
+   "malware_families": [
+    "KPOT Stealer"
+   ],
+   "adversary": "Magecart",
+   "indicators": [
+    {
+     "type": "URL",
+     "indicator": "http://icherryls.com/exec.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://icherryls.com/taskid.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://2ndpub.com/taskid.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://2ndpub.com/taskmg.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://inewsmvo.com/taskhs.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://inewsmvo.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://setseta.com/taskis.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://k0j8h7f6d5s4.com/tasks.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://setseta.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://setseta.com//set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://setseta.com//taskis.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://setseta.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://setseta.com/tasks1.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://setseta.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://setseta.com//set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://setseta.com//taskis.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://kaiwachis.ug/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://kaiwachis.ug/NShnObEA4XwtlDCC/login.php"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://kaiwachis.ug/nshnobea4xwtldcc/gate.php"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://1stpubs.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://1stpubs.com/cgi-sys/suspendedpage.cgi"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://1stpubs.com/taskhs.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://1stpubs.com/tasks.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://icherryls.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://icherryls.com/msa.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://www.icherryls.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://www.icherryls.com/1.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3prokladkaeu.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3prokladkaeu.com/cgi-sys/suspendedpage.cgi"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://d3f4.com.hk/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://d3f4.com.hk/OfJ3qDlVoGBRGjYK/conf.php"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://d3f4.com.hk/OfJ3qDlVoGBRGjYK/config.php"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://qposhgames.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://qposhgames.com/set1.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://qposhgames.com/taskis.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://qposhgames.com/tasks.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3eueu.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://2ndpub.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://2ndpub.com/taskidd.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://2ndpub.com/taskis.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://2ndpub.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://commbank.detailsconfirm.in/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://j5h4f9b6.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://j5h4f9b6.com/taskid.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://inewsmvo.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://inewsmvo.com/X76kw.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://k0j8h7f6d5s4.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://k0j8h7f6d5s4.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://k0j8h7f6d5s4.com/taskid.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://k0j8h7f6d5s4.com/taskis.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3pubss.com/"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3pubss.com/builds.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3pubss.com/taskhs.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3pubss.com/tasks.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3eueu.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://D3f4.com.hk/OfJ3qDlVoGBRGjYK/conf.php"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://Setseta.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://Inewsmvo.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3prokladkaeu.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://Commbank.detailsconfirm.in/204/js/main2.js"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://K0j8h7f6d5s4.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://Kaiwachis.ug/NShnObEA4XwtlDCC/gate.php"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3prokladkaeu.com/taskis.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://Qposhgames.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://Maper.info/XGu48"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://2ndpub.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://Icherryls.com/exec.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://35.246.189.253/gate/log.php"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://1stpubs.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://J5h4f9b6.com/set.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://3pubss.com/set.exe"
+    }
+   ]
+  },
+  {
+   "id": "67f3aae3b4d4fbbfe08e7839",
+   "name": "Unveiling EncryptHub: Analysis of a multi-stage malware campaign",
+   "malware_families": [
+    "Kematian Stealer",
+    "Rhadamanthys",
+    "EncryptRAT"
+   ],
+   "adversary": "Larva-208",
+   "indicators": [
+    {
+     "type": "URL",
+     "indicator": "http://31.41.244.11/files/5094364719/WClchuE.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://185.215.113.39/files/5094364719/pcuy9xE.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://185.215.113.97/files/5094364719/LR8QUOU.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://31.41.244.11/files/5094364719/rrfd0ev.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://encrypthub.us/encrypthub/ram/"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://encrypthub.us/encrypthub/ram/ram.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://185.215.113.39/files/5094364719/7GVy9sB.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://185.215.113.39/files/5094364719/RNsgUnN.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://185.215.113.39/files/5094364719/fpEu4ir.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://31.41.244.11/files/5094364719/RRFd0ev.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://31.41.244.11/files/5094364719/T5NHWKA.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://31.41.244.11/files/5094364719/wVjWGck.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://31.41.244.11/files/5094364719/wclchue.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://31.41.244.11/files/5094364719/wvjwgck.ps1"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://85.234.100.177/b97c5970b3a1f0ccc/iwbsn37q.xl2a8"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://encrypthub.us/encrypthub/fickle/payload.xn--ps1-to0a"
+    },
+    {
+     "type": "URL",
+     "indicator": "https://encrypthub.us/encrypthub/ram/ram.exe"
+    }
+   ]
+  },
+  {
+   "id": "679a2613007f9da5db46eb5f",
+   "name": "Phorpiex - Downloader Delivering Ransomware",
+   "malware_families": [
+    "Phorpiex",
+    "TWIZT"
+   ],
+   "adversary": "",
+   "indicators": [
+    {
+     "type": "URL",
+     "indicator": "http://twizt.net/Installed"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://193.233.132.177/lbbb.exe"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://twizt.net"
+    },
+    {
+     "type": "URL",
+     "indicator": "http://twizt.net/installed"
+    }
+   ]
+  }
+ ],
+ "defanged_url": "https://bashupload.com/ucipm/sent_kill[.]zip",
+ "defanged_url_twin": "https://bashupload.com/uCiPm/SENT_Kill.zip",
+ "defanged_url_pulse": "6389edf4071ec7c595fc8204"
+}

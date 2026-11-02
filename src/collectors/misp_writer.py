@@ -973,19 +973,6 @@ def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any], written_aft
     return True
 
 
-def _dedup_key(attr_type: Any, value: Any) -> Tuple[Any, Any]:
-    """``(type, value)`` key the dedup compares (2026-10-21).
-
-    A ``text`` value that reads as an ATT&CK entry is keyed in its current ``<id> - <name>`` form, so
-    an ``<id>: <name>`` value (the form MISPWriter wrote before 2026-10-20) counts as present. Any
-    other attribute keeps its exact ``(type, value)``. Not used by
-    ``_attribute_match_key``: a pushed value is confirmed against what MISP stored for it, exactly.
-    """
-    if attr_type == "text":
-        return (attr_type, attack_value_key(value))
-    return (attr_type, value)
-
-
 # 2026-11: the attribute types whose value MISP changes in case on save (MISP 2.5,
 # ``AttributeValidationTool::modifyBeforeValidation``): hashes and other fingerprints, host names,
 # domains, e-mail addresses, IP addresses (an IPv6 address is written in lower case), MAC addresses,
@@ -1036,6 +1023,44 @@ def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     if not value_norm:
         return None
     return (type_norm, value_norm)
+
+
+# 2026-11: how many case variants the ``[CASE-VARIANT]`` line of a push names.
+_CASE_VARIANT_LOG_SAMPLE = 5
+
+
+def _within_push_key(attribute: Any) -> Tuple[str, str]:
+    """``(type, value)`` key of the dedup within one push (2026-11): ``_attribute_match_key``'s rule, so
+    two attributes MISP holds as one value (surrounding whitespace, and the case of
+    ``_CASE_NORMALISED_TYPES``) are pushed once. An attribute without a type or a value keeps its exact
+    ``(type, value)``."""
+    key = _attribute_match_key(attribute)
+    if key is not None:
+        return key
+    if not isinstance(attribute, dict):
+        return ("", str(attribute))
+    return (str(attribute.get("type")), str(attribute.get("value")))
+
+
+def _dedup_key(attr_type: Any, value: Any) -> Tuple[str, Any]:
+    """``(type, value)`` key of the duplicate check against what MISP holds: the keys of the existing
+    attributes (per event, across the source's events, a caller's ``known_source_keys``), the index of
+    stored copies, and the pushed attribute looked up in both (the refresh of a re-reported indicator).
+
+    2026-11: compared as MISP compares a value with the one it stores, the rule of the dedup within the
+    push (``_within_push_key``): surrounding whitespace ignored, and case for ``_CASE_NORMALISED_TYPES``.
+    MISP holds a hash sent as ``ABC…`` as ``abc…``, so a re-reported ``ABC…`` is the stored copy: present,
+    and refreshed when due. Compared exactly, it was pushed again on every run and its copy never
+    refreshed, and a later ``abc…`` the within-push dedup dropped took the matching spelling with it. Any
+    other type (URLs, names, text) keeps its case. 2026-10-21: a ``text`` value that reads as an ATT&CK
+    entry is keyed in its current ``<id> - <name>`` form, so an ``<id>: <name>`` value (the form
+    MISPWriter wrote before 2026-10-20) counts as present. Not used by ``_attribute_match_key``: a
+    pushed value is confirmed against what MISP stored for it.
+    """
+    key = _within_push_key({"type": attr_type, "value": value})
+    if key[0] == "text":
+        return (key[0], attack_value_key(key[1]))
+    return key
 
 
 def _iso_epoch(raw: Any) -> Optional[float]:
@@ -1667,7 +1692,8 @@ class MISPWriter:
         it is set to the ``StoredCopy`` MISP wrote last (uuid, ``timestamp``, ``first_seen``,
         ``last_seen``). The rows the listing already reads carry these fields and their event's
         ``info``, so this adds no request, and only the keys asked for are kept: memory grows with
-        the push, not with the source.
+        the push, not with the source. 2026-11: the keys of both, the returned set and ``stored_copy_of``,
+        are ``_dedup_key``s (as MISP compares values), so a copy stored as ``abc…`` answers ``ABC…``.
 
         2026-10 (event lookup after the cross-event check): ``listing_complete`` receives
         ``{tag: True}`` when the listing read the source's attributes up to MISP's last (short)
@@ -1810,8 +1836,8 @@ class MISPWriter:
                 t = a.get("type")
                 v = a.get("value")
                 if t is not None and v is not None and str(v).strip():
-                    key = (str(t), str(v))
-                    keys.add(_dedup_key(*key))
+                    key = _dedup_key(str(t), str(v))
+                    keys.add(key)
                     if stored_copy_of is not None and key in stored_copy_of:
                         _note_stored_copy(stored_copy_of, key, a)
             if len(attrs) < page_limit:
@@ -3371,7 +3397,7 @@ class MISPWriter:
         # conversion reaches neither the event lookup nor MISP.
         grouped: Dict[Tuple[str, str], List[Dict]] = {}
         # 2026-10: (type, value) of the indicators each source reports in this push — the
-        # candidates for a last_seen refresh when MISP already holds them.
+        # candidates for a last_seen refresh when MISP already holds them. 2026-11: keyed by ``_dedup_key``.
         reported_indicators: Dict[str, set] = {}
         # 2026-10: per source, the reasons items could not be converted to a MISP attribute and
         # how many items each reason dropped, and the number of items each source gave. A source's
@@ -3381,7 +3407,8 @@ class MISPWriter:
 
         # 2026-10: (type, value) → positions in *items*, to name the items of a failed batch; per
         # source, the positions of the items no attribute could be built from, listed as unstored
-        # when the source's drop is systemic.
+        # when the source's drop is systemic. 2026-11: keyed as the dedup within the push keys
+        # (``_within_push_key``), so the item of a variant it drops is unstored with the attribute kept.
         item_positions_by_key: Dict[Tuple[Any, Any], List[int]] = {}
         not_converted_positions: Dict[str, List[int]] = {}
         unstored_positions: set = set()
@@ -3389,7 +3416,7 @@ class MISPWriter:
         def _note_unstored(attrs: List[Dict]) -> None:
             for a in attrs:
                 if _value_is_storable(a):
-                    unstored_positions.update(item_positions_by_key.get((a.get("type"), a.get("value")), ()))
+                    unstored_positions.update(item_positions_by_key.get(_within_push_key(a), ()))
 
         for item_position, item in enumerate(items):
             source = item.get("tag", "unknown")
@@ -3429,9 +3456,9 @@ class MISPWriter:
                 continue
 
             grouped.setdefault(key, []).append(attr)
-            item_positions_by_key.setdefault((attr.get("type"), attr.get("value")), []).append(item_position)
+            item_positions_by_key.setdefault(_within_push_key(attr), []).append(item_position)
             if kind == "indicator":
-                reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
+                reported_indicators.setdefault(source, set()).add(_dedup_key(attr.get("type"), attr.get("value")))
 
         not_converted_ct = 0
         # 2026-10: the dropped items of the sources for which the drop is systemic in this push;
@@ -3478,7 +3505,7 @@ class MISPWriter:
                 _lookup = stored_copies_by_tag.setdefault(self.SOURCE_TAGS.get(_source, f"source:{_source}"), {})
                 for _key in _keys:
                     _lookup.setdefault(_key, None)
-        # (type, value) → (the stored copy to edit, last_seen of the re-reported item)
+        # ``_dedup_key`` → (the stored copy to edit, last_seen of the re-reported item)
         refresh_due: Dict[Tuple[str, str], Tuple[StoredCopy, Optional[str]]] = {}
 
         # Resolve events + prefetch existing (type, value); build work queue (post-filter batch counts).
@@ -3519,10 +3546,13 @@ class MISPWriter:
             _copies = stored_copies_by_tag.get(source_tag)
             if not _copies or refresh_days <= 0:
                 return
+            # 2026-11: looked up by ``_dedup_key``, the key the existing-attribute check skipped it by, so a
+            # pushed ``ABC…`` finds the copy MISP stored as ``abc…``; the edit names that copy's uuid.
             for a in candidates:
-                _copy = _copies.get((a.get("type"), a.get("value")))
+                _key = _dedup_key(a.get("type"), a.get("value"))
+                _copy = _copies.get(_key)
                 if _copy is not None and _copy.written < refresh_cutoff:
-                    refresh_due[(a.get("type"), a.get("value"))] = (_copy, a.get("last_seen"))
+                    refresh_due[_key] = (_copy, a.get("last_seen"))
 
         def _cross_event_note(cross_event_keys: set, checked_first: bool) -> str:
             # Says why the cross-event count of the skip line may be 0: a bare "0 cross-event" did
@@ -3538,14 +3568,35 @@ class MISPWriter:
             return "cross-event PR-F7 active"
 
         for (source, date), attributes in grouped.items():
-            # Deduplicate attributes by value
-            seen = set()
+            # Deduplicate attributes by value. 2026-11: compared as MISP compares a pushed attribute with the
+            # value it stores (``_within_push_key``): whitespace, and the case of the types whose case MISP
+            # changes on save. The first attribute is pushed; a later one that differs from it only so is
+            # logged, because its comment and tags (an OTX item's report ids) are not merged into the first.
+            seen: Dict[Tuple[str, str], Dict] = {}
             unique_attrs = []
+            variants: List[Tuple[Any, Any, Any]] = []
             for attr in attributes:
-                key = f"{attr['type']}:{attr['value']}"
-                if key not in seen:
-                    seen.add(key)
+                key = _within_push_key(attr)
+                kept = seen.get(key)
+                if kept is None:
+                    seen[key] = attr
                     unique_attrs.append(attr)
+                elif (kept.get("type"), kept.get("value")) != (attr.get("type"), attr.get("value")):
+                    variants.append((attr.get("type"), attr.get("value"), kept.get("value")))
+            if variants:
+                logger.warning(
+                    "[CASE-VARIANT] MISP push %s (%s): %d attribute(s) not pushed, each the same value as an attribute "
+                    "earlier in this push but for case or surrounding whitespace, which MISP stores as one value; "
+                    "their comments and tags are not merged into the attribute pushed (first %d: %s)",
+                    source,
+                    date,
+                    len(variants),
+                    min(len(variants), _CASE_VARIANT_LOG_SAMPLE),
+                    "; ".join(
+                        f"{t} {dropped!r} (pushed: {pushed!r})"
+                        for t, dropped, pushed in variants[:_CASE_VARIANT_LOG_SAMPLE]
+                    ),
+                )
 
             # PR-F7: the cache key is the RESOLVED ``source_tag`` — not the raw ``source``
             # string. Two sources can share a tag via the registry's alias
@@ -3556,7 +3607,8 @@ class MISPWriter:
             source_tag = self.SOURCE_TAGS.get(source, f"source:{source}")
             if source_tag not in cross_event_cache:
                 if known_source_keys is not None and source_tag in known_source_keys:
-                    cross_event_cache[source_tag] = set(known_source_keys[source_tag])
+                    # 2026-11: keyed as the check compares (``_dedup_key``); NVD and KEV give upper-case CVE ids.
+                    cross_event_cache[source_tag] = {_dedup_key(t, v) for t, v in known_source_keys[source_tag]}
                     cross_event_complete[source_tag] = True
                 else:
                     cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(
