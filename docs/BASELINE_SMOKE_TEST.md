@@ -85,7 +85,7 @@ python src/run_pipeline.py --baseline --baseline-days 7
 python src/run_pipeline.py --baseline --fresh-baseline --baseline-days 7
 ```
 
-> **For a smoke test of the baseline:** Option A or B, or `edgeguard fresh-baseline --days 7` on the Compose install — it triggers the `edgeguard_baseline` DAG (the path the hosted pipeline runs), enforces the backup-timestamp gate, and is what `scripts/verify_fresh_baseline.py` is written for. The in-process `run_pipeline.py` commands above serve development only.
+> **For a smoke test of the baseline:** Option A or B, or `edgeguard fresh-baseline --days 7` (through `docker compose exec` on the Compose host, through the Airflow REST API without it) — it triggers the `edgeguard_baseline` DAG (the path the hosted pipeline runs), enforces the backup-timestamp gate, and is what `scripts/verify_fresh_baseline.py` is written for. The in-process `run_pipeline.py` commands above serve development only.
 
 On a 7-day window the acceptance script reports the CVE-properties check as *informational*: NVD assigns reference tags and CPE configurations weeks after publication, so day-old CVEs legitimately lack them.
 
@@ -101,10 +101,11 @@ Requires MISP/Neo4j (and API keys) as for a normal run.
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `edgeguard fresh-baseline` for a smoke run also without Compose (it triggers through the Airflow REST API there).
 - 2026-11-01 — A smoke run goes through the `edgeguard_baseline` DAG on every install; Option B covers installs without Docker, with a run configuration for `airflow dags trigger`; Option C (`run_pipeline.py`, offered as the route without Airflow) is development only and builds a reduced graph. The fresh trigger of Option B states where its backup gate reads `EDGEGUARD_LAST_BACKUP_AT`.
 - 2026-10-23 — The reading order points to SETUP_GUIDE.md; the README section it named was removed.
 - 2026-10-17 — Restated as a guide to the current behaviour, with the change history moved here.

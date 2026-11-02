@@ -611,7 +611,7 @@ Each entry: symptom → detection signal → remediation.
 - **Recovery.**
   1. **Metadata database first.** When the `metadatabase` component is unhealthy, the API server cannot read the metadata database, and the scheduler is reported unhealthy too. Restore the database first (`docker compose ps airflow_postgres`, `docker compose logs airflow_postgres`): `airflow standalone` initialises the database before it starts any component, so Airflow does not start while the database is down.
   2. **A task still running.** Check whether a task of the run is still running: the Airflow UI (Grid view), or `docker compose exec airflow airflow tasks states-for-dag-run <dag_id> <run_id>`. A restart stops it, and the new scheduler resets it, so it runs again from its start (for `full_neo4j_sync`, hours of the run's budget). When one is running and the run's time allows, let it end first.
-  3. **Restart.** `docker compose restart airflow` (bare metal: stop and start `airflow standalone`). The new scheduler takes over the DAG runs in progress: tasks that finished are not run again (a baseline does not repeat `baseline_clean`), and the next tasks start. Do not trigger the DAG again and do not clear the run. Do not pause the DAG either: the restarted scheduler starts no task of a paused DAG's run until the DAG is resumed. The alerts clear once the new scheduler heartbeats.
+  3. **Restart.** `docker compose restart airflow` (bare metal: stop and start `airflow standalone`). The new scheduler takes over the DAG runs in progress: tasks that finished are not run again (a baseline does not repeat `baseline_clean`), and the next tasks start. Do not trigger the DAG again and do not clear the run; `edgeguard baseline` and `edgeguard fresh-baseline` refuse to trigger while the scheduler is not healthy or an `edgeguard_baseline` run is queued or running. Do not pause the DAG either: the restarted scheduler starts no task of a paused DAG's run until the DAG is resumed. The alerts clear once the new scheduler heartbeats.
   4. **Triggerer or DAG processor alone** (`EdgeGuardAirflowComponentUnhealthy`, scheduler healthy): a run in progress continues without them, since no EdgeGuard DAG defers a task and the DAG files parsed before stay registered. Restart Airflow when no DAG run is in progress.
 - **Time budget.** A restart does not move the run's start time, so the stalled time counts against its `dagrun_timeout` (32 hours for `edgeguard_baseline`); `edgeguard dag status` shows how long the run has been going.
 - **Prevention.** The Compose stack keeps the metadata database in PostgreSQL (`airflow_postgres`). A bare-metal install should do the same ([AIRFLOW_DAGS.md § Scheduler or triggerer stopped](AIRFLOW_DAGS.md#scheduler-or-triggerer-stopped)); SQLite is for development only, and a SQLite setup should at least append `?timeout=60` to `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, so that a lock waits 60 seconds instead of 5. Check `[13]` of `scripts/preflight_baseline.sh` warns on a SQLite metadata database. EdgeGuard restarts nothing by itself.
@@ -851,8 +851,7 @@ or `edgeguard dag kill --dag-id <dag>`) until none of them has a running run
 
 **A baseline runs through the DAG on every install**, with Docker or
 without it: triggered from the Airflow UI, the API, `airflow dags trigger`
-(the form an install without Docker uses) or the CLI wrappers (Compose
-only), the DAG takes the lock. The in-process
+or the CLI wrappers, the DAG takes the lock. The in-process
 `python src/run_pipeline.py --baseline` takes it too, but it is a
 development path that builds a reduced graph (no ATT&CK tactic, software
 or technique-implementation links, no indicator-malware links or
@@ -936,8 +935,41 @@ Exit non-zero = do NOT launch. Exit zero + green summary = safe to trigger.
 `edgeguard baseline --days N` (additive) and `edgeguard fresh-baseline`
 (destructive — typed confirmation + backup-timestamp gate) trigger the
 same `edgeguard_baseline` DAG; they add safety UX, not a mutex of their
-own, and they run `docker compose exec`, so they work on the Compose
-install only. The `baseline_in_progress.lock` sentinel is held by the DAG
+own. They trigger through `docker compose exec` when the Compose `airflow`
+service runs in the current directory, and through the Airflow REST API
+otherwise (bare metal, or inside the `airflow` container). Before the
+probes, the backup gate and the typed confirmation, and for
+`fresh-baseline` again just before the trigger, they read Airflow's
+health answer and the queued or running `edgeguard_baseline` runs
+through the REST API. On the Compose host, run from the directory of
+`docker-compose.yml`, they need no API credentials: a reading the REST
+API does not give (no `AIRFLOW_API_PASSWORD` in the shell, or no API
+server) is taken in the running `airflow` container with
+`airflow dags list-runs edgeguard_baseline -o json` and
+`airflow jobs check --job-type SchedulerJob`. They exit 2 without
+triggering:
+
+- while the scheduler or the metadata database is not reported healthy,
+  or `airflow jobs check` in the container finds no alive scheduler
+  (the run would stay queued and start, with its wipe, whenever the
+  scheduler returns; recover as in "Airflow scheduler or triggerer
+  stopped" first);
+- while an `edgeguard_baseline` run is queued or running: the DAG has
+  `max_active_runs=1`, so Airflow queues a second trigger, and a second
+  fresh baseline starts when the first run ends and wipes the graph it
+  built. Follow the run with `edgeguard dag status --dag-id
+  edgeguard_baseline`; to replace it, mark it failed first
+  (`edgeguard dag kill --dag-id edgeguard_baseline`);
+- when Airflow's health answer or its run list can be read neither
+  through the REST API (Airflow not reachable at `AIRFLOW_WEBSERVER_URL`,
+  or no `AIRFLOW_API_PASSWORD` in the shell) nor in a running Compose
+  `airflow` service. After checking the Airflow UI,
+  `--skip-airflow-check` triggers anyway; it never overrides an
+  unhealthy scheduler or a pending run.
+
+A trigger that timed out is not repeated: the run may exist, so check
+`edgeguard dag status --dag-id edgeguard_baseline` before triggering
+again. The `baseline_in_progress.lock` sentinel is held by the DAG
 (`baseline_acquire_lock`) and by the in-process
 `python src/run_pipeline.py --baseline` run, a development path that
 builds a reduced graph.
@@ -1424,6 +1456,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Baseline launch path: the `edgeguard baseline` / `fresh-baseline` wrappers refuse to trigger while the scheduler or metadata database is not healthy, while an `edgeguard_baseline` run is queued or running (a second fresh run would wipe the first one's graph), or when Airflow cannot be read (`--skip-airflow-check`), and trigger through the Airflow REST API without a running Compose `airflow` service (they needed Compose); a timed-out trigger is not repeated. On the Compose host they read in the `airflow` container what the REST API does not give, so they need no API credentials there. Scheduler recovery step 3 names the refusal.
 - 2026-11-02 — Failure mode 2: `[STORED-AFTER-5XX]` warnings (a batch MISP stored although it answered HTTP 5xx) are no loss; raise MISP's `memory_limit`.
 - 2026-11-01 — Failure mode 5: the sync's CVE batches (`merge_cves_batch`) and their lines: `_write_cve_batch` at ERROR and `[CVE-BATCH-FALLBACK]` at WARNING (it was an ERROR when the batch writer itself raised), the run summary's count of batches written one CVE at a time, the counter `edgeguard_neo4j_cve_batch_fallback_total{reason}`, a log probe for `[CVE-BATCH-FALLBACK]` and what to do when batches keep falling back (a batch at its transaction timeout counts as `non_retryable` and is handled as in § Neo4j statement timeouts). Neo4j statement timeouts: a CVE batch is one transaction and its `[NEO4J-TIMEOUT]` line names it (a batch at its timeout had logged only the `_write_cve_batch` error).
 - 2026-11-01 — Requesting a full sync, Duration: a full sync of a 730-day MISP has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run. The section had given it as about 6 hours, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs.

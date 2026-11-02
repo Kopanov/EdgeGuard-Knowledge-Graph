@@ -378,8 +378,12 @@ class TestCliCommands:
         args.days = 30
         args.force = False
 
-        with patch("baseline_clean.probe_baseline_state", return_value=unreachable):
+        with (
+            patch("edgeguard._baseline_trigger_gate", return_value=None),
+            patch("baseline_clean.probe_baseline_state", return_value=unreachable) as probe,
+        ):
             ret = edgeguard.cmd_fresh_baseline(args)
+        probe.assert_called_once()
 
         # Exit code 2 = preflight failed (system unhealthy); distinct from
         # exit 1 (user declined).

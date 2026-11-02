@@ -22,8 +22,8 @@ The CLI reads its settings from the environment only; it does not read `.env`.
   export NEO4J_URI=bolt://localhost:7687
   ```
 
-  `MISP_URL` must also be reachable from the host. The Airflow commands (`dag`, the DAG list of `preflight` and `doctor`) need `AIRFLOW_API_PASSWORD` on the host; inside the container the CLI reads the password file the Simple auth manager generates. Without it, `preflight` warns "Could not query DAG list". The same warning appears while Airflow has registered no EdgeGuard DAG yet; `doctor` names that case ("No EdgeGuard DAGs found in Airflow").
-- **Compose host only.** `baseline` and `fresh-baseline` trigger the DAG through `docker compose exec`, so they run on the Compose host, from the repository directory, with the settings exported.
+  `MISP_URL` must also be reachable from the host. The Airflow commands (`dag`, the DAG list of `preflight` and `doctor`) need `AIRFLOW_API_PASSWORD` on the host; inside the container the CLI reads the password file the Simple auth manager generates. Without it, `preflight` warns "Could not query DAG list". The same warning appears while Airflow has registered no EdgeGuard DAG yet; `doctor` names that case ("No EdgeGuard DAGs found in Airflow"). The Airflow check of `baseline` and `fresh-baseline` needs no API credentials on the Compose host ([Baseline triggers](#baseline-triggers)).
+- **Baseline triggers.** `baseline` and `fresh-baseline` trigger the DAG through `docker compose exec` when `docker compose`, run from the current directory, lists the `airflow` service as running (the Compose host, from the repository directory), and through the Airflow REST API otherwise (a bare-metal Airflow, or the CLI inside the `airflow` container), at `AIRFLOW_WEBSERVER_URL` with the API credentials.
 
 Every command accepts `--help`. `edgeguard --update` is a synonym of `edgeguard update`.
 
@@ -74,11 +74,17 @@ Every command accepts `--help`. `edgeguard --update` is a synonym of `edgeguard 
 | `baseline --days N` | Trigger an additive baseline |
 | `fresh-baseline --days N` | Trigger a destructive baseline |
 
+- **Airflow check.** Both commands first read Airflow's health answer and the `edgeguard_baseline` runs that are queued or running, through the REST API at `AIRFLOW_WEBSERVER_URL` (the health answer needs no credentials, the run list needs `AIRFLOW_API_PASSWORD`). On the Compose host (`docker compose`, run from the current directory, lists the `airflow` service as running) a reading the REST API does not give is taken in the `airflow` container, which reads the metadata database itself and needs no API credentials: `airflow dags list-runs edgeguard_baseline -o json` for the runs, and `airflow jobs check --job-type SchedulerJob` for the scheduler (exit 0: a scheduler is alive). The container is not asked once a reading refuses. The commands exit 2 without triggering:
+  - when the scheduler or the metadata database is not reported healthy (the run would stay queued and start, a fresh baseline with its wipe, whenever the scheduler returns); the recovery is printed as by `dag status`, and a triggerer or DAG processor reported unhealthy is only a warning;
+  - when an `edgeguard_baseline` run is queued or running: the DAG has `max_active_runs=1`, so Airflow queues a second run instead of refusing it, and a second fresh baseline starts when the first run ends and wipes the graph it built. The command names the run; `dag status --dag-id edgeguard_baseline` follows it, and `dag kill --dag-id edgeguard_baseline` ends it first when it is to be replaced;
+  - when the `airflow` container answers `airflow jobs check` with "No alive jobs found." (the same refusal as an unhealthy scheduler);
+  - when either answer can be read neither through the REST API (Airflow not reachable at `AIRFLOW_WEBSERVER_URL`, or no API credentials for the run list) nor in a running Compose `airflow` service (no such service in the current directory, or its command failed or gave no answer within 60 seconds), unless `--skip-airflow-check` is given. The flag replaces only a reading that is missing: a scheduler or metadata database reported not healthy, or a queued or running run, still refuses. One flag covers both readings because they come from the same Airflow. It is logged as a warning; check the Airflow UI first.
+- **Trigger.** Through the Airflow REST API the command sends `POST /api/v2/dags/edgeguard_baseline/dagRuns` with `{"logical_date": null, "conf": {...}}` (Airflow 3 requires the `logical_date` key; with `AIRFLOW_API_VERSION=v1`, `{"conf": {...}}`), once. When Airflow does not answer in time the run may have been created: the command says so and does not send the request again; check `dag status --dag-id edgeguard_baseline` before a new trigger (the Airflow check refuses while that run is queued or running). The same holds when `docker compose exec` does not answer within 60 seconds.
 - **`baseline`** triggers the `edgeguard_baseline` DAG with the run configuration `{"baseline_days": N}`; existing data stays and nothing is confirmed. Without `--days`, the window is `EDGEGUARD_BASELINE_DAYS` or 730 days.
-- **`fresh-baseline`** probes Neo4j, MISP and the checkpoints, shows what it would delete, runs the backup gate, asks you to type `FRESH-BASELINE`, and triggers the DAG with `fresh_baseline` set. It exits 2 when a store or the checkpoint file cannot be probed or the backup gate refuses, and 1 when the confirmation does not match.
+- **`fresh-baseline`** checks Airflow, probes Neo4j, MISP and the checkpoints, shows what it would delete, runs the backup gate, asks you to type `FRESH-BASELINE`, checks Airflow again (the prompt may have stayed open), and triggers the DAG with `fresh_baseline` set. It exits 2 when the Airflow check refuses, when a store or the checkpoint file cannot be probed or the backup gate refuses, and 1 when the confirmation does not match.
   - The Neo4j wipe deletes only EdgeGuard-managed nodes; `--wipe-all` deletes every node and adds `"wipe_scope": "all"` to the run configuration.
   - `--skip-backup-check` bypasses the backup gate with a logged warning (the DAG receives `skip_backup_check`); otherwise the run configuration attests that the CLI ran the gate (`backup_check_passed_cli`).
-  - `--force` skips the typed confirmation; the probes still run.
+  - `--force` skips the typed confirmation; the Airflow check and the probes still run.
 
 The run configuration keys are listed in [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md); the procedure is in the README's [Running the 730-day baseline](../README.md#running-the-730-day-baseline) and in [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md).
 
@@ -222,10 +228,11 @@ A baseline, smoke or 730-day, runs through the `edgeguard_baseline` DAG on every
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `baseline` and `fresh-baseline` read Airflow before they trigger and exit 2 while the scheduler or metadata database is not healthy, while an `edgeguard_baseline` run is queued or running, or when Airflow cannot be read (`--skip-airflow-check` for the last case only); `fresh-baseline` checks again after the confirmation. Without a running Compose `airflow` service they trigger through the Airflow REST API (they worked on the Compose host only), and a trigger that timed out is not repeated. On the Compose host the check reads in the `airflow` container what the REST API does not give (`airflow dags list-runs`, `airflow jobs check`), so it needs no API credentials there.
 - 2026-11-01 — `dag status`, `doctor` and `preflight` read the status of Airflow's scheduler, triggerer, DAG processor and metadata database from the health answer (they reported only that the API server answered); `dag status` exits 1 when the scheduler is not healthy; `preflight_baseline.sh` check `[13]`.
 - 2026-11-01 — `run_pipeline.py --baseline` is development only and builds a reduced graph (the module list offered a 730-day run of it, and the section said the DAGs run these steps); `preflight_baseline.sh` assumes `--launch-path=dag` when none is given (it assumed `cli`) and warns on `cli` that the graph is reduced.
 - 2026-10-25 — `preflight_baseline.sh`: both launch paths fail while a scheduled DAG has a running run.

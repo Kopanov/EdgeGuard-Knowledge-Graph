@@ -2,7 +2,7 @@
 EdgeGuard — Airflow REST API client
 ====================================
 Thin wrapper around the Airflow REST API used by the ``edgeguard`` CLI
-(``dag status``, ``dag kill``, ``preflight``, ``doctor``), by the metrics exporter
+(``dag status``, ``dag kill``, ``preflight``, ``doctor``, ``baseline``, ``fresh-baseline``), by the metrics exporter
 (Airflow component health) and by the orphan-process safeguard in ``parent_dag_liveness``.
 
 API versions
@@ -30,8 +30,11 @@ AIRFLOW_API_PASSWORD    Password. When unset, the client reads the password file
                         with an explicit error instead of an unauthenticated request.
 
 Every public function that calls Airflow returns parsed JSON or ``{"error": <message>}``; it
-never raises for transport or authentication failures. ``component_health`` reads the status of the
-scheduler, triggerer, DAG processor and metadata database from a health answer.
+never raises for transport or authentication failures. When Airflow did not answer within the
+request timeout, the error also carries ``"timed_out": True``: the request may have reached Airflow.
+``component_health`` reads the status of the scheduler, triggerer, DAG processor and metadata
+database from a health answer. ``trigger_dag_run`` (used by ``edgeguard baseline`` and
+``edgeguard fresh-baseline`` where no Compose ``airflow`` service runs) creates one DAG run.
 """
 
 import json
@@ -251,7 +254,9 @@ def _request(method: str, path: str, params: Optional[Dict] = None, json_body: O
     except requests.exceptions.ConnectionError:
         return {"error": f"Cannot connect to Airflow at {_base_url()}. Is it running?"}
     except requests.exceptions.Timeout:
-        return {"error": f"Airflow API timed out ({_TIMEOUT}s)."}
+        # A connect timeout is a ConnectionError (above); this one came while Airflow had the request,
+        # so it may have been carried out.
+        return {"error": f"Airflow API timed out ({_TIMEOUT}s).", "timed_out": True}
     except Exception as e:
         return {"error": str(e)}
 
@@ -446,6 +451,20 @@ def list_all_active_dag_runs(
                     run["dag_id"] = dag_id  # ensure dag_id is on each run
                     active.append(run)
     return active
+
+
+def trigger_dag_run(dag_id: str, conf: Dict[str, Any]) -> Dict[str, Any]:
+    """Create one manual run of ``dag_id`` with ``conf``: the new run (``dag_run_id``, ``state``, ...), or
+    ``{"error": ...}``.
+
+    Airflow 3's ``TriggerDAGRunPostBody`` requires the key ``logical_date`` (``null``: the run has no
+    logical date) and refuses unknown keys; Airflow 2's ``v1`` body is ``conf`` alone. The request is
+    sent once; a ``401`` only renews the token first and creates no run. An error with ``timed_out``
+    means Airflow had the request and did not answer in time, so the run may exist: list the DAG's runs
+    before triggering again.
+    """
+    body: Dict[str, Any] = {"logical_date": None, "conf": conf} if _api_version() == "v2" else {"conf": conf}
+    return _post(f"/dags/{quote(dag_id, safe='')}/dagRuns", body)
 
 
 def patch_dag_run_state(dag_id: str, dag_run_id: str, state: str = "failed") -> Dict[str, Any]:
