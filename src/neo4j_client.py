@@ -65,6 +65,7 @@ from node_identity import (  # noqa: E402
     is_placeholder_name,
 )
 from sector_evidence import link_evidence as sector_link_evidence  # noqa: E402  — 2026-10-18
+from sector_labels import SECTOR_LABELLED_NODE_LABELS  # noqa: E402  — 2026-11-02
 
 try:
     from destructive_ops_audit import record_destructive_op
@@ -3035,7 +3036,9 @@ class Neo4jClient:
         list property and are applied with APOC so the label name is dynamic.
 
         This must be called *after* nodes have been merged so that the ``zone``
-        property is already present.
+        property is already present. The sync calls it at its end; campaigns, which
+        ``build_campaign_nodes`` creates after the sync, get theirs from that builder
+        (``sector_labels``).
 
         Returns:
             Number of nodes that received at least one new sector label.
@@ -3047,18 +3050,7 @@ class Neo4jClient:
         # Scope to EdgeGuard-managed node labels only — avoids a full-graph scan
         # (`MATCH (n)`) and prevents accidentally labelling nodes from other
         # applications that share the same Neo4j instance.
-        edgeguard_labels = [
-            "Indicator",
-            "Vulnerability",
-            "Malware",
-            "ThreatActor",
-            "Technique",
-            "Tactic",
-            "Campaign",
-            "Tool",
-            "Source",
-            "CVE",
-        ]
+        edgeguard_labels = SECTOR_LABELLED_NODE_LABELS
         per_label_query = """
         MATCH (n:{label})
         WHERE n.zone IS NOT NULL AND size(n.zone) > 0

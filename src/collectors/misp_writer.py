@@ -1569,6 +1569,8 @@ class MISPWriter:
             # them, failed conversion in one push counts them.
             "items_not_converted": 0,
             "items_not_converted_failed": 0,
+            # Batches MISP answered with HTTP 5xx and stored in full (2026-11-02, ``_stored_after_server_error``).
+            "batches_stored_after_5xx": 0,
         }
         # PR-F6 (Issue #65): per-batch parent-DAG liveness callback.
         # ``None`` = no check (legacy / incremental DAGs); a callable
@@ -2012,7 +2014,15 @@ class MISPWriter:
         Asked by value, 500 at a time (2026-10, to confirm NVD additions MISP's answers did not
         confirm). Raises ``MispTransientError`` / ``MispLookupError`` like ``index_source_attributes``.
         """
-        found: set = set()
+        rows = self._attributes_by_value({"tags": [source_tag], "type": attr_type}, values, f"{attr_type} value(s)")
+        found = {str(r.get("value") or "").strip().upper() for r in rows}
+        found.discard("")
+        return found
+
+    def _attributes_by_value(self, filters: Dict[str, Any], values: Sequence[str], what: str) -> List[Dict[str, Any]]:
+        """The attribute rows ``attributes/restSearch`` answers for *values* under *filters*, asked 500
+        values at a time, 2,000 rows a page. Raises ``MispTransientError`` / ``MispLookupError``."""
+        found: List[Dict[str, Any]] = []
         wanted = [str(v) for v in values if str(v or "").strip()]
         for i in range(0, len(wanted), 500):
             chunk = wanted[i : i + 500]
@@ -2020,15 +2030,8 @@ class MISPWriter:
             while True:
                 response = self._post_with_retries(
                     f"{self.url}/attributes/restSearch",
-                    {
-                        "returnFormat": "json",
-                        "tags": [source_tag],
-                        "type": attr_type,
-                        "value": chunk,
-                        "page": page,
-                        "limit": 2000,
-                    },
-                    context=f"lookup of {len(chunk)} {attr_type} value(s)",
+                    {"returnFormat": "json", **filters, "value": chunk, "page": page, "limit": 2000},
+                    context=f"lookup of {len(chunk)} {what}",
                 )
                 if response.status_code != 200:
                     raise MispLookupError(f"MISP attributes/restSearch by value answered HTTP {response.status_code}")
@@ -2039,12 +2042,45 @@ class MISPWriter:
                 resp = data.get("response", data) if isinstance(data, dict) else data
                 rows = resp.get("Attribute", []) if isinstance(resp, dict) else resp
                 rows = rows if isinstance(rows, list) else [rows]
-                found.update(str(r.get("value") or "").strip().upper() for r in rows if isinstance(r, dict))
+                found.extend(r for r in rows if isinstance(r, dict))
                 if len(rows) < 2000:
                     break
                 page += 1
-        found.discard("")
         return found
+
+    def _stored_after_server_error(self, event_id: str, attributes: List[Dict]) -> Optional[Tuple[int, List[Dict]]]:
+        """Which attributes of a batch MISP stored although it answered the push with HTTP 5xx (2026-11-02).
+
+        MISP answers an event edit with the whole event (``_push_batch``). An event too large for its PHP
+        ``memory_limit`` to hold in that answer is saved first and then fails with HTTP 500, so the status
+        says nothing about the data: on 1 Nov 2026, with 2 GB, every batch pushed to an OTX event past about
+        148,800 attributes answered 500 and was stored, and re-sending it cost four retries and a cooldown.
+        The batch's values are therefore looked up in the event (``attributes/restSearch`` by value, with
+        the lower- and upper-case forms of the types MISP changes in case) and matched as a 200 answer is
+        (``_attribute_match_key``). Returns ``(stored count, unstored attributes)``, or None when the lookup
+        fails (then nothing is known and the batch is retried as before).
+        """
+        values: set = set()
+        for attribute in attributes:
+            value = str(attribute.get("value") or "").strip()
+            if not value:
+                continue
+            values.add(value)
+            if str(attribute.get("type") or "").strip().lower() in _CASE_NORMALISED_TYPES:
+                values.update((value.lower(), value.upper()))
+        try:
+            rows = self._attributes_by_value({"eventid": event_id}, sorted(values), f"value(s) of event {event_id}")
+        except (MispLookupError, *_TRANSIENT_HTTP_ERRORS) as e:
+            logger.warning(
+                "MISP push to event %s: lookup of the batch after the server error failed (%s: %s) — retrying the batch",
+                event_id,
+                type(e).__name__,
+                e,
+            )
+            return None
+        present = {key for key in (_attribute_match_key(r) for r in rows) if key is not None}
+        unstored = [a for a in attributes if _attribute_match_key(a) not in present]
+        return len(attributes) - len(unstored), unstored
 
     def _post_with_retries(self, url: str, payload: Dict[str, Any], *, context: str, attempts: int = 3):
         """POST *payload*; a timeout, connection error, HTTP 429 or 5xx is retried (5 s, then 10 s).
@@ -3455,6 +3491,8 @@ class MISPWriter:
         present_ct = 0
         processed_batches = 0
         start_time = time.time()
+        # 2026-11-02: the batches of this push MISP stored although it answered HTTP 5xx (summary line).
+        stored_after_5xx_before = self.__dict__.get("stats", {}).get("batches_stored_after_5xx", 0)
         # PR-N4 round 2 (Bugbot R2-A): widened from 2-tuple to 4-tuple
         # carrying (source, event_id, existing_attrs_count, attrs).
         # The threading was added in round 1 (F1: stale source) + round 1
@@ -4167,14 +4205,27 @@ class MISPWriter:
                     # contain log-injection sequences). Strip ANSI/control
                     # chars defensively.
                     _safe_event_id = "".join(c for c in str(event_id) if c.isprintable() and c not in ("\r", "\n"))[:64]
+                    # 2026-11-02: what MISP held of the batch after the last 5xx (``_stored_after_server_error``)
+                    # counts as pushed; only the rest failed. Unknown (None, a timeout or a failed lookup):
+                    # the whole batch failed.
+                    stored_after_error = getattr(exc, "stored_after_error", None)
+                    if stored_after_error is not None:
+                        success, unstored = stored_after_error
+                        failed = len(batch) - success
+                        self.stats["attributes_added"] += success
+                        _note_unstored(unstored)
+                    else:
+                        success, failed = 0, len(batch)
+                        _note_unstored(batch)
                     logger.error(
-                        "Batch %s for event %s failed after retries (%s) — counting batch as failed and continuing",
+                        "Batch %s for event %s failed after retries (%s) — %d of %d attribute(s) counted as failed "
+                        "and continuing",
                         processed_batches,
                         _safe_event_id,
                         exc,
+                        failed,
+                        len(batch),
                     )
-                    success, failed = 0, len(batch)
-                    _note_unstored(batch)
                     self.stats["errors"] += 1
                     # PR-N4 round 2 (Cross-Checker #2): instance-scoped
                     # counter persists across push_items calls so a
@@ -4222,10 +4273,16 @@ class MISPWriter:
         reported_note = (
             f"; {reported_only_ct} item(s) not converted, not counted as failed ([CONVERT])" if reported_only_ct else ""
         )
+        stored_after_5xx = self.__dict__.get("stats", {}).get("batches_stored_after_5xx", 0) - stored_after_5xx_before
+        stored_note = (
+            f"; {stored_after_5xx} batch(es) stored although MISP answered HTTP 5xx ([STORED-AFTER-5XX])"
+            if stored_after_5xx
+            else ""
+        )
         if total_success > 0 or total_failed > 0:
             logger.info(
                 f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed{reported_note}"
-                f"{refreshed_note} in {total_elapsed:.1f}s"
+                f"{stored_note}{refreshed_note} in {total_elapsed:.1f}s"
             )
         elif total_items > 0:
             deduplicated = (
@@ -4435,6 +4492,7 @@ class MISPWriter:
                 # terminal failure path (last raise from the decorator) is
                 # handled by the outer caller which counts failed_count.
                 if response.status_code == 429 or response.status_code >= 500:
+                    stored = None
                     if response.status_code == 429:
                         # Rate limited: honour Retry-After (bounded by collector_utils) before the
                         # decorator's exponential backoff retries the batch.
@@ -4446,10 +4504,32 @@ class MISPWriter:
                                 wait,
                             )
                             time.sleep(wait)
-                    raise MispTransientError(
+                    else:
+                        # 2026-11-02: a 5xx can come after the save (``_stored_after_server_error``): a batch
+                        # MISP stored in full is pushed, not sent again.
+                        stored = self._stored_after_server_error(event_id, attributes)
+                        if stored is not None and not stored[1]:
+                            self.stats["attributes_added"] += stored[0]
+                            self.stats["batches_sent"] += 1
+                            self.stats["batches_stored_after_5xx"] = self.stats.get("batches_stored_after_5xx", 0) + 1
+                            logger.warning(
+                                "[STORED-AFTER-5XX] MISP answered HTTP %s for event %s but holds all %d attributes of "
+                                "the batch — counted as pushed, not sent again. MISP saved the batch and then failed "
+                                "building its answer, which lists the whole event: past the size its PHP memory_limit "
+                                "can answer, every batch to this event ends so (docs/MISP_TUNING.md)",
+                                response.status_code,
+                                event_id,
+                                stored[0],
+                            )
+                            return stored[0], skipped_unstorable
+                    error = MispTransientError(
                         f"MISP {response.status_code} pushing batch to event {event_id}",
                         response=response,
                     )
+                    # What MISP holds of the batch after this answer (None: not known), for the count of a
+                    # batch whose retries all fail (``push_items``).
+                    error.stored_after_error = stored
+                    raise error
                 # Other 4xx: permanent validation failure — count once and return.
                 self.stats["errors"] += 1
                 return 0, len(attributes) + skipped_unstorable
@@ -4501,6 +4581,7 @@ class MISPWriter:
             "attributes_unconfirmed": 0,
             "items_not_converted": 0,
             "items_not_converted_failed": 0,
+            "batches_stored_after_5xx": 0,
         }
 
 

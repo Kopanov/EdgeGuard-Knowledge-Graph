@@ -334,7 +334,8 @@ This is the production path from the local graph to the cloud. Producer side
 `$primary_labels` is the list of labels that carry a uuid
 (`node_identity.supported_labels()`, the keys of `_NATURAL_KEYS`). A node can
 also carry secondary sector labels (`:Finance`, `:Healthcare`, …, added by
-`Neo4jClient.apply_sector_labels`), so the delta names the node's primary
+`Neo4jClient.apply_sector_labels`, and on campaigns set by
+`enrichment_jobs.build_campaign_nodes`), so the delta names the node's primary
 label separately from its full label list:
 
 ```cypher
@@ -785,10 +786,11 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Sector labels: campaigns get theirs from `build_campaign_nodes`.
 - 2026-11-01 — `(:CVE)`: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the text named `merge_cve`.
 - 2026-10-23 — The re-stamp recipe states that `clear_neo4j.py --force` deletes the nodes EdgeGuard created (`edgeguard_managed = true`), not every node of the EdgeGuard labels.
 - 2026-10-19 — Recipe 2 seeds on the `CVE` node and takes both links from an indicator, `INDICATES` (named in the same OTX report) and `EXPLOITS` (the indicator's own CVE tag), kept apart by the edge type; it seeded on the `Vulnerability` twin and took `EXPLOITS` only.

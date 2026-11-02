@@ -96,7 +96,16 @@ class TestCampaignBuild:
     def test_step_1_aggregates_the_seen_dates_per_indicator_then_per_campaign(self, monkeypatch):
         import enrichment_jobs
 
-        counts = {"campaigns": 0, "backfilled": 0, "deleted": 0, "names": [], "links": 0, "removed": 0, "pruned": 0}
+        counts = {
+            "campaigns": 0,
+            "backfilled": 0,
+            "deleted": 0,
+            "names": [],
+            "links": 0,
+            "removed": 0,
+            "pruned": 0,
+            "added": 0,  # 2026-11-02: Step 6, the campaigns' sector labels
+        }
         driver, statements, _ = _recording_session(lambda q: {**counts, "count": 0})
         client = MagicMock()
         client.driver = driver

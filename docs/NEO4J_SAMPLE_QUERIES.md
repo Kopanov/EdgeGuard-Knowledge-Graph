@@ -68,7 +68,7 @@ ORDER BY cves DESC
 ```
 
 ### Find healthcare-tagged CVEs
-Sectors are stored on the **`zone`** property (list of strings) at MERGE time. After the post-sync `apply_sector_labels()` call (`Neo4jClient.apply_sector_labels` in `src/neo4j_client.py`, run at the end of every sync; `global` is never a label), nodes ALSO get secondary labels (e.g. `:CVE :Healthcare`). For portable queries — pre or post `apply_sector_labels` — use the `zone` property:
+Sectors are stored on the **`zone`** property (list of strings) at MERGE time. After the post-sync `apply_sector_labels()` call (`Neo4jClient.apply_sector_labels` in `src/neo4j_client.py`, run at the end of every sync; `global` is never a label), nodes ALSO get secondary labels (e.g. `:CVE :Healthcare`); campaigns get theirs when `build_campaign_nodes` builds them, after the sync. For portable queries — pre or post `apply_sector_labels` — use the `zone` property:
 
 ```cypher
 MATCH (c:CVE)
@@ -367,10 +367,11 @@ LIMIT 25
 
 *Save queries to test the prototype*
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Sector labels: campaigns get theirs from `build_campaign_nodes`, after the sync.
 - 2026-11-01 — Label note: the sync writes CVEs in batches (`merge_cves_batch`), each as `merge_cve()` writes it.
 - 2026-10-25 — The shared-event pivot: a source/date past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes continues in `-part<N>` events, so a shared event means the same part of a split day.
 - 2026-10-18 — Sample query: the CVEs named in the same OTX report as an indicator (`INDICATES` to a `CVE`).

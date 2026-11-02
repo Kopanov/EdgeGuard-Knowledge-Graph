@@ -280,7 +280,7 @@ After every sync, nodes are labeled by sector. The `zone` property is always a l
 (:Vulnerability {cve_id: 'CVE-2024-9999', zone: ['global']})   // no :Global label: global is never applied as a label
 ```
 
-`apply_sector_labels` (`Neo4jClient.apply_sector_labels`, run at the end of every sync) adds one secondary label per sector in `zone` (`healthcare` → `:Healthcare`), to the threat-intel labels only (Indicator, CVE, Vulnerability, Malware, ThreatActor, Technique, Tactic, Tool, Campaign, Source); `global` is never a label. Links to the sector itself go to `(:Sector {name})`.
+`apply_sector_labels` (`Neo4jClient.apply_sector_labels`, run at the end of every sync) adds one secondary label per sector in `zone` (`healthcare` → `:Healthcare`), to the threat-intel labels only (Indicator, CVE, Vulnerability, Malware, ThreatActor, Technique, Tactic, Tool, Campaign, Source); `global` is never a label. Campaigns get theirs from the enrichment job `build_campaign_nodes`, which creates them after the sync and recomputes each campaign's `zone` from its active indicators on every run: it adds the labels of the campaign's zones and, on a campaign EdgeGuard created, removes the sector labels its zones no longer give (`src/sector_labels.py`). The acceptance check `sector_labels_follow_zones` fails when an EdgeGuard node lacks the label of one of its sector zones or carries one its zones do not give. Links to the sector itself go to `(:Sector {name})`.
 
 ### Multi-Zone Support
 
@@ -598,10 +598,11 @@ ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Sector labels of campaigns: `build_campaign_nodes` sets them from the campaign's zones (after the 730-day baseline of 2026-11-01 none of 533 campaigns carried one, because the sync labels at its end, before the campaigns exist); acceptance check `sector_labels_follow_zones`.
 - 2026-11-01 — ATT&CK objects of one name: the MITRE collector leaves out a deprecated group or software when an active one has the same lower-cased name (the active ICS `Triton` had been lost to the deprecated Enterprise `TRITON`, and the deprecated ICS `Killdisk` had marked the active `KillDisk` node); an ATT&CK record sets `n.deprecated` either way (it was set only); `ThreatActor` and `Malware` nodes from ATT&CK carry their ATT&CK id as `mitre_id`, and their `SOURCED_FROM` edge and the links built from it cite `mitre_attck:<id>`.
 - 2026-10-25 — `ensure_sources` deletes an EdgeGuard `Source` node keyed by a variant that has no relationship.
 - 2026-10-25 — `r.sources` lists `stix_import` among the canonical ids, and an unregistered name in it is lowercased and stripped (the row said kept as given).

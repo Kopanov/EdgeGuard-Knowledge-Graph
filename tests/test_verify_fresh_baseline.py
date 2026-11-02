@@ -319,6 +319,11 @@ _INDICATOR_CVE_ROW = {
 }
 
 
+# 2026-11-02, check 10n: the counts of the iMac 730-day graph of 1 Nov 2026 once its campaigns carry their labels
+# (the graph as built had the 433 sector-zoned campaigns without; see TestSectorLabelsFollowZones).
+_SECTOR_LABELS_ROW = {"nodes": 433284, "missing_label": 0, "stray_label": 0, "examples": []}
+
+
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
@@ -343,6 +348,9 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     # 2026-10-25: check 13e (campaign seen dates).
     if "AS first_seen_after_members" in s:
         return [dict(_CAMPAIGN_SEEN_DATES_ROW)]
+    # 2026-11-02: check 10n (sector labels follow the zones).
+    if "AS stray_label" in s:
+        return [dict(_SECTOR_LABELS_ROW)]
     if "AS runs_without_evidence" in s:
         return [dict(_CAMPAIGN_EVIDENCE_ROW)]
     if "d.name =~ $suffixed" in s:
@@ -730,7 +738,8 @@ class TestRealBreakageStillFails:
                 [{"edges": 21}]
                 if "apoc.meta.cypher.type(r.sources)" in st and "AS edges" in st
                 else [{"nodes": 11}]
-                if "apoc.meta.cypher.type(n.zone)" in st and "AS nodes" in st
+                # check 10n (2026-11-02) reads n.zone as a list too
+                if "apoc.meta.cypher.type(n.zone)" in st and "AS nodes" in st and "AS stray_label" not in st
                 else rows
             ),
         )
@@ -2569,3 +2578,59 @@ class TestIndicatorCveReportLinks:
         rep = _run(vfb, monkeypatch, override=legacy)
         assert _check(rep, "indicator_cve_report_links")["detail"]["indicates_other_targets"] == 12
         assert rep.failed == []
+
+
+class TestSectorLabelsFollowZones:
+    """Check 10n (2026-11-02): every EdgeGuard node of the labelled kinds carries the sector labels of its
+    zones and none its zones do not give (``sector_labels``). The iMac 730-day graph of 1 Nov 2026 had 433
+    sector-zoned campaigns without a label: the sync labelled before the campaigns were built."""
+
+    # The check's answer on that graph (read-only, 2026-11-02), with its first example.
+    IMAC_ROW = {
+        "nodes": 433284,
+        "missing_label": 433,
+        "stray_label": 0,
+        "examples": [{"label": "Campaign", "missing": ["Energy", "Finance", "Healthcare"], "stray": []}],
+    }
+
+    @staticmethod
+    def _with(row):
+        def override(statement, rows):
+            return [dict(row)] if "AS stray_label" in statement else rows
+
+        return override
+
+    def test_runs_the_shared_query_with_its_parameters(self, vfb, monkeypatch):
+        import sector_labels
+
+        seen = []
+
+        def fake_post(statement, params=None, timeout=180):
+            if "AS stray_label" in statement:
+                seen.append((statement, params))
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        rep = vfb.run_checks(False, False, False, False)
+        assert seen == [(sector_labels.SECTOR_LABELS_CHECK_QUERY, sector_labels.check_params())]
+        assert _check(rep, "sector_labels_follow_zones")["ok"] is True
+
+    def test_campaigns_without_their_labels_fail(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, self._with(self.IMAC_ROW))
+        assert [c["check"] for c in rep.failed] == ["sector_labels_follow_zones"]
+        assert _check(rep, "sector_labels_follow_zones")["detail"]["examples"] == self.IMAC_ROW["examples"]
+
+    def test_a_stray_label_fails(self, vfb, monkeypatch):
+        row = {
+            "nodes": 10,
+            "missing_label": 0,
+            "stray_label": 1,
+            "examples": [{"label": "Campaign", "missing": [], "stray": ["Energy"]}],
+        }
+        rep = _run(vfb, monkeypatch, self._with(row))
+        assert [c["check"] for c in rep.failed] == ["sector_labels_follow_zones"]
+
+    def test_informational_without_zoned_nodes(self, vfb, monkeypatch):
+        row = {"nodes": 0, "missing_label": 0, "stray_label": 0, "examples": []}
+        rep = _run(vfb, monkeypatch, self._with(row))
+        assert _check(rep, "sector_labels_follow_zones")["ok"] is None and rep.failed == []

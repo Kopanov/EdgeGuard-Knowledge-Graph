@@ -96,6 +96,8 @@ class _Session:
                 "runs_removed": 0,
                 "members_removed": 0,
                 "names": [],
+                # 2026-11-02: Step 6, the campaigns' sector labels
+                "added": 0,
             }
         return result
 
