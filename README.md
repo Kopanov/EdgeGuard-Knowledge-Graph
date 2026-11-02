@@ -244,7 +244,7 @@ Open `http://localhost:3000/visualization.html`, enter the API URL (`http://loca
 - **A reachable MISP instance and its API key.** EdgeGuard does not ship MISP; the containers must reach `MISP_URL`. Large baselines need raised PHP and MySQL limits on the MISP server ([docs/MISP_TUNING.md](docs/MISP_TUNING.md)).
 - **Docker with Compose v2** (`docker compose`). The stack runs Neo4j with APOC, Airflow with its PostgreSQL, the metrics service, the REST API and the GraphQL API.
 - **Host memory.** 16 GB is enough only for a short smoke test with lowered memory limits. A 730-day baseline needs the 730-day memory profile ([Steps](#steps), step 1) and about 48 GB of host RAM, more when MISP runs on the same host ([docs/MEMORY_TUNING.md](docs/MEMORY_TUNING.md)).
-- **Host-side tools.** `scripts/preflight_baseline.sh`, `edgeguard baseline`, `edgeguard fresh-baseline` and `edgeguard doctor --memory` run on the Compose host and need Python 3.12 or later with the project installed in the repository's `.venv`. `./install.sh --python` creates it; it starts no container and leaves the running stack as it is.
+- **Host-side tools.** `scripts/preflight_baseline.sh` and `edgeguard doctor --memory` run on the Compose host and need Python 3.12 or later with the project installed in the repository's `.venv`; `edgeguard baseline` and `edgeguard fresh-baseline` run there too, or in the `airflow` container, where they trigger through the Airflow REST API ([docs/CLI.md § Baseline triggers](docs/CLI.md#baseline-triggers)). `./install.sh --python` creates the `.venv`; it starts no container and leaves the running stack as it is.
 
 Without Docker, Python 3.12 or later with Neo4j and APOC works too, with Airflow on a PostgreSQL metadata database: every baseline runs through the `edgeguard_baseline` DAG on that install as well ([docs/SETUP_GUIDE.md § 4](docs/SETUP_GUIDE.md#4-path-b--python--venv-no-docker)); conda and edge devices: [docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md).
 
@@ -256,7 +256,7 @@ cd EdgeGuard-Knowledge-Graph
 ./install.sh
 ```
 
-`./install.sh` checks Docker and Compose v2, creates `.env` from `.env.example` (mode 600), generates the secrets that are blank, records the deployed commit, builds the images, runs `docker compose up -d` and waits for the services to become healthy. The REST and GraphQL services exit at start while `MISP_API_KEY` is empty or the template placeholder: set it, and `MISP_URL` to an address the containers reach, then run `docker compose up -d`.
+`./install.sh` checks Docker and Compose v2, creates `.env` from `.env.example` (mode 600), generates the secrets the [Configure](#configure) table lists as set by `install.sh`, records the deployed commit, builds the images, runs `docker compose up -d` and waits for the services to become healthy. The REST and GraphQL services exit at start while `MISP_API_KEY` is empty or the template placeholder: set it, and `MISP_URL` to an address the containers reach, then run `docker compose up -d`.
 
 ### Configure
 
@@ -358,9 +358,9 @@ The baseline loads about two years of history in one run of the `edgeguard_basel
 The `edgeguard_baseline` DAG holds a lock for the whole run: the `baseline_acquire_lock` task writes `checkpoints/baseline_in_progress.lock`, with the DAG run as holder, before the destructive `baseline_clean` step, and `baseline_release_lock` removes it after a successful run. Every baseline runs through this DAG: `python src/run_pipeline.py` runs the collectors into MISP only and refuses `--baseline` ([docs/CLI.md § Pipeline modules run on their own](docs/CLI.md#pipeline-modules-run-on-their-own)).
 
 - While the lock is held, the five scheduled DAGs skip at task start: a collector task succeeds with `skipped: true` (a green task, reason `baseline_in_progress`), and every writing task of `edgeguard_neo4j_sync` skips.
-- A failed run keeps the lock, so clearing the failed task resumes under it. A refusal of `baseline_clean` before the wipe (a misspelt `fresh_baseline` key, an invalid `wipe_scope`, the backup gate) releases it, so the corrected trigger is not refused.
+- A failed run keeps the lock, so clearing the failed task resumes under it. A failed `baseline_postcheck` names the invariants the graph breaks; clearing it alone checks the same graph again, so clear the task [docs/RUNBOOK.md § 7](docs/RUNBOOK.md#7-baseline-chain-stopped-after-a-failed-step-postcheck) (7d) names for each invariant. A refusal of `baseline_clean` before the wipe (a misspelt `fresh_baseline` key, an invalid `wipe_scope`, the backup gate) releases it, so the corrected trigger is not refused.
 - The lock ends with a successful run, after `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48 hours by default, above the 32-hour run limit) or when the operator removes the file. The scheduled DAGs read the holder's run state through the Airflow REST API and fall back to the file's age.
-- Pausing the scheduled DAGs first is optional; it is recommended before a fresh baseline. Pausing stops new tasks and retries, while a scheduled task that is already running when the lock is taken keeps running to its end (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), and a paused DAG's run stays `running` while tasks of it are left; so before a fresh baseline mark every run the five DAGs still have failed (Airflow UI, or `edgeguard dag kill --dag-id <dag>`) and wait until its task has stopped; preflight check `[5]` fails while one of them has a running run ([docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol), Option A).
+- Pausing the scheduled DAGs first is optional; it is recommended before a fresh baseline. Pausing stops new tasks and retries, while a scheduled task that is already running when the lock is taken keeps running to its end (a `run_neo4j_sync` attempt up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`), and a paused DAG's run stays `running` while tasks of it are left; so before a fresh baseline mark every run the five DAGs still have failed (Airflow UI, or `edgeguard dag kill --dag-id <dag>`) and wait until its task has stopped; check `[5]` of `scripts/preflight_baseline.sh` fails while one of them has a running run ([docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol), Option A).
 
 Full lock semantics: [docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#baseline-day-protocol).
 
@@ -444,7 +444,7 @@ set -a; . ./.env; set +a
 python3 scripts/verify_fresh_baseline.py
 ```
 
-Exit 0 means every mandatory check passed. After a baseline with CISA ICS enabled add `--require-cisa-ics`, and after one that collected OTX add `--require-otx-industries`.
+Exit 0 means every mandatory check passed. Run it while no sync and no `build_relationships` run is in progress: between the two, the checks of the links `build_relationships` builds fail by design ([docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance)). With an opt-in source enabled, add its flag, so that the script fails when that source left no data: `--require-cisa-ics` (CISA ICS), `--require-ics` (ATT&CK for ICS), `--require-malwarebazaar` (MalwareBazaar); after a baseline that collected OTX, add `--require-otx-industries`.
 
 ---
 
@@ -554,7 +554,7 @@ Set a flag in `.env` and run `docker compose up -d airflow`. On an existing grap
 
 - **CI** (GitHub Actions) runs Ruff lint and format checks, Mypy on `src/` and `scripts/`, the unit tests with a 30% coverage floor, the Neo4j integration tests, both Docker image builds with Trivy scans, and `pip-audit`.
 - **Documentation is pinned to the code** by tests: every `EDGEGUARD_*` variable, `src/*.py` path and container name in a `docker` command that the README, CONTRIBUTING or a page directly under `docs/` names must exist ([docs/ARCHITECTURE_FLOW.md](docs/ARCHITECTURE_FLOW.md)), and the README's launch commands and GraphQL example are checked by the test suite.
-- **Acceptance.** `scripts/verify_fresh_baseline.py` checks a loaded graph: the links the writers build from the claims on the nodes (ATT&CK tactics and techniques, sectors) and the share of NVD's non-rejected CVEs with a CVSS sub-node, provenance on every source-built relationship, the sector evidence, the description sources and the indicator aging properties.
+- **Acceptance.** `scripts/verify_fresh_baseline.py` checks a loaded graph, among other things the links the writers build from the claims on the nodes (ATT&CK tactics and techniques, sectors, feed families), the CVE scores and the share of NVD's non-rejected CVEs with a CVSS sub-node, provenance on every source-built relationship, the sector evidence, the campaigns' evidence and seen dates, the description sources and the indicator aging properties. Every check and its pass criterion: [docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance).
 - **Resilience.** Circuit breakers guard the feed fetches and the sync's MISP and Neo4j connection checks; VirusTotal, AbuseIPDB, FIRST EPSS and the collectors' MISP writes have none ([docs/RESILIENCE_CONFIG.md](docs/RESILIENCE_CONFIG.md)). MISP pushes retry with backoff and adapt their batch size to large events.
 - **Versions** are calendar versions (`YYYY.M.D`, [docs/VERSIONING.md](docs/VERSIONING.md)).
 

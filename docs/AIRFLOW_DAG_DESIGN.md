@@ -90,7 +90,7 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Baseline collectors OTX / NVD (unlimited)            | 5 hours each |
 | Baseline collectors CISA / MITRE / Tier 2 feeds      | 2 hours each |
 | Baseline wipe (`baseline_clean`) | 60 minutes |
-| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, whole hours, at most 22; a full sync of a 730-day MISP has to fit the baseline full sync's limit of 6 hours, and the 8 hours are that limit plus a third, because a requested full sync stands until it succeeds; the duration of such a sync with batched CVE writes is to be measured on the next 730-day run) |
+| Neo4j sync (`run_neo4j_sync`; incremental, or full on the first run and on `NEO4J_FULL_SYNC=true`) | 8 hours by default (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, whole hours, at most 22; a full sync of a 730-day MISP has to fit the baseline full sync's limit of 6 hours, and the 8 hours are that limit plus a third, because a requested full sync stands until it succeeds) |
 | Neo4j full sync (baseline) | 6 hours |
 | build_relationships | 5 hours |
 | run_enrichment_jobs | 5 hours |
@@ -433,7 +433,6 @@ full provenance. Nodes carry no `n.first_seen` field.
 | `first_imported_at` | node | Timestamp | When EdgeGuard first imported the node (ON CREATE only — never overwritten) |
 | `last_updated` | node | Timestamp | DB-local refresh timestamp (set on every MERGE) |
 | `confidence_score` | node | Float | 0.0 - 1.0: the highest confidence a source reported; on an `Indicator`, `source_confidence` × the aging factor, at least 0.10 |
-| `validation_status` | node | String | verified, pending, disputed |
 | `imported_at` | edge `SOURCED_FROM` | Timestamp | Per-source DB-local import time |
 | `updated_at` | edge `SOURCED_FROM` | Timestamp | Per-source DB-local refresh time |
 | `source_reported_first_at` | edge `SOURCED_FROM` | Timestamp / NULL | MIN-CASE of source's claimed first observation; NULL when source did not report (honest-NULL principle) |
@@ -517,6 +516,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — The provenance-property table no longer lists `validation_status`, which no code writes or reads; the timeout row no longer names a full-sync measurement still to be made.
 - 2026-11-02 — Campaign nodes: `build_campaign_nodes` sets the campaigns' sector labels.
 - 2026-11-01 — Timeouts: a full sync of a 730-day MISP has to fit the 6 hours of the baseline full sync, and its duration with batched CVE writes is to be measured on the next 730-day run. The table had given it as about 6 hours, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs.
 - 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (tier 2 and the per-source limit gave about 1,130 and 1,100 a day, the rate of the keyless 30-day file); a run after a gap of failed runs can spread over parts.

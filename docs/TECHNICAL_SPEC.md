@@ -149,7 +149,6 @@ Auth:    Configured via environment variables
   aliases: LIST,            // Other names, including a source's suffixed name ("Cobalt Strike - S0154")
   merged_from: LIST,        // ATT&CK-id twins the enrichment job merge_malware_attack_twins folded in (steps 9b / 2d resolve these names to this node)
   malware_types: LIST,      // Types (trojan, ransomware, etc.)
-  family: STRING,           // Malware family
   description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source
   description_source: STRING, // The source of description ("mitre_attck", ...)
   tag: STRING,              // Source tag (provenance — NOT part of UNIQUE constraint)
@@ -158,6 +157,7 @@ Auth:    Configured via environment variables
   confidence_score: FLOAT,  // 0.0-1.0
   first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
   last_updated: DATETIME,   // Last update
+  deprecated: BOOLEAN,      // ATT&CK's status: set and cleared by an ATT&CK record; another source only sets it
   misp_event_ids: LIST      // Accumulated MISP event ids (set, deduped)
 })
 ```
@@ -174,6 +174,7 @@ Auth:    Configured via environment variables
   uses_techniques: LIST,    // MITRE IDs from STIX actor **uses** technique; drives (Actor)-[:EMPLOYS_TECHNIQUE]->(Technique) edges in build_relationships.py. Property name retained as-is (STIX-side contract).
   confidence_score: FLOAT,  // 0.0-1.0
   first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
+  deprecated: BOOLEAN,      // ATT&CK's status: set and cleared by an ATT&CK record; another source only sets it
   last_updated: DATETIME    // Last update
 })
 ```
@@ -207,7 +208,7 @@ Auth:    Configured via environment variables
   attack_domain: STRING,    // enterprise / ics / mobile (default enterprise)
   description: STRING,      // Ranked text, as on Technique
   description_source: STRING,
-  deprecated: BOOLEAN       // Set when ATT&CK deprecated the object
+  deprecated: BOOLEAN       // ATT&CK's status: set and cleared by an ATT&CK record; another source only sets it
 })
 ```
 
@@ -219,7 +220,7 @@ Auth:    Configured via environment variables
   indicator_count: INTEGER, // Active indicators at the last run
   malware_count: INTEGER,   // Member malware at the last run
   first_seen: DATETIME,     // Earliest first seen of its indicators (a source's claim, else its latest report); never moves later
-  last_seen: DATETIME,      // Latest last seen of its indicators (a source's claim, else its latest report); never moves earlier
+  last_seen: DATETIME,      // Latest last seen of its indicators (per source its own date first: the last-seen claim, else its latest report when the source dated it, else the first-seen claim, else the MISP record time); never moves earlier
   zone: LIST,               // Union of the indicators' zones
   active: BOOLEAN,          // false once no indicator linked to it is active
   tlp: STRING               // most restrictive r.tlp of the links it rests on (a curated claim's level); absent when none has one
@@ -246,6 +247,7 @@ Auth:    Configured via environment variables
   uses_techniques: LIST,    // MITRE IDs from STIX uses relationships
   zone: LIST,               // Detected zones
   source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
+  deprecated: BOOLEAN,      // ATT&CK's status: set and cleared by an ATT&CK record; another source only sets it
   confidence_score: FLOAT   // 0.0-1.0
 })
 ```
@@ -871,7 +873,7 @@ as the code builds them):
   "enrichment": {
     "indicator": "<canonical indicator value>",
     "indicator_type": "<graph type: ipv4, ipv6, domain, url, hash, ...>",
-    "known_malware": [{"name": "<malware>", "family": "<family or null>", "malware_types": ["<type>"], "description": "<text or null>"}],
+    "known_malware": [{"name": "<malware>", "family": null, "malware_types": ["<type>"], "description": "<text or null>"}],
     "threat_actors": [{"name": "<actor>", "aliases": ["<alias>"], "description": "<text or null>"}],
     "techniques": [{"mitre_id": "<T####>", "name": "<technique>", "description": "<text or null>"}],
     "cves": [{"cve_id": "<CVE id>", "cvss_score": "<score or null>", "severity": "<severity or null>",
@@ -881,7 +883,7 @@ as the code builds them):
     "users": [],
     "confidence": "<the indicator's confidence_score>",
     "first_seen": "<per source its first-seen claim, else its latest report: the earliest, never after the first import>",
-    "last_updated": "<per source its last-seen claim, else its latest report: the latest; the last update when no source dated it>",
+    "last_updated": "<per source its own date first: the last-seen claim, else its latest report when the source dated it, else the first-seen claim, else the MISP record time; the latest; the last update when no source dated it>",
     "sectors_affected": ["<zone>"],
     "cross_zone_detected": "<true when more than one zone>",
     "recommendations": ["<generated from the fields above>"]
@@ -899,7 +901,9 @@ recommendation for a CVE linked only by the same report says so. The score and
 severity are taken as a pair from one node: the `CVE` node's (a null score with severity `UNKNOWN` when
 the CVE has no CVSS), or the `Vulnerability` node's when no `CVE` node of that id states them. A
 CVE the alert names is listed with `"source": "alert"`, a malware the alert names with the
-description `From alert (not in graph)`. `assets` and `users` stay empty: no code path writes
+description `From alert (not in graph)`. `known_malware[].family` is always null: no writer sets a `family`
+property on `Malware` nodes (the family a feed gives an indicator is `Indicator.malware_family`). `assets` and
+`users` stay empty: no code path writes
 `(Alert)-[:TARGETS]->(Asset)` or `(Alert)-[:INVOLVES_USER]->(User)`. A failed enrichment query is
 reported in `query_metadata.error`; `process_alert` keeps `enriched: true` then, while the read-only
 `enrich_alert_read_only` of the demo answers `enriched: false` ([DEMO.md](DEMO.md)).
@@ -991,7 +995,7 @@ other type is compared as given.
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Events exceeding this attribute count are deferred to end of sync (small events first). `0` = disable. |
 | `EDGEGUARD_MISP_PAGE_SIZE` | `500` | MISP `/events/index` page size used by the **primary** index path in `run_misp_to_neo4j._fetch_edgeguard_events_via_requests_index`. |
 | `EDGEGUARD_MISP_MAX_PAGES` | `100` | MISP `/events/index` page cap on the primary index path. A listing that reaches the cap with a full last page fails the sync run (events beyond the cap were not listed; the DAG keeps its cursor), also when no EdgeGuard event was listed; raise it when the index for the window can exceed `EDGEGUARD_MISP_MAX_PAGES` × `EDGEGUARD_MISP_PAGE_SIZE` rows (50,000 by default). A page that fails after the first raises `_MispFallbackHardError`. |
-| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `172800` (48h) | Cross-host stale-lock TTL for the `baseline_lock` sentinel; 48h gives a 16h buffer above the baseline's 32h `dagrun_timeout`. See `src/baseline_lock.py`. |
+| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `172800` (48h) | Age after which the `baseline_lock` sentinel is pruned when no run state decides: a failed `edgeguard_baseline` run (kept so that it can be resumed), a run whose state the Airflow REST API does not give, or a legacy process sentinel written on another host. 48h gives a 16h buffer above the baseline's 32h `dagrun_timeout`. See `src/baseline_lock.py`. |
 | `EDGEGUARD_API_KEY` | - | Shared secret for the REST and GraphQL data endpoints (`X-API-Key`); required when `EDGEGUARD_ENV` is production (unset or empty counts as production). |
 | `EDGEGUARD_ENV` | - (production) | Environment name; `dev`, `development`, `local`, `staging`, `test` are non-production. Forwarded to every container by `docker-compose.yml`. |
 | `EDGEGUARD_API_HOST` / `EDGEGUARD_API_PORT` / `EDGEGUARD_API_WORKERS` | `127.0.0.1` / `8000` / `1` | REST bind address, port and worker count (compose: `0.0.0.0`, 8000 published on loopback, 2 workers). |
@@ -1024,6 +1028,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Node schema: `Malware` no longer lists `family`, which no writer sets, and `known_malware[].family` of the alert enrichment is null (the schema and the sample showed a family); `deprecated` is listed on `Malware`, `ThreatActor` and `Tool`, and on `Tactic` with its clearing by an ATT&CK record (it was listed set-only on `Tactic`). A campaign's `last_seen` and the enrichment's `last_updated` take per source its own date first, the first-seen claim before the MISP record time (they named the last-seen claim, else the latest report). `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`: the age applies when no run state decides (it was described as a cross-host TTL).
 - 2026-11-02 — Read-side lookup canonicalization: a `url`, and a `scheme://host` value given without a type, is looked up with its scheme and host lower-cased, as the write side now keys a `url`.
 - 2026-11-02 — `ATTRIBUTED_TO`: `match_type='exact'` (Q2) is on no link: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label.
 - 2026-11-02 — `CVE.published` / `last_modified`: a STIX import is no longer named among the records that fill them (the command-line STIX import is removed).

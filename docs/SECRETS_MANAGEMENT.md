@@ -118,6 +118,7 @@ several **infrastructure** secrets — all listed in `.env.example`:
 | `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | Source-truthful timestamp creator-org allow-list (defends against MISP tag impersonation; see [SECURITY_ROADMAP.md](SECURITY_ROADMAP.md)). |
 | `AIRFLOW_API_AUTH_JWT_SECRET` | Airflow 3.x JWT signing key (`[api_auth] jwt_secret`, passed as `AIRFLOW__API_AUTH__JWT_SECRET`), shared by the scheduler and the API server. The option exists from Airflow 3 on; the Airflow 2.x `[webserver] secret_key` maps to `[api] secret_key`, not to this one. |
 | `AIRFLOW_FERNET_KEY` | Airflow Fernet encryption for Variables / Connections. |
+| `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` | Airflow REST API login of the host CLI (`edgeguard dag`, the DAG list of `preflight` and `doctor`, and `baseline` / `fresh-baseline` off the Compose host, which trigger through the REST API). With the password unset, processes inside the Compose `airflow` container read the password file the Simple auth manager of `airflow standalone` generates ([CONFIGURATION.md](CONFIGURATION.md)). |
 | `GRAFANA_ADMIN_PASSWORD` | Grafana admin login (default user is admin). |
 | `PROMETHEUS_ADMIN_PASSWORD` | Placeholder only — nothing in the repository reads it (Prometheus basic auth needs your own web-config or proxy). |
 | `EDGEGUARD_ADMIN_TOKEN` | `/admin/query` endpoint auth (when `EDGEGUARD_ENABLE_ADMIN_QUERY=true`). |
@@ -131,6 +132,7 @@ Generate strong values for all of these except the `PROMETHEUS_ADMIN_PASSWORD` p
 - [ ] No API keys or passwords committed to git.
 - [ ] `MISP_API_KEY` and `NEO4J_PASSWORD` set via environment.
 - [ ] `EDGEGUARD_API_KEY`, `AIRFLOW_API_AUTH_JWT_SECRET`, `AIRFLOW_FERNET_KEY`, `GRAFANA_ADMIN_PASSWORD` set via environment (production).
+- [ ] `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` set in `.env` on a host that runs the CLI against Airflow.
 - [ ] `EDGEGUARD_SSL_VERIFY=true` in production.
 - [ ] Optional keys (`OTX_API_KEY`, `NVD_API_KEY`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`) configured if corresponding collectors are enabled.
 - [ ] `/admin/query` enabled only when needed and protected with `EDGEGUARD_ADMIN_TOKEN` + network controls.
@@ -142,6 +144,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — § 5.1 and the § 6 checklist list the Airflow API credentials of the host CLI (`AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD`), which `edgeguard dag`, `preflight`, `doctor` and the baseline triggers off the Compose host use.
 - 2026-11-02 — § 4: the prototype shell helpers it named are deleted.
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY`: the recognised values (`true`/`1`/`yes`/`on`, `false`/`0`/`no`/`off`, with only ASCII whitespace around the value ignored); any other value keeps TLS verification on with a warning.
 - 2026-10-17 — Corrected the `credentials/api_keys.yaml` format (`KEY=value` lines, read only when `VIRUSTOTAL_API_KEY` is not set in the environment), the production rule for `EDGEGUARD_API_KEY`, the Airflow 3 option behind `AIRFLOW_API_AUTH_JWT_SECRET` and the unread `PROMETHEUS_ADMIN_PASSWORD`; the main text describes current behavior only and the change history is kept here.

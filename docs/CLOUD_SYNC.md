@@ -157,7 +157,10 @@ information available at the time of the MERGE.
 Used by every MISP-derived edge MERGE in the codebase, including:
 
 - All 17 query templates in `Neo4jClient.create_misp_relationships_batch`
-- All 6 standalone `Neo4jClient.create_*_relationship` helpers
+- The 3 standalone `Neo4jClient.create_*_relationship` helpers
+  (`create_indicator_vulnerability_relationship`,
+  `create_indicator_sector_relationship`,
+  `create_vulnerability_sector_relationship`; no pipeline path calls them)
 - All 20 link steps in `src/build_relationships.py`
 - The REFERS_TO bridge in `src/enrichment_jobs.py`
 - The HAS_CVSS_v* edges in `Neo4jClient._merge_cvss_node`
@@ -195,10 +198,12 @@ that builds an edge (where there's no upstream MERGE pass), the uuid
 must be precomputed in Python and injected as a parameter / Cypher CASE
 literal. Three places use this:
 
-- **Sector** auto-CREATE in `create_indicator_sector_relationship` and
-  `create_vulnerability_sector_relationship` — Sector uuid pre-computed
-  via `compute_node_uuid("Sector", {"name": sec})` and passed as
-  `$sector_uuid`.
+- **Sector** auto-CREATE in `create_misp_relationships_batch`, the sync's
+  writer: each `TARGETS` / `AFFECTS` row carries
+  `sector_uuid = compute_node_uuid("Sector", {"name": sec})`; the uncalled
+  helpers `create_indicator_sector_relationship` /
+  `create_vulnerability_sector_relationship` pass `$sector_uuid` the same
+  way.
 - **Sector** auto-CREATE in `build_relationships.py` steps 7a–7d
   (Indicator, ThreatActor and Malware TARGETS; Vulnerability/CVE AFFECTS) —
   the sector uuids are precomputed at module load from `VALID_ZONES` and
@@ -790,6 +795,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Mechanism B lists the three remaining standalone relationship helpers, which no pipeline path calls (it counted six; three were removed with the retired in-process load); Mechanism A names the sync's batch writer, `create_misp_relationships_batch`, as the path that creates Sector nodes (it named the uncalled helpers).
 - 2026-11-02 — Sector labels: campaigns get theirs from `build_campaign_nodes`.
 - 2026-11-01 — `(:CVE)`: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the text named `merge_cve`.
 - 2026-10-23 — The re-stamp recipe states that `clear_neo4j.py --force` deletes the nodes EdgeGuard created (`edgeguard_managed = true`), not every node of the EdgeGuard labels.

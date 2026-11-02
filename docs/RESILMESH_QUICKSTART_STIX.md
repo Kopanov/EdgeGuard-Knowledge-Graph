@@ -252,8 +252,9 @@ the 0–100 scale (`confidence_score` × 100; the source's confidence when the n
 the time the aging rule will retire it if no source reports it again (the basis of its age plus
 `EDGEGUARD_AGING_RETIRE_DAYS`, 730 days by default); a newer report moves it later. The projected value
 uses the current `EDGEGUARD_AGING_RETIRE_DAYS`, so changing that setting changes the `valid_until` of an
-indicator that is not yet retired without a later `modified`. An indicator written before the aging rule
-existed carries no `valid_until`. `revoked` is never set: a retired indicator expires, it is not withdrawn.
+indicator that is not yet retired without a later `modified`. An indicator the aging rule has not evaluated
+(neither `aging_basis` nor `retired_at` set, because EdgeGuard holds no report or import time for it) carries
+no `valid_until`. `revoked` is never set: a retired indicator expires, it is not withdrawn.
 
 ```json
 {
@@ -539,9 +540,11 @@ Notes:
   exactly `limit` objects may have been cut; the response does not say
   so.
 - **ATT&CK ids on groups and malware.** Intrusion-sets and malware carry
-  no `mitre-attack` reference, because the graph's ThreatActor and
-  Malware nodes hold no ATT&CK group or software id (`G…`, `S…`); adding
-  them is a change on the write side.
+  no `mitre-attack` reference: the exporter writes one for an
+  `attack-pattern`, an `x-mitre-tactic` and a `tool` only, although the
+  graph's ThreatActor and Malware nodes from ATT&CK hold their group or
+  software id (`mitre_id`, `G…` / `S…`); adding the reference is a change
+  in the exporter.
 - **Bitcoin addresses.** STIX 2.1 has no Cyber-observable type for a
   bitcoin address, so such an indicator uses the custom pattern
   `[x-edgeguard-observable:value = '…']`: valid under the patterning
@@ -564,10 +567,11 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — ATT&CK ids on groups and malware: the graph's ThreatActor and Malware nodes from ATT&CK hold their id (`mitre_id`), and the missing `mitre-attack` reference is a gap of the exporter (the text said the nodes hold no id). `valid_until`: an indicator the aging rule has not evaluated carries none (the text named indicators written before the rule existed).
 - 2026-10-25 — `x_edgeguard_sources` named as canonical source ids, with a pointer to the list of sources and their variants.
 - 2026-10-21 — A campaign and its `RUNS` / `PART_OF_CAMPAIGN` links carry the most restrictive TLP of the links they rest on (`build_campaign_nodes`): a campaign built on a curated-package claim was exported at the deployment default (TLP:WHITE) while its links named the package's source, claim ids and MISP event.
 - 2026-10-18 — Indicator and CVE bundles carry the `related-to` links between an indicator and the CVEs the graph links to it as named in the same OTX report (`INDICATES`, `otx_pulse`; built per MISP event and OTX report, within the per-report caps).

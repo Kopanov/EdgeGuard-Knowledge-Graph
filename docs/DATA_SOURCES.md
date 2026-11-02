@@ -13,7 +13,7 @@
 | 1 | AlienVault OTX | ~8,000 | ✅ Auto-tagged | Primary IOC source | ✅ Active |
 | 2 | NVD | ~500 | ✅ Auto-tagged | CVE database; carries CISA's SSVC decision points | ✅ Active |
 | 3 | CISA KEV | ~500 | ✅ Auto-tagged | Known exploits | ✅ Active |
-| 4 | MITRE ATT&CK | ~300 | N/A | TTPs & relationships | ✅ Active |
+| 4 | MITRE ATT&CK | the whole ATT&CK bundle whenever it changed (ETag) | N/A | TTPs & relationships | ✅ Active |
 | 5 | VirusTotal | grows by ≤ 400 lookups/day (free-tier budget) | ✅ Auto-tagged | Enrichment of hashes already in MISP (lookups, not a feed) | ✅ Active |
 | 6 | ThreatFox | the IOCs of the last 7 days (7,398 on the 730-day baseline; about 1,100 new per day), ≤ 10,000 per run | ✅ Auto-tagged | Malware IOCs | ✅ Active |
 | 7 | AbuseIPDB | the blacklist: at most one request per run of at most 10,000 addresses (the free plan's maximum per request; 10,000 on the 730-day baseline); 5 blacklist requests per UTC day on the free plan: an answer is reused for the rest of its UTC day, and a 429 fails the task ([COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector)) | ✅ Auto-tagged | IP reputation | ✅ Active |
@@ -183,21 +183,20 @@
 ---
 
 ### 5. MITRE ATT&CK
-**Items:** 500 | **Zone:** N/A (techniques/actors)
+**Items:** the whole ATT&CK bundle whenever it changed: every technique, tactic, group, malware and tool, one item per graph node | **Zone:** N/A
 
 | Attribute | Value |
 |-----------|-------|
 | URL | `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` (per `src/collectors/mitre_collector.py`); with `EDGEGUARD_ENABLE_MITRE_ICS=true` (default off) also `ics-attack/ics-attack.json` — ATT&CK for ICS (97 techniques T08xx, 12 tactics, 14 groups, 23 malware), items stamped `attack_domain: ics`, ICS fetch failure isolated from the Enterprise ingest |
 | Format | STIX 2.1 JSON |
 | Auth | None (public) |
-| Update | Periodic |
+| Update | Daily (`edgeguard_daily` → `collect_mitre`), only when the bundle changed (ETag, `EDGEGUARD_MITRE_CONDITIONAL_GET`); a baseline always downloads it; `EDGEGUARD_INCREMENTAL_LIMIT` does not apply (`EDGEGUARD_MAX_ENTRIES` does when set) |
 | Classification | ❌ N/A - provides relationships |
 
 **What we get:**
-- Techniques (300)
-- Threat Actors (100)
-- Malware (100)
-- **Relationships** — 1,459 TTP edges, typed `EMPLOYS_TECHNIQUE` (Actor→Technique, attribution) or `IMPLEMENTS_TECHNIQUE` (Malware/Tool→Technique, capability)
+- Techniques and tactics
+- Groups (threat actors, with their G ids), malware and tools (with their S ids)
+- **Relationships** — the `uses` relationships as `EMPLOYS_TECHNIQUE` (group → technique, attribution), `IMPLEMENTS_TECHNIQUE` (malware or tool → technique, capability), `USES_MALWARE` and `USES_TOOL` (group → software); the sub-technique hierarchy as `SUBTECHNIQUE_OF` and each technique's tactics as `IN_TACTIC`
 
 **How classified:**
 - N/A - these are TTP entities, not sector-specific
@@ -318,6 +317,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — MITRE ATT&CK (overview row 4, § 5): a run pushes the whole bundle whenever it changed, every technique, tactic, group, malware and tool, one item per graph node, with the G and S ids of groups and software; the daily DAG collects it with an ETag check, and `EDGEGUARD_INCREMENTAL_LIMIT` does not apply; the relationships are listed by type, `USES_MALWARE`, `USES_TOOL`, `SUBTECHNIQUE_OF` and `IN_TACTIC` included (the section gave a periodic update of 500 items, 300 techniques, 100 threat actors and 100 malware, with 1,459 technique edges, and the overview about 300).
 - 2026-11-02 — OTX: the per-run limit counts distinct pulses; a pulse a later page returned again was processed twice and took a slot of the limit.
 - 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (the page gave about 1,130 a day, the rate of the keyless 30-day file). MalwareBazaar: the full export is a v2 export with the Auth-Key (the keyless `/export/csv/full/` answers HTTP 410).
 - 2026-10-25 — URLhaus per-run cap: the ThreatFox count names its baseline (2026-10-13); it pointed to the URLhaus count, which is now the export of 2026-10-24.

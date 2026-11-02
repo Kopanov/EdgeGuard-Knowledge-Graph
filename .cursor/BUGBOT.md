@@ -486,7 +486,7 @@ SET n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_array)
 Flag any `SET n.source = [value]` that discards the accumulated source history.
 
 ### Sector label never applied
-After the sync, `Neo4jClient.apply_sector_labels()` (called once by `run_misp_to_neo4j`) adds the sector labels (`:Finance`, `:Healthcare`, `:Energy`) from each node's `zone` list, one statement per label of its `edgeguard_labels` list:
+After the sync, `Neo4jClient.apply_sector_labels()` (called once by `run_misp_to_neo4j`) adds the sector labels (`:Finance`, `:Healthcare`, `:Energy`) from each node's `zone` list, one statement per label of `SECTOR_LABELLED_NODE_LABELS` (`src/sector_labels.py`):
 ```cypher
 MATCH (n:Indicator)
 WHERE n.zone IS NOT NULL AND size(n.zone) > 0
@@ -495,7 +495,7 @@ WHERE size(sectorLabels) > 0
 CALL apoc.create.addLabels(n, sectorLabels) YIELD node
 RETURN count(DISTINCT node) AS labeled
 ```
-The yielded variable must differ from the bound one. Flag removal of that call, and a new zoned node label missing from `edgeguard_labels`. Without the labels, sector-filtered Cypher queries return empty results.
+The yielded variable must differ from the bound one. Campaigns are built after the sync, so Step 6 of `build_campaign_nodes` (`CAMPAIGN_SECTOR_LABELS_CYPHER`) sets their labels: it adds those of their zones and, on an `edgeguard_managed` campaign only, removes the sector labels its zones no longer give. Flag removal of either call, a new zoned node label missing from `SECTOR_LABELLED_NODE_LABELS` (which the acceptance check `sector_labels_follow_zones` also reads), and a removal of sector labels from a campaign that is not `edgeguard_managed`. Without the labels, sector-filtered Cypher queries return empty results.
 
 ### UNIQUE constraint missing for new node type
 If a new EdgeGuard-owned node label is added, flag a missing `CREATE CONSTRAINT` in `Neo4jClient.create_constraints`. Missing constraints allow race-condition duplicates. Never add a UNIQUE constraint on a partner-owned label (`SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT`: Device, NetworkService, SoftwareVersion, Application, Role, User): such a constraint makes the partner's scanner writes fail, and `create_constraints` drops any such constraint on every run.
@@ -982,6 +982,7 @@ The correct pattern is:
 if self.neo4j.merge_vulnerability(item, ...):
     self.stats["vulnerabilities_synced"] += 1
 ```
+CVEs are written through `merge_cves_batch()` (`_merge_cves`), which returns one outcome per CVE: True, False or the exception `merge_cve` raised. The CVE loops must raise an exception outcome again and count `vulnerabilities_synced` only for True; the `merge_cve()` results `_merge_cves` collects in its fallback are counted by those loops, not where they are collected.
 
 ### Every write result is read inside its retry
 
@@ -1057,6 +1058,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Sector label rule: the labelled kinds are `SECTOR_LABELLED_NODE_LABELS` in `src/sector_labels.py`, and Step 6 of `build_campaign_nodes` labels the campaigns, removing stale labels on `edgeguard_managed` ones only (the rule named the local `edgeguard_labels` list and the sync's call only). Merge return values: the CVE loops check the per-CVE outcomes of `merge_cves_batch()` (the rule named `merge_cve()` only).
 - 2026-11-02 — Architecture: `run_pipeline.py` runs the collectors into MISP only and refuses its baseline and STIX options (it loaded Neo4j through a STIX import); the SCO-labels, substring-matching and merge-return rules no longer name it, and the KEV and `SOURCED_FROM` provenance rules no longer name the reduced CVE record of its STIX import (`refresh_raw_data=False`).
 - 2026-11-02 — Architecture: `run_pipeline.py` is a development path that builds a reduced graph (it was named an optional CLI path); every baseline runs through the `edgeguard_baseline` DAG.
 - 2026-10-25 — MERGE block missing SOURCED_FROM edge: the edge MATCHes the `Source` node by the canonical id (the rule's pattern MERGEd the node); new flags for a statement other than `ensure_sources` that creates a `Source` node and for a `SOURCED_FROM` writer that does not resolve its id with `canonical_source_id`.

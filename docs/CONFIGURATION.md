@@ -42,6 +42,8 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `NEO4J_HTTP_URL` | `http://127.0.0.1:7474` | Neo4j HTTP API of the host scripts |
 | `NEO4J_HTTP_USER_AGENT` | a browser's | User-Agent of the host scripts' HTTP requests |
 | `NEO4J_WSS_HOST` | unset | Host of the Bolt-over-WebSocket bridge: `scripts/neo4j_wss_bridge.py` run on its own exits 2 without it; `tests/test_cypher_query_catalog.py` uses the bridge when it is set |
+| `NEO4J_URL` | `bolt://localhost:7687` | Bolt address check `[2]` of `scripts/preflight_baseline.sh` uses when `docker compose ps` lists no `neo4j` service (the script does not read `NEO4J_URI`) |
+| `NEO4J_DOCKER_CONTAINER` | `edgeguard_neo4j` | Container `src/check_neo4j.sh` checks |
 | `NEO4J_HEAP_INITIAL` | `512m` | JVM initial heap of the `neo4j` service |
 | `NEO4J_HEAP_MAX` | `2g` | JVM maximum heap |
 | `NEO4J_PAGECACHE` | `1g` | Page cache |
@@ -163,7 +165,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_VIRUSTOTAL_BUDGET_PATH` | in the state directory | VirusTotal daily ledger file |
 
 - The ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist, AbuseIPDB and MalwareBazaar caps replace `EDGEGUARD_INCREMENTAL_LIMIT` for their sources, in baseline and scheduled runs alike; `0` means no cap, except for AbuseIPDB, where `0` means 10,000.
-- ThreatFox's API returns at most the last 7 days and URLhaus its `recent.csv` export (about 63,000 URLs on 2026-10-24); a run that reaches its cap keeps the newest items and logs a warning.
+- ThreatFox's API returns at most the last 7 days and URLhaus its `recent.csv` export (the URLs added in the past 30 days: about 63,000 on 2026-10-24); a run that reaches its cap keeps the newest items and logs a warning.
 - AbuseIPDB makes at most one blacklist request per run, none when it reuses the answer fetched earlier on the same UTC day; the free plan returns at most 10,000 addresses per request and allows 5 blacklist requests per day, and a 429 fails `collect_abuseipdb` ([RUNBOOK.md § AbuseIPDB daily blacklist quota](RUNBOOK.md#abuseipdb-daily-blacklist-quota-429)).
 - MalwareBazaar keeps labelled samples first. VirusTotal's free tier allows 500 lookups per day; an exhausted budget skips the task (log prefix `[VT-QUOTA]`). The ledger file defaults to `virustotal_daily_budget.json` in the state directory.
 
@@ -229,7 +231,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 
 - Window precedence: the run configuration's `baseline_days` (or `edgeguard baseline --days N`), then `EDGEGUARD_BASELINE_DAYS`, then the Airflow Variable `BASELINE_DAYS`, then 730. The collection limit follows the same order. ThreatFox reaches back at most 7 days, and CISA KEV ignores the window unless `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false`.
 - Remove a short test value of `EDGEGUARD_BASELINE_DAYS` after a smoke test: it also narrows the scheduled NVD runs ([BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)).
-- The lock file is derived from the module location (`<repository>/checkpoints/`, mounted at `/opt/airflow/checkpoints` in the container). The 48-hour age is above the baseline's 32-hour `dagrun_timeout`; on the same host the holder's liveness is checked first.
+- The lock file is derived from the module location (`<repository>/checkpoints/`, mounted at `/opt/airflow/checkpoints` in the container). The 48-hour age is above the baseline's 32-hour `dagrun_timeout`; the holder's run state, read through the Airflow REST API, is checked first (a queued or running run keeps the lock, a successful one removes it), and the age applies to a failed run or a state that cannot be read.
 - The backup gate of `edgeguard fresh-baseline` and the `baseline_clean` task refuses a wipe of non-empty stores unless `EDGEGUARD_LAST_BACKUP_AT` (ISO 8601 or Unix seconds) lies within `EDGEGUARD_BACKUP_MAX_AGE_HOURS`. The bypasses are explicit and logged (`--skip-backup-check`, or `skip_backup_check: true` in the run configuration) ([BACKUP.md](BACKUP.md)). Compose forwards both variables to `airflow` only.
 - The liveness check calls the Airflow REST API between MISP write batches.
 
@@ -252,7 +254,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Pause before retrying events that failed |
 | `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | `500` | Parsed items merged per chunk |
 | `EDGEGUARD_REL_BATCH_SIZE` | `500` | Relationships per Neo4j write batch |
-| `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` | `8` | Hours before Airflow stops the `run_neo4j_sync` task (per attempt), whole hours from 1 to 22: a larger value uses 22, an invalid one 8, both with a warning. A full sync has to fit the 6 h of the baseline's `full_neo4j_sync` (its duration with batched CVE writes is to be measured on the next 730-day run); below the duration of a full sync a requested `NEO4J_FULL_SYNC` fails every attempt of every run. The 68 h `dagrun_timeout` of `edgeguard_neo4j_sync` and the margin of the 24 h skip guard are derived from the default: above 12 h a run in which every task fails on all attempts exceeds the 68 h, which then cuts the late tasks. The threshold of `EdgeGuardNeo4jSyncStale` follows the limit (122 h at 8 h, 3 h more for each hour above 8): each attempt records its limit in `edgeguard_neo4j_sync_task_limit_seconds` when it starts |
+| `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` | `8` | Hours before Airflow stops the `run_neo4j_sync` task (per attempt), whole hours from 1 to 22: a larger value uses 22, an invalid one 8, both with a warning. A full sync has to fit the 6 h of the baseline's `full_neo4j_sync`; below the duration of a full sync a requested `NEO4J_FULL_SYNC` fails every attempt of every run. The 68 h `dagrun_timeout` of `edgeguard_neo4j_sync` and the margin of the 24 h skip guard are derived from the default: above 12 h a run in which every task fails on all attempts exceeds the 68 h, which then cuts the late tasks. The threshold of `EdgeGuardNeo4jSyncStale` follows the limit (122 h at 8 h, 3 h more for each hour above 8): each attempt records its limit in `edgeguard_neo4j_sync_task_limit_seconds` when it starts |
 | `EDGEGUARD_NEO4J_READ_TIMEOUT` | `3600` | Transaction timeout of pipeline statements (s) |
 | `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` | `900` | Read timeout of one MISP event delete |
 | `EDGEGUARD_QUERY_PAUSE_SECONDS` | `0` | Pause between Neo4j chunks (at most 60) |
@@ -332,7 +334,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `AIRFLOW_API_AUTH_JWT_SECRET` | required | Signing secret of the Airflow API server |
 | `AIRFLOW_FERNET_KEY` | required in production | Encryption key of Airflow's stored secrets |
 | `AIRFLOW_API_USER` | `admin` | User of the Airflow REST calls (CLI and tasks) |
-| `AIRFLOW_API_PASSWORD` | unset | Its password (required on the host) |
+| `AIRFLOW_API_PASSWORD` | unset | Its password (required on the host, except by `baseline` and `fresh-baseline` run from the directory of `docker-compose.yml` with the `airflow` service running, which read and trigger through that container) |
 | `AIRFLOW_API_VERSION` | `v2` | `v2` (Airflow 3) or `v1` (Airflow 2) |
 | `AIRFLOW_WEBSERVER_URL` | `http://localhost:8082` | Airflow API base URL for the CLI, the tasks, check `[13]` of `scripts/preflight_baseline.sh` and a bare-metal metrics server (`src/metrics_exporter.py` or `src/metrics_server.py`; the Compose `metrics` service has its own) |
 | `AIRFLOW_MEMORY_LIMIT` | `12g` | Container memory limit of `airflow` |
@@ -343,7 +345,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `EDGEGUARD_COLLECTOR_POOL_SLOTS` | `4` | Slots of the collector pool across all DAGs |
 
 - Compose passes `AIRFLOW_API_AUTH_JWT_SECRET` to Airflow as `AIRFLOW__API_AUTH__JWT_SECRET` and `AIRFLOW_FERNET_KEY` as `AIRFLOW__CORE__FERNET_KEY`; set the short names in `.env`. With an empty JWT secret the API server does not start; keep both values stable, because a new Fernet key makes the stored connections and variables unreadable. `./install.sh` generates both when they are blank.
-- The CLI, the scheduled DAGs' check of the baseline lock's holder and the baseline collectors' liveness check exchange `AIRFLOW_API_USER` and `AIRFLOW_API_PASSWORD` for a token at `POST /auth/token` (`AIRFLOW_API_VERSION=v2`); Compose forwards both to the `airflow` service. With the password unset, a process inside the Airflow container reads the password file the Simple auth manager generates; on the host the password is required. A wrong password in `.env` also reaches the tasks: the lock check then falls back to the lock file's age, and the liveness check cannot tell whether the DAG run has ended.
+- The CLI, the scheduled DAGs' check of the baseline lock's holder and the baseline collectors' liveness check exchange `AIRFLOW_API_USER` and `AIRFLOW_API_PASSWORD` for a token at `POST /auth/token` (`AIRFLOW_API_VERSION=v2`); Compose forwards both to the `airflow` service. With the password unset, a process inside the Airflow container reads the password file the Simple auth manager generates; on the host the password is required, except by `baseline` and `fresh-baseline` on the Compose host ([CLI.md § Baseline triggers](CLI.md#baseline-triggers)). A wrong password in `.env` also reaches the tasks: the lock check then falls back to the lock file's age, and the liveness check cannot tell whether the DAG run has ended.
 - The password of `AIRFLOW_POSTGRES_PASSWORD` must stay URL-safe (no `@`, `#`, `/`, `?`), because it goes into the SQLAlchemy URI.
 - Every collector task of every DAG runs in the pool `edgeguard_collectors`; the Compose `airflow` service creates or resizes it at every start, so apply a change with `docker compose up -d airflow`. Without Compose, create it once after `airflow db migrate`:
 
@@ -416,7 +418,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | Variable | Default | Purpose |
 |---|---|---|
 | `EDGEGUARD_CHECKPOINT_DIR` | `checkpoints/` | Collector checkpoints (host CLI) |
-| `EDGEGUARD_STATE_DIR` | `state/` | Sync state and ledgers (host CLI) |
+| `EDGEGUARD_STATE_DIR` | `state/` | Sync state file of the DAGs, VirusTotal ledger, AbuseIPDB blacklist cache |
 | `EDGEGUARD_BASE_DIR` | the parent of `dags/` | Project root the DAGs resolve paths from |
 | `EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH` | `logs/destructive_ops.jsonl` | Audit log of destructive operations |
 | `EDGEGUARD_MISP_EVENT_LOCK_PATH` | a file in `/tmp` | Lock of MISP event creation |
@@ -426,7 +428,7 @@ Set on the `airflow` service of `docker-compose.yml`; a pip-installed Airflow se
 | `EDGEGUARD_DEPLOY_CHECK_LIVE` | unset | `1`: the deployment check also probes live services |
 | `EDGEGUARD_API_BASE` | `http://127.0.0.1:8000` | API address of the STIX smoke script |
 
-- The checkpoint and state directories are relative to the project root and must stay inside it. The Airflow container uses `/opt/airflow/checkpoints` and `/opt/airflow/state`, bind-mounted from `./checkpoints` and `./state`, so the host CLI reads what the DAGs wrote.
+- `EDGEGUARD_CHECKPOINT_DIR` must resolve (symlinks followed) to the project root or a directory inside it; any other value is ignored with a warning and the checkpoints stay in `<project root>/checkpoints`. The directory is created by the first checkpoint write. `EDGEGUARD_STATE_DIR` is used as given (default `<project root>/state`). The Airflow container uses `/opt/airflow/checkpoints` and `/opt/airflow/state`, bind-mounted from `./checkpoints` and `./state`, so the host CLI reads what the DAGs wrote. `edgeguard doctor`, `monitor` and `stats` read the last sync time from `<project root>/state` and do not read `EDGEGUARD_STATE_DIR`: with the variable pointing elsewhere they do not see the DAGs' sync time.
 - `EDGEGUARD_MISP_EVENT_LOCK_PATH` defaults to `/tmp/edgeguard_misp_get_or_create_event.lock`; collectors that create the day's MISP event take it, so two runs do not create the same event twice.
 - `EDGEGUARD_INSTALL_WAIT_SEC` is read from the shell, not from `.env`; `0` checks once.
 - `scripts/deployment_wiring_check.sh` also reads `EDGEGUARD_REST_HEALTH_URL`, `EDGEGUARD_GRAPHQL_HEALTH_URL` and `EDGEGUARD_SKIP_HTTP_HEALTH`.
@@ -459,6 +461,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Checked against the code: `NEO4J_URL` (check `[2]` of the baseline preflight) and `NEO4J_DOCKER_CONTAINER` (`src/check_neo4j.sh`) are listed; the baseline lock's run state is read through the Airflow REST API first, on any host (the text named a same-host liveness check); `AIRFLOW_API_PASSWORD` is not needed by `baseline` and `fresh-baseline` on the Compose host; only `EDGEGUARD_CHECKPOINT_DIR` must stay inside the project root, a value outside it being ignored with a warning, and `EDGEGUARD_STATE_DIR` is used as given (the text required both to stay inside it); `EDGEGUARD_STATE_DIR` holds the DAGs' sync state, the VirusTotal ledger and the AbuseIPDB cache, while `edgeguard doctor`, `monitor` and `stats` read `<project root>/state`; the pending full-sync measurement is no longer in the `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` row; the per-run cap note names the URLhaus export's window, the URLs added in the past 30 days.
 - 2026-11-02 — `EDGEGUARD_BASELINE_REQUIRED_SOURCES` is also checked after the run: the baseline postcheck fails when a listed source with a baseline collector holds no `SOURCED_FROM` edge (INV-6).
 - 2026-11-02 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` and `AIRFLOW_WEBSERVER_URL`: `src/metrics_server.py` reads Airflow's health endpoint as well, as the exporter does.
 - 2026-11-01 — `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`: a full sync has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run; the row had named about 6 h as the full-sync estimate, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs. `EDGEGUARD_NEO4J_READ_TIMEOUT` limits the statements of a multi-statement transaction together, the sync's CVE batches included.

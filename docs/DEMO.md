@@ -181,7 +181,7 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       "indicator": "<canonical indicator value>",
       "indicator_type": "<graph type: ipv4, ipv6, domain, url, hash, ...>",
       "known_malware": [
-        {"name": "<malware>", "family": "<family or null>", "malware_types": ["<type>"], "description": "<text or null>"}
+        {"name": "<malware>", "family": null, "malware_types": ["<type>"], "description": "<text or null>"}
       ],
       "threat_actors": [{"name": "<actor>", "aliases": ["<alias>"], "description": "<text or null>"}],
       "techniques": [{"mitre_id": "<T####>", "name": "<technique>", "description": "<text or null>"}],
@@ -194,7 +194,7 @@ A JSON array with one response per alert, the `EnrichedAlert` of `src/alert_proc
       "users": [],
       "confidence": "<the indicator's confidence_score>",
       "first_seen": "<per source its first-seen claim, else its latest report: the earliest, never after the first import>",
-      "last_updated": "<per source its last-seen claim, else its latest report: the latest; the last update when no source dated it>",
+      "last_updated": "<per source its own date first: its last-seen claim, else its latest report when earlier than the MISP record time, else its first-seen claim, else its latest report: the latest; the last update when no source dated it>",
       "sectors_affected": ["<zone>"],
       "cross_zone_detected": "<true when more than one zone>",
       "recommendations": ["<generated from the fields above, e.g. Block IP <indicator> at perimeter firewall>"]
@@ -343,6 +343,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Alert enrichment sample: `last_updated` takes per source its own date first (last-seen claim, else a report earlier than the MISP record time, else the first-seen claim, else the latest report; it named the last-seen claim, else the latest report), and `known_malware[].family` is null, as no writer sets `Malware.family` (it showed a family value).
 - 2026-11-02 — `edgeguard stats --misp` counts each event once on a MISP that answers the whole listing on every page (with 500 or more EdgeGuard events it would have counted the listing once per page, up to 200 pages).
 - 2026-10-25 — `edgeguard stats --misp`: a `-part<N>` event (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`) counts under its source.
 - 2026-10-25 — `first_seen` and `last_updated` of the alert enrichment are the indicator's seen dates: per source the claim, else the source's latest report (an indicator only OTX reported, which has no claim, had shown its import time and its last write).

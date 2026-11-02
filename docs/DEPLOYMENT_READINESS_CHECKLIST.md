@@ -90,7 +90,7 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 |------|--------|--------|
 | [ ] | Prometheus / metrics | [PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md), [docker-compose.monitoring.yml](../docker-compose.monitoring.yml) |
 | [ ] | Collector skips | `edgeguard_collector_skips_total` — [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
-| [ ] | Alerts | [prometheus/alerts.yml](../prometheus/alerts.yml) — verify `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale` and Alertmanager target (`alertmanager:9093`) |
+| [ ] | Alerts | [prometheus/alerts.yml](../prometheus/alerts.yml) — verify `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale`, the Airflow rules `EdgeGuardAirflowSchedulerDown` / `EdgeGuardAirflowComponentUnhealthy` / `EdgeGuardAirflowHealthUnreachable` with `edgeguard_airflow_health_up` = 1 on the metrics endpoint (`curl -s http://127.0.0.1:8001/metrics \| grep -F edgeguard_airflow_health_up`), and the Alertmanager target (`alertmanager:9093`) |
 | [ ] | Failure callbacks | Trigger a task failure; check logs for `[ALERT] Task FAILED:` message |
 
 ---
@@ -122,10 +122,11 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Layer 5 Alerts row: the Airflow health rules (`EdgeGuardAirflowSchedulerDown`, `EdgeGuardAirflowComponentUnhealthy`, `EdgeGuardAirflowHealthUnreachable`) and the `edgeguard_airflow_health_up` gauge they need, read on the metrics endpoint (the row named the two DAG-run rules only).
 - 2026-11-01 — Layer 3 Airflow row: the pass criterion is a healthy scheduler (`edgeguard dag status` exit 0, the `airflow` service healthy), not a reachable UI or health endpoint.
 - 2026-10-23 — The settings and health references point to CONFIGURATION.md and TECHNICAL_SPEC.md, which hold what the README's settings and health sections held; `preflight_ci.sh`, `deployment_wiring_check.sh` and `make deploy-check` are stated to stop at the DagBag step on Airflow 3.3, and the DAG parse is checked with `airflow dags list-import-errors` (the gate asked for exit 0, which the script cannot reach).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

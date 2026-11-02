@@ -14,7 +14,7 @@ topology. Container names (per `container_name:` in compose):
 | Service in compose | Container name |
 |---|---|
 | `neo4j` | `edgeguard_neo4j` |
-| `airflow` | `edgeguard_airflow` (single Airflow standalone container — webserver + scheduler + worker bundled per Airflow 3.x) |
+| `airflow` | `edgeguard_airflow` (one `airflow standalone` container: the scheduler, triggerer, DAG processor and API server, each a subprocess; tasks run under the LocalExecutor) |
 | `airflow_postgres` | `edgeguard_airflow_postgres` |
 | `api` | `edgeguard_api` |
 | `graphql` | `edgeguard_graphql` |
@@ -84,7 +84,7 @@ the change to take effect. Revert by unsetting the variable and recreating the s
 | `EdgeGuardSourceAccessDenied` | warning | `edgeguard_collector_skips_total{reason_class=~".+_auth_denied"}` rose in the last 25 h, or appeared for the first time. The provider refuses the source's requests (HTTP 401/403) and the task stays green while nothing is collected: run `python src/source_key_check.py`, renew the key, or check whether the provider blocks this host |
 | `EdgeGuardAirflowSchedulerDown` | **critical** | `edgeguard_airflow_component_healthy{component="scheduler"} == 0` for 5m: Airflow reports its scheduler not healthy (also while the metadata database cannot be read); no task starts and runs shown as running do not progress; see "Airflow scheduler or triggerer stopped" (do not pause the DAG) |
 | `EdgeGuardAirflowComponentUnhealthy` | warning | `edgeguard_airflow_component_healthy{component!="scheduler"} == 0` for 10m: the triggerer, the DAG processor or the metadata database (the alert's `component` label) is reported unhealthy; see "Airflow scheduler or triggerer stopped" |
-| `EdgeGuardAirflowHealthUnreachable` | warning | `edgeguard_airflow_health_up == 0` for 10m: the metrics service has no answer from Airflow's health endpoint, so the scheduler state is unknown |
+| `EdgeGuardAirflowHealthUnreachable` | warning | `edgeguard_airflow_health_up == 0` for 10m: the metrics server has no answer from Airflow's health endpoint, so the scheduler state is unknown |
 
 Verify alerts load cleanly on baseline day:
 
@@ -100,11 +100,15 @@ Each entry: symptom → detection signal → remediation.
 
 ### 1. MISP batch permanent failure (5xx exhaustion)
 
-- **Symptom.** One or more 500-attribute batches lost; post-baseline
-  `MATCH (i:Indicator) WHERE 'alienvault_otx' IN i.source RETURN count(i)` is lower than
+- **Symptom.** One or more push batches (500 attributes by default) failed after the retries. The
+  attributes of such a batch that MISP does not hold are lost; all of them are lost when what MISP
+  holds could not be looked up after the last answer. Post-baseline
+  `MATCH (i:Indicator) WHERE 'alienvault_otx' IN i.source RETURN count(i)` is lower than the
   `edgeguard_indicators_collected_total{source="otx"}` counter value.
 - **Prom alert.** `EdgeGuardMispBatchPermanentFailure` — critical.
-- **Log probe.** `docker logs edgeguard_airflow 2>&1 | grep -E 'failed after retries .* counting batch as failed' | tail -20`
+- **Log probe.** `docker logs edgeguard_airflow 2>&1 | grep -F 'counted as failed and continuing' | tail -20`
+  (each line, `Batch <n> for event <id> failed after retries (…) — N of M attribute(s) counted as
+  failed and continuing`, gives how many attributes of the batch counted as failed).
 - **Root cause.** MISPWriter's `@retry_with_backoff(max_retries=4)` gave
   up after five attempts (the first and four retries). Typical triggers: MISP PHP memory_limit below
   event-size threshold, MySQL `innodb_buffer_pool_size` too small for
@@ -251,9 +255,13 @@ Each entry: symptom → detection signal → remediation.
     A malformed CVSS payload in an attribute's `NVD_META` is not a write error: the sync checks each
     payload when it reads the attribute, reads one that is not a JSON object as absent and drops an
     entry that is not a property (a map or list value, a name with other characters than letters,
-    digits and underscores, a number that is not finite: `Infinity`, `-Infinity`, `NaN` or `1e309`
-    in the JSON), reads a payload left without a base score as absent, and logs
-    `[META] NVD_META.<payload> of <CVE> ...` at WARNING; the CVE counts as synced. Correct the
+    digits and underscores, a name the writer keeps for itself: the sub-node's own properties such
+    as `uuid`, `cve_id` and `tag`, and the arguments of the statement call, `query`, `parameters`,
+    `timeout` and `self` (`CVSS_PAYLOAD_RESERVED_NAMES` in `src/neo4j_client.py`), a number that is
+    not finite: `Infinity`, `-Infinity`, `NaN` or `1e309` in the JSON), reads a payload left without
+    a base score as absent, and logs `[META] NVD_META.<payload> of <CVE> ...` at WARNING, each
+    dropped name quoted as Python's `repr()` writes it (a name with a newline stays on one line);
+    the CVE counts as synced. Correct the
     attribute's comment in MISP if the payload should be there.
   - The sync writes the CVEs of a chunk in batches of up to 500 (`merge_cves_batch`), each batch in one
     transaction. A batch whose transaction fails (a terminal error on one of its statements, often
@@ -451,8 +459,12 @@ Each entry: symptom → detection signal → remediation.
   lock stays held and the scheduled DAGs keep skipping. The same task log
   gives the numbers of each invariant on INFO lines (`INV-4 ATT&CK shape`,
   `INV-5 CVE score coverage`, `INV-6 delivery`, also on a run that passes)
-  and one WARNING table of the collectors that delivered nothing in this run:
-  skipped, with their `skip_reason_class`, or failed. A collector in that
+  and one WARNING table of the collectors that delivered nothing in this run,
+  each with its reason: `skipped (<skip_reason_class>)`, `failed (status
+  success=false)`, `task <state>` (the task's Airflow state when it did not
+  succeed, such as `failed`, `upstream_failed` or `skipped`), `task not run`
+  (no state in this run, such as a task cleared and not yet run again) or
+  `no status returned`. A collector in that
   table fails the run only when `EDGEGUARD_BASELINE_REQUIRED_SOURCES` names
   its source.
 - **Invariants and recovery.** The run still holds the lock, so a cleared
@@ -644,7 +656,7 @@ Each entry: symptom → detection signal → remediation.
 - **What applies.** `airflow standalone` (the Compose `airflow` service, or a bare-metal install that runs it) runs the scheduler, triggerer, DAG processor and API server as subprocesses. When one of them dies, it is not restarted and standalone does not exit. A metadata database error that outlasts Airflow's retries (`[database] max_db_retries`, 3) stops the scheduler and the triggerer; with SQLite a lock held a few seconds is enough (the default busy wait is 5 seconds). The API server keeps answering, and `/api/v2/monitor/health` answers HTTP 200 with `"unhealthy"` in its JSON body only.
 - **Symptom.** No new task starts. A DAG run in progress stays `running` without progressing, its next tasks stay `queued` or `scheduled`, and the Airflow UI still loads. A task that was already running goes on until it ends: with the LocalExecutor the stopping scheduler waits for its running tasks, and a task enforces its own `execution_timeout`. The scheduler alone enforces `dagrun_timeout` and the task heartbeat timeout, so nothing fails the run either.
 - **Detection.**
-  - `EdgeGuardAirflowSchedulerDown` (critical) after 5 minutes; `EdgeGuardAirflowComponentUnhealthy` (warning) for the triggerer, the DAG processor or the metadata database after 10 minutes; `EdgeGuardAirflowHealthUnreachable` (warning) when the metrics service has had no answer for 10 minutes ([PROMETHEUS_SETUP.md § Airflow Component Health](PROMETHEUS_SETUP.md#airflow-component-health)).
+  - `EdgeGuardAirflowSchedulerDown` (critical) after 5 minutes; `EdgeGuardAirflowComponentUnhealthy` (warning) for the triggerer, the DAG processor or the metadata database after 10 minutes; `EdgeGuardAirflowHealthUnreachable` (warning) when the metrics server has had no answer for 10 minutes ([PROMETHEUS_SETUP.md § Airflow Component Health](PROMETHEUS_SETUP.md#airflow-component-health)).
   - `docker compose ps` shows the `airflow` service `unhealthy`: its healthcheck reads the scheduler status, and five failed checks 30 seconds apart mark it. Docker does not restart an unhealthy container.
   - `edgeguard dag status` still lists the runs and exits 1 with "runs shown as running or queued are not progressing"; `edgeguard doctor` and `edgeguard preflight` count a scheduler or metadata database that is not healthy as an error and a triggerer or DAG processor reported unhealthy as a warning; check `[13]` of `scripts/preflight_baseline.sh` fails. A triggerer or DAG processor that Airflow lists without status runs no job of its own (Airflow 2 parses the DAG files inside the scheduler by default); it is reported as information and has no alert.
   - By hand: `docker compose exec airflow curl -s http://localhost:8082/api/v2/monitor/health` gives each component's `status` and last heartbeat; `docker compose exec airflow airflow jobs check --job-type SchedulerJob` exits non-zero when no scheduler is alive.
@@ -684,7 +696,7 @@ Each entry: symptom → detection signal → remediation.
   ```bash
   docker compose exec airflow airflow variables set NEO4J_FULL_SYNC false
   ```
-- **Duration.** A full sync of a 730-day MISP has to fit the 6-hour limit of the baseline DAG's `full_neo4j_sync`. The sync writes CVEs in batches (§ 5); the duration of such a full sync is to be measured on the next 730-day run (the sync's `Duration:` line), and every batch written one CVE at a time (the run summary's `CVE batches written one CVE at a time` line) adds the per-CVE write time. The task's limit is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, 8 hours by default: the 6 hours plus a third, because a limit at the duration of a full sync could fail every attempt of a request, and a request stands until it succeeds; a limit below the duration of a full sync makes a requested full sync fail every attempt of every run. It takes whole hours up to 22 (a larger value uses 22, an invalid one 8, both with a warning). When a remote Neo4j with many changed events needs more, raise it in `.env` and recreate the airflow container between runs (`docker compose up -d airflow`). The DAG run's limit of 68 hours covers every task of the chain failing on all three attempts, plus 20%, as for the other DAGs, and is sized for the default limit; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit (§ *MISP → Neo4j sync schedule*).
+- **Duration.** A full sync of a 730-day MISP has to fit the 6-hour limit of the baseline DAG's `full_neo4j_sync`. The sync writes CVEs in batches (§ 5); its `Duration:` line gives the duration of each run, and every batch written one CVE at a time (the run summary's `CVE batches written one CVE at a time` line) adds the per-CVE write time. The task's limit is `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`, 8 hours by default: the 6 hours plus a third, because a limit at the duration of a full sync could fail every attempt of a request, and a request stands until it succeeds; a limit below the duration of a full sync makes a requested full sync fail every attempt of every run. It takes whole hours up to 22 (a larger value uses 22, an invalid one 8, both with a warning). When a remote Neo4j with many changed events needs more, raise it in `.env` and recreate the airflow container between runs (`docker compose up -d airflow`). The DAG run's limit of 68 hours covers every task of the chain failing on all three attempts, plus 20%, as for the other DAGs, and is sized for the default limit; the threshold of `EdgeGuardNeo4jSyncStale` follows the limit (§ *MISP → Neo4j sync schedule*).
 
 ## AbuseIPDB daily blacklist quota (429)
 
@@ -825,6 +837,22 @@ output and traceback lines at INFO. A notice Neo4j returns with a statement is
 such a WARNING too (logger `neo4j.notifications`, e.g.
 `UnknownPropertyKeyWarning` for a statement that reads a property key the
 database does not hold).
+
+The run summary of the MISP → Neo4j sync gives `Relationship rows written: N`
+and `Relationships created: N`. The first counts the relationship definitions
+that reached Neo4j, each once: an `AFFECTS` or indicator `EXPLOITS` row written
+to both `Vulnerability` and `CVE` counts once. The second counts the new edges,
+from Neo4j's counters; a re-sync that refreshes existing edges creates few. The
+enrichment task logs one summary line:
+
+```bash
+docker logs edgeguard_airflow 2>&1 | grep -F '[ENRICHMENT SUMMARY]'
+# expected: bridge_linked=N actor_alias_merged=N malware_twins_merged=N campaigns_built=N \
+#           campaign_links=N decay_changed=N epss_cves_updated=N
+```
+
+`campaigns_built` counts every campaign the run built, new or existing. A job
+whose result counts errors adds `<job>_errors=N` when N is not 0.
 
 Every collector run also emits one grep-able push summary:
 
@@ -1156,12 +1184,12 @@ It also checks the sector evidence, the description sources and the indicator ag
 
 | Check | Fails when | Not judged |
 |---|---|---|
-| `sector_links_name_only_feeds_that_gave_the_sector` | a link to a `Sector` names a feed whose `SOURCED_FROM.zones` do not hold that sector | no `SOURCED_FROM` edge has `zones` (a graph written by an earlier version) |
+| `sector_links_name_only_feeds_that_gave_the_sector` | a link to a `Sector` names a feed whose `SOURCED_FROM.zones` do not hold that sector | no `SOURCED_FROM` edge has `zones`, or no EdgeGuard link reaches a `Sector` |
 | `advisory_sector_only_where_cisa_stated` | `advisory_sector` sits on anything but an `AFFECTS` link from a CVE to a sector the `cisa_ics` edge lists in `stated_zones` | no link carries the label |
-| `cisa_stated_sectors_linked_as_advisory_sector` | a sector CISA stated is not linked as `advisory_sector`; with `--require-cisa-ics`, also when no sector is stated although the `cisa_ics` edges carry `zones` | no stated sector, when `--require-cisa-ics` is not given or no `cisa_ics` edge carries `zones` (a graph written by an earlier version, or kept and not re-read since) |
-| `sector_links_cite_only_records_that_gave_the_sector` | a sector link cites a CISA ICS advisory whose sector note does not name its sector (the `cisa_ics` edge records the advisories per sector in `stated_refs`) | no `cisa_ics` edge has `stated_refs` (judged only for the feeds whose records state every zone they give: an OTX record also gives zones by keyword, for which it records no reference) |
+| `cisa_stated_sectors_linked_as_advisory_sector` | a sector CISA stated is not linked as `advisory_sector`; with `--require-cisa-ics`, also when no sector is stated although the `cisa_ics` edges carry `zones` | no stated sector, when `--require-cisa-ics` is not given or no `cisa_ics` edge carries `zones` |
+| `sector_links_cite_only_records_that_gave_the_sector` | a sector link cites a CISA ICS advisory whose sector note does not name its sector (the `cisa_ics` edge records the advisories per sector in `stated_refs`) | no `cisa_ics` edge has `stated_refs`, or no EdgeGuard link reaches a `Sector` (judged only for the feeds whose records state every zone they give: an OTX record also gives zones by keyword, for which it records no reference) |
 | `otx_industries_only_where_otx_stated` | `otx_industries` sits on anything but a `TARGETS` link from an Indicator, ThreatActor or Malware to a sector the `alienvault_otx` edge lists in `stated_zones` (an `AFFECTS` link with it fails; `examples`), or such a link cites none of the pulses the edge records for its sector in `stated_refs` (`citing_examples`) | no link carries the label |
-| `otx_stated_sectors_linked_as_otx_industries` | a sector an OTX record stated (the `alienvault_otx` edge's `stated_zones` on an Indicator, ThreatActor or Malware) has no `TARGETS` link, or one labelled `zone_classification` (a label outside the table is not judged); with `--require-otx-industries`, also when no sector is stated although the `alienvault_otx` edges give a sector (`otx_records_with_a_sector`) | no OTX record states a sector, when `--require-otx-industries` is not given or no `alienvault_otx` edge gives a sector (a graph synced by an earlier version) |
+| `otx_stated_sectors_linked_as_otx_industries` | a sector an OTX record stated (the `alienvault_otx` edge's `stated_zones` on an Indicator, ThreatActor or Malware) has no `TARGETS` link, or one labelled `zone_classification` (a label outside the table is not judged); with `--require-otx-industries`, also when no sector is stated although the `alienvault_otx` edges give a sector (`otx_records_with_a_sector`) | no OTX record states a sector, when `--require-otx-industries` is not given or no `alienvault_otx` edge gives a sector |
 | `sector_confidence_follows_label` | a sector link's confidence is not the label table's value (`src/sector_evidence.py`; a label outside the table is not judged) | no sector link |
 | `descriptions_name_their_source` | a node with a ranked description (CVE, Vulnerability, Malware, ThreatActor, Tool, Technique, Tactic) has no `description_source` | no description |
 | `indicators_have_aging_basis` | an Indicator has no `aging_basis` or no `source_confidence` | no Indicator |
@@ -1457,7 +1485,7 @@ RETURN r.raw_data, r.misp_event_ids, r.source_refs LIMIT 1;
 
 ### Whose text a description is, and every source's text
 
-A `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` node holds one description: the text of the highest-ranked source whose record gave one (CVE and Vulnerability: NVD > CISA KEV > CISA ICS > any other source; the other labels: MITRE ATT&CK > a curated source > any other source; [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Descriptions and their source"). `n.description_source` names that source; it is null on a node without a description and on a description written by an earlier version. Every source that named the node has its own `SOURCED_FROM` edge, with the MISP events that hold its attribute and its own record ids:
+A `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` node holds one description: the text of the highest-ranked source whose record gave one (CVE and Vulnerability: NVD > CISA KEV > CISA ICS > any other source; the other labels: MITRE ATT&CK > a curated source > any other source; [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Descriptions and their source"). `n.description_source` names that source; it is null on a node without a description. Every source that named the node has its own `SOURCED_FROM` edge, with the MISP events that hold its attribute and its own record ids:
 
 ```cypher
 MATCH (c:CVE {cve_id: 'CVE-2025-21042'})-[r:SOURCED_FROM]->(s:Source)
@@ -1509,6 +1537,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Checked against the code: the `airflow` container runs the scheduler, triggerer, DAG processor and API server of `airflow standalone` as subprocesses under the LocalExecutor (it named a webserver and a worker); the log probe of failure mode 1 greps the line that gives how many attributes of a failed batch counted as failed, and only the attributes MISP does not hold are lost (it grepped a phrase no code logs and called every such batch lost); the dropped `NVD_META` payload names include the names the writer keeps for itself and are logged quoted; the WARNING table of 7d gives every reason a collector delivered nothing (it named skipped and failed only); the post-run summary describes the sync's `Relationship rows written` and `Relationships created` lines and the `[ENRICHMENT SUMMARY]` line; two sector checks are also not judged when no EdgeGuard link reaches a `Sector`, and the not-judged cells and `description_source` no longer refer to graphs of earlier versions; the full-sync duration is the sync's `Duration:` line (it named a measurement still to be made); `EdgeGuardAirflowHealthUnreachable` names the metrics server (it named the Compose metrics service).
 - 2026-11-02 — Failure mode 7d: the baseline postcheck fails the run on three more invariants, read with the acceptance script's statements: INV-4 (the `IN_TACTIC` and `mitre_explicit` technique links of the claims on the nodes, and on an unlimited run the claims themselves), INV-5 (CVE score coverage after an NVD delivery) and INV-6 (each collector's delivery reaches its `Source` node, and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES` hold data); a WARNING table lists the collectors that delivered nothing. INV-3 holds whenever the sync connects, so a run that lost a relationship family or a whole source had passed the postcheck. On the 730-day graph of 2026-11-01 with that run's collector counts the postcheck passes in about 3 s: 1,024 tactic phases, 4,854 / 10,895 / 869 technique claims, 0 links missing; 142,236 of 146,858 CVEs scored (0.969); lowest delivery share ThreatFox 9,774 of 10,000 (0.977). It fails the same graph read without `IN_TACTIC`, the technique links and the CVSS sub-nodes, and with the OTX `SOURCED_FROM` edges read as 0 or as 0.85 of their number. Recovery per invariant, acceptance of a graph, abandonment of a run. AbuseIPDB daily blacklist quota (429): a failed `collect_abuseipdb` is listed in the postcheck's WARNING table, and fails the run with the lock held when `EDGEGUARD_BASELINE_REQUIRED_SOURCES` names `abuseipdb` and the graph holds no AbuseIPDB data; the remediation for that case is § 7d's.
 - 2026-11-02 — Post-run summary grep: the `[BUILD_RELATIONSHIPS SUMMARY]` line reports `relationships_created` and `outer_rows` (it reported the outer rows as `total_edges`), `per_query` gives both per step and marks `[PARTIAL]` steps; the technique steps' `[SKIP]` counts are taken after the revoked-id translation (they counted a revoked id whose successor exists, 44,268 instead of 21,207 for step 8 on the 730-day baseline); a failed `[SKIP]` count is a WARNING; child lines keep their level in the task log; step 2 runs no query; step 2d no longer reads the dropped relationship property `report_ids` (the 730-day baseline of 2026-11-01 logged 8 `UnknownPropertyKeyWarning` notices for it). On the 730-day baseline of 2026-11-01, step 8 processed 130,419 indicator rows and created 1,565,094 links.
 - 2026-11-02 — Baseline launch path: `run_pipeline.py` runs the collectors into MISP only and refuses `--baseline`; the in-process baseline, which took the baseline lock and built a reduced graph, is retired. Aging, CVE dates and `r.raw_data` no longer name the command-line STIX import or VirusTotal re-enrichment (both removed). Scheduler or triggerer stopped: check `[13]` of the preflight script fails (it named the DAG launch path, now the only one).

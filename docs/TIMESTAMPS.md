@@ -346,6 +346,12 @@ Only Indicator SDOs carry `x_edgeguard_first_seen_inferred`; a Vulnerability SDO
 
 #### Report SDO (manual STIX fallback)
 
+The export (`src/stix_exporter.py`, `GET /stix/export/{object_type}/{identifier}`) emits no Report SDO. The MISP → STIX converter of `run_misp_to_neo4j.py`
+(`convert_to_stix21`, with its manual fallback `_manual_convert_to_stix21` and that fallback's per-attribute
+`_attribute_to_stix21`) builds one, and no pipeline step or
+API calls that converter ([ARCHITECTURE.md § Pipeline flow](ARCHITECTURE.md#pipeline-flow-what-actually-runs-where));
+the rows below describe the converter only.
+
 Reports are EdgeGuard-generated container objects. Their `created` is
 *today* (when we generated the report) — this is correct STIX semantics.
 The 2013-CVE-shows-as-2013 information lives **inside** the contained
@@ -386,8 +392,8 @@ valid_from = source_reported_first_at IF available
 
 **Manual-fallback path note.** The
 ``run_misp_to_neo4j._attribute_to_stix21`` path re-emits STIX directly
-from MISP attributes without first writing to Neo4j (used when PyMISP's
-``to_stix2()`` is unavailable). In that path, the canonical concept-3
+from MISP attributes without first writing to Neo4j (the converter's
+fallback when PyMISP's ``to_stix2()`` is unavailable). In that path, the canonical concept-3
 analogue is **MISP ``Attribute.timestamp``** — the MISP-internal
 write-time epoch for the attribute. It's not Neo4j's
 ``first_imported_at`` (that doesn't exist for this attribute yet) but
@@ -526,6 +532,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Report SDO: the STIX export emits none; the subsection describes the MISP → STIX converter of `run_misp_to_neo4j.py`, which no pipeline step or API calls (the subsection read as part of the export contract).
 - 2026-11-02 — Seen dates of an indicator: the command-line STIX import of `run_pipeline.py`, named as a writer without a MISP report, is removed.
 - 2026-11-02 — The last date of an edge is the source's own date first: its last-seen claim, its latest report when that is earlier than the MISP record time, its first-seen claim, and only then the record time. The campaign build orders its sample of 100 indicators by that date (it ordered by the node's `last_reported_at`), so the sample, the campaign's `last_seen` and the alert enrichment read one definition. On the 730-day baseline of 2026-11-01 the record time, the time of the push, had placed the items of the feeds without a last-seen date above indicators their sources reported later: 4,270 of 40,938 indicator links change (OTX 29,903 → 31,780, ThreatFox 9,960 → 8,553, MalwareBazaar 1,225 → 911, URLhaus 3 → 65, Feodo Tracker 289 → 8, SSL Blacklist 62 → 0), and 177 instead of 216 of 533 campaigns get a last seen of 1 November; a stored `last_seen` stays until a fresh baseline.
 - 2026-10-25 — The acceptance script checks the campaign seen dates (`campaign_seen_dates_cover_members`).

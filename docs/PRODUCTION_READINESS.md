@@ -25,7 +25,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Knowledge graph schema | Ready | Constraints, provenance on every source-built link |
 | Post-sync enrichment | Ready | Six jobs after every sync and baseline |
 | Airflow DAGs | Ready | Baseline and five scheduled DAGs |
-| Baseline safety | Ready | Baseline lock, backup gate, audit trail |
+| Baseline safety | Ready | Baseline lock, trigger check, backup gate, audit trail |
 | REST API | Ready | Queries, STIX 2.1 and Wazuh CDB exports |
 | GraphQL API | Ready | Port 4001, query depth and alias limits |
 | Security hardening | Ready | API keys, loopback ports, injection guards, TLS |
@@ -42,7 +42,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 - **Knowledge graph schema.** Single-key `MERGE` deduplication across sources; every relationship built from the sources names its sources, their record ids and the MISP events (`sources[]`, `source_refs[]`, `misp_event_ids[]`), and the linking ones carry `match_type` and a confidence. The shared-database contract marks nodes EdgeGuard creates with `edgeguard_managed` and partner nodes it writes to with `edgeguard_enriched`; `CVE` and its CVSS sub-nodes follow the ResilMesh data model, and partner-owned labels get no UNIQUE constraint.
 - **Post-sync enrichment.** Vulnerability–CVE bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging, campaigns and FIRST EPSS ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)).
 - **Airflow DAGs.** `max_active_runs=1` and a `dagrun_timeout` on the baseline and the five scheduled DAGs (the metrics DAGs of `dags/edgeguard_metrics_server.py` have no `dagrun_timeout`), `execution_timeout` on every task, failure and success callbacks; the baseline DAG is created unpaused, the five scheduled DAGs paused. The sync runs every 72 hours.
-- **Baseline safety.** The baseline DAG holds the baseline lock for the whole run, so the scheduled DAGs skip; a destructive baseline passes the backup gate, and its Neo4j wipe, like those of `edgeguard clear` and `scripts/clear_neo4j.py`, is recorded in `logs/destructive_ops.jsonl` and the counter `edgeguard_destructive_ops_total` ([BACKUP.md](BACKUP.md)).
+- **Baseline safety.** The baseline DAG holds the baseline lock for the whole run, so the scheduled DAGs skip; `edgeguard baseline` and `edgeguard fresh-baseline` refuse to trigger while the Airflow scheduler or metadata database is not healthy, while an `edgeguard_baseline` run is queued or running, or when Airflow cannot be read ([CLI.md § Baseline triggers](CLI.md#baseline-triggers)); a destructive baseline passes the backup gate, and its Neo4j wipe, like those of `edgeguard clear` and `scripts/clear_neo4j.py`, is recorded in `logs/destructive_ops.jsonl` and the counter `edgeguard_destructive_ops_total` ([BACKUP.md](BACKUP.md)).
 - **REST and GraphQL APIs.** `X-API-Key` authentication (required in production), rate limits, a request-body cap and `GET /health` with HTTP 503 while Neo4j is degraded. STIX 2.1 bundles are deterministic and parse under strict `stix2.parse` ([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)); the Graph Explorer reads `GET /graph/explore` ([GRAPH_EXPLORER.md](GRAPH_EXPLORER.md)).
 - **Monitoring and metrics.** The metrics of every Airflow task process are served by the `metrics` service on 8001 (Prometheus scrapes `metrics:8001` over `edgeguard_net`); the alert rules evaluate in Prometheus and a Grafana dashboard is provisioned. Once `prometheus/secrets/slack_api_url` is provided, Slack receives the critical and the collector alerts; the circuit-breaker alerts go to PagerDuty and every other alert to the default e-mail receiver, both placeholders, so those alerts are delivered only after a mailbox or a rendered key is configured ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#alertmanager-notifications)).
 - **Automated code review.** Pull requests are reviewed automatically against project rules kept in the repository.
@@ -96,18 +96,7 @@ Planned work is listed in [ROADMAP.md](ROADMAP.md).
 
 ## Testing Status
 
-| Test Suite | Result | Date | Notes |
-|------------|--------|------|-------|
-| Manual: Neo4j connectivity | ✅ Pass | 2026-03-05 | — |
-| Manual: MISP health check | ✅ Pass | 2026-03-05 | — |
-| Manual: Phase 1 (Sources → MISP) | ✅ Pass | 2026-03-05 | — |
-| Manual: Phase 2 (MISP → Neo4j) | ✅ Pass | 2026-03-05 | — |
-| Manual: Relationship creation | ✅ Pass | 2026-03-05 | — |
-| **CI: Ruff lint (50 source files)** | ✅ Pass | 2026-03-17 | GitHub Actions |
-| **CI: Mypy type-check** | ✅ Pass | 2026-03-17 | GitHub Actions |
-| **CI: Unit tests (1814+ tests)** | ✅ Pass | 2026-04-25 | 30% coverage gate in CI and `make test` |
-| **CI: Docker image build** | ✅ Pass | 2026-04-25 | Non-root user, no secrets baked in |
-| **CI: pip-audit security scan** | ✅ Pass | 2026-04-25 | Blocking check, no ignore list |
+CI (`.github/workflows/ci.yml`) runs the checks listed under **CI/CD pipeline** above on every pull request and on pushes to `main` and `develop`; **Local verification** at the top of this page gives the local equivalents ([CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ---
 
@@ -203,10 +192,11 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Baseline safety names the trigger check of `edgeguard baseline` and `fresh-baseline`. Testing Status describes the CI checks and when they run; the dated table of manual tests and CI runs (March and April 2026, with their file and test counts) is removed.
 - 2026-10-23 — The baseline-safety control names the Neo4j wipe of `scripts/clear_neo4j.py` among those the destructive-operations trail records.
 - 2026-10-23 — The component table takes the README's lists of available and implemented capabilities, de-duplicated, with the details below it: the collectors counted as 10 by default and 3 opt-in, the scheduled DAGs created paused, the circuit breakers limited to the feed fetches and the sync's checks; the deployment steps no longer require `credentials/config.yaml`, which the Docker path does not read, and trigger the baseline in the `airflow` container; the future-phase and enhancement tables and the "what's left" list are replaced by a pointer to ROADMAP.md, the list of planned work, and the conclusion says "ready for a production test" as the status does; `max_active_runs=1` and `dagrun_timeout` are named for the baseline and the five scheduled DAGs (the metrics DAGs have no timeout), automated review is not claimed for every pull request, the alert routing names the alerts that reach Slack, `preflight_ci.sh` and `make deploy-check` are stated to stop at the DAG parse on Airflow 3.3, and the controls and deployment tables keep short cells with the detail in lists below them.
 - 2026-10-17 — Restated as a guide to the current state: the dated fix history condensed here, the controls it established listed as current controls, the coverage gate located in CI and `make test`.

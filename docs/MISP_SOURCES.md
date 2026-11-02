@@ -10,7 +10,7 @@ This page describes how collectors stage data in MISP and how the sync reads it 
 External sources → Collectors → MISP → run_misp_to_neo4j (Airflow) → Neo4j
 ```
 
-External feeds (OTX, NVD, CISA, MITRE, VirusTotal, abuse.ch, …) push into **MISP** first via **`MISPWriter`**. The knowledge graph is filled from MISP primarily by **`run_misp_to_neo4j`** in Airflow. **`MISPCollector`** (`src/collectors/misp_collector.py`) is a **separate** optional path and is **not** used in the default baseline collector step.
+External feeds (OTX, NVD, CISA, MITRE, VirusTotal, abuse.ch, …) push into **MISP** first via **`MISPWriter`**. The knowledge graph is filled from MISP primarily by **`run_misp_to_neo4j`** in Airflow. **`MISPCollector`** (`src/collectors/misp_collector.py`) is a **separate** optional reader of MISP that no DAG or `run_pipeline.py` runs ([COLLECTORS.md § 11](COLLECTORS.md#11-misp-collector)).
 
 This is the product path, **collectors → MISP → Neo4j** (see **[ARCHITECTURE.md](ARCHITECTURE.md)**); deployments do not bypass MISP.
 
@@ -54,7 +54,7 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **10** a
 | MalwareBazaar | CSV export | Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, off) | Yes | sha256 + family label; abuse.ch key |
 | FIRST EPSS | gzip CSV | Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, on) | No (writes to Neo4j) | Exploit-prediction score on existing CVE nodes |
 
-**Optional `MISPCollector`:** pulls from MISP **`/events`** with **its own** limits; **not** wired into default baseline collector step 2. It is not counted among the DATA_SOURCES.md sources.
+**Optional `MISPCollector`:** pulls from MISP **`/events`** with **its own** limits; no DAG or `run_pipeline.py` runs it. It is not counted among the DATA_SOURCES.md sources.
 
 **Sector mix in your graph:** Depends on feeds, classifier, and time range. Use Neo4j (`MATCH (n) RETURN labels(n), count(*)`) or the MISP UI — **do not** rely on static percentage tables.
 
@@ -122,7 +122,7 @@ FS-ISAC, Health-ISAC, etc.: no collector; ingest via MISP or future connectors. 
 
 **MISP Import Regexp.** MISP applies its Import Regexp rules (*Input Filters → Import Regexp*) to the value of every attribute it stores; the comment and the tags are not rewritten. A fresh MISP database holds the default rules, which normalise Windows paths: those for Windows, Program Files, ProgramData, Documents and Settings and Users begin with any character, a colon and any character (`/.:.Windows./i` → `%WINDIR%\`), so MISP stores the file-name indicator `C:\Windows\System32\evil.exe` as `%WINDIR%\System32\evil.exe`. The ATT&CK values carry no colon for this reason: written as `<id>: <name>`, `T1059.003: Windows Command Shell` would be stored as `T1059.00%WINDIR%\Command Shell`, without its id and name, and so would every ATT&CK entry named "Windows …". They are the only values EdgeGuard composes; every other value is a source's (an indicator, a name, a CVE id) and is stored as MISP's rules leave it.
 
-**How the sync reads an ATT&CK value.** `run_misp_to_neo4j` (the node parse and its STIX conversion) reads a `text` value with `attack_values.parse_attack_value` (`src/attack_values.py`): the id (`T1234` or `T1234.123` for a technique, `TA1234` for a tactic, `S1234` for a tool), then ` - ` or `: `, then the name. A value that starts like an ATT&CK id (`T`, `TA` or `S`, three digits, then a fourth digit or `%`) but holds no valid one, such as a value a MISP rule rewrote, creates no node: the sync logs an `[ATTACK-VALUE]` warning naming the attribute and the value, counts it in the run summary and in `edgeguard_misp_attributes_dropped_total{reason="attack_id_invalid"}`, and goes on (the run does not fail). Any other `text` value is an `Indicator` of type `unknown`.
+**How the sync reads an ATT&CK value.** `run_misp_to_neo4j` (the node parse) reads a `text` value with `attack_values.parse_attack_value` (`src/attack_values.py`): the id (`T1234` or `T1234.123` for a technique, `TA1234` for a tactic, `S1234` for a tool), then ` - ` or `: `, then the name. A value that starts like an ATT&CK id (`T`, `TA` or `S`, three digits, then a fourth digit or `%`) but holds no valid one, such as a value a MISP rule rewrote, creates no node: the sync logs an `[ATTACK-VALUE]` warning naming the attribute and the value, counts it in the run summary and in `edgeguard_misp_attributes_dropped_total{reason="attack_id_invalid"}`, and goes on (the run does not fail). Any other `text` value is an `Indicator` of type `unknown`.
 
 ---
 
@@ -184,6 +184,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `MISPCollector`: no DAG or `run_pipeline.py` runs it (the text named the collector step of the retired in-process baseline). How the sync reads an ATT&CK value: the node parse only (the text also named a STIX conversion that no pipeline step calls).
 - 2026-11-02 — Event names and lookups: the readers of an event part's source no longer list the STIX flow of `run_pipeline.py`, which is removed (`run_pipeline.py` runs the collectors into MISP only).
 - 2026-11-01 — `MITRE_USES_TECHNIQUES.aid`: the ATT&CK id of a MITRE group or malware.
 - 2026-10-25 — Event names and lookups: a source/date event continues in `-part2`, `-part3`, ... past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, except a group with OTX report ids; later parts are looked up by exact name until the first missing one, the duplicate check covers every part of the day, and readers count a part under its source.

@@ -181,7 +181,7 @@ GET /graph/explore?view={view}&zone={zone}&limit={limit}
 ```json
 {
   "nodes": [
-    {"data": {"id": "malware:emotet", "label": "emotet", "type": "malware", "family": "emotet"}},
+    {"data": {"id": "malware:emotet", "label": "emotet", "type": "malware", "family": null}},
     {"data": {"id": "indicator:203.0.113.5", "label": "203.0.113.5", "type": "indicator", "sector": "finance"}}
   ],
   "edges": [
@@ -190,6 +190,8 @@ GET /graph/explore?view={view}&zone={zone}&limit={limit}
   "stats": {"nodes": 42, "edges": 67}
 }
 ```
+
+`family` is null on every malware node: no writer sets `Malware.family`.
 
 Edges named after a graph relationship (`INDICATES`, `EMPLOYS_TECHNIQUE`, `IN_TACTIC`) point the
 way the relationship does. `BELONGS_TO` (indicator → sector) and `IN_ZONE` (CVE → sector) are not
@@ -249,10 +251,11 @@ All Cytoscape.js styles are defined inline in the `cy` initialization. Node colo
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Response format: `family` is null on every malware node, as no writer sets `Malware.family` (the example showed a family name).
 - 2026-11-01 — Vulnerability query comment: the sync writes `:CVE` nodes in batches (`merge_cves_batch`, each as `merge_cve` writes it); the comment named `merge_cve`.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
 - 2026-10-17 — The CVE view states `description` (first 200 characters) and `description_source` (of a CVE's twins, the text the source ranking keeps); the Cypher pattern comments use `//`, because `--` is not a Cypher comment.

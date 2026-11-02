@@ -35,7 +35,7 @@ ORDER BY count DESC
 
 ## Vulnerabilities
 
-> **Label note:** the MISP→Neo4j sync writes every CVE as `merge_cve()` writes it, in batches (`merge_cves_batch`) → the **`:CVE`** label (`MISPToNeo4jSync._sync_to_neo4j_chunk` in `src/run_misp_to_neo4j.py`: CVEs with and without CVSS sub-nodes alike). The **`:Vulnerability`** label is **empty** on current baselines (the production snapshot of 2026-05-25 held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may hold `:Vulnerability` nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
+> **Label note:** the MISP→Neo4j sync writes every CVE as `merge_cve()` writes it, in batches (`merge_cves_batch`) → the **`:CVE`** label (`MISPToNeo4jSync._sync_to_neo4j_chunk` in `src/run_misp_to_neo4j.py`: CVEs with and without CVSS sub-nodes alike). The **`:Vulnerability`** label is **empty** on a graph the pipeline builds (no sync, link or enrichment step creates a `:Vulnerability` node), so query `:CVE`. If a graph may hold `:Vulnerability` nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
 
 > **Scores:** `c.cvss_score` / `c.severity` are the base score and rating of the CVE's first CVSS in the order v3.1 → v3.0 → v2 → v4.0, and `c.cvss_version` names the version. A CVE without any CVSS (rejected, or awaiting NVD analysis without a CNA score) has a null score and severity `UNKNOWN`.
 >
@@ -371,6 +371,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Label note: `:Vulnerability` is empty on a graph the pipeline builds, as no step creates such a node (the note gave the production snapshot of 2026-05-25: 99,757 `:CVE`, 0 `:Vulnerability`).
 - 2026-11-02 — Sector labels: campaigns get theirs from `build_campaign_nodes`, after the sync.
 - 2026-11-01 — Label note: the sync writes CVEs in batches (`merge_cves_batch`), each as `merge_cve()` writes it.
 - 2026-10-25 — The shared-event pivot: a source/date past `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes continues in `-part<N>` events, so a shared event means the same part of a split day.
