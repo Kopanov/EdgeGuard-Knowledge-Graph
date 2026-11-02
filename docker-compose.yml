@@ -118,7 +118,7 @@ x-common-env: &common-env
   # at most this many collectors run at once across all DAGs. The airflow service creates the pool.
   EDGEGUARD_COLLECTOR_POOL_SLOTS: ${EDGEGUARD_COLLECTOR_POOL_SLOTS:-4}
   # Source API key check (src/source_key_check.py): switch for the live requests, and the keyed
-  # sources a baseline must not start without (comma-separated; empty = none).
+  # sources a baseline must not start or end without (comma-separated; empty = none).
   EDGEGUARD_SOURCE_KEY_CHECK: ${EDGEGUARD_SOURCE_KEY_CHECK:-true}
   EDGEGUARD_BASELINE_REQUIRED_SOURCES: ${EDGEGUARD_BASELINE_REQUIRED_SOURCES:-}
   # NVD incremental runs (2026-10): lookback without a stored cursor, overlap before the cursor,

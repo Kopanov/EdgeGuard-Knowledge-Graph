@@ -14,7 +14,7 @@ forgetting another. Two safeguards cover it:
 
 ---
 
-## TL;DR — the 6 touchpoints
+## TL;DR — the touchpoints
 
 To add a label `Foo` with natural key `(field_a, field_b)`:
 
@@ -25,9 +25,11 @@ To add a label `Foo` with natural key `(field_a, field_b)`:
 [ ] 4. UNIQUE constraint              src/neo4j_client.py — Neo4jClient.create_constraints
 [ ] 5. n.uuid index                   src/neo4j_client.py — Neo4jClient.create_indexes
 [ ] 6. Merge function                 src/neo4j_client.py — merge_foo / create_foo_node
+[ ] 7. SECTOR_LABELLED_NODE_LABELS    src/sector_labels.py  (only if the label carries a `zone` list)
 ```
 
-If any of these are missing, the invariant tests in `tests/test_round26_invariants.py` fail loudly.
+The invariant tests in `tests/test_round26_invariants.py` catch most omissions of 1–6 ([What's pinned by tests](#whats-pinned-by-tests-vs-whats-manual)); no test
+catches a missing 7 ([Labels that carry a `zone` list](#labels-that-carry-a-zone-list)).
 
 > **No backfill step:** EdgeGuard is pre-release; no production graph carries
 > Foo nodes without a uuid. The `merge_foo` write-time MERGE stamps `n.uuid` and
@@ -270,6 +272,15 @@ nodes are auto-created by `build_relationships.py` steps 7a-7d
 Don't try to `compute_node_uuid` inside Cypher — UUIDv5 is not available
 as a Cypher function.
 
+### Labels that carry a `zone` list
+
+A label whose nodes carry `zone` gets its sector labels (`:Finance`,
+`:Healthcare`, `:Energy`) only when `SECTOR_LABELLED_NODE_LABELS` in
+`src/sector_labels.py` lists it: `Neo4jClient.apply_sector_labels` labels
+those kinds after every sync, and the acceptance check
+`sector_labels_follow_zones` checks only those kinds. No test fails when the
+entry is missing.
+
 ---
 
 ## What's pinned by tests vs. what's manual
@@ -282,6 +293,7 @@ as a Cypher function.
 | 4. UNIQUE constraint | `test_every_natural_key_label_has_a_unique_constraint` | No |
 | 5. uuid index | None — but cloud-side O(n) MATCH at scale flags it | Yes |
 | 6. Merge function | `test_merge_key_dict_matches_natural_keys_for_every_helper` (key match) + `test_every_session_run_has_explicit_timeout` (timeout) + `test_every_node_merge_stamps_managed_on_create_and_enriched_on_match` (ownership marker) + `TestNoWriteResultIsDiscarded` (result read) | Partial |
+| 7. `SECTOR_LABELLED_NODE_LABELS` (labels with a `zone` list) | None | Yes |
 
 The "manual check needed" items are candidates for further invariant
 tests.
@@ -306,10 +318,11 @@ the input shape already constrains the value space.
 
 ---
 
-_Last updated: 2026-10-17_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — A label with a `zone` list is added to `SECTOR_LABELLED_NODE_LABELS` (touchpoint 7, no test catches its omission), so that `apply_sector_labels` gives its nodes their sector labels and `sector_labels_follow_zones` checks them; the checklist named six touchpoints.
 - 2026-10-17 — Main text restated as a guide to current behaviour; change history moved to this section.
 - 2026-10-17 — The merge template and checklist follow the shared-database contract (`ON CREATE SET n.edgeguard_managed = true` and the `_enriched_on_match_clause` ON MATCH clause) and read the write result (`.consume()`), each with its test; step 4 names the partner-owned labels without a constraint; the validation step runs the ownership, write-result and timeout tests; the label-guard message, the 37-character filter and the `Sector` MERGE sites match the code.
 - 2026-04-26 — The contract is six touchpoints (step 7, the edge backfill, was dropped with the backfill script); the "Unicode-safe natural keys" subsection was added for labels keyed on free-form strings.

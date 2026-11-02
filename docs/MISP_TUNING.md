@@ -234,7 +234,7 @@ small CISA event uses default batching.
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `edgeguard_misp_push_permanent_failure_total` | `source` | Each increment = one batch (default 500 attrs) lost after `@retry_with_backoff(max_retries=4)` exhausted. **Non-zero rate is the operator signal that backend is undersized.** Labelled by `source` only, without `event_id`, to keep cardinality bounded — each MISP run creates a date-stamped event, which would generate one new time series per source per day. |
+| `edgeguard_misp_push_permanent_failure_total` | `source` | Each increment = one batch (default 500 attrs) that still failed with HTTP 5xx or 429 after `@retry_with_backoff(max_retries=4)` exhausted. Of it, the attributes MISP does not hold count as failed: after a 5xx the writer looks the batch up in the event, and after a 429, or when that lookup fails, the whole batch counts as failed. A batch MISP stored in full despite a 5xx counts as pushed and is not counted here (`[STORED-AFTER-5XX]`). **Non-zero rate is the operator signal that backend is undersized.** Labelled by `source` only, without `event_id`, to keep cardinality bounded — each MISP run creates a date-stamped event, which would generate one new time series per source per day. |
 | `edgeguard_misp_push_backoff_triggered_total` | `source` | Each increment = EdgeGuard entered an extended cooldown (default 5 min) after N consecutive 5xx failures. Distinguishes "occasional flap" from "sustained backend overload." |
 
 ### Alert rules (shipped)
@@ -272,7 +272,7 @@ second, so that expression means more than one cooldown per second
 | HTTP 500 with "MySQL has gone away" | `max_allowed_packet` rejecting the JSON | `max_allowed_packet = 256M` |
 | HTTP 504 / Apache hangs after ~30s | `max_execution_time` truncating the PHP | `max_execution_time = 600` |
 | `Trying to access array offset on value of type null` | MISP attribute payload rejected as too many vars | `max_input_vars = 50000` |
-| Push completes but only some attributes saved | MISP silent dedup; expected if `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS=true` and you're re-running | No action; check `attrs_skipped_existing` in collector stats |
+| Push completes but only some attributes saved | Values the event already held, skipped by the writer before the push (`attrs_skipped_existing`), or values MISP answered HTTP 200 for without storing them: one an earlier request stored in another case (names, URLs and the other types whose case MISP keeps) or one failing MISP's validation (`[UNCONFIRMED]`, `attributes_unconfirmed`) | No action for the skipped values; for `[UNCONFIRMED]` lines see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), MISP push accounting |
 | MISP container restarts mid-push | Apache prefork OOMing the container | Raise the Docker compose `mem_limit` for `misp` AND apply the PHP / MySQL settings above |
 
 ---
@@ -336,15 +336,18 @@ of a day:
 MISP answers a push with the whole event (every attribute it holds), so an
 event can outgrow the answer before it outgrows the store: MISP saves the
 batch, runs out of PHP memory building the answer and responds HTTP 500.
-With `memory_limit = 2048M` that happened on every batch to an OTX event past
+The answer grows with the event, so once an event passes the size its PHP
+`memory_limit` can answer, every further batch to it ends this way: with
+`memory_limit = 2048M` that happened on every batch to an OTX event past
 about 148,800 attributes (730-day baseline of 2026-11-01). After a 5xx the
 writer therefore looks the batch's values up in the event
 (`attributes/restSearch` by `eventid` and value). A batch MISP holds in full
 counts as pushed and is not sent again: a WARNING `[STORED-AFTER-5XX]`, the
 writer stat `batches_stored_after_5xx` and a note on the push summary line.
 Of a batch whose retries all fail, only the attributes MISP does not hold
-count as failed. When the lookup fails too, the batch is retried and counted
-as before. `[STORED-AFTER-5XX]` on every batch means the event is past what
+count as failed. When the lookup fails too, the batch is retried; when every
+retry fails and the lookup after the last one gives no answer, every attribute
+of the batch counts as failed. `[STORED-AFTER-5XX]` on every batch means the event is past what
 MISP can answer: raise `memory_limit` (the TL;DR's 4096M) so the pushes
 answer 200 again and each batch is checked against the stored event.
 
@@ -365,6 +368,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `edgeguard_misp_push_permanent_failure_total`: of a counted batch only the attributes MISP does not hold count as failed, and a batch MISP stored in full despite a 5xx is not counted (the row called every counted batch lost). Troubleshooting: a push that saved only some attributes is told apart into values skipped before the push and values MISP did not store (`[UNCONFIRMED]`) (the row named MISP's silent dedup only). Event size: the text states why every further batch to an event past that size fails, and how a batch counts when the lookup fails too (it said "as before").
 - 2026-11-02 — Event size: MISP answers a push with the whole event and an event can outgrow that answer (HTTP 500 after the save; with 2048M, an OTX event past about 148,800 attributes on 2026-11-01); the writer looks a batch up after a 5xx and counts what MISP holds as pushed (`[STORED-AFTER-5XX]`); a row in the cheat-sheet.
 - 2026-10-25 — Event size and audience: the writer continues a source/date event in `-partN` events of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, except a group with OTX report ids, so the OTX event is the baseline event past 50,000 attributes; with the default thresholds no part reaches the adaptive tiers (a lowered `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` applies them to parts); a knob row for the split, and the prefetch row says the split reads a part's size from it (the page said a baseline writes one event per source, URLhaus one event of about 63,000 URLs, and partitioning is planned).
 - 2026-10-25 — Audience: URLhaus (its whole `recent.csv` export in one baseline event, about 63,000 URLs on 2026-10-24) named among the sources whose baseline events pass 50,000 attributes; ThreatFox (at most 10,000 IOCs per run) removed from them.

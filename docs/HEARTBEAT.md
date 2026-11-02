@@ -7,6 +7,7 @@
 - Airflow 3 runs every task under a **supervisor** process. While the task runs, the supervisor sends a heartbeat to the API server about every **`[workers] min_heartbeat_interval`** seconds (default **5**), whatever the task's Python code is doing; the supervisor is a separate process, so long imports or a long computation in the task do not delay it.
 - The scheduler fails a task whose last heartbeat is older than **`[scheduler] task_instance_heartbeat_timeout`** (default **300** s; the Airflow 2 name is `scheduler_zombie_task_threshold`). It looks for such tasks every **`[scheduler] task_instance_heartbeat_timeout_detection_interval`** (default **10** s; Airflow 2 name `zombie_detection_interval`); that is a scan interval, not "kill after 10 s".
 - A heartbeat timeout therefore means that the supervisor or the API server was unreachable, or the worker was overloaded. A long-running task alone does not cause one. `[scheduler] task_instance_heartbeat_sec` (Airflow 2 name `local_task_job_heartbeat_sec`) is defined, but no code of Airflow 3.3.2 reads it.
+- Only a running scheduler detects a heartbeat timeout. While the scheduler is stopped, no timeout is detected and a DAG run stays `running` ([AIRFLOW_DAGS.md § Scheduler or triggerer stopped](AIRFLOW_DAGS.md#scheduler-or-triggerer-stopped); alert `EdgeGuardAirflowSchedulerDown`).
 
 **Docker Compose (this repo):** `docker-compose.yml` sets **`AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT=3600`** and **`AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT_DETECTION_INTERVAL=60`** on the **airflow** service; both can be overridden in **`.env`**. The compose file sets no heartbeat interval, since no Airflow 3.3.2 code reads `task_instance_heartbeat_sec`. The value in effect:
 
@@ -38,10 +39,11 @@ Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — A stopped scheduler detects no heartbeat timeout and a DAG run stays `running`; pointer to the scheduler guide and its alert.
 - 2026-10-25 — Airflow container memory: events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000) attributes are fetched as metadata plus attribute pages of 5000 joined into one list (the page said the initial fetch loads the full event JSON).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).
 - 2026-10-17 — Rewritten as a guide to the current system; the Airflow 2 variable names moved to the appendix.

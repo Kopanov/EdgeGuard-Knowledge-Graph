@@ -74,6 +74,8 @@ The `baseline_start` task log prints the effective item limit and history window
 
 On a 7-day window the acceptance script reports the CVE-properties check as *informational*: NVD assigns reference tags and CPE configurations weeks after publication, so day-old CVEs legitimately lack them.
 
+`baseline_postcheck` judges a smoke run as it judges a full run, except that a run with an item limit (`collection_limit` above 0) is judged on its ATT&CK links only, not on the claims. The CVE score coverage (at least half of the non-rejected NVD CVEs with a CVSS sub-node, judged when NVD delivered and the graph holds at least 100 of them), each collector's delivery (at least 0.9 of its count as `SOURCED_FROM` edges at its `Source` node) and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES` can fail a smoke run, and a failed postcheck keeps the baseline lock held ([RUNBOOK.md § 7](RUNBOOK.md#7-baseline-chain-stopped-after-a-failed-step-postcheck), 7d).
+
 Requires MISP/Neo4j (and API keys) as for a normal run.
 
 ---
@@ -90,6 +92,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Checking the result: how `baseline_postcheck` judges a smoke run (ATT&CK links only with an item limit; CVE score coverage, each collector's delivery and the required sources as on a full run; a failed postcheck keeps the lock held). The section named only the acceptance script.
 - 2026-11-02 — Option C (`python src/run_pipeline.py --baseline`, development only, a reduced graph) removed: `run_pipeline.py` runs the collectors into MISP only and refuses `--baseline`; its notes on checking a smoke run are under § Checking the result.
 - 2026-11-02 — `edgeguard fresh-baseline` for a smoke run also without Compose (it triggers through the Airflow REST API there).
 - 2026-11-01 — A smoke run goes through the `edgeguard_baseline` DAG on every install; Option B covers installs without Docker, with a run configuration for `airflow dags trigger`; Option C (`run_pipeline.py`, offered as the route without Airflow) is development only and builds a reduced graph. The fresh trigger of Option B states where its backup gate reads `EDGEGUARD_LAST_BACKUP_AT`.

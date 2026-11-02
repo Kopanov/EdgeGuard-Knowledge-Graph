@@ -85,14 +85,14 @@ Every document of the repository, by topic. The [README](../README.md) at the re
 | [DEMO.md](DEMO.md) | Alert enrichment demo and workflow demonstration checks |
 | [sources/README.md](sources/README.md) | Notes on running MISP next to EdgeGuard, with a reference Compose file |
 
-`visualization.html` (the Graph Explorer), `demo.html` and `architecture_presentation.html` are pages to open in a browser, served from a local web server.
+`visualization.html` (the Graph Explorer) is served from a local web server whose origin the APIs allow ([GRAPH_EXPLORER.md](GRAPH_EXPLORER.md)).
 
 ## Project
 
 | Document | Description |
 |---|---|
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Pull-request checklist, CI, documentation convention |
-| [ROADMAP.md](ROADMAP.md) | Planned work, its dependencies and the issues that track it |
+| [ROADMAP.md](ROADMAP.md) | Planned work with its dependencies and the issues that track it; known defects of the code; open issues with implemented work |
 | [CONTRIBUTING.md (docs stub)](CONTRIBUTING.md) | Pointer to the root guide |
 
 ## Historical records
@@ -103,11 +103,15 @@ These record a past state and are not maintained; each opens with a pointer to t
 |---|---|
 | [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) | Traceability tables of the documentation audits |
 | [flow_audits/README.md](flow_audits/README.md) | Flow audits of April 2026 and their findings |
+| [migrations/2026_04_first_seen_at_source.md](../migrations/2026_04_first_seen_at_source.md) | The move of per-source timestamps onto the `SOURCED_FROM` edges; the current model is in [TIMESTAMPS.md](TIMESTAMPS.md) |
+| [demo.html](demo.html) | Overview page of Sprint 1 (March 2026), a static page that opens from disk; the current graph is in [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), the alert enrichment demo in [DEMO.md](DEMO.md) |
+| [architecture_presentation.html](architecture_presentation.html) | Architecture presentation of Sprint 1 (March 2026), a static page that opens from disk; the current architecture is in [ARCHITECTURE.md](ARCHITECTURE.md), the graph schema in [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md) |
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — The historical record of the per-source timestamp change in `migrations/` is listed; only the Graph Explorer needs a web server, while `demo.html` and `architecture_presentation.html` open from disk (the map said all three are served); the ROADMAP row names its known defects and open issues with implemented work. `demo.html` and `architecture_presentation.html` are listed as historical records, the presentation pages of Sprint 1 (March 2026), with pointers to the current documents (they were listed under Tools and demos as current pages, while they show the schema of that time: the architecture presentation the generic `USES` relationship, `Malware.family` and a malware-family to Finance mapping, the overview page `sources` arrays and `is_family` in its property table).
 - 2026-10-23 — Created as the full documentation index, taken from the README's documentation section and completed with the documents it did not list (RUNBOOK, BACKUP, MEMORY_TUNING, MISP_TUNING, BASELINE_LAUNCH_CHECKLIST, TIMESTAMPS, SECURITY_ROADMAP, CLOUD_SYNC, AIRFLOW_DAG_DESIGN, ARCHITECTURE_FLOW, ADDING_A_NODE_LABEL, CONFIGURATION, CLI, ROADMAP); the SETUP_GUIDE, MIGRATIONS, RESILIENCE_CONFIG and DATA_SOURCES descriptions state what those documents cover.

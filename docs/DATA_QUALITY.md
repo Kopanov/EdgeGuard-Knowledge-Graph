@@ -62,11 +62,12 @@ RETURN z as zone, count(DISTINCT n) as count
 
 ### Relationship building with exact matching
 
-`build_relationships.py` matches names exactly, never with a substring test such as `CONTAINS`, because a substring match creates false positives (e.g. "APT" would match "AP"). The family step (Q9) compares the indicator's family label with the malware's name and aliases:
+`build_relationships.py` matches names exactly, never with a substring test such as `CONTAINS`, because a substring match creates false positives (e.g. "APT" would match "AP"). The family step (Q9) decides once per run, in Python, which `Malware` nodes each feed family label names (`family_resolution.resolve_feed_families`): every node whose name or an alias equals the label, both stripped and lower-cased; only when none does, the one node whose name, without whitespace, hyphens, underscores and dots, equals the label without them (`SalatStealer` → `salat stealer`; a label several nodes match that way names none). The statement then finds each node by its name ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#feed-family-labels)):
 
 ```cypher
-// Exact match (simplified: Q9 compares trimmed, lower-cased values and also matches m.aliases)
-WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family))
+// Q9 (simplified): $family_targets maps each label, as stored, to the names of the nodes it names
+UNWIND coalesce($family_targets[i.malware_family], []) AS mname
+MATCH (m:Malware {name: mname})
 ```
 
 **Confidence scoring** (current evidence labels, `r.match_type`; no partial or fuzzy matching exists):
@@ -127,6 +128,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Relationship building with exact matching: the family step (Q9) resolves the feed family labels once per run in Python, with the separator-free fallback on node names, and its statement finds each node by name (the text showed a Cypher comparison of name and aliases that the statement no longer makes).
 - 2026-11-02 — `exact` (Q2): no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label; the exact-match example is the family step's (Q9).
 - 2026-10-23 — The chunking reference points to CONFIGURATION.md, which holds the settings the README listed.
 - 2026-10-18 — `otx_pulse` also labels `INDICATES` from an indicator to a CVE named in the same OTX pulse.

@@ -292,7 +292,7 @@ groups:
           component: airflow
         annotations:
           summary: "Airflow health endpoint does not answer"
-          description: "The metrics service has had no answer from Airflow's health endpoint for 10 minutes (AIRFLOW_WEBSERVER_URL; http://airflow:8082 on Docker Compose): the airflow container or its API server is down, or the metrics service cannot reach it. The state of the scheduler is then unknown and EdgeGuardAirflowSchedulerDown cannot fire. Check `docker compose ps airflow` and `docker compose logs airflow`."
+          description: "The metrics server has had no answer from Airflow's health endpoint for 10 minutes (AIRFLOW_WEBSERVER_URL; http://airflow:8082 on Docker Compose): the airflow container or its API server is down, or the metrics server cannot reach it. The state of the scheduler is then unknown and EdgeGuardAirflowSchedulerDown cannot fire. Check `docker compose ps airflow` and `docker compose logs airflow`."
 
   # ================================================================================
   # Pipeline Alerts
@@ -905,10 +905,10 @@ groups:
             context.
 
             Remediation:
-              1. Tail Airflow logs: ``grep "\[BATCH-PERMANENT-FAILURE\]" /opt/airflow/logs/**/*.log | tail -20``
+              1. Tail Airflow logs: ``docker logs edgeguard_airflow 2>&1 | grep -F '[BATCH-PERMANENT-FAILURE]' | tail -20``
               2. If ``retries_exhausted``: Neo4j is overloaded. Scale or wait.
               3. If ``non_retryable``: schema drift or constraint. Check
-                 Neo4j logs: ``docker logs edgeguard-neo4j 2>&1 | grep -i constraint``
+                 Neo4j logs: ``docker logs edgeguard_neo4j 2>&1 | grep -i constraint``
               4. See docs/RUNBOOK.md § "5. Neo4j batch PERMANENT failure (retry exhaustion)"
 
       - alert: EdgeGuardMergeRejectPlaceholderSpike
@@ -953,11 +953,11 @@ groups:
         #
         # Each increment = one MISP event whose attribute list exceeded
         # ``MAX_ATTRIBUTES_PER_EVENT`` and was silently sliced by
-        # ``MISPCollector.collect``. At baseline scale large NVD events
-        # routinely lose 75%+ of their data this way. Non-zero rate
-        # within an hour means active data loss — operator should
-        # either raise the cap (if MISP can handle it) or investigate
-        # why the source is producing over-sized events.
+        # ``MISPCollector.collect``. No pipeline path runs MISPCollector
+        # (run_pipeline.py leaves it out and no DAG uses it), so the rule
+        # fires only after a manual
+        # ``python src/collectors/misp_collector.py``; the sync's deferral of
+        # events above EDGEGUARD_MAX_EVENT_ATTRIBUTES does not increment it.
         #
         # Use ``increase()`` (absolute count over window) NOT
         # ``rate()`` — same lesson as PR-N12 follow-ups.
@@ -972,12 +972,14 @@ groups:
             ``MISPCollector.collect`` truncated one or more events from
             source ``{{ $labels.source }}`` whose attribute list
             exceeded ``MAX_ATTRIBUTES_PER_EVENT``. Each occurrence
-            silently drops attributes (typically 75%+ of the event's
-            data on large NVD events).
+            silently drops the attributes above the cap. No DAG runs
+            ``MISPCollector``: only a manual
+            ``python src/collectors/misp_collector.py`` increments the counter.
 
             Remediation:
-              1. Identify the offending event(s):
-                 ``grep -E 'truncated.*attributes' /opt/airflow/logs/**/misp_collector.log | tail -20``
+              1. Identify the offending event(s) in the output of the
+                 manual run:
+                 ``python src/collectors/misp_collector.py 2>&1 | grep -F '[MISP-EVENT-TRUNCATED]'``
               2. Decide: raise ``MAX_ATTRIBUTES_PER_EVENT`` (if MISP
                  backend can handle larger events — check PHP
                  ``memory_limit`` and MySQL ``innodb_buffer_pool_size``
@@ -995,7 +997,7 @@ groups:
         # PR-K3's streaming helper already bounds Python-side buffering
         # — this alert catches the OTHER failure modes: Neo4j-side
         # MemoryLimitExceededException inside the TX, kernel OOM of the
-        # Airflow worker, or a build_relationships.py exception that
+        # Airflow task process, or a build_relationships.py exception that
         # dies before emitting the summary counter (``record_build_
         # relationships_completion``). If the counter hasn't incremented
         # for 6h while a DAG run started in the last 8h, we have a
@@ -1084,10 +1086,10 @@ groups:
             relationships, and nothing died.
 
             Common causes (ranked by likelihood):
-              1. Airflow worker OOM-killed (exit 137). Check:
-                 ``docker stats edgeguard-airflow-worker --no-stream``
+              1. The Airflow container or its task process OOM-killed (exit 137). Check:
+                 ``docker stats edgeguard_airflow --no-stream``
               2. Neo4j MemoryLimitExceededException inside an APOC batch.
-                 Check: ``docker logs edgeguard-neo4j 2>&1 | grep -iE
+                 Check: ``docker logs edgeguard_neo4j 2>&1 | grep -iE
                  'MemoryLimit|OutOfMemory'``
               3. Airflow task ``execution_timeout`` (5h default) fired.
                  Check the task's state in Airflow UI.
@@ -1129,8 +1131,8 @@ groups:
               3. Per-row Cypher error (schema drift, constraint violation).
 
             Remediation:
-              1. Log probe: ``docker logs edgeguard-airflow-worker
-                 2>&1 | grep -E '\[PARTIAL\]' | tail -20``
+              1. Log probe: ``docker logs edgeguard_airflow
+                 2>&1 | grep -F '[PARTIAL]' | tail -20``
               2. Inspect the reported errorMessages in the log line
                  (first 3 errors are pre-logged).
               3. Re-run the whole build_relationships task (its MERGEs are idempotent; there is no per-step re-run), or

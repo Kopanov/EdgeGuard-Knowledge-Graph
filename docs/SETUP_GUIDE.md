@@ -259,7 +259,7 @@ docker compose down
 docker compose up -d
 ```
 
-**Neo4j check helper:** `src/check_neo4j.sh` expects Docker container **`edgeguard_neo4j`** and reads **`NEO4J_PASSWORD`** from **`.env`** in the repo root (or your environment). Prefer **`python src/health_check.py`** for a full MISP+Neo4j check.
+**Neo4j check helper:** `src/check_neo4j.sh` checks the Docker container **`edgeguard_neo4j`** (`NEO4J_DOCKER_CONTAINER` names another) and reads **`NEO4J_PASSWORD`** from **`.env`** in the repo root (or your environment). Prefer **`python src/health_check.py`** for a full MISP+Neo4j check.
 
 The `edgeguard` commands, the `make` targets and the operator scripts: [CLI.md](CLI.md).
 
@@ -307,6 +307,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Neo4j check helper: `NEO4J_DOCKER_CONTAINER` names another container than `edgeguard_neo4j` (the text said the helper expects that container).
 - 2026-11-02 — `python src/run_pipeline.py` runs the collectors into MISP only and refuses `--baseline`; the venv path named its in-process baseline as a development path that builds a reduced graph.
 - 2026-11-02 — Venv path: the `edgeguard baseline` / `fresh-baseline` wrappers trigger through the Airflow REST API without Compose (the text said they work on the Compose install only) and refuse while the scheduler is not healthy or a baseline run is queued or running.
 - 2026-11-01 — `airflow standalone` runs each Airflow component in its own subprocess of the one container (the text said one process).

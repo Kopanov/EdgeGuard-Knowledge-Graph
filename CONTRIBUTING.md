@@ -9,7 +9,12 @@ Use **Python 3.12+** (see `pyproject.toml` `requires-python`; CI uses 3.12).
 3. **Types (optional but recommended):** `make type-check` (checks `src/`; CI runs Mypy on `src/` and `scripts/`)
 4. **Tests:** `make test` — same env vars as CI (`NEO4J_*`, `MISP_*` dummies are set by the Makefile)
 
-CI runs **Ruff**, **Mypy** (`src/` and `scripts/`), **pytest** (with coverage floor 30%), a **Neo4j integration** test, **Docker builds** of both images with **Trivy** image scans, and **pip-audit** — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI runs **Ruff**, **Mypy** (`src/` and `scripts/`), **pytest** (with coverage floor 30%), the **Neo4j integration** tests (`tests/*_neo4j.py`, run against a throwaway Neo4j with APOC; locally they skip unless `EDGEGUARD_IT_NEO4J_URI`, with `EDGEGUARD_IT_NEO4J_USER` and `EDGEGUARD_IT_NEO4J_PASSWORD`, names such a database, and they refuse a database that holds nodes they did not write), **Docker builds** of both images with **Trivy** image scans, and **pip-audit** — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+## Writing tests
+
+- **Nothing in the checkout.** Autouse fixtures in `tests/conftest.py` give every test its own baseline lock path (`EDGEGUARD_BASELINE_LOCK_PATH`), baseline checkpoint directory, pipeline lock path, state directory (`EDGEGUARD_STATE_DIR`), destructive-operations audit trail (`EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH`) and pipeline metrics file under pytest's temporary directory; a test of one of these paths sets its own. A test that reloads `baseline_checkpoint` or calls `monkeypatch.undo()` puts the checkpoint paths back into the checkout and fails at teardown; use `monkeypatch.context()` for a local undo.
+- **Any file order.** Tests must pass in any order of the test files; check with the reverse order (`pytest $(ls tests/test_*.py | sort -r)`), since CI runs one order only. A test that needs fresh copies of modules calls `drop_modules_for_test(monkeypatch, *names)` from `tests/stub_cleanup.py`, which puts `sys.modules` back after the test, instead of deleting entries or reloading a module in place. Stand-in modules are installed inside `sys_modules_restored()`, and a DAG file is imported inside `dag_module_import()`, which skips the test only where Airflow is not installed.
 
 ## CLI and version behavior
 
@@ -26,7 +31,7 @@ Every document in the repository follows one convention:
 - **The README has no History.** `README.md` ends with its single `_Last updated: YYYY-MM-DD_` line and carries no `## History` section; every other document keeps its History.
 - **Planned work lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).** Other documents describe the current behavior and state its limits; the roadmap is the one document whose main text may link the open GitHub issue that tracks an item.
 - **No procedures for data written by earlier versions.** After larger changes the project wipes MISP and Neo4j and runs a fresh baseline, so the documents describe a fresh deployment only: repairs and one-off migrations of data kept across an upgrade are not documented (git history keeps earlier procedures). A change that a reader needs in order to understand the current system is recorded as one dated History line.
-- **Historical records keep their text.** `docs/flow_audits/`, `migrations/*.md` and `docs/DOCUMENTATION_AUDIT.md` record a past state; each opens with a one-line note that points to the current document. A design proposal is not kept once it is implemented: what stays true moves into the current document and git history keeps the proposal.
+- **Historical records keep their text.** `docs/flow_audits/`, `migrations/*.md`, `docs/DOCUMENTATION_AUDIT.md` and the Sprint 1 pages `docs/demo.html` and `docs/architecture_presentation.html` record a past state; each opens with a one-line note that points to the current document. A design proposal is not kept once it is implemented: what stays true moves into the current document and git history keeps the proposal.
 
 When a heading changes, its anchor changes too: update every link to the old anchor in the same pull request.
 
@@ -40,10 +45,11 @@ If you run Airflow on the host (not only via repo `docker-compose.yml`), **do no
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Historical records: the Sprint 1 pages `docs/demo.html` and `docs/architecture_presentation.html` are listed with them. Writing tests: the per-test temporary paths of `tests/conftest.py`, the module helpers of `tests/stub_cleanup.py` and the file-order rule. CI runs the Neo4j integration tests (`tests/*_neo4j.py`), which skip locally without a throwaway database (the checklist named one integration test).
 - 2026-10-23 — `README.md` carries only its `_Last updated` line, without a History section; planned work lives in `docs/ROADMAP.md` (created with this rule), the one document that may link the issue tracking an item.
 - 2026-10-18 — The STIX exporter design proposal left the historical records: its current content moved into docs/RESILMESH_QUICKSTART_STIX.md and the proposal was deleted; an implemented proposal is not kept.
 - 2026-10-18 — Documents no longer keep procedures for data written by earlier versions; the project re-baselines after larger changes.
