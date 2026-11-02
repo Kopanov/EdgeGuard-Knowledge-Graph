@@ -723,6 +723,50 @@ OTX_INCREMENTAL_MAX_PAGES = _env_int("EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES", 25)
 # consecutive empty pages, so this only caps a very large modified-since window.
 OTX_BASELINE_MAX_PAGES = _env_int("EDGEGUARD_OTX_BASELINE_MAX_PAGES", 200)
 
+
+def otx_retry_per_run() -> int:
+    """``EDGEGUARD_OTX_RETRY_PER_RUN`` (default 50; ``0`` = no retries): the pulses of the OTX retry list a
+    scheduled run fetches by id (``/api/v1/pulses/{id}``) and pushes again, those tried longest ago first. A
+    pulse goes on the list when the writer lists one of its items as unstored and the cursor moves on
+    (``otx_collector``, 2026-11-02). Each fetch is one OTX request, 2 s apart like the page requests (OTX
+    allows about 30 a minute), so 50 add at least 100 s of fetch pauses to a run of ``collect_otx`` (limit 1
+    hour). The pulses of the list are pushed after the window's push, each in batches of its own, within
+    ``EDGEGUARD_OTX_RETRY_MAX_SECONDS``."""
+    return max(0, _env_int("EDGEGUARD_OTX_RETRY_PER_RUN", 50))
+
+
+def otx_retry_max_seconds() -> int:
+    """``EDGEGUARD_OTX_RETRY_MAX_SECONDS`` (default 600, at least 1): wall-clock time a scheduled OTX run spends
+    at most on pushing the pulses of its retry list (2026-11-02), counted from the start of that push, which
+    follows the window's push: its event lookup and listings, its batches with their throttle pauses, back-off
+    cooldowns and HTTP 5xx retries, and its refresh edits. No batch starts once a throttle pause or cooldown
+    due before it would end at or after the limit, and no refresh edit starts after it; the pulses whose items
+    were not sent keep their entries unchanged and are pushed first by the next run. A batch already sent is
+    not interrupted, so the push can exceed the limit by one batch's attempts (``MISPWriter._push_batch``:
+    five, with 150 s of pauses between them after HTTP 5xx). 10 minutes is a sixth of the task's limit (1
+    hour), as for ``EDGEGUARD_MISP_REFRESH_MAX_SECONDS``."""
+    return max(1, _env_int("EDGEGUARD_OTX_RETRY_MAX_SECONDS", 600))
+
+
+def otx_retry_max_days() -> int:
+    """``EDGEGUARD_OTX_RETRY_MAX_DAYS`` (default 7, at least 1): a pulse still on the OTX retry list this many
+    days after its first failure is given up once a run has tried it past that deadline: it leaves the list
+    with an ERROR (``[OTX-RETRY-GAVE-UP]``) and counts in ``edgeguard_otx_retry_given_up_total``. A baseline whose
+    window reaches its ``modified`` collects it again."""
+    return max(1, _env_int("EDGEGUARD_OTX_RETRY_MAX_DAYS", 7))
+
+
+def otx_retry_max_pulses() -> int:
+    """``EDGEGUARD_OTX_RETRY_MAX_PULSES`` (default 1000, at least 1): the most pulses the OTX retry list holds;
+    beyond it the pulses that first failed longest ago are given up as after ``EDGEGUARD_OTX_RETRY_MAX_DAYS``,
+    when the run writes the pulses its window's push added, before the pulses of the list are pushed, so a run
+    that raises or is killed during that push leaves no longer list. The list lives in the incremental state
+    file (``checkpoints/baseline_checkpoint.json``, written with ``json.dump(..., indent=2)``): an entry takes
+    about 490 bytes of it and at most 2,000 (``otx_collector._RETRY_ENTRY_MAX_BYTES``), so the list at most 2 MB
+    at the default."""
+    return max(1, _env_int("EDGEGUARD_OTX_RETRY_MAX_PULSES", 1000))
+
+
 # MITRE: use If-None-Match on the STIX bundle URL when not in baseline mode (304 → skip re-push).
 MITRE_USE_CONDITIONAL_GET = _env_bool("EDGEGUARD_MITRE_CONDITIONAL_GET", "true")
 

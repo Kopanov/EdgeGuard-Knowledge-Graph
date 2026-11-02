@@ -153,6 +153,13 @@ x-common-env: &common-env
   EDGEGUARD_MISP_CROSS_EVENT_DEDUP: ${EDGEGUARD_MISP_CROSS_EVENT_DEDUP:-true}
   EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS: ${EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS:-3}
   EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC: ${EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC:-300}
+  # OTX retry list (2026-11-02, src/collectors/otx_collector.py): pulses fetched by id per scheduled run
+  # (0 = none), days until a failing pulse is given up, most pulses on the list, seconds a run spends at most
+  # on pushing the listed pulses. Defaults mirror src/config.py.
+  EDGEGUARD_OTX_RETRY_PER_RUN: ${EDGEGUARD_OTX_RETRY_PER_RUN:-50}
+  EDGEGUARD_OTX_RETRY_MAX_DAYS: ${EDGEGUARD_OTX_RETRY_MAX_DAYS:-7}
+  EDGEGUARD_OTX_RETRY_MAX_PULSES: ${EDGEGUARD_OTX_RETRY_MAX_PULSES:-1000}
+  EDGEGUARD_OTX_RETRY_MAX_SECONDS: ${EDGEGUARD_OTX_RETRY_MAX_SECONDS:-600}
   EDGEGUARD_ZONE_DETECT_THRESHOLD: ${EDGEGUARD_ZONE_DETECT_THRESHOLD:-1.5}
   EDGEGUARD_ZONE_ITEM_THRESHOLD: ${EDGEGUARD_ZONE_ITEM_THRESHOLD:-1.5}
   # Re-reported indicators (2026-10, src/collectors/misp_writer.py): the stored copy of an

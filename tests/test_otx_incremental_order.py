@@ -20,11 +20,13 @@ fixture), and ``collect`` keeps its incremental state in a dict, so several runs
 
 A push of items MISP already holds returns (0, 0) (``push_items`` counts them as neither stored nor failed);
 the cursor advances after it as after any push without failures, so the oldest-first limit does not take the
-same pulses on every run (``_HoldingWriter``). After a push with failures, whatever it stored, the cursor stops
-below the oldest pulse with an item the writer lists as unstored; a push with failures that stored nothing left
-it where it was. The guards (a baseline, a window read before the page ceiling, a short last page, a writer
-without a list of unstored items, an unstored item of a pulse without a readable ``modified``) pass before the
-change too and say so in their docstrings.
+same pulses on every run (``_HoldingWriter``). After a push with failures in batches MISP answered, whatever
+it stored, the cursor advances too and the pulses with an item the writer lists as unstored go on the retry
+list, which later runs fetch by id (2026-11-02; ``test_otx_retry_list.py``); when every listed item failed at
+its MISP event (MISP unreachable, the day's event failing), the cursor stops below the oldest pulse with one.
+The guards (a baseline, a window read before the page ceiling, a short last page, a writer without a list of
+unstored items, an unstored item of a pulse without an id) pass before the change too and say so in their
+docstrings.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -108,11 +110,36 @@ class _Otx:
     """``/api/v1/pulses/subscribed`` as measured on 2026-11-02: the pulses modified at or after
     ``modified_since``, newest-modified first and the higher id first among equal ``modified`` values,
     paged by offset (``page``, ``limit``), with the number of matching pulses as ``count``. A pulse without
-    a readable ``modified`` matches every request and comes last."""
+    a readable ``modified`` matches every request and comes last.
+
+    ``/api/v1/pulses/{id}`` (the retry list's fetch by id, 2026-11-02) answers the pulse with that id, or
+    HTTP 404 with OTX's body ``{"detail": "Not Found"}`` (``tests/fixtures/otx_pulse_by_id_2026_11_02.json``);
+    *fetch_errors* maps an id to the HTTP status to answer instead, to an exception to raise, or to another
+    body to answer with HTTP 200, and
+    *by_id_only* holds pulses answered by id but not listed as subscribed (a pulse modified again after the
+    page requests of the run, for example)."""
 
     def __init__(self, pulses: List[Dict[str, Any]]):
         self.pulses = list(pulses)
         self.requests: List[Dict[str, Any]] = []
+        self.by_id_requests: List[str] = []
+        self.by_id_calls: List[Dict[str, Any]] = []
+        self.fetch_errors: Dict[str, Any] = {}
+        self.by_id_only: Dict[str, Dict[str, Any]] = {}
+
+    def by_id(self, pid: str) -> MagicMock:
+        self.by_id_requests.append(pid)
+        error = self.fetch_errors.get(pid)
+        if isinstance(error, Exception):
+            raise error
+        if isinstance(error, dict):
+            response = MagicMock(status_code=200)
+            response.json.return_value = copy.deepcopy(error)
+            return response
+        pulse = self.by_id_only.get(pid) or next((p for p in self.pulses if p.get("id") == pid), None)
+        response = MagicMock(status_code=error or (200 if pulse else 404))
+        response.json.return_value = copy.deepcopy(pulse) if response.status_code == 200 else {"detail": "Not Found"}
+        return response
 
     def ordered(self, since: datetime) -> List[Dict[str, Any]]:
         dated = [p for p in self.pulses if (dt := _utc(p.get("modified"))) is not None and dt >= since]
@@ -120,6 +147,10 @@ class _Otx:
         return dated + [p for p in self.pulses if _utc(p.get("modified")) is None]
 
     def answer(self, method: str, url: str, params: Optional[Dict[str, Any]] = None, **_kw: Any) -> MagicMock:
+        if not url.endswith("/api/v1/pulses/subscribed"):
+            assert "/api/v1/pulses/" in url and params is None, url
+            self.by_id_calls.append({"method": method, "url": url, **_kw})
+            return self.by_id(url.rsplit("/", 1)[1])
         params = dict(params or {})
         self.requests.append(params)
         since = _utc(params["modified_since"])
@@ -157,16 +188,27 @@ class _RecordedPages:
 
 class _Writer:
     """A MISP writer double: stores every item except those of the pulses in *failing*, which it lists in
-    ``last_push_unstored_items`` (positions in the pushed list) as ``MISPWriter`` does."""
+    ``last_push_unstored_items`` (positions in the pushed list) as ``MISPWriter`` does; with *at_the_event* they
+    failed at their MISP event (``last_push_event_failed_items``: MISP unreachable, the day's event failing),
+    otherwise in batches MISP answered. The items of a run's pushes (the window's, then the retry list's,
+    2026-11-02) are kept in ``pushed`` and their *batch_key* (``push_items``' argument; ``None`` without one) in
+    ``batch_keys``, in push order; ``calls`` keeps each call's items and keyword arguments."""
 
-    def __init__(self, failing: Iterable[str] = ()):
+    def __init__(self, failing: Iterable[str] = (), at_the_event: bool = False):
         self.failing = set(failing)
+        self.at_the_event = at_the_event
         self.pushed: List[Dict[str, Any]] = []
+        self.batch_keys: List[Any] = []
+        self.calls: List[Dict[str, Any]] = []
         self.last_push_unstored_items: List[int] = []
+        self.last_push_event_failed_items: List[int] = []
 
-    def push_items(self, items: List[Dict[str, Any]]):
-        self.pushed = list(items)
+    def push_items(self, items: List[Dict[str, Any]], batch_key: Any = None, **kw: Any):
+        self.calls.append({"items": list(items), "batch_key": batch_key, **kw})
+        self.pushed += list(items)
+        self.batch_keys += [batch_key(item) if batch_key is not None else None for item in items]
         self.last_push_unstored_items = [n for n, item in enumerate(items) if item.get("pulse_id") in self.failing]
+        self.last_push_event_failed_items = list(self.last_push_unstored_items) if self.at_the_event else []
         return len(items) - len(self.last_push_unstored_items), len(self.last_push_unstored_items)
 
 
@@ -178,8 +220,8 @@ class _WriterWithoutList:
         self.every_item_fails = every_item_fails
         self.pushed: List[Dict[str, Any]] = []
 
-    def push_items(self, items: List[Dict[str, Any]]):
-        self.pushed = list(items)
+    def push_items(self, items: List[Dict[str, Any]], **_kw: Any):
+        self.pushed += list(items)
         failed = len(items) if self.every_item_fails else 1
         return len(items) - failed, failed
 
@@ -203,8 +245,8 @@ class _HoldingWriter:
         self.counts: List[tuple] = []
         self.last_push_unstored_items: List[int] = []
 
-    def push_items(self, items: List[Dict[str, Any]]):
-        self.pushed = list(items)
+    def push_items(self, items: List[Dict[str, Any]], **_kw: Any):
+        self.pushed += list(items)
         new = [(n, item) for n, item in enumerate(items) if item["value"] not in self.held]
         self.last_push_unstored_items = [n for n, item in new if item.get("pulse_id") in self.failing]
         stored = [item["value"] for n, item in new if n not in self.last_push_unstored_items]
@@ -219,6 +261,8 @@ class _Result(NamedTuple):
     cursor: Optional[str]
     messages: List[str]
     warnings: List[str]
+    retry: List[Dict[str, Any]]  # the retry list in the state after the run (2026-11-02)
+    errors: List[str]
 
 
 def _collect(
@@ -231,8 +275,14 @@ def _collect(
     max_pages: int = 25,
     page_size: int = 100,
     writer: Any = None,
+    sleeps: Optional[List[float]] = None,
+    push_to_misp: bool = True,
+    sleep: Optional[Callable[[float], None]] = None,
 ) -> _Result:
-    """One ``collect`` run against *otx*, reading and writing the incremental state in *state*."""
+    """One ``collect`` run against *otx*, reading and writing the incremental state in *state*; *sleeps*
+    collects the pauses the run takes, and *sleep*, when given, takes them (a virtual clock). Each write goes
+    through JSON, as ``baseline_checkpoint`` writes the state file, so *state* never shares an object with the
+    run: a change the run makes to an entry after writing it reaches *state* only through a later write."""
     collector = OTXCollector.__new__(OTXCollector)
     collector.api_key = "a" * 64
     collector.base_url = "https://otx.example"
@@ -243,13 +293,21 @@ def _collect(
     collector.circuit_breaker = MagicMock()
     collector.source_name = "otx"
     collector.misp_writer = writer if writer is not None else _Writer()
+    if isinstance(getattr(collector.misp_writer, "pushed", None), list):
+        collector.misp_writer.pushed = []  # the items of this run's pushes
+    if isinstance(getattr(collector.misp_writer, "batch_keys", None), list):
+        collector.misp_writer.batch_keys = []
     caplog.clear()
     with (
         patch.object(collector, "check_service_available", return_value=True),
         patch.object(otx_collector, "request_with_rate_limit_retries", side_effect=otx.answer),
-        patch.object(otx_collector.time, "sleep"),
-        patch.object(otx_collector, "get_source_incremental", side_effect=lambda _src: dict(state)),
-        patch.object(otx_collector, "update_source_incremental", side_effect=lambda _src, **kw: state.update(kw)),
+        patch.object(otx_collector.time, "sleep", side_effect=sleep or (sleeps.append if sleeps is not None else None)),
+        patch.object(otx_collector, "get_source_incremental", side_effect=lambda _src: copy.deepcopy(state)),
+        patch.object(
+            otx_collector,
+            "update_source_incremental",
+            side_effect=lambda _src, **kw: state.update(json.loads(json.dumps(kw))),
+        ),
         patch.object(otx_collector, "OTX_INCREMENTAL_MAX_PAGES", max_pages),
         patch.object(otx_collector, "OTX_INCREMENTAL_OVERLAP_SEC", 300),
         # The look-back reaches every fixture pulse whatever the date the tests run on.
@@ -257,7 +315,7 @@ def _collect(
         patch.object(otx_collector, "_OTX_INCREMENTAL_PAGE_SIZE", page_size, create=True),
         caplog.at_level("INFO", logger=otx_collector.logger.name),
     ):
-        status = collector.collect(limit=limit, push_to_misp=True, baseline=baseline, baseline_days=100000)
+        status = collector.collect(limit=limit, push_to_misp=push_to_misp, baseline=baseline, baseline_days=100000)
     pushed = getattr(collector.misp_writer, "pushed", [])
     records = [r for r in caplog.records if r.name == otx_collector.logger.name]
     return _Result(
@@ -266,6 +324,8 @@ def _collect(
         cursor=state.get("otx_last_pulse_modified"),
         messages=[r.getMessage() for r in records],
         warnings=[r.getMessage() for r in records if r.levelname == "WARNING"],
+        retry=list(state.get("otx_retry_pulses") or []),
+        errors=[r.getMessage() for r in records if r.levelname == "ERROR"],
     )
 
 
@@ -278,6 +338,24 @@ def _passed_by_the_cursor(read: Iterable[Dict[str, Any]], stored: Iterable[str],
     if at is None:
         return []
     return [p["id"] for p in read if p["id"] not in stored_ids and (dt := _utc(p["modified"])) is not None and dt < at]
+
+
+# The retry-list counts of a scheduled run that pushed and whose retry list stayed empty (2026-11-02).
+NO_RETRY = {
+    "retry_pending": 0,
+    "retry_added": 0,
+    "retry_fetched": 0,
+    "retry_recovered": 0,
+    "retry_given_up": 0,
+    "retry_not_found": 0,
+    "retry_fetch_failed": 0,
+    "retry_not_pushed": 0,
+}
+
+
+def _listed(run: "_Result") -> List[str]:
+    """The pulse ids on the retry list after *run*, sorted."""
+    return sorted(entry["id"] for entry in run.retry)
 
 
 # --------------------------------------------------------------------------- the double
@@ -315,6 +393,7 @@ def test_without_a_stored_cursor_the_limit_takes_the_oldest_pulses_of_the_look_b
         "processed": 20,
         "without_item": 0,
         "deferred": 40,
+        **NO_RETRY,
     }
     deferral = [m for m in run.messages if LIMIT_LOG in m]
     assert deferral == [
@@ -603,58 +682,78 @@ def test_the_newest_modified_is_returned_as_its_own_value_reads():
 # --------------------------------------------------------------------------- partial failure
 
 
-def test_a_partial_failure_holds_the_cursor_below_the_oldest_pulse_with_an_unstored_item(caplog):
-    """Pulses 50-55 and a limit of 3: the run takes 55, 54 and 53, and pulse 53's item is not stored. The
-    cursor stops below pulse 53 (at 54) and every pulse not stored (53, and 52-50 deferred) is modified
-    after it. Before the change the run took pulses 50-52, its push succeeded and the cursor reached
-    pulse 50, past 53-55."""
+def test_a_partial_failure_advances_the_cursor_and_lists_the_pulse_with_an_unstored_item(caplog):
+    """Pulses 50-55 and a limit of 3: the run takes 55, 54 and 53, and pulse 53's item is not stored (listed).
+    The cursor advances to pulse 53, the newest processed, and pulse 53 goes on the retry list; the next run
+    reads pulse 53 again inside the overlap (modified at the cursor), stores it and takes it off the list,
+    without a request by id. Before the retry list the cursor stopped below pulse 53 (at 54)."""
     otx = _Otx(_recorded(range(50, 56)))
     state: Dict[str, Any] = {}
-    writer = _Writer(failing=[IDS[53]])
-    run = _collect(otx, state, caplog, limit=3, writer=writer)
+    run = _collect(otx, state, caplog, limit=3, writer=_Writer(failing=[IDS[53]]))
 
-    assert run.cursor == ROWS[54]["modified"] == "2026-10-27T16:21:59.690000"
-    stored = [pid for pid in run.processed if pid != IDS[53]]
-    assert sorted(stored) == sorted(_ids([54, 55]))
-    assert _passed_by_the_cursor(_recorded(range(50, 56)), stored, run.cursor) == []
-    assert all(_utc(ROWS[i]["modified"]) > _utc(run.cursor) for i in (50, 51, 52, 53))
+    assert sorted(run.processed) == sorted(_ids([53, 54, 55]))
+    assert run.cursor == ROWS[53]["modified"] == "2026-10-27T16:30:12.295000"
+    assert _listed(run) == [IDS[53]]
+    assert all(_utc(ROWS[i]["modified"]) > _utc(run.cursor) for i in (50, 51, 52)), "the deferred pulses"
     assert run.status["pulse_counts"]["deferred"] == 3
+    assert run.status["success"] is False
+
+    later = _collect(otx, state, caplog, limit=3)
+    assert IDS[53] in later.processed and otx.by_id_requests == []
+    assert later.retry == [] and later.status["pulse_counts"]["retry_recovered"] == 1
 
 
-def test_an_undated_pulse_with_an_unstored_item_holds_the_cursor(caplog):
-    """Guard (unchanged rule): the stored cursor is at pulse 55, the run processes pulses 50-55 and one
-    pulse without a readable ``modified``, and the items of that pulse and of pulse 52 are not stored. A
-    held pulse that cannot be placed leaves the cursor where it is (``_pulses_before_oldest``); taken
-    without it, the cursor would move to pulse 53, the newest below pulse 52."""
+@pytest.mark.parametrize("every_item_fails", [False, True], ids=["two pulses fail", "every item fails at the event"])
+def test_an_undated_pulse_with_an_unstored_item(caplog, every_item_fails):
+    """The stored cursor is at pulse 55, and the run processes pulses 50-55 and one pulse without a readable
+    ``modified``. When the items of that pulse and of pulse 52 are not stored while the others are, the cursor
+    advances to pulse 50 and both go on the retry list, the undated one by its id alone (no ``modified``).
+    When every item fails at its MISP event (a whole-push failure), the cursor stays where it was (guard,
+    unchanged rule): the undated held pulse cannot be placed against it (``_pulses_before_oldest``), and no
+    pulse goes on the list."""
     undated = "6a0000000000000000000001"
     otx = _Otx(_recorded(range(50, 56)) + [_pulse(undated, None, "2026-10-27T12:00:00", 61)])
     state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[55]["modified"]}
-    writer = _Writer(failing=[undated, IDS[52]])
-    run = _collect(otx, state, caplog, limit=10, writer=writer)
+    failing = [undated, *_ids(range(50, 56))] if every_item_fails else [undated, IDS[52]]
+    run = _collect(otx, state, caplog, limit=10, writer=_Writer(failing=failing, at_the_event=every_item_fails))
 
     assert sorted(run.processed) == sorted(_ids(range(50, 56)) + [undated])
-    assert run.status["failed"] == 2
-    assert state == {"otx_last_pulse_modified": ROWS[55]["modified"]}
+    if every_item_fails:
+        assert run.status["failed"] == 7
+        assert state == {"otx_last_pulse_modified": ROWS[55]["modified"]}
+    else:
+        assert run.status["failed"] == 2
+        assert run.cursor == ROWS[50]["modified"]
+        assert _listed(run) == sorted([undated, IDS[52]])
+        assert "modified" not in next(e for e in run.retry if e["id"] == undated)
 
 
-def test_while_an_item_fails_on_every_run_the_runs_take_the_same_pulses_after_the_held_cursor(caplog):
-    """The 60 pulses, a limit of 20, and pulse 45's item not stored on the first three runs. The cursor
-    stays below pulse 45 (at pulse 46), so each of those runs counts the same 20 oldest pulses after it
-    (45 down to 26) and the 26 newer pulses wait: none of pulses 0-25 is processed until the item is stored.
-    Then three runs process the rest, oldest first, and the cursor reaches the newest pulse."""
+def test_while_an_item_fails_on_every_run_the_runs_move_on_and_retry_its_pulse_by_id(caplog):
+    """The 60 pulses, a limit of 20, and pulse 45's item not stored on the first three runs. Run 1 takes pulses
+    40-59, the cursor advances to pulse 40 and pulse 45 goes on the retry list; runs 2 and 3 take the newer
+    pulses (20-39, then 0-19, each with its re-reads) and fetch pulse 45 by id, which fails again (attempts 2
+    and 3, the first failure kept). Run 4, the item stored, fetches it once more and takes it off the list.
+    Before the retry list the cursor stayed below pulse 45 and each run took the same 20 oldest pulses after it
+    while 0-25 waited."""
     otx = _Otx(_recorded(range(60)))
     state: Dict[str, Any] = {}
     held = [_collect(otx, state, caplog, limit=20, writer=_Writer(failing=[IDS[45]])) for _ in range(3)]
 
-    assert sorted(held[0].processed) == sorted(_ids(range(40, 60)))
-    assert sorted(held[1].processed) == sorted(held[2].processed) == sorted(_ids(range(26, 47)))
-    assert [r.cursor for r in held] == [ROWS[46]["modified"]] * 3
-    assert [r.status["pulse_counts"]["deferred"] for r in held] == [40, 26, 26]
-    assert not set(_ids(range(26))) & {pid for r in held for pid in r.processed}
+    assert [sorted(set(r.processed) - {IDS[45]}) for r in held] == [
+        sorted(set(_ids(range(40, 60))) - {IDS[45]}),
+        sorted(_ids(range(20, 42))),
+        sorted(_ids(range(0, 22))),
+    ], "each window with its re-reads (41 and 21 lie within 300 s of the cursor)"
+    assert [r.cursor for r in held] == [ROWS[40]["modified"], ROWS[20]["modified"], ROWS[0]["modified"]]
+    assert otx.by_id_requests == [IDS[45], IDS[45]]
+    assert [[(e["id"], e["attempts"]) for e in r.retry] for r in held] == [[(IDS[45], n)] for n in (1, 2, 3)]
+    assert len({e["first_failed_at"] for r in held for e in r.retry}) == 1, "the first failure is kept"
+    assert [r.status["pulse_counts"]["retry_fetched"] for r in held] == [0, 1, 1]
 
-    cleared = [_collect(otx, state, caplog, limit=20) for _ in range(3)]
-    assert [r.cursor for r in cleared] == [ROWS[26]["modified"], ROWS[6]["modified"], ROWS[0]["modified"]]
-    assert set(_ids(range(26))) <= {pid for r in cleared for pid in r.processed}
+    cleared = _collect(otx, state, caplog, limit=20)
+    assert otx.by_id_requests == [IDS[45]] * 3
+    assert cleared.retry == [] and cleared.status["pulse_counts"]["retry_recovered"] == 1
+    assert cleared.cursor == ROWS[0]["modified"], "a retried pulse never moves the cursor"
 
 
 # --------------------------------------------------------------------------- items MISP already holds
@@ -700,17 +799,16 @@ def test_without_a_stored_cursor_a_push_of_items_misp_holds_advances_the_cursor(
 
 
 @pytest.mark.parametrize("stored", [0, 1, 5], ids=["stores nothing", "stores one item", "stores five items"])
-def test_a_push_with_failures_holds_the_cursor_below_the_oldest_failed_pulse_whatever_it_stored(caplog, stored):
+def test_a_push_with_failures_advances_the_cursor_and_lists_the_failed_pulses_whatever_it_stored(caplog, stored):
     """Stored cursor at pulse 59, a limit of 20: the run takes pulses 39-58 (and pulse 59 as a re-read). MISP
     already holds the items of pulses 49-59, the items of pulses 44-48 fail (listed as unstored), and of pulses
-    39-43 the push stores the first *stored* while MISP holds the others. Whatever the push stored, the cursor
-    stops below the oldest pulse with a failed item (48), at pulse 49, and once the items can be stored the next
-    run takes pulses 44-48 again and stores them.
+    39-43 the push stores the first *stored* while MISP holds the others. Whatever the push stored, MISP stored
+    or held items of the push, so the failure is one of items, not of the push: the cursor advances to pulse 39
+    and pulses 44-48 go on the retry list. The next run, the items storable again, takes the newer pulses 19-38
+    and fetches pulses 44-48 by id, stores them and empties the list.
 
-    The gate on main left the cursor after a push with failures that stored nothing, so with the oldest-first
-    limit the case that stores nothing would keep the cursor at pulse 59 (on main every case fails, only because
-    the limit took the newest pulses there). The case that stores one item pins the boundary of the rule: a gate
-    that required more than one stored item would leave the cursor there too."""
+    The case that stores nothing is the stall of the previous rule: its push returns (0, 5), and the cursor
+    stopped below pulse 48 on every run while the newer pulses waited."""
     otx = _Otx(_recorded(range(60)))
     state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[59]["modified"]}
     held = [_value(i) for i in range(39 + stored, 44)] + [_value(i) for i in range(49, 60)]
@@ -719,23 +817,27 @@ def test_a_push_with_failures_holds_the_cursor_below_the_oldest_failed_pulse_wha
 
     assert sorted(run.processed) == sorted(_ids(range(39, 60)))
     assert writer.counts == [(stored, 5)]
-    assert run.cursor == ROWS[49]["modified"]
-    assert all(_utc(ROWS[i]["modified"]) > _utc(run.cursor) for i in range(44, 49))
+    assert run.cursor == ROWS[39]["modified"]
+    assert _listed(run) == sorted(_ids(range(44, 49)))
+    assert {(e["attempts"], e["modified"]) for e in run.retry} == {(1, ROWS[i]["modified"]) for i in range(44, 49)}
     assert run.status["success"] is False, "the failures still fail the run"
+    assert run.status["pulse_counts"]["retry_added"] == 5
 
     writer.failing = set()
     retried = _collect(otx, state, caplog, limit=20, writer=writer)
-    assert set(_ids(range(44, 49))) <= set(retried.processed)
-    assert {_value(i) for i in range(44, 49)} <= writer.held
+    assert sorted(otx.by_id_requests) == sorted(_ids(range(44, 49)))
+    assert set(_ids(range(19, 40))) <= set(retried.processed)
+    assert {_value(i) for i in range(19, 49)} <= writer.held
+    assert retried.retry == [] and retried.cursor == ROWS[19]["modified"]
 
 
 @pytest.mark.parametrize("stored", [False, True], ids=["stores nothing", "stores the other items"])
 def test_an_unstored_item_that_names_no_pulse_leaves_the_cursor(caplog, stored):
     """Guard (unchanged rule, passes before the change too): the stored cursor is at pulse 55, and the run
     processes pulses 50-55 and a pulse without an id (OTX's rows without an id are kept), whose item is not
-    stored and is listed. The item cannot be placed against the cursor, so the cursor stays where it is, whether
-    the push stored the other items or MISP already held them; skipping the item instead, the cursor would move
-    to pulse 50, past the pulse without an id."""
+    stored and is listed. The item cannot be placed against the cursor or fetched by id, so the cursor stays
+    where it is and no pulse goes on the retry list, whether the push stored the other items or MISP already
+    held them; skipping the item instead, the cursor would move to pulse 50, past the pulse without an id."""
     nameless = _pulse(None, "2026-10-27T16:00:00", "2026-10-27T12:00:00", 61)
     otx = _Otx(_recorded(range(50, 56)) + [nameless])
     state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[55]["modified"]}
@@ -751,8 +853,8 @@ def test_an_unstored_item_that_names_no_pulse_leaves_the_cursor(caplog, stored):
 @pytest.mark.parametrize("every_item_fails", [False, True], ids=["one item fails", "every item fails"])
 def test_a_writer_without_a_list_of_unstored_items_leaves_the_cursor(caplog, every_item_fails):
     """Guard (unchanged rule, passes before the change too): a push with failures whose writer lists no
-    unstored items leaves the stored cursor where it is, also when the limit deferred pulses, whether the push
-    stored items or none."""
+    unstored items leaves the stored cursor where it is and puts no pulse on the retry list, also when the limit
+    deferred pulses, whether the push stored items or none."""
     otx = _Otx(_recorded(range(60)))
     state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[50]["modified"]}
     run = _collect(otx, state, caplog, limit=20, writer=_WriterWithoutList(every_item_fails))

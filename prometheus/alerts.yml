@@ -173,6 +173,67 @@ groups:
           summary: "{{ $labels.source }} is not collected: the provider denies access"
           description: "{{ $labels.source }} was skipped with {{ $labels.reason_class }} (HTTP 401/403) in the last 25 hours. The task is green, nothing is collected. Check the source's API key with `python src/source_key_check.py`, or whether the provider blocks this client."
 
+      - alert: EdgeGuardOtxRetryPulsesWaiting
+        # 2026-11-02: a scheduled OTX run whose MISP push left items unstored in batches MISP answered
+        # moves its cursor on and puts the pulses of those items on a retry list
+        # (src/collectors/otx_collector.py); later runs (every 30 min) fetch them by id and push each in
+        # batches of its own. A pulse still on the list a day after its first failure has failed up to one
+        # retry per run (more when Airflow retries a red run): the cause persists (a value MISP refuses, a
+        # payload the collector no longer reads). The gauges are set after every scheduled run and by the
+        # fresh baseline's wipe; the oldest-failure gauge is 0 when the list is empty. While the pulse fails,
+        # runs with nothing new to store go red, so EdgeGuardDAGRunFailures and EdgeGuardSourceUnhealthy
+        # (otx) can fire with this alert, from the same cause. Warning: nothing is lost yet, the pulses are
+        # given up after EDGEGUARD_OTX_RETRY_MAX_DAYS (7) and EdgeGuardOtxRetryPulsesGivenUp then fires.
+        expr: |
+          edgeguard_otx_retry_pulses > 0
+          and on ()
+          (time() - edgeguard_otx_retry_oldest_failure_timestamp_seconds) > 86400
+        for: 30m
+        labels:
+          severity: warning
+          component: collector
+        annotations:
+          summary: "{{ $value }} OTX pulse(s) on the retry list, the oldest failing for more than a day"
+          description: |
+            OTX pulses whose items MISP did not store have waited on the retry list for more than 24 hours;
+            the scheduled runs fetch them by id and push them again, and they still fail. The cursor and the
+            other pulses move on. Find the cause in the collect_otx task log ([OTX-RETRY] lines, the MISP push
+            errors of the same run) and fix it; the pulses leave the list at the next run that stores their
+            items. Red collect_otx runs (EdgeGuardDAGRunFailures, EdgeGuardSourceUnhealthy for otx) can have
+            the same cause. See docs/RUNBOOK.md § "OTX retry backlog and given-up pulses".
+
+      - alert: EdgeGuardOtxRetryPulsesGivenUp
+        # 2026-11-02: pulses given up from the OTX retry list ([OTX-RETRY-GAVE-UP] at ERROR): still failing
+        # EDGEGUARD_OTX_RETRY_MAX_DAYS (7) days after their first failure, tried since, or beyond
+        # EDGEGUARD_OTX_RETRY_MAX_PULSES (1000), whatever their age. No scheduled run collects them any
+        # more. Warning, not critical: the loss is bounded to the named pulses, nothing else is held back, a
+        # baseline whose window reaches their modified collects them once the cause is fixed, and for
+        # pulses given up by age EdgeGuardOtxRetryPulsesWaiting has fired for six days before; pulses given
+        # up beyond the cap mean the list overflowed (raise EDGEGUARD_OTX_RETRY_MAX_PULSES or fix the cause).
+        # Paging at night would not change the action. Second clause: increase() is 0 for a series that has
+        # just been created, as when the first pulse is ever given up.
+        expr: |
+          sum(increase(edgeguard_otx_retry_given_up_total[24h])) > 0
+          or
+          (
+            sum(edgeguard_otx_retry_given_up_total) > 0
+              unless
+            sum(edgeguard_otx_retry_given_up_total offset 24h)
+          )
+        for: 0m
+        labels:
+          severity: warning
+          component: collector
+        annotations:
+          summary: "OTX pulses given up from the retry list in the last 24 hours"
+          description: |
+            OTX pulses whose items MISP did not store left the retry list without being stored: they failed
+            for EDGEGUARD_OTX_RETRY_MAX_DAYS, or the list exceeded EDGEGUARD_OTX_RETRY_MAX_PULSES. Their failed
+            items are not in MISP and no scheduled run collects them. The [OTX-RETRY-GAVE-UP] ERROR lines of the
+            collect_otx task log name each pulse with its modified, attempts and last reason. Fix the cause,
+            then run an additive baseline whose baseline_days reach their modified.
+            See docs/RUNBOOK.md § "OTX retry backlog and given-up pulses".
+
   # ================================================================================
   # Circuit Breaker Alerts
   # ================================================================================

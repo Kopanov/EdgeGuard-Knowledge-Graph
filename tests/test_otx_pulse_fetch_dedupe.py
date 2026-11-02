@@ -33,6 +33,19 @@ if _SRC not in sys.path:
 from collectors import otx_collector  # noqa: E402
 from collectors.otx_collector import OTXCollector  # noqa: E402
 
+# The retry-list counts a scheduled run that pushed adds to ``pulse_counts`` (2026-11-02); none of these runs
+# has a pulse on the list.
+NO_RETRY = {
+    "retry_pending": 0,
+    "retry_added": 0,
+    "retry_fetched": 0,
+    "retry_recovered": 0,
+    "retry_given_up": 0,
+    "retry_not_found": 0,
+    "retry_fetch_failed": 0,
+    "retry_not_pushed": 0,
+}
+
 
 def _indicator(n: int, ind_type: str, value: str) -> Dict[str, Any]:
     return {
@@ -272,6 +285,7 @@ def test_a_run_whose_pulses_all_yielded_no_item_still_returns_the_counts(caplog)
         "processed": 2,
         "without_item": 2,
         "deferred": 0,
+        **NO_RETRY,
     }
 
 
@@ -290,6 +304,7 @@ def test_an_incremental_repeat_no_longer_takes_a_slot_of_the_limit(caplog):
         "processed": 3,
         "without_item": 0,
         "deferred": 0,
+        **NO_RETRY,
     }
     messages = [r.getMessage() for r in records]
     assert (
@@ -343,6 +358,7 @@ def test_a_scheduled_run_counts_only_the_pulses_within_the_limit(caplog):
         "processed": 2,
         "without_item": 0,
         "deferred": 1,
+        **NO_RETRY,
     }
     lines = [
         r.getMessage() for r in records if " processed, " in r.getMessage() and r.getMessage().startswith("[PULSES]")

@@ -419,6 +419,7 @@ class TestFailures:
         assert writer.push_items(batch) == (5, 50)
         assert f"{BASE}-part3" not in misp.events.values()
         assert writer.last_push_unstored_items == list(range(50))
+        assert writer.last_push_event_failed_items == writer.last_push_unstored_items  # at the event (2026-11-02)
         assert sizes(misp)[f"EdgeGuard-threatfox-{TODAY}"] == 5
 
     def test_a_part_the_walk_could_not_read_is_never_written_blind(self):
@@ -465,6 +466,7 @@ class TestFailures:
         with caplog.at_level("ERROR", logger=misp_writer.logger.name):
             assert writer.push_items(held_by_part3 + threatfox) == (5, 10)
         assert writer.last_push_unstored_items == list(range(10))
+        assert writer.last_push_event_failed_items == writer.last_push_unstored_items  # at the event (2026-11-02)
         assert any(
             r.levelname == "ERROR" and "10 attribute(s) counted as failed, nothing written" in r.getMessage()
             for r in caplog.records
@@ -493,6 +495,7 @@ class TestFailures:
         writer = writer_for(misp)
         assert writer.push_items(items(30, offset=5000)) == (20, 10)
         assert writer.last_push_unstored_items == list(range(20, 30))
+        assert writer.last_push_event_failed_items == writer.last_push_unstored_items  # at the event (2026-11-02)
         assert sizes(misp) == {BASE: 100, f"{BASE}-part2": 100, f"{BASE}-part3": 40}
 
     @pytest.mark.parametrize("dedup", [False, True])
@@ -529,6 +532,7 @@ class TestFailures:
         assert writer.push_items(items(350)) == (100, 250)
         assert sorted(misp.events.values()) == [BASE]  # no part 3 after the missing part 2
         assert writer.last_push_unstored_items == list(range(100, 350))
+        assert writer.last_push_event_failed_items == writer.last_push_unstored_items  # at the event (2026-11-02)
 
     def test_a_failed_part_creation_fails_only_its_own_group(self):
         misp = FakeMisp([], event_info=BASE)
@@ -559,6 +563,7 @@ class TestFailures:
         writer = writer_for(misp)
         assert writer.push_items(items(250)) == (100, 150)
         assert writer.last_push_unstored_items == list(range(100, 250))
+        assert writer.last_push_event_failed_items == writer.last_push_unstored_items  # at the event (2026-11-02)
 
     def test_an_abort_during_the_backoff_cooldown_leaves_no_empty_part(self, monkeypatch):
         # part 1's three batches fail with HTTP 500, which trips the back-off cooldown before part 2's first

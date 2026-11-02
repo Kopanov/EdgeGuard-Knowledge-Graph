@@ -689,8 +689,9 @@ _CONVERSION_REQUIRES: Dict[str, str] = {
 # which deliver vulnerabilities) that is every item, for OTX and MITRE ATT&CK the share of that
 # kind. The threshold must lie far above the share one bad record has in a small incremental
 # window, because a counted failure keeps the source's cursor or ETag (MITRE ATT&CK, CISA ICS, the
-# cursor an NVD baseline seeds) or, for OTX, holds the cursor below the pulse of each counted item
-# (``MISPWriter.last_push_unstored_items``), so the next run reads the same record again and fails again.
+# cursor an NVD baseline seeds) or, for OTX, puts the pulse of each counted item on the retry list
+# (``MISPWriter.last_push_unstored_items``; 2026-11-02), so a later run reads the same record again and
+# fails again.
 # At 0.5 one bad item fails a push only when the source has at most two items in it, and the cursor
 # moves at the first run whose window holds three or more; a payload change that breaks most of a
 # source's items still fails the run. A value such as 0.05 (the complement of the default
@@ -1307,6 +1308,16 @@ def _make_attributes_storable(attributes: List[Dict]) -> List[Dict]:
             ]
         storable.append(clean)
     return storable
+
+
+def _batches(attrs: List[Dict], size: int, key_of: Callable[[Dict], Any]) -> List[List[Dict]]:
+    """*attrs* in batches of at most *size* (2026-11-02). Attributes for which *key_of* differs never share a
+    batch: each key's attributes are batched apart, in their order, the keys in the order of their first
+    attribute. With one key for all (``push_items`` without ``batch_key``) the batches follow *attrs*."""
+    by_key: Dict[Any, List[Dict]] = {}
+    for attr in attrs:
+        by_key.setdefault(key_of(attr), []).append(attr)
+    return [group[i : i + size] for group in by_key.values() for i in range(0, len(group), size)]
 
 
 def _strict_push_accounting() -> bool:
@@ -3263,6 +3274,8 @@ class MISPWriter:
         batch_size: int = 500,
         *,
         known_source_keys: Optional[Dict[str, set]] = None,
+        batch_key: Optional[Callable[[Dict], Any]] = None,
+        deadline: Optional[float] = None,
     ) -> Tuple[int, int]:
         """
         Push a list of items to MISP in batches.
@@ -3277,6 +3290,10 @@ class MISPWriter:
             known_source_keys: ``{source_tag: {(type, value), ...}}`` the caller has already
                 listed (2026-10, NVD incremental runs via ``index_source_attributes``); used in
                 place of the cross-event prefetch for that tag, so MISP is not listed twice.
+            batch_key: a function of an item; items it maps to different values are never in one
+                batch (2026-11-02, below).
+            deadline: a ``time.monotonic()`` value after which no batch starts and no refresh edit
+                starts (2026-11-02, below).
 
         Returns:
             Tuple of (successful_count, failed_count)
@@ -3299,8 +3316,8 @@ class MISPWriter:
         ``CONVERT_FAILED_MIN_SHARE`` of them did. A source whose payload stops converting thus fails
         ``status_after_misp_push``, while a few bad records neither turn a run red nor hold a
         collector's cursor or ETag: CISA ICS, the NVD baseline seed and MITRE ATT&CK move only after
-        a push without failures, OTX after a push with failures only up to the oldest pulse with an
-        item in ``last_push_unstored_items``, which lists the items of a systemic drop (below). A
+        a push without failures, and OTX retries the pulses with an item in
+        ``last_push_unstored_items``, which lists the items of a systemic drop (below). A
         (source, date) group left without attributes reaches neither the event lookup nor MISP.
         With cross-event dedup on and a complete listing of the source's attributes (or
         ``known_source_keys``), the cross-event filter runs before ``_get_or_create_event``: a
@@ -3363,8 +3380,9 @@ class MISPWriter:
         2026-10 (unstored items): after the call, ``self.last_push_unstored_items`` lists the
         positions in *items* of the items MISP did not store because their batch, their group's
         event lookup, the creation of their part or the lookup of a further part failed, and of the
-        items of a systemic conversion drop (below). A cursor that
-        must not pass them (OTX) stops below them. The items of a batch are listed after HTTP
+        items of a systemic conversion drop (below). OTX fetches their pulses again by id on later runs
+        (its retry list), or holds its cursor below them when every listed item failed at its event
+        (``last_push_event_failed_items``, 2026-11-02). The items of a batch are listed after HTTP
         4xx, a batch error or HTTP 429 after the retries; after HTTP 5xx and the retries, the
         attributes the lookup in the event does not find (all of them when that lookup fails); when
         the event id is empty once sanitised (no request is sent, 2026-11-02); and under strict
@@ -3374,8 +3392,39 @@ class MISPWriter:
         payload the collector no longer reads, whose items a later run stores once the collector
         reads it again; single bad records below the share are not. Values MISP can never store
         (4-byte characters) are not listed either: a later run cannot store them.
+
+        2026-11-02 (items that failed at their event): ``self.last_push_event_failed_items`` lists the
+        positions, among the unstored items, of those listed because the MISP event their attribute goes
+        to could not be used: the lookup or creation of their group's event failed (after the retries,
+        or without an event id), the lookup of a further part failed, their part could not be created,
+        or the event id was empty once sanitised. No batch carried them, so a push whose listed items
+        are all in it is one MISP failed as a whole (unreachable, or the day's event failing), not one
+        of items MISP refused. A batch MISP answered with an error is a failure of its items, whatever
+        share of the push it holds: one value MISP refuses fails its whole batch. The OTX collector
+        holds its cursor after a push whose listed items all failed at their event and puts the pulses
+        of the listed items of any other push on its retry list.
+
+        2026-11-02 (*batch_key*): a function of an item; attributes whose items it maps to different
+        values never share a batch, each value's attributes being batched apart, in the order of the
+        first item of each value (``_batches``; the attribute of several items in the push takes the
+        value of the first). Without it the batches follow the order of the items, as before. The OTX
+        collector passes it so that each pulse of its retry list is pushed in batches of its own: a
+        value MISP refuses then fails no item of another pulse. The throttle applies between all
+        batches.
+
+        2026-11-02 (*deadline*): a ``time.monotonic()`` value. A batch starts only when the throttle
+        pause before it, and the back-off cooldown when one is due, end before the deadline; otherwise
+        the push stops there, and ``self.last_push_skipped_items`` lists the positions of the items of
+        that batch and of every later one, which are neither stored nor failed (nothing was sent for
+        them). A batch already sent is not interrupted: its attempts after HTTP 5xx can take it past the
+        deadline. The refresh of re-reported indicators starts no edit after the deadline either. The
+        event lookups and listings before the first batch are not bounded by it. Without a deadline the
+        push is unchanged. The OTX collector passes one for the push of the pulses of its retry list
+        (``EDGEGUARD_OTX_RETRY_MAX_SECONDS``).
         """
         self.last_push_unstored_items: List[int] = []
+        self.last_push_event_failed_items: List[int] = []
+        self.last_push_skipped_items: List[int] = []
         if not items:
             return 0, 0
 
@@ -3418,11 +3467,27 @@ class MISPWriter:
         item_positions_by_key: Dict[Tuple[Any, Any], List[int]] = {}
         not_converted_positions: Dict[str, List[int]] = {}
         unstored_positions: set = set()
+        # 2026-11-02: the positions listed because their event could not be used (``last_push_event_failed_items``).
+        event_failed_positions: set = set()
+        # 2026-11-02: the positions of the items not sent because *deadline* came (``last_push_skipped_items``).
+        skipped_positions: set = set()
 
-        def _note_unstored(attrs: List[Dict]) -> None:
+        def _note_unstored(attrs: List[Dict], at_the_event: bool = False) -> None:
             for a in attrs:
                 if _value_is_storable(a):
-                    unstored_positions.update(item_positions_by_key.get(_within_push_key(a), ()))
+                    positions = item_positions_by_key.get(_within_push_key(a), ())
+                    unstored_positions.update(positions)
+                    if at_the_event:
+                        event_failed_positions.update(positions)
+
+        def _note_skipped(attrs: List[Dict]) -> None:
+            for a in attrs:
+                skipped_positions.update(item_positions_by_key.get(_within_push_key(a), ()))
+
+        def _key_of(attr: Dict) -> Any:
+            # The batch key of an attribute (2026-11-02): *batch_key* of the first item it was built from.
+            positions = item_positions_by_key.get(_within_push_key(attr))
+            return batch_key(items[positions[0]]) if batch_key is not None and positions else None
 
         for item_position, item in enumerate(items):
             source = item.get("tag", "unknown")
@@ -3481,7 +3546,7 @@ class MISPWriter:
                 if systemic:
                     not_converted_failed_ct += dropped
                     # Listed as unstored (2026-10): a collector that reads the payload again can
-                    # store them, so they hold the OTX cursor like the items of a failed batch.
+                    # store them, so OTX treats them like the items of a failed batch.
                     unstored_positions.update(not_converted_positions.get(src, ()))
                 reasons = ", ".join(f"{count} {reason}" for reason, count in sorted(not_converted[src].items()))
                 verdict = "counted as failed" if systemic else "not counted as failed"
@@ -3683,11 +3748,11 @@ class MISPWriter:
                 )
                 self.stats["errors"] += 1
                 total_failed += len(unique_attrs)
-                _note_unstored(unique_attrs)
+                _note_unstored(unique_attrs, at_the_event=True)
                 continue
             if not event_id:
                 total_failed += len(unique_attrs)
-                _note_unstored(unique_attrs)
+                _note_unstored(unique_attrs, at_the_event=True)
                 continue
 
             per_event_keys = self._get_existing_attribute_keys(event_id)
@@ -3805,7 +3870,7 @@ class MISPWriter:
                 )
                 self.stats["errors"] += 1
                 total_failed += len(unique_attrs)
-                _note_unstored(unique_attrs)
+                _note_unstored(unique_attrs, at_the_event=True)
                 continue
             # 2026-10: the part found above takes attributes up to ``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE``, the later
             # parts that exist take what fits them, and the rest goes to new parts of at most the limit each.
@@ -3829,7 +3894,7 @@ class MISPWriter:
                 )
                 self.stats["errors"] += 1
                 total_failed += len(lost)
-                _note_unstored(lost)
+                _note_unstored(lost, at_the_event=True)
                 new_chunks = []
             for part_no, chunk in enumerate(new_chunks, start=len(part_ids) + 1):
                 push_queue.append((source, _PendingPart(source, date, part_no), 0, chunk))
@@ -4002,7 +4067,7 @@ class MISPWriter:
         # events. Now uses the same ``_adaptive_for`` helper as the inner
         # loop — single source of truth.
         total_batches = sum(
-            (len(attrs) + _adaptive_for(existing_ct)[0] - 1) // _adaptive_for(existing_ct)[0]
+            len(_batches(attrs, _adaptive_for(existing_ct)[0], _key_of))
             for _src, _eid, existing_ct, attrs in push_queue
         )
 
@@ -4029,12 +4094,17 @@ class MISPWriter:
         # 2026-10: (source, date) groups whose new part could not be created; their later parts are not
         # created either, so the walk of the next push finds no part after a gap.
         failed_part_groups: set = set()
+        # 2026-11-02: the batch before which *deadline* stopped the push (0: not stopped); no later batch is sent.
+        stopped_before_batch = 0
         for source, event_id, existing_attrs_count, unique_attrs in push_queue:
+            if stopped_before_batch:
+                _note_skipped(unique_attrs)
+                continue
             pending = event_id if isinstance(event_id, _PendingPart) else None
             if pending is not None:
                 event_id = None
                 if (pending.source, pending.date) in failed_part_groups:
-                    total_batches -= -(-len(unique_attrs) // _adaptive_for(existing_attrs_count)[0])
+                    total_batches -= len(_batches(unique_attrs, _adaptive_for(existing_attrs_count)[0], _key_of))
                     logger.error(
                         "MISP push %s (%s): part %d not created — %d attribute(s) counted as failed",
                         pending.source,
@@ -4043,7 +4113,7 @@ class MISPWriter:
                         len(unique_attrs),
                     )
                     total_failed += len(unique_attrs)
-                    _note_unstored(unique_attrs)
+                    _note_unstored(unique_attrs, at_the_event=True)
                     continue
             # PR-N4: ADAPTIVE SCALING. ``existing_attrs_count`` was
             # captured during the dedup loop above (we already paid for
@@ -4070,9 +4140,20 @@ class MISPWriter:
                     batch_throttle,
                 )
 
-            # Send attributes in batches
-            for i in range(0, len(unique_attrs), effective_batch_size):
-                batch = unique_attrs[i : i + effective_batch_size]
+            # Send attributes in batches (2026-11-02: apart per *batch_key*, ``_batches``)
+            queue_batches = _batches(unique_attrs, effective_batch_size, _key_of)
+            for i, batch in enumerate(queue_batches):
+                # 2026-11-02 (*deadline*): the batch starts only when the throttle pause before it, and the
+                # back-off cooldown when one is due, end before the deadline. Otherwise nothing more is sent:
+                # the items of this batch and of every later one are skipped, neither stored nor failed.
+                if deadline is not None:
+                    wait = effective_throttle if (i > 0 or processed_batches > 0) and effective_throttle > 0 else 0.0
+                    if self._misp_push_consecutive_failures >= _backoff_threshold and _backoff_cooldown_sec > 0:
+                        wait += _backoff_cooldown_sec
+                    if time.monotonic() + wait >= deadline:
+                        _note_skipped([a for rest in queue_batches[i:] for a in rest])
+                        stopped_before_batch = processed_batches + 1
+                        break
 
                 # Throttle between batches (skip only the very first batch of the first event)
                 if (i > 0 or processed_batches > 0) and effective_throttle > 0:
@@ -4189,7 +4270,7 @@ class MISPWriter:
                         self.stats["errors"] += 1
                     if not event_id:
                         failed_part_groups.add((pending.source, pending.date))
-                        total_batches -= -(-len(unique_attrs) // effective_batch_size)
+                        total_batches -= len(_batches(unique_attrs, effective_batch_size, _key_of))
                         logger.error(
                             "MISP push %s (%s): part %d not created — %d attribute(s) counted as failed",
                             pending.source,
@@ -4198,7 +4279,7 @@ class MISPWriter:
                             len(unique_attrs),
                         )
                         total_failed += len(unique_attrs)
-                        _note_unstored(unique_attrs)
+                        _note_unstored(unique_attrs, at_the_event=True)
                         break
                     logger.info(
                         "MISP push %s (%s): part %d is event %s — %d attribute(s) go to it",
@@ -4238,8 +4319,9 @@ class MISPWriter:
                 try:
                     success, failed = self._push_batch(event_id, batch)
                     if success == 0 and failed:
-                        # HTTP 4xx, a batch error, none confirmed (strict) or an event id empty once sanitised: none stored
-                        _note_unstored(batch)
+                        # HTTP 4xx, a batch error, none confirmed (strict) or an event id empty once sanitised: none
+                        # stored. 2026-11-02: an empty id sent no request, so its items failed at the event.
+                        _note_unstored(batch, at_the_event=not sanitize_value(str(event_id), max_length=20))
                     # PR-N4 round 2 (Cross-Checker #2, Bug Hunter #5):
                     # require N CONSECUTIVE FULL SUCCESSES before
                     # resetting the failure counter. Pre-fix, a single
@@ -4321,10 +4403,22 @@ class MISPWriter:
                 total_success += success
                 total_failed += failed
 
+        if stopped_before_batch:
+            logger.info(
+                "[PUSH] the push's deadline came before batch %d of %d could start: %d item(s) not sent, neither "
+                "stored nor failed",
+                stopped_before_batch,
+                total_batches,
+                len(skipped_positions),
+            )
+
         refreshed_note = ""
         if refresh_due:
-            refreshed, _refresh_failed = self._refresh_stored_copies(refresh_due, refresh_days)
+            refreshed, _refresh_failed = self._refresh_stored_copies(refresh_due, refresh_days, deadline=deadline)
             refreshed_note = f"; {refreshed} existing attribute(s) refreshed"
+        skipped_note = (
+            f"; {len(skipped_positions)} item(s) not sent before the push's deadline" if skipped_positions else ""
+        )
 
         # Final summary. 2026-10: the items dropped in conversion but not counted as failed are named,
         # so that neither line reads as if every item had been pushed or found present.
@@ -4342,7 +4436,12 @@ class MISPWriter:
         if total_success > 0 or total_failed > 0:
             logger.info(
                 f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed{reported_note}"
-                f"{stored_note}{refreshed_note} in {total_elapsed:.1f}s"
+                f"{stored_note}{refreshed_note}{skipped_note} in {total_elapsed:.1f}s"
+            )
+        elif skipped_positions:
+            logger.info(
+                f"[SKIP] MISP push: 0 attributes pushed{reported_note}{refreshed_note}{skipped_note} "
+                f"in {total_elapsed:.1f}s"
             )
         elif total_items > 0:
             deduplicated = (
@@ -4357,10 +4456,15 @@ class MISPWriter:
             logger.info("[OK] MISP push: no items provided")
 
         self.last_push_unstored_items = sorted(unstored_positions)
+        self.last_push_event_failed_items = sorted(event_failed_positions)
+        self.last_push_skipped_items = sorted(skipped_positions)
         return total_success, total_failed
 
     def _refresh_stored_copies(
-        self, due: Dict[Tuple[str, str], Tuple[StoredCopy, Optional[str]]], refresh_days: int
+        self,
+        due: Dict[Tuple[str, str], Tuple[StoredCopy, Optional[str]]],
+        refresh_days: int,
+        deadline: Optional[float] = None,
     ) -> Tuple[int, int]:
         """Refresh the stored copies of indicators a source reported again (2026-10).
 
@@ -4383,7 +4487,9 @@ class MISPWriter:
         stop once ``EDGEGUARD_MISP_REFRESH_MAX_SECONDS`` is spent or after
         ``REFRESH_MAX_CONSECUTIVE_FAILURES`` failed edits in a row (MISP failing: each failure costs
         up to three attempts), so the refresh cannot use up the collector task's time limit. What is
-        not attempted is counted as deferred and is due again on the next run that reports it.
+        not attempted is counted as deferred and is due again on the next run that reports it. With a
+        *deadline* (a ``time.monotonic()`` value, ``push_items``' argument, 2026-11-02) no edit starts at
+        or after it either.
         Returns ``(refreshed, failed)``.
         """
         ordered = sorted(due.values(), key=lambda entry: entry[0].written)
@@ -4404,6 +4510,10 @@ class MISPWriter:
             if budget and done > 1 and time.monotonic() - started >= budget:
                 deferred += len(ordered) - done + 1
                 stop_reasons.append(f"EDGEGUARD_MISP_REFRESH_MAX_SECONDS={budget} spent")
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                deferred += len(ordered) - done + 1
+                stop_reasons.append("the push's deadline came")
                 break
             changes = {"last_seen": _refreshed_last_seen(stored_copy, reported, now)}
             if self.update_attribute(stored_copy.uuid, changes, written_after=stored_copy.written):
