@@ -525,6 +525,13 @@ _REJECTED_PLACEHOLDER_NAMES: frozenset = frozenset(
         "",  # empty-string already caught by existing filters; included for completeness
         "unknown",
         "unknown malware",
+        # ThreatFox's generic family labels (``malware_printable``, stored as
+        # ``Indicator.malware_family``): their Malpedia ids ``unknown_loader``, ``unknown_rat``
+        # and ``unknown_stealer`` (``malware_malpedia``) name no family, like ``unknown`` for
+        # "Unknown malware" (2026-11-02).
+        "unknown loader",
+        "unknown rat",
+        "unknown stealer",
         "unspecified",
         "undefined",
         "null",

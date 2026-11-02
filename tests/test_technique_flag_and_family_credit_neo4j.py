@@ -112,7 +112,9 @@ def _run_step(client, outer_name, inner_name, stat_key, skip_name, params=None):
 
 
 def _q9(client):
-    _run_step(client, "_q9_outer", "_q9_inner", "indicates_family", "_q9_skip")
+    # 2026-11-02: the labels are resolved once per run (``$family_targets``), as build_relationships does.
+    params = build_relationships._family_target_params(client)
+    _run_step(client, "_q9_outer", "_q9_inner", "indicates_family", "_q9_skip", params=params)
 
 
 def _q9b(client):

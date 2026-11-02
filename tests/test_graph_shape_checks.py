@@ -265,3 +265,39 @@ def test_cvss_coverage_verdict(judged, scored, verdict):
     row = {"nvd_cves_not_rejected": judged, "nvd_cves_with_cvss": scored}
     assert gsc.cvss_coverage_verdict(row) is verdict
     assert gsc.CVE_CVSS_COVERAGE_MIN_CVES == 100 and gsc.CVE_CVSS_COVERAGE_MIN_SHARE == 0.5
+
+
+def test_family_statement_judges_the_links_step_9_writes(writer_steps):
+    """Step 9 MERGEs ``INDICATES`` to the nodes ``$family_targets`` names for the stored label and stamps
+    ``malware_family`` on every write; the statement looks the same label up in the same map and looks for that
+    label on the link."""
+    outer, inner = _step(writer_steps, "UNWIND coalesce($family_targets[i.malware_family], []) AS mname")
+    assert outer.startswith("MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL ")
+    assert (
+        "MATCH (m:Malware {name: mname}) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.created_at = datetime() SET "
+        in inner
+    )
+    assert 'r.match_type = "malware_family"' in inner.split("ON CREATE SET r.created_at = datetime() SET ", 1)[1]
+
+    statement = gsc.FAMILY_INDICATES_COMPLETE_QUERY
+    assert statement.startswith("MATCH (i:Indicator) WHERE i.malware_family IN keys($family_targets) ")
+    assert "UNWIND $family_targets[family] AS name MATCH (m:Malware {name: name})" in statement
+    assert "EXISTS { (i)-[r:INDICATES]->(m) WHERE r.match_type = 'malware_family' } AS linked" in statement
+    # grouped by label: one lookup of the nodes per label, not a scan of the Malware nodes per indicator
+    assert statement.index("WITH i.malware_family AS family, collect(i) AS indicators") < statement.index(
+        "MATCH (m:Malware"
+    )
+
+
+@pytest.mark.parametrize(
+    "row, verdict",
+    [
+        ({"claims_with_target": 13900, "edge_missing": 0}, True),
+        ({"claims_with_target": 13900, "edge_missing": 695}, False),
+        ({"claims_with_target": 0, "edge_missing": 0}, None),
+        ({"claims_with_target": 13900}, False),
+        ({"claims_with_target": 0, "edge_missing": 3}, False),
+    ],
+)
+def test_family_indicates_verdict(row, verdict):
+    assert gsc.family_indicates_verdict(row) is verdict

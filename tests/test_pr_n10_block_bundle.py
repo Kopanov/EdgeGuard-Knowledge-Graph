@@ -181,27 +181,37 @@ class TestFix1PlaceholderNameReject:
         outer = block[q9_outer_idx:q9_outer_end]
         assert "NOT toLower(trim(i.malware_family)) IN" in outer, "Q9 outer must filter placeholder malware_family"
 
-    def test_q9_inner_filters_placeholder_malware_names(self):
-        src = (SRC / "build_relationships.py").read_text()
-        q9_start = _link(src, "9")
-        q10_start = _link(src, "10")
-        block = src[q9_start:q10_start]
-        q9_inner_idx = block.find("_q9_inner")
-        q9_skip_idx = block.find("_q9_skip", q9_inner_idx)
-        inner = block[q9_inner_idx:q9_skip_idx]
-        assert "NOT toLower(trim(m.name)) IN" in inner, "Q9 inner must filter placeholder Malware names"
+    def test_q9_never_targets_a_placeholder_malware_name(self):
+        """Since 2026-11-02 Q9 links only the nodes ``$family_targets`` names, and the resolver that builds the
+        map never names a node whose name is a placeholder (legacy ``unknown`` nodes), nor maps a placeholder
+        label, also when an alias of a real node is that placeholder."""
+        from family_resolution import resolve_feed_families
 
-    def test_q9_skip_mirrors_inner_filter(self):
+        resolution = resolve_feed_families(
+            ["Unknown", "Unknown malware", "Unknown Loader", "N/A", "Emotet", "Unknown_Malware"],
+            [
+                {"name": "unknown"},
+                {"name": "n/a"},
+                {"name": "unknown malware"},
+                {"name": "emotet", "aliases": ["Unknown", "N/A"]},
+            ],
+        )
+        assert resolution.targets == {"Emotet": ["emotet"]}
+        assert resolution.placeholders == ["N/A", "Unknown", "Unknown Loader", "Unknown malware"]
+        # no placeholder spelling, but without separators the name of a placeholder node: not that node
+        assert resolution.unresolved == ["Unknown_Malware"]
+
+    def test_q9_skip_mirrors_outer_filter(self):
         src = (SRC / "build_relationships.py").read_text()
         q9_start = _link(src, "9")
         q10_start = _link(src, "10")
         block = src[q9_start:q10_start]
         q9_skip_idx = block.find("_q9_skip")
-        next_assignment_idx = block.find("if not _safe_run_batched", q9_skip_idx)
+        next_assignment_idx = block.find("_safe_run_batched", q9_skip_idx)
         skip = block[q9_skip_idx:next_assignment_idx]
-        # Skip must mirror both outer (malware_family) and inner (m.name) filters
+        # The skip counts the outer statement's rows (placeholder labels left out) without a map entry
         assert "NOT toLower(trim(i.malware_family)) IN" in skip
-        assert "NOT toLower(trim(m.name)) IN" in skip
+        assert "size(coalesce($family_targets[i.malware_family], [])) = 0" in skip
 
 
 # ===========================================================================

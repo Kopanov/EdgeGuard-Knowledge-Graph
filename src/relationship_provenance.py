@@ -48,8 +48,9 @@ OTX_FEEDS = '["alienvault_otx"]'
 # the indicator as ``pulse_malware_families``; build_relationships step 9b links those, with OTX's
 # provenance, to the ``Malware`` node whose name is the family name, that name without an ATT&CK
 # software id, or the node the twin merge folded a node of either name into (``merged_from``). Q9
-# also matches ``m.aliases`` and ``m.family``: a pulse that names the family only by such another
-# name of the node gives that link no OTX credit.
+# also matches ``m.aliases`` and, when neither the name nor an alias matches, the node name without
+# separators (``family_resolution``): a pulse that names the family only by such another name of the
+# node gives that link no OTX credit.
 FAMILY_LABEL_FEEDS = '["threatfox", "malwarebazaar", "feodo_tracker"]'
 # Variables bound by ``prov_with``; a later ``WITH`` must carry them through to the ``SET``.
 PROV_VARS = "_feeds, _prov_refs, _prov_events"

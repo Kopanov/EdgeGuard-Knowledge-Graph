@@ -94,6 +94,9 @@ from canonical_threat_actors import (  # noqa: E402
     load_canonical_reference,
 )
 from canonical_threat_actors import several_actor_reports as _several_actor_reports  # noqa: E402
+from family_resolution import CYPHER_FEED_FAMILIES_READ as _FEED_FAMILIES_READ  # noqa: E402
+from family_resolution import CYPHER_MALWARE_NAMES_READ as _MALWARE_NAMES_READ  # noqa: E402
+from family_resolution import resolve_feed_families as _resolve_feed_families  # noqa: E402
 from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
 from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
 from relationship_provenance import PROV_VARS as _PROV_VARS  # noqa: E402
@@ -136,6 +139,42 @@ def _software_id_params(client) -> Dict[str, Any]:
     if folded:
         logger.info("[LINK] %d folded Malware name(s) resolve to the node they were merged into", len(folded))
     return {"software_id_suffix": _SOFTWARE_ID_SUFFIX, "folded_families": folded}
+
+
+def _family_target_params(client) -> Optional[Dict[str, Any]]:
+    """``$family_targets`` of step 9 (2026-11-02): the Malware node names each feed family label names.
+
+    Read once, when the step starts: the distinct ``Indicator.malware_family`` labels and the names and
+    aliases of the Malware nodes, resolved by ``family_resolution.resolve_feed_families``. The labels
+    whose name without separators several nodes carry are logged and linked to none. ``None`` when a
+    read raises: the step is not run and counts as failed (an empty map would link nothing)."""
+    try:
+        rows = client.run(_FEED_FAMILIES_READ) or []
+        labels = {row.get("family"): row.get("indicators") for row in rows if isinstance(row, dict)}
+        nodes = [row for row in client.run(_MALWARE_NAMES_READ) or [] if isinstance(row, dict)]
+        resolution = _resolve_feed_families(list(labels), nodes)
+    except Exception as e:
+        logger.error("[LINK] step 9: feed family labels or Malware names unreadable (%s): step 9 not run", e)
+        return None
+    logger.info(
+        "[LINK] step 9: %d feed family label(s) name a Malware node (%d by the name without separators: %s); "
+        "%d name none; %d placeholder label(s)",
+        len(resolution.targets),
+        len(resolution.separator_free_matches),
+        ", ".join(f"{label} -> {node}" for label, node in sorted(resolution.separator_free_matches.items())),
+        len(resolution.unresolved),
+        len(resolution.placeholders),
+    )
+    for label, names in sorted(resolution.ambiguous.items()):
+        logger.warning(
+            "[LINK] step 9: family %r (%s indicators): without separators it is the name of %d Malware nodes "
+            "(%s); linked to none",
+            label,
+            labels.get(label),
+            len(names),
+            ", ".join(names),
+        )
+    return {"family_targets": resolution.targets}
 
 
 def _cited_set(var: str) -> str:
@@ -1380,15 +1419,19 @@ def build_relationships():
             failures += 1
         query_pause()
 
-        # 9. Indicator → Malware (INDICATES) — malware_family name match
-        # PR #34 round 20: skip_query counts Indicators with a non-empty
-        # malware_family that have NO matching Malware node (by name, alias,
-        # or family) — direct skip count, no comparison.
+        # 9. Indicator → Malware (INDICATES) — the family a feed labelled the indicator with
+        # (``i.malware_family``: ThreatFox, MalwareBazaar, Feodo Tracker). 2026-11-02: the Malware nodes a
+        # label names are decided once per run in Python (``family_resolution.resolve_feed_families``: the
+        # name or an alias, stripped and lower-cased; only when that finds none, the name without
+        # whitespace, hyphens, underscores and dots, and only when exactly one node has it) and passed as
+        # ``$family_targets``, keyed by the label as stored, so the statement compares nothing itself and
+        # finds each node by its indexed name. Before, every indicator compared its label with every
+        # Malware node (about 5 minutes on the 730-day graph), and "SalatStealer" never reached the node
+        # "salat stealer". The outer statement leaves out blank and placeholder labels; the skip statement
+        # counts the indicators whose label names no node.
         logger.info("[LINK] 9/20 Indicator → Malware (malware_family match)...")
         # PR-N8 R1 Bugbot LOW: outer now uses ``size(trim(...)) > 0``
-        # so whitespace-only values (e.g. ``"   "``) are rejected
-        # before they reach the comparison. Prevents the spurious-
-        # match chain described below on the inner query.
+        # so whitespace-only values (e.g. ``"   "``) are rejected.
         # PR-N10 defense-in-depth: drop Indicators whose malware_family
         # canonicalizes to a placeholder (e.g. "unknown", "Unknown
         # malware", "N/A"). See node_identity._REJECTED_PLACEHOLDER_NAMES
@@ -1397,7 +1440,8 @@ def build_relationships():
         # defense catches legacy indicators already in the graph AND
         # placeholder values on Indicator.malware_family that come from
         # collector default fallbacks (vt_collector.py:425,
-        # global_feed_collector.py:322, misp_collector.py:403).
+        # global_feed_collector.py:322, misp_collector.py:403). The resolver
+        # never maps a placeholder label, nor to a node whose name is one.
         _q9_outer = (
             "MATCH (i:Indicator) "
             "WHERE i.malware_family IS NOT NULL "
@@ -1408,43 +1452,11 @@ def build_relationships():
         # Q9 MERGEs an INDICATES edge another step may have written (the sync's same-pulse
         # ``otx_pulse`` link): its provenance accumulates (``_prov_set``), and the confidence keeps
         # the maximum, so the 0.8 family match raises a weaker link and never lowers a stronger one.
-        # PR-N8 HIGH (audit Bug Hunter H1, 2026-04-21): canonicalization
-        # parity — apply ``trim() + toLower()`` on BOTH sides of every
-        # string comparison. Pre-fix ``m.name`` was NFC+strip+lower'd
-        # at ingest via ``canonicalize_merge_key`` (PR #37), while
-        # ``i.malware_family`` was stored RAW. A feed emitting
-        # ``"Emotet "`` (trailing whitespace) or ``"eMotet"`` (mixed
-        # case) on an Indicator wouldn't match ``m.name = "emotet"``
-        # despite being semantically identical — silent edge drop.
-        # ``trim()`` covers the whitespace case; ``toLower()`` covers
-        # case. NFC normalization is a known remaining gap (Cypher /
-        # APOC don't have ``unicodedata.normalize`` — NFD vs NFC of
-        # accented chars still miss, rare in practice but filed as a
-        # follow-up: fix at ingest via ``canonicalize_merge_key``).
-        # PR-N8 R1 Bugbot LOW: ``coalesce(m.family, '')`` has been
-        # DROPPED. Pre-R1 it converted NULL to empty-string; combined
-        # with a whitespace-only ``i.malware_family`` that passed the
-        # pre-R1 outer filter, the comparison ``"" = ""`` was TRUE →
-        # spurious INDICATES edge to every Malware with NULL family.
-        # Post-R1: ``trim(NULL)`` returns NULL which propagates through
-        # ``toLower`` and ``=`` → universally falsy. Safe. Outer filter
-        # hardened to ``size(trim(...)) > 0`` as belt-and-suspenders.
         _q9_inner = (
-            "WITH $i AS i " + _prov_with("i", _family_feeds("i")) + "MATCH (m:Malware) "
-            # PR-N10 defense-in-depth: skip Malware nodes whose canonical
-            # name is a placeholder — the merge-time reject at
-            # neo4j_client.merge_malware blocks new creation, but legacy
-            # "unknown" Malware nodes from pre-PR-N10 graphs could still
-            # hub false edges here.
-            f"WHERE NOT toLower(trim(m.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "AND (toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
-            # PR-N9: filter NULL/whitespace aliases (a whitespace-only
-            # alias trims to ""). Q9's outer filter already ensures
-            # trim(i.malware_family) is non-empty so the LHS can't
-            # produce a false-match via "" = ""; the filter is
-            # defense-in-depth.
-            "   OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
-            "   OR toLower(trim(m.family)) = toLower(trim(i.malware_family))) "
+            "WITH $i AS i "
+            + _prov_with("i", _family_feeds("i"))
+            + "UNWIND coalesce($family_targets[i.malware_family], []) AS mname "
+            "MATCH (m:Malware {name: mname}) "
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.created_at = datetime() "
             "SET r.confidence_score = CASE "
@@ -1468,28 +1480,19 @@ def build_relationships():
              + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
-        # PR-N8 HIGH + R1 Bugbot LOW: same trim()+toLower() parity as
-        # _q9_inner with the coalesce DROPPED (see _q9_inner comment
-        # above for rationale). Outer filter also uses size(trim(...)).
+        # The outer statement's indicators whose label has no entry in ``$family_targets``: a label that
+        # names no node, or whose name without separators several nodes carry.
         _q9_skip = (
             "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL "
             "AND size(trim(i.malware_family)) > 0 "
-            # PR-N10: exclude placeholder malware_family (so orphan
-            # count matches actual match behaviour post-placeholder-filter)
             f"AND NOT toLower(trim(i.malware_family)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "AND NOT EXISTS { "
-            "  MATCH (m:Malware) "
-            # PR-N10: same Malware-name placeholder filter as _q9_inner
-            f"  WHERE NOT toLower(trim(m.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "  AND (toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
-            # PR-N9: same NULL/whitespace filter as _q9_inner above so
-            # the orphan count matches actual match behaviour.
-            "     OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
-            "     OR toLower(trim(m.family)) = toLower(trim(i.malware_family))) "
-            "} "
+            "AND size(coalesce($family_targets[i.malware_family], [])) = 0 "
             "RETURN count(i) AS c"
         )
-        if not _safe_run_batched(
+        family_params = _family_target_params(client)
+        if family_params is None:
+            failures += 1
+        elif not _safe_run_batched(
             client,
             "Indicator → Malware (family match)",
             _q9_outer,
@@ -1497,6 +1500,7 @@ def build_relationships():
             stats,
             "indicates_family",
             skip_query=_q9_skip,
+            params=family_params,
         ):
             failures += 1
         query_pause()

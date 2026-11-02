@@ -248,24 +248,36 @@ class TestFix4CanonicalizationParity:
     def _src(self) -> str:
         return (SRC / "build_relationships.py").read_text()
 
-    def test_q9_inner_uses_trim_and_lower_on_both_sides(self):
-        src = self._src()
-        q9_idx = src.find("_q9_inner")
-        next_assignment = src.find("_q9_skip", q9_idx)
-        block = src[q9_idx:next_assignment]
-        # Both m.name and i.malware_family sides must go through trim()+toLower()
-        assert "toLower(trim(m.name))" in block, "Q9 m.name side must use trim()+toLower()"
-        assert "toLower(trim(i.malware_family))" in block, "Q9 i.malware_family side must use trim()+toLower()"
+    def test_q9_inner_and_skip_look_the_stored_label_up_in_the_resolved_map(self):
+        """Since 2026-11-02 Q9 compares no strings: the inner and the skip statement look the label up, as
+        stored, in ``$family_targets``, which ``family_resolution.resolve_feed_families`` builds with the
+        trim()+toLower() parity (next test), so the two never disagree on what matches."""
+        from build_rel_queries import assigned_query
 
-    def test_q9_skip_uses_trim_and_lower_on_both_sides(self):
-        """Skip-query must use the same normalization so orphan count
-        matches actual match behaviour."""
-        src = self._src()
-        q9_skip_idx = src.find("_q9_skip")
-        next_assignment = src.find("if not _safe_run_batched", q9_skip_idx)
-        block = src[q9_skip_idx:next_assignment]
-        assert "toLower(trim(m.name))" in block, "Q9 skip m.name must use trim()+toLower()"
-        assert "toLower(trim(i.malware_family))" in block, "Q9 skip i.malware_family must use trim()+toLower()"
+        inner, skip = assigned_query("_q9_inner"), assigned_query("_q9_skip")
+        assert (
+            "UNWIND coalesce($family_targets[i.malware_family], []) AS mname MATCH (m:Malware {name: mname})" in inner
+        )
+        assert "size(coalesce($family_targets[i.malware_family], [])) = 0" in skip
+        for statement in (inner, skip):
+            assert "MATCH (m:Malware) " not in statement, "no scan of every Malware node per indicator"
+            assert "m.family" not in statement, "Malware.family is written by no writer"
+
+    def test_the_resolver_applies_trim_and_lower_on_both_sides(self):
+        """The guarantee the Cypher comparison carried before 2026-11-02, now in the resolver: a label with
+        surrounding whitespace or another case matches the node's name and a stored alias of another case."""
+        from family_resolution import resolve_feed_families
+
+        resolution = resolve_feed_families(
+            ["Emotet ", "eMotet", " heodo", "QakBot"],
+            [{"name": "emotet", "aliases": [" Heodo ", "Emotet - S0367"]}, {"name": "qakbot "}],
+        )
+        assert resolution.targets == {
+            "Emotet ": ["emotet"],
+            "eMotet": ["emotet"],
+            " heodo": ["emotet"],
+            "QakBot": ["qakbot "],
+        }
 
     def test_q2_runs_no_query(self):
         """Q2 (Malware.attributed_to vs ThreatActor.name) runs no query since 2026-11-02: no writer

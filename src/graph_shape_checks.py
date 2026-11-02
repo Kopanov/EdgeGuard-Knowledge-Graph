@@ -4,7 +4,9 @@
 kill-chain phases (``tactic_phases``, step 1 ``IN_TACTIC``), the techniques MITRE says a group or a piece of
 software uses (``uses_techniques``, steps 5, 6 and 10, ``EMPLOYS_TECHNIQUE`` / ``IMPLEMENTS_TECHNIQUE`` with
 ``match_type = 'mitre_explicit'``), the ATT&CK ids of an OTX report on its indicators (``attack_ids``, step 8
-``USES_TECHNIQUE``) and a node's sector zones (``zone``, steps 7a-7d ``TARGETS`` / ``AFFECTS`` to a ``Sector``).
+``USES_TECHNIQUE``), a node's sector zones (``zone``, steps 7a-7d ``TARGETS`` / ``AFFECTS`` to a ``Sector``) and the
+family label a feed gave an indicator (``malware_family``, step 9 ``INDICATES`` labelled ``malware_family``, to the
+nodes ``family_resolution.resolve_feed_families`` finds for the label).
 A step that matches nothing still reports success, so a graph that lost a whole family of links looks like
 a complete one until somebody counts. Each statement here judges a family against the claims stored on the
 nodes, as the writer reads them:
@@ -20,10 +22,15 @@ The CVE score coverage (``CVE_CVSS_COVERAGE_QUERY``) is the share of NVD's non-r
 CVSS sub-node (``HAS_CVSS_*``): a run whose CVSS writes failed scores no CVE, and every consistency check of
 the scores still passes on it.
 
+``TOOL_NAMES_READ`` and ``MALWARE_INDICATES_COUNTS_QUERY`` count, for information, the indicators of the non-MITRE
+``Malware`` nodes named after an ATT&CK ``Tool`` (``family_resolution.tool_named_malware``): those indicators link
+to the ``Malware`` node only, as no writer links an indicator to a ``Tool``.
+
 The acceptance script (``scripts/verify_fresh_baseline.py``) runs these statements and reports their
 verdicts. Standard library and the stdlib-only ``relationship_provenance`` at import, like the other modules
 that script reads. The statements take no parameter but ``$revoked`` (the revoked-id map, the same the
-writers read: ``attack_revoked.technique_successors``) and ``$sector_zones`` (``SECTOR_ZONES``).
+writers read: ``attack_revoked.technique_successors``), ``$sector_zones`` (``SECTOR_ZONES``), ``$family_targets``
+(the map step 9 runs with, ``family_resolution.resolve_feed_families``) and ``$names`` (Malware node names).
 """
 
 from __future__ import annotations
@@ -140,6 +147,32 @@ SECTOR_LINKS_COMPLETE_QUERY = (
     "+ toString(coalesce(n.name, n.value, n.cve_id, '?')) + ' -> ' + zone_name END)[..10] AS examples"
 )
 
+# Step 9: every indicator whose family label names Malware nodes (``$family_targets``: label as stored → node
+# names, ``family_resolution.resolve_feed_families``, the map step 9 runs with) has its INDICATES to each of them
+# labelled ``malware_family``. Grouped by label: the nodes of a label are looked up once by their indexed name,
+# then each indicator's link (3 s on the 730-day graph; matching every indicator against every node took 243 s).
+FAMILY_INDICATES_COMPLETE_QUERY = (
+    "MATCH (i:Indicator) WHERE i.malware_family IN keys($family_targets) "
+    "WITH i.malware_family AS family, collect(i) AS indicators "
+    "UNWIND $family_targets[family] AS name "
+    "MATCH (m:Malware {name: name}) "
+    "UNWIND indicators AS i "
+    "WITH family, i, m, EXISTS { (i)-[r:INDICATES]->(m) WHERE r.match_type = 'malware_family' } AS linked "
+    "RETURN count(DISTINCT family) AS mapped_families, count(DISTINCT i) AS mapped_indicators, "
+    "count(*) AS claims_with_target, sum(CASE WHEN linked THEN 0 ELSE 1 END) AS edge_missing, "
+    "collect(CASE WHEN NOT linked THEN toString(coalesce(i.value, '?')) + ' -> ' + m.name END)[..10] AS examples"
+)
+
+# The ATT&CK Tool nodes (``family_resolution.tool_named_malware`` keeps those from MITRE) and the number of
+# indicators that INDICATE each named Malware node (``$names``).
+TOOL_NAMES_READ = (
+    "MATCH (t:Tool) WHERE t.name IS NOT NULL RETURN t.name AS name, t.mitre_id AS mitre_id, t.source AS source"
+)
+MALWARE_INDICATES_COUNTS_QUERY = (
+    "UNWIND $names AS name MATCH (m:Malware {name: name}) "
+    "RETURN m.name AS name, COUNT { (:Indicator)-[:INDICATES]->(m) } AS indicates"
+)
+
 # The share of the EdgeGuard CVEs NVD delivered, not REJECTED, that have a CVSS sub-node. ``status`` and
 # ``source`` are lists (a scalar reads as a one-entry list); CVEs only another feed delivered (CISA KEV, CISA
 # ICS, OTX) are left out, and so are REJECTED records, which carry no score.
@@ -195,6 +228,17 @@ def sector_links_verdict(row: Mapping[str, Any]) -> Optional[bool]:
     if not row.get("node_sectors"):
         return None
     return row.get("sector_link_missing") == 0
+
+
+def family_indicates_verdict(row: Mapping[str, Any]) -> Optional[bool]:
+    """Fails when an indicator lacks the link to a node its family label names (whatever else); informational
+    when no label names a node (``claims_with_target`` 0: no feed family, or none that names a node); else
+    passes when no link is missing (a missing count fails)."""
+    if row.get("edge_missing"):
+        return False
+    if not row.get("claims_with_target"):
+        return None
+    return row.get("edge_missing") == 0
 
 
 def cvss_coverage_verdict(row: Mapping[str, Any]) -> Optional[bool]:

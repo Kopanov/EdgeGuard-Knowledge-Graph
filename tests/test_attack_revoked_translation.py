@@ -194,7 +194,8 @@ class TestBuildRelationships:
         assert all(p == {"iterate_params": expected} for q, p in technique_steps if "SUBTECHNIQUE_OF" not in q)
         # Other steps take no map, except (2026-10) steps 9b and 2d, which take the ATT&CK software id
         # pattern and the folded Malware names (none here: the fake client's read returns no Malware
-        # row), and step 2d's statements, which take the attribution parameters.
+        # row), step 2d's statements, which take the attribution parameters, and (2026-11-02) step 9,
+        # which takes the resolved feed family labels (none here: the read returns no label).
         from build_rel_queries import assigned_query
 
         import build_relationships
@@ -204,7 +205,8 @@ class TestBuildRelationships:
         link_2d = assigned_query("_q2d_outer")
         cleanup_2d = [assigned_query(n) for n in ("_q2d_remove_outer", "_q2d_trim_outer")]
         others = [(q, p) for q, p in iterate if ":Technique {mitre_id:" not in q]
-        seen = {"2d": 0, "9b": 0, "sector": 0}
+        q9_inner = assigned_query("_q9_inner")
+        seen = {"2d": 0, "9": 0, "9b": 0, "sector": 0}
         sector_params = [{"iterate_params": sector_evidence.cypher_params(t)} for t in ("AFFECTS", "TARGETS")]
         for q, p in others:
             if p is not None and "sector_confidence" in p["iterate_params"]:
@@ -217,10 +219,13 @@ class TestBuildRelationships:
                 assert {k: p["iterate_params"][k] for k in software_id_params} == software_id_params
             elif any(o in q for o in cleanup_2d):
                 assert set(p["iterate_params"]) == attribution_keys, "step 2d cleanup"
+            elif q9_inner in q:
+                seen["9"] += 1
+                assert p == {"iterate_params": {"family_targets": {}}}, "step 9"
             elif p is not None:
                 seen["9b"] += 1
                 assert p == {"iterate_params": software_id_params}, "step 9b"
-        assert seen == {"2d": 1, "9b": 1, "sector": 4}, seen
+        assert seen == {"2d": 1, "9": 1, "9b": 1, "sector": 4}, seen
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
 

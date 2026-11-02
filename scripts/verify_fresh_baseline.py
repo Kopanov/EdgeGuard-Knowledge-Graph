@@ -62,6 +62,10 @@ exists has no ``IN_TACTIC``, when a technique MITRE says a group, a malware or a
 MITRE nodes carry no such claim at all), when an ATT&CK id of an indicator's OTX report has no
 ``USES_TECHNIQUE`` to its existing Technique, when a sector a feed gave a node has no ``TARGETS`` /
 ``AFFECTS`` link to its Sector, and when fewer than half of NVD's non-rejected CVEs have a CVSS sub-node.
+Since 2026-11-02 it also fails when an indicator whose feed family label names Malware nodes, as
+``build_relationships`` step 9 finds them (``src/family_resolution.py``), lacks its ``INDICATES`` labelled
+``malware_family`` to one of them, reports the labels that name no node, and lists the Malware nodes from
+another source than MITRE that are named after an ATT&CK Tool, with their ``INDICATES`` counts.
 
 A check that judges a set of edges or nodes reports the size of that set (``judged_edges`` /
 ``judged_nodes``); the ownership check of the nodes, which scans every node and judges EdgeGuard's labels
@@ -147,17 +151,31 @@ from canonical_threat_actors import (  # noqa: E402
 # (checks 10d-10k). Standard library and ``source_registry`` only, like the modules above.
 from description_ranking import ranking_for_label  # noqa: E402
 
+# 2026-11-02: the Malware nodes a feed's family label names, as build_relationships step 9 finds them
+# (check 10a10), and the Malware nodes named after an ATT&CK Tool (check 10a11). Standard library and
+# ``node_identity`` only.
+from family_resolution import (  # noqa: E402
+    CYPHER_FEED_FAMILIES_READ,
+    CYPHER_MALWARE_NAMES_READ,
+    resolve_feed_families,
+    tool_named_malware,
+)
+
 # 2026-11-02: the completeness of the links the writers build from the claims on the nodes, and the CVE score
 # coverage (checks 9c, 10a7-10a9, 10o and 14c). Standard library and ``relationship_provenance`` only.
 from graph_shape_checks import (  # noqa: E402
     CVE_CVSS_COVERAGE_QUERY,
     EMPLOYS_TECHNIQUE_COMPLETE_QUERY,
+    FAMILY_INDICATES_COMPLETE_QUERY,
     IMPLEMENTS_TECHNIQUE_COMPLETE_QUERIES,
     IN_TACTIC_COMPLETE_QUERY,
+    MALWARE_INDICATES_COUNTS_QUERY,
     SECTOR_LINKS_COMPLETE_QUERY,
+    TOOL_NAMES_READ,
     USES_TECHNIQUE_COMPLETE_QUERY,
     combined_verdict,
     cvss_coverage_verdict,
+    family_indicates_verdict,
     in_tactic_verdict,
     sector_links_verdict,
     sector_params,
@@ -1140,6 +1158,49 @@ def run_checks(
         {"software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX, "folded_families": folded_families},
     )
     rep.add("pulse_indicates_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
+
+    # 10a10. Feed-family INDICATES (2026-11-02, build_relationships step 9): every indicator whose family label
+    #        (``malware_family``: ThreatFox, MalwareBazaar, Feodo Tracker) names Malware nodes has its INDICATES
+    #        labelled ``malware_family`` to each of them. The labels are resolved as step 9 resolves them, by the
+    #        same function (``family_resolution.resolve_feed_families``: the name or an alias, else the one node
+    #        whose name without separators is the label's). The labels that name no node, the ambiguous ones and
+    #        the placeholder ones are reported with their indicators, not judged. Informational while no label
+    #        names a node.
+    family_counts = {
+        row["family"]: row.get("indicators")
+        for row in _post(CYPHER_FEED_FAMILIES_READ)
+        if isinstance(row.get("family"), str)
+    }
+    malware_names = _post(CYPHER_MALWARE_NAMES_READ)
+    resolution = resolve_feed_families(list(family_counts), malware_names)
+    r = _one(FAMILY_INDICATES_COMPLETE_QUERY, {"family_targets": resolution.targets})
+    rep.add("family_indicates_complete", family_indicates_verdict(r), {**resolution.summary(family_counts), **r})
+
+    # 10a11. Malware nodes named after an ATT&CK Tool (2026-11-02, informational): the non-MITRE Malware nodes
+    #        whose name without separators is the name of an ATT&CK Tool (``asyncrat``, ``quasar rat``: OTX pulses
+    #        name tools as malware families), with the indicators that INDICATE each. Those indicators reach the
+    #        Malware node only; no writer links an indicator to a Tool.
+    named_after_tools = tool_named_malware(malware_names, _post(TOOL_NAMES_READ))
+    tool_named = sorted({p["malware"] for p in named_after_tools})
+    indicates = {
+        row["name"]: row.get("indicates") or 0
+        for row in (_post(MALWARE_INDICATES_COUNTS_QUERY, {"names": tool_named}) if tool_named else [])
+    }
+    exact_named = sorted({p["malware"] for p in named_after_tools if p["exact_name"]})
+    rep.add(
+        "attack_tool_named_malware",
+        None,
+        {
+            "nodes": len(tool_named),
+            "indicates": sum(indicates.get(n, 0) for n in tool_named),
+            "exact_name_nodes": len(exact_named),
+            "exact_name_indicates": sum(indicates.get(n, 0) for n in exact_named),
+            "malware": sorted(
+                ({**p, "indicates": indicates.get(p["malware"], 0)} for p in named_after_tools),
+                key=lambda p: (-p["indicates"], p["malware"]),
+            ),
+        },
+    )
 
     # 10a6. Indicators and CVEs named in the same OTX report (2026-10-18): the sync links them as
     #       ``(Indicator)-[:INDICATES]->(CVE)`` with ``match_type`` ``otx_pulse`` and the report as
