@@ -947,7 +947,10 @@ resolves analyst/sensor input against the graph — REST
 (`/stix/export/{object_type}/{identifier}`), and NATS alert enrichment —
 first passes the input through `src/ioc_normalize.py::canonicalize_lookup`:
 defang reversal (`hxxp://` → `http://`, `1.2.3[.]4` → `1.2.3.4`), Unicode
-NFC, case-folding to the write-side merge key, and full write-side
+NFC, case-folding to the write-side merge key (a `url` gets its scheme and
+host lower-cased and keeps the case of its path, as the write side keys it,
+and so does any `scheme://host` value given without a type:
+[KNOWLEDGE_GRAPH.md § Indicator identity](KNOWLEDGE_GRAPH.md#indicator-identity)), and full write-side
 `TYPE_MAPPING` parity (e.g. `hostname` → `domain`, `btc` → `bitcoin`, MISP
 `text` → `unknown`; blank/`unknown` types are shape-inferred). This
 guarantees a lookup keys the same `(indicator_type, value)` node the MISP
@@ -1021,6 +1024,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Read-side lookup canonicalization: a `url`, and a `scheme://host` value given without a type, is looked up with its scheme and host lower-cased, as the write side now keys a `url`.
 - 2026-11-02 — `ATTRIBUTED_TO`: `match_type='exact'` (Q2) is on no link: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label.
 - 2026-11-01 — `CVE` properties: the MISP → Neo4j sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the comment named `merge_cve` as the sync's path.
 - 2026-11-01 — `Malware` and `ThreatActor` carry the ATT&CK id of a MITRE record (`mitre_id`); `deprecated` is cleared by an ATT&CK record of the active object (it was never cleared).

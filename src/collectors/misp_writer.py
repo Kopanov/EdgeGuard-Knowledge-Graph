@@ -1038,6 +1038,23 @@ def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     return (type_norm, value_norm)
 
 
+# 2026-11: how many case variants the ``[CASE-VARIANT]`` line of a push names.
+_CASE_VARIANT_LOG_SAMPLE = 5
+
+
+def _within_push_key(attribute: Any) -> Tuple[str, str]:
+    """``(type, value)`` key of the dedup within one push (2026-11): ``_attribute_match_key``'s rule, so
+    two attributes MISP holds as one value (surrounding whitespace, and the case of
+    ``_CASE_NORMALISED_TYPES``) are pushed once. An attribute without a type or a value keeps its exact
+    ``(type, value)``."""
+    key = _attribute_match_key(attribute)
+    if key is not None:
+        return key
+    if not isinstance(attribute, dict):
+        return ("", str(attribute))
+    return (str(attribute.get("type")), str(attribute.get("value")))
+
+
 def _iso_epoch(raw: Any) -> Optional[float]:
     """An ISO 8601 date as epoch seconds (a date without zone is UTC, as MISP stores it); None when
     empty or unreadable (2026-10)."""
@@ -3381,7 +3398,8 @@ class MISPWriter:
 
         # 2026-10: (type, value) → positions in *items*, to name the items of a failed batch; per
         # source, the positions of the items no attribute could be built from, listed as unstored
-        # when the source's drop is systemic.
+        # when the source's drop is systemic. 2026-11: keyed as the dedup within the push keys
+        # (``_within_push_key``), so the item of a variant it drops is unstored with the attribute kept.
         item_positions_by_key: Dict[Tuple[Any, Any], List[int]] = {}
         not_converted_positions: Dict[str, List[int]] = {}
         unstored_positions: set = set()
@@ -3389,7 +3407,7 @@ class MISPWriter:
         def _note_unstored(attrs: List[Dict]) -> None:
             for a in attrs:
                 if _value_is_storable(a):
-                    unstored_positions.update(item_positions_by_key.get((a.get("type"), a.get("value")), ()))
+                    unstored_positions.update(item_positions_by_key.get(_within_push_key(a), ()))
 
         for item_position, item in enumerate(items):
             source = item.get("tag", "unknown")
@@ -3429,7 +3447,7 @@ class MISPWriter:
                 continue
 
             grouped.setdefault(key, []).append(attr)
-            item_positions_by_key.setdefault((attr.get("type"), attr.get("value")), []).append(item_position)
+            item_positions_by_key.setdefault(_within_push_key(attr), []).append(item_position)
             if kind == "indicator":
                 reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
 
@@ -3538,14 +3556,35 @@ class MISPWriter:
             return "cross-event PR-F7 active"
 
         for (source, date), attributes in grouped.items():
-            # Deduplicate attributes by value
-            seen = set()
+            # Deduplicate attributes by value. 2026-11: compared as MISP compares a pushed attribute with the
+            # value it stores (``_within_push_key``): whitespace, and the case of the types whose case MISP
+            # changes on save. The first attribute is pushed; a later one that differs from it only so is
+            # logged, because its comment and tags (an OTX item's report ids) are not merged into the first.
+            seen: Dict[Tuple[str, str], Dict] = {}
             unique_attrs = []
+            variants: List[Tuple[Any, Any, Any]] = []
             for attr in attributes:
-                key = f"{attr['type']}:{attr['value']}"
-                if key not in seen:
-                    seen.add(key)
+                key = _within_push_key(attr)
+                kept = seen.get(key)
+                if kept is None:
+                    seen[key] = attr
                     unique_attrs.append(attr)
+                elif (kept.get("type"), kept.get("value")) != (attr.get("type"), attr.get("value")):
+                    variants.append((attr.get("type"), attr.get("value"), kept.get("value")))
+            if variants:
+                logger.warning(
+                    "[CASE-VARIANT] MISP push %s (%s): %d attribute(s) not pushed, each the same value as an attribute "
+                    "earlier in this push but for case or surrounding whitespace, which MISP stores as one value; "
+                    "their comments and tags are not merged into the attribute pushed (first %d: %s)",
+                    source,
+                    date,
+                    len(variants),
+                    min(len(variants), _CASE_VARIANT_LOG_SAMPLE),
+                    "; ".join(
+                        f"{t} {dropped!r} (pushed: {pushed!r})"
+                        for t, dropped, pushed in variants[:_CASE_VARIANT_LOG_SAMPLE]
+                    ),
+                )
 
             # PR-F7: the cache key is the RESOLVED ``source_tag`` — not the raw ``source``
             # string. Two sources can share a tag via the registry's alias

@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -55,7 +56,7 @@ from collectors.collector_utils import (
     retry_with_backoff,
     status_after_misp_push,
 )
-from collectors.misp_writer import MISPWriter, tlp_rank
+from collectors.misp_writer import _CASE_NORMALISED_TYPES, MISPWriter, tlp_rank
 from config import (
     OTX_API_KEY,
     OTX_BASELINE_MAX_PAGES,
@@ -68,6 +69,7 @@ from config import (
     otx_industry_zones,
     resolve_collection_limit,
 )
+from node_identity import fold_url_scheme_and_host
 
 # Import resilience utilities
 from resilience import (
@@ -94,16 +96,49 @@ RETRY_DELAY_BASE = 2  # seconds
 OTX_CIRCUIT_BREAKER = get_circuit_breaker("otx", failure_threshold=3, recovery_timeout=3600)
 
 
+def _pulse_name_key(name: Any) -> str:
+    """The same-run key of a malware family or adversary name: its graph key (``name_key``: NFC, trimmed,
+    lower-case), a run of whitespace inside it counting as one space (2026-11)."""
+    if not isinstance(name, str):
+        return str(name)
+    return name_key(" ".join(name.split()))
+
+
+def _pulse_value_key(indicator_type: Any, value: Any) -> str:
+    """The same-run key of an indicator value, compared as MISP compares it on the type MISPWriter sends
+    (2026-11): a value of a type MISP changes in case on save (hashes, domains, IP and e-mail addresses,
+    CVE ids: ``_CASE_NORMALISED_TYPES``) lower-cased; a URL with its scheme and host lower-cased
+    (``fold_url_scheme_and_host``, the graph's ``url`` key); any other value as given. NFC-normalised and
+    trimmed, as the graph keys it; a defanged value stays as it is."""
+    if not isinstance(value, str):
+        return str(value)
+    text = unicodedata.normalize("NFC", value).strip()
+    misp_type = MISPWriter.TYPE_MAPPING.get(str(indicator_type))
+    if misp_type == "url":
+        return fold_url_scheme_and_host(text)
+    if misp_type in _CASE_NORMALISED_TYPES:
+        return text.lower()
+    return text
+
+
 def _pulse_item_key(item: Dict[str, Any]) -> str:
-    """Same-run identity of an OTX item (what two pulses naming the same thing share)."""
+    """Same-run identity of an OTX item (what two pulses naming the same thing share).
+
+    2026-11: items are compared as MISP and the graph compare them. In one event MISP does not store an
+    attribute whose type and value match, ignoring case, an attribute an earlier request stored, so a
+    later pulse's ``DCRAT`` beside an earlier ``DcRat`` was dropped with that pulse's id. Malware and
+    adversary names are keyed by ``_pulse_name_key`` and indicator values by ``_pulse_value_key``;
+    ``_dedupe_pulse_items`` folds a case variant into the first item, which keeps the first pulse's
+    spelling.
+    """
     if "indicator_type" in item and "value" in item:
-        return f"{item.get('indicator_type')}:{item.get('value')}"
+        return f"{item.get('indicator_type')}:{_pulse_value_key(item.get('indicator_type'), item.get('value'))}"
     if item.get("type") == "malware":
-        return f"malware:{item.get('name')}"
+        return f"malware:{_pulse_name_key(item.get('name'))}"
     if item.get("type") == "vulnerability":
         return f"cve:{item.get('cve_id')}"
     if item.get("type") == "actor":
-        return f"actor:{item.get('name')}"
+        return f"actor:{_pulse_name_key(item.get('name'))}"
     return str(item)
 
 
