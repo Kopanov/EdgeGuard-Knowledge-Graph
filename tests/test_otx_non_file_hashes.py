@@ -105,7 +105,11 @@ def test_the_skip_is_counted_in_the_log(caplog):
 
 
 def test_a_baseline_that_stops_at_its_page_ceiling_says_so(caplog):
-    """The last page was full, so pulses older than it were not read (2026-10)."""
+    """The last page was full, so pulses older than it were not read (2026-10). The warning counts the
+    distinct pulses read (2026-11-02): page 2 returns the pulse of page 1 again beside a second one, so
+    three rows hold two pulses."""
+    second = dict(_PULSE, id="6710e46581edfe9bba0da3f2")
+    pages = {1: [_PULSE], 2: [_PULSE, second]}
     c = OTXCollector.__new__(OTXCollector)
     c.api_key = "a" * 64
     c.tag = "alienvault_otx"
@@ -117,7 +121,7 @@ def test_a_baseline_that_stops_at_its_page_ceiling_says_so(caplog):
     c.source_name = "otx"
     with (
         patch.object(c, "check_service_available", return_value=True),
-        patch.object(c, "_fetch_pulses", side_effect=lambda **_kw: [_PULSE]),
+        patch.object(c, "_fetch_pulses", side_effect=lambda **kw: pages.get(kw["page"], [])),
         patch.object(otx_collector.time, "sleep"),
         patch.object(otx_collector, "get_source_incremental", return_value={}),
         patch.object(otx_collector, "update_source_incremental"),
@@ -125,4 +129,6 @@ def test_a_baseline_that_stops_at_its_page_ceiling_says_so(caplog):
         caplog.at_level("WARNING", logger=otx_collector.logger.name),
     ):
         c.collect(limit=None, push_to_misp=False, baseline=True, baseline_days=730)
-    assert any("stopped at its page ceiling" in r.getMessage() for r in caplog.records)
+    ceiling = [r.getMessage() for r in caplog.records if "stopped at its page ceiling" in r.getMessage()]
+    assert len(ceiling) == 1
+    assert "(EDGEGUARD_OTX_BASELINE_MAX_PAGES=2, 2 pulses)" in ceiling[0]

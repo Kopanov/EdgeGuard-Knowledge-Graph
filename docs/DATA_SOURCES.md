@@ -42,7 +42,7 @@
 | URL | https://otx.alienvault.com/api/v1/pulses/subscribed |
 | Format | JSON API |
 | Auth | API Key required |
-| Update | Every 30 minutes (`edgeguard_pipeline` → `collect_otx`): pulses modified since the stored cursor (`otx_last_pulse_modified` minus `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC`, 300 s; without a cursor the last `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS`, 3), in pages of 100 up to `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` (25), with at most `EDGEGUARD_INCREMENTAL_LIMIT` (200) pulses processed per run. A baseline reads pages of 50 pulses (the baseline limit when one is set) up to `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (200) |
+| Update | Every 30 minutes (`edgeguard_pipeline` → `collect_otx`): pulses modified since the stored cursor (`otx_last_pulse_modified` minus `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC`, 300 s; without a cursor the last `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS`, 3), in pages of 100 up to `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` (25), with at most `EDGEGUARD_INCREMENTAL_LIMIT` (200) distinct pulses processed per run. A baseline reads pages of 50 pulses (the baseline limit when one is set) up to `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (200). Both keep one copy of a pulse that comes back on a later page and log the distinct pulses beside the rows read ([COLLECTORS.md](COLLECTORS.md#pages-and-pulse-counts)) |
 | Classification | ✅ Keyword-based on the whole pulse (name, tags, description, indicators), plus OTX's own `industries` |
 
 **What we get:**
@@ -314,10 +314,11 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — OTX: the per-run limit counts distinct pulses; a pulse a later page returned again was processed twice and took a slot of the limit.
 - 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (the page gave about 1,130 a day, the rate of the keyless 30-day file). MalwareBazaar: the full export is a v2 export with the Auth-Key (the keyless `/export/csv/full/` answers HTTP 410).
 - 2026-10-25 — URLhaus per-run cap: the ThreatFox count names its baseline (2026-10-13); it pointed to the URLhaus count, which is now the export of 2026-10-24.
 - 2026-10-25 — URLhaus and MalwareBazaar read the abuse.ch v2 `recent.csv` exports with the Auth-Key (`THREATFOX_API_KEY`) in the URL path, because the keyless downloads (`downloads/csv_recent/`, `csv_top10k/`, `/export/csv/recent/`) answer HTTP 410 since 2026-10; the URLhaus export listed about 63,000 URLs on 2026-10-24 (the keyless 30-day file 34,003 on 2026-10-13), and `EDGEGUARD_URLHAUS_MAX_PER_RUN` is 100,000 (was 50,000), so the cap covers it again.

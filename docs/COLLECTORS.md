@@ -155,6 +155,17 @@ Collects threat intelligence pulses from AlienVault OTX, including:
 - **API Key:** Required (free)
 - **Rate Limits:** ~30 requests/minute (free tier, 2s between requests)
 
+### Pages and pulse counts
+OTX pages `/api/v1/pulses/subscribed` by offset (`page` and `limit`), and the request names no sort order. When the order shifts between two page requests (a pulse modified while the pages are read, or pulses that share a `modified` time), a pulse can come back on a later page and another be passed over. Both fetch paths, the baseline and the scheduled run, therefore keep the first copy of each pulse id and leave out the later rows (`_first_copy_of_each_pulse`); a row without an id is kept. The scheduled run removes the repeats before it applies `EDGEGUARD_INCREMENTAL_LIMIT`, so a repeated row takes no slot of the limit.
+
+Each run logs:
+
+- the distinct pulses beside the rows the pages returned and, when OTX states it (`count` in the answer), the number of pulses OTX reported: `Baseline complete: N distinct pulses collected of M that OTX reported for the window (R rows read, X of them repeating a pulse already read)`; a scheduled run logs `OTX incremental: N distinct pulses read of M that OTX reported for the window (R rows read, X of them repeating a pulse already read)`;
+- at WARNING, when pages repeated pulses, how many rows and pulses and the ids of up to 20 of the repeated pulses, whose first copy was kept (ids only): `[PULSES] OTX: X page row(s) repeated P pulse(s) already read (repeated ids: <id>, <id>, …); the first copy of each is kept. If the page order shifted between requests, as many other pulses may have been passed over.` The ids name the pulses that came back, not the ones that may have been passed over, which the run cannot see;
+- after processing, the pulses processed and those that yielded no item (no collected indicator, malware family, CVE or adversary; for example a pulse whose indicators are all of a non-file hash type), with the ids of up to 20 of them: `[PULSES] OTX: N pulse(s) processed, K of them yielded no item (no collected indicator, malware family, CVE or adversary): <id>, …`. A pulse whose items another pulse of the run listed first is not among them: its id travels in the kept item's `report_ids`. A pulse without an id is counted as processed but never among them (OTX gives every pulse an id).
+
+The status a run returns carries the same counts as `pulse_counts`: `rows_read`, `distinct`, `repeated_rows`, `processed` and `without_item`. A distinct count below the reported one, with repeated rows, points to paging; pulses that yielded items but have no reference on the graph point to items lost after the collector (in MISP or the sync).
+
 ### Zone Detection
 ```python
 def detect_sectors(self, text: str) -> List[str]:
@@ -1183,7 +1194,7 @@ What each collector pulls on a 730-day baseline, and the upstream limit behind i
 | Energy, Healthcare | Placeholders, no DAG task | — |
 
 - **NVD.** The baseline iterates 120-day windows (`iter_nvd_published_windows`); NVD allows `resultsPerPage` up to 2,000 and a `pubStartDate`..`pubEndDate` span of at most 120 days. A run-level `limit` present in a baseline (an incremental-style setting) is ignored with a warning, because it would cut almost the whole windowed collection.
-- **OTX.** `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (default 200, forwarded by `docker-compose.yml`) sets the ceiling, about 10,000 pulses at 2 s between pages; a baseline that stops at it with a full last page logs a warning. OTX documents no pulse cap; the effective throttle of the free tier is about 30 requests per minute.
+- **OTX.** `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (default 200, forwarded by `docker-compose.yml`) sets the ceiling, about 10,000 pulses at 2 s between pages; a baseline that stops at it with a full last page logs a warning. OTX documents no pulse cap; the effective throttle of the free tier is about 30 requests per minute. A pulse that comes back on a later page is kept once, and the run logs the distinct pulses beside the rows read ([Pages and pulse counts](#pages-and-pulse-counts)).
 - **CISA KEV.** The public JSON has no authentication, no rate limit and no per-entry modification date. Every run compares the whole catalogue with EdgeGuard's MISP copies and edits revised entries in place, at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) per run ([§ 3](#revisions-every-run-compares-the-catalogue-with-misp)); `notes`, `cwes` and `forensicTriage` are not stored in MISP (`cwes` and `notes` are read onto the item but not written to `NVD_META`).
 - **MITRE ATT&CK.** The bundle is a public GitHub raw file. A scheduled run pushes the whole changed bundle; objects MISP already holds keep their stored text ([§ Duplicate avoidance](#duplicate-avoidance-misp--incremental-runs)).
 - **MISP (local).** `MISPCollector` is library code that no DAG or CLI step runs; the graph is built from MISP by the MISP → Neo4j sync instead.
@@ -1311,10 +1322,11 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — OTX: both fetch paths keep the first copy of each pulse id (offset paging can return a pulse on two pages; the rows were appended as they came, so a repeated pulse was processed twice and, in a scheduled run, took a slot of the limit); the baseline logs the distinct pulses beside the rows read (it logged the rows as `N total pulses collected`), the repeated pulse ids and the pulses that yielded no item, and the status carries `pulse_counts`; the page-ceiling warning counts distinct pulses (it counted the rows).
 - 2026-11-01 — NVD, CVEs MISP holds: the sync updates the `CVE` node as `merge_cve` writes it, in batches (`merge_cves_batch`); the text named `merge_cve` as the sync's writer.
 - 2026-11-01 — MITRE ATT&CK: one item per group / malware name (lower-cased), an active object winning over a deprecated one (`[ATTACK-SAME-NAME]`); a failed ICS bundle holds back the deprecated groups and malware and leaves the ETag unstored (it was stored, so ICS waited for the next Enterprise release); group and malware items carry their ATT&CK id (`aid` in MISP); the push confirmation ignores case only for the attribute types whose case MISP changes on save (a value the event held only in another case had been confirmed).
 - 2026-10-25 — MISP push: the items of a group whose later-part lookup failed without a complete cross-event listing are listed as unstored.
