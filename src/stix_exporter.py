@@ -1652,10 +1652,9 @@ class StixExporter:
         derived aggregate built by enrichment_jobs). We instead read
         the campaign's own ``first_seen`` / ``last_seen`` properties —
         which the campaign builder aggregates across the seen dates of
-        the campaign's indicators (``indicator_seen_dates``: a source's
-        claim, else its latest report). So Campaign SDOs DO get the
-        ``x_edgeguard_*`` extensions, just sourced from a different
-        place than other entity types.
+        the campaign's indicators (``indicator_seen_dates``). So
+        Campaign SDOs DO get the ``x_edgeguard_*`` extensions, just
+        sourced from a different place than other entity types.
 
         2026-10-25: the other labels keep the sources' claims only. An
         indicator only OTX reported gets neither

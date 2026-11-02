@@ -522,7 +522,8 @@ class AlertProcessor:
                 # build): per edge the source's claim, else the source's latest report, so an indicator
                 # only OTX reported (no claims) is dated by its reports, not EdgeGuard's import time;
                 # the first seen never later than the first import; ``first_imported_at`` /
-                # ``last_updated`` when no edge dates it.
+                # ``last_updated`` when no edge dates it. 2026-11-02: the last date of an edge is the
+                # source's own date first (its first-seen claim before the MISP record time).
                 indicator_result = session.run(
                     f"""
                     MATCH (i:Indicator {{value: $indicator}})

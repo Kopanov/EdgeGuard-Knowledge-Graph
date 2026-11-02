@@ -1572,7 +1572,13 @@ class TestCampaignSeenDates:
         # Per edge the claim, else the latest report; the first date never after the first import.
         assert "coalesce(r.source_reported_first_at, r.last_reported_at)" in st
         assert "+ [i.first_imported_at]" in st
-        assert "max(coalesce(r.source_reported_last_at, r.last_reported_at)) AS member_last" in st
+        # 2026-11-02: the last date per edge is the source's own date first: the last-seen claim, the
+        # latest report when it is earlier than the record time, the first-seen claim, the record time.
+        assert (
+            "max(coalesce(r.source_reported_last_at, "
+            "CASE WHEN r.last_reported_at < r.last_recorded_at THEN r.last_reported_at END, "
+            "r.source_reported_first_at, r.last_reported_at)) AS member_last"
+        ) in st
         # The node's last write moves with every write, so the check does not read it.
         assert "i.last_updated" not in st
         # A campaign with members and no stored date, or one that does not compare (a String), is a

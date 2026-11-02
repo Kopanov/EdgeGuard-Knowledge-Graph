@@ -242,11 +242,22 @@ definition of when an indicator was first and last reported (`src/indicator_seen
 | Date | Per edge | Over the indicator's edges | No edge dates it |
 |------|----------|----------------------------|------------------|
 | First seen | `coalesce(r.source_reported_first_at, r.last_reported_at)` | The earliest, and never later than `n.first_imported_at` (EdgeGuard has had the indicator since then, from a source or an alert; the edge keeps only the latest report, which a later report moves past the import) | `n.first_imported_at` |
-| Last seen | `coalesce(r.source_reported_last_at, r.last_reported_at)` | The latest | `n.last_updated` (an indicator no source reported, such as one an alert created) |
+| Last seen | The source's own date first: `coalesce(r.source_reported_last_at, CASE WHEN r.last_reported_at < r.last_recorded_at THEN r.last_reported_at END, r.source_reported_first_at, r.last_reported_at)` | The latest | `n.last_updated` (an indicator no source reported, such as one an alert created) |
 
 The node's `n.last_reported_at` is no fallback: every writer records the same report on that
 source's edge (the sync's batch write in the same statement), so it is the latest of its edges'
 reports.
+
+An edge does not store which kind of date its report is (the node does, `last_reported_basis`). A
+report earlier than the edge's MISP record time (`r.last_recorded_at`) is a date the source gave; a
+report equal to it is the record time, the time of the push. Every item of a feed that sends no
+last-seen date has the record time as its report: MalwareBazaar, SSL Blacklist and most ThreatFox
+IOCs. Such an edge's last date is its first-seen claim; the record time only when the edge holds no
+date of the source. An OTX edge holds no claim, so an OTX indicator whose last-seen date the writer
+dropped (it was earlier than the first-seen date) still dates by the record time. The comparison
+stands in for the stored kind: a later record of the same source that dates the indicator earlier
+than the edge's report moves `r.last_recorded_at` but not the report, so a record time kept as the
+report then reads as a source date (rare).
 
 - **Campaign** (`build_campaign_nodes`): `first_seen` is the earliest first seen of its active
   indicators, `last_seen` the latest last seen. `first_seen` only moves earlier and `last_seen`
@@ -256,6 +267,11 @@ reports.
   The acceptance script checks the dates after a baseline: no campaign is first seen after an
   indicator member's first date or last seen before a member's latest dated report
   (`campaign_seen_dates_cover_members`, [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md)).
+  The campaign's sample of up to 100 active indicators (`PART_OF_CAMPAIGN`) is ordered by the same
+  last date: the latest over the indicator's edges, or its `first_imported_at` when no edge dates it
+  (`sample_date`; `last_updated` moves with every write), newest first, then by value and type. The
+  sample and the campaign's `last_seen` therefore follow one definition, and a feed's items do not
+  rank above the other sources' because MISP recorded them last.
 - **Alert enrichment** (`alert_processor`): `first_seen` and `last_updated` of the indicator,
   computed for each alert, with no stored value. An edge without a first-seen claim (such as OTX's)
   keeps only the source's latest report, so once that source reports the indicator
@@ -486,7 +502,12 @@ seen dates; `tests/test_campaign_seen_dates_neo4j.py` the dates a campaign
 and the alert enrichment get on a real Neo4j (indicators written through
 the sync's write path, and the alert path for one no source dated): an
 OTX-only campaign, a claim and a report on one indicator, a report after
-the first import, a stored campaign, an indicator no source dated.
+the first import, a stored campaign, an indicator no source dated; the
+last date of every stored edge shape; a campaign sample of 100 OTX
+indicators that a MalwareBazaar sample dated by the record time does not
+enter, an indicator two sources report that takes one place in it by the
+latest of its edges' dates, an indicator no source dated that enters it by
+its first import, and a campaign whose last seen is no feed's record time.
 
 ---
 
@@ -502,10 +523,11 @@ the first import, a stored campaign, an indicator no source dated.
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — The last date of an edge is the source's own date first: its last-seen claim, its latest report when that is earlier than the MISP record time, its first-seen claim, and only then the record time. The campaign build orders its sample of 100 indicators by that date (it ordered by the node's `last_reported_at`), so the sample, the campaign's `last_seen` and the alert enrichment read one definition. On the 730-day baseline of 2026-11-01 the record time, the time of the push, had placed the items of the feeds without a last-seen date above indicators their sources reported later: 4,270 of 40,938 indicator links change (OTX 29,903 → 31,780, ThreatFox 9,960 → 8,553, MalwareBazaar 1,225 → 911, URLhaus 3 → 65, Feodo Tracker 289 → 8, SSL Blacklist 62 → 0), and 177 instead of 216 of 533 campaigns get a last seen of 1 November; a stored `last_seen` stays until a fresh baseline.
 - 2026-10-25 — The acceptance script checks the campaign seen dates (`campaign_seen_dates_cover_members`).
 - 2026-10-25 — Seen dates: only the edges the sync writes carry `r.last_reported_at`; the alert enrichment's import-time first seen holds for an edge without a first-seen claim; a campaign `last_seen` a build stored too late stays until a fresh baseline.
 - 2026-10-25 — Seen dates of an indicator for the campaign build and the alert enrichment: per edge the source's claim, else its latest report (`r.last_reported_at`); the first seen date never later than the first import. Both had read the claims alone, so an indicator without one (one only OTX reported) was dated by EdgeGuard's import time, and a campaign whose indicators all came from OTX had the import time as its first and last seen.

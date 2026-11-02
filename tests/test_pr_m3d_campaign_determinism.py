@@ -117,8 +117,10 @@ class TestPartOfEdgesDeterministic:
         return (SRC / "enrichment_jobs.py").read_text()
 
     def test_step3_has_order_by_before_collect(self, source: str) -> None:
-        """The ``ORDER BY i.first_imported_at DESC, i.value ASC``
-        clause MUST appear between the WHERE filter and the
+        """The ``ORDER BY _sample_date DESC, i.value ASC`` clause
+        (``i.first_imported_at`` until 2026-10-16, then
+        ``coalesce(i.last_reported_at, i.first_imported_at)`` until
+        2026-11-02) MUST appear between the WHERE filter and the
         ``collect(i)[0..100]`` slice.
 
         PR-N21 renamed the variable ``link_indicators`` →
@@ -138,23 +140,30 @@ class TestPartOfEdgesDeterministic:
         # outer `)` of the apoc call. Use a generous slice that
         # covers both shapes.
         link_block = body[li_start : li_start + 3000]
-        # 2026-10-16: newest by the latest report, or when EdgeGuard created the node (indicator aging).
-        assert "ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC" in link_block, (
+        # 2026-11-02: newest by the sources' own dates, the latest last date of the indicator's
+        # SOURCED_FROM edges (``indicator_seen_dates.edge_last``), else when EdgeGuard created the node
+        # (``sample_date``); tests/test_indicator_seen_dates.py checks the rendered statement.
+        assert "ORDER BY _sample_date DESC, i.value ASC" in link_block, (
             "Step 3 must sort deterministically before the 100-slice"
         )
+        assert "OPTIONAL MATCH (i)-[_sf:SOURCED_FROM]->(:Source)" in link_block
+        assert "WITH c, a, i, max(__EDGE_LAST__) AS _edges_last" in link_block
+        assert "WITH c, a, i, __SAMPLE_DATE__ AS _sample_date" in link_block
+        assert 'indicator_seen_dates.edge_last("_sf")' in body
+        assert 'indicator_seen_dates.sample_date("_edges_last", "i")' in body
         # Ensure the ORDER BY comes BEFORE the collect
-        order_idx = link_block.find("ORDER BY coalesce(i.last_reported_at, i.first_imported_at)")
+        order_idx = link_block.find("ORDER BY _sample_date")
         # 2026-10-16: the slice takes 100 distinct indicators (it took 100 paths, so an indicator
         # reached through two member malware took two places); the provenance and evidence are read
         # from every path of each indicator afterwards.
         distinct_idx = link_block.find("WITH DISTINCT c, a, i")
+        dates_idx = link_block.find("OPTIONAL MATCH (i)-[_sf:SOURCED_FROM]->(:Source)")
         collect_idx = link_block.find("collect(i)[0..100]")
-        assert 0 <= distinct_idx < order_idx < collect_idx, "DISTINCT, then ORDER BY, then the 100-indicator slice"
-        # The indicator key is (type, value): the type breaks a tie of date and value, so the order is total.
-        assert (
-            "ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC, i.indicator_type ASC"
-            in link_block
+        assert 0 <= distinct_idx < dates_idx < order_idx < collect_idx, (
+            "DISTINCT, then the dates per indicator, then ORDER BY, then the 100-indicator slice"
         )
+        # The indicator key is (type, value): the type breaks a tie of date and value, so the order is total.
+        assert "ORDER BY _sample_date DESC, i.value ASC, i.indicator_type ASC" in link_block
 
     def test_step3a_stamps_r_updated_at(self, source: str) -> None:
         """Every PART_OF MERGE MUST stamp ``r.updated_at = datetime()``
