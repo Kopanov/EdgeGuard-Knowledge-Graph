@@ -315,8 +315,31 @@ class TestMalformedCvssPayload:
         (line,) = warnings
         assert line.endswith(
             "of CVE-2025-7223: entries that are not CVSS properties dropped: "
-            "attack_complexity, bad key, big, refs, self, timeout, uuid"
+            "'attack_complexity', 'bad key', 'big', 'refs', 'self', 'timeout', 'uuid'"
         )
+
+    def test_a_name_ending_in_a_newline_is_dropped(self, caplog):
+        """2026-11: the real payload with one name edited to end in a newline. The name check read ``$`` as the
+        end, which also matches before a final newline, so the entry passed: the single CVE write then named a
+        parameter the map did not hold, and the batched write read a null and left the property unchanged."""
+        real = self._real_v30()
+        payload = {("base_severity\n" if name == "base_severity" else name): value for name, value in real.items()}
+        item, warnings = self._read(caplog, cvss_v30_data=payload)
+        assert item["cvss_v30_data"] == {k: v for k, v in real.items() if k != "base_severity"}
+        (line,) = warnings
+        assert line.endswith("of CVE-2025-7223: entries that are not CVSS properties dropped: 'base_severity\\n'")
+        assert neo4j_client._prepare_cve_write(dict(item, cvss_v30_data=payload), "nvd") is None
+
+    @pytest.mark.parametrize("base_score", [7.8, None])
+    def test_a_dropped_name_cannot_start_a_log_line(self, caplog, base_score):
+        """2026-11-02: a dropped name is logged as its ``repr()``. Written raw, a name with a newline would start a
+        second line in a plain-text log, one that the run summary's ``grep -F`` hint for ``[MERGE-REJECT]`` would
+        print as a marker line. With and without a base score left, the warning stays one line."""
+        forged = "x\n[MERGE-REJECT] Malware name='Spyware' is a placeholder sentinel"
+        item, warnings = self._read(caplog, cvss_v30_data={**self._real_v30(), "base_score": base_score, forged: 1})
+        (line,) = warnings
+        assert "\n" not in line and repr(forged[:40]) in line
+        assert line.startswith("[META] NVD_META.cvss_v30_data of CVE-2025-7223")
 
     @pytest.mark.parametrize("base_score", [{"value": 7.8}, ["7.8"], None, ""])
     def test_a_payload_left_without_a_base_score_counts_as_absent(self, caplog, base_score):
@@ -328,7 +351,7 @@ class TestMalformedCvssPayload:
         assert (item["cvss_score"], item["cvss_version"]) == (None, None)
         (line,) = warnings
         # An empty string is no number, so it is dropped like a map or a list (2026-10-17, scores are finite numbers).
-        dropped = " (entries dropped: base_score)" if isinstance(base_score, (dict, list, str)) else ""
+        dropped = " (entries dropped: 'base_score')" if isinstance(base_score, (dict, list, str)) else ""
         assert line.endswith(
             f"NVD_META.cvss_v30_data of CVE-2025-7223 has no base score{dropped} — the CVE is read without it"
         )
@@ -465,7 +488,7 @@ class TestNonFiniteCvssNumbers:
         assert item["cvss_v30_data"] == {k: v for k, v in v30.items() if k != field}
         assert (item["cvss_score"], item["cvss_version"]) == (7.8, "3.0"), "the base score still scores the CVE"
         (line,) = warnings
-        assert line.endswith(f"of CVE-2025-7223: entries that are not CVSS properties dropped: {field}")
+        assert line.endswith(f"of CVE-2025-7223: entries that are not CVSS properties dropped: '{field}'")
 
     @pytest.mark.parametrize("literal", NON_FINITE_LITERALS)
     def test_a_non_finite_base_score_leaves_the_payload_absent(self, caplog, literal):
@@ -474,7 +497,7 @@ class TestNonFiniteCvssNumbers:
         assert (item["cvss_score"], item["severity"], item["cvss_version"]) == (None, "UNKNOWN", None)
         (line,) = warnings
         assert line.endswith(
-            "NVD_META.cvss_v30_data of CVE-2025-7223 has no base score (entries dropped: base_score) "
+            "NVD_META.cvss_v30_data of CVE-2025-7223 has no base score (entries dropped: 'base_score') "
             "— the CVE is read without it"
         )
 

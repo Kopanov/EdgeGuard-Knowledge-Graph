@@ -461,7 +461,7 @@ def report_collector_failure(
         logger.warning(log_block)
         send_slack_alert(
             f"Collector {source_name} SKIPPED (transient: {exc_type}). "
-            f"Pipeline continued. Full triage in Airflow logs (grep '[{source_name}] SKIPPED')."
+            f"Pipeline continued. Full triage in Airflow logs (grep -F '[{source_name}] SKIPPED')."
         )
     else:
         _safe(record_collection, source_name, zone, 0, "failed")
@@ -472,7 +472,7 @@ def report_collector_failure(
         logger.error(log_block)
         send_slack_alert(
             f"[CRITICAL] Collector {source_name} HARD-FAILED ({exc_type}). "
-            f"Downstream tasks blocked. Full triage in Airflow logs (grep '[{source_name}] FAILED')."
+            f"Downstream tasks blocked. Full triage in Airflow logs (grep -F '[{source_name}] FAILED')."
         )
 
     return classification

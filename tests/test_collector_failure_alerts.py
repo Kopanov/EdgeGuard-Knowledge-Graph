@@ -1,6 +1,6 @@
 """PR #35 commit 2: tests for the shared failure-alerts module.
 
-Vanko's follow-up audit caught that the CLI path (``src/run_pipeline.py``)
+A follow-up audit found that the CLI path (``src/run_pipeline.py``)
 was silently swallowing collector failures with no Prometheus / Slack
 visibility — only logs. PR #35 commit 2 extracts the classifier + Slack
 helper into ``src/collector_failure_alerts.py`` and wires the CLI path
@@ -402,8 +402,8 @@ def test_run_pipeline_helper_swallows_reporter_failures():
 
 def test_cli_except_branches_call_report_failure_with_metrics():
     """All four except branches in the run_pipeline.py collector loop
-    must call ``_report_failure_with_metrics`` so Vanko's gap (CLI-path
-    failures invisible to Prometheus + Slack) stays closed even if a
+    must call ``_report_failure_with_metrics`` so the gap the audit found
+    (CLI-path failures invisible to Prometheus + Slack) stays closed even if a
     future contributor adds a 5th except branch and forgets the call."""
     src_path = os.path.join(os.path.dirname(__file__), "..", "src", "run_pipeline.py")
     with open(src_path) as fh:
@@ -428,12 +428,12 @@ def test_cli_except_branches_call_report_failure_with_metrics():
 
 
 def test_failure_log_block_for_http_503_includes_status_url_and_action():
-    """Vanko's request: when a collector skips, the log line must say
-    EXACTLY why and what to do — not just "transient external error".
+    """When a collector skips, the log line must say EXACTLY why and what
+    to do — not just "transient external error".
 
     Pin the structure of ``_format_failure_log_block`` for the canonical
-    HTTP 503 case so an operator running ``grep "[urlhaus] SKIPPED"`` in
-    the Airflow logs sees:
+    HTTP 503 case so an operator running ``grep -F '[urlhaus] SKIPPED'`` in
+    the Airflow logs (the command the Slack alert names) sees:
       - source name + SKIPPED status
       - reason + exception class
       - HTTP status code (extracted from ``exc.response.status_code``)

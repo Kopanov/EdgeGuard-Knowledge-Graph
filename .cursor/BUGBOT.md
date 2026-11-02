@@ -14,7 +14,7 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
 
 - **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist and, behind their enable flags, CISA ICS and MalwareBazaar
 - **MISP** is the only place collector output lands first — no collector writes directly to Neo4j
-- **Neo4j (primary path):** `src/run_misp_to_neo4j.py` syncs from MISP. **Optional CLI path:** `run_pipeline.py` with STIX flow calls `load_stix21_to_neo4j()` — this is not a direct collector→Neo4j write either
+- **Neo4j:** `src/run_misp_to_neo4j.py` syncs from MISP (run by the `edgeguard_baseline` DAG and the scheduled sync DAG). **Development only:** the in-process `run_pipeline.py` loads Neo4j through its STIX 2.1 import (`load_stix21_to_neo4j()`) and builds a reduced graph (`docs/AIRFLOW_DAGS.md`, "In-process CLI baseline") — this is not a direct collector→Neo4j write either
 - **Optional allowlist:** `EDGEGUARD_COLLECT_SOURCES` — canonical names in `src/collector_allowlist.py` (import this from DAGs at parse time, **not** `collectors/__init__.py`, which loads every collector)
 - **REST API** (`src/query_api.py`) — external-facing read API on port 8000
 - **GraphQL API** (`src/graphql_api.py`) — Strawberry-based API on port 4001 mirroring ISIM's interface
@@ -1053,10 +1053,11 @@ When code changes affect user-visible behavior (CLI commands, env vars, DAG sett
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Architecture: `run_pipeline.py` is a development path that builds a reduced graph (it was named an optional CLI path); every baseline runs through the `edgeguard_baseline` DAG.
 - 2026-10-25 — MERGE block missing SOURCED_FROM edge: the edge MATCHes the `Source` node by the canonical id (the rule's pattern MERGEd the node); new flags for a statement other than `ensure_sources` that creates a `Source` node and for a `SOURCED_FROM` writer that does not resolve its id with `canonical_source_id`.
 - 2026-10-25 — Duplicate event creation allows the `-part<N>` events of a source and day (`_get_or_create_event(source, date, part)`); new rule Event split: lookups of later parts never create, a part is created only right before its first batch and once the existing parts are allotted to the limit, no part after a failed lookup or creation, and a group with source-report ids is never split.
 - 2026-10-25 — The optional-key rule names URLhaus and MalwareBazaar, which need the abuse.ch key (`missing_abusech_key`).

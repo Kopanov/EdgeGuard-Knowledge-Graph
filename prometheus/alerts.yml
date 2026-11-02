@@ -256,12 +256,12 @@ groups:
           summary: "Source {{ $labels.source }} ({{ $labels.zone }}) is unhealthy"
           description: "Data source {{ $labels.source }} in zone {{ $labels.zone }} is marked as unhealthy."
 
-      # Airflow component health, read by the metrics service from Airflow's health endpoint at every
-      # scrape (src/metrics_exporter.py, AIRFLOW_WEBSERVER_URL). `airflow standalone` keeps its API
-      # server up when the scheduler, triggerer or DAG processor dies, and the endpoint then answers
-      # HTTP 200 with "unhealthy" in its body only. The scheduler alone starts tasks and enforces
-      # dagrun_timeout: with it stopped a run stays "running", and EdgeGuardDAGRunStuck fires only
-      # after the run's dagrun_timeout (32 h 15 min for a baseline).
+      # Airflow component health, read by both EdgeGuard metrics servers (src/metrics_exporter.py and
+      # src/metrics_server.py) from Airflow's health endpoint at every scrape (AIRFLOW_WEBSERVER_URL).
+      # `airflow standalone` keeps its API server up when the scheduler, triggerer or DAG processor
+      # dies, and the endpoint then answers HTTP 200 with "unhealthy" in its body only. The scheduler
+      # alone starts tasks and enforces dagrun_timeout: with it stopped a run stays "running", and
+      # EdgeGuardDAGRunStuck fires only after the run's dagrun_timeout (32 h 15 min for a baseline).
       # The two rules on edgeguard_airflow_component_healthy set no `component` label: the alert keeps
       # the series' own `component` (scheduler, metadatabase, triggerer, dag_processor). A rule label
       # would overwrite it, and two components down at once would then give two alerts with one label

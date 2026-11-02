@@ -672,8 +672,10 @@ _NODE_COUNT_TIMEOUT_SEC = 60
 
 
 # Compiled regex for validating Cypher property/relationship names.
-# Allows only identifiers: letter or underscore, followed by letters/digits/underscores.
-_PROP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Allows only identifiers: letter or underscore, followed by letters/digits/underscores. ``\Z`` ends the
+# match at the end of the string: ``$`` also matches before a final newline, so "baseScore\n" passed
+# (2026-11). Every caller uses ``.match``.
+_PROP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def _validate_rel_type(name: str) -> str:

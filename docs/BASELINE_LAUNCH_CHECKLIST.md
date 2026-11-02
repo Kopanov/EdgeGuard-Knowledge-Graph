@@ -101,13 +101,23 @@ are the only ones. Specifically:
   path; a triggerer or DAG processor reported unhealthy, and an endpoint
   that does not answer, are warnings; one listed without status runs no job
   of its own and is information. The metadata database
-  backend is read from `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` or, on the DAG
-  path, from `docker compose exec -T airflow airflow config get-value
-  database sql_alchemy_conn`; only its scheme is judged and the value
-  (which holds the database password) is never printed. SQLite is a
-  warning: it is for development only, and a lock can stop the scheduler and
-  the triggerer (use PostgreSQL; a SQLite setup should at least append
-  `?timeout=60` to the connection string)
+  backend is looked up in Airflow's order: the environment
+  (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, then the deprecated
+  `AIRFLOW__CORE__SQL_ALCHEMY_CONN`), then, on the DAG path, `docker compose
+  exec -T airflow airflow config get-value database sql_alchemy_conn`, then
+  `airflow.cfg` (`AIRFLOW_CONFIG`, else `$AIRFLOW_HOME/airflow.cfg`, else
+  `~/airflow/airflow.cfg`; `[database]`, then `[core]`, `sql_alchemy_conn`).
+  Set nowhere, it is Airflow's default, SQLite, which the first `airflow`
+  command of a bare-metal install writes into `airflow.cfg`; the check never
+  runs the `airflow` CLI, which would write that file. A value set through a
+  command or a secrets backend (the `_CMD` / `_SECRET` variables,
+  `sql_alchemy_conn_cmd` / `_secret` in `airflow.cfg`) is not checked, which
+  the check lists as information. Only the scheme is judged and the value
+  (which holds the database password) is never printed; run the check with
+  the `AIRFLOW_HOME` of the running Airflow. SQLite is a warning: it is for
+  development only, and a lock can stop the scheduler and the triggerer (use
+  PostgreSQL; a SQLite setup should at least append `?timeout=60` to the
+  connection string)
 
 **If it fails:** the failing check names the exact remediation. Do
 **NOT** override `STRICT=1` to skip a fail — every fail in this script
@@ -660,6 +670,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Check `[13]` reads the metadata database backend from `airflow.cfg` as well, in Airflow's order, and reports Airflow's default, SQLite, when it is set nowhere; it read only the environment variable (and, on the DAG path, the Compose airflow service), so on a bare-metal install with the default configuration it printed "not checked" instead of the SQLite warning.
 - 2026-11-02 — Acceptance checks of the graph's shape: `in_tactic_complete`, `employs_technique_complete`, `implements_technique_complete`, `uses_technique_complete`, `sector_links_complete` and `cve_cvss_coverage` (a run that lost `IN_TACTIC`, the `mitre_explicit` technique links or every CVSS sub-node passed every check before, with the verdicts of a complete graph). `in_tactic_same_domain`, `mitre_explicit_only_from_mitre_nodes`, `attributed_to_has_match_type`, `attributed_to_fanout_plausible`, `cvss_bidirectional` and the two sector-provenance checks are informational on an empty set (they passed it); the checks report the size of the set they judge; `cvss_bidirectional` covers CVSSv2. The technique-link checks are informational when no claim reaches an existing `Technique`; the script is run when no sync and no `build_relationships` run is in progress. On the 730-day graph of 2026-11-01: in_tactic_complete 824 techniques, 1,024 phases with a tactic, 0 missing; ATT&CK claims 4,854 / 10,895 + 869 / 1,587,886, 0 missing (21,207 indicator claims name a technique the graph does not hold); sector_links_complete 61,538 zoned nodes, 78,262 node sectors, 0 missing; cve_cvss_coverage 142,236 of 146,858 (0.969), newest day 49 of 81 (0.60).
 - 2026-11-02 — `campaign_seen_dates_cover_members`: a member's last date per edge is the source's own date first, the build's definition; with the record time as the last date, the check would fail every build in which MISP recorded a member of a feed without a last-seen date after the campaign's latest source date.
 - 2026-11-02 — Launch decision: the `edgeguard` wrappers refuse while the scheduler is not healthy or a baseline run is queued or running, and trigger through the Airflow REST API without Docker (they ran `docker compose exec` only).

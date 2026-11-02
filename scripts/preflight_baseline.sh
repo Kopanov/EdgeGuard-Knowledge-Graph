@@ -623,10 +623,17 @@ else
   warn "Airflow health endpoint not reachable at $AF_HEALTH_URL; scheduler state not checked (AIRFLOW_WEBSERVER_URL, AIRFLOW_API_VERSION)"
 fi
 
-# Metadata database backend: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN from this
-# shell, else, on the DAG launch path, the value the airflow service uses. The
-# value reaches python3 on standard input (printf is a shell builtin, so it is
-# not in any process's argument list), and only its scheme is printed.
+# Metadata database backend, looked up in Airflow's order: the environment
+# (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN, its _CMD and _SECRET forms, then the
+# deprecated AIRFLOW__CORE__ names), then, on the DAG launch path, the value the
+# airflow service uses, then airflow.cfg (AIRFLOW_CONFIG, else
+# $AIRFLOW_HOME/airflow.cfg, else ~/airflow/airflow.cfg: [database], then the
+# deprecated [core], sql_alchemy_conn, then its _cmd and _secret forms). Set
+# nowhere, it is Airflow's default, SQLite. The airflow CLI is never run: its
+# first call writes an airflow.cfg and logs/ into AIRFLOW_HOME. A command or a
+# secrets backend is neither run nor read. A value reaches python3 on standard
+# input (printf is a shell builtin, so it is not in any process's argument
+# list), and only its scheme is printed.
 AF_DB_SCHEME_PY='
 import re, sys
 scheme = ""
@@ -636,31 +643,93 @@ for line in sys.stdin.read().splitlines():
         scheme = match.group(1).split("+")[0].lower()
 print(scheme)
 '
+# Prints "value <section> <scheme>", "cmd <section>", "secret <section>" or
+# "unset" for the airflow.cfg named by the first argument, and nothing when the
+# file cannot be read or parsed.
+AF_DB_CFG_PY='
+import configparser, os, re, sys
+parser = configparser.ConfigParser(interpolation=None, strict=False)
+with open(sys.argv[1], encoding="utf-8") as handle:
+    parser.read_file(handle)
+for suffix in ("", "_cmd", "_secret"):
+    for section in ("database", "core"):
+        if not parser.has_option(section, "sql_alchemy_conn" + suffix):
+            continue
+        if suffix:
+            print(suffix[1:], section)
+            sys.exit(0)
+        value = os.path.expanduser(os.path.expandvars(parser.get(section, "sql_alchemy_conn")))
+        match = re.match(r"\s*([A-Za-z][A-Za-z0-9+.-]*)://", value)
+        print("value", section, match.group(1).split("+")[0].lower() if match else "")
+        sys.exit(0)
+print("unset")
+'
 AF_DB_SCHEME=""
 AF_DB_FROM=""
-if [[ -n "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-}" ]]; then
-  AF_DB_SCHEME=$(printf '%s\n' "$AIRFLOW__DATABASE__SQL_ALCHEMY_CONN" | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
-  AF_DB_FROM="AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"
-elif [[ "$LAUNCH_PATH" == "dag" ]] && command -v docker >/dev/null 2>&1; then
-  AF_DB_SCHEME=$(docker compose exec -T airflow airflow config get-value database sql_alchemy_conn 2>/dev/null \
-    | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
-  AF_DB_FROM="airflow config get-value database sql_alchemy_conn"
-fi
-case "$AF_DB_SCHEME" in
-  sqlite)
-    warn "Airflow metadata database is SQLite ($AF_DB_FROM): SQLite is for development only; a lock held a few seconds can stop the scheduler and the triggerer. Use PostgreSQL (docker-compose.yml runs airflow_postgres); a SQLite setup should at least append ?timeout=60 to the connection string"
-    ;;
-  "")
-    if [[ -n "$AF_DB_FROM" ]]; then
-      warn "Airflow metadata database backend not determined ($AF_DB_FROM gave no connection string)"
-    else
-      printf '  - %s\n' "Airflow metadata database backend not checked (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN not set in this shell; the DAG launch path asks the airflow service)"
+AF_DB_UNREAD=""
+AF_CFG="${AIRFLOW_CONFIG:-${AIRFLOW_HOME:-${HOME:-}/airflow}/airflow.cfg}"
+AF_DB_ENV=""
+for af_var in AIRFLOW__DATABASE__SQL_ALCHEMY_CONN AIRFLOW__CORE__SQL_ALCHEMY_CONN; do
+  for af_name in "$af_var" "${af_var}_CMD" "${af_var}_SECRET"; do
+    if [[ -n "${!af_name:-}" ]]; then
+      AF_DB_ENV="$af_name"
+      break 2
     fi
-    ;;
-  *)
-    pass "Airflow metadata database is $AF_DB_SCHEME ($AF_DB_FROM)"
-    ;;
-esac
+  done
+done
+if [[ "$AF_DB_ENV" == *_CMD || "$AF_DB_ENV" == *_SECRET ]]; then
+  AF_DB_UNREAD="$AF_DB_ENV is set"
+elif [[ -n "$AF_DB_ENV" ]]; then
+  AF_DB_SCHEME=$(printf '%s\n' "${!AF_DB_ENV}" | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
+  AF_DB_FROM="$AF_DB_ENV"
+else
+  if [[ "$LAUNCH_PATH" == "dag" ]] && command -v docker >/dev/null 2>&1; then
+    AF_DB_SCHEME=$(docker compose exec -T airflow airflow config get-value database sql_alchemy_conn 2>/dev/null \
+      | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
+    AF_DB_FROM="airflow config get-value database sql_alchemy_conn"
+  fi
+  if [[ -z "$AF_DB_SCHEME" && -f "$AF_CFG" ]]; then
+    read -r af_kind af_section af_scheme <<< "$(python3 -c "$AF_DB_CFG_PY" "$AF_CFG" 2>/dev/null || true)"
+    case "$af_kind" in
+      value)
+        AF_DB_SCHEME="${af_scheme:-}"
+        AF_DB_FROM="[$af_section] sql_alchemy_conn in $AF_CFG"
+        ;;
+      cmd|secret)
+        AF_DB_UNREAD="[$af_section] sql_alchemy_conn_$af_kind in $AF_CFG"
+        ;;
+      unset)
+        AF_DB_SCHEME="sqlite"
+        AF_DB_FROM="not set in this shell or in $AF_CFG: Airflow's default"
+        ;;
+      *)
+        AF_DB_FROM="$AF_CFG could not be read"
+        ;;
+    esac
+  elif [[ -z "$AF_DB_SCHEME" && -z "$AF_DB_FROM" ]]; then
+    AF_DB_SCHEME="sqlite"
+    AF_DB_FROM="not set in this shell, and no $AF_CFG: Airflow's default"
+  fi
+fi
+if [[ -n "$AF_DB_UNREAD" ]]; then
+  printf '  - %s\n' "Airflow metadata database backend not checked ($AF_DB_UNREAD; this check runs no command and reads no secrets backend)"
+else
+  case "$AF_DB_SCHEME" in
+    sqlite)
+      warn "Airflow metadata database is SQLite ($AF_DB_FROM): SQLite is for development only; a lock held a few seconds can stop the scheduler and the triggerer. Use PostgreSQL (docker-compose.yml runs airflow_postgres); a SQLite setup should at least append ?timeout=60 to the connection string"
+      ;;
+    "")
+      if [[ "$AF_DB_FROM" == *"could not be read" ]]; then
+        warn "Airflow metadata database backend not determined ($AF_DB_FROM)"
+      else
+        warn "Airflow metadata database backend not determined ($AF_DB_FROM gave no connection string)"
+      fi
+      ;;
+    *)
+      pass "Airflow metadata database is $AF_DB_SCHEME ($AF_DB_FROM)"
+      ;;
+  esac
+fi
 
 # -----------------------------------------------------------------------------
 # Summary

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -641,6 +642,119 @@ class TestAirflowHealthCollector:
 
 
 # ---------------------------------------------------------------------------
+# src/metrics_server.py serves the gauges as well (2026-11)
+# ---------------------------------------------------------------------------
+
+
+class TestMetricsServerServesAirflowHealth:
+    """``python src/metrics_server.py`` (PROMETHEUS_SETUP Option A on a bare-metal install), the in-task server of a
+    single-process install and the ``edgeguard_metrics_server`` DAG serve the Airflow health gauges as the exporter
+    does. Before, only ``metrics_exporter.serve`` registered the collector, so on these servers the series were
+    absent and the alerts on them (plain comparisons, no ``absent()``) could not fire. Measured before the change:
+    no ``edgeguard_airflow_*`` series from ``MetricsServer`` in either mode."""
+
+    @pytest.fixture
+    def scrape(self, monkeypatch):
+        """Start ``MetricsServer`` on a free port and return a function that scrapes its ``/metrics``."""
+        import urllib.request
+
+        import metrics_server
+
+        monkeypatch.delenv(metrics_exporter.AIRFLOW_HEALTH_ENV, raising=False)
+        monkeypatch.delenv(metrics_exporter.MULTIPROC_ENV, raising=False)
+        monkeypatch.setitem(sys.modules, "airflow_client", airflow_client)
+        servers = []
+
+        def _start():
+            server = metrics_server.MetricsServer(host="127.0.0.1", port=0)
+            assert server.start_threaded() is not None
+            servers.append(server)
+            return server
+
+        def _scrape(server=None):
+            server = server or (servers[-1] if servers else _start())
+            port = server.server.server_address[1]
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=30) as answer:
+                return answer.read().decode()
+
+        _scrape.start = _start
+        yield _scrape
+        for server in servers:
+            server.stop()
+        # The collector on the default registry would ask Airflow at every later collection of it.
+        if metrics_server._airflow_health_collector is not None:
+            metrics_server.registry.unregister(metrics_server._airflow_health_collector)
+        metrics_server._airflow_health_collector = None
+        metrics_server._airflow_health_served = None
+
+    @staticmethod
+    def _series(text):
+        return sorted(line for line in text.splitlines() if line.startswith("edgeguard_airflow_"))
+
+    def test_unreachable_airflow_is_served_as_health_up_0(self, scrape, monkeypatch):
+        """The real health call against a closed port: the endpoint does not answer."""
+        monkeypatch.setenv("AIRFLOW_WEBSERVER_URL", "http://127.0.0.1:9")
+        assert self._series(scrape()) == ["edgeguard_airflow_health_up 0.0"]
+
+    def test_a_dead_scheduler_is_served(self, scrape, monkeypatch):
+        monkeypatch.setattr(airflow_client, "airflow_health", lambda timeout=None: UNHEALTHY)
+        assert self._series(scrape()) == [
+            'edgeguard_airflow_component_healthy{component="dag_processor"} 1.0',
+            'edgeguard_airflow_component_healthy{component="metadatabase"} 1.0',
+            'edgeguard_airflow_component_healthy{component="scheduler"} 0.0',
+            'edgeguard_airflow_component_healthy{component="triggerer"} 0.0',
+            "edgeguard_airflow_health_up 1.0",
+        ]
+
+    def test_the_multi_process_mode_serves_them_with_the_aggregate(self, scrape, monkeypatch, tmp_path):
+        monkeypatch.setattr(airflow_client, "airflow_health", lambda timeout=None: UNHEALTHY)
+        monkeypatch.setenv(metrics_exporter.MULTIPROC_ENV, str(tmp_path))
+        first, second = scrape(), scrape()
+        assert 'edgeguard_airflow_component_healthy{component="scheduler"} 0.0' in self._series(first)
+        assert self._series(first) == self._series(second), "a fresh registry per scrape, one collector on it"
+        import metrics_server
+
+        assert metrics_server._airflow_health_collector is None, "the default registry is not served here"
+
+    def test_two_servers_register_the_collector_once(self, scrape, monkeypatch, caplog):
+        import metrics_server
+
+        monkeypatch.setattr(airflow_client, "airflow_health", lambda timeout=None: HEALTHY)
+        with caplog.at_level(logging.WARNING, logger="metrics_server"):
+            first, second = scrape.start(), scrape.start()
+        collector = metrics_server._airflow_health_collector
+        assert collector is not None and metrics_server._airflow_health_served is True
+        assert not [r for r in caplog.records if "not served" in r.getMessage()]
+        for server in (first, second):
+            assert self._series(scrape(server)).count("edgeguard_airflow_health_up 1.0") == 1
+
+    @pytest.mark.parametrize("multiprocess", [False, True])
+    def test_switched_off(self, scrape, monkeypatch, tmp_path, multiprocess):
+        calls = []
+        monkeypatch.setattr(airflow_client, "airflow_health", lambda timeout=None: calls.append(timeout) or HEALTHY)
+        monkeypatch.setenv(metrics_exporter.AIRFLOW_HEALTH_ENV, "false")
+        if multiprocess:
+            monkeypatch.setenv(metrics_exporter.MULTIPROC_ENV, str(tmp_path))
+        assert self._series(scrape()) == [] and calls == []
+
+    def test_importing_the_module_registers_nothing(self):
+        """A DAG file imports ``metrics_server``: the import alone must neither register the collector nor ask
+        Airflow (a fresh interpreter, Airflow at a closed port)."""
+        code = (
+            "import sys; sys.path.insert(0, 'src'); import metrics_server; "
+            "from prometheus_client import REGISTRY; "
+            "print(REGISTRY.get_sample_value('edgeguard_airflow_health_up'), metrics_server._airflow_health_served)"
+        )
+        env = {k: v for k, v in os.environ.items() if k != metrics_exporter.MULTIPROC_ENV}
+        env["AIRFLOW_WEBSERVER_URL"] = "http://127.0.0.1:9"
+        done = subprocess.run(
+            [sys.executable, "-c", code], cwd=_ROOT, env=env, capture_output=True, text=True, timeout=120
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.split() == ["None", "None"]
+
+
+# ---------------------------------------------------------------------------
 # Alert rules and their documentation
 # ---------------------------------------------------------------------------
 
@@ -842,7 +956,7 @@ class TestPreflightScriptCheck13:
     def run_check(self, tmp_path):
         script = (_ROOT / "scripts" / "preflight_baseline.sh").read_text()
         block = script[script.index('hdr "[13]') : script.index("# Summary\n")]
-        block = block[: block.rindex("esac\n") + 5]
+        block = block[: block.rindex("\nfi\n") + 4]  # the end of the metadata database check
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         (bin_dir / "curl").write_text(
@@ -854,20 +968,28 @@ class TestPreflightScriptCheck13:
             'echo "[2026-11-01T12:00:00] {configuration.py} WARNING - a log line"\n'
             'echo "$STUB_CONN"\n'
         )
+        # The check never runs the airflow CLI: its first call writes an airflow.cfg and logs/ (2026-11).
+        (bin_dir / "airflow").write_text('#!/bin/sh\necho "$*" >> "$STUB_DIR/airflow_args"\necho "sqlite:////x.db"\n')
         for stub in bin_dir.iterdir():
             stub.chmod(0o755)
+        (tmp_path / "home").mkdir()
         harness = (
             "set -uo pipefail\n"
             'pass() { echo "PASS|$*"; }\nwarn() { echo "WARN|$*"; }\nfail() { echo "FAIL|$*"; }\nhdr() { :; }\n' + block
         )
 
-        def _run(payload, launch_path="dag", conn_env=None, docker_conn=None, url=None, api_version=None):
+        def _run(
+            payload, launch_path="dag", conn_env=None, docker_conn=None, url=None, api_version=None, extra_env=None
+        ):
             env = {
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                 "STUB_DIR": str(tmp_path),
                 "STUB_BODY": "",
                 "STUB_CONN": docker_conn or "",
                 "LAUNCH_PATH": launch_path,
+                # An empty home: the check never reads the developer's ~/airflow/airflow.cfg.
+                "HOME": str(tmp_path / "home"),
+                **(extra_env or {}),
             }
             if payload is not None:
                 body = tmp_path / "body.json"
@@ -884,9 +1006,27 @@ class TestPreflightScriptCheck13:
             )
             assert done.returncode == 0, done.stderr
             assert _SECRET not in done.stdout + done.stderr, "the connection string is never printed"
+            assert not (tmp_path / "airflow_args").exists(), "the airflow CLI is never run"
             return done.stdout.splitlines()
 
         return _run
+
+    @staticmethod
+    def _cfg(directory, conn=None, line=None):
+        """``directory/airflow.cfg``: Airflow 3.3.2's own (``fixtures/airflow_3_3_2_cfg_database.cfg``: its
+        ``[core]`` start and ``[database]`` section as the first CLI call wrote them), with ``conn`` as its
+        ``sql_alchemy_conn`` or ``line`` in place of that line."""
+        text = (_FIXTURES / "airflow_3_3_2_cfg_database.cfg").read_text()
+        default = "sql_alchemy_conn = sqlite:////home/edgeguard/airflow/airflow.db\n"
+        assert text.count(default) == 1
+        if conn is not None:
+            text = text.replace(default, f"sql_alchemy_conn = {conn}\n")
+        elif line is not None:
+            text = text.replace(default, line)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "airflow.cfg"
+        path.write_text(text)
+        return path
 
     @staticmethod
     def _kinds(lines):
@@ -971,9 +1111,274 @@ class TestPreflightScriptCheck13:
         )
 
     def test_the_cli_path_without_the_variable_does_not_ask_docker(self, run_check, tmp_path):
-        lines = run_check(HEALTHY, launch_path="cli", docker_conn="sqlite:////x.db")
-        assert lines[-1].startswith("  - Airflow metadata database backend not checked")
+        lines = run_check(HEALTHY, launch_path="cli", docker_conn="postgresql://airflow@db/airflow")
+        assert lines[-1].startswith("WARN|Airflow metadata database is SQLite (not set in this shell, and no ")
         assert not (tmp_path / "docker_args").exists()
+
+    # 2026-11: a bare-metal install keeps the connection string in airflow.cfg, where the first CLI call
+    # writes Airflow's default, SQLite (measured with Airflow 3.3.2); the check read only the environment
+    # variable and printed "not checked" there, the case its SQLite warning exists for.
+    def test_sqlite_in_airflow_cfg_is_a_warning(self, run_check, tmp_path):
+        cfg = self._cfg(tmp_path / "afhome")
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert lines[-1].startswith(f"WARN|Airflow metadata database is SQLite ([database] sql_alchemy_conn in {cfg}):")
+        assert "development only" in lines[-1] and "?timeout=60" in lines[-1]
+
+    def test_postgresql_in_airflow_cfg_passes_without_printing_the_value(self, run_check, tmp_path):
+        cfg = self._cfg(tmp_path / "afhome", conn=f"postgresql+psycopg2://airflow:{_SECRET}@db:5432/airflow")
+        lines = run_check(HEALTHY, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert lines[-1] == f"PASS|Airflow metadata database is postgresql ([database] sql_alchemy_conn in {cfg})"
+        assert (tmp_path / "docker_args").exists(), "the DAG path asks the airflow service first"
+
+    def test_the_cfg_is_where_airflow_looks_for_it(self, run_check, tmp_path):
+        """``AIRFLOW_CONFIG``, else ``$AIRFLOW_HOME/airflow.cfg``, else ``~/airflow/airflow.cfg``."""
+        home_cfg = self._cfg(tmp_path / "home" / "airflow")
+        lines = run_check(HEALTHY, launch_path="cli")
+        assert lines[-1].startswith(
+            f"WARN|Airflow metadata database is SQLite ([database] sql_alchemy_conn in {home_cfg})"
+        )
+        self._cfg(tmp_path / "afhome", conn="postgresql://airflow@db/airflow")
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert lines[-1].startswith("PASS|Airflow metadata database is postgresql")
+        other = self._cfg(tmp_path / "elsewhere", conn="mysql://airflow@db/airflow")
+        lines = run_check(
+            HEALTHY,
+            launch_path="cli",
+            extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), "AIRFLOW_CONFIG": str(other)},
+        )
+        assert lines[-1] == f"PASS|Airflow metadata database is mysql ([database] sql_alchemy_conn in {other})"
+
+    def test_the_variable_takes_precedence_over_the_cfg(self, run_check, tmp_path):
+        self._cfg(tmp_path / "afhome")
+        lines = run_check(
+            HEALTHY,
+            launch_path="cli",
+            conn_env=f"postgresql+psycopg2://airflow:{_SECRET}@db/airflow",
+            extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")},
+        )
+        assert lines[-1] == "PASS|Airflow metadata database is postgresql (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN)"
+
+    def test_the_dag_path_reads_the_cfg_when_the_airflow_service_gives_no_value(self, run_check, tmp_path):
+        cfg = self._cfg(tmp_path / "afhome")
+        lines = run_check(HEALTHY, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert (tmp_path / "docker_args").exists()
+        assert lines[-1].startswith(f"WARN|Airflow metadata database is SQLite ([database] sql_alchemy_conn in {cfg})")
+        lines = run_check(HEALTHY, docker_conn="postgresql://airflow@airflow_postgres/airflow")
+        assert lines[-1] == (
+            "PASS|Airflow metadata database is postgresql (airflow config get-value database sql_alchemy_conn)"
+        )
+
+    def test_set_nowhere_is_airflows_default_sqlite(self, run_check, tmp_path):
+        """No variable and no airflow.cfg: an Airflow started from this shell would use its default, SQLite. The
+        check says so without running the airflow CLI, which would write a cfg and logs/ there."""
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert lines[-1].startswith(
+            f"WARN|Airflow metadata database is SQLite (not set in this shell, and no {tmp_path}/afhome/airflow.cfg: "
+            "Airflow's default):"
+        )
+        assert not (tmp_path / "afhome").exists(), "nothing is written"
+
+    def test_the_dag_path_without_any_answer_is_not_determined(self, run_check):
+        lines = run_check(HEALTHY)
+        assert lines[-1] == (
+            "WARN|Airflow metadata database backend not determined "
+            "(airflow config get-value database sql_alchemy_conn gave no connection string)"
+        )
+
+    @pytest.mark.parametrize(
+        "variable",
+        [
+            "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD",
+            "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_SECRET",
+            "AIRFLOW__CORE__SQL_ALCHEMY_CONN_CMD",
+        ],
+    )
+    def test_a_command_or_secret_is_not_run(self, run_check, tmp_path, variable):
+        """Airflow takes these before airflow.cfg; the check neither runs the command nor reads the secret."""
+        self._cfg(tmp_path / "afhome")
+        lines = run_check(
+            HEALTHY,
+            launch_path="cli",
+            extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), variable: f"echo sqlite:////{_SECRET}.db"},
+        )
+        assert lines[-1] == (
+            f"  - Airflow metadata database backend not checked ({variable} is set; this check runs no "
+            "command and reads no secrets backend)"
+        )
+
+    def test_the_deprecated_core_variable_is_read(self, run_check, tmp_path):
+        self._cfg(tmp_path / "afhome", conn="postgresql://airflow@db/airflow")
+        lines = run_check(
+            HEALTHY,
+            launch_path="cli",
+            extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), "AIRFLOW__CORE__SQL_ALCHEMY_CONN": "sqlite:////x.db"},
+        )
+        assert lines[-1].startswith("WARN|Airflow metadata database is SQLite (AIRFLOW__CORE__SQL_ALCHEMY_CONN)")
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            (
+                "sql_alchemy_conn_cmd = cat /run/secrets/airflow_db\n",
+                "  - Airflow metadata database backend not checked ([database] sql_alchemy_conn_cmd in {cfg}; this check runs no command and reads no secrets backend)",
+            ),
+            (
+                "sql_alchemy_conn_secret = airflow/db\n",
+                "  - Airflow metadata database backend not checked ([database] sql_alchemy_conn_secret in {cfg}; this check runs no command and reads no secrets backend)",
+            ),
+            ("\n", "WARN|Airflow metadata database is SQLite (not set in this shell or in {cfg}: Airflow's default): "),
+        ],
+    )
+    def test_a_cfg_without_the_value(self, run_check, tmp_path, line, expected):
+        cfg = self._cfg(tmp_path / "afhome", line=line)
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert lines[-1].startswith(expected.format(cfg=cfg))
+
+    def test_the_deprecated_core_option_in_the_cfg_is_read(self, run_check, tmp_path):
+        cfg = self._cfg(tmp_path / "afhome", line="\n")
+        cfg.write_text(
+            cfg.read_text().replace("[core]\n", f"[core]\nsql_alchemy_conn = postgresql://airflow:{_SECRET}@db/af\n")
+        )
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert lines[-1] == f"PASS|Airflow metadata database is postgresql ([core] sql_alchemy_conn in {cfg})"
+
+    def test_an_unreadable_cfg_is_not_determined(self, run_check, tmp_path):
+        directory = tmp_path / "afhome"
+        directory.mkdir()
+        (directory / "airflow.cfg").write_text("sql_alchemy_conn = sqlite:////x.db\n")  # no section header
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(directory)})
+        assert lines[-1] == (
+            f"WARN|Airflow metadata database backend not determined ({directory}/airflow.cfg could not be read)"
+        )
+
+    # The lookup order, pinned with sources that disagree (2026-11-02). It is Airflow 3.3.2's: its own
+    # conf.get("database", "sql_alchemy_conn") took the [database] name before the deprecated [core] one, in the
+    # environment a value before its _CMD form and the environment before airflow.cfg, and in airflow.cfg every
+    # value before every _cmd, the [database] _cmd before the [core] one; the _SECRET and _secret forms come after
+    # the _CMD and _cmd ones in its code (_get_env_var_option, _lookup_sequence).
+    _NOT_CHECKED = (
+        "  - Airflow metadata database backend not checked ({}; this check runs no command and reads no secrets "
+        "backend)"
+    )
+    # In Airflow's order: each source takes precedence over every source after it.
+    _ENV_ORDER = {
+        "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN": "postgresql://airflow@db/airflow",
+        "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD": f"echo sqlite:////{_SECRET}.db",
+        "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_SECRET": "airflow/db",
+        "AIRFLOW__CORE__SQL_ALCHEMY_CONN": "sqlite:////x.db",
+        "AIRFLOW__CORE__SQL_ALCHEMY_CONN_CMD": f"echo postgresql://airflow:{_SECRET}@db/airflow",
+        "AIRFLOW__CORE__SQL_ALCHEMY_CONN_SECRET": "airflow/db",
+    }
+
+    def test_the_airflow_service_answer_wins_over_a_cfg_under_airflow_home(self, run_check, tmp_path):
+        """A Compose host that also keeps an airflow.cfg under ``AIRFLOW_HOME`` (a local install's, with
+        Airflow's SQLite default): on the DAG path the value the airflow service uses is judged, either way."""
+        self._cfg(tmp_path / "afhome")
+        lines = run_check(
+            HEALTHY,
+            docker_conn=f"postgresql+psycopg2://airflow:{_SECRET}@airflow_postgres/airflow",
+            extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")},
+        )
+        assert lines[-1] == (
+            "PASS|Airflow metadata database is postgresql (airflow config get-value database sql_alchemy_conn)"
+        )
+        self._cfg(tmp_path / "afhome", conn="postgresql://airflow@db/airflow")
+        lines = run_check(
+            HEALTHY,
+            docker_conn="sqlite:////opt/airflow/airflow.db",
+            extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")},
+        )
+        assert lines[-1].startswith(
+            "WARN|Airflow metadata database is SQLite (airflow config get-value database sql_alchemy_conn):"
+        )
+
+    @pytest.mark.parametrize(
+        ("first", "expected"),
+        [
+            pytest.param(
+                "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN",
+                "PASS|Airflow metadata database is postgresql (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN)",
+                id="DATABASE",
+            ),
+            pytest.param(
+                "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD",
+                _NOT_CHECKED.format("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD is set"),
+                id="DATABASE_CMD",
+            ),
+            pytest.param(
+                "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_SECRET",
+                _NOT_CHECKED.format("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_SECRET is set"),
+                id="DATABASE_SECRET",
+            ),
+            pytest.param(
+                "AIRFLOW__CORE__SQL_ALCHEMY_CONN",
+                "WARN|Airflow metadata database is SQLite (AIRFLOW__CORE__SQL_ALCHEMY_CONN):",
+                id="CORE",
+            ),
+            pytest.param(
+                "AIRFLOW__CORE__SQL_ALCHEMY_CONN_CMD",
+                _NOT_CHECKED.format("AIRFLOW__CORE__SQL_ALCHEMY_CONN_CMD is set"),
+                id="CORE_CMD",
+            ),
+            pytest.param(
+                "AIRFLOW__CORE__SQL_ALCHEMY_CONN_SECRET",
+                _NOT_CHECKED.format("AIRFLOW__CORE__SQL_ALCHEMY_CONN_SECRET is set"),
+                id="CORE_SECRET",
+            ),
+        ],
+    )
+    def test_the_environment_is_read_in_airflows_order(self, run_check, tmp_path, first, expected):
+        """``first`` and every variable after it in Airflow's order are set, the ones before it are not, and an
+        airflow.cfg with PostgreSQL sits behind them all: the check judges ``first``."""
+        names = list(self._ENV_ORDER)
+        variables = {name: self._ENV_ORDER[name] for name in names[names.index(first) :]}
+        self._cfg(tmp_path / "afhome", conn="postgresql://airflow@db/airflow")
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), **variables})
+        assert lines[-1].startswith(expected)
+
+    @pytest.mark.parametrize(
+        ("database", "core", "expected"),
+        [
+            pytest.param(
+                "sql_alchemy_conn = sqlite:////x.db\n",
+                "sql_alchemy_conn = postgresql://airflow@db/airflow\n",
+                "WARN|Airflow metadata database is SQLite ([database] sql_alchemy_conn in {cfg}):",
+                id="database-before-core",
+            ),
+            pytest.param(
+                f"sql_alchemy_conn = postgresql://airflow:{_SECRET}@db/airflow\n"
+                "sql_alchemy_conn_cmd = echo sqlite:////x.db\nsql_alchemy_conn_secret = airflow/db\n",
+                "",
+                "PASS|Airflow metadata database is postgresql ([database] sql_alchemy_conn in {cfg})",
+                id="value-before-its-cmd-and-secret",
+            ),
+            pytest.param(
+                "sql_alchemy_conn_cmd = echo sqlite:////x.db\n",
+                "sql_alchemy_conn = postgresql://airflow@db/airflow\n",
+                "PASS|Airflow metadata database is postgresql ([core] sql_alchemy_conn in {cfg})",
+                id="core-value-before-database-cmd",
+            ),
+            pytest.param(
+                "sql_alchemy_conn_cmd = echo postgresql://airflow@db/airflow\n",
+                "sql_alchemy_conn_cmd = echo sqlite:////x.db\n",
+                _NOT_CHECKED.format("[database] sql_alchemy_conn_cmd in {cfg}"),
+                id="database-cmd-before-core-cmd",
+            ),
+            pytest.param(
+                "sql_alchemy_conn_secret = airflow/db\n",
+                "sql_alchemy_conn_cmd = echo sqlite:////x.db\n",
+                _NOT_CHECKED.format("[core] sql_alchemy_conn_cmd in {cfg}"),
+                id="core-cmd-before-database-secret",
+            ),
+        ],
+    )
+    def test_airflow_cfg_is_read_in_airflows_order(self, run_check, tmp_path, database, core, expected):
+        """``database`` in place of the ``[database] sql_alchemy_conn`` line of Airflow 3.3.2's own cfg, and
+        ``core`` at the start of its ``[core]`` section."""
+        cfg = self._cfg(tmp_path / "afhome", line=database)
+        cfg.write_text(cfg.read_text().replace("[core]\n", "[core]\n" + core, 1))
+        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        assert lines[-1].startswith(expected.format(cfg=cfg))
 
     def test_the_header_and_the_help_list_check_13(self):
         script = (_ROOT / "scripts" / "preflight_baseline.sh").read_text()

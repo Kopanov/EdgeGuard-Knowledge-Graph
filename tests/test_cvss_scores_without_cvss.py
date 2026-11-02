@@ -274,7 +274,7 @@ class TestSyncOfHostedAttributes:
         # sees it, and reports it there; the score is still skipped and reported, never stored.
         assert any(
             "rejected by clamp" in r.message
-            or ("NVD_META.cvss_v31_data" in r.message and "entries dropped: base_score" in r.message)
+            or ("NVD_META.cvss_v31_data" in r.message and "entries dropped: 'base_score'" in r.message)
             for r in caplog.records
         )
 

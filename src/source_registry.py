@@ -121,10 +121,10 @@ class Source:
         ``[0.0, 1.0]`` confidence base used by the merge layer for
         corroboration scoring. Drives Neo4j ``:Source.reliability``.
     cli_id : Optional[str]
-        Short id used in ``edgeguard run --sources X,Y,Z`` and the
-        ``edgeguard sources`` CLI listing. ``None`` means the source
-        is not exposed via the CLI (rare; mostly for sources that are
-        always-on / have no toggle).
+        Short id that names the source in the ``edgeguard source list``
+        CLI listing and in the enabled sources ``edgeguard doctor`` reports.
+        ``None`` means the source is not exposed via the CLI (rare; mostly
+        for sources that are always-on / have no toggle).
     api_key_env : Optional[str]
         Env var name for the API key. ``None`` for free / no-key sources.
     rate_limit : str
@@ -573,8 +573,8 @@ def to_neo4j_sources_dict() -> Dict[str, Dict[str, object]]:
     }
 
 
-# PR #43 audit-2 (LOW — bugbot): the legacy `edgeguard.DEFAULT_SOURCES`
-# dict had a hand-curated key order that drove the `edgeguard sources`
+# PR #43 audit-2 (LOW): the legacy `edgeguard.DEFAULT_SOURCES`
+# dict had a hand-curated key order that drove the `edgeguard source list`
 # CLI listing. The pre-refactor order was (otx, nvd, virustotal, cisa,
 # mitre, abuseipdb, urlhaus, feodo, sslbl, threatfox, misp);
 # the registry order matches `neo4j_client.SOURCES` instead, which
