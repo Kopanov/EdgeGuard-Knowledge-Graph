@@ -1,0 +1,2594 @@
+{
+ "_provenance": "Read on 2026-11-02, read-only, from the 730-day baseline graph of 2026-11-01 (Neo4j 2026.10 on the baseline host). 'families': every distinct Indicator.malware_family value with its number of indicators (MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL RETURN i.malware_family AS family, count(*) AS indicators). 'malware': the Malware nodes (name, aliases, source as stored) whose name or an alias equals a family label once stripped and lower-cased, whose name without whitespace, hyphens, underscores and dots equals a label's or an ATT&CK Tool name's, and seven nodes whose names differ only by separators (cobalt strike beacon, darkcrystal rat, lockbit black); no other of the 3,648 Malware nodes changes how a label resolves. 'tools': every Tool node (name, mitre_id, source). 'tool_named_indicates': the INDICATES count of each non-MITRE Malware node named after an ATT&CK Tool. 'records': the SOURCED_FROM raw_data (verbatim) of one indicator per listed label, from the family-label feeds (ThreatFox, MalwareBazaar, Feodo Tracker), with the label the indicator carries.",
+ "families": [
+  {
+   "family": "QakBot",
+   "indicators": 4457
+  },
+  {
+   "family": "IClickFix",
+   "indicators": 2296
+  },
+  {
+   "family": "ClearFake",
+   "indicators": 1305
+  },
+  {
+   "family": "AMOS",
+   "indicators": 1106
+  },
+  {
+   "family": "Vidar",
+   "indicators": 947
+  },
+  {
+   "family": "Unknown malware",
+   "indicators": 876
+  },
+  {
+   "family": "BumbleBee",
+   "indicators": 847
+  },
+  {
+   "family": "Mirai",
+   "indicators": 682
+  },
+  {
+   "family": "TrickBot",
+   "indicators": 636
+  },
+  {
+   "family": "SalatStealer",
+   "indicators": 604
+  },
+  {
+   "family": "Emotet",
+   "indicators": 598
+  },
+  {
+   "family": "Dridex",
+   "indicators": 490
+  },
+  {
+   "family": "VShell",
+   "indicators": 297
+  },
+  {
+   "family": "BazarLoader",
+   "indicators": 290
+  },
+  {
+   "family": "Pikabot",
+   "indicators": 289
+  },
+  {
+   "family": "Unknown Loader",
+   "indicators": 287
+  },
+  {
+   "family": "StrelaStealer",
+   "indicators": 197
+  },
+  {
+   "family": "php.shin_webshell",
+   "indicators": 140
+  },
+  {
+   "family": "Cobalt Strike",
+   "indicators": 82
+  },
+  {
+   "family": "WARDENStealer",
+   "indicators": 81
+  },
+  {
+   "family": "PureRAT",
+   "indicators": 73
+  },
+  {
+   "family": "Stealc",
+   "indicators": 69
+  },
+  {
+   "family": "Sliver",
+   "indicators": 68
+  },
+  {
+   "family": "Mozi",
+   "indicators": 65
+  },
+  {
+   "family": "SmartLoader",
+   "indicators": 54
+  },
+  {
+   "family": "stealler",
+   "indicators": 46
+  },
+  {
+   "family": "ValleyRAT",
+   "indicators": 45
+  },
+  {
+   "family": "XWorm",
+   "indicators": 45
+  },
+  {
+   "family": "Remcos",
+   "indicators": 35
+  },
+  {
+   "family": "AsyncRAT",
+   "indicators": 31
+  },
+  {
+   "family": "Jackskid",
+   "indicators": 28
+  },
+  {
+   "family": "Formbook",
+   "indicators": 23
+  },
+  {
+   "family": "Manuscrypt",
+   "indicators": 21
+  },
+  {
+   "family": "SilentNet",
+   "indicators": 21
+  },
+  {
+   "family": "Unknown RAT",
+   "indicators": 21
+  },
+  {
+   "family": "LunexLoader",
+   "indicators": 20
+  },
+  {
+   "family": "XMRIG",
+   "indicators": 20
+  },
+  {
+   "family": "Hermes (Stealer)",
+   "indicators": 18
+  },
+  {
+   "family": "Unknown Stealer",
+   "indicators": 18
+  },
+  {
+   "family": "WannaCryptor",
+   "indicators": 18
+  },
+  {
+   "family": "Quasar RAT",
+   "indicators": 16
+  },
+  {
+   "family": "Aura Stealer",
+   "indicators": 15
+  },
+  {
+   "family": "CoinMiner",
+   "indicators": 15
+  },
+  {
+   "family": "Coinminer",
+   "indicators": 15
+  },
+  {
+   "family": "Evilginx",
+   "indicators": 15
+  },
+  {
+   "family": "Prometei",
+   "indicators": 14
+  },
+  {
+   "family": "SmartApeSG",
+   "indicators": 14
+  },
+  {
+   "family": "Grandoreiro",
+   "indicators": 13
+  },
+  {
+   "family": "AdaptixC2",
+   "indicators": 12
+  },
+  {
+   "family": "DCRat",
+   "indicators": 12
+  },
+  {
+   "family": "Remus",
+   "indicators": 12
+  },
+  {
+   "family": "DeimosC2",
+   "indicators": 11
+  },
+  {
+   "family": "ACR Stealer",
+   "indicators": 10
+  },
+  {
+   "family": "Drifter",
+   "indicators": 10
+  },
+  {
+   "family": "RedLine Stealer",
+   "indicators": 10
+  },
+  {
+   "family": "Aisuru",
+   "indicators": 9
+  },
+  {
+   "family": "OtterCookie",
+   "indicators": 9
+  },
+  {
+   "family": "RN Stealer",
+   "indicators": 9
+  },
+  {
+   "family": "TinyMet",
+   "indicators": 9
+  },
+  {
+   "family": "Turla RAT",
+   "indicators": 9
+  },
+  {
+   "family": "Agent Tesla",
+   "indicators": 8
+  },
+  {
+   "family": "PsychedelicStealer",
+   "indicators": 8
+  },
+  {
+   "family": "RevStealer",
+   "indicators": 8
+  },
+  {
+   "family": "AgentTesla",
+   "indicators": 6
+  },
+  {
+   "family": "Akira Stealer",
+   "indicators": 6
+  },
+  {
+   "family": "ArcaneStealer ",
+   "indicators": 6
+  },
+  {
+   "family": "ConnectWise",
+   "indicators": 6
+  },
+  {
+   "family": "Creal Stealer",
+   "indicators": 6
+  },
+  {
+   "family": "CrossRAT",
+   "indicators": 6
+  },
+  {
+   "family": "NetWire RC",
+   "indicators": 6
+  },
+  {
+   "family": "NjRAT",
+   "indicators": 6
+  },
+  {
+   "family": "Phorpiex",
+   "indicators": 6
+  },
+  {
+   "family": "Raven Stealer",
+   "indicators": 6
+  },
+  {
+   "family": "RemcosRAT",
+   "indicators": 6
+  },
+  {
+   "family": "RemusStealer",
+   "indicators": 6
+  },
+  {
+   "family": "RustyStealer",
+   "indicators": 6
+  },
+  {
+   "family": "Svirtu",
+   "indicators": 6
+  },
+  {
+   "family": "TinyLoader",
+   "indicators": 6
+  },
+  {
+   "family": "WannaCry",
+   "indicators": 6
+  },
+  {
+   "family": "Ghost RAT",
+   "indicators": 5
+  },
+  {
+   "family": "Havoc",
+   "indicators": 5
+  },
+  {
+   "family": "SectopRAT",
+   "indicators": 5
+  },
+  {
+   "family": "BTMOB RAT",
+   "indicators": 4
+  },
+  {
+   "family": "DarkCoreRAT",
+   "indicators": 4
+  },
+  {
+   "family": "DeerStealer",
+   "indicators": 4
+  },
+  {
+   "family": "Panchan",
+   "indicators": 4
+  },
+  {
+   "family": "Phantom Stealer",
+   "indicators": 4
+  },
+  {
+   "family": "Potassium",
+   "indicators": 4
+  },
+  {
+   "family": "ACRStealer",
+   "indicators": 3
+  },
+  {
+   "family": "Adware.OfferCore",
+   "indicators": 3
+  },
+  {
+   "family": "Ave Maria",
+   "indicators": 3
+  },
+  {
+   "family": "GUIDLOADER",
+   "indicators": 3
+  },
+  {
+   "family": "KongTuke",
+   "indicators": 3
+  },
+  {
+   "family": "Loki",
+   "indicators": 3
+  },
+  {
+   "family": "MacSync",
+   "indicators": 3
+  },
+  {
+   "family": "MiniBrowse",
+   "indicators": 3
+  },
+  {
+   "family": "PavinLoader",
+   "indicators": 3
+  },
+  {
+   "family": "PureLogsStealer",
+   "indicators": 3
+  },
+  {
+   "family": "Tofsee",
+   "indicators": 3
+  },
+  {
+   "family": "Venus Stealer",
+   "indicators": 3
+  },
+  {
+   "family": "YoungLotus",
+   "indicators": 3
+  },
+  {
+   "family": "BianLian",
+   "indicators": 2
+  },
+  {
+   "family": "CNBackdoor",
+   "indicators": 2
+  },
+  {
+   "family": "Chaos",
+   "indicators": 2
+  },
+  {
+   "family": "DesktopStreamRAT",
+   "indicators": 2
+  },
+  {
+   "family": "Efimer",
+   "indicators": 2
+  },
+  {
+   "family": "ElectroRAT",
+   "indicators": 2
+  },
+  {
+   "family": "GCleaner",
+   "indicators": 2
+  },
+  {
+   "family": "Gunra",
+   "indicators": 2
+  },
+  {
+   "family": "LxBase RAT",
+   "indicators": 2
+  },
+  {
+   "family": "LxBaseRAT",
+   "indicators": 2
+  },
+  {
+   "family": "MilleniumRAT",
+   "indicators": 2
+  },
+  {
+   "family": "MopsStealer",
+   "indicators": 2
+  },
+  {
+   "family": "Nanocore RAT",
+   "indicators": 2
+  },
+  {
+   "family": "NightshadeC2",
+   "indicators": 2
+  },
+  {
+   "family": "Overlord RAT",
+   "indicators": 2
+  },
+  {
+   "family": "PoshC2",
+   "indicators": 2
+  },
+  {
+   "family": "SpyBanker",
+   "indicators": 2
+  },
+  {
+   "family": "Tsunami",
+   "indicators": 2
+  },
+  {
+   "family": "VIPKeylogger",
+   "indicators": 2
+  },
+  {
+   "family": "Venom RAT",
+   "indicators": 2
+  },
+  {
+   "family": "ZigClipper",
+   "indicators": 2
+  },
+  {
+   "family": "Amadey",
+   "indicators": 1
+  },
+  {
+   "family": "Antidot",
+   "indicators": 1
+  },
+  {
+   "family": "ApolloRAT",
+   "indicators": 1
+  },
+  {
+   "family": "Arechclient2",
+   "indicators": 1
+  },
+  {
+   "family": "AvisLoader",
+   "indicators": 1
+  },
+  {
+   "family": "Bashlite",
+   "indicators": 1
+  },
+  {
+   "family": "Brute Ratel C4",
+   "indicators": 1
+  },
+  {
+   "family": "CECbot",
+   "indicators": 1
+  },
+  {
+   "family": "ClipBanker",
+   "indicators": 1
+  },
+  {
+   "family": "Conficker",
+   "indicators": 1
+  },
+  {
+   "family": "Coruna",
+   "indicators": 1
+  },
+  {
+   "family": "DanaBot",
+   "indicators": 1
+  },
+  {
+   "family": "DarkCloud",
+   "indicators": 1
+  },
+  {
+   "family": "DarkComet",
+   "indicators": 1
+  },
+  {
+   "family": "Empire Downloader",
+   "indicators": 1
+  },
+  {
+   "family": "Eye Pyramid",
+   "indicators": 1
+  },
+  {
+   "family": "FAKEUPDATES",
+   "indicators": 1
+  },
+  {
+   "family": "FleetDeck",
+   "indicators": 1
+  },
+  {
+   "family": "Hermes",
+   "indicators": 1
+  },
+  {
+   "family": "Loki Password Stealer (PWS)",
+   "indicators": 1
+  },
+  {
+   "family": "MassLogger",
+   "indicators": 1
+  },
+  {
+   "family": "Meterpreter",
+   "indicators": 1
+  },
+  {
+   "family": "NanoCore",
+   "indicators": 1
+  },
+  {
+   "family": "NeedleStealer",
+   "indicators": 1
+  },
+  {
+   "family": "Nitol",
+   "indicators": 1
+  },
+  {
+   "family": "NonEuclid RAT",
+   "indicators": 1
+  },
+  {
+   "family": "RaspberryRobin",
+   "indicators": 1
+  },
+  {
+   "family": "RatHat",
+   "indicators": 1
+  },
+  {
+   "family": "Redosdru",
+   "indicators": 1
+  },
+  {
+   "family": "Rugmi",
+   "indicators": 1
+  },
+  {
+   "family": "STRRAT",
+   "indicators": 1
+  },
+  {
+   "family": "SeroRAT",
+   "indicators": 1
+  },
+  {
+   "family": "SnappyClient",
+   "indicators": 1
+  },
+  {
+   "family": "Snojan",
+   "indicators": 1
+  },
+  {
+   "family": "Tsundere",
+   "indicators": 1
+  },
+  {
+   "family": "Xtreme RAT",
+   "indicators": 1
+  },
+  {
+   "family": "Zeus",
+   "indicators": 1
+  }
+ ],
+ "malware": [
+  {
+   "name": "acr stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "acrstealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "adaptixc2",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "agent tesla",
+   "aliases": [
+    "Agent Tesla",
+    "Agent Tesla - S0331"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "agenttesla",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "aisuru",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "amadey",
+   "aliases": [
+    "Amadey",
+    "Amadey - S1025"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "amos",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "antidot",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "arechclient2",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "async rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "asyncrat",
+   "aliases": [
+    "AsyncRAT - S1087"
+   ],
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "aura stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "aurastealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "ave maria",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "avemaria",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "avisloader",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "bashlite",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "bazarloader",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "bianlian",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "bloodhound",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "brute ratel c4",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "bruteratel c4",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "bumblebee",
+   "aliases": [
+    "Bumblebee",
+    "Bumblebee - S1039"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "chaos",
+   "aliases": [
+    "Chaos",
+    "Chaos - S0220"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "clearfake",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "clipbanker",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "cobalt strike",
+   "aliases": [
+    "Cobalt Strike",
+    "Cobalt Strike - S0154"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "cobalt strike beacon",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "cobaltstrike",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "cobaltstrike beacon",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "coinminer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "conficker",
+   "aliases": [
+    "Conficker",
+    "Kido",
+    "Downadup"
+   ],
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "coruna",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "covenant",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "crossrat",
+   "aliases": [
+    "CrossRAT"
+   ],
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "danabot",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "dark cloud",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "dark crystal rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "darkcloud",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "darkcomet",
+   "aliases": [
+    "DarkComet",
+    "DarkKomet",
+    "Fynloski",
+    "Krademok",
+    "FYNLOS",
+    "DarkComet - S0334"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "darkcrystal rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "darkcrystalrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "dcrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "deerstealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "donut",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "dridex",
+   "aliases": [
+    "Dridex",
+    "Bugat v5",
+    "Dridex - S0384"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "efimer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "emotet",
+   "aliases": [
+    "Emotet",
+    "Geodo",
+    "Emotet - S0367"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "evilginx",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "evilginx2",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "fakeupdates",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "fleetdeck",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "formbook",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "gcleaner",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "ghost rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "ghostrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "grandoreiro",
+   "aliases": [
+    "Grandoreiro",
+    "Grandoreiro - S0531"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "guidloader",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "gunra",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "havoc",
+   "aliases": [
+    "Havoc",
+    "Havoc - S1229"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "htran",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "impacket",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "jackskid",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "kongtuke",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "lazagne",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "lockbit black",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "lockbit.black",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "lunexloader",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "macsync",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "manuscrypt",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "masslogger",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "meterpreter",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "millenium rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "mimikatz",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "minibrowse",
+   "aliases": [
+    "MiniBrowse"
+   ],
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "mirai",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "mozi",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "mythic",
+   "aliases": [
+    "Mythic - S0699"
+   ],
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "nanocore",
+   "aliases": [
+    "NanoCore",
+    "NanoCore - S0336"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "nanocorerat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "needlestealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "ngrok",
+   "aliases": [
+    "Ngrok - S9000"
+   ],
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "njrat",
+   "aliases": [
+    "njRAT",
+    "Njw0rm",
+    "LV",
+    "Bladabindi",
+    "njRAT - S0385"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "noneuclid rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "ottercookie",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "overlord rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "pavinloader",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "phantom stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "phantomstealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "phorpiex",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "pikabot",
+   "aliases": [
+    "Pikabot"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "poshc2",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "prometei",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "psexec",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "purelogs stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "purerat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "qakbot",
+   "aliases": [
+    "QakBot",
+    "Pinkslipbot",
+    "QuackBot",
+    "QBot",
+    "QakBot - S0650"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "quasar rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "quasarrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "raspberry robin",
+   "aliases": [
+    "Raspberry Robin",
+    "Raspberry Robin - S1130"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "rathat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "raven stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "rclone",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "red line stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "redline stealer",
+   "aliases": [
+    "RedLine Stealer",
+    "RedLine Stealer - S1240"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "remcos",
+   "aliases": [
+    "Remcos - S0332"
+   ],
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "remcos rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "remcosrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "remus",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "remus stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "remusstealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "revstealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "rn stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "rubeus",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "rugmi",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "rustystealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "salat stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "sdelete",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "sectop rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "sectoprat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "silenttrinity",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "sliver",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "smartapesg",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "smartloader",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "snappyclient",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "socgholish",
+   "aliases": [
+    "SocGholish",
+    "FakeUpdates",
+    "SocGholish - S1124"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "stealc",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "strela stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "strelastealer",
+   "aliases": [
+    "StrelaStealer"
+   ],
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "strrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "trickbot",
+   "aliases": [
+    "TrickBot",
+    "Totbrick",
+    "TSPY_TRICKLOAD",
+    "TrickBot - S0266"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "tsunami",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "tsundere",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "uacme",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "valley rat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "valleyrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "venomrat",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "vidar",
+   "aliases": [
+    "Vidar"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "vip keylogger",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "vip_keylogger",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "vipkeylogger",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "vshell",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "wannacry",
+   "aliases": [
+    "WannaCry",
+    "WanaCry",
+    "WanaCrypt",
+    "WanaCrypt0r",
+    "WCry"
+   ],
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "warden stealer",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "warzonerat",
+   "aliases": [
+    "WarzoneRAT",
+    "Warzone",
+    "Ave Maria",
+    "WarzoneRAT - S0670"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "xloader",
+   "aliases": [
+    "XLoader",
+    "Formbook",
+    "XLoader - S1207"
+   ],
+   "source": [
+    "mitre_attck",
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "xmrig",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "xworm",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  },
+  {
+   "name": "zigclipper",
+   "aliases": null,
+   "source": [
+    "alienvault_otx"
+   ]
+  }
+ ],
+ "tools": [
+  {
+   "name": "Mimikatz",
+   "mitre_id": "S0002",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Windows Credential Editor",
+   "mitre_id": "S0005",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "pwdump",
+   "mitre_id": "S0006",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "gsecdump",
+   "mitre_id": "S0008",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "PsExec",
+   "mitre_id": "S0029",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Net",
+   "mitre_id": "S0039",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "HTRAN",
+   "mitre_id": "S0040",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Tasklist",
+   "mitre_id": "S0057",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Reg",
+   "mitre_id": "S0075",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "ftp",
+   "mitre_id": "S0095",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Systeminfo",
+   "mitre_id": "S0096",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Ping",
+   "mitre_id": "S0097",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Arp",
+   "mitre_id": "S0099",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "ipconfig",
+   "mitre_id": "S0100",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "ifconfig",
+   "mitre_id": "S0101",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "nbtstat",
+   "mitre_id": "S0102",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "route",
+   "mitre_id": "S0103",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "netstat",
+   "mitre_id": "S0104",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "dsquery",
+   "mitre_id": "S0105",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "cmd",
+   "mitre_id": "S0106",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "netsh",
+   "mitre_id": "S0108",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "at",
+   "mitre_id": "S0110",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "schtasks",
+   "mitre_id": "S0111",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "UACMe",
+   "mitre_id": "S0116",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Cachedump",
+   "mitre_id": "S0119",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Fgdump",
+   "mitre_id": "S0120",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Lslsass",
+   "mitre_id": "S0121",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Pass-The-Hash Toolkit",
+   "mitre_id": "S0122",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "xCmd",
+   "mitre_id": "S0123",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "certutil",
+   "mitre_id": "S0160",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Responder",
+   "mitre_id": "S0174",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "meek",
+   "mitre_id": "S0175",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "MimiPenguin",
+   "mitre_id": "S0179",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Tor",
+   "mitre_id": "S0183",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "BITSAdmin",
+   "mitre_id": "S0190",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Winexe",
+   "mitre_id": "S0191",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Pupy",
+   "mitre_id": "S0192",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Forfiles",
+   "mitre_id": "S0193",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "PowerSploit",
+   "mitre_id": "S0194",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "SDelete",
+   "mitre_id": "S0195",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Havij",
+   "mitre_id": "S0224",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "sqlmap",
+   "mitre_id": "S0225",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "spwebmember",
+   "mitre_id": "S0227",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Invoke-PSImage",
+   "mitre_id": "S0231",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Koadic",
+   "mitre_id": "S0250",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "QuasarRAT",
+   "mitre_id": "S0262",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Remcos",
+   "mitre_id": "S0332",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "LaZagne",
+   "mitre_id": "S0349",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Impacket",
+   "mitre_id": "S0357",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Ruler",
+   "mitre_id": "S0358",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Nltest",
+   "mitre_id": "S0359",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Expand",
+   "mitre_id": "S0361",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Empire",
+   "mitre_id": "S0363",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "RawDisk",
+   "mitre_id": "S0364",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "PoshC2",
+   "mitre_id": "S0378",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "esentutl",
+   "mitre_id": "S0404",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "MailSniper",
+   "mitre_id": "S0413",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Imminent Monitor",
+   "mitre_id": "S0434",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "ShimRatReporter",
+   "mitre_id": "S0445",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "CARROTBALL",
+   "mitre_id": "S0465",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "CrackMapExec",
+   "mitre_id": "S0488",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "MCMD",
+   "mitre_id": "S0500",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "ngrok",
+   "mitre_id": "S0508",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "BloodHound",
+   "mitre_id": "S0521",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "CSPY Downloader",
+   "mitre_id": "S0527",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "AdFind",
+   "mitre_id": "S0552",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "IronNetInjector",
+   "mitre_id": "S0581",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "NBTscan",
+   "mitre_id": "S0590",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "ConnectWise",
+   "mitre_id": "S0591",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "RemoteUtilities",
+   "mitre_id": "S0592",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Out1",
+   "mitre_id": "S0594",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Sliver",
+   "mitre_id": "S0633",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Wevtutil",
+   "mitre_id": "S0645",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "AADInternals",
+   "mitre_id": "S0677",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Peirates",
+   "mitre_id": "S0683",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "ROADTools",
+   "mitre_id": "S0684",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "SILENTTRINITY",
+   "mitre_id": "S0692",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Donut",
+   "mitre_id": "S0695",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Mythic",
+   "mitre_id": "S0699",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Rclone",
+   "mitre_id": "S1040",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "PcShare",
+   "mitre_id": "S1050",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Brute Ratel C4",
+   "mitre_id": "S1063",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Rubeus",
+   "mitre_id": "S1071",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "AsyncRAT",
+   "mitre_id": "S1087",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Pacu",
+   "mitre_id": "S1091",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "NPPSPY",
+   "mitre_id": "S1131",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "FRP",
+   "mitre_id": "S1144",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Covenant",
+   "mitre_id": "S1155",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "attrib",
+   "mitre_id": "S1176",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "cipher.exe",
+   "mitre_id": "S1205",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Quick Assist",
+   "mitre_id": "S1209",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "Diskpart",
+   "mitre_id": "S9002",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "evilginx2",
+   "mitre_id": "S9003",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "TruffleHog",
+   "mitre_id": "S9009",
+   "source": [
+    "mitre_attck"
+   ]
+  },
+  {
+   "name": "DCRAT",
+   "mitre_id": "S9017",
+   "source": [
+    "mitre_attck"
+   ]
+  }
+ ],
+ "tool_named_indicates": {
+  "async rat": 16,
+  "asyncrat": 3304,
+  "bloodhound": 47,
+  "brute ratel c4": 131,
+  "bruteratel c4": 29,
+  "covenant": 59,
+  "dcrat": 1363,
+  "donut": 1,
+  "evilginx2": 27,
+  "htran": 7,
+  "impacket": 139,
+  "lazagne": 166,
+  "mimikatz": 618,
+  "mythic": 71,
+  "ngrok": 16,
+  "poshc2": 36,
+  "psexec": 46,
+  "quasar rat": 1116,
+  "quasarrat": 1637,
+  "rclone": 84,
+  "remcos": 2635,
+  "rubeus": 112,
+  "sdelete": 62,
+  "silenttrinity": 47,
+  "sliver": 984,
+  "uacme": 54
+ },
+ "records": [
+  {
+   "family_on_indicator": "SalatStealer",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-29T18:56:24.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.8, \"pulse_name\": \"SalatStealer\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"29ab82cc-6dfd-4d27-bfa2-c56b5f2eeb83\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:03:38+00:00\", \"reported_at\": \"2026-11-01T16:03:38+00:00\", \"report_ref\": \"29ab82cc-6dfd-4d27-bfa2-c56b5f2eeb83\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/win.salatstealer\", \"reference\": null, \"tf_tags\": [], \"last_seen\": null, \"threat_type_desc\": \"Indicator that identifies a malware sample (payload)\", \"malware_family\": \"SalatStealer\", \"reporter\": \"Grim\", \"attributed_to\": \"\", \"threat_type\": \"payload\", \"ioc_id\": \"2002026\", \"malware_alias\": null, \"source_refs\": [\"threatfox:2002026\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Formbook",
+   "source_id": "malwarebazaar",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-31T08:18:41.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"malwarebazaar\"], \"confidence_score\": 0.5, \"pulse_name\": \"Formbook\", \"misp_event_id\": \"68\", \"misp_attribute_id\": \"0c138770-6de3-4000-b334-c4e29d793043\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:05:29+00:00\", \"reported_at\": \"2026-11-01T16:05:29+00:00\", \"report_ref\": \"0c138770-6de3-4000-b334-c4e29d793043\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"\", \"reference\": \"https://bazaar.abuse.ch/sample/0f4bdea083137db9fb14b677d019c8dc6c87f40ab76e46512afbe05bd6a4f76b/\", \"tf_tags\": [\"ps1\"], \"last_seen\": \"\", \"threat_type_desc\": \"\", \"malware_family\": \"Formbook\", \"reporter\": \"abuse_ch\", \"attributed_to\": \"\", \"threat_type\": \"\", \"ioc_id\": \"\", \"malware_alias\": \"\", \"source_id\": \"malwarebazaar\"}"
+  },
+  {
+   "family_on_indicator": "Cobalt Strike",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-11-01T00:05:05.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.8, \"pulse_name\": \"Cobalt Strike\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"f4287eda-c330-453a-a59e-87d0fa014628\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:01:36+00:00\", \"reported_at\": \"2026-11-01T16:01:36+00:00\", \"report_ref\": \"f4287eda-c330-453a-a59e-87d0fa014628\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/win.cobalt_strike\", \"reference\": null, \"tf_tags\": [\"CobaltStrike\"], \"last_seen\": null, \"threat_type_desc\": \"Indicator that identifies a botnet command&control server (C&C)\", \"malware_family\": \"Cobalt Strike\", \"reporter\": \"anonymous\", \"attributed_to\": \"\", \"threat_type\": \"botnet_cc\", \"ioc_id\": \"2007023\", \"malware_alias\": \"Agentemis,BEACON,CobaltStrike,cobeacon\", \"source_refs\": [\"threatfox:2007023\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Unknown Loader",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-11-01T09:56:37.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.5, \"pulse_name\": \"Unknown Loader\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"0c2779b1-3817-4bca-b0c9-8a17c3dd5d54\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:01:25+00:00\", \"reported_at\": \"2026-11-01T16:01:25+00:00\", \"report_ref\": \"0c2779b1-3817-4bca-b0c9-8a17c3dd5d54\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/unknown_loader\", \"reference\": null, \"tf_tags\": [\"bat\", \"Dropper\", \"ps1\"], \"last_seen\": null, \"threat_type_desc\": \"Indicator that identifies a malware sample (payload)\", \"malware_family\": \"Unknown Loader\", \"reporter\": \"Tuxxin\", \"attributed_to\": \"\", \"threat_type\": \"payload\", \"ioc_id\": \"2007665\", \"malware_alias\": null, \"source_refs\": [\"threatfox:2007665\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Unknown RAT",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-30T19:03:26.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.8, \"pulse_name\": \"Unknown RAT\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"4dd92cb7-47de-4cef-9016-bd9569536b29\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:02:22+00:00\", \"reported_at\": \"2026-11-01T16:02:22+00:00\", \"report_ref\": \"4dd92cb7-47de-4cef-9016-bd9569536b29\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/unknown_rat\", \"reference\": \"\", \"tf_tags\": [\"ManageEngine\", \"rmm\", \"uemsagent\"], \"last_seen\": null, \"threat_type_desc\": \"Indicator that identifies a botnet command&control server (C&C)\", \"malware_family\": \"Unknown RAT\", \"reporter\": \"rifteyy\", \"attributed_to\": \"\", \"threat_type\": \"botnet_cc\", \"ioc_id\": \"2004950\", \"malware_alias\": null, \"source_refs\": [\"threatfox:2004950\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Unknown Stealer",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-31T03:56:18.000000+00:00\", \"last_seen_at_source\": \"2026-10-31T19:30:06.000000+00:00\", \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.8, \"pulse_name\": \"Unknown Stealer\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"4432e4ed-5377-40ad-a657-7f130183049f\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:02:10+00:00\", \"reported_at\": \"2026-10-31T19:30:06+00:00\", \"report_ref\": \"4432e4ed-5377-40ad-a657-7f130183049f\", \"reported_basis\": \"source_date\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/unknown_stealer\", \"reference\": null, \"tf_tags\": [\"exe\", \"RustyStealer\", \"stealer\"], \"last_seen\": \"2026-10-31 19:30:06 UTC\", \"threat_type_desc\": \"Indicator that identifies a malware sample (payload)\", \"malware_family\": \"Unknown Stealer\", \"reporter\": \"Tuxxin\", \"attributed_to\": \"\", \"threat_type\": \"payload\", \"ioc_id\": \"2005823\", \"malware_alias\": null, \"source_refs\": [\"threatfox:2005823\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Unknown Stealer",
+   "source_id": "malwarebazaar",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-31T03:25:21.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"malwarebazaar\"], \"confidence_score\": 0.5, \"pulse_name\": \"RustyStealer\", \"misp_event_id\": \"68\", \"misp_attribute_id\": \"0d315e84-ef34-4891-a66c-43f28273ec1f\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:05:29+00:00\", \"reported_at\": \"2026-11-01T16:05:29+00:00\", \"report_ref\": \"0d315e84-ef34-4891-a66c-43f28273ec1f\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"\", \"reference\": \"https://bazaar.abuse.ch/sample/0f9edac8d410a072446bb0e0215a7903a9e48f1461638dbacfaafab617aa767b/\", \"tf_tags\": [\"exe\"], \"last_seen\": \"\", \"threat_type_desc\": \"\", \"malware_family\": \"RustyStealer\", \"reporter\": \"Tuxxin\", \"attributed_to\": \"\", \"threat_type\": \"\", \"ioc_id\": \"\", \"malware_alias\": \"\", \"source_id\": \"malwarebazaar\"}"
+  },
+  {
+   "family_on_indicator": "Unknown malware",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-28T06:35:08.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.5, \"pulse_name\": \"Unknown malware\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"a2c73be9-3a0f-440e-a259-969dac7769d3\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:04:58+00:00\", \"reported_at\": \"2026-11-01T16:04:58+00:00\", \"report_ref\": \"a2c73be9-3a0f-440e-a259-969dac7769d3\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/unknown\", \"reference\": \"https://tria.ge/261028-gcqhlshy5x\", \"tf_tags\": [\"triage\"], \"last_seen\": null, \"threat_type_desc\": \"Indicator that identifies a malware sample (payload)\", \"malware_family\": \"Unknown malware\", \"reporter\": \"abao_ch\", \"attributed_to\": \"\", \"threat_type\": \"payload\", \"ioc_id\": \"1998759\", \"malware_alias\": null, \"source_refs\": [\"threatfox:1998759\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Venom RAT",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-11-01T07:56:23.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.8, \"pulse_name\": \"Venom RAT\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"cdb441b7-e936-474d-8bcc-92f8f81c3961\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:01:25+00:00\", \"reported_at\": \"2026-11-01T16:01:25+00:00\", \"report_ref\": \"cdb441b7-e936-474d-8bcc-92f8f81c3961\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/win.venom\", \"reference\": null, \"tf_tags\": [\"exe\", \"venomrat\"], \"last_seen\": null, \"threat_type_desc\": \"Indicator that identifies a malware sample (payload)\", \"malware_family\": \"Venom RAT\", \"reporter\": \"Tuxxin\", \"attributed_to\": \"\", \"threat_type\": \"payload\", \"ioc_id\": \"2007517\", \"malware_alias\": null, \"source_refs\": [\"threatfox:2007517\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Venom RAT",
+   "source_id": "malwarebazaar",
+   "raw_data": "{\"first_seen_at_source\": \"2026-11-01T07:09:20.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"malwarebazaar\"], \"confidence_score\": 0.5, \"pulse_name\": \"VenomRAT\", \"misp_event_id\": \"68\", \"misp_attribute_id\": \"395a980b-ed21-4c15-b316-556560a2cf05\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:05:29+00:00\", \"reported_at\": \"2026-11-01T16:05:29+00:00\", \"report_ref\": \"395a980b-ed21-4c15-b316-556560a2cf05\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"\", \"reference\": \"https://bazaar.abuse.ch/sample/0e825537dc98505984e647da4b5d9354804e36eb34fae4293d6166a7bcc11301/\", \"tf_tags\": [\"exe\"], \"last_seen\": \"\", \"threat_type_desc\": \"\", \"malware_family\": \"VenomRAT\", \"reporter\": \"Tuxxin\", \"attributed_to\": \"\", \"threat_type\": \"\", \"ioc_id\": \"\", \"malware_alias\": \"\", \"source_id\": \"malwarebazaar\"}"
+  },
+  {
+   "family_on_indicator": "Nanocore RAT",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-11-01T12:44:21.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.8, \"pulse_name\": \"Nanocore RAT\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"a2681fd4-d0de-4e8c-8f60-3f93b843212f\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:01:14+00:00\", \"reported_at\": \"2026-11-01T16:01:14+00:00\", \"report_ref\": \"a2681fd4-d0de-4e8c-8f60-3f93b843212f\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/win.nanocore\", \"reference\": \"https://www.shodan.io/host/193.181.35.86\", \"tf_tags\": [\"NanoCore\"], \"last_seen\": null, \"threat_type_desc\": \"Indicator that identifies a botnet command&control server (C&C)\", \"malware_family\": \"Nanocore RAT\", \"reporter\": \"z3r0s6\", \"attributed_to\": \"\", \"threat_type\": \"botnet_cc\", \"ioc_id\": \"2008127\", \"malware_alias\": \"Nancrat,NanoCore\", \"source_refs\": [\"threatfox:2008127\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "Brute Ratel C4",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-29T05:18:37.000000+00:00\", \"last_seen_at_source\": \"2026-11-01T15:44:48.000000+00:00\", \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.5, \"pulse_name\": \"Brute Ratel C4\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"629fd57a-e516-440c-a81a-50b274c0ad76\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:04:03+00:00\", \"reported_at\": \"2026-11-01T15:44:48+00:00\", \"report_ref\": \"629fd57a-e516-440c-a81a-50b274c0ad76\", \"reported_basis\": \"source_date\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/win.brute_ratel_c4\", \"reference\": \"https://magnify.modat.io/hosts/37.119.57.248\", \"tf_tags\": [\"BruteRatel\", \"modat\"], \"last_seen\": \"2026-11-01 15:44:48 UTC\", \"threat_type_desc\": \"Indicator that identifies a botnet command&control server (C&C)\", \"malware_family\": \"Brute Ratel C4\", \"reporter\": \"juroots\", \"attributed_to\": \"\", \"threat_type\": \"botnet_cc\", \"ioc_id\": \"2000970\", \"malware_alias\": \"BOLDBADGER,BruteRatel\", \"source_refs\": [\"threatfox:2000970\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "WARDENStealer",
+   "source_id": "malwarebazaar",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-31T23:23:28.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"malwarebazaar\"], \"confidence_score\": 0.5, \"pulse_name\": \"WARDENStealer\", \"misp_event_id\": \"68\", \"misp_attribute_id\": \"23f11bda-9f05-42ab-9798-fc96ef1bc0c8\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:05:29+00:00\", \"reported_at\": \"2026-11-01T16:05:29+00:00\", \"report_ref\": \"23f11bda-9f05-42ab-9798-fc96ef1bc0c8\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"\", \"reference\": \"https://bazaar.abuse.ch/sample/0cffe2b753674df357aa2980e349765dc763602149f1a61de87cf817506857eb/\", \"tf_tags\": [\"exe\"], \"last_seen\": \"\", \"threat_type_desc\": \"\", \"malware_family\": \"WARDENStealer\", \"reporter\": \"aachum\", \"attributed_to\": \"\", \"threat_type\": \"\", \"ioc_id\": \"\", \"malware_alias\": \"\", \"source_id\": \"malwarebazaar\"}"
+  },
+  {
+   "family_on_indicator": "Emotet",
+   "source_id": "feodo_tracker",
+   "raw_data": "{\"first_seen_at_source\": \"2023-03-16T22:31:15.000000+00:00\", \"last_seen_at_source\": \"2023-03-16T22:31:15.000000+00:00\", \"zone\": [\"global\"], \"source\": [\"feodo_tracker\"], \"confidence_score\": 0.3, \"pulse_name\": \"Emotet\", \"misp_event_id\": \"65\", \"misp_attribute_id\": \"613211b1-fc41-4f9b-b93d-b9a7cb728cda\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:03:28+00:00\", \"reported_at\": \"2023-03-16T22:31:15+00:00\", \"report_ref\": \"613211b1-fc41-4f9b-b93d-b9a7cb728cda\", \"reported_basis\": \"source_date\", \"malware_malpedia\": \"\", \"reference\": \"https://feodotracker.abuse.ch/browse/host/1.234.2.232/\", \"tf_tags\": [\"c2_status:offline\", \"port:8080\"], \"last_seen\": \"2023-03-16 22:31:15\", \"threat_type_desc\": \"Botnet Command&Control server (C&C)\", \"malware_family\": \"Emotet\", \"reporter\": \"\", \"attributed_to\": \"\", \"threat_type\": \"botnet_cc\", \"ioc_id\": \"\", \"malware_alias\": \"\", \"last_online\": \"2023-03-16\", \"source_id\": \"feodo_tracker\"}"
+  },
+  {
+   "family_on_indicator": "IClickFix",
+   "source_id": "threatfox",
+   "raw_data": "{\"first_seen_at_source\": \"2026-10-31T01:05:45.000000+00:00\", \"last_seen_at_source\": \"2026-11-01T02:45:55.000000+00:00\", \"zone\": [\"global\"], \"source\": [\"threatfox\"], \"confidence_score\": 0.5, \"pulse_name\": \"IClickFix\", \"misp_event_id\": \"64\", \"misp_attribute_id\": \"7ae8de93-d44b-42bf-a723-0f16a5b93e5a\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:02:22+00:00\", \"reported_at\": \"2026-11-01T02:45:55+00:00\", \"report_ref\": \"7ae8de93-d44b-42bf-a723-0f16a5b93e5a\", \"reported_basis\": \"source_date\", \"malware_malpedia\": \"https://malpedia.caad.fkie.fraunhofer.de/details/js.iclickfix\", \"reference\": \"\", \"tf_tags\": [\"ClickFix\"], \"last_seen\": \"2026-11-01 02:45:55 UTC\", \"threat_type_desc\": \"Indicator that identifies a malware distribution server (payload delivery)\", \"malware_family\": \"IClickFix\", \"reporter\": \"varysz\", \"attributed_to\": \"\", \"threat_type\": \"payload_delivery\", \"ioc_id\": \"2005330\", \"malware_alias\": null, \"source_refs\": [\"threatfox:2005330\"], \"source_id\": \"threatfox\"}"
+  },
+  {
+   "family_on_indicator": "ConnectWise",
+   "source_id": "malwarebazaar",
+   "raw_data": "{\"first_seen_at_source\": \"2026-11-01T07:03:54.000000+00:00\", \"last_seen_at_source\": null, \"zone\": [\"global\"], \"source\": [\"malwarebazaar\"], \"confidence_score\": 0.5, \"pulse_name\": \"ConnectWise\", \"misp_event_id\": \"68\", \"misp_attribute_id\": \"9f634f36-3073-446f-9f3f-3ca99e3f75c6\", \"tlp\": \"white\", \"relationships\": [], \"recorded_at\": \"2026-11-01T16:05:29+00:00\", \"reported_at\": \"2026-11-01T16:05:29+00:00\", \"report_ref\": \"9f634f36-3073-446f-9f3f-3ca99e3f75c6\", \"reported_basis\": \"misp_recorded\", \"malware_malpedia\": \"\", \"reference\": \"https://bazaar.abuse.ch/sample/14390be6d9f0f6da24e8d906ac3deda6f2b729e02ba601d128810f96d63910e2/\", \"tf_tags\": [\"exe\"], \"last_seen\": \"\", \"threat_type_desc\": \"\", \"malware_family\": \"ConnectWise\", \"reporter\": \"Tuxxin\", \"attributed_to\": \"\", \"threat_type\": \"\", \"ioc_id\": \"\", \"malware_alias\": \"\", \"source_id\": \"malwarebazaar\"}"
+  }
+ ]
+}

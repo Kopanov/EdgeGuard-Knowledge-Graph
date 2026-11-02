@@ -2576,9 +2576,13 @@ class MISPWriter:
                 # CSV exports), and ``malware_alias`` (alternate
                 # names). All three were emitted by
                 # ``global_feed_collector.py:240-243`` and silently
-                # dropped here, losing ``ioc_id`` cross-day dedup +
-                # losing the alias signal Q2/Q9 consumes. Mirror of
-                # the OTX_META ``malware_family`` fix in PR-N10 #3.
+                # dropped here, losing ``ioc_id`` cross-day dedup.
+                # Mirror of the OTX_META ``malware_family`` fix in
+                # PR-N10 #3. No writer stores ``malware_alias`` as a
+                # property (it is only in the SOURCED_FROM raw_data),
+                # and no build_relationships step reads it (Q9 matches
+                # the indicator's ``malware_family`` against the names
+                # and aliases of the ``Malware`` nodes).
                 "threat_type": indicator.get("threat_type", ""),
                 "ioc_id": indicator.get("ioc_id", ""),
                 "malware_alias": indicator.get("malware_alias", ""),

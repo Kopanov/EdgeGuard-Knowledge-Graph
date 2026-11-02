@@ -377,6 +377,22 @@ _CVE_CVSS_COVERAGE_ROW = {"nvd_cves_not_rejected": 146858, "nvd_cves_with_cvss":
 _SECTOR_LINK_COUNT_ROW = {"sector_links": 78262, "managed_sector_links": 78262}
 _CVSS_NODES = {"CVSSv2": 13475, "CVSSv30": 2397, "CVSSv31": 134295, "CVSSv40": 41865}
 
+# 2026-11-02, checks 10a10 / 10a11: the feed family labels, the Malware nodes that decide how they resolve, the
+# Tool nodes and the INDICATES counts of the Malware nodes named after a Tool, read from the iMac 730-day graph
+# of 1 Nov 2026 (``tests/fixtures/feed_family_labels_2026_11_01.json``), and what
+# ``FAMILY_INDICATES_COMPLETE_QUERY`` returned on that graph's labelled indicators and Malware nodes, copied to a
+# throwaway Neo4j, once step 9 had run with the resolved labels (before it: the same row with 695 links missing).
+_FAMILY_FIXTURE = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "feed_family_labels_2026_11_01.json").read_text(encoding="utf-8")
+)
+_FAMILY_INDICATES_ROW = {
+    "mapped_families": 108,
+    "mapped_indicators": 13873,
+    "claims_with_target": 13900,
+    "edge_missing": 0,
+    "examples": [],
+}
+
 
 def _shape_rows(s: str, params: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """The healthy answer to a statement of the 2026-11-02 checks, or None for any other statement. Asked first,
@@ -398,6 +414,17 @@ def _shape_rows(s: str, params: Dict[str, Any]) -> Optional[List[Dict[str, Any]]
         return [dict(_CVE_CVSS_COVERAGE_ROW)]
     if "AS managed_sector_links" in s:
         return [dict(_SECTOR_LINK_COUNT_ROW)]
+    if "AS mapped_families" in s:  # before the families read: this statement groups by the label too
+        return [dict(_FAMILY_INDICATES_ROW)]
+    if "i.malware_family AS family" in s:
+        return [dict(r) for r in _FAMILY_FIXTURE["families"]]
+    if "m.aliases AS aliases, m.source AS source" in s:
+        return [dict(r) for r in _FAMILY_FIXTURE["malware"]]
+    if "t.mitre_id AS mitre_id, t.source AS source" in s:
+        return [dict(r) for r in _FAMILY_FIXTURE["tools"]]
+    if "UNWIND $names AS name MATCH (m:Malware {name: name})" in s:
+        counts = _FAMILY_FIXTURE["tool_named_indicates"]
+        return [{"name": n, "indicates": counts[n]} for n in params["names"] if n in counts]
     return None
 
 
@@ -3237,3 +3264,121 @@ class TestEmptySetsAreInformational:
         out = capsys.readouterr().out
         assert "[INFO] in_tactic_same_domain:" in out and "[INFO] mitre_explicit_only_from_mitre_nodes:" in out
         assert out.rstrip().endswith("RESULT: PASS")
+
+
+class TestFeedFamilyIndicates:
+    """2026-11-02, check 10a10 ``family_indicates_complete``: every indicator whose feed family label names
+    Malware nodes, as ``build_relationships`` step 9 resolves the labels (``family_resolution``), has its
+    INDICATES labelled ``malware_family`` to each; and the informational check 10a11
+    ``attack_tool_named_malware``. Rows of the 730-day graph of 1 Nov 2026."""
+
+    @staticmethod
+    def _seen_run(vfb, monkeypatch, answers=None):
+        seen: Dict[str, Any] = {}
+
+        def fake_post(statement, params=None, timeout=180):
+            seen[statement] = params
+            for fragment, rows in (answers or {}).items():
+                if fragment in statement:
+                    return [dict(r) for r in rows]
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        return vfb.run_checks(False, False, False, False), seen
+
+    def test_passes_once_step_9_linked_every_label_that_names_a_node(self, vfb, monkeypatch):
+        import graph_shape_checks as gsc
+        from family_resolution import resolve_feed_families
+
+        rep, seen = self._seen_run(vfb, monkeypatch)
+        c = _check(rep, "family_indicates_complete")
+        assert c["ok"] is True and c["mandatory"] is True
+        labels = [r["family"] for r in _FAMILY_FIXTURE["families"]]
+        # the statement judges the map of the same resolver step 9 runs with
+        expected = resolve_feed_families(labels, _FAMILY_FIXTURE["malware"]).targets
+        assert seen[gsc.FAMILY_INDICATES_COMPLETE_QUERY] == {"family_targets": expected}
+        detail = c["detail"]
+        assert {
+            k: detail[k] for k in ("claims", "target_missing", "placeholder_indicators", "unresolved_families")
+        } == {
+            "claims": 16560,
+            "target_missing": 2687,
+            "placeholder_indicators": 1202,
+            "unresolved_families": 47,
+        }
+        assert {k: detail[k] for k in _FAMILY_INDICATES_ROW} == _FAMILY_INDICATES_ROW
+        assert detail["separator_free_matches"]["SalatStealer"] == "salat stealer"
+        assert list(detail["unresolved"].items())[:2] == [("IClickFix", 2296), ("php.shin_webshell", 140)]
+
+    def test_a_missing_link_fails(self, vfb, monkeypatch):
+        """The 730-day graph as step 9 left it before 2026-11-02: the 695 indicators of the labels found without
+        separators had no link."""
+        before = dict(
+            _FAMILY_INDICATES_ROW,
+            edge_missing=695,
+            examples=["3f54539bac31d1d38602fb01b5377d71ab8b46b1efa174ee3dd8bfad6a2703b3 -> salat stealer"],
+        )
+        rep, _ = self._seen_run(vfb, monkeypatch, {"AS mapped_families": [before]})
+        assert [c["check"] for c in rep.failed] == ["family_indicates_complete"]
+        assert _check(rep, "family_indicates_complete")["detail"]["edge_missing"] == 695
+
+    def test_informational_without_a_label_that_names_a_node(self, vfb, monkeypatch):
+        import graph_shape_checks as gsc
+
+        empty = {"mapped_families": 0, "mapped_indicators": 0, "claims_with_target": 0, "edge_missing": 0}
+        # no feed family at all
+        rep, seen = self._seen_run(
+            vfb, monkeypatch, {"AS mapped_families": [dict(empty, examples=[])], "i.malware_family AS family": []}
+        )
+        c = _check(rep, "family_indicates_complete")
+        assert c["ok"] is None and seen[gsc.FAMILY_INDICATES_COMPLETE_QUERY] == {"family_targets": {}}
+        assert (c["detail"]["claims"], c["detail"]["unresolved_families"]) == (0, 0)
+        # labels that name no node: reported with their indicators, not judged
+        labels = [{"family": "Unknown malware", "indicators": 876}, {"family": "IClickFix", "indicators": 2296}]
+        rep, seen = self._seen_run(
+            vfb, monkeypatch, {"AS mapped_families": [dict(empty, examples=[])], "i.malware_family AS family": labels}
+        )
+        c = _check(rep, "family_indicates_complete")
+        assert c["ok"] is None and seen[gsc.FAMILY_INDICATES_COMPLETE_QUERY] == {"family_targets": {}}
+        assert c["detail"]["unresolved"] == {"IClickFix": 2296}
+        assert (c["detail"]["claims"], c["detail"]["target_missing"], c["detail"]["placeholder_indicators"]) == (
+            2296,
+            2296,
+            876,
+        )
+        assert rep.failed == []
+
+    def test_a_missing_count_fails(self, vfb, monkeypatch):
+        rep, _ = self._seen_run(
+            vfb, monkeypatch, {"AS mapped_families": [dict(_FAMILY_INDICATES_ROW, edge_missing=None)]}
+        )
+        assert [c["check"] for c in rep.failed] == ["family_indicates_complete"]
+
+    def test_the_malware_named_after_attack_tools_are_listed(self, vfb, monkeypatch):
+        import graph_shape_checks as gsc
+
+        rep, seen = self._seen_run(vfb, monkeypatch)
+        c = _check(rep, "attack_tool_named_malware")
+        assert c["ok"] is None
+        detail = c["detail"]
+        assert {k: detail[k] for k in ("nodes", "indicates", "exact_name_nodes", "exact_name_indicates")} == {
+            "nodes": 26,
+            "indicates": 12807,
+            "exact_name_nodes": 23,
+            "exact_name_indicates": 11646,
+        }
+        assert detail["malware"][0] == {
+            "malware": "asyncrat",
+            "tool": "AsyncRAT",
+            "tool_id": "S1087",
+            "exact_name": True,
+            "indicates": 3304,
+        }
+        assert {"malware": "quasar rat", "tool": "QuasarRAT", "tool_id": "S0262", "exact_name": False} in [
+            {k: v for k, v in m.items() if k != "indicates"} for m in detail["malware"]
+        ]
+        assert len(seen[gsc.MALWARE_INDICATES_COUNTS_QUERY]["names"]) == 26
+        # without such a node the counts are not read
+        rep, seen = self._seen_run(vfb, monkeypatch, {"t.mitre_id AS mitre_id, t.source AS source": []})
+        assert _check(rep, "attack_tool_named_malware")["detail"]["nodes"] == 0
+        assert gsc.MALWARE_INDICATES_COUNTS_QUERY not in seen

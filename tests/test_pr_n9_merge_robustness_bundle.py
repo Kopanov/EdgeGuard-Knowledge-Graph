@@ -98,25 +98,24 @@ class TestFixANullEmptyAliasFilter:
         assert "coalesce(a.aliases, [])" not in block and "coalesce(m.aliases, [])" not in block
         assert "_safe_run_batched(" not in block
 
-    def test_q9_inner_list_comprehension_filters_null_and_whitespace(self):
-        """Q9 inner has one list comprehension (m.aliases). Must carry
-        the same filter."""
-        src = self._src()
-        # Find Q9 inner
-        q9_idx = src.find("_q9_inner")
-        next_assignment = src.find("_q9_skip", q9_idx)
-        block = src[q9_idx:next_assignment]
-        m_alias_filter = "x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0"
-        assert m_alias_filter in block, "Q9 inner m.aliases comprehension must filter NULL/whitespace entries"
+    def test_q9_reads_no_alias_in_cypher(self):
+        """Since 2026-11-02 Q9's inner and skip statements compare no alias: the resolver does (next test)."""
+        from build_rel_queries import assigned_query
 
-    def test_q9_skip_list_comprehension_filters_null_and_whitespace(self):
-        """Q9's skip-query mirrors the inner's shape — must also filter."""
-        src = self._src()
-        q9_skip_idx = src.find("_q9_skip")
-        next_assignment = src.find("if not _safe_run_batched", q9_skip_idx)
-        block = src[q9_skip_idx:next_assignment]
-        m_alias_filter = "x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0"
-        assert m_alias_filter in block, "Q9 skip m.aliases comprehension must filter NULL/whitespace entries"
+        for name in ("_q9_inner", "_q9_skip"):
+            assert "m.aliases" not in assigned_query(name), name
+
+    def test_q9_resolver_ignores_null_and_whitespace_aliases(self):
+        """The filter the Q9 alias comprehension carried, in ``family_resolution``: a NULL, empty,
+        whitespace-only or non-string alias matches nothing, and a whitespace-only label is not resolved."""
+        from family_resolution import resolve_feed_families
+
+        resolution = resolve_feed_families(
+            ["Emotet", "   ", ""],
+            [{"name": "emotet", "aliases": [None, "", "   ", 7]}, {"name": "dridex", "aliases": "   "}],
+        )
+        assert resolution.targets == {"Emotet": ["emotet"]}
+        assert resolution.unresolved == [] and resolution.placeholders == []
 
     def test_no_bare_list_comprehension_without_filter(self):
         """Regression pin: any ``[x IN coalesce(..., []) | toLower(...)]``
