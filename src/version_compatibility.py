@@ -206,8 +206,9 @@ def _get_neo4j_server_version_fast() -> Optional[str]:
     instead — that branch keeps the existing test contract.
     """
     try:
-        from config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER  # noqa: WPS433
         from neo4j import GraphDatabase  # noqa: WPS433
+
+        from config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER  # noqa: WPS433
     except Exception as e:  # noqa: BLE001
         logger.debug(f"neo4j driver / config import failed: {e}")
         return None

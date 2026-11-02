@@ -19,7 +19,8 @@ Each fix is a small (<1h) change that closes a real finding:
      were features.
   5. **``curl --netrc-file`` replacement** (Red Team HIGH) — Neo4j
      password leaked into ``/proc/<pid>/cmdline`` + ``ps auxw`` via
-     ``curl -u user:$PWD`` in DAG quality check + check_progress.sh.
+     ``curl -u user:$PWD`` in the DAG quality check and a prototype
+     shell helper (deleted 2026-11-02).
   6. **Airflow 3.x command + `.gitignore` cache hygiene** (Cross-Checker
      LOW) — the AIRFLOW_DAGS.md Manual Run section showed the
      Airflow-2.x ``airflow webserver -p 8080`` command; `.mypy_cache/`
@@ -191,19 +192,11 @@ class TestDeadPlaceholdersRemoved:
 
 class TestCurlCredentialFileReplacement:
     """Neo4j password must NOT appear in ``curl -u user:$PWD`` form
-    anywhere (would leak into ``/proc/<pid>/cmdline``). ``src/check_progress.sh``
-    uses curl's config-file format (``-K``) with a 0600 file + trap cleanup.
-
-    PR-F9 round-2 (Bugbot LOW): initially used ``--netrc-file``, but
-    netrc is whitespace-delimited with no quoting — a password
-    containing a space silently truncates to the first token.
-    Switched to curl config format (``user = \"u:p\"``), which
-    supports quoted strings + backslash escapes (handles whitespace,
-    ``"``, and ``\\``). Same security win; correct for realistic
-    passwords.
+    anywhere (would leak into ``/proc/<pid>/cmdline``).
 
     2026-10: the DAG quality check no longer shells out at all (it queries through
-    ``Neo4jClient``), so the password cannot reach argv from it.
+    ``Neo4jClient``), so the password cannot reach argv from it. The prototype shell
+    helper that used curl's config-file format is deleted (2026-11-02).
     """
 
     def test_dag_quality_check_does_not_shell_out(self):
@@ -215,32 +208,6 @@ class TestCurlCredentialFileReplacement:
         assert "PythonOperator(" in block, "DAG quality check must be a PythonOperator, not a shell command"
         assert "BashOperator" not in block and "bash_command" not in block
         assert "curl" not in block, "DAG quality check must not shell out to curl (password handling)"
-
-    def test_check_progress_sh_uses_config_file_not_argv_password(self):
-        with open("src/check_progress.sh") as fh:
-            content = fh.read()
-        assert 'curl -s -u "neo4j:${NEO4J_PASSWORD' not in content, (
-            "check_progress.sh must NOT embed password in curl argv"
-        )
-        assert "curl -s -K " in content or "curl -K " in content, "check_progress.sh must use ``curl -K <config>``"
-        assert "chmod 600" in content
-        assert "trap " in content
-        assert "--netrc-file" not in content, (
-            "netrc format truncates passwords with whitespace — use curl config instead"
-        )
-
-    def test_password_is_escaped_for_curl_config_format(self):
-        """curl config's quoted-string format supports ``\\\\`` (backslash)
-        and ``\\"`` (double-quote) escapes. The call site must escape
-        the password before writing it into the config file — otherwise
-        a password containing ``"`` would break the config parser."""
-        with open("src/check_progress.sh") as fh:
-            content = fh.read()
-        assert "NEO4J_PWD_ESC" in content, (
-            "src/check_progress.sh must escape password characters (backslash + quote) "
-            "before embedding in curl config — otherwise special chars "
-            "break the config parser (PR-F9 round-2)"
-        )
 
 
 # ===========================================================================

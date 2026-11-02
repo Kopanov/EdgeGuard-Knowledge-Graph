@@ -83,15 +83,9 @@ Collectors → MISP → [per MISP event] parse_attribute() → dedupe → cross-
 
 No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Report-scoped** relationships produced during sync are built from **one event’s item list only**, and inside it only between items that share the same OTX `pulse_id`: `Indicator → INDICATES → Malware`, `Indicator → INDICATES → CVE` (at most 50 CVEs per pulse; the `CVE` node is matched, never created) and `Malware → ATTRIBUTED_TO → ThreatActor` (the latter only when the pulse's actors are one actor; the aliases of one actor count as one, and the OTX collector marks a pulse naming several actors on every item of it, `several_actor_pulses`, or `several_actor_pulses_by_name` when it judged without the canonical reference: only the former is stored on `Indicator` nodes), `match_type='otx_pulse'`, confidence 0.6, `r.sources = ['alienvault_otx']`, the pulse in `r.source_refs[]` (`alienvault_otx:<pulse id>`). Items without a pulse id are never paired, and nothing is paired across the whole per-source, per-day event (see the `_build_cross_item_relationships` docstring in `run_misp_to_neo4j.py`). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
 
-**CLI / `run_pipeline.py` (development only)** — step 3 of **`python src/run_pipeline.py`** always takes the STIX flow (`--stix-flow` is on by default and cannot be turned off; without the STIX library the run fails). The nodes it writes lack what `build_relationships.py` links by (technique tactic phases; actor, malware and tool technique and software lists; malware attribution; indicator malware family and OTX technique ids; CVE CVSS data), so `run_pipeline.py --baseline` builds a reduced graph and is not a way to run a baseline ([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)):
+**CLI / `run_pipeline.py` (development only)** — **`python src/run_pipeline.py`** runs the enabled collectors once into MISP and writes nothing to Neo4j; the MISP → Neo4j sync above is the one path from MISP into the graph. Its `--baseline`, `--fresh-baseline`, `--baseline-days` and `--stix-flow` exit with code 2: every baseline runs through the `edgeguard_baseline` DAG ([AIRFLOW_DAGS.md § One baseline path](AIRFLOW_DAGS.md#one-baseline-path)).
 
-```
-MISP → convert_to_stix21() / PyMISP to_stix2 → load_stix21_to_neo4j() → Neo4j
-```
-
-Each object names its source in `x_edgeguard_source`, as a canonical id: the source the MISP event's own `source:*` tag names, through the registry's MISP-tag map the MISP → Neo4j sync reads (a `source:*` name the map does not hold gives `misp`, with a warning); for a collector's event, which carries only the `EdgeGuard` tag, the source its name gives (`EdgeGuard-<source>-<date>`, `-part<N>` on a continued event), or `misp`, with a warning, when the name gives no registered source. The event of a curated package (its tag names a registered curated source, such as `coreideas`) is skipped with an INFO log: a package carries claims about existing nodes and never creates nodes, and the MISP → Neo4j sync links its claims. The loader resolves a variant to its canonical id and attributes an object without `x_edgeguard_source` (an external bundle) to `stix_import`, a registered source, so such a record reaches a `Source` node; an object whose `x_edgeguard_source` the registry does not know has none ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Source nodes").
-
-The MISP → STIX conversion of this path lives in **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** — those helpers are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow. STIX leaves EdgeGuard only through the graph exporter, **`GET /stix/export/{object_type}/{identifier}`** (`src/stix_exporter.py`, [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
+The MISP → STIX conversion helpers **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow, nor by any other pipeline step. STIX leaves EdgeGuard only through the graph exporter, **`GET /stix/export/{object_type}/{identifier}`** (`src/stix_exporter.py`, [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)).
 
 **After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging — one rule for every Indicator, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later, so a re-run of an older run never moves a node's aging back ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*) —, campaigns, FIRST EPSS). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
 
@@ -319,8 +313,7 @@ from `attr.uuid`, set in
 scalars `misp_event_id` / `misp_attribute_id`. A node from several events
 is tracked via the array's full list of contributing events with
 `any(eid IN n.misp_event_ids WHERE eid IN $active_ids)` semantics. No query
-in `build_relationships.py` or `run_pipeline.py` links by event
-co-occurrence.
+in `build_relationships.py` links by event co-occurrence.
 
 **Cross-environment traceability:** every node carries a
 deterministic `n.uuid` = `uuid5(namespace, canonical(label, natural_key))`
@@ -361,7 +354,7 @@ steps in `build_relationships.py`; every uuid is stamped at write time.
 | nvd | NVD | Vulnerability DB | nvd_collector.py |
 | cisa_kev | CISA KEV | Advisory | cisa_collector.py |
 | mitre_attck | MITRE ATT&CK | Framework | mitre_collector.py |
-| virustotal | VirusTotal | Threat Intel | `vt_collector.py` (scheduled, `edgeguard_medium_freq`); `virustotal_collector.py` (`run_pipeline.py` collector `virustotal_enrich` and `src/enrichment.py` only — no DAG task) |
+| virustotal | VirusTotal | Threat Intel | `vt_collector.py` (scheduled, `edgeguard_medium_freq`); `virustotal_collector.py` (`run_pipeline.py` collector `virustotal_enrich` only — no DAG task) |
 | abuseipdb | AbuseIPDB | IP Reputation | abuseipdb_collector.py |
 | feodo_tracker | Feodo Tracker | Threat Intel | finance_feed_collector.py |
 | ssl_blacklist | SSL Blacklist | Threat Intel | finance_feed_collector.py |
@@ -404,8 +397,8 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/healthcare_feed_collector.py` | Healthcare placeholder |
 | `src/collectors/energy_feed_collector.py` | Energy placeholder |
 | `src/collectors/misp_collector.py` | Reads existing MISP events — library code; no DAG or CLI step runs it |
-| `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j** sync (`fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`) and the STIX converter of `run_pipeline.py` |
-| `src/run_pipeline.py` | CLI orchestration, development only: collectors → MISP, then MISP → STIX 2.1 → Neo4j (the STIX flow is always on; a reduced graph) |
+| `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j** sync (`fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`) |
+| `src/run_pipeline.py` | Development tool: the enabled collectors, once, into MISP; nothing to Neo4j |
 | `src/enrichment_jobs.py` | The six post-sync enrichment jobs ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)) |
 | `src/cve_feed_enrichment.py` | FIRST EPSS scores on existing `CVE` nodes, written without MISP |
 | `src/build_relationships.py` | Post-sync graph links on exact keys, each with `match_type` and confidence |
@@ -520,6 +513,7 @@ _Last updated: 2026-11-02_
 ## History
 
 - 2026-11-02 — `ATTRIBUTED_TO`: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label (the row described the exact match as a producer).
+- 2026-11-02 — `run_pipeline.py` runs the collectors into MISP only: its STIX import into Neo4j (`load_stix21_to_neo4j`), its actor-technique and malware-actor writes at confidence 0.7, its `EXPLOITS` pass and its VirusTotal writes (`src/enrichment.py`, deleted) are removed, and `--baseline` exits 2 (it built a reduced graph). The Key Files rows and the VirusTotal row follow.
 - 2026-11-01 — Node list: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the list named `merge_cve`.
 - 2026-11-01 — The `run_pipeline.py` CLI is development only (it was "optional"): its STIX import writes nodes without the lists `build_relationships.py` links by, so its baseline is a reduced graph; Airflow is the baseline path on every install.
 - 2026-10-25 — The STIX flow states how each loaded object's source is named: `x_edgeguard_source`, resolved to the canonical id, or `stix_import` for an object without it; an object whose `x_edgeguard_source` the registry does not know reaches no `Source` node (the text said every imported record does). An event's own `source:*` tag names its source before its name does, and the event of a curated package is skipped (its objects were loaded as nodes attributed to `misp`, the source its name gave). An event name that gives no registered source is attributed to `misp` (until then to `"unknown"`, which reached no `Source` node).

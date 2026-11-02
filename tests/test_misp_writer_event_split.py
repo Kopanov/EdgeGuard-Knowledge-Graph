@@ -778,32 +778,6 @@ class TestNameParsing:
         ]
         assert summary["total_events"] == 4 and summary["total_attributes"] == 40012
 
-    def test_stix_flow_labels_part_objects_with_their_source(self, monkeypatch):
-        import run_pipeline
-
-        pipeline = run_pipeline.EdgeGuardPipeline.__new__(run_pipeline.EdgeGuardPipeline)
-
-        class _Exporter:
-            def fetch_edgeguard_events(self):
-                return [{"id": "7", "info": "EdgeGuard-nvd-2026-10-22-part2"}]
-
-            def fetch_event_details(self, _event_id):
-                return {"Event": {"id": "7"}}
-
-            def convert_to_stix21(self, _event):
-                return {"objects": [{"type": "vulnerability", "id": "vulnerability--1"}]}
-
-        class _Neo4j:
-            def run(self, _q):
-                return [{"ok": 1}]
-
-        bundles = []
-        pipeline.stix_exporter = _Exporter()
-        pipeline.neo4j = _Neo4j()
-        pipeline.load_stix21_to_neo4j = lambda bundle: bundles.append(bundle) or {"vulnerabilities": 1}
-        pipeline._run_stix_flow()
-        assert [o["x_edgeguard_source"] for o in bundles[0]["objects"]] == ["nvd"]
-
     def test_own_event_prefix_check_accepts_the_suffix(self):
         assert "EdgeGuard-nvd-2026-10-22-part2".startswith(misp_writer._OWN_EVENT_PREFIX)
 

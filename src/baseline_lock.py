@@ -1,44 +1,45 @@
 """
-EdgeGuard baseline lock — cross-process mutex between CLI baseline runs
-and scheduled Airflow collector DAG tasks.
+EdgeGuard baseline lock — cross-process mutex between a running baseline
+(the ``edgeguard_baseline`` DAG run) and the writing tasks of the scheduled
+Airflow DAGs.
 
 Problem this solves
 -------------------
 
-Before this module existed, there was no serialization between a CLI
-baseline run (`python run_pipeline.py --baseline`) and the regularly
-scheduled Airflow collector DAGs (edgeguard_pipeline, edgeguard_daily,
-edgeguard_low_freq, etc.). Both could target MISP and Neo4j at the same
-time, racing on MISP event writes and Neo4j MERGE operations.
+A baseline and the regularly scheduled Airflow DAGs (edgeguard_pipeline,
+edgeguard_daily, edgeguard_low_freq, the sync DAG, etc.) can target MISP
+and Neo4j at the same time, racing on MISP event writes and Neo4j MERGE
+operations.
 
-Existing locks did not cover this:
+Other locks do not cover this:
 - `checkpoints/pipeline.lock` (set in run_pipeline.py) only prevents
-  concurrent CLI invocations.
+  concurrent runs of that development tool.
 - `max_active_runs=1` on each DAG only prevents overlap *within* that DAG.
-
-Neither knew about the other.
 
 Design
 ------
 
-A sentinel file at `checkpoints/baseline_in_progress.lock` that CLI
-baseline runs write on entry and remove on exit. Every scheduled DAG
+A sentinel file at `checkpoints/baseline_in_progress.lock` that the
+baseline writes on entry (task ``baseline_acquire_lock``) and removes after a
+successful run (task ``baseline_release_lock``). Every scheduled DAG
 collector task checks the sentinel before doing work and short-circuits
 (returns a skipped status) if a baseline is holding it.
 
 The sentinel stores `{"pid": int, "started_at": ISO-8601, "host": str}`
-so stale entries (process died without cleanup) can be pruned safely by
-checking whether the PID is still alive on the same host. Cross-host
-stale detection uses a configurable max-age (default 24h).
+and its holder (below), so stale entries can be pruned safely: by the
+DAG-run state for a DAG-run holder, by whether the PID is still alive on
+the same host for a process holder, and otherwise by a configurable max
+age (``EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC``, default 48 h).
 
 Holders (2026-10, Issue #57)
 ----------------------------
 
 The sentinel records who holds it:
 
-* ``process`` (default, legacy) — the in-process CLI baseline
-  (``python src/run_pipeline.py --baseline``). Liveness is the PID on the
-  same host, then the age cap on other hosts.
+* ``process`` (a legacy sentinel kind; a sentinel without ``holder`` is one)
+  — a sentinel that names no DAG run. No code path writes one; one that is
+  found is still honoured. Liveness is the PID on the same host, then the age
+  cap on other hosts.
 * ``airflow_dag_run`` — the ``edgeguard_baseline`` DAG (task
   ``baseline_acquire_lock``). The task process that writes the sentinel
   exits seconds later while the DAG run continues for hours, so PID
@@ -61,7 +62,7 @@ The sentinel records who holds it:
 
   The collector tasks of that same DAG run pass their run identity to
   ``baseline_skip_reason(own_holder=...)`` and are not skipped by the sentinel
-  their own run holds; a sentinel of another run or of an in-process baseline
+  their own run holds; a sentinel of another run or of the legacy process kind
   still skips them. Since 2026-10-16 the baseline's ``build_relationships``
   passes its run identity as well, and the writing tasks of the scheduled
   sync DAG (``run_neo4j_sync``, ``build_relationships``,
@@ -72,11 +73,11 @@ The sentinel records who holds it:
 Why not Airflow pools / ExternalTaskSensor
 ------------------------------------------
 
-Airflow pools require API plumbing from the CLI side to take the slot,
-which is more invasive. ExternalTaskSensor only works if the baseline
-also runs inside Airflow. The sentinel file is the cheapest approach
-that handles both the CLI→Airflow and Airflow→Airflow directions, and
-it matches the existing `pipeline.lock` idiom.
+A pool would need every writing task of every DAG to take a slot, and
+ExternalTaskSensor waits on one task of one DAG. The sentinel file, chosen
+when a baseline could also run outside Airflow, is the cheapest approach
+that every task can read at its start, and it matches the existing
+`pipeline.lock` idiom.
 """
 
 from __future__ import annotations
@@ -101,9 +102,9 @@ logger = logging.getLogger(__name__)
 # headroom). Cross-host deployments (k8s / multi-host docker-compose)
 # where a different host writes the sentinel than reads it would have
 # the lock reaped 8h before the baseline finishes under the old 24h
-# default. Same-host deployments (the recommended CLI launch path per
-# preflight script) are unaffected — PID liveness check bypasses this
-# age cap. 48h gives 16h buffer above the dagrun_timeout ceiling.
+# default. A legacy process-held sentinel on the same host is unaffected —
+# the PID liveness check bypasses this age cap. 48h gives 16h buffer above
+# the dagrun_timeout ceiling.
 _BASELINE_LOCK_MAX_AGE_SEC_DEFAULT = 48 * 3600
 
 # Sentinel holder kinds (``holder`` key; absent means ``process``).
@@ -270,7 +271,7 @@ def is_baseline_running() -> Optional[Dict[str, Any]]:
     # we can ask the kernel directly whether the PID is still alive.
     # A live same-host PID is authoritative — do NOT fall through to the
     # cross-host age check, or a baseline running longer than
-    # EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC (default 24h) would have its
+    # EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC (default 48h) would have its
     # sentinel pruned out from under a still-running process and re-open
     # the exact race the mutex is designed to prevent.
     local_host = socket.gethostname()
@@ -391,13 +392,13 @@ def acquire_baseline_lock(holder: Optional[Dict[str, Any]] = None) -> bool:
     Write the sentinel file. Returns True on success, False if another
     live baseline already holds the lock (caller should not proceed).
 
-    ``holder`` is None for the in-process CLI baseline (PID-based liveness) or
+    ``holder`` is None for a sentinel of the legacy process kind (PID-based
+    liveness; no code path takes the lock so) or
     ``{"dag_id": ..., "run_id": ...}`` for the ``edgeguard_baseline`` DAG, whose
     liveness is the DAG-run state (see the module docstring).
 
     The caller is responsible for calling `release_baseline_lock()` on
-    exit — both success and failure paths. `_run_pipeline_inner` wraps
-    this in a try/finally alongside the existing pipeline.lock cleanup.
+    exit — both success and failure paths.
 
     PR #38 (Bug Hunter Tier S S2): the sentinel acquisition is now
     ATOMIC via ``os.open(path, O_CREAT|O_EXCL|O_WRONLY)``. The previous
@@ -599,7 +600,7 @@ def is_own_dag_run_sentinel(data: Optional[Dict[str, Any]], own_holder: Optional
     """True when the sentinel *data* is held by the Airflow DAG run that *own_holder* names.
 
     Both ``dag_id`` and ``run_id`` must be present and equal. A process-held sentinel
-    (``run_pipeline --baseline``) is never "own" for a DAG task.
+    is never "own" for a DAG task.
     """
     if not data or not own_holder or sentinel_holder(data) != HOLDER_AIRFLOW_DAG_RUN:
         return False
@@ -619,8 +620,8 @@ def baseline_skip_reason(own_holder: Optional[Dict[str, Any]] = None) -> Optiona
     ``edgeguard_baseline`` DAG itself: the sentinel their own run wrote in
     ``baseline_acquire_lock`` must not make them skip. Without it every collector
     of the baseline would stand down for "the baseline in progress" — its own —
-    and the run would collect nothing. A sentinel held by another DAG run or by
-    an in-process baseline still returns a reason. Scheduled DAGs pass nothing.
+    and the run would collect nothing. A sentinel held by another DAG run or of
+    the legacy process kind still returns a reason. Scheduled DAGs pass nothing.
     """
     if own_holder and is_own_dag_run_sentinel(_read_sentinel(baseline_lock_path()), own_holder):
         return None

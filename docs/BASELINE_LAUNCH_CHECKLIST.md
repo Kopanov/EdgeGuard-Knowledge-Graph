@@ -52,10 +52,8 @@ EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path=dag
 
 **Pass criteria:** exit code 0, all 13 checks green. Without
 `--launch-path` the script assumes `dag` and warns that it did (which fails
-under STRICT=1). `--launch-path=cli`, the in-process
-`python src/run_pipeline.py --baseline`, checks only for running runs in
-check [5] and warns that this path builds a reduced graph: it is a
-development path, not a launch path for this checklist. Without Docker,
+under STRICT=1). `--launch-path=cli`, the retired in-process baseline of
+`run_pipeline.py`, is refused. Without Docker,
 checks [5] and [6] cannot read Airflow or the container's memory limit
 (they use `docker compose exec` and `docker inspect`) and only warn, so
 STRICT=1 cannot pass there: check them by hand in the Airflow environment
@@ -69,8 +67,8 @@ are the only ones. Specifically:
 * `[1] required env vars present` — NEO4J_PASSWORD, MISP_API_KEY, MISP_URL
 * `[2] Neo4j reachable + APOC + indexes` — through `docker compose exec neo4j cypher-shell` when the Compose neo4j service runs, else `cypher-shell -a $NEO4J_URL` (default bolt://localhost:7687; the script reads NEO4J_URL, not NEO4J_URI, and logs in as user `neo4j`)
 * `[3] MISP API reachable + auth valid`
-* `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; `--launch-path=cli` refers only to the in-process `run_pipeline.py --baseline`, a development path that builds a reduced graph: [AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only))
-* `[5] DAG path: 5 scheduled DAGs PAUSED, none with a running run; CLI path: none with a running run` (an unpaused DAG is a warning, a failure under STRICT=1: the baseline lock makes scheduled tasks skip when they start, and pausing stops new tasks and retries. A running run of one of the 5 DAGs is a failure: pausing does not stop a task that is already running, and a `run_neo4j_sync` attempt can last up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Running runs that cannot be queried are a warning)
+* `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; the DAG is the only launch path: [AIRFLOW_DAGS.md § One baseline path](AIRFLOW_DAGS.md#one-baseline-path))
+* `[5] 5 scheduled DAGs PAUSED, none with a running run` (an unpaused DAG is a warning, a failure under STRICT=1: the baseline lock makes scheduled tasks skip when they start, and pausing stops new tasks and retries. A running run of one of the 5 DAGs is a failure: pausing does not stop a task that is already running, and a `run_neo4j_sync` attempt can last up to `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`. Running runs that cannot be queried are a warning)
 * `[6] Airflow worker RAM ≥ 4 GB`
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
 * `[7b] alertmanager.yml has no placeholder / un-rendered ${...} pager key`
@@ -95,15 +93,14 @@ are the only ones. Specifically:
 * `[13] Airflow components and metadata database` — reads
   `${AIRFLOW_WEBSERVER_URL:-http://localhost:8082}/api/v2/monitor/health`
   (`/health` with `AIRFLOW_API_VERSION=v1`, Airflow 2): a scheduler or
-  metadata database that Airflow does not report healthy is a failure on
-  the DAG launch path (no baseline task would start; `airflow standalone`
-  keeps its API server up when the scheduler dies) and a warning on the CLI
-  path; a triggerer or DAG processor reported unhealthy, and an endpoint
+  metadata database that Airflow does not report healthy is a failure (no
+  baseline task would start; `airflow standalone` keeps its API server up
+  when the scheduler dies); a triggerer or DAG processor reported unhealthy, and an endpoint
   that does not answer, are warnings; one listed without status runs no job
   of its own and is information. The metadata database
   backend is looked up in Airflow's order: the environment
   (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, then the deprecated
-  `AIRFLOW__CORE__SQL_ALCHEMY_CONN`), then, on the DAG path, `docker compose
+  `AIRFLOW__CORE__SQL_ALCHEMY_CONN`), then, where `docker` is installed, `docker compose
   exec -T airflow airflow config get-value database sql_alchemy_conn`, then
   `airflow.cfg` (`AIRFLOW_CONFIG`, else `$AIRFLOW_HOME/airflow.cfg`, else
   `~/airflow/airflow.cfg`; `[database]`, then `[core]`, `sql_alchemy_conn`).
@@ -681,6 +678,7 @@ _Last updated: 2026-11-02_
 
 - 2026-11-02 — Launch step 3: `baseline_postcheck` fails the run on the ATT&CK links of the claims, the CVE scores after an NVD delivery, each collector's delivery and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES`, and lists the collectors that delivered nothing.
 - 2026-11-02 — Acceptance checks `family_indicates_complete` (step 9 resolves the feed family labels once per run, with a fallback without separators) and `attack_tool_named_malware` (informational); the note on the checks that fail by design between a sync and the next `build_relationships` run names `family_indicates_complete` and `pulse_indicates_complete` (it named `uses_technique_complete` and `sector_links_complete` only). On the 730-day graph of 2026-11-01, before step 9 resolved the labels: 13,900 links judged, 695 missing (the labels found without separators), 2,687 indicators with a label that names no node (IClickFix 2,296), 1,202 with a placeholder label; 26 `Malware` nodes named after an ATT&CK tool with 12,807 `INDICATES` (23 with the tool's name but for case, 11,646). The statement takes about 3 s on that graph.
+- 2026-11-02 — Preflight `--launch-path=cli` is refused: the in-process baseline of `run_pipeline.py` is retired (it checked running runs only and warned of a reduced graph); checks `[5]` and `[13]` describe the DAG launch path only, and check `[13]` asks the Compose `airflow` service for the metadata database wherever `docker` is installed (it did so on the DAG path).
 - 2026-11-02 — Check `[13]` reads the metadata database backend from `airflow.cfg` as well, in Airflow's order, and reports Airflow's default, SQLite, when it is set nowhere; it read only the environment variable (and, on the DAG path, the Compose airflow service), so on a bare-metal install with the default configuration it printed "not checked" instead of the SQLite warning.
 - 2026-11-02 — Acceptance checks of the graph's shape: `in_tactic_complete`, `employs_technique_complete`, `implements_technique_complete`, `uses_technique_complete`, `sector_links_complete` and `cve_cvss_coverage` (a run that lost `IN_TACTIC`, the `mitre_explicit` technique links or every CVSS sub-node passed every check before, with the verdicts of a complete graph). `in_tactic_same_domain`, `mitre_explicit_only_from_mitre_nodes`, `attributed_to_has_match_type`, `attributed_to_fanout_plausible`, `cvss_bidirectional` and the two sector-provenance checks are informational on an empty set (they passed it); the checks report the size of the set they judge; `cvss_bidirectional` covers CVSSv2. The technique-link checks are informational when no claim reaches an existing `Technique`; the script is run when no sync and no `build_relationships` run is in progress. On the 730-day graph of 2026-11-01: in_tactic_complete 824 techniques, 1,024 phases with a tactic, 0 missing; ATT&CK claims 4,854 / 10,895 + 869 / 1,587,886, 0 missing (21,207 indicator claims name a technique the graph does not hold); sector_links_complete 61,538 zoned nodes, 78,262 node sectors, 0 missing; cve_cvss_coverage 142,236 of 146,858 (0.969), newest day 49 of 81 (0.60).
 - 2026-11-02 — `campaign_seen_dates_cover_members`: a member's last date per edge is the source's own date first, the build's definition; with the record time as the last date, the check would fail every build in which MISP recorded a member of a feed without a last-seen date after the campaign's latest source date.

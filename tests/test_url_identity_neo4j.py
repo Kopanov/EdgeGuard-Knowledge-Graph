@@ -169,9 +169,6 @@ def test_every_link_writer_matches_the_stored_node(client, raw_driver):
     assert client.create_indicator_sector_relationship(
         PASTED, "finance", source_id="alienvault_otx", indicator_type="url"
     )
-    assert client.create_indicator_malware_relationship(
-        PULSE_SPELLING, "KPOT Stealer", source_id="alienvault_otx", indicator_type="url"
-    )
     with raw_driver.session() as session:
         links = sorted(
             (r["t"], r["target"])

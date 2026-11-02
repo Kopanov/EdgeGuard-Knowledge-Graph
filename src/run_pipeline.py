@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """
-EdgeGuard - Main Pipeline Runner
-Orchestrates collection, filtering, and loading to Neo4j
+EdgeGuard - collectors into MISP (development tool)
+
+``python src/run_pipeline.py`` runs every enabled collector once, with the incremental limit of
+its source (``config.get_effective_limit``), and pushes what it collects to MISP, the single
+source of truth. It writes nothing to Neo4j. The graph is built from MISP by the MISP -> Neo4j
+sync, the link step and the enrichment jobs: the Airflow DAGs run them, and each also runs on its
+own (``src/run_misp_to_neo4j.py``, ``src/build_relationships.py``, ``src/enrichment_jobs.py``;
+docs/CLI.md). A baseline runs through the ``edgeguard_baseline`` DAG (docs/AIRFLOW_DAGS.md).
+
+The options of the retired in-process baseline and its Neo4j load (the STIX 2.1 import),
+``--baseline``, ``--fresh-baseline``, ``--baseline-days`` and ``--stix-flow``, exit with code 2
+before the pipeline lock is taken, anything is wiped or a collector runs. The refusal and ``--help``
+need no configuration: ``config``, which requires ``NEO4J_PASSWORD`` and the MISP settings when it is
+imported, and the collectors, which import it, are imported only where the pipeline is built and run.
 """
 
 import os
@@ -11,6 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
+import inspect
 import logging
 import time
 import uuid
@@ -19,26 +32,9 @@ from typing import Optional
 
 import requests
 
-from attack_revoked import load_revoked_ids
-from collector_allowlist import collect_sources_allowlist_from_env, is_collector_enabled_by_allowlist
-from collector_failure_alerts import report_collector_failure
-from collectors.abuseipdb_collector import AbuseIPDBCollector
-from collectors.cisa_collector import CISACollector
-from collectors.cisa_ics_collector import CISAICSCollector
-from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
-from collectors.global_feed_collector import MalwareBazaarCollector, ThreatFoxCollector, URLhausCollector
-from collectors.misp_collector import MISPCollector
-from collectors.misp_writer import MISPWriter
-from collectors.mitre_collector import MITRECollector
-from collectors.nvd_collector import NVDCollector
-from collectors.otx_collector import OTXCollector
-from collectors.virustotal_collector import VirusTotalCollector
-from collectors.vt_collector import VTCollector
-from config import baseline_collection_limit_from_env, get_effective_limit
-from neo4j_client import Neo4jClient
-from relationship_provenance import node_feeds, prov_set, prov_with
-from sector_evidence import stated_zones as sector_stated_zones
-from source_registry import get_source, is_curated_source, misp_tag_to_canonical_map
+# ``config`` and the collectors are imported where the pipeline is built and run (``EdgeGuardPipeline``,
+# ``_report_failure_with_metrics``), not here: importing ``config`` requires the Neo4j and MISP settings,
+# and ``main`` refuses the retired options and answers ``--help`` without them.
 
 
 # PR #35 commit 2: surface CLI-path collector failures to Prometheus + Slack
@@ -59,6 +55,8 @@ def _report_failure_with_metrics(source_name: str, exc: BaseException) -> None:
     doesn't break the CLI's own error reporting.
     """
     try:
+        from collector_failure_alerts import report_collector_failure
+
         report_collector_failure(source_name, exc)
     except Exception as report_err:
         logging.getLogger(__name__).warning(
@@ -68,162 +66,53 @@ def _report_failure_with_metrics(source_name: str, exc: BaseException) -> None:
         )
 
 
-# Import STIX conversion from run_misp_to_neo4j
-try:
-    from run_misp_to_neo4j import MISPToNeo4jSync
-
-    STIX_AVAILABLE = True
-except ImportError:
-    STIX_AVAILABLE = False
-    logging.warning("STIX conversion not available. Install stix2 library for STIX 2.1 support.")
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ``--baseline`` loads Neo4j through the STIX import of this module (``load_stix21_to_neo4j``), not through
-# the MISP -> Neo4j sync (``MISPToNeo4jSync.run``) of the ``edgeguard_baseline`` DAG. The nodes it writes
-# carry none of the lists build_relationships.py links by (tactic phases, technique and software lists,
-# attribution, malware family, OTX technique ids) and CVEs no CVSS data, so the graph is reduced
-# (docs/AIRFLOW_DAGS.md, "In-process CLI baseline"). The help text and the warning say so; the run itself
-# is unchanged.
-CLI_BASELINE_HELP_NOTE = (
-    "Development only: builds a reduced graph (no ATT&CK tactic, software or technique-implementation "
-    "links, no indicator-malware links or campaigns, no CVSS scores). A baseline whose graph is queried "
-    "or validated runs the edgeguard_baseline DAG."
+# The options of the retired in-process baseline and its Neo4j load. The parser still knows them, so a
+# call with one of them is refused with directions (exit 2, before anything runs) instead of argparse's
+# "unrecognized arguments".
+RETIRED_OPTIONS = ("--baseline", "--fresh-baseline", "--baseline-days", "--stix-flow")
+RETIRED_OPTIONS_HELP = "Retired: exits 2 before anything runs; a baseline runs through the edgeguard_baseline DAG."
+RETIRED_OPTIONS_MESSAGE = (
+    "The in-process baseline and its Neo4j load (the STIX 2.1 import) are retired: run_pipeline.py "
+    "runs the collectors into MISP only and writes nothing to Neo4j.\n"
+    "A baseline runs through the edgeguard_baseline DAG. On every install, with Docker Compose or without it:\n"
+    "  edgeguard fresh-baseline --days N   wipe, then collect (backup gate, typed confirmation)\n"
+    "  edgeguard baseline --days N         additive\n"
+    "  (both refuse while the Airflow scheduler or metadata database is not healthy or an edgeguard_baseline run is\n"
+    "  queued or running; without a running Compose airflow service they trigger through the Airflow REST API;\n"
+    '  docs/CLI.md, "Baseline triggers")\n'
+    "The raw trigger, without those checks, in the Airflow environment:\n"
+    "  airflow dags trigger edgeguard_baseline --conf '{\"baseline_days\": N}'   additive\n"
+    '  airflow dags trigger edgeguard_baseline --conf \'{"fresh_baseline": true, "baseline_days": N}\'   wipe, then '
+    "collect\n"
+    "    (the backup gate runs in the baseline_clean task: EDGEGUARD_LAST_BACKUP_AT goes into the environment of the "
+    "Airflow processes; docs/BACKUP.md)\n"
+    "For development, the modules the DAGs run build the graph from MISP, each on its own:\n"
+    "  python src/run_misp_to_neo4j.py --full\n"
+    "  python src/build_relationships.py\n"
+    "  python src/enrichment_jobs.py\n"
+    '(docs/CLI.md, "Pipeline modules run on their own"; docs/AIRFLOW_DAGS.md)'
 )
-CLI_BASELINE_WARNING_LINES = (
-    "[REDUCED-GRAPH] This in-process baseline (run_pipeline.py --baseline) is a development path and "
-    "builds a REDUCED graph.",
-    "[REDUCED-GRAPH] It loads Neo4j through the STIX import, whose nodes lack the ATT&CK tactic phases, "
-    "technique and software lists and attribution, the indicators' malware family and the CVSS data:",
-    "[REDUCED-GRAPH] no IN_TACTIC, IMPLEMENTS_TECHNIQUE, USES_MALWARE, USES_TOOL, USES_TECHNIQUE or "
-    "INDICATES links, few EMPLOYS_TECHNIQUE and ATTRIBUTED_TO links, no campaigns, no CVSS scores.",
-    "[REDUCED-GRAPH] Do not query or validate this graph. Full baselines run the edgeguard_baseline DAG "
-    "(airflow dags trigger edgeguard_baseline; docs/AIRFLOW_DAGS.md).",
-)
-
-
-def _log_cli_baseline_warning() -> None:
-    """Log, before anything is wiped or collected, that this baseline builds a reduced graph."""
-    logger.warning("=" * 60)
-    for line in CLI_BASELINE_WARNING_LINES:
-        logger.warning(line)
-    logger.warning("=" * 60)
-
-
-# Source ID mapping (tag -> source_id)
-SOURCE_ID_MAP = {
-    "misp": "misp",
-    "alienvault_otx": "alienvault_otx",
-    "otx": "alienvault_otx",
-    "nvd": "nvd",
-    "cisa_kev": "cisa",
-    "cisa": "cisa",
-    "cisa_ics": "cisa_ics",
-    "mitre_attck": "mitre_attck",
-    "mitre": "mitre_attck",
-    "virustotal": "virustotal",
-    "virustotal_enrich": "virustotal",
-    "abuseipdb": "abuseipdb",
-    "feodo": "feodo",
-    "feodo_tracker": "feodo",  # tag used by FeodoCollector
-    "sslbl": "sslbl",
-    "ssl_blacklist": "sslbl",  # tag used by SSLBlacklistCollector
-    "urlhaus": "urlhaus",
-    "threatfox": "threatfox",
-    "malwarebazaar": "malwarebazaar",
-}
-
-
-def get_source_id(item, raise_on_unknown: bool = False):
-    """Get source_id from item's tag or sources list
-
-    Args:
-        item: Dict with 'tag' or 'sources' keys
-        raise_on_unknown: If True, raise ValueError for unknown sources
-
-    Returns:
-        Source ID string, or None if source cannot be determined
-
-    Raises:
-        ValueError: If source is unknown and raise_on_unknown is True
-    """
-    tag = item.get("tag", "")
-    sources = item.get("source", item.get("sources", []))
-
-    # Try tag first
-    if tag in SOURCE_ID_MAP:
-        return SOURCE_ID_MAP[tag]
-
-    # Try first source
-    if sources and sources[0] in SOURCE_ID_MAP:
-        return SOURCE_ID_MAP[sources[0]]
-
-    # Log warning for unknown source - record as 'unknown' but continue
-    unknown_source = tag or (sources[0] if sources else "unknown")
-    logger.warning(
-        f"[WARN] Unknown source '{unknown_source}' - recording as 'unknown'. Add mapping to SOURCE_ID_MAP if needed."
-    )
-
-    # Default to 'unknown' for automated pipelines (data not lost, but marked for review)
-    return "unknown"
-
-
-# Source id for STIX objects the in-process loader imports. ``x_edgeguard_source`` is
-# stamped per object by ``sync_misp_to_neo4j_via_stix`` (the MISP event's source id);
-# a bundle that arrives without it (external STIX) is attributed to ``stix_import`` —
-# never to a real feed and never to the string ``"unknown"``. (Bugbot on PR #134.)
-STIX_IMPORT_SOURCE_ID = "stix_import"
-# Evidence label for relationships that come from an explicit STIX relationship object
-# in an imported bundle (legacy in-process path only; see
-# docs/RESILMESH_INTEROPERABILITY.md § 3.2.2).
-STIX_RELATIONSHIP_MATCH_TYPE = "stix_relationship"
-
-
-def _stix_object_source(obj: dict) -> str:
-    return str(obj.get("x_edgeguard_source") or STIX_IMPORT_SOURCE_ID)
-
-
-def _misp_event_source(event_info: str) -> str:
-    """The source of an EdgeGuard MISP event, from its name (``EdgeGuard-<source>-<date>``, with
-    ``-part<N>`` on a continued event), as its canonical id (2026-10-25). A name that gives no
-    registered source falls back to ``misp``, the registered source of MISP's own data, with a
-    warning: never ``"unknown"``, which no ``Source`` node carries, so every object of the STIX flow
-    reaches a ``Source`` node."""
-    parts = str(event_info or "").split("-", 2)
-    src = get_source(parts[1]) if len(parts) >= 2 else None
-    if src is None:
-        logger.warning("Could not take a registered source from event info %r; attributing it to 'misp'", event_info)
-        return "misp"
-    return src.canonical_id
-
-
-def _misp_event_tag_source(misp_event: object) -> Optional[str]:
-    """The source a MISP event names in its own ``source:*`` tag, as a canonical id, through the
-    registry's MISP-tag map (``misp_tag_to_canonical_map``, the map the MISP -> Neo4j sync reads as
-    ``SOURCE_MAPPING``). A curated package's event carries one (``scripts/import_curated_package.py``:
-    ``EdgeGuard``, the package source's ``source:*`` tag, ``tlp:<level>``); a collector's event carries
-    only ``EdgeGuard``, so ``None`` sends it to the name rule (``_misp_event_source``). A ``source:*``
-    name the map does not hold gives ``misp``, with a warning, as in the sync."""
-    event = misp_event.get("Event", misp_event) if isinstance(misp_event, dict) else None
-    if not isinstance(event, dict):
-        return None
-    tags = event.get("Tag") or []
-    for tag in tags if isinstance(tags, list) else [tags]:
-        name = str((tag.get("name") if isinstance(tag, dict) else tag) or "")
-        if not name.startswith("source:"):
-            continue
-        canonical = misp_tag_to_canonical_map().get(name[len("source:") :])
-        if canonical is None:
-            logger.warning("MISP event tag %r names no registered source; attributing the event to 'misp'", name)
-            return "misp"
-        return canonical
-    return None
 
 
 class EdgeGuardPipeline:
     def __init__(self):
-        self.neo4j = Neo4jClient()
+        # Imported here, after ``main`` has refused the retired options: these modules import ``config``.
+        from collectors.abuseipdb_collector import AbuseIPDBCollector
+        from collectors.cisa_collector import CISACollector
+        from collectors.cisa_ics_collector import CISAICSCollector
+        from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
+        from collectors.global_feed_collector import MalwareBazaarCollector, ThreatFoxCollector, URLhausCollector
+        from collectors.misp_collector import MISPCollector
+        from collectors.misp_writer import MISPWriter
+        from collectors.mitre_collector import MITRECollector
+        from collectors.nvd_collector import NVDCollector
+        from collectors.otx_collector import OTXCollector
+        from collectors.virustotal_collector import VirusTotalCollector
+        from collectors.vt_collector import VTCollector
+
         # Create shared MISPWriter instance for collectors that push to MISP
         self.misp_writer = MISPWriter()
 
@@ -250,684 +139,13 @@ class EdgeGuardPipeline:
             # 2026-10: MalwareBazaar (flag-guarded; collect() skips unless EDGEGUARD_ENABLE_MALWAREBAZAAR)
             "malwarebazaar": MalwareBazaarCollector(misp_writer=self.misp_writer),
         }
-        self.mitre_collector = self.collectors["mitre"]  # Store for relationships
-        # The MISP → STIX converter of the ``--stix-flow`` path (MISP → STIX 2.1 → Neo4j).
-        self.stix_exporter = None
-        if STIX_AVAILABLE:
-            try:
-                self.stix_exporter = MISPToNeo4jSync(neo4j_client=self.neo4j)
-                logger.info("[OK] STIX converter initialized successfully")
-            except Exception as e:
-                logger.warning(f"[WARN] Could not initialize STIX converter: {type(e).__name__}: {e}")
 
-    def _extract_zones_from_stix_labels(self, obj: dict) -> list:
-        """Extract zones from a STIX object.
+    def run(self) -> bool:
+        """Run every enabled collector once and push to MISP, under the pipeline lock.
 
-        SDOs store zones in ``labels`` (e.g. ``zone:finance``).
-        SCOs store zones in the custom ``x_edgeguard_zones`` property to comply
-        with the STIX 2.1 spec (SCOs have no ``labels`` property).
-
-        Args:
-            obj: STIX object dict
-
-        Returns:
-            List of zones (e.g., ['finance', 'global'])
+        Returns False when the lock is held by a live process, or when a collector reported failure
+        or raised (``_run_pipeline_inner``).
         """
-        # Check both locations; prefer x_edgeguard_zones (SCOs) then labels (SDOs)
-        zone_sources = list(obj.get("x_edgeguard_zones") or []) + list(obj.get("labels") or [])
-        zones = []
-        for label in zone_sources:
-            if label and label.startswith("zone:"):
-                zone = label.replace("zone:", "").strip()
-                if zone:
-                    zones.append(zone)
-        return zones if zones else ["global"]
-
-    def _stix_zone_fields(self, obj: dict) -> dict:
-        """``zone`` of a STIX object and, as the attribute flow sets them (``MISPToNeo4jSync._with_provenance``),
-        the zones its source states itself (``stated_zones``, 2026-10-16): a CVE of a CISA ICS event gets the
-        same ``advisory_sector`` link from ``build_relationships`` step 7b whichever flow loaded it. The STIX
-        objects carry no ``NVD_META``, so no advisory ids: the link cites no advisory. Nor do they carry an
-        OTX pulse's ``industries`` (2026-10-18): an OTX object states no sector, and its links stay
-        ``zone_classification``."""
-        zones = self._extract_zones_from_stix_labels(obj)
-        fields: dict = {"zone": zones}
-        stated = sector_stated_zones(_stix_object_source(obj), zones)
-        if stated:
-            fields["stated_zones"] = stated
-        return fields
-
-    def _create_indicates_relationships(self) -> int:
-        """
-        CLI relationship pass: CVE-tag EXPLOITS only (2026-10: event co-occurrence INDICATES removed).
-
-        The correct threat-intel logic: when an Indicator (IP, domain, hash) and
-        a Malware node share the same MISP event ID, they were observed together
-        in the same threat report — the indicator is evidence of the malware.
-
-        This avoids the false-positive trap of text matching (an IP value like
-        '1.2.3.4' will never meaningfully "contain" a malware name like 'TrickBot').
-
-        Returns:
-            Number of INDICATES relationships created
-        """
-        try:
-            # 2026-10 (fresh-baseline PR, conformance finding F1): the whole-event
-            # co-occurrence INDICATES query that lived here was removed. EdgeGuard MISP
-            # events are per-source, per-day buckets, so a shared event id never meant
-            # a source asserted the link. Report-scoped INDICATES (same OTX pulse,
-            # match_type "otx_pulse") is written by the MISP→Neo4j sync; the family
-            # match lives in build_relationships Q9. This CLI path keeps only the
-            # CVE-tag EXPLOITS pass below.
-            indicates_count = 0
-
-            # Second pass: Indicators that explicitly mention a CVE are linked to
-            # that CVE/Vulnerability via EXPLOITS (more specific than INDICATES).
-            # EXPLOITS: batched via apoc.periodic.iterate
-            exploits_query = """
-            CALL apoc.periodic.iterate(
-                'MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> "" RETURN i',
-                'WITH $i AS i
-                 __PROV_WITH__MATCH (c:CVE {cve_id: i.cve_id})
-                 MERGE (i)-[r:EXPLOITS]->(c)
-                 ON CREATE SET r.created_at = datetime(), r.match_type = "cve_tag", r.confidence_score = 0.9, r.src_uuid = i.uuid, r.trg_uuid = c.uuid
-                 SET r.updated_at = datetime(),
-                     r.src_uuid = coalesce(r.src_uuid, i.uuid),
-                     r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
-                     __PROV_SET__',
-                {batchSize: 5000, parallel: false}
-            )
-            YIELD total
-            RETURN total AS created
-            """.replace(
-                # 2026-10 (relationship provenance): same contract as build_relationships Q3b —
-                # the indicator's own feeds, record ids and MISP events; ``cve_tag`` evidence.
-                "__PROV_WITH__",
-                prov_with("i", node_feeds("i")),
-            ).replace("__PROV_SET__", prov_set())
-            results = self.neo4j.run(exploits_query)
-            record = results[0] if results else None
-            exploits_count = record.get("created", 0) if record else 0
-            logger.info(f"   ℹ️ EXPLOITS (CVE tag match): {exploits_count} relationships")
-
-            return indicates_count + exploits_count
-
-        except Exception as e:
-            logger.warning(f"   [WARN] INDICATES/EXPLOITS creation failed: {e}")
-            return 0
-
-    def load_stix21_to_neo4j(self, stix_bundle: dict) -> dict:
-        """
-        Load STIX 2.1 bundle data into Neo4j.
-
-        This method parses STIX 2.1 objects and creates corresponding
-        nodes in Neo4j, enabling the flow: MISP → STIX → Neo4j
-
-        Args:
-            stix_bundle: STIX 2.1 bundle dictionary
-
-        Returns:
-            Dict with counts of loaded objects by type
-        """
-        stats = {
-            "indicators": 0,
-            "vulnerabilities": 0,
-            "malware": 0,
-            "actors": 0,
-            "techniques": 0,
-            "observables": 0,
-            "relationships_indicates": 0,
-            "relationships_attributed_to": 0,
-            "errors": 0,
-        }
-
-        objects = stix_bundle.get("objects", [])
-        logger.info(f"   Loading {len(objects)} STIX objects into Neo4j...")
-        # 2026-10: a technique id ATT&CK revoked is no node (the MITRE collector skips it); a
-        # relationship that names it lands on its successor (``attack_revoked``).
-        revoked = load_revoked_ids()
-
-        # First pass: build ID mapping for relationship resolution
-        id_map = {}  # STIX ID -> {type, name, mitre_id}
-
-        for obj in objects:
-            obj_type = obj.get("type", "")
-            stix_id = obj.get("id", "")
-
-            if obj_type == "indicator":
-                # Extract indicator value from pattern
-                pattern = obj.get("pattern", "")
-                indicator_data = self._parse_stix_pattern(pattern)
-                if indicator_data:
-                    id_map[stix_id] = {
-                        "type": "indicator",
-                        "value": indicator_data.get("value", ""),
-                        "indicator_type": indicator_data.get("type", "unknown"),
-                    }
-            elif obj_type == "malware":
-                id_map[stix_id] = {"type": "malware", "name": obj.get("name", "")}
-            elif obj_type == "tool":
-                id_map[stix_id] = {"type": "tool", "name": obj.get("name", "")}
-            elif obj_type == "threat-actor":
-                id_map[stix_id] = {"type": "actor", "name": obj.get("name", "")}
-            elif obj_type == "attack-pattern":
-                external_refs = obj.get("external_references", [])
-                mitre_id = ""
-                for ext in external_refs:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
-                id_map[stix_id] = {
-                    "type": "technique",
-                    "name": obj.get("name", ""),
-                    "mitre_id": revoked.translate_technique(mitre_id),
-                }
-            elif obj_type == "x-mitre-tactic":
-                external_refs = obj.get("external_references", [])
-                mitre_id = ""
-                shortname = obj.get("x_mitre_shortname", "")
-                for ext in external_refs:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
-                id_map[stix_id] = {
-                    "type": "tactic",
-                    "name": obj.get("name", ""),
-                    "mitre_id": mitre_id,
-                    "shortname": shortname,
-                }
-            elif obj_type == "vulnerability":
-                id_map[stix_id] = {"type": "vulnerability", "cve_id": obj.get("name", "")}
-            elif obj_type in ["ipv4-addr", "ipv6-addr", "domain-name", "url"]:
-                id_map[stix_id] = {"type": "observable", "value": obj.get("value", ""), "observable_type": obj_type}
-
-        logger.info(f"   Built ID map with {len(id_map)} entries")
-
-        # Second pass: create nodes and relationships
-        for obj in objects:
-            try:
-                obj_type = obj.get("type", "")
-
-                # Handle Indicator objects
-                if obj_type == "indicator":
-                    pattern = obj.get("pattern", "")
-                    # Parse pattern to extract indicator value
-                    indicator_data = self._parse_stix_pattern(pattern)
-                    if indicator_data:
-                        ok = self.neo4j.merge_indicator(
-                            {
-                                "indicator_type": indicator_data.get("type", "unknown"),
-                                "value": indicator_data.get("value", ""),
-                                **self._stix_zone_fields(obj),
-                                "tag": "stix_import",
-                                "source": [_stix_object_source(obj)],  # Source as array (like zone)
-                                # PR-N14 Fix #4 (2026-04-21 pre-baseline audit): pass
-                                # None through when STIX has no ``created`` / ``modified``
-                                # — do NOT substitute wall-clock NOW. The prior
-                                # ``datetime.now(...).isoformat()`` default violated PR-N5
-                                # C7 honest-NULL: re-importing an old CVE-2013 bundle today
-                                # stamped ``first_seen=2026-04-21``, poisoning every
-                                # age calculation.
-                                "first_seen": obj.get("created") or None,
-                                "last_updated": obj.get("modified") or None,
-                                "confidence_score": 0.7,
-                                "misp_event_id": None,
-                            },
-                            source_id=_stix_object_source(obj),
-                        )
-                        if ok:
-                            stats["indicators"] += 1
-
-                # Handle Vulnerability objects (CVE)
-                elif obj_type == "vulnerability":
-                    vuln_name = obj.get("name", "")
-                    # Check if it looks like a CVE
-                    import re
-
-                    if re.match(r"^CVE-\d{4}-\d{4,}$", vuln_name, re.IGNORECASE):
-                        ok = self.neo4j.merge_cve(
-                            {
-                                "cve_id": vuln_name.upper(),
-                                "description": obj.get("description", ""),
-                                "cvss_score": None,  # None = unscored; 0.0 is a valid CVSS score
-                                "severity": "UNKNOWN",
-                                # No attack vector: merge_cve derives it from the CVSS sub-nodes (2026-10).
-                                **self._stix_zone_fields(obj),
-                                "tag": "stix_import",
-                                "source": [_stix_object_source(obj)],  # Source as array (like zone)
-                                # PR-N14 Fix #4: honest-NULL on STIX re-import — see
-                                # Indicator block above for rationale.
-                                "first_seen": obj.get("created") or None,
-                                "last_updated": obj.get("modified") or None,
-                                "confidence_score": 0.7,
-                                "misp_event_id": None,
-                            },
-                            source_id=_stix_object_source(obj),
-                            # 2026-10: this reduced record is not the source's (no NVD_META, no CVSS, no
-                            # KEV fields), so it never replaces the record on the SOURCED_FROM edge of
-                            # the MISP event's source; it is written only when it creates the edge.
-                            refresh_raw_data=False,
-                        )
-                        if ok:
-                            stats["vulnerabilities"] += 1
-
-                # Handle Threat Actor objects
-                elif obj_type == "threat-actor":
-                    ok = self.neo4j.merge_actor(
-                        {
-                            "name": obj.get("name", ""),
-                            "aliases": obj.get("aliases", []),
-                            "description": obj.get("description", ""),
-                            **self._stix_zone_fields(obj),
-                            "tag": "stix_import",
-                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
-                            "confidence_score": 0.7,
-                        },
-                        source_id=_stix_object_source(obj),
-                    )
-                    if ok:
-                        stats["actors"] += 1
-
-                # Handle Malware objects
-                elif obj_type == "malware":
-                    ok = self.neo4j.merge_malware(
-                        {
-                            "name": obj.get("name", ""),
-                            "malware_types": obj.get("malware_types", []),
-                            "family": obj.get("name", ""),
-                            "description": obj.get("description", ""),
-                            **self._stix_zone_fields(obj),
-                            "tag": "stix_import",
-                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
-                            "confidence_score": 0.7,
-                        },
-                        source_id=_stix_object_source(obj),
-                    )
-                    if ok:
-                        stats["malware"] += 1
-
-                # Handle Tool objects (Cobalt Strike, Mimikatz, etc.)
-                elif obj_type == "tool":
-                    mitre_id = ""
-                    for ref in obj.get("external_references", []):
-                        if ref.get("source_name") == "mitre-attack":
-                            mitre_id = ref.get("external_id", "")
-                            break
-                    self.neo4j.merge_tool(
-                        {
-                            "mitre_id": mitre_id,
-                            "name": obj.get("name", ""),
-                            "description": obj.get("description", ""),
-                            "tool_types": obj.get("labels", []),
-                            **self._stix_zone_fields(obj),
-                            "tag": "stix_import",
-                            "source": [_stix_object_source(obj)],
-                            "confidence_score": 0.7,
-                        },
-                        source_id=_stix_object_source(obj),
-                    )
-                    stats.setdefault("tools", 0)
-                    stats["tools"] += 1
-
-                # Handle Attack Pattern (Technique) objects
-                elif obj_type == "attack-pattern":
-                    # Try to extract MITRE ID from external references
-                    mitre_id = ""
-                    external_refs = obj.get("external_references", [])
-                    for ref in external_refs:
-                        if ref.get("source_name") == "mitre-attack":
-                            mitre_id = ref.get("external_id", "")
-                            break
-                    if revoked.technique_successor(mitre_id) is not None:
-                        stats["revoked_techniques_skipped"] = stats.get("revoked_techniques_skipped", 0) + 1
-                        continue
-
-                    self.neo4j.merge_technique(
-                        {
-                            "mitre_id": mitre_id,
-                            "name": obj.get("name", ""),
-                            "description": obj.get("description", ""),
-                            "platforms": [],
-                            **self._stix_zone_fields(obj),
-                            "tag": "stix_import",
-                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
-                            "confidence_score": 0.8,
-                        },
-                        source_id=_stix_object_source(obj),
-                    )
-                    stats["techniques"] += 1
-
-                # Handle Tactic objects (x-mitre-tactic)
-                elif obj_type == "x-mitre-tactic":
-                    mitre_id = ""
-                    shortname = obj.get("x_mitre_shortname", "")
-                    for ref in obj.get("external_references", []):
-                        if ref.get("source_name") == "mitre-attack":
-                            mitre_id = ref.get("external_id", "")
-                            break
-                    self.neo4j.merge_tactic(
-                        {
-                            "mitre_id": mitre_id,
-                            "name": obj.get("name", ""),
-                            "shortname": shortname,
-                            "description": obj.get("description", ""),
-                            "zone": ["global"],
-                            "tag": "stix_import",
-                            "source": [_stix_object_source(obj)],
-                            "confidence_score": 1.0,
-                        },
-                        source_id=_stix_object_source(obj),
-                    )
-                    stats.setdefault("tactics", 0)
-                    stats["tactics"] += 1
-
-                # Handle observable objects (IPv4, domain, etc.)
-                elif obj_type in ["ipv4-addr", "ipv6-addr", "domain-name", "url"]:
-                    # Convert observable to indicator
-                    indicator_type = self._stix_observable_type_to_indicator(obj_type)
-                    value = obj.get("value", "")
-                    if value:
-                        self.neo4j.merge_indicator(
-                            {
-                                "indicator_type": indicator_type,
-                                "value": value,
-                                **self._stix_zone_fields(obj),
-                                "tag": "stix_import",
-                                "source": [_stix_object_source(obj)],
-                                # PR-N14 Fix #4: STIX observables (IPv4 / domain /
-                                # URL / …) have no native ``created`` / ``modified``
-                                # properties. Pass None instead of wall-clock NOW —
-                                # the downstream merge's ON CREATE SET +
-                                # ``last_updated = datetime()`` clauses will stamp
-                                # server-side timestamps correctly, without forging
-                                # a ``first_seen`` the source never claimed.
-                                "first_seen": None,
-                                "last_updated": None,
-                                "confidence_score": 0.7,
-                                "misp_event_id": None,
-                            },
-                            source_id=_stix_object_source(obj),
-                        )
-                        stats["observables"] += 1
-
-                # Handle STIX Relationship objects
-                elif obj_type == "relationship":
-                    rel_type = obj.get("relationship_type", "")
-                    src_ref = obj.get("source_ref", "")
-                    tgt_ref = obj.get("target_ref", "")
-
-                    src = id_map.get(src_ref, {})
-                    tgt = id_map.get(tgt_ref, {})
-
-                    if not src or not tgt:
-                        continue
-
-                    # Handle INDICATES (Indicator -> Malware)
-                    if rel_type == "indicates":
-                        if src["type"] == "indicator" and tgt["type"] == "malware":
-                            self.neo4j.create_indicator_malware_relationship(
-                                src["value"], tgt["name"], source_id=_stix_object_source(obj)
-                            )
-                            stats["relationships_indicates"] += 1
-
-                    # Handle ATTRIBUTED_TO (Malware -> ThreatActor)
-                    elif rel_type == "attributed-to":
-                        if src["type"] == "malware" and tgt["type"] == "actor":
-                            self.neo4j.create_malware_actor_relationship(
-                                src["name"],
-                                tgt["name"],
-                                source_id=_stix_object_source(obj),
-                                match_type=STIX_RELATIONSHIP_MATCH_TYPE,
-                            )
-                            stats["relationships_attributed_to"] += 1
-
-                    # Handle STIX "uses" predicate → EMPLOYS_TECHNIQUE (Actor)
-                    # or IMPLEMENTS_TECHNIQUE (Malware/Tool). The STIX SRO
-                    # type stays "uses" on input; we route to the right
-                    # specialized edge based on the source type at write
-                    # time. See 2026-04 refactor note in neo4j_client.py.
-                    elif rel_type == "uses":
-                        if src["type"] in ["actor", "malware"] and tgt["type"] == "technique":
-                            if src["type"] == "actor":
-                                self.neo4j.create_actor_technique_relationship(src["name"], tgt["mitre_id"])
-                            # Malware→Technique (IMPLEMENTS_TECHNIQUE) is
-                            # created post-sync by build_relationships.py
-                            # from the uses_techniques property, not here.
-
-                # Handle STIX Report objects (containers)
-                elif obj_type == "report":
-                    # Reports contain references to other objects - we could
-                    # create relationships here if needed
-                    pass
-
-            except Exception as e:
-                logger.warning(f"[WARN] Error loading STIX object {obj.get('id', 'unknown')}: {type(e).__name__}: {e}")
-                stats["errors"] += 1
-
-        return stats
-
-    def _parse_stix_pattern(self, pattern: str) -> Optional[dict]:
-        """
-        Parse a STIX pattern to extract indicator type and value.
-
-        Args:
-            pattern: STIX pattern string (e.g., "[ipv4-addr:value = '1.2.3.4']")
-
-        Returns:
-            Dict with 'type' and 'value' or None if not parseable
-        """
-        import re
-
-        # Pattern for ipv4-addr:value
-        match = re.search(r"ipv4-addr:value\s*=\s*'([^']+)'", pattern)
-        if match:
-            return {"type": "ipv4", "value": match.group(1)}
-
-        # Pattern for ipv6-addr:value
-        match = re.search(r"ipv6-addr:value\s*=\s*'([^']+)'", pattern)
-        if match:
-            return {"type": "ipv6", "value": match.group(1)}
-
-        # Pattern for domain-name:value
-        match = re.search(r"domain-name:value\s*=\s*'([^']+)'", pattern)
-        if match:
-            return {"type": "domain", "value": match.group(1)}
-
-        # Pattern for url:value
-        match = re.search(r"url:value\s*=\s*'([^']+)'", pattern)
-        if match:
-            return {"type": "url", "value": match.group(1)}
-
-        # Pattern for file:hashes
-        match = re.search(r"file:hashes\.'([^']+)'\s*=\s*'([^']+)'", pattern)
-        if match:
-            return {"type": "hash", "value": match.group(2)}
-
-        return None
-
-    def _stix_observable_type_to_indicator(self, observable_type: str) -> str:
-        """Map STIX observable type to EdgeGuard indicator type."""
-        mapping = {
-            "ipv4-addr": "ipv4",
-            "ipv6-addr": "ipv6",
-            "domain-name": "domain",
-            "url": "url",
-            "file": "hash",
-            "email-addr": "email",
-        }
-        return mapping.get(observable_type, "unknown")
-
-    def _run_stix_flow(self) -> dict:
-        """
-        Run the STIX 2.1 flow: Fetch from MISP → Convert to STIX → Load to Neo4j.
-
-        Returns:
-            Dict with counts of loaded objects by type
-        """
-        loaded = {"vulnerabilities": 0, "indicators": 0, "malware": 0, "actors": 0, "techniques": 0, "tactics": 0}
-
-        try:
-            # Step 3a: Fetch all EdgeGuard events from MISP
-            logger.info("   🔄 Step 3a: Fetching events from MISP...")
-            events = self.stix_exporter.fetch_edgeguard_events()
-
-            if not events:
-                logger.info("   ℹ️  No events found to convert")
-                return loaded
-
-            logger.info(f"   [OK] Fetched {len(events)} events from MISP")
-
-            # Step 3b: Convert all events to STIX 2.1
-            logger.info("   🔄 Step 3b: Converting events to STIX 2.1 format...")
-            all_stix_objects = []
-            conversion_errors = 0
-            skipped_curated = 0
-
-            for event in events:
-                event_id = event.get("id")
-                event_info = event.get("info", "")
-                if event_id is None:
-                    logger.warning("   [WARN] Skipping MISP event row with no id during STIX pipeline")
-                    conversion_errors += 1
-                    continue
-                logger.debug(f"   Converting event {event_id} to STIX 2.1")
-
-                try:
-                    # Fetch full event details
-                    full_event = self.stix_exporter.fetch_event_details(str(event_id))
-                    if not full_event:
-                        logger.warning(f"   [WARN]  Skipping event {event_id} - failed to fetch details")
-                        conversion_errors += 1
-                        continue
-
-                    # The event's source, as a canonical id: from its own source:* tag, else (a
-                    # collector's event, tagged EdgeGuard only) from its name (EdgeGuard-{source}-{date}).
-                    source_from_event = _misp_event_tag_source(full_event) or _misp_event_source(event_info)
-                    if is_curated_source(source_from_event):
-                        # A curated package carries claims about existing nodes and never creates
-                        # nodes; the MISP -> Neo4j sync (run_misp_to_neo4j.py) links its claims.
-                        logger.info(
-                            "   Skipping event %s (%r): a curated package of %s creates no nodes; "
-                            "the MISP -> Neo4j sync links its claims",
-                            event_id,
-                            event_info,
-                            source_from_event,
-                        )
-                        skipped_curated += 1
-                        continue
-
-                    # Convert to STIX 2.1 using PyMISP to_stix2()
-                    stix_bundle = self.stix_exporter.convert_to_stix21(full_event)
-
-                    if "objects" in stix_bundle:
-                        # Add x_edgeguard_source to each object
-                        for obj in stix_bundle["objects"]:
-                            obj["x_edgeguard_source"] = source_from_event
-                        all_stix_objects.extend(stix_bundle["objects"])
-
-                except Exception as e:
-                    logger.warning(f"   [WARN]  Error converting event {event_id}: {e}")
-                    conversion_errors += 1
-
-            logger.info(
-                f"   [OK] Converted {len(events) - conversion_errors - skipped_curated}/{len(events)} events"
-                + (f" ({skipped_curated} curated package event(s) skipped)" if skipped_curated else "")
-            )
-            logger.info(f"   [STATS] Total STIX objects created: {len(all_stix_objects)}")
-
-            # Step 3c: Load STIX objects into Neo4j
-            # Re-verify Neo4j connectivity before heavy write phase (may have died during 5h+ Step 2)
-            logger.info("   🔍 Step 3c: Verifying Neo4j connectivity before write phase...")
-            _neo4j_ok = False
-            for _retry in range(3):
-                # neo4j.run() re-raises transient errors after retry exhaustion,
-                # so we catch exceptions here to drive our own reconnect loop.
-                try:
-                    _test = self.neo4j.run("RETURN 1 AS ok")
-                except Exception:
-                    _test = []
-                if _test:
-                    _neo4j_ok = True
-                    break
-                # Failed — sleep and try to reconnect
-                logger.warning(f"   Neo4j not reachable (attempt {_retry + 1}/3)")
-                if _retry < 2:
-                    time.sleep(10)
-                    try:
-                        if self.neo4j.connect():
-                            logger.info("   Neo4j reconnected")
-                        else:
-                            logger.warning(f"   Neo4j reconnect returned False (attempt {_retry + 1}/3)")
-                    except Exception as e:
-                        logger.warning(f"   Neo4j reconnect failed: {e}")
-
-            if not _neo4j_ok:
-                logger.error("   [FAIL] Neo4j is unreachable after 3 attempts — cannot load data!")
-                logger.error("   Check: docker compose ps neo4j / docker compose logs neo4j")
-                return loaded  # Return with 0 counts — don't report success
-
-            logger.info("   ✅ Neo4j connectivity verified — starting write phase...")
-            master_bundle = {
-                "type": "bundle",
-                "id": f"bundle--{uuid.uuid4()}",
-                "spec_version": "2.1",
-                "objects": all_stix_objects,
-            }
-
-            stix_stats = self.load_stix21_to_neo4j(master_bundle)
-
-            # Aggregate counts
-            loaded["indicators"] = stix_stats.get("indicators", 0) + stix_stats.get("observables", 0)
-            loaded["vulnerabilities"] = stix_stats.get("vulnerabilities", 0)
-            loaded["malware"] = stix_stats.get("malware", 0)
-            loaded["actors"] = stix_stats.get("actors", 0)
-            loaded["techniques"] = stix_stats.get("techniques", 0)
-            loaded["relationships_indicates"] = stix_stats.get("relationships_indicates", 0)
-            loaded["relationships_attributed_to"] = stix_stats.get("relationships_attributed_to", 0)
-
-            _stix_total = sum(
-                v for k, v in loaded.items() if k not in ("relationships_indicates", "relationships_attributed_to")
-            )
-            if _stix_total > 0:
-                logger.info(f"   [OK] STIX flow complete: {_stix_total} objects loaded")
-            else:
-                logger.error("   [FAIL] STIX flow complete but 0 objects loaded — Neo4j writes failed!")
-            logger.info(f"      - INDICATES relationships: {loaded['relationships_indicates']}")
-            logger.info(f"      - ATTRIBUTED_TO relationships: {loaded['relationships_attributed_to']}")
-
-        except Exception as e:
-            logger.error(f"   [ERR] STIX flow error: {e}")
-
-        return loaded
-
-    def run(
-        self,
-        use_stix_flow: bool = False,
-        baseline: bool = False,
-        baseline_days: int | None = None,
-        fresh_baseline: bool = False,
-    ):
-        """
-        Run the complete pipeline.
-
-        Args:
-            use_stix_flow: If True, use STIX 2.1 as intermediate format (MISP → STIX → Neo4j)
-            baseline: If True, collect historical data (all available, not just latest)
-            baseline_days: How many days back to collect in baseline mode. ``None``
-                defers to ``baseline_config.resolve_baseline_days(explicit=None)`` —
-                respects ``EDGEGUARD_BASELINE_DAYS`` env, then falls back to the
-                shipped ``DEFAULT_BASELINE_DAYS`` (730). PR-C v2 audit fix
-                (Maintainer H1 + Cross-Checker B1): the previous hardcoded 730
-                literal was the very pattern ``baseline_config`` was meant to
-                consolidate.
-            fresh_baseline: If True with baseline, perform a true clean slate: clear Neo4j
-                graph data, delete MISP EdgeGuard events, and discard checkpoints before
-                re-collecting. Default False preserves existing data and checkpoints for resume.
-        """
-        if baseline_days is None:
-            from baseline_config import resolve_baseline_days
-
-            baseline_days = resolve_baseline_days(explicit=None)
         # ── Pipeline lock: prevent concurrent CLI runs ──
         # NOTE: This lock only protects CLI invocations (python run_pipeline.py).
         # Airflow DAGs use max_active_runs=1 for concurrency control instead.
@@ -941,8 +159,8 @@ class EdgeGuardPipeline:
         # ``os.path.exists(lock_path)`` then ``with open(lock_path, "w")`` —
         # could let two CLI invocations both find no lock and both write
         # their PID, last writer wins. Two pipelines then ran concurrently,
-        # racing MISP event creation and Neo4j MERGEs (the very condition
-        # the lock was meant to prevent).
+        # racing MISP event creation (the very condition the lock was meant
+        # to prevent).
         #
         # ``O_EXCL`` is POSIX-defined as atomic create-or-fail: if the
         # file already exists, ``os.open`` raises ``FileExistsError`` AND
@@ -1091,59 +309,17 @@ class EdgeGuardPipeline:
         import atexit
         import signal
 
-        # Baseline runs also take an additional cross-process sentinel that
-        # scheduled Airflow collector DAGs check before running. This
-        # prevents a CLI baseline and a regularly-scheduled DAG task from
-        # racing on MISP/Neo4j writes. Non-baseline runs do NOT take this
-        # lock — they're expected to share the pipeline with Airflow.
-        baseline_lock_held = False
-        if baseline:
-            from baseline_lock import acquire_baseline_lock
-
-            if not acquire_baseline_lock():
-                # Another baseline is already running — refuse to start.
-                # Bugbot LOW (PR-A audit on f60e213 + 329559e): use the
-                # ``_read_lock_pid`` helper rather than re-inlining the
-                # PID-check logic. Despite its definition appearing
-                # earlier-in-source than ``_cleanup_lock``, ``_read_lock_pid``
-                # IS in scope here — both inner functions and the
-                # ``acquire_baseline_lock`` failure path are in the same
-                # ``run()`` body, and Python resolves nested-function names
-                # via the enclosing scope at call time.
-                # PR-A audit fix (Bugbot LOW on commit 8ab02ac): the previous
-                # ``if existing_pid == os.getpid()`` else-branch fired with
-                # ``existing_pid=None`` (lock missing/unreadable) and logged
-                # a misleading "sentinel pid=None != current pid=X" — implying
-                # a PID mismatch when the real cause was a missing/corrupt
-                # file. Mirror ``_cleanup_lock``'s explicit None-guard so
-                # the only warning fires on a genuine PID mismatch.
-                existing_pid = _read_lock_pid(lock_path)
-                if existing_pid is not None and existing_pid == os.getpid():
-                    try:
-                        os.remove(lock_path)
-                    except OSError:
-                        pass
-                elif existing_pid is not None:
-                    logger.warning(
-                        "Not removing pipeline lock on baseline-acquire failure: sentinel pid=%s != current pid=%s",
-                        existing_pid,
-                        os.getpid(),
-                    )
-                # else: existing_pid is None — lock missing/unreadable;
-                # don't remove and don't warn (no actionable information).
-                return False
-            baseline_lock_held = True
-
         def _cleanup_lock(*_args):
             # PR-A audit fix (Bug Hunter HIGH H2): only remove the lock file
             # if it still belongs to THIS process. Earlier code did a blind
             # ``os.remove(lock_path)`` — but the stale-PID recovery path
-            # (lines 1027-1032) lets a competing process unlink-and-re-acquire
-            # the same lock. Without the PID check, this process's atexit
-            # handler then unlinks the OTHER process's freshly-acquired lock,
-            # opening a window where a third invocation can also acquire.
-            # Two pipelines run concurrently, racing MERGE. Mirrors the
-            # release_baseline_lock pattern in src/baseline_lock.py.
+            # (the ``ProcessLookupError`` branch above) lets a competing process
+            # unlink-and-re-acquire the same lock. Without the PID check, this
+            # process's atexit handler then unlinks the OTHER process's
+            # freshly-acquired lock, opening a window where a third invocation
+            # can also acquire. Two pipelines run concurrently, racing MISP event
+            # creation. Mirrors the release_baseline_lock pattern in
+            # src/baseline_lock.py.
             try:
                 pid = _read_lock_pid(lock_path)
                 if pid is not None and pid == os.getpid():
@@ -1156,13 +332,6 @@ class EdgeGuardPipeline:
                     )
             except OSError:
                 pass
-            if baseline_lock_held:
-                try:
-                    from baseline_lock import release_baseline_lock as _release
-
-                    _release()
-                except Exception:
-                    logger.debug("Baseline lock release failed", exc_info=True)
 
         atexit.register(_cleanup_lock)
 
@@ -1173,77 +342,20 @@ class EdgeGuardPipeline:
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
         try:
-            return self._run_pipeline_inner(
-                use_stix_flow=use_stix_flow,
-                baseline=baseline,
-                baseline_days=baseline_days,
-                fresh_baseline=fresh_baseline,
-            )
+            return self._run_pipeline_inner()
         finally:
             _cleanup_lock()
 
-    def _run_pipeline_inner(
-        self,
-        use_stix_flow=False,
-        baseline=False,
-        baseline_days=None,
-        fresh_baseline=False,
-    ):
-        """Inner pipeline logic, separated so the lock is always cleaned up.
+    def _run_pipeline_inner(self) -> bool:
+        """Collection into MISP, separated so the lock is always cleaned up.
 
-        ``baseline_days=None`` defers to ``baseline_config.resolve_baseline_days``
-        — same SSoT as the public ``run()`` method.
+        Returns False when a collector reported failure (``success`` False) or raised; a skipped
+        optional source (no key, not in ``EDGEGUARD_COLLECT_SOURCES``) is no failure.
         """
-        if baseline_days is None:
-            from baseline_config import resolve_baseline_days
+        from collector_allowlist import collect_sources_allowlist_from_env, is_collector_enabled_by_allowlist
+        from config import get_effective_limit
 
-            baseline_days = resolve_baseline_days(explicit=None)
-        # Import baseline checkpoint utilities. ``clear_checkpoint`` is still
-        # used by the resume-completed-baseline branch below (line ~1152).
-        from baseline_checkpoint import clear_checkpoint, get_baseline_status
-
-        # Log baseline mode
-        if baseline:
-            logger.info(f"BASELINE MODE: Collecting historical data (last {baseline_days} days)")
-            # Before the wipe of a fresh baseline and before any collector runs.
-            _log_cli_baseline_warning()
-            if fresh_baseline:
-                # PR-C audit fix (Cross-Checker H3 + Prod Readiness HIGH): the
-                # previous inline 3-step clean (checkpoints, Neo4j, MISP) lived
-                # here as 80 LOC of paginated DELETE loops. It silently logged
-                # warnings on partial failures (the ``except Exception`` blocks
-                # at the previous lines 1134/1196), leaving operators with a
-                # half-cleaned state that was harder to debug than a clean
-                # failure. Replaced by the shared helper that wipes + settles
-                # + verifies + raises BaselineCleanError on any step failure.
-                # Same code path is now used by the new ``baseline_clean``
-                # Airflow task (PR-C wires it in dags/edgeguard_pipeline.py).
-                from baseline_clean import BaselineCleanError, reset_baseline_data
-
-                try:
-                    clean_result = reset_baseline_data()
-                    # 2026-11-02: what the wipe reported deleting (``CleanResult.deleted_summary``).
-                    logger.info("Fresh-baseline clean complete: %s", clean_result.deleted_summary())
-                except BaselineCleanError as e:
-                    logger.error("Fresh-baseline clean FAILED: %s", e)
-                    return False  # Refuse to run collectors on a half-cleaned state.
-
-                logger.info("=== Fresh baseline ready — collecting from scratch ===")
-            else:
-                existing = get_baseline_status()
-                if existing:
-                    completed = [s for s, d in existing.items() if d.get("completed")]
-                    in_progress = [s for s, d in existing.items() if not d.get("completed")]
-                    if in_progress:
-                        logger.info("Resuming baseline (add --fresh-baseline to restart from scratch)")
-                        logger.info(f"  Completed: {completed}, In-progress: {in_progress}")
-                    else:
-                        logger.info("All previous checkpoints are completed — starting fresh baseline")
-                        clear_checkpoint()
-                else:
-                    logger.info("No existing checkpoints — starting fresh baseline")
-        else:
-            logger.info("UPDATE MODE: Collecting latest data only")
+        logger.info("UPDATE MODE: Collecting latest data into MISP")
 
         # Generate run ID for reproducibility and traceability
         run_id = str(uuid.uuid4())[:8]
@@ -1267,29 +379,12 @@ class EdgeGuardPipeline:
 
         start_time = datetime.now(timezone.utc)
         logger.info("=" * 60)
-        logger.info(f"[START] EdgeGuard Pipeline Started (run_id: {run_id})")
+        logger.info(f"[START] EdgeGuard collection into MISP started (run_id: {run_id})")
         if git_commit:
             logger.info(f"📌 Git commit: {git_commit}")
-        if use_stix_flow:
-            logger.info("🔄 STIX 2.1 pipeline flow enabled (MISP → STIX → Neo4j)")
         logger.info("=" * 60)
 
-        # Step 1: Connect to Neo4j
-        logger.info("\n📡 Step 1: Connecting to Neo4j...")
-        if not self.neo4j.connect():
-            logger.error("Failed to connect to Neo4j. Exiting.")
-            return False
-
-        # Create constraints and indexes
-        self.neo4j.create_constraints()
-        self.neo4j.create_indexes()
-
-        # Ensure source nodes exist (no clearing - data accumulates)
-        logger.info("\n[INFO] Ensuring Source nodes exist...")
-        self.neo4j.ensure_sources()
-
-        # Step 2: Collect from all external sources and push to MISP
-        logger.info("\n[FETCH] Step 2: Collecting from sources and pushing to MISP...")
+        logger.info("\n[FETCH] Collecting from sources and pushing to MISP...")
         total_pushed = 0
         step2_ok: list[str] = []
         step2_skipped: list[tuple[str, str, str]] = []  # (source, reason, reason_class)
@@ -1315,33 +410,13 @@ class EdgeGuardPipeline:
                 continue
             try:
                 logger.info(f"\n   Collecting from {source_name}...")
-                # Baseline uses BASELINE_COLLECTION_LIMIT (env); cron uses incremental limits
-                if baseline:
-                    effective_limit = baseline_collection_limit_from_env()
-                else:
-                    effective_limit = get_effective_limit(source_name)
+                # The incremental limit of the source, as the scheduled DAGs use it.
+                effective_limit = get_effective_limit(source_name)
                 logger.info(f"   ℹ️  Limit for {source_name}: {effective_limit if effective_limit else 'unlimited'}")
-                if baseline:
-                    logger.info(f"   ℹ️  {source_name}: Baseline mode - collecting historical data")
-                # Push to MISP (MISP becomes the single source of truth)
-                if hasattr(collector, "collect"):
-                    import inspect
-
-                    sig = inspect.signature(collector.collect)
-                    if "push_to_misp" in sig.parameters:
-                        if "baseline" in sig.parameters:
-                            data = collector.collect(
-                                limit=effective_limit, push_to_misp=True, baseline=baseline, baseline_days=baseline_days
-                            )
-                        else:
-                            data = collector.collect(limit=effective_limit, push_to_misp=True)
-                    else:
-                        if "baseline" in sig.parameters:
-                            data = collector.collect(
-                                limit=effective_limit, baseline=baseline, baseline_days=baseline_days
-                            )
-                        else:
-                            data = collector.collect(limit=effective_limit)
+                # Push to MISP (MISP becomes the single source of truth). The keyword arguments of the
+                # scheduled DAGs' collection call: no baseline flag, no baseline window.
+                if "push_to_misp" in inspect.signature(collector.collect).parameters:
+                    data = collector.collect(limit=effective_limit, push_to_misp=True)
                 else:
                     data = collector.collect(limit=effective_limit)
 
@@ -1395,7 +470,7 @@ class EdgeGuardPipeline:
                 _report_failure_with_metrics(source_name, e)
 
         logger.info(f"\n[STATS] Total pushed to MISP: {total_pushed} items")
-        logger.info("\n[SUMMARY] Step 2 — collection by source:")
+        logger.info("\n[SUMMARY] Collection by source:")
         logger.info(f"   • Succeeded ({len(step2_ok)}): {', '.join(step2_ok) if step2_ok else '—'}")
         if step2_skipped:
             logger.warning(f"   • Skipped optional ({len(step2_skipped)}) — pipeline continues; no data from:")
@@ -1418,385 +493,61 @@ class EdgeGuardPipeline:
             logger.info("   • Raised exception: none")
         if step2_failed or step2_exceptions:
             logger.warning(
-                "[WARN] Step 2 had failures — MISP may be missing data from those sources; "
-                "review logs above and fix keys/connectivity before relying on a full baseline."
+                "[WARN] Collection had failures — MISP may be missing data from those sources; "
+                "review logs above and fix keys/connectivity."
             )
-
-        # Step 3: MISP → Neo4j (STIX 2.1 flow only)
-        loaded = {
-            "vulnerabilities": 0,
-            "indicators": 0,
-            "cves": 0,
-            "malware": 0,
-            "actors": 0,
-            "techniques": 0,
-            "tactics": 0,
-            "relationships_indicates": 0,
-            "relationships_attributed_to": 0,
-        }
-        inactive_stats = {}
-
-        if use_stix_flow:
-            # STIX 2.1 FLOW: MISP → STIX → Neo4j
-            logger.info("\n[SAVE] Step 3: Converting MISP data to STIX 2.1 and loading to Neo4j...")
-
-            if not STIX_AVAILABLE or not self.stix_exporter:
-                logger.error("   [ERR] STIX 2.1 flow requested but STIX library not available!")
-                logger.error("   STIX flow is required - pipeline cannot continue without STIX support.")
-                return False
-            else:
-                loaded = self._run_stix_flow()
-                inactive_stats = {}  # STIX flow handles inactive nodes differently
-
-        # Step 4: Create relationships
-        logger.info("\n[LINK] Step 4: Creating relationships...")
-
-        # Get relationships from MITRE collector
-        relationships = self.mitre_collector.get_relationships()
-        logger.info(f"   Found {len(relationships)} relationships to process")
-
-        rel_stats = {"uses": 0, "attributed_to": 0}
-
-        # Create relationships from MITRE collector
-        # Track for debugging and derived relationships
-        actor_uses_malware = []  # For deriving ATTRIBUTED_TO
-        missing_techniques = set()
-
-        for rel in relationships:
-            try:
-                if rel["type"] == "uses":
-                    # After the 2026-04 USES→{EMPLOYS,IMPLEMENTS}_TECHNIQUE
-                    # split, create_actor_technique_relationship writes
-                    # EMPLOYS_TECHNIQUE matching only ThreatActor. Malware
-                    # → Technique edges (IMPLEMENTS_TECHNIQUE) are built
-                    # post-sync by build_relationships.py from the
-                    # `uses_techniques` property on Malware nodes — skip
-                    # them here rather than routing a malware source to
-                    # the actor-only method.
-                    if rel["source_type"] == "actor" and rel["target_type"] == "technique":
-                        success = self.neo4j.create_actor_technique_relationship(
-                            rel["source_name"], rel["target_mitre_id"], source_id="mitre_attck"
-                        )
-                        if success:
-                            rel_stats["uses"] += 1
-                        else:
-                            missing_techniques.add(rel["target_mitre_id"])
-                    # Track actor/malware -> malware for deriving ATTRIBUTED_TO
-                    elif rel["source_type"] in ["actor", "malware"] and rel["target_type"] == "malware":
-                        actor_uses_malware.append(
-                            {
-                                "actor": rel["source_name"],
-                                "malware": rel["target_name"],
-                                "source_type": rel["source_type"],
-                            }
-                        )
-                elif rel["type"] == "attributed_to":
-                    if rel["source_type"] == "malware" and rel["target_type"] == "actor":
-                        self.neo4j.create_malware_actor_relationship(
-                            rel["source_name"], rel["target_name"], source_id="mitre_attck"
-                        )
-                        rel_stats["attributed_to"] += 1
-            except Exception as e:
-                logger.warning(f"   [WARN] Failed to create relationship: {e}")
-
-        # Log missing techniques for debugging
-        if missing_techniques:
-            logger.info(
-                f"   ℹ️ {len(missing_techniques)} techniques not found in Neo4j (sample: {list(missing_techniques)[:5]})"
-            )
-
-        # Derive ATTRIBUTED_TO: if Actor uses Malware, then Malware is attributed to Actor
-        logger.info(f"   ℹ️ Deriving {len(actor_uses_malware)} ATTRIBUTED_TO relationships from 'uses malware'...")
-        derived_attributed = 0
-        for rel in actor_uses_malware:
-            try:
-                if rel["malware"] and rel["actor"]:
-                    success = self.neo4j.create_malware_actor_relationship(
-                        rel["malware"], rel["actor"], source_id="mitre_derived"
-                    )
-                    if success:
-                        derived_attributed += 1
-            except Exception as e:
-                logger.debug(f"   ATTRIBUTED_TO derive error for {rel.get('malware')} → {rel.get('actor')}: {e}")
-        logger.info(f"   [OK] Derived {derived_attributed} ATTRIBUTED_TO relationships")
-
-        # Create INDICATES/EXPLOITS via MISP event co-occurrence and CVE tag matching
-        logger.info("   ℹ️ Creating INDICATES/EXPLOITS relationships (MISP event co-occurrence)...")
-        indicates_created = self._create_indicates_relationships()
-        logger.info(f"   [OK] Created {indicates_created} INDICATES relationships")
-
-        logger.info(f"   [OK] Created {rel_stats['uses']} EMPLOYS_TECHNIQUE relationships (Actor→Technique)")
-        logger.info(f"   [OK] Created {rel_stats['attributed_to']} ATTRIBUTED_TO relationships")
-
-        # Step 5: Enrich existing indicators from multiple sources
-        logger.info("\n[TARGET] Step 5: Enriching indicators (A/B test)...")
-        try:
-            from enrichment import EnrichmentEngine
-
-            enricher = EnrichmentEngine(self.neo4j)
-            enriched = enricher.enrich_all_indicators(limit=50)
-            logger.info(f"   [OK] Enriched {enriched} indicators with additional sources")
-        except Exception as e:
-            logger.warning(f"   [WARN] Enrichment skipped: {e}")
-
-        # PR-C audit fix (Cross-Checker HIGH H1 + H2): CLI ↔ DAG parity.
-        # The Airflow DAG runs ``build_relationships.py`` and
-        # ``enrichment_jobs.run_all_enrichment_jobs`` after the sync — but
-        # the CLI never invoked either. Operators running
-        # ``python run_pipeline.py --baseline`` got a broken graph: no
-        # IMPLEMENTS_TECHNIQUE / TARGETS / AFFECTS edges (the 12 link
-        # queries in build_relationships.py were skipped), no Campaign
-        # nodes, no IOC decay, no Vulnerability↔CVE bridges. Fixed by
-        # invoking both here, gated to ``baseline=True`` to avoid
-        # surprising incremental-mode CLI users with extra latency.
-        # The steps match the DAG's, the graph does not: the STIX import of
-        # Step 3 writes nodes without the lists build_relationships links
-        # by, so most of its link steps find no input
-        # (``CLI_BASELINE_WARNING_LINES``).
-        if baseline:
-            # Step 5b: build_relationships (20 cross-entity link steps).
-            # Subprocess-isolated to match the DAG's invocation shape.
-            #
-            # PR-K3 §1-4: use the streaming helper so the child's 5-hour
-            # output is logged line-by-line as it arrives instead of
-            # buffered in parent memory until exit. Same OOM concern
-            # as on the DAG side — the old ``capture_output=True`` path
-            # accumulated tens of MB of log text across the 12 APOC
-            # queries. The helper caps memory at
-            # ``DEFAULT_TAIL_LINES`` (200 lines retained for
-            # error-context) and enforces the 5h timeout with a
-            # SIGTERM-then-SIGKILL escalation so APOC transactions
-            # get a chance to roll back cleanly.
-            logger.info("\n[TARGET] Step 5b: build_relationships (on the reduced graph of the STIX import)...")
-            # PR-K3 Bugbot round-1 (Medium): import OUTSIDE the try block.
-            # If the import itself fails (e.g. module missing from deployment),
-            # a ModuleNotFoundError fires — but Python would then try to
-            # evaluate ``except SubprocessStreamTimeout as e:`` which
-            # references the un-imported name, raising NameError that
-            # propagates PAST the ``except Exception`` fallback. Bugbot
-            # caught this bypassing the CLI's degraded-mode guarantee.
-            # The DAG site already had the import outside ``try``; this
-            # brings the CLI site into parity.
-            from subprocess_streaming import (
-                SubprocessStreamTimeout,
-                run_with_streaming_output,
-            )
-
-            try:
-                br_returncode, br_tail = run_with_streaming_output(
-                    [sys.executable, os.path.join(os.path.dirname(__file__), "build_relationships.py")],
-                    timeout=18000,  # 5h, matches DAG's run_build_relationships
-                    child_logger=logger,
-                    line_prefix="[build_relationships] ",
-                )
-                if br_returncode == 0:
-                    logger.info("   [OK] build_relationships complete")
-                else:
-                    # PR-C v2 audit fix (Cross-Checker B2, comprehensive
-                    # 7-agent audit): the previous comment claimed "same
-                    # behavior as the DAG", but the DAG actually raises
-                    # ``AirflowException`` on non-zero exit (see
-                    # ``dags/edgeguard_pipeline.py``: ``run_build_relationships``).
-                    # The CLI deliberately diverges — local operators
-                    # want a "degraded-mode finish" rather than a hard
-                    # abort that loses Step 5c enrichment too.
-                    #
-                    # Operator hint: the graph edges from
-                    # build_relationships (20 link steps:
-                    # IMPLEMENTS_TECHNIQUE, TARGETS, AFFECTS, ...) will
-                    # be MISSING. Re-run ``python src/build_relationships.py``
-                    # standalone to complete the graph.
-                    #
-                    # Structured log with ``extra={"degraded": True}`` is
-                    # cloud-portable (Datadog/CloudWatch/etc. can route
-                    # on the ``degraded`` extra field).
-                    #
-                    # PR-K3: ``br_tail`` is the pre-bounded deque of the
-                    # last 200 lines streamed (already logged line-by-line
-                    # above). Joining the last ~10 gives the operator
-                    # enough context in the summary log without a second
-                    # full-stderr dump.
-                    tail_context = "\n".join(br_tail[-10:]) if br_tail else "(no output captured)"
-                    logger.warning(
-                        "   [WARN] build_relationships exited with code %d. "
-                        "Graph is in DEGRADED MODE (link edges missing). "
-                        "DAG would have raised AirflowException; CLI continues "
-                        "to allow Step 5c enrichment to run. "
-                        "Re-run ``python src/build_relationships.py`` standalone to repair. "
-                        "Last 10 lines:\n%s",
-                        br_returncode,
-                        tail_context,
-                        extra={"degraded": True, "step": "build_relationships"},
-                    )
-            except SubprocessStreamTimeout as e:
-                logger.warning(
-                    "   [WARN] build_relationships timed out: %s. Graph in DEGRADED MODE.",
-                    e,
-                    extra={"degraded": True, "step": "build_relationships"},
-                )
-            except Exception as e:
-                logger.warning(
-                    "   [WARN] build_relationships skipped: %s",
-                    e,
-                    extra={"degraded": True, "step": "build_relationships"},
-                )
-
-            # Step 5c: post-sync enrichment_jobs (the six jobs of
-            # run_all_enrichment_jobs, including the actor alias merge and,
-            # 2026-10, the Malware ATT&CK-id twin merge). In-process because
-            # each job is short-running and shares the existing Neo4jClient.
-            logger.info("\n[TARGET] Step 5c: post-sync enrichment_jobs (on the reduced graph of the STIX import)...")
-            try:
-                from enrichment_jobs import run_all_enrichment_jobs
-
-                summary = run_all_enrichment_jobs(self.neo4j)
-                logger.info("   [OK] Enrichment jobs complete: %s", summary)
-            except Exception as e:
-                logger.warning(f"   [WARN] Enrichment jobs skipped: {e}")
-
-        # Step 6: Get final stats
-        logger.info("\n[STATS] Step 6: Final Statistics...")
-        stats = self.neo4j.get_stats()
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-        # Check if anything is actually in Neo4j (use real counts, not pipeline counters)
-        total_loaded = sum(
-            stats.get(k, 0) for k in ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique")
-        )
-
-        logger.info("\n" + "=" * 60)
-        if total_loaded > 0:
-            logger.info("[OK] EdgeGuard Pipeline Complete!")
-        else:
-            logger.error("[FAIL] EdgeGuard Pipeline Complete — BUT 0 NODES LOADED TO NEO4J!")
-            logger.error("       Data was collected to MISP but NOT synced to Neo4j.")
-            logger.error("       Check Neo4j connectivity: docker compose ps neo4j")
-        logger.info("=" * 60)
         logger.info(f"\n⏱️  Total time: {elapsed:.1f} seconds")
-        logger.info("\n[STATS] Nodes loaded:")
-        logger.info(f"   - Vulnerabilities: {loaded['vulnerabilities']}")
-        logger.info(f"   - Indicators: {loaded['indicators']}")
-        logger.info(f"   - Malware: {loaded['malware']}")
-        logger.info(f"   - Threat Actors: {loaded['actors']}")
-        logger.info(f"   - Techniques: {loaded['techniques']}")
-
-        # Calculate total relationships
-        total_indicates = loaded.get("relationships_indicates", 0)
-        total_attributed_to = loaded.get("relationships_attributed_to", 0) + rel_stats.get("attributed_to", 0)
-        # rel_stats["uses"] only counts actor→technique edges created via
-        # create_actor_technique_relationship (EMPLOYS_TECHNIQUE). Malware
-        # and Tool → Technique edges (IMPLEMENTS_TECHNIQUE) are built by
-        # build_relationships.py after the sync and are NOT reflected in
-        # this counter — don't pretend otherwise in the log.
-        total_employs_technique = rel_stats.get("uses", 0)
-
-        logger.info("\n[STATS] Relationships created (this pipeline pass):")
-        logger.info(f"   - EMPLOYS_TECHNIQUE (Actor → Technique): {total_employs_technique}")
         logger.info(
-            "   - IMPLEMENTS_TECHNIQUE (Malware/Tool → Technique): built post-sync by "
-            "build_relationships.py — see its own log line"
+            "Nothing was written to Neo4j: the MISP -> Neo4j sync (src/run_misp_to_neo4j.py), "
+            "src/build_relationships.py and src/enrichment_jobs.py build the graph from MISP."
         )
-        logger.info(f"   - ATTRIBUTED_TO (Malware → Actor): {total_attributed_to}")
-        logger.info(f"   - INDICATES (Indicator → Malware): {total_indicates}")
+        return not (step2_failed or step2_exceptions)
 
-        # Report inactive nodes if available
-        if inactive_stats:
-            logger.info("\n[STATS] Stale nodes marked inactive:")
-            logger.info(f"   - Indicators: {inactive_stats.get('indicators_marked_inactive', 0)}")
-            logger.info(f"   - Vulnerabilities: {inactive_stats.get('vulnerabilities_marked_inactive', 0)}")
 
-        logger.info("\n[STATS] By zone:")
-        for zone, count in stats.get("by_zone", {}).items():
-            logger.info(f"   - {zone}: {count}")
-
-        logger.info("\n[NET] Neo4j Browser: http://localhost:7474")
-        logger.info("   User: neo4j / <configured via NEO4J_PASSWORD>")
-
-        # Close connection
-        self.neo4j.close()
-
-        if use_stix_flow:
-            return total_loaded > 0
-        # Non-STIX flow: pipeline only pushes to MISP (Step 2).
-        # Neo4j sync is handled separately (Airflow edgeguard_neo4j_sync DAG).
-        # Return True if collection ran (regardless of Neo4j state).
-        return True
+def _retired_options_given(args: argparse.Namespace) -> list[str]:
+    """The retired options on the command line, in ``RETIRED_OPTIONS`` order."""
+    given = {
+        "--baseline": args.baseline,
+        "--fresh-baseline": args.fresh_baseline,
+        "--baseline-days": args.baseline_days is not None,
+        "--stix-flow": args.stix_flow,
+    }
+    return [option for option in RETIRED_OPTIONS if given[option]]
 
 
 def main():
     """Main entry point with argument parsing"""
-    # No abbreviations: ``--stix`` would otherwise be read as ``--stix-flow`` instead of being refused.
+    # No abbreviations: ``--stix`` would otherwise be read as ``--stix-flow``, ``--base`` as ``--baseline``.
     parser = argparse.ArgumentParser(
-        description="EdgeGuard Pipeline - Orchestrates threat intel collection, MISP and the Neo4j load",
+        description=(
+            "EdgeGuard collectors into MISP (development tool): runs every enabled collector once and pushes "
+            "to MISP. Writes nothing to Neo4j; a baseline runs through the edgeguard_baseline DAG."
+        ),
         allow_abbrev=False,
     )
-    parser.add_argument(
-        "--stix-flow",
-        action="store_true",
-        default=True,  # STIX flow is now the default
-        help="Use STIX 2.1 as intermediate format in pipeline (MISP → STIX → Neo4j) [default: enabled]",
-    )
-    parser.add_argument(
-        "--baseline",
-        action="store_true",
-        default=False,
-        help=(
-            "Collect available, historical data (all not just latest). Default: False (latest updates only). "
-            + CLI_BASELINE_HELP_NOTE
-        ),
-    )
-    # PR-C v2 audit fix (Maintainer H1 + Cross-Checker B1, comprehensive
-    # 7-agent audit): the SSoT module ``baseline_config.resolve_baseline_days``
-    # was created in PR-C but only the new ``edgeguard.cmd_*`` callers used
-    # it — the legacy CLI parser here, ``run_pipeline.run(baseline_days=730)``,
-    # ``_run_pipeline_inner(baseline_days=730)``, and the DAG's
-    # ``get_baseline_config`` all kept hardcoded 730 literals. Wire the SSoT
-    # in here so the docstring's "single source of truth" claim is real.
-    #
-    # Cross-Checker D4: the previous help text said "default: 365" while
-    # ``_bd_default = 730`` — corrected below.
-    from baseline_config import DEFAULT_BASELINE_DAYS, resolve_baseline_days
-
-    _bd_default = resolve_baseline_days(explicit=None)  # respects env, falls back to default
-    parser.add_argument(
-        "--baseline-days",
-        type=int,
-        default=_bd_default,
-        help=(
-            f"How many days back for baseline mode (default: {DEFAULT_BASELINE_DAYS}, "
-            "or EDGEGUARD_BASELINE_DAYS env var if set)"
-        ),
-    )
-    parser.add_argument(
-        "--fresh-baseline",
-        action="store_true",
-        default=False,
-        help="True clean slate: clear Neo4j graph + MISP events + checkpoints, then re-collect (use with --baseline)",
-    )
+    retired = parser.add_argument_group("retired options", RETIRED_OPTIONS_HELP)
+    retired.add_argument("--baseline", action="store_true", help="the in-process baseline (retired)")
+    retired.add_argument("--fresh-baseline", action="store_true", help="the in-process fresh baseline (retired)")
+    retired.add_argument("--baseline-days", metavar="N", default=None, help="the in-process baseline window (retired)")
+    retired.add_argument("--stix-flow", action="store_true", help="the STIX 2.1 import into Neo4j (retired)")
 
     args = parser.parse_args()
 
-    # Validate STIX flow is available
-    if args.stix_flow and not STIX_AVAILABLE:
-        print("\n⚠️  Warning: --stix-flow requested but STIX library not available.")
-        print("   Install with: pip install stix2 pymisp")
-        print("   Falling back to direct MISP → Neo4j flow...")
+    refused = _retired_options_given(args)
+    if refused:
+        # Before the pipeline is built, the lock taken, anything wiped or a collector run.
+        print(f"run_pipeline.py: {', '.join(refused)} refused.\n{RETIRED_OPTIONS_MESSAGE}", file=sys.stderr)
+        return 2
 
     pipeline = EdgeGuardPipeline()
-    success = pipeline.run(
-        use_stix_flow=args.stix_flow,
-        baseline=args.baseline,
-        baseline_days=args.baseline_days,
-        fresh_baseline=args.fresh_baseline,
-    )
+    success = pipeline.run()
 
     if success:
-        print("\n🎉 Pipeline completed successfully!")
-        if args.stix_flow:
-            print("🔄 STIX 2.1 pipeline flow was used")
+        print("\nCollection into MISP finished.")
     else:
-        print("\n❌ Pipeline failed. Check logs.")
+        print("\nCollection into MISP failed or was refused. Check logs.")
 
     return 0 if success else 1
 

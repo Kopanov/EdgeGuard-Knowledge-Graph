@@ -34,7 +34,7 @@ Auth:    Configured via environment variables
   // vector-string letter (N/L/A/P), UNKNOWN or a KEV/OTX default.
   attack_vector: STRING,    // NETWORK / ADJACENT_NETWORK / LOCAL / PHYSICAL, null without CVSS
   // published / last_modified where a record carries them: set by NVD's record; a KEV,
-  // CISA ICS or OTX record, a STIX import or a partner write fills them only where the node has none.
+  // CISA ICS or OTX record or a partner write fills them only where the node has none.
   // description: the text of the highest-ranked source, NVD > CISA KEV > CISA ICS > any
   // other source, named in description_source (src/description_ranking.py). A MISP metadata block
   // (OTX_META:{...}, NVD_META:{...}) and an OTX pulse reference ("Referenced in OTX pulse: <name>")
@@ -1026,6 +1026,7 @@ _Last updated: 2026-11-02_
 
 - 2026-11-02 — Read-side lookup canonicalization: a `url`, and a `scheme://host` value given without a type, is looked up with its scheme and host lower-cased, as the write side now keys a `url`.
 - 2026-11-02 — `ATTRIBUTED_TO`: `match_type='exact'` (Q2) is on no link: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label.
+- 2026-11-02 — `CVE.published` / `last_modified`: a STIX import is no longer named among the records that fill them (the command-line STIX import is removed).
 - 2026-11-01 — `CVE` properties: the MISP → Neo4j sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the comment named `merge_cve` as the sync's path.
 - 2026-11-01 — `Malware` and `ThreatActor` carry the ATT&CK id of a MITRE record (`mitre_id`); `deprecated` is cleared by an ATT&CK record of the active object (it was never cleared).
 - 2026-10-25 — `GET /indicators`: the `source` filter takes a source's canonical id or a variant (until then only the canonical id matched).

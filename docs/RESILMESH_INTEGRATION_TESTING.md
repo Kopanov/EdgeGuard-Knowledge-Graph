@@ -68,7 +68,7 @@ To verify a full flow from external feeds all the way into the ResilMesh data mo
 
 2. **Fill the graph through the EdgeGuard DAGs**
 
-   Run a 7-day smoke baseline of the `edgeguard_baseline` DAG ([BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)), on Compose or on an install without Docker ([SETUP_GUIDE.md](SETUP_GUIDE.md)). `python src/run_pipeline.py` loads Neo4j through its STIX import and builds a reduced graph, without the ATT&CK, attribution and indicator-malware links ([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)), so an integration test on it checks a graph EdgeGuard does not produce.
+   Run a 7-day smoke baseline of the `edgeguard_baseline` DAG ([BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)), on Compose or on an install without Docker ([SETUP_GUIDE.md](SETUP_GUIDE.md)). `python src/run_pipeline.py` runs the collectors into MISP only and writes nothing to Neo4j ([AIRFLOW_DAGS.md § One baseline path](AIRFLOW_DAGS.md#one-baseline-path)).
    - (Optionally) trigger any integration logic you add that maps TI into ResilMesh nodes.
 
 3. **Call the ResilMesh merge/bridge methods**
@@ -143,10 +143,11 @@ ResilMesh then works on a Neo4j graph that holds **both**:
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — End-to-end test: `python src/run_pipeline.py` writes nothing to Neo4j (it loaded a reduced graph through a STIX import).
 - 2026-11-01 — Who should run what: the CVSS sub-nodes and their edges are written by `merge_cve()` and, in the sync, by the CVSS statement of its CVE batches (`merge_cves_batch`); the text named `merge_cve()` alone.
 - 2026-11-01 — End-to-end test: the graph is filled by a smoke baseline of the `edgeguard_baseline` DAG (the step ran `python src/run_pipeline.py`, whose STIX import builds a reduced graph).
 - 2026-10-25 — `merge_resilmesh_cve` example: `stix_import` is a registered source without a description rank (`ranked_for_descriptions=False`), so `resilmesh`, whose id sorts first, still replaces its text.

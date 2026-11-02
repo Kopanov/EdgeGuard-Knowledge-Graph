@@ -143,7 +143,7 @@ export EDGEGUARD_SSL_VERIFY=true
 python src/query_api.py   # via uvicorn in production
 ```
 
-Wherever the pipeline runs, on the device or on a server, it runs as the Airflow DAGs (the scheduled collection, the MISP → Neo4j sync and every baseline): there, install the `airflow` extra and give Airflow a PostgreSQL metadata database ([SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker)). `python src/run_pipeline.py` loads Neo4j through its STIX import and builds a reduced graph; it is for development only ([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)).
+Wherever the pipeline runs, on the device or on a server, it runs as the Airflow DAGs (the scheduled collection, the MISP → Neo4j sync and every baseline): there, install the `airflow` extra and give Airflow a PostgreSQL metadata database ([SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker)). `python src/run_pipeline.py` runs the collectors into MISP only, for development ([AIRFLOW_DAGS.md § One baseline path](AIRFLOW_DAGS.md#one-baseline-path)).
 
 For production, you would typically run these via a process manager (systemd, Docker, Kubernetes) and inject the environment variables there instead of exporting them manually.
 
@@ -189,7 +189,7 @@ should know them. All four are in `.env.example`.
 |---|---|---|
 | `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | `500` | Attributes per MISP push batch (`MISPWriter.push_items` default; the adaptive scaling lowers it on large events). Lower on memory-constrained MISP hosts that answer HTTP 500 on large batches. |
 | `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Seconds between failed-event retry passes. Gives MISP time to recover from transient 5xx. |
-| `EDGEGUARD_BASELINE_LOCK_PATH` | `checkpoints/baseline_in_progress.lock` | Sentinel held by a running baseline: the `edgeguard_baseline` DAG run (from `baseline_acquire_lock`; `edgeguard baseline` triggers that DAG) or an in-process `run_pipeline.py --baseline` (a development path). While another run holds it, the scheduled collectors and the sync DAG's `run_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` skip. |
+| `EDGEGUARD_BASELINE_LOCK_PATH` | `checkpoints/baseline_in_progress.lock` | Sentinel held by a running baseline: the `edgeguard_baseline` DAG run (from `baseline_acquire_lock`; `edgeguard baseline` triggers that DAG). While another run holds it, the scheduled collectors and the sync DAG's `run_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` skip. |
 | `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `172800` (48 h, above the baseline DAG's 32 h `dagrun_timeout`) | Max age before a stale lock is auto-cleared (e.g. after a crash on a different host — the PID-liveness check only works on the same host). |
 
 See [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) for the wider set of Airflow-related
@@ -206,10 +206,11 @@ references the baseline lock.
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `run_pipeline.py` runs the collectors into MISP only (it loaded Neo4j through a STIX import and built a reduced graph); `EDGEGUARD_BASELINE_LOCK_PATH`: the `edgeguard_baseline` DAG run holds the sentinel, and the in-process `run_pipeline.py --baseline`, which also took it, is retired.
 - 2026-11-01 — Pinned versions list the Airflow image's `Authlib`, upgraded past CVE-2026-96760.
 - 2026-11-01 — The edge recipe no longer starts `python src/run_pipeline.py --stix-flow` as the pipeline: the pipeline runs as the Airflow DAGs with a PostgreSQL metadata database, also outside Compose; `run_pipeline.py` builds a reduced graph (development only).
 - 2026-10-25 — Sync RAM: events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000) attributes are fetched as metadata plus attribute pages of 5000 joined into one list, not as one PyMISP event JSON.

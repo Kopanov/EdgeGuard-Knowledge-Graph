@@ -710,7 +710,7 @@ logger.info(
 )
 
 
-# MISP preflight (aligned with run_pipeline_misp_spt.check_misp_health)
+# MISP preflight
 #
 # MISPHealthCheck.check_health() returns MISPHealthCheckResult (dict-like .get / [] / "checks" in result).
 # result["healthy"] is API+DB (workers optional). With REQUIRE_WORKERS, preflight also requires workers.
@@ -775,7 +775,7 @@ def assert_misp_preflight() -> None:
             compat_issues = [i for i in issues if "compatible" in i.lower() or "pymisp" in i.lower()]
             if compat_issues:
                 logger.warning(f"MISP VERSION WARNING: {compat_issues[0]}")
-                # No run_pipeline.py workaround: its STIX import builds a reduced graph (docs/AIRFLOW_DAGS.md).
+                # No run_pipeline.py workaround: it only runs the collectors into MISP.
                 logger.warning(
                     "Pipeline may work but Airflow DAG scheduler could hang; fix the version mismatch named above."
                 )
@@ -860,9 +860,8 @@ def run_collector_with_metrics(
 
     task_start = time.time()
 
-    # Baseline mutex: if a baseline (the edgeguard_baseline DAG run or an
-    # in-process ``run_pipeline --baseline``) is holding the sentinel lock,
-    # skip this scheduled run instead of racing against it for MISP/Neo4j
+    # Baseline mutex: if a baseline (the edgeguard_baseline DAG run) is
+    # holding the sentinel lock, skip this scheduled run instead of racing against it for MISP/Neo4j
     # writes. The baseline is treated as authoritative — it's a long,
     # expensive, operator-driven run that shouldn't be undermined by
     # interleaved partial writes from the incremental DAGs.
@@ -1443,9 +1442,9 @@ def should_run_neo4j_sync(**context):
     import json
 
     # Baseline mutex: the scheduled Neo4j sync must never run concurrently
-    # with a CLI baseline. The baseline runs its own MISP->Neo4j sync in
-    # the same Python process and a parallel Airflow sync would read
-    # MISP mid-push, producing partial data in Neo4j. ShortCircuit skips
+    # with a baseline. The edgeguard_baseline DAG run runs its own full
+    # MISP->Neo4j sync (full_neo4j_sync), and a parallel scheduled sync would
+    # read MISP mid-push, producing partial data in Neo4j. ShortCircuit skips
     # the whole sync DAG run downstream. Fail-open: if baseline_lock
     # fails to import (e.g. module not on PYTHONPATH during a test),
     # log the error and proceed rather than blocking the sync.
@@ -2870,7 +2869,7 @@ def _require_baseline_lock(context, step: str, *, own: bool = False) -> None:
     baseline's ``build_relationships`` and ``run_enrichment_jobs``): the step also refuses unless the
     live sentinel names this DAG run. These tasks run whatever the collectors' outcome
     (``ALL_DONE`` / ``NONE_FAILED_MIN_ONE_SUCCESS``) and the full sync and the enrichment have no
-    check of their own, so with another baseline's lock (or the in-process baseline's) a run whose
+    check of their own, so with another baseline's lock (or a legacy process-held sentinel) a run whose
     ``baseline_start`` was marked success by hand ran a full MISP→Neo4j write during that baseline's
     wipe or refill. No check without a run id (no Airflow DAG run, as in ``_retake_baseline_lock``);
     fail-open when the lock cannot be read, as the collectors' own check.
@@ -3806,8 +3805,8 @@ def _retake_baseline_lock(holder: dict, step: str, before: str) -> None:
     nothing; the collectors then refuse while no baseline holds the lock, and ``full_neo4j_sync``,
     ``build_relationships`` and ``run_enrichment_jobs`` unless this run holds it
     (``_require_baseline_lock``).
-    Idempotent while this run holds the lock; refuses while another DAG run or an in-process
-    baseline holds it. ``baseline_acquire_lock`` refuses a context without a run id, so no such run
+    Idempotent while this run holds the lock; refuses while another DAG run or a legacy
+    process-held sentinel holds it. ``baseline_acquire_lock`` refuses a context without a run id, so no such run
     reaches this step; it is a no-op there.
     """
     if not holder["run_id"]:
@@ -4098,11 +4097,10 @@ def _baseline_clean(**context):
     The CLI wrapper ``edgeguard fresh-baseline`` (added in PR-C) sets this
     conf automatically so operators don't have to remember the JSON.
 
-    PR-C audit fix (Cross-Checker HIGH H3): closes the CLI ↔ DAG drift
-    where ``--fresh-baseline`` on the CLI did the destructive clean but
-    the DAG had no equivalent. The shared helper ``baseline_clean.reset_baseline_data``
-    is the SAME code path the CLI now uses (so any future improvement
-    benefits both).
+    PR-C audit fix (Cross-Checker HIGH H3): closed the CLI ↔ DAG drift
+    where the in-process ``--fresh-baseline`` (retired 2026-11-02) did the
+    destructive clean and the DAG had no equivalent. This task is the one
+    caller of ``baseline_clean.reset_baseline_data``.
     """
     # PR-C v2 audit fix (Bugbot HIGH on commit 951b163): ``dag_run.conf``
     # can be ``None`` in Airflow 3.x when the DAG is triggered via the UI

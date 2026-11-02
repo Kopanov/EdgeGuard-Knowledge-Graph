@@ -1,7 +1,7 @@
 """
 Regression tests for baseline vs incremental collection limits.
 
-Verifies resolve_collection_limit() and baseline env helper without live APIs.
+Verifies resolve_collection_limit() without live APIs.
 """
 
 from unittest.mock import MagicMock, patch
@@ -27,23 +27,6 @@ def test_resolve_incremental_none_uses_get_effective_limit():
     with patch.object(config, "get_effective_limit", return_value=200) as m:
         assert config.resolve_collection_limit(None, "otx", baseline=False) == 200
         m.assert_called_once_with("otx")
-
-
-def test_baseline_collection_limit_from_env(monkeypatch):
-    """Reads os.environ each call — no config reload required."""
-    from config import baseline_collection_limit_from_env
-
-    monkeypatch.delenv("BASELINE_COLLECTION_LIMIT", raising=False)
-    assert baseline_collection_limit_from_env() is None
-
-    monkeypatch.setenv("BASELINE_COLLECTION_LIMIT", "0")
-    assert baseline_collection_limit_from_env() is None
-
-    monkeypatch.setenv("BASELINE_COLLECTION_LIMIT", "-1")
-    assert baseline_collection_limit_from_env() is None
-
-    monkeypatch.setenv("BASELINE_COLLECTION_LIMIT", "750")
-    assert baseline_collection_limit_from_env() == 750
 
 
 def test_otx_fetch_pulses_default_page_limit_when_collect_limit_none():

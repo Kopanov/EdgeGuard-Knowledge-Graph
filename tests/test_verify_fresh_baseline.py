@@ -1064,8 +1064,7 @@ class TestContractIsWhatTheWritersWrite:
     every ``build_relationships`` step (rendered without a database), the sync's batch writer, the
     campaign and Vulnerability ↔ CVE jobs, the CVSS sub-node writer and the three ``SOURCED_FROM``
     writers. A property counts for a type when every writer of that type assigns it after its
-    MERGE. The single-pair writers of the in-process ``run_pipeline.py`` path are not part of the
-    baseline DAG and are left out."""
+    MERGE. Single-pair writers outside the baseline DAG are left out."""
 
     def _writer_queries(self, monkeypatch) -> Dict[str, List[str]]:
         """The Cypher each writer sends, by writer, recorded without a database."""

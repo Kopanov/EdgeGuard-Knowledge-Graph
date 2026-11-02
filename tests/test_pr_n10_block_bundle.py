@@ -220,9 +220,11 @@ class TestFix1PlaceholderNameReject:
 
 
 class TestFix2CalibratorGuardRemoved:
-    """The guard and its kill switch went with the co-occurrence calibration job; the 6
+    """The guard and its kill switch went with the co-occurrence calibration job; the
     create_*_relationship helpers and the batched ``_set_clause`` write their confidence directly (the two
-    sector helpers the label table's, by the batched writer's rule, 2026-10-18)."""
+    sector helpers the label table's, by the batched writer's rule, 2026-10-18). The actor-technique (0.7),
+    malware-actor (0.7) and indicator-malware (0.6) helpers went with the in-process STIX loader
+    (2026-11-02)."""
 
     def _src(self) -> str:
         return (SRC / "neo4j_client.py").read_text()
@@ -236,12 +238,12 @@ class TestFix2CalibratorGuardRemoved:
 
     def test_helper_sites_write_their_confidence(self):
         src = self._src()
-        assert src.count("r.confidence_score = 0.7,") == 2
+        assert src.count("r.confidence_score = 0.7,") == 0
         # create_indicator_vulnerability_relationship (two branches); the two sector helpers take the
         # label table's value and never lower a stored link (2026-10-18, ``_unstated_sector_link_items``)
         assert src.count("r.confidence_score = 0.5,") == 2
         assert src.count('{_unstated_sector_link_items("r")},') == 2
-        assert src.count("r.confidence_score = 0.6,") == 1
+        assert src.count("r.confidence_score = 0.6,") == 0
         assert 'confidence_expr = "row.confidence"' in src
 
 

@@ -131,7 +131,6 @@ These items need the graph of the next fresh baseline to be checked or changed. 
 - **DragonForce.** The `dragonforce` entry of the canonical threat-actor reference is the hacktivist group based in Malaysia; the operators of the DragonForce ransomware have no actor of their own in the reference.
 - **Curated packages.**
   - A fresh-baseline wipe deletes the package's MISP event, whose title contains `EdgeGuard`, and a full sync on an empty graph processes the package before the events that create its ends (the sync takes the smallest events first), so its claims attach to nothing and are not retried. A package is therefore imported after the baseline, and again after every wipe ([RUNBOOK.md § Importing a curated package](RUNBOOK.md#importing-a-curated-package)).
-  - The STIX flow of `src/run_pipeline.py` writes an actor's technique link through `create_actor_technique_relationship`, which sets `confidence_score` to 0.7 on every write, so a run of that path over a pair that a curated claim created lowers the claim's 0.85. The Airflow sync keeps the higher value.
   - The sync takes the first `tlp:` tag of an attribute and its event (`_extract_tlp_tag`), not the most restrictive one.
   - Withdrawing a claim from a package and importing the package again does not remove the link the claim created; the removal is the manual procedure of the RUNBOOK section above.
 - **Acceptance check.** The co-occurrence check of `scripts/verify_fresh_baseline.py` rejects links labelled `misp_cooccurrence`; it should also reject `misp_correlation`. Nothing writes either label.
@@ -218,14 +217,15 @@ Defects found in the code; each is fixed in its own change.
 
 ## Open issues with implemented work
 
-- **[#57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57) Airflow-aware baseline lock.** Implemented: the `edgeguard_baseline` DAG takes `checkpoints/baseline_in_progress.lock` with the DAG run as holder (`baseline_acquire_lock`, `baseline_release_lock`), the scheduled DAGs read the holder's run state through the Airflow REST API and fall back to the lock's age, and `src/run_pipeline.py --baseline` takes the same lock ([RUNBOOK.md § Baseline-day protocol](RUNBOOK.md#baseline-day-protocol)). The issue is still open.
+- **[#57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57) Airflow-aware baseline lock.** Implemented: the `edgeguard_baseline` DAG takes `checkpoints/baseline_in_progress.lock` with the DAG run as holder (`baseline_acquire_lock`, `baseline_release_lock`), the scheduled DAGs read the holder's run state through the Airflow REST API and fall back to the lock's age ([RUNBOOK.md § Baseline-day protocol](RUNBOOK.md#baseline-day-protocol)). The issue is still open.
 
 ---
 
-_Last updated: 2026-10-26_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Curated packages: the item on the 0.7 actor-technique writes of `run_pipeline.py` is closed; that path and `create_actor_technique_relationship` are removed. Issue #57 no longer names `run_pipeline.py --baseline` as a holder of the baseline lock (its in-process baseline is retired).
 - 2026-10-26 — CI safety net: the entry for the collection-time stubs of `tests/test_graphql_api.py` is reworded; the stubs are in a fixture that puts `sys.modules` back after that file's tests, and test modules no longer leave second copies of `neo4j_client`, `run_misp_to_neo4j`, `build_relationships`, `enrichment_jobs` or `stix_exporter` behind. Still planned: a session hook that fails when a test module leaves either.
 - 2026-10-25 — OTX event partitioning (was MISP event partitioning): the writer splits every source/date event into `-partN` events of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20,000) attributes except a group with OTX report ids; what remains is report-scoped linking across the parts of a day in the sync, then splitting OTX; Bounded memory names the split instead of planned partitioning.
 - 2026-10-25 — Operational guardrails, live graph invariants: the entry for `check_neo4j_quality` exiting 0 when its query fails is reworded; the task counts nodes through `Neo4jClient` and fails when Neo4j is unreachable or the count query fails, but still checks no invariant.

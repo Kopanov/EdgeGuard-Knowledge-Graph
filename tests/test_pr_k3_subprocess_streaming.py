@@ -1,9 +1,9 @@
 """
 PR-K3 §1-4 — bounded-memory subprocess streaming for build_relationships.
 
-Regression coverage for ``src/subprocess_streaming.py`` and the two
-call sites that use it (DAG ``run_build_relationships`` + CLI
-``run_pipeline.py`` Step 5b).
+Regression coverage for ``src/subprocess_streaming.py`` and its call
+site, the DAG's ``run_build_relationships`` (the CLI's Step 5b in
+``run_pipeline.py`` is retired with the in-process baseline, 2026-11-02).
 
 ## The bug
 
@@ -44,7 +44,6 @@ Behavioural (using a small Python subprocess as a stand-in for
 Source-pins (guard against a future refactor reverting to
 capture_output=True):
 - DAG ``run_build_relationships`` uses the helper, not subprocess.run
-- CLI Step 5b uses the helper, not subprocess.run
 - Helper's tail buffer is bounded (``deque(maxlen=...)``)
 """
 
@@ -274,23 +273,6 @@ class TestSourcePinsCaptureOutputGone:
         # The SubprocessStreamTimeout branch must be present so timeouts are handled.
         assert "SubprocessStreamTimeout" in code_only
 
-    def test_cli_step_5b_uses_helper(self):
-        """CLI site: ``run_pipeline.py`` Step 5b MUST call the
-        streaming helper."""
-        cli_src = (REPO_ROOT / "src" / "run_pipeline.py").read_text()
-        # Locate Step 5b — uniquely identified by the log marker.
-        marker = "Step 5b: build_relationships"
-        idx = cli_src.find(marker)
-        assert idx > 0, "could not find Step 5b marker in run_pipeline.py"
-        # Grab the next ~120 lines of context.
-        block = cli_src[idx : idx + 6000]
-        code_only = self._strip_docstrings_and_comments(block)
-
-        assert "run_with_streaming_output(" in code_only, "PR-K3: Step 5b must call run_with_streaming_output"
-        assert "subprocess.run(" not in code_only, "PR-K3: Step 5b must not revert to subprocess.run(...)"
-        # Degraded-mode log must still be there — CLI divergence from DAG preserved.
-        assert "DEGRADED MODE" in code_only
-
     def test_helper_uses_bounded_deque(self):
         """The helper's tail buffer MUST be a bounded ``deque(maxlen=...)``
         — otherwise the memory-cap guarantee of PR-K3 evaporates."""
@@ -382,42 +364,6 @@ class TestDefaultTailLinesIsGenerous:
 # ===========================================================================
 # Bugbot round-1 follow-up findings (Medium + 2 Low)
 # ===========================================================================
-
-
-class TestImportOutsideTryBlock:
-    """PR-K3 Bugbot round-1 (Medium): ``from subprocess_streaming
-    import ...`` MUST be OUTSIDE the ``try`` block in ``run_pipeline.py``
-    Step 5b. If the import is inside ``try`` and fails, the
-    ``except SubprocessStreamTimeout as e:`` clause references an
-    un-imported name → NameError propagates PAST the
-    ``except Exception`` fallback, breaking the CLI's degraded-mode
-    guarantee.
-
-    The DAG site already had it outside; this pin enforces parity."""
-
-    def test_subprocess_streaming_imported_outside_try(self):
-        """The import must precede the ``try:`` block, not be inside it."""
-        cli_src = (REPO_ROOT / "src" / "run_pipeline.py").read_text()
-        marker = "Step 5b: build_relationships"
-        idx = cli_src.find(marker)
-        assert idx > 0
-        block = cli_src[idx : idx + 6000]
-
-        # Find the import statement
-        import_line = "from subprocess_streaming import"
-        import_idx = block.find(import_line)
-        assert import_idx > 0, f"could not find {import_line!r} in Step 5b region"
-
-        # Find the first try: block AFTER the marker
-        try_idx = block.find("try:", 0)
-        assert try_idx > 0, "could not find try block in Step 5b region"
-
-        # The import MUST come before the try, not inside it.
-        assert import_idx < try_idx, (
-            "PR-K3 Bugbot round-1 (Medium): subprocess_streaming import must be "
-            "OUTSIDE the try block. If the import fails inside try, NameError on "
-            "the except clause bypasses the degraded-mode handler."
-        )
 
 
 class TestTimeoutMessageReflectsActualEscalation:

@@ -14,7 +14,7 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
 
 - **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist and, behind their enable flags, CISA ICS and MalwareBazaar
 - **MISP** is the only place collector output lands first — no collector writes directly to Neo4j
-- **Neo4j:** `src/run_misp_to_neo4j.py` syncs from MISP (run by the `edgeguard_baseline` DAG and the scheduled sync DAG). **Development only:** the in-process `run_pipeline.py` loads Neo4j through its STIX 2.1 import (`load_stix21_to_neo4j()`) and builds a reduced graph (`docs/AIRFLOW_DAGS.md`, "In-process CLI baseline") — this is not a direct collector→Neo4j write either
+- **Neo4j:** `src/run_misp_to_neo4j.py` syncs from MISP (run by the `edgeguard_baseline` DAG and the scheduled sync DAG). **Development only:** `run_pipeline.py` runs the collectors into MISP and writes nothing to Neo4j; its `--baseline`, `--fresh-baseline`, `--baseline-days` and `--stix-flow` exit 2 (`docs/AIRFLOW_DAGS.md`, "One baseline path")
 - **Optional allowlist:** `EDGEGUARD_COLLECT_SOURCES` — canonical names in `src/collector_allowlist.py` (import this from DAGs at parse time, **not** `collectors/__init__.py`, which loads every collector)
 - **REST API** (`src/query_api.py`) — external-facing read API on port 8000
 - **GraphQL API** (`src/graphql_api.py`) — Strawberry-based API on port 4001 mirroring ISIM's interface
@@ -151,7 +151,7 @@ Flag a cursor update that runs before, or regardless of, the result of the push 
 
 ### Source revisions edited in place
 Every CISA KEV run compares the whole catalogue with EdgeGuard's `source:CISA-KEV` copies and edits the copy of a revised entry in place, only through `src/collectors/vulnerability_update.py` (`plan_source_updates`, `push_additions`, `apply_vulnerability_edits`): one complete listing (a failed listing writes nothing), only copies in EdgeGuard events (`KnownAttribute.own_event`), each edit confirmed against the stored copy's timestamp (`written_after`), the refresh path's stop rules, and `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`. A deferred edit is not a failure; a failed edit counts in the run's status.
-Flag a KEV change that applies a `dateAdded` window or the generic incremental limit to incremental runs, pushes a revised entry as a new attribute, edits a copy outside an EdgeGuard event, edits without `written_after` or outside the stop rules, or counts a deferred edit as failed. Flag a new `NVD_META` key written for every source or with an empty default: it changes the digest of every stored copy and edits each once; add a key only when the item carries it. Flag a change to `Neo4jClient.merge_cve` that lets a record other than CISA KEV's set `cisa_exploit_add`, `cisa_action_due`, `cisa_required_action` or `cisa_vulnerability_name` on a node that holds a value, or that writes a CVE's `SOURCED_FROM.raw_data` only when the edge is created for a record from a MISP attribute, or replaces it with the reduced record of the STIX import (`run_pipeline`, `refresh_raw_data=False`). Flag a KEV tag policy that detaches a tag EdgeGuard does not write: `KEV_REPLACED_TAGS` names the families `severity:` and `cvss:` and the one tag `ransomware:known`, never the whole `ransomware:` namespace (an analyst's taxonomy tags).
+Flag a KEV change that applies a `dateAdded` window or the generic incremental limit to incremental runs, pushes a revised entry as a new attribute, edits a copy outside an EdgeGuard event, edits without `written_after` or outside the stop rules, or counts a deferred edit as failed. Flag a new `NVD_META` key written for every source or with an empty default: it changes the digest of every stored copy and edits each once; add a key only when the item carries it. Flag a change to `Neo4jClient.merge_cve` that lets a record other than CISA KEV's set `cisa_exploit_add`, `cisa_action_due`, `cisa_required_action` or `cisa_vulnerability_name` on a node that holds a value, or that writes a CVE's `SOURCED_FROM.raw_data` only when the edge is created for a record from a MISP attribute. Flag a KEV tag policy that detaches a tag EdgeGuard does not write: `KEV_REPLACED_TAGS` names the families `severity:` and `cvss:` and the one tag `ransomware:known`, never the whole `ransomware:` namespace (an analyst's taxonomy tags).
 
 ### Collector missing status return
 Every `collect()` method must return a status dict using `make_status()` from `src/collectors/collector_utils.py`.
@@ -245,7 +245,7 @@ Default **`500`** (Python-side chunk size). **`0`** or **`all`** (case-insensiti
 
 STIX 2.1 does not define **`labels`** on SCO types (`ipv4-addr`, `domain-name`, `file`, `url`, …). The PyMISP **`to_stix2()`** bundle path must call **`apply_edgeguard_zone_metadata_to_stix_dict()`** so zones go to **`x_edgeguard_zones`** on SCOs and **`labels`** only on SDOs.
 
-Flag any change that adds **`labels`** to SCO dicts in **`convert_to_stix21()`** or strips **`x_edgeguard_zones`** from observables consumed by **`run_pipeline._extract_zones_from_stix_labels`**.
+Flag any change that adds **`labels`** to SCO dicts in **`convert_to_stix21()`** or strips **`x_edgeguard_zones`** from observables.
 
 ---
 
@@ -366,7 +366,7 @@ These rules guard against the most dangerous class of bugs in threat intelligenc
 
 Text-based matching (e.g., `WHERE indicator.value CONTAINS malware.name`) always produces hallucinated relationships. An IP address like `1.2.3.4` will never correctly "contain" the string `Emotet`, and a CVE description containing the word "bank" does not mean that CVE targets the finance sector.
 
-Flag any relationship-building query in `build_relationships.py`, `run_pipeline.py`, or `run_misp_to_neo4j.py` that uses `CONTAINS`, `STARTS WITH`, or Python `in` string checks to link two threat intelligence entities. The only acceptable linking methods are:
+Flag any relationship-building query in `build_relationships.py` or `run_misp_to_neo4j.py` that uses `CONTAINS`, `STARTS WITH`, or Python `in` string checks to link two threat intelligence entities. The only acceptable linking methods are:
 - **Explicit source data**: `uses_techniques` on **ThreatActor** and **Malware** (MITRE STIX), `cve_id` tag, `misp_event_id` shared between nodes within the same tightly-scoped event
 - **Shared unique identifiers**: CVE ID, MITRE technique ID, hash value, exact domain/IP match
 
@@ -824,7 +824,7 @@ On an `Indicator` the max-wins applies to `n.source_confidence` (`indicator_agin
 Flag an Indicator write that sets `confidence_score` other than through `aging_map`, a max-wins on an Indicator's `confidence_score`, `source_confidence` filled from an aged `confidence_score`, and any path that lowers a non-Indicator node's confidence.
 
 ### `SOURCED_FROM` edge provenance
-`r.raw_data` on the `SOURCED_FROM` edge is written when the edge is created (`ON CREATE SET`), except on CVE: `merge_cve` passes `refresh_raw_data=True` (the default), so the edge holds the source's latest record (a MISP copy edited in place and re-read by the sync); the STIX import (`run_pipeline`, a reduced record) passes `refresh_raw_data=False` and never replaces it.
+`r.raw_data` on the `SOURCED_FROM` edge is written when the edge is created (`ON CREATE SET`), except on CVE: `merge_cve` passes `refresh_raw_data=True` (the default), so the edge holds the source's latest record (a MISP copy edited in place and re-read by the sync).
 `r.imported_at` is immutable after creation. `r.confidence`, `r.source`, `r.misp_event_ids`, `r.source_refs`, `r.zones` / `r.stated_zones` / `r.stated_refs` and `r.updated_at` are updated on every write; `r.source_reported_first_at` / `r.source_reported_last_at` move by MIN / MAX, and an Indicator's edge records the source's report forward only (`indicator_aging.edge_report_items`).
 
 ---
@@ -972,7 +972,7 @@ The `default_args` dict must include `on_success_callback` pointing to `_on_task
 
 ### Neo4j merge return values must be checked before incrementing stats
 
-In `src/run_misp_to_neo4j.py` and `src/run_pipeline.py`, every call to `merge_indicator()`, `merge_vulnerability()`, `merge_cve()`, `merge_malware()`, `merge_actor()`, `merge_technique()` must check the boolean return value before incrementing the stats counter. Flag any pattern like:
+In `src/run_misp_to_neo4j.py`, every call to `merge_indicator()`, `merge_vulnerability()`, `merge_cve()`, `merge_malware()`, `merge_actor()`, `merge_technique()` must check the boolean return value before incrementing the stats counter. Flag any pattern like:
 ```python
 self.neo4j.merge_vulnerability(item, ...)
 self.stats["vulnerabilities_synced"] += 1  # BUG: not checking return value
@@ -997,7 +997,7 @@ Every collector task (scheduled and baseline) sets `pool=COLLECTOR_POOL` (`edgeg
 
 ### `clear_checkpoint()` must preserve incremental state
 
-`src/baseline_checkpoint.py` `clear_checkpoint(source=None)` (the `--fresh-baseline` path) must preserve `"incremental"` sub-dicts inside each source entry. These hold OTX `modified_since` cursors, MITRE ETags, etc. Destroying them forces scheduled runs to re-process all historical data. Flag any change to `clear_checkpoint` that deletes incremental state on the global (no-source) path.
+`src/baseline_checkpoint.py` `clear_checkpoint(source=None)` without `include_incremental` (`edgeguard checkpoint clear` without `--include-incremental`, `python src/baseline_checkpoint.py clear`) must preserve `"incremental"` sub-dicts inside each source entry. These hold OTX `modified_since` cursors, MITRE ETags, etc. Destroying them forces scheduled runs to re-process all historical data. The fresh baseline's `baseline_clean` task passes `include_incremental=True` and clears them by design. Flag any change to `clear_checkpoint` that deletes incremental state on the global (no-source) path without `include_incremental`.
 
 ### Prometheus stuck-run alerts require gauge wiring
 
@@ -1057,6 +1057,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Architecture: `run_pipeline.py` runs the collectors into MISP only and refuses its baseline and STIX options (it loaded Neo4j through a STIX import); the SCO-labels, substring-matching and merge-return rules no longer name it, and the KEV and `SOURCED_FROM` provenance rules no longer name the reduced CVE record of its STIX import (`refresh_raw_data=False`).
 - 2026-11-02 — Architecture: `run_pipeline.py` is a development path that builds a reduced graph (it was named an optional CLI path); every baseline runs through the `edgeguard_baseline` DAG.
 - 2026-10-25 — MERGE block missing SOURCED_FROM edge: the edge MATCHes the `Source` node by the canonical id (the rule's pattern MERGEd the node); new flags for a statement other than `ensure_sources` that creates a `Source` node and for a `SOURCED_FROM` writer that does not resolve its id with `canonical_source_id`.
 - 2026-10-25 — Duplicate event creation allows the `-part<N>` events of a source and day (`_get_or_create_event(source, date, part)`); new rule Event split: lookups of later parts never create, a part is created only right before its first batch and once the existing parts are allotted to the limit, no part after a failed lookup or creation, and a group with source-report ids is never split.

@@ -11,10 +11,8 @@
    ``EMPLOYS_TECHNIQUE`` / ``IMPLEMENTS_TECHNIQUE`` / ``EXPLOITS`` rows now carry it too, and
    ``build_relationships`` Q7a-Q7d label the edges the sync created first (since 2026-10-16 with the
    label they compute from the sector evidence, ``sector_evidence``).
-3. **STIX path loses ATTRIBUTED_TO source** (Medium) — the in-process STIX loader attributes every
-   object to its ``x_edgeguard_source`` (stamped per object by ``sync_misp_to_neo4j_via_stix``),
-   falls back to ``stix_import`` (never ``"unknown"``), and labels the explicit ``attributed-to``
-   relationship object ``stix_relationship``.
+3. **STIX path loses ATTRIBUTED_TO source** (Medium) — fixed in the in-process STIX loader of
+   ``run_pipeline.py``, which is retired with its pins (2026-11-02).
 """
 
 from __future__ import annotations
@@ -308,75 +306,6 @@ class TestBatchRowsCarryMatchType:
             assert "THEN r.match_type ELSE _label END AS _kept SET r.match_type = _kept" in body
             assert 'coalesce(r.match_type, "zone_classification")' not in body
             assert "r.edgeguard_managed = true" in body
-
-
-# --------------------------------------------------------------------------- 3. STIX loader provenance
-class TestStixLoaderProvenance:
-    @pytest.fixture
-    def pipeline(self):
-        from run_pipeline import EdgeGuardPipeline
-
-        p = EdgeGuardPipeline()
-        p.neo4j = MagicMock()
-        return p
-
-    @staticmethod
-    def _bundle(with_source: bool):
-        objs = [
-            {"type": "malware", "id": "malware--1", "name": "Emotet"},
-            {"type": "threat-actor", "id": "threat-actor--1", "name": "TA542"},
-            {"type": "indicator", "id": "indicator--1", "pattern": "[ipv4-addr:value = '1.2.3.4']"},
-            {
-                "type": "relationship",
-                "id": "relationship--1",
-                "relationship_type": "attributed-to",
-                "source_ref": "malware--1",
-                "target_ref": "threat-actor--1",
-            },
-            {
-                "type": "relationship",
-                "id": "relationship--2",
-                "relationship_type": "indicates",
-                "source_ref": "indicator--1",
-                "target_ref": "malware--1",
-            },
-        ]
-        if with_source:
-            for o in objs:
-                o["x_edgeguard_source"] = "alienvault_otx"
-        return {"type": "bundle", "objects": objs}
-
-    def test_attributed_to_keeps_the_objects_source_and_gets_the_stix_label(self, pipeline):
-        pipeline.load_stix21_to_neo4j(self._bundle(with_source=True))
-        pipeline.neo4j.create_malware_actor_relationship.assert_called_once_with(
-            "Emotet", "TA542", source_id="alienvault_otx", match_type="stix_relationship"
-        )
-        _, kw = pipeline.neo4j.create_indicator_malware_relationship.call_args
-        assert kw["source_id"] == "alienvault_otx"
-
-    def test_bundle_without_source_is_attributed_to_stix_import_never_unknown(self, pipeline):
-        pipeline.load_stix21_to_neo4j(self._bundle(with_source=False))
-        _, kw = pipeline.neo4j.create_malware_actor_relationship.call_args
-        assert kw["source_id"] == "stix_import"
-        for call in pipeline.neo4j.method_calls:
-            assert "unknown" not in repr(call.kwargs.get("source_id", "")), call
-
-    def test_legacy_writer_derives_label_from_source_and_stamps_marker(self):
-        from neo4j_client import Neo4jClient
-
-        client = Neo4jClient.__new__(Neo4jClient)
-        client.driver = MagicMock()
-        session = MagicMock()
-        client.driver.session.return_value.__enter__ = MagicMock(return_value=session)
-        client.driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        assert client.create_malware_actor_relationship("Emotet", "TA542") is not None
-        query, kwargs = session.run.call_args[0][0], session.run.call_args[1]
-        assert "r.edgeguard_managed = true" in query and "r.match_type = coalesce(r.match_type, $match_type)" in query
-        assert kwargs["match_type"] == "mitre_explicit", "default source mitre_attck → MITRE's own attributed-to"
-        client.create_malware_actor_relationship("Emotet", "TA542", source_id="mitre_derived")
-        assert session.run.call_args[1]["match_type"] == "mitre_derived"
-        client.create_malware_actor_relationship("Emotet", "TA542", source_id="alienvault_otx")
-        assert session.run.call_args[1]["match_type"] is None, "no invented label for an unknown evidence class"
 
 
 def _split_on_create(cypher: str) -> tuple[str, str]:

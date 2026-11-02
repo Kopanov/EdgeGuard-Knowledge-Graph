@@ -2,25 +2,18 @@
 EdgeGuard — Baseline Configuration (single source of truth)
 ============================================================
 
-Centralizes the resolution of baseline-mode configuration values that have
-been historically defined in 4+ places with subtle drift:
+Centralizes the resolution of baseline-mode configuration values, which were
+once hardcoded in several places with subtle drift (the default window of
+730 days, and the per-source item limit ``BASELINE_COLLECTION_LIMIT``).
 
-  - ``DEFAULT_BASELINE_DAYS`` was hardcoded as ``730`` in:
-      * src/run_pipeline.py:881 (CLI default)
-      * src/run_pipeline.py:1104 (inner method default)
-      * dags/edgeguard_pipeline.py:1732 (DAG ENV default)
-      * dags/edgeguard_pipeline.py:1744 (DAG Variable default)
-    plus the CLI's ``--baseline-days`` help text said "365" while the
-    actual default was 730 (audit Cross-Checker MED + Devil's Advocate).
-
-  - ``BASELINE_COLLECTION_LIMIT`` had similar sprawl.
-
-This module gives both call sites (CLI + DAG) one resolution function with
-documented precedence. Any future change to the default propagates without
-hunting for hardcoded strings.
+Its callers share one resolution function per value, with documented
+precedence: the ``edgeguard_baseline`` DAG (``get_baseline_config``),
+``edgeguard baseline`` / ``edgeguard fresh-baseline`` (``--days``), and the
+NVD and CISA collectors (the scope of their scheduled runs). Any future
+change to the default propagates without hunting for hardcoded strings.
 
 Resolution precedence (highest first):
-  1. Explicit kwarg/CLI flag (``--baseline-days N`` or ``baseline_days=N``)
+  1. Explicit kwarg/CLI flag (``edgeguard baseline --days N`` or ``explicit=N``)
   2. ``dag_run.conf`` override (DAG-only — the operator triggering the DAG
       can override per-run via the JSON conf box)
   3. ``EDGEGUARD_BASELINE_DAYS`` env var
@@ -46,10 +39,7 @@ logger = logging.getLogger(__name__)
 # Defaults — single source of truth
 # --------------------------------------------------------------------------- #
 
-#: 2 years of historical data is the recommended baseline window. Audit
-#: Cross-Checker confirmed 730 is the value used by both DAG and CLI in
-#: practice; the previous CLI ``--baseline-days`` help text saying "365"
-#: was wrong. Documented at:
+#: 2 years of historical data is the recommended baseline window. Documented at:
 #:   - docs/AIRFLOW_DAGS.md
 #:   - docs/BASELINE_SMOKE_TEST.md
 DEFAULT_BASELINE_DAYS: int = 730

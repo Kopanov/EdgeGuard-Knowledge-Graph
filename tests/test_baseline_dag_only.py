@@ -1,12 +1,10 @@
-"""Every baseline runs through the ``edgeguard_baseline`` DAG; the in-process CLI baseline is a development path.
+"""Every baseline runs through the ``edgeguard_baseline`` DAG.
 
-``python src/run_pipeline.py --baseline`` loads Neo4j through its STIX import, whose nodes lack the lists
-``build_relationships.py`` links by, so it builds a reduced graph while ending "successfully". These tests pin
-that the CLI says so (``--help`` and a warning logged before the fresh-baseline wipe and before any collector),
-that ``scripts/preflight_baseline.sh`` assumes the DAG launch path when none is given and, without Docker, says
-which checks it could not run, that the MISP version warnings no longer offer ``run_pipeline.py`` as a
-workaround, and that the docs which show the CLI command say what it builds and send installs without Docker to
-the DAG.
+The in-process baseline of ``python src/run_pipeline.py`` is retired (``run_pipeline.py`` refuses ``--baseline``;
+``tests/test_run_pipeline_collect_only.py``). These tests pin that ``scripts/preflight_baseline.sh`` assumes the
+DAG launch path when none is given, refuses the retired ``cli`` launch path and, without Docker, says which checks
+it could not run, that the MISP version warnings offer no ``run_pipeline.py`` workaround, and that the docs offer
+no in-process baseline and send installs without Docker to the DAG.
 """
 
 from __future__ import annotations
@@ -39,136 +37,6 @@ class _Collect(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self.messages.append(record.getMessage())
-
-
-@pytest.fixture
-def pipeline_log():
-    import run_pipeline
-
-    handler = _Collect()
-    run_pipeline.logger.addHandler(handler)
-    previous = run_pipeline.logger.level
-    run_pipeline.logger.setLevel(logging.INFO)
-    try:
-        yield handler.messages
-    finally:
-        run_pipeline.logger.removeHandler(handler)
-        run_pipeline.logger.setLevel(previous)
-
-
-def _bare_pipeline(connect_result: bool = False):
-    """An ``EdgeGuardPipeline`` without collectors: ``_run_pipeline_inner`` needs only ``neo4j`` up to Step 1."""
-    import run_pipeline
-
-    pipeline = run_pipeline.EdgeGuardPipeline.__new__(run_pipeline.EdgeGuardPipeline)
-    pipeline.neo4j = MagicMock()
-    pipeline.neo4j.connect.return_value = connect_result
-    return pipeline
-
-
-def _warning_lines(messages: list[str]) -> list[str]:
-    return [m for m in messages if m.startswith("[REDUCED-GRAPH]")]
-
-
-class TestCliBaselineSaysItIsReduced:
-    def test_help_text_of_baseline_names_the_reduced_graph_and_the_dag(self, monkeypatch, capsys):
-        import run_pipeline
-
-        pipeline_class = MagicMock()
-        monkeypatch.setattr(run_pipeline, "EdgeGuardPipeline", pipeline_class)
-        monkeypatch.setattr(sys, "argv", ["run_pipeline.py", "--help"])
-        with pytest.raises(SystemExit) as exc:
-            run_pipeline.main()
-        assert exc.value.code == 0
-        pipeline_class.assert_not_called()
-        text = " ".join(capsys.readouterr().out.split())
-        # The option's own help, between "--baseline " and the next option.
-        baseline_help = text.split("--baseline ", 1)[1].split("--baseline-days", 1)[0]
-        assert " ".join(run_pipeline.CLI_BASELINE_HELP_NOTE.split()) in baseline_help
-        assert "Development only: builds a reduced graph" in baseline_help
-        assert "no CVSS scores" in baseline_help
-        assert "runs the edgeguard_baseline DAG" in baseline_help
-
-    def test_fresh_baseline_logs_the_warning_before_the_wipe(self, monkeypatch, pipeline_log):
-        import baseline_clean
-
-        pipeline = _bare_pipeline()
-        seen_at_wipe: list[list[str]] = []
-
-        def fake_reset(**_kwargs):
-            seen_at_wipe.append(list(pipeline_log))
-            raise baseline_clean.BaselineCleanError("stopped by the test after the wipe call")
-
-        monkeypatch.setattr(baseline_clean, "reset_baseline_data", fake_reset)
-        assert pipeline._run_pipeline_inner(baseline=True, fresh_baseline=True, baseline_days=7) is False
-
-        (before_wipe,) = seen_at_wipe
-        import run_pipeline
-
-        assert _warning_lines(before_wipe) == list(run_pipeline.CLI_BASELINE_WARNING_LINES)
-        warning = " ".join(_warning_lines(before_wipe))
-        for missing in ("IN_TACTIC", "USES_MALWARE", "USES_TOOL", "IMPLEMENTS_TECHNIQUE", "no CVSS scores"):
-            assert missing in warning
-        assert "edgeguard_baseline DAG" in warning
-        # The refused clean stops the run before anything is collected or loaded.
-        pipeline.neo4j.connect.assert_not_called()
-
-    def test_fresh_baseline_logs_what_the_wipe_deleted(self, monkeypatch, pipeline_log):
-        """2026-11-02: the counts the wipe reported (the 730-day run of 2026-11-01: 14 MISP events deleted,
-        700 counted by the pre-wipe probe), not the probe's."""
-        import baseline_clean
-
-        before = baseline_clean.BaselineState(
-            neo4j_count=145_429, neo4j_ok=True, misp_count=700, misp_ok=True, checkpoint_count=2, checkpoint_ok=True
-        )
-        after = baseline_clean.BaselineState(neo4j_ok=True, misp_ok=True, checkpoint_ok=True)
-        result = baseline_clean.CleanResult(
-            before=before,
-            after=after,
-            duration_seconds=117.7,
-            verify_attempts=1,
-            neo4j_nodes_deleted=145_429,
-            misp_events_deleted=14,
-        )
-        monkeypatch.setattr(baseline_clean, "reset_baseline_data", lambda **_kw: result)
-        assert _bare_pipeline()._run_pipeline_inner(baseline=True, fresh_baseline=True, baseline_days=7) is False
-        assert (
-            "Fresh-baseline clean complete: deleted 145429 Neo4j nodes, 14 MISP events, 2 checkpoint entries (117.7s)"
-            in pipeline_log
-        )
-
-    def test_additive_baseline_logs_the_warning_before_it_collects(self, monkeypatch, pipeline_log):
-        import baseline_checkpoint
-        import run_pipeline
-
-        monkeypatch.setattr(baseline_checkpoint, "get_baseline_status", lambda *a, **k: {})
-        pipeline = _bare_pipeline()
-        seen_at_connect: list[list[str]] = []
-
-        def fake_connect():
-            seen_at_connect.append(list(pipeline_log))
-            return False  # Step 1 fails: the run ends before Step 2 collects anything
-
-        pipeline.neo4j.connect.side_effect = fake_connect
-        assert pipeline._run_pipeline_inner(baseline=True, fresh_baseline=False, baseline_days=7) is False
-        (before_step_1,) = seen_at_connect
-        assert _warning_lines(before_step_1) == list(run_pipeline.CLI_BASELINE_WARNING_LINES)
-
-    def test_an_update_run_logs_no_baseline_warning(self, pipeline_log):
-        pipeline = _bare_pipeline()
-        assert pipeline._run_pipeline_inner(baseline=False) is False
-        pipeline.neo4j.connect.assert_called_once()
-        assert "UPDATE MODE: Collecting latest data only" in pipeline_log
-        assert _warning_lines(pipeline_log) == []
-
-    def test_step_5b_no_longer_claims_parity_with_the_dag(self):
-        import inspect
-
-        import run_pipeline
-
-        source = inspect.getsource(run_pipeline.EdgeGuardPipeline._run_pipeline_inner)
-        assert "Step 5b: build_relationships" in source
-        assert "parity with DAG" not in source
 
 
 def _launch_path_block() -> str:
@@ -210,23 +78,29 @@ class TestPreflightLaunchPath:
         assert "edgeguard_baseline DAG" in warning
 
     @pytest.mark.parametrize(
-        ("args", "env_launch_path", "expected"),
-        [
-            (["--launch-path=dag"], None, "dag"),
-            (["--launch-path", "cli"], None, "cli"),
-            ([], "cli", "cli"),
-            (["--launch-path=dag"], "cli", "dag"),
-        ],
+        ("args", "env_launch_path"),
+        [(["--launch-path=dag"], None), (["--launch-path", "dag"], None), ([], "dag"), (["--launch-path=dag"], "cli")],
     )
-    def test_an_explicit_launch_path_is_kept_without_a_warning(self, tmp_path, args, env_launch_path, expected):
+    def test_an_explicit_dag_launch_path_is_kept_without_a_warning(self, tmp_path, args, env_launch_path):
         code, out = _resolve_launch_path(tmp_path, args, env_launch_path)
         assert code == 0
-        assert out == [f"LAUNCH_PATH={expected}"]
+        assert out == ["LAUNCH_PATH=dag"]
+
+    @pytest.mark.parametrize(
+        ("args", "env_launch_path"), [(["--launch-path", "cli"], None), (["--launch-path=cli"], None), ([], "cli")]
+    )
+    def test_the_retired_cli_launch_path_is_refused(self, tmp_path, args, env_launch_path):
+        """The in-process baseline it checked is retired: ``run_pipeline.py`` refuses ``--baseline``."""
+        code, out = _resolve_launch_path(tmp_path, args, env_launch_path)
+        assert code == 1
+        (failure,) = out
+        assert failure.startswith("FAIL|--launch-path 'cli' is retired: run_pipeline.py refuses --baseline")
+        assert "every baseline runs through the edgeguard_baseline DAG (--launch-path=dag" in failure
 
     def test_an_unknown_launch_path_fails(self, tmp_path):
         code, out = _resolve_launch_path(tmp_path, ["--launch-path=docker"])
         assert code == 1
-        assert out == ["FAIL|invalid --launch-path 'docker' (must be 'cli' or 'dag')"]
+        assert out == ["FAIL|invalid --launch-path 'docker' (must be 'dag')"]
 
     def test_help_prints_the_whole_header_with_the_launch_path_default(self, tmp_path):
         done = subprocess.run(
@@ -237,9 +111,12 @@ class TestPreflightLaunchPath:
         assert lines[0].startswith("# preflight_baseline.sh")
         assert lines[-1].startswith("# See docs/RUNBOOK.md")
         text = " ".join(line.lstrip("#").strip() for line in lines)
-        assert "./scripts/preflight_baseline.sh [--launch-path dag|cli] [--strict]" in text
-        assert 'the script assumes "dag" and warns that it assumed it' in text
-        assert "a development path that builds a reduced graph" in text
+        assert "./scripts/preflight_baseline.sh [--launch-path dag] [--strict]" in text
+        assert 'script assumes "dag" and warns that it assumed it' in text
+        assert (
+            '"cli", the retired in-process baseline of src/run_pipeline.py (run_pipeline.py refuses --baseline), is refused'
+            in text
+        )
 
 
 def _preflight_section(start: str, end: str) -> str:
@@ -278,12 +155,6 @@ class TestPreflightWithoutDocker:
         assert "'airflow dags details <dag>' shows is_paused True" in warning
         assert "'airflow dags list-runs <dag> --state running -o json' prints []" in warning
 
-    def test_the_cli_path_keeps_its_lock_lines_and_warnings(self, tmp_path):
-        out = _run_without_docker(tmp_path, _preflight_section(*self._LAUNCH), launch_path="cli")
-        assert [line.split("|", 1)[0] for line in out] == ["PASS", "PASS", "WARN", "WARN"]
-        assert "reduced graph" in out[2]
-        assert out[3].startswith("WARN|docker not found; cannot verify that no scheduled DAG has a running run")
-
     def test_the_memory_check_points_to_the_host_memory(self, tmp_path):
         (warning,) = _run_without_docker(tmp_path, _preflight_section(*self._MEMORY))
         assert warning.startswith("WARN|docker not available; skipping the memory check of the edgeguard_airflow")
@@ -320,7 +191,7 @@ def _incompatible_misp_health(monkeypatch, issue: str) -> None:
 
 class TestOperatorMessagesOfferNoCliWorkaround:
     """The MISP version warnings of ``edgeguard doctor`` and of the DAGs' MISP preflight name the fix, not
-    ``run_pipeline.py``, whose STIX import builds a reduced graph."""
+    ``run_pipeline.py``, which runs the collectors into MISP only."""
 
     def test_edgeguard_doctor(self, monkeypatch, capsys):
         import requests
@@ -397,18 +268,28 @@ def _main_text_sections(text: str) -> list[str]:
 
 
 class TestDocs:
-    def test_every_section_that_shows_the_cli_baseline_says_it_builds_a_reduced_graph(self):
-        command = "python src/run_pipeline.py --baseline"
+    def test_no_doc_offers_the_in_process_baseline(self):
+        """No command line in a doc runs ``run_pipeline.py`` with a retired option, and every section that names
+        ``run_pipeline.py`` together with ``--baseline`` says that it refuses it."""
         docs = sorted((ROOT / "docs").glob("*.md")) + [ROOT / "README.md"]
-        showing: set[str] = set()
+        retired = ("--baseline", "--fresh-baseline", "--stix-flow")
+        commands: list[str] = []
         unlabelled: list[str] = []
+        naming: set[str] = set()
         for path in docs:
             for section in _main_text_sections(path.read_text()):
-                if command in section:
-                    showing.add(path.name)
-                    if "reduced graph" not in section:
+                for line in section.splitlines():
+                    if "run_pipeline.py" in line and line.lstrip().startswith(("python", "$ python", "./")):
+                        if any(option in line for option in retired):
+                            commands.append(f"{path.name}: {line.strip()}")
+                if "run_pipeline" in section and "--baseline" in section:
+                    naming.add(path.name)
+                    if not any(
+                        word in section for word in ("refuses", "refused", "exit with code 2", "exits 2", "retired")
+                    ):
                         unlabelled.append(f"{path.name}: {section.splitlines()[0][:80]}")
-        assert {"README.md", "AIRFLOW_DAGS.md", "BASELINE_SMOKE_TEST.md", "SETUP_GUIDE.md", "CLI.md"} <= showing
+        assert not commands, commands
+        assert {"README.md", "AIRFLOW_DAGS.md", "BASELINE_SMOKE_TEST.md", "SETUP_GUIDE.md", "CLI.md"} <= naming
         assert not unlabelled, unlabelled
 
     def test_installs_without_docker_are_sent_to_the_dag_with_postgresql(self):
@@ -422,7 +303,7 @@ class TestDocs:
         assert "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN" in path_b and "?timeout=60" in path_b
         assert "airflow dags trigger edgeguard_baseline" in path_b
         smoke = (ROOT / "docs" / "BASELINE_SMOKE_TEST.md").read_text()
-        option_b = smoke.split("## Option B", 1)[1].split("\n## Option C", 1)[0]
+        option_b = smoke.split("## Option B", 1)[1].split("\n## Checking the result", 1)[0]
         assert "airflow dags trigger edgeguard_baseline --conf" in option_b
 
     def test_env_example_names_a_postgresql_metadata_database_and_the_sqlite_caveat(self):
@@ -441,22 +322,6 @@ class TestDocs:
         echoed = re.findall(r"apache-airflow\[postgres\](~=[\d.]+)", install)
         assert echoed == [pin]
 
-    def test_the_short_lists_of_what_the_cli_baseline_lacks_agree(self):
-        summary = (
-            "(no ATT&CK tactic, software or technique-implementation links, no indicator-malware links or campaigns, "
-            "few actor-technique or attribution links, no CVSS scores)"
-        )
-        for name in ("README.md", "docs/SETUP_GUIDE.md", "docs/RUNBOOK.md"):
-            text = " ".join((ROOT / name).read_text().split())
-            assert f"builds a reduced graph {summary}" in text, name
-        import run_pipeline
-
-        assert "no indicator-malware links or campaigns" in run_pipeline.CLI_BASELINE_HELP_NOTE
-        dags_doc = (ROOT / "docs" / "AIRFLOW_DAGS.md").read_text()
-        section = dags_doc.split("#### In-process CLI baseline (development only)", 1)[1].split("\n---", 1)[0]
-        assert "`INDICATES` relationships" in section
-        assert "File hashes, email addresses and certificate fingerprints are not loaded" in section
-
     def test_the_no_docker_route_is_complete(self):
         # Preflight checks [5] and [6] only warn without Docker: the checklist and the README say what to check.
         checklist = " ".join((ROOT / "docs" / "BASELINE_LAUNCH_CHECKLIST.md").read_text().split())
@@ -468,7 +333,7 @@ class TestDocs:
         assert "Without Docker, checks `[5]` and `[6]` cannot read Airflow" in step_2
         # A fresh trigger without Docker: the backup gate reads the environment of the Airflow processes.
         smoke = " ".join((ROOT / "docs" / "BASELINE_SMOKE_TEST.md").read_text().split())
-        option_b = smoke.split("## Option B", 1)[1].split("## Option C", 1)[0]
+        option_b = smoke.split("## Option B", 1)[1].split("## Checking the result", 1)[0]
         assert "`EDGEGUARD_LAST_BACKUP_AT`" in option_b and "followed by their restart" in option_b
         assert '`"skip_backup_check": true`' in option_b
         # The airflow commands read the metadata database setting too.

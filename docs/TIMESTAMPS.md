@@ -234,9 +234,8 @@ This is why Invariant 2 is mandatory.
 Concepts 1 and 2 come only from the sources on the reliable first-seen allowlist, so an
 indicator's OTX edge has neither; every indicator edge the MISP → Neo4j sync writes has the
 source's latest report, `r.last_reported_at` (the source's own last-report date capped at the MISP
-timestamp, or the MISP timestamp when the source gave none). Writers that carry no MISP report (the
-command-line STIX import of `run_pipeline.py`, for example) record none on the edges they write, so
-such an edge dates the indicator only by a claim. The campaign build and the alert enrichment read one
+timestamp, or the MISP timestamp when the source gave none). A writer that carries no MISP report
+records none on the edges it writes, so such an edge dates the indicator only by a claim. The campaign build and the alert enrichment read one
 definition of when an indicator was first and last reported (`src/indicator_seen_dates.py`):
 
 | Date | Per edge | Over the indicator's edges | No edge dates it |
@@ -527,6 +526,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Seen dates of an indicator: the command-line STIX import of `run_pipeline.py`, named as a writer without a MISP report, is removed.
 - 2026-11-02 — The last date of an edge is the source's own date first: its last-seen claim, its latest report when that is earlier than the MISP record time, its first-seen claim, and only then the record time. The campaign build orders its sample of 100 indicators by that date (it ordered by the node's `last_reported_at`), so the sample, the campaign's `last_seen` and the alert enrichment read one definition. On the 730-day baseline of 2026-11-01 the record time, the time of the push, had placed the items of the feeds without a last-seen date above indicators their sources reported later: 4,270 of 40,938 indicator links change (OTX 29,903 → 31,780, ThreatFox 9,960 → 8,553, MalwareBazaar 1,225 → 911, URLhaus 3 → 65, Feodo Tracker 289 → 8, SSL Blacklist 62 → 0), and 177 instead of 216 of 533 campaigns get a last seen of 1 November; a stored `last_seen` stays until a fresh baseline.
 - 2026-10-25 — The acceptance script checks the campaign seen dates (`campaign_seen_dates_cover_members`).
 - 2026-10-25 — Seen dates: only the edges the sync writes carry `r.last_reported_at`; the alert enrichment's import-time first seen holds for an edge without a first-seen claim; a campaign `last_seen` a build stored too late stays until a fresh baseline.

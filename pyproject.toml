@@ -130,7 +130,6 @@ omit = [
     "src/neo4j_client.py",
     "src/run_misp_to_neo4j.py",
     "src/run_pipeline.py",
-    "src/run_pipeline_misp_spt.py",
     "src/edgeguard.py",
     "src/health_check.py",
     "src/setup.py",
@@ -146,7 +145,6 @@ omit = [
     "src/test_resilmesh_schema.py",
     "src/edgeguard_operator.py",
     "src/config_manager.py",
-    "src/enrichment.py",
 ]
 
 [tool.mypy]
@@ -163,7 +161,6 @@ module = [
     "graphql_schema",
     "query_api",
     "run_pipeline",
-    "run_pipeline_misp_spt",
     "run_misp_to_neo4j",
     "edgeguard_operator",
     "edgeguard",

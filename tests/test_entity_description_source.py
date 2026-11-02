@@ -293,7 +293,7 @@ def synced(attr: dict, source: str = "mitre_attck") -> dict:
 
 
 def stix(attr: dict) -> dict:
-    """The STIX object the STIX flow builds from *attr*."""
+    """The STIX object the sync's MISP → STIX conversion builds from *attr*."""
     obj = MISPToNeo4jSync(neo4j_client=MagicMock())._attribute_to_stix21(
         copy.deepcopy(attr), "00000000-0000-4000-8000-000000000000", ["global"]
     )
@@ -733,7 +733,7 @@ class TestSyncEndToEnd:
         assert description_of(node) is None
 
 
-# ================================================================ the STIX flow
+# ================================================================ the MISP → STIX conversion
 class TestStixObjects:
     @pytest.mark.parametrize(
         ("kind", "stix_type"),
@@ -776,40 +776,6 @@ class TestStixObjects:
             ),
         }[case]()
         assert "description" not in stix(attr)
-
-
-class TestStixImport:
-    """``run_pipeline.load_stix21_to_neo4j`` (MISP → STIX → Neo4j, ``--stix-flow``): an object carries the
-    source of its event (``x_edgeguard_source``), and the source ranking decides as in the attribute flow."""
-
-    @staticmethod
-    def _import(obj: dict, source: str):
-        from run_pipeline import EdgeGuardPipeline
-
-        client, session = _recording_client()
-        pipeline = EdgeGuardPipeline()
-        pipeline.neo4j = client
-        obj = dict(obj, x_edgeguard_source=source)  # as the STIX flow stamps the objects of an event
-        pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [obj]})
-        return _node_merges(session)[-1]
-
-    @pytest.mark.parametrize("kind", ["actor", "malware", "tool", "technique", "tactic"])
-    def test_a_mitre_object_carries_the_attribute_flows_text_at_the_top_rank(self, kind):
-        attr = written(kind, mitre_items()[kind])
-        _label, _key, query, params = self._import(stix(attr), "mitre_attck")
-        assert _ranked(query, params) == (synced(attr)["description"], "mitre_attck", ENTITY_DESCRIPTIONS.top_rank)
-
-    @pytest.mark.parametrize("kind", ["actor", "malware", "tool"])
-    def test_another_object_carries_its_source_and_rank(self, kind):
-        obj = dict(stix(written(kind, mitre_items()[kind])), description="An external bundle's text")
-        _label, _key, query, params = self._import(obj, "stix_import")
-        assert _ranked(query, params) == ("An external bundle's text", "stix_import", 0)
-
-    def test_an_otx_object_writes_no_description(self):
-        attr = written("actor", otx_item_before_2026_10("actor", "Dragonfly"))
-        _label, _key, query, params = self._import(stix(attr), "alienvault_otx")
-        assert _ranked(query, params) is None
-        assert not re.search(r"n\.description(_source)? = ", query)
 
 
 # ================================================================ PyMISP's own STIX conversion

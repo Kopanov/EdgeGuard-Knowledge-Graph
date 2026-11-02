@@ -159,12 +159,11 @@ class TestStixMitreToolTacticRewrite:
         ``x-mitre-tactic`` custom type (MITRE ATT&CK STIX extension),
         not as ``attack-pattern``.
 
-        Why: ``run_pipeline.py::load_stix21_to_neo4j`` routes ALL
-        ``attack-pattern`` objects to ``merge_technique()`` (line ~567)
-        and handles tactics only under ``"x-mitre-tactic"`` (line ~592).
-        If tactics land with type ``attack-pattern``, they get CREATED
-        AS TECHNIQUES — strictly worse than the prior "silently
-        dropped" state."""
+        Why: the STIX loader of ``run_pipeline.py`` (retired 2026-11-02)
+        routed ALL ``attack-pattern`` objects to ``merge_technique()``
+        and handled tactics only under ``"x-mitre-tactic"``; a STIX
+        consumer reads an ``attack-pattern`` as a technique, so a tactic
+        emitted as one would be taken for a technique."""
         tactic_idx = source.find(_TACTIC_BRANCH)
         assert tactic_idx > 0
         tactic_block = source[tactic_idx : tactic_idx + 2000]
@@ -293,67 +292,6 @@ class TestStixAttributeConversionDoesNotCrash:
         assert result.get("x_edgeguard_mitre_kind") == "tactic"
         refs = result.get("external_references") or []
         assert any(r.get("external_id") == "TA0001" and r.get("source_name") == "mitre-attack" for r in refs)
-
-    def test_tactic_type_matches_consumer_routing_contract(self, monkeypatch) -> None:
-        """Cross-file contract check: the type we emit for tactics in
-        ``_attribute_to_stix21`` MUST match the type the consumer in
-        ``run_pipeline.py::load_stix21_to_neo4j`` routes to
-        ``merge_tactic()``.
-
-        This test guards against a regression like the one Bugbot
-        caught: emitting a type that the consumer routes elsewhere
-        (attack-pattern → merge_technique) silently misclassifies
-        data in Neo4j. The contract is: tactics go through
-        ``x-mitre-tactic``. Period."""
-        syncer = self._make_syncer(monkeypatch)
-        attr = {
-            "type": "text",
-            "value": "TA0003: Persistence",
-            "uuid": "dddddddd-dddd-dddd-dddd-dddddddddddd",
-            "Tag": [],
-            "comment": "",
-        }
-        result = syncer._attribute_to_stix21(attr, "event-uuid", event_zones=[])
-        assert result is not None
-
-        # Read the consumer's routing rules from the source.  Note:
-        # run_pipeline.py has two dispatches on ``obj_type ==
-        # "x-mitre-tactic"`` — an upstream id-map populator and the
-        # actual neo4j merger call.  We only need to know that SOME
-        # branch (a) exists for the type we emit, and (b) routes to
-        # ``merge_tactic`` somewhere — not ``merge_technique``.
-        pipeline_src = (REPO_ROOT / "src" / "run_pipeline.py").read_text()
-        assert f'elif obj_type == "{result["type"]}":' in pipeline_src, (
-            f"Tactic type '{result['type']}' has no corresponding branch "
-            f"in run_pipeline.py — emitter and consumer are out of sync. "
-            f"See Bugbot round-2 finding on PR-G1 for why this matters."
-        )
-        # Find EVERY dispatch block for our type and confirm at least
-        # one routes to ``merge_tactic``.  A strict contract: none may
-        # route to ``merge_technique``.
-        type_str = result["type"]
-        dispatch_pattern = f'elif obj_type == "{type_str}":'
-        blocks = []
-        start = 0
-        while True:
-            idx = pipeline_src.find(dispatch_pattern, start)
-            if idx < 0:
-                break
-            # Slice until the next ``elif obj_type ==`` to bound this
-            # dispatch's body.
-            end = pipeline_src.find("elif obj_type ==", idx + len(dispatch_pattern))
-            if end < 0:
-                end = idx + 2000  # tail of function; reasonable cap
-            blocks.append(pipeline_src[idx:end])
-            start = end
-        assert blocks, f"no dispatch blocks for '{type_str}' found"
-        assert any("merge_tactic(" in b for b in blocks), (
-            f"no dispatch for '{type_str}' routes to merge_tactic(); tactics may be silently misrouted"
-        )
-        assert not any("merge_technique(" in b for b in blocks), (
-            f"a dispatch for '{type_str}' routes to merge_technique() — "
-            f"this is the exact misrouting bug Bugbot round-2 caught"
-        )
 
     def test_tool_with_mitre_uses_techniques_comment_parses(self, monkeypatch) -> None:
         """The MITRE_USES_TECHNIQUES comment format must still parse,

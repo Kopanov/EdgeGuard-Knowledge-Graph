@@ -3853,7 +3853,8 @@ class MISPWriter:
         if not push_queue and present_ct > 0 and total_failed == 0 and not_converted_ct == 0:
             logger.warning(
                 "[DEDUP] All %d items were already present in MISP — nothing new to push. "
-                "This is normal on re-runs. Use --fresh-baseline to force re-collection.",
+                "This is normal on re-runs. Use 'edgeguard fresh-baseline' (the edgeguard_baseline DAG with "
+                "fresh_baseline) to force re-collection.",
                 present_ct,
             )
 

@@ -71,7 +71,7 @@ The environment variable wins when present; the file is a local convenience only
 
 ### 4. API keys in development scripts
 
-Some helper scripts (e.g. `run_with_env.sh`, `hourly_status.sh`, `setup.py`) are intended for **local development** and may show example `export` lines. To use them safely:
+Some helper scripts (e.g. `setup.py`) are intended for **local development** and may show example `export` lines. To use them safely:
 
 - Replace any example values with your own keys **locally**.
 - Do **not** commit real keys to these files.
@@ -138,10 +138,11 @@ Generate strong values for all of these except the `PROMETHEUS_ADMIN_PASSWORD` p
 
 ---
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — § 4: the prototype shell helpers it named are deleted.
 - 2026-10-23 — `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY`: the recognised values (`true`/`1`/`yes`/`on`, `false`/`0`/`no`/`off`, with only ASCII whitespace around the value ignored); any other value keeps TLS verification on with a warning.
 - 2026-10-17 — Corrected the `credentials/api_keys.yaml` format (`KEY=value` lines, read only when `VIRUSTOTAL_API_KEY` is not set in the environment), the production rule for `EDGEGUARD_API_KEY`, the Airflow 3 option behind `AIRFLOW_API_AUTH_JWT_SECRET` and the unread `PROMETHEUS_ADMIN_PASSWORD`; the main text describes current behavior only and the change history is kept here.
 - 2026-04-26 — Added § 5.1 on the API, Airflow and monitoring secrets required in production (including the creator-org allow-list of the MISP tag-impersonation defense) and aligned the § 6 checklist; the `credentials/api_keys.yaml` example was rewritten as a YAML mapping, which the 2026-10-17 entry reverts.

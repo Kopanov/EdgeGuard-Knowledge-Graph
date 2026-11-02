@@ -1,6 +1,6 @@
 """
-Step 2 collection harness: mock Neo4j + collectors; full ``run()`` completes Steps 3–7
-with lightweight mocks (no real graph / enrichment dependency).
+Collection harness of ``run_pipeline.py``: mock collectors; ``run()`` collects into MISP only and
+fails when a collector reported failure or raised.
 """
 
 import logging
@@ -40,15 +40,7 @@ def test_step2_branches_and_summary(caplog):
     c_exc.collect.side_effect = boom_collect
 
     p = EdgeGuardPipeline()
-    p.neo4j.connect = MagicMock(return_value=True)
-    p.neo4j.create_constraints = MagicMock()
-    p.neo4j.create_indexes = MagicMock()
-    p.neo4j.ensure_sources = MagicMock()
-    p.neo4j.close = MagicMock()
-    p.neo4j.get_stats = MagicMock(return_value={"by_zone": {}})
-    p.neo4j.create_actor_technique_relationship = MagicMock(return_value=False)
-    p.neo4j.create_malware_actor_relationship = MagicMock(return_value=False)
-    p._create_indicates_relationships = MagicMock(return_value=0)
+    assert not hasattr(p, "neo4j"), "the collection run holds no Neo4j client"
 
     p.collectors = {
         "misp": MagicMock(),
@@ -59,15 +51,9 @@ def test_step2_branches_and_summary(caplog):
         "src_list": c_list,
         "src_exc": c_exc,
     }
-    p.mitre_collector = MagicMock()
-    p.mitre_collector.get_relationships.return_value = []
 
-    # Without use_stix_flow, pipeline only pushes to MISP (Step 2) and returns True
-    # when collection ran (Neo4j sync is a separate Airflow DAG).
-    # This test validates Step 2 collection branches, not Step 3 Neo4j loading.
-    result = p.run()
-    assert result is True  # non-STIX flow: collection ran, returns True
-    p.neo4j.close.assert_called()
+    # A collector reported failure and another raised: the run fails, after every collector ran.
+    assert p.run() is False
 
     text = caplog.text
     assert "[SKIP] src_skip:" in text
@@ -85,3 +71,4 @@ def test_step2_branches_and_summary(caplog):
 
     for c in (c_skip, c_fail, c_ok, c_bare, c_list, c_exc):
         assert c.collect.called
+    p.collectors["misp"].collect.assert_not_called()

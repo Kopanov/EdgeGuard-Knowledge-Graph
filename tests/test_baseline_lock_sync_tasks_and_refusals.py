@@ -16,7 +16,7 @@
 3. A ``baseline_start`` marked success by hand after such a refusal takes nothing, and the
    collectors' own check finds no sentinel: the collectors and ``full_neo4j_sync`` now refuse while
    no baseline holds the lock (a verify, not a re-acquire: the tier-2 collectors run in parallel).
-4. The same run with another baseline's lock (or the in-process baseline's): the collectors stand
+4. The same run with another baseline's lock (or a legacy process-held sentinel): the collectors stand
    down in their own check, but ``full_neo4j_sync`` (``trigger_rule=ALL_DONE``) has none and ran a
    full MISP→Neo4j write during that baseline's wipe or refill. ``full_neo4j_sync``, the baseline's
    ``build_relationships`` and its ``run_enrichment_jobs`` now refuse unless the lock names their own
@@ -204,7 +204,7 @@ def test_the_sync_tasks_proceed_when_the_lock_cannot_be_read(dag, lock, sync_tas
 
 
 def test_a_process_held_lock_skips_the_sync_tasks_too(dag, lock, sync_tasks):
-    """The in-process baseline (``run_pipeline --baseline``) is never the task's own run."""
+    """A process-held lock (the holder of the retired in-process baseline) is never the task's own run."""
     assert baseline_lock.acquire_baseline_lock()
     try:
         with pytest.raises(dag.AirflowSkipException):
@@ -464,7 +464,7 @@ def test_a_writer_refuses_while_another_baseline_run_holds_the_lock(dag, lock, s
 
 @pytest.mark.parametrize("task_id", WRITERS)
 def test_a_writer_refuses_while_the_in_process_baseline_holds_the_lock(dag, lock, sync_tasks, task_id):
-    """``run_pipeline --baseline`` holds a process sentinel, which never names a DAG run."""
+    """A process sentinel (the holder of the retired in-process baseline) never names a DAG run."""
     assert baseline_lock.acquire_baseline_lock()
     try:
         with pytest.raises(dag.AirflowFailException, match=r"held by pid=\d+ host="):

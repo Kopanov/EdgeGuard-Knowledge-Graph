@@ -14,7 +14,6 @@ exists:
 * the MISP→Neo4j sync — technique ids of ``misp-galaxy:mitre-attack-pattern`` tags and of curated
   claims (``run_misp_to_neo4j``), and ``scripts/import_curated_package.py``, which reports each
   translation;
-* the STIX import of the command-line pipeline (``run_pipeline``);
 * the STIX export of a technique (``StixExporter.export_technique``).
 
 The same map decides which revoked techniques are no nodes: the MITRE collector skips a revoked

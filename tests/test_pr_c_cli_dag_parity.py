@@ -1,9 +1,8 @@
 """
 Tests for PR-C — CLI ↔ DAG parity + fresh-baseline.
 
-Covers (from the comprehensive 7-agent audit):
-  - **Cross-Checker HIGH H1**: CLI baseline never invoked enrichment_jobs
-  - **Cross-Checker HIGH H2**: CLI baseline never invoked build_relationships
+Covers (from the comprehensive 7-agent audit; H1 and H2, the CLI baseline's missing
+build_relationships and enrichment_jobs, went with the in-process baseline, retired 2026-11-02):
   - **Cross-Checker HIGH H3**: baseline_dag had no fresh_baseline conf knob
   - **Devil's Advocate / Cross-Checker MED**: 730 baseline_days hardcoded 4×
   - **Prod Readiness HIGH**: fresh-baseline had no pre-baseline backup gate,
@@ -191,64 +190,8 @@ class TestBaselineCleanContract:
 
 
 # ---------------------------------------------------------------------------
-# CLI ↔ DAG parity invariants
+# baseline_clean DAG task
 # ---------------------------------------------------------------------------
-
-
-class TestCliDagParity:
-    """The audit (Cross-Checker HIGH H1, H2) found the CLI baseline path
-    skipped enrichment_jobs and build_relationships entirely. These tests
-    pin the parity invariants — if a future refactor accidentally removes
-    them, the test fails."""
-
-    def _pipeline_inner_source(self) -> str:
-        import run_pipeline
-
-        return inspect.getsource(run_pipeline.EdgeGuardPipeline._run_pipeline_inner)
-
-    def test_cli_baseline_invokes_build_relationships(self):
-        # CLI baseline path must call build_relationships.py as a subprocess
-        # (matches the DAG's invocation shape — same script, same timeout).
-        src = self._pipeline_inner_source()
-        # Gated on `if baseline:` to avoid surprising incremental runs
-        assert "build_relationships.py" in src
-        # Subprocess invocation must be present. PR-K3 §1-4 (2026-04-20
-        # flow audit) replaced the old ``subprocess.run(capture_output=True)``
-        # — which buffered 5h of stdout in parent memory — with
-        # ``run_with_streaming_output()`` from ``src/subprocess_streaming.py``
-        # (which wraps ``subprocess.Popen`` with line-by-line draining).
-        # Either form satisfies the "is invoked as a subprocess" contract
-        # this test pins.
-        assert "subprocess.run" in src or "run_with_streaming_output" in src, (
-            "CLI baseline must invoke build_relationships.py as a subprocess "
-            "(either subprocess.run directly or via run_with_streaming_output helper)"
-        )
-
-    def test_cli_baseline_invokes_run_all_enrichment_jobs(self):
-        # CLI baseline path must call enrichment_jobs.run_all_enrichment_jobs
-        # (matches the DAG's enrichment task — produces Campaign nodes,
-        # decay, bridge_vuln_cve).
-        src = self._pipeline_inner_source()
-        assert "run_all_enrichment_jobs" in src
-        # In-process (we have a Neo4jClient open) — distinct from build_rels
-        # which is subprocess.
-        assert "from enrichment_jobs import run_all_enrichment_jobs" in src
-
-    def test_cli_baseline_skips_enrichment_when_not_baseline(self):
-        # The build_rels + enrichment calls must be gated on `if baseline:`
-        # so incremental CLI runs don't pay the latency cost.
-        src = self._pipeline_inner_source()
-        # The comment block notes the gating rationale
-        assert "Step 5b" in src or "Step 5c" in src
-        # Inspect the source structure: build_relationships call is inside
-        # an `if baseline:` block.
-        # Find the build_relationships.py reference and check it's inside
-        # an `if baseline:` block by walking back through the source.
-        idx = src.find("build_relationships.py")
-        assert idx > 0
-        # Walk back and find the most recent `if ` keyword at lower indent.
-        prefix = src[:idx]
-        assert "if baseline:" in prefix
 
 
 class TestFreshBaselineDagTask:
@@ -427,43 +370,3 @@ class TestCliCommands:
                 assert "fresh_baseline" not in line, (
                     "cmd_baseline must NOT pass fresh_baseline conf — that would trigger the destructive clean"
                 )
-
-
-# ---------------------------------------------------------------------------
-# Run_pipeline.py — fresh-baseline path delegates to baseline_clean
-# ---------------------------------------------------------------------------
-
-
-class TestRunPipelineDelegatesToBaselineClean:
-    """The CLI's --fresh-baseline path must use the SAME helper as the DAG.
-    Otherwise we re-introduce the CLI ↔ DAG drift the audit found."""
-
-    def test_run_pipeline_imports_baseline_clean(self):
-        with open("src/run_pipeline.py") as fh:
-            src = fh.read()
-        assert "from baseline_clean import" in src
-        assert "BaselineCleanError" in src
-        assert "reset_baseline_data" in src
-
-    def test_run_pipeline_no_longer_has_inline_misp_delete_loop(self):
-        # The previous inline 80-LOC paginated DELETE loop is gone.
-        with open("src/run_pipeline.py") as fh:
-            src = fh.read()
-        # Negative: no more inline _misp_url + searchall=EdgeGuard pattern
-        # in the fresh-baseline branch (the helper has its own copy)
-        # Strip comments first so the rationale comment doesn't false-fail
-        code_only = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
-        # The previous code had a `for _round in range(20):` loop — that's
-        # now in baseline_clean._wipe_misp_events.
-        assert "for _round in range(20):" not in code_only
-
-    def test_run_pipeline_returns_false_on_clean_error(self):
-        # When BaselineCleanError fires, the inner pipeline returns False
-        # — refusing to run collectors on a half-cleaned state.
-        with open("src/run_pipeline.py") as fh:
-            src = fh.read()
-        assert "except BaselineCleanError" in src
-        # The handler must return False (not continue silently)
-        idx = src.find("except BaselineCleanError")
-        handler_body = src[idx : idx + 500]
-        assert "return False" in handler_body

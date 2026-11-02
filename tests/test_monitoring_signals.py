@@ -1323,7 +1323,7 @@ class TestCollectorOutcomes:
                 return collect()
 
         if path == "baseline_in_progress":
-            assert baseline_lock.acquire_baseline_lock() is True  # an in-process baseline holds the lock
+            assert baseline_lock.acquire_baseline_lock() is True  # a legacy process-held sentinel
         try:
             if path == "not_a_status_dict":
                 with pytest.raises(dag_module.AirflowException, match="expected a status dict"):

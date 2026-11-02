@@ -887,9 +887,8 @@ def resolve_collection_limit(
     Resolve per-run item cap for collector ``collect()`` methods.
 
     Scheduled **baseline** runs pass ``limit=None`` when the baseline cap is
-    unlimited (Airflow Variable ``BASELINE_COLLECTION_LIMIT`` ≤ 0, or env for
-    ``run_pipeline --baseline``). That must **not** be replaced with the
-    incremental default (e.g. 200).
+    unlimited (Airflow Variable ``BASELINE_COLLECTION_LIMIT`` ≤ 0). That must
+    **not** be replaced with the incremental default (e.g. 200).
 
     Regular (cron) runs pass an explicit limit from the DAG, or rely on the
     incremental default when ``limit`` is omitted.
@@ -903,24 +902,6 @@ def resolve_collection_limit(
     if baseline:
         return None
     return get_effective_limit(source)
-
-
-def baseline_collection_limit_from_env() -> Optional[int]:
-    """
-    Per-source cap for ``run_pipeline --baseline`` (not Airflow).
-
-    Same semantics as Airflow Variable ``BASELINE_COLLECTION_LIMIT``:
-    unset / ``0`` / negative → unlimited (``None``); positive → cap per source.
-
-    Reads ``EDGEGUARD_BASELINE_COLLECTION_LIMIT`` first, then ``BASELINE_COLLECTION_LIMIT``
-    (aligned with the baseline DAG env overrides in ``dags/edgeguard_pipeline.py``).
-    """
-    raw_str = os.getenv("EDGEGUARD_BASELINE_COLLECTION_LIMIT") or os.getenv("BASELINE_COLLECTION_LIMIT") or "0"
-    try:
-        raw = int(str(raw_str).strip())
-    except ValueError:
-        raw = 0
-    return None if raw <= 0 else raw
 
 
 # Sector Mapping - CONSERVATIVE keywords (no malware families!)

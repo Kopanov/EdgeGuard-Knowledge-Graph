@@ -1,5 +1,5 @@
 """
-Audit MAX_ENTRIES / EDGEGUARD_MAX_ENTRIES semantics across config and MISP-SPT runner.
+Audit MAX_ENTRIES / EDGEGUARD_MAX_ENTRIES semantics in config.
 
 Regression: `limit or MAX_ENTRIES_PER_SOURCE` must never be used — when MAX is 0,
 `None or 0` became 0 and capped every collect at zero items.
@@ -8,22 +8,8 @@ Regression: `limit or MAX_ENTRIES_PER_SOURCE` must never be used — when MAX is
 from __future__ import annotations
 
 import importlib
-import sys
-import types
-from unittest.mock import MagicMock, patch
 
 import pytest
-
-
-@pytest.fixture
-def stub_run_misp_to_neo4j(monkeypatch):
-    """Avoid importing neo4j_client via run_misp_to_neo4j when loading run_pipeline_misp_spt."""
-    name = "run_misp_to_neo4j"
-    fake = types.ModuleType(name)
-    fake.MISPToNeo4jSync = MagicMock()
-    # monkeypatch puts the real module back afterwards (a pop would leave no entry, and the next
-    # import a second copy).
-    monkeypatch.setitem(sys.modules, name, fake)
 
 
 def _reload_config(monkeypatch: pytest.MonkeyPatch, **env: str) -> None:
@@ -82,71 +68,3 @@ def test_get_effective_limit_negative_override_is_not_a_limit(monkeypatch: pytes
     importlib.reload(config)
     # otx: a source under the generic incremental limit (NVD applies its own per-run cap, 2026-10)
     assert config.get_effective_limit("otx") == 200
-
-
-def test_misp_spt_passes_none_when_global_max_zero(
-    monkeypatch: pytest.MonkeyPatch,
-    stub_run_misp_to_neo4j,
-) -> None:
-    """Phase1 must not coerce (None, MAX=0) → limit=0."""
-    _reload_config(monkeypatch, EDGEGUARD_MAX_ENTRIES="0", EDGEGUARD_INCREMENTAL_LIMIT="200")
-    import run_pipeline_misp_spt as spt
-
-    importlib.reload(spt)
-
-    captured: dict = {}
-
-    def fake_collect(self, limit=None, push_to_misp=True, **kwargs):
-        captured["limit"] = limit
-        return {"success": True, "count": 0}
-
-    pipeline = spt.EdgeGuardPipelineMISPSPT()
-    with patch.object(spt.OTXCollector, "collect", fake_collect):
-        pipeline.run_phase1_collect_to_misp(sources=["otx"], limit=None)
-
-    assert captured.get("limit") is None
-
-
-def test_misp_spt_passes_explicit_global_when_set(
-    monkeypatch: pytest.MonkeyPatch,
-    stub_run_misp_to_neo4j,
-) -> None:
-    _reload_config(monkeypatch, EDGEGUARD_MAX_ENTRIES="444", EDGEGUARD_INCREMENTAL_LIMIT="200")
-    import run_pipeline_misp_spt as spt
-
-    importlib.reload(spt)
-
-    captured: dict = {}
-
-    def fake_collect(self, limit=None, push_to_misp=True, **kwargs):
-        captured["limit"] = limit
-        return {"success": True, "count": 0}
-
-    pipeline = spt.EdgeGuardPipelineMISPSPT()
-    with patch.object(spt.OTXCollector, "collect", fake_collect):
-        pipeline.run_phase1_collect_to_misp(sources=["otx"], limit=None)
-
-    assert captured.get("limit") == 444
-
-
-def test_misp_spt_explicit_zero_preserved(
-    monkeypatch: pytest.MonkeyPatch,
-    stub_run_misp_to_neo4j,
-) -> None:
-    """Caller limit=0 must stay 0, not replaced by MAX_ENTRIES."""
-    _reload_config(monkeypatch, EDGEGUARD_MAX_ENTRIES="500", EDGEGUARD_INCREMENTAL_LIMIT="200")
-    import run_pipeline_misp_spt as spt
-
-    importlib.reload(spt)
-
-    captured: dict = {}
-
-    def fake_collect(self, limit=None, push_to_misp=True, **kwargs):
-        captured["limit"] = limit
-        return {"success": True, "count": 0}
-
-    pipeline = spt.EdgeGuardPipelineMISPSPT()
-    with patch.object(spt.OTXCollector, "collect", fake_collect):
-        pipeline.run_phase1_collect_to_misp(sources=["otx"], limit=0)
-
-    assert captured.get("limit") == 0

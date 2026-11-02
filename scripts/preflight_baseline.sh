@@ -18,8 +18,8 @@
 #   [1] required env vars present (NEO4J_PASSWORD, MISP_API_KEY, MISP_URL)
 #   [2] Neo4j reachable + APOC available + baseline-critical indexes present
 #   [3] MISP API reachable + auth valid + server version ≥ 2.4
-#   [4] launch-path decision confirmed (DAG+pause, or the development-only CLI) — see RUNBOOK
-#   [5] IF DAG launch path: the 5 scheduled DAGs are PAUSED, none with a running run (Issue #57)
+#   [4] launch-path decision confirmed (the edgeguard_baseline DAG) — see RUNBOOK
+#   [5] the 5 scheduled DAGs are PAUSED, none with a running run (Issue #57)
 #   [6] Airflow worker RAM ≥ 4 GB
 #   [7] Prometheus alerts.yml parses + edgeguard rule group loaded
 #   [8] no stale baseline_lock sentinel from a previous aborted run
@@ -29,19 +29,18 @@
 #   [12] source API keys accepted by their providers (live check; a rejected key
 #        is a warning, a key state that would stop the baseline is a failure)
 #   [13] Airflow components and metadata database: scheduler (and metadata
-#        database) healthy per Airflow's health endpoint (a failure on the DAG
-#        launch path, a warning on the CLI path), triggerer and DAG processor
+#        database) healthy per Airflow's health endpoint (a failure),
+#        triggerer and DAG processor
 #        healthy when they run (warnings), metadata database not SQLite (a warning)
 #
 # Usage:
-#   ./scripts/preflight_baseline.sh [--launch-path dag|cli] [--strict]
+#   ./scripts/preflight_baseline.sh [--launch-path dag] [--strict]
 #   EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh --launch-path dag
 #
 # Launch path: "dag" is the edgeguard_baseline DAG, the baseline path on every install (with or
-# without Docker). Without --launch-path (or EDGEGUARD_PREFLIGHT_LAUNCH_PATH) the script assumes
-# "dag" and warns that it assumed it. "cli" is the in-process `python src/run_pipeline.py --baseline`,
-# a development path that builds a reduced graph (docs/AIRFLOW_DAGS.md, "In-process CLI baseline");
-# it is checked for the lock and running runs only, with a warning.
+# without Docker) and the only one. Without --launch-path (or EDGEGUARD_PREFLIGHT_LAUNCH_PATH) the
+# script assumes "dag" and warns that it assumed it. "cli", the retired in-process baseline of
+# src/run_pipeline.py (run_pipeline.py refuses --baseline), is refused.
 #
 # Without Docker, checks [5] and [6] cannot read Airflow or the container's memory limit and only
 # warn (so --strict cannot pass there): check the pause state, the running runs and the host memory
@@ -92,8 +91,9 @@ if [[ -z "${LAUNCH_PATH}" ]]; then
 fi
 
 case "$LAUNCH_PATH" in
-  cli|dag) ;;
-  *) fail "invalid --launch-path '$LAUNCH_PATH' (must be 'cli' or 'dag')"; exit 1 ;;
+  dag) ;;
+  cli) fail "--launch-path 'cli' is retired: run_pipeline.py refuses --baseline, and every baseline runs through the edgeguard_baseline DAG (--launch-path=dag; docs/AIRFLOW_DAGS.md)"; exit 1 ;;
+  *) fail "invalid --launch-path '$LAUNCH_PATH' (must be 'dag')"; exit 1 ;;
 esac
 
 # -----------------------------------------------------------------------------
@@ -240,10 +240,10 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# [4] + [5] launch-path decision (DAG+pause verification, the default; or the development-only CLI)
+# [4] + [5] launch-path decision (the edgeguard_baseline DAG; the scheduled DAGs paused)
 # -----------------------------------------------------------------------------
 hdr "[4][5] launch-path = $LAUNCH_PATH"
-# Pausing stops new tasks and retries only, and on every launch path a task that is already running
+# Pausing stops new tasks and retries only, and a task that is already running
 # keeps running (a run_neo4j_sync attempt up to EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS): the baseline lock
 # is read only when a task starts. check_running_runs fails while a scheduled DAG has a running run.
 check_running_runs() {
@@ -279,43 +279,30 @@ print(len(runs) if isinstance(runs, list) else "?")
     warn "running runs of DAG $dag not queryable (airflow dags list-runs $dag --state running -o json failed or printed no JSON list)"
   fi
 }
-if [[ "$LAUNCH_PATH" == "cli" ]]; then
-  pass "CLI launch path — in-process baseline_lock will gate incrementals (EdgeGuardPipeline.run in src/run_pipeline.py)"
-  pass "The scheduled DAGs skip tasks that start while the baseline lock is held"
-  warn "CLI launch path: python src/run_pipeline.py --baseline is a development path and builds a reduced graph (no ATT&CK tactic, software or technique-implementation links, no indicator-malware links or campaigns, no CVSS scores); a baseline whose graph is queried or validated runs the edgeguard_baseline DAG (--launch-path=dag; docs/AIRFLOW_DAGS.md, \"In-process CLI baseline\")"
-  if command -v docker >/dev/null 2>&1; then
-    for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
-      check_running_runs "$dag"
-    done
-  else
-    warn "docker not found; cannot verify that no scheduled DAG has a running run (a task already running keeps writing during the baseline)"
-  fi
+# Verify that the 5 scheduled DAGs are paused and none of them has a running run
+if ! command -v docker >/dev/null 2>&1; then
+  # Without Docker (Airflow installed with pip) neither the pause state nor the running runs are
+  # read here; the operator checks both in the Airflow environment, so this stays a warning.
+  warn "docker not found; cannot verify that the 5 scheduled DAGs are paused and have no running run. Without Docker, check it in the Airflow environment for each of them: 'airflow dags details <dag>' shows is_paused True, and 'airflow dags list-runs <dag> --state running -o json' prints [] (docs/RUNBOOK.md Option A)"
 else
-  # DAG path — verify the 5 scheduled DAGs are paused and none of them has a running run
-  if ! command -v docker >/dev/null 2>&1; then
-    # Without Docker (Airflow installed with pip) neither the pause state nor the running runs are
-    # read here; the operator checks both in the Airflow environment, so this stays a warning.
-    warn "docker not found; cannot verify that the 5 scheduled DAGs are paused and have no running run. Without Docker, check it in the Airflow environment for each of them: 'airflow dags details <dag>' shows is_paused True, and 'airflow dags list-runs <dag> --state running -o json' prints [] (docs/RUNBOOK.md Option A)"
-  else
-    # Service name is `airflow` (single standalone container, docker-compose.yml)
-    # — the earlier worker-suffixed service name never existed in the shipped
-    # compose and made this check permanently inert (PR-N35 fixed the docs;
-    # this fixes the executable).
-    # All 5 scheduled DAGs — including edgeguard_neo4j_sync (every 3 days):
-    # a full MISP→Neo4j sync firing mid-baseline is the same concurrent-writer
-    # hazard as the collector DAGs (the baseline lock is held by the DAG as well since 2026-10).
-    for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
-      STATE=$(docker compose exec -T airflow airflow dags details "$dag" 2>/dev/null | grep -iE '^is_paused' | awk '{print $NF}' || echo "")
-      if [[ "$STATE" == "True" ]]; then
-        pass "DAG $dag is PAUSED"
-      elif [[ -z "$STATE" ]]; then
-        warn "DAG $dag state not queryable (airflow service unresponsive?)"
-      else
-        warn "DAG $dag is not paused — the baseline DAG holds the baseline lock and scheduled tasks skip at start; pause it so that no new task or retry starts during the baseline (docs/RUNBOOK.md Option A). Issue #57."
-      fi
-      check_running_runs "$dag"
-    done
-  fi
+  # Service name is `airflow` (single standalone container, docker-compose.yml)
+  # — the earlier worker-suffixed service name never existed in the shipped
+  # compose and made this check permanently inert (PR-N35 fixed the docs;
+  # this fixes the executable).
+  # All 5 scheduled DAGs — including edgeguard_neo4j_sync (every 3 days):
+  # a full MISP→Neo4j sync firing mid-baseline is the same concurrent-writer
+  # hazard as the collector DAGs (the baseline lock is held by the DAG as well since 2026-10).
+  for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
+    STATE=$(docker compose exec -T airflow airflow dags details "$dag" 2>/dev/null | grep -iE '^is_paused' | awk '{print $NF}' || echo "")
+    if [[ "$STATE" == "True" ]]; then
+      pass "DAG $dag is PAUSED"
+    elif [[ -z "$STATE" ]]; then
+      warn "DAG $dag state not queryable (airflow service unresponsive?)"
+    else
+      warn "DAG $dag is not paused — the baseline DAG holds the baseline lock and scheduled tasks skip at start; pause it so that no new task or retry starts during the baseline (docs/RUNBOOK.md Option A). Issue #57."
+    fi
+    check_running_runs "$dag"
+  done
 fi
 
 # -----------------------------------------------------------------------------
@@ -415,7 +402,7 @@ fi
 # -----------------------------------------------------------------------------
 hdr "[8] baseline_lock sentinel"
 # The real sentinel is `checkpoints/baseline_in_progress.lock` on the HOST
-# repo (written by the CLI baseline path — src/baseline_lock.py; override via
+# repo (written by the edgeguard_baseline DAG — src/baseline_lock.py; override via
 # EDGEGUARD_BASELINE_LOCK_PATH). The earlier check docker-exec'd into a
 # nonexistent worker service and probed a tmp-dir sentinel path that appears
 # nowhere in the code — it could never detect a real stale lock. Check the
@@ -607,11 +594,7 @@ for name in ("metadatabase", "scheduler", "triggerer", "dag_processor"):
         pass "$af_text"
       elif [[ "$af_name" == "scheduler" || "$af_name" == "metadatabase" ]]; then
         # Without a scheduler no baseline task starts and the run never reaches its timeout.
-        if [[ "$LAUNCH_PATH" == "dag" ]]; then
-          fail "$af_text — no task starts and DAG runs do not progress; $af_recover"
-        else
-          warn "$af_text — the scheduled DAGs do not run; $af_recover"
-        fi
+        fail "$af_text — no task starts and DAG runs do not progress; $af_recover"
       elif [[ "$af_status" == "unknown" ]]; then
         printf '  - %s\n' "$af_text — no $af_name job recorded; it does not run as a process of its own"
       else
@@ -625,8 +608,8 @@ fi
 
 # Metadata database backend, looked up in Airflow's order: the environment
 # (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN, its _CMD and _SECRET forms, then the
-# deprecated AIRFLOW__CORE__ names), then, on the DAG launch path, the value the
-# airflow service uses, then airflow.cfg (AIRFLOW_CONFIG, else
+# deprecated AIRFLOW__CORE__ names), then, where docker is installed, the value the
+# Compose airflow service uses, then airflow.cfg (AIRFLOW_CONFIG, else
 # $AIRFLOW_HOME/airflow.cfg, else ~/airflow/airflow.cfg: [database], then the
 # deprecated [core], sql_alchemy_conn, then its _cmd and _secret forms). Set
 # nowhere, it is Airflow's default, SQLite. The airflow CLI is never run: its
@@ -683,7 +666,7 @@ elif [[ -n "$AF_DB_ENV" ]]; then
   AF_DB_SCHEME=$(printf '%s\n' "${!AF_DB_ENV}" | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
   AF_DB_FROM="$AF_DB_ENV"
 else
-  if [[ "$LAUNCH_PATH" == "dag" ]] && command -v docker >/dev/null 2>&1; then
+  if command -v docker >/dev/null 2>&1; then
     AF_DB_SCHEME=$(docker compose exec -T airflow airflow config get-value database sql_alchemy_conn 2>/dev/null \
       | python3 -c "$AF_DB_SCHEME_PY" 2>/dev/null || true)
     AF_DB_FROM="airflow config get-value database sql_alchemy_conn"

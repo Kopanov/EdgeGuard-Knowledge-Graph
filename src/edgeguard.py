@@ -135,6 +135,7 @@ def test_neo4j_connection():
     """Test Neo4j connection."""
     try:
         from neo4j import GraphDatabase
+
         from neo4j_client import session_kwargs
 
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
@@ -375,7 +376,7 @@ def cmd_doctor(args):
                     i for i in result.details.get("issues", []) if "compatible" in i.lower() or "pymisp" in i.lower()
                 ]
                 warn(f"MISP {version}: {issues[0] if issues else 'version mismatch detected'}")
-                # No run_pipeline.py workaround: its STIX import builds a reduced graph (docs/AIRFLOW_DAGS.md).
+                # No run_pipeline.py workaround: it only runs the collectors into MISP.
                 warn("This may cause the Airflow DAG parser to hang; fix the version mismatch named above.")
             else:
                 ok(f"MISP server {version} compatible with PyMISP")
@@ -1526,6 +1527,7 @@ def get_neo4j_status():
     """Get Neo4j status and stats."""
     try:
         from neo4j import GraphDatabase
+
         from neo4j_client import session_kwargs
 
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
@@ -2543,9 +2545,9 @@ def _fetch_misp_event_summary() -> dict:
 # wrapper" recommendation): the previous workflow forked into two divergent
 # entry points:
 #
-#   - ``python src/run_pipeline.py --baseline [--fresh-baseline] [--baseline-days N]``
-#     → runs in-process, holds the lock for the entire 8h+ baseline duration,
-#     CLI session must stay alive.
+#   - ``python src/run_pipeline.py --baseline [--fresh-baseline] [--baseline-days N]`` (retired 2026-11-02)
+#     → ran in-process, held the lock for the entire 8h+ baseline duration,
+#     CLI session had to stay alive.
 #
 #   - Operator clicks "Trigger DAG" in Airflow UI on edgeguard_baseline →
 #     runs in Airflow workers, but had no ``fresh_baseline`` knob (audit

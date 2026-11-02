@@ -658,27 +658,6 @@ def test_another_record_only_fills_the_kev_fields():
         assert params[f"fill_{field}"] == nvd_item[field]
 
 
-def test_the_stix_import_keeps_the_record_on_the_edge(env):
-    """The opt-in STIX flow (``run_pipeline --stix-flow``) writes a reduced record under the MISP event's
-    source id (``cisa_kev`` for a KEV event): no NVD_META, CVSS or KEV fields. It is written only when it
-    creates the edge, never over the source's record that the sync wrote there."""
-    from run_misp_to_neo4j import MISPToNeo4jSync
-    from run_pipeline import EdgeGuardPipeline
-
-    clock = Clock()
-    misp = stored_after(catalogue("2026-10-16", DUE), clock)
-    sdo = MISPToNeo4jSync(neo4j_client=MagicMock())._attribute_to_stix21(
-        copy.deepcopy(misp.by_value(DUE)), "00000000-0000-4000-8000-000000000000", ["global"]
-    )
-    sdo["x_edgeguard_source"] = "cisa_kev"  # as the STIX flow stamps the objects of a KEV event
-    client, session = _session_client()
-    pipeline = EdgeGuardPipeline.__new__(EdgeGuardPipeline)
-    pipeline.neo4j = client
-    assert pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [sdo]})["vulnerabilities"] == 1
-    (edge_query,) = [c[0][0] for c in session.run.call_args_list if "MERGE (n)-[r:SOURCED_FROM]->(s)" in c[0][0]]
-    assert edge_query.count("r.raw_data = $raw_data") == 1, "ON CREATE SET only"
-
-
 def test_only_a_cve_write_refreshes_the_edge_record():
     client, session = _session_client()
     assert client.merge_indicator(

@@ -460,13 +460,13 @@ _REGISTRY: Tuple[Source, ...] = (
         misp_tag="source:MISP-Galaxy",
         reliable_first_seen=False,
     ),
-    # 2026-10-25: the objects of an external STIX bundle that name no EdgeGuard source
-    # (``run_pipeline.STIX_IMPORT_SOURCE_ID``, the in-process STIX loader). Registered so their
-    # records reach a ``Source`` node through a ``SOURCED_FROM`` edge. Not a feed: no collector, no
-    # CLI entry, no MISP event (the loader writes to Neo4j directly; the tag only completes the
-    # record). The producer is unknown, hence the lowest reliability, no first-seen claims (an
-    # object's ``created`` is when its producer made it, not an observation) and the description
-    # rank of an unregistered source.
+    # 2026-10-25: the objects of an external STIX bundle that name no EdgeGuard source. Registered
+    # so their records reach a ``Source`` node through a ``SOURCED_FROM`` edge. Not a feed: no
+    # collector, no CLI entry, no MISP event (the tag only completes the record). No code path writes
+    # it: the in-process STIX loader of ``run_pipeline.py`` that did is retired (2026-11-02); the
+    # ``Source`` node stays, as for every registered source. The producer is unknown, hence the
+    # lowest reliability, no first-seen claims (an object's ``created`` is when its producer made it,
+    # not an observation) and the description rank of an unregistered source.
     Source(
         canonical_id="stix_import",
         display_name="STIX import",

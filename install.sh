@@ -540,7 +540,7 @@ echo "    #  the standard provider is REQUIRED: the DAGs import BashOperator/Pyt
 echo "    #  ShortCircuitOperator from it on Airflow 3.x)"
 echo "    # Every baseline runs through the edgeguard_baseline DAG, also without Docker: give Airflow a"
 echo "    # PostgreSQL metadata database (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN, see .env.example and"
-echo "    # docs/SETUP_GUIDE.md § 4); 'python src/run_pipeline.py --baseline' builds a reduced graph."
+echo "    # docs/SETUP_GUIDE.md § 4)."
 echo ""
 warn "Airflow API server must run on port 8082 (not 8080) alongside ResilMesh:"
 echo "    # Airflow 3.x: the port moved from [webserver] to [api] — the old"

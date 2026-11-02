@@ -1222,20 +1222,8 @@ class TestBaselineConfigSsotIsWired:
     """The SSoT was created in PR-C but only the new ``edgeguard.cmd_*``
     callers used it. PR-C v2 wires it into the legacy paths. These tests
     pin the wiring so a refactor that drops ``baseline_config`` import
-    from any of the four call sites breaks loud."""
-
-    def test_run_pipeline_argparse_uses_resolve_baseline_days(self):
-        """``src/run_pipeline.py:main`` must defer to ``baseline_config``
-        instead of hardcoding ``_bd_default = 730``."""
-        with open("src/run_pipeline.py") as fh:
-            src = fh.read()
-        # The hardcoded ``_bd_default = 730`` must NOT exist anymore
-        # (the comment-block in PR-C v2 explains why).
-        code_only = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-        assert "_bd_default = 730" not in code_only, "Maintainer H1: hardcoded literal must be replaced by SSoT"
-        # The SSoT import must be present
-        assert "from baseline_config import" in src
-        assert "resolve_baseline_days" in src
+    from a call site breaks loud. (The in-process baseline of
+    ``run_pipeline.py``, another call site, is retired: 2026-11-02.)"""
 
     def test_dag_get_baseline_config_uses_resolve_baseline_days(self):
         """``dags/edgeguard_pipeline.py:get_baseline_config`` must defer
@@ -1277,17 +1265,3 @@ class TestBaselineConfigSsotIsWired:
         )
         # Positive: the safe isinstance idiom must be present
         assert "isinstance(raw_conf, dict)" in code_only, "expected safe isinstance check for dag_run.conf"
-
-    def test_run_pipeline_help_text_no_longer_says_default_365(self):
-        """Cross-Checker D4: the ``--baseline-days`` help text said
-        ``default: 365`` while the actual default was 730. Both PR-C
-        v1's hardcoded literal and the help text are gone now."""
-        with open("src/run_pipeline.py") as fh:
-            src = fh.read()
-        # Strip comment lines — the explanatory comment for this fix
-        # mentions the bad pattern as the thing we're NOT doing.
-        code_only = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-        assert "default: 365" not in code_only, (
-            "Cross-Checker D4: stale 365 in --help text — must reference DEFAULT_BASELINE_DAYS"
-        )
-        assert "DEFAULT_BASELINE_DAYS" in src

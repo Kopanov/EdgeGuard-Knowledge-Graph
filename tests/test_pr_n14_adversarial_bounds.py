@@ -42,8 +42,8 @@ Fix: ``_sanitize_array_value`` helper in ``merge_node_with_source``:
 
 ## Fix #4 — STIX re-import honest-NULL
 
-``run_pipeline.py`` re-imports STIX bundles back into EdgeGuard (e.g.
-ResilMesh feedback loop). Three sites substituted
+``run_pipeline.py`` re-imported STIX bundles (retired 2026-11-02) back
+into EdgeGuard (e.g. ResilMesh feedback loop). Three sites substituted
 ``datetime.now(...).isoformat()`` when STIX lacked ``created`` /
 ``modified`` fields. Re-importing CVE-2013 today stamped
 ``first_seen=2026-04-21``, poisoning every age calculation (PR-N5 C7
@@ -51,7 +51,8 @@ violation).
 
 Fix: pass None through (honest-NULL). The merge layer's ``ON CREATE
 SET`` clauses stamp server-side timestamps correctly without forging
-the source's ``first_seen``.
+the source's ``first_seen``. The STIX re-import of ``run_pipeline.py`` is
+retired with its pins (2026-11-02).
 
 ## Fix #5 — past-date clamp on source-truthful timestamps
 
@@ -253,44 +254,6 @@ class TestFix3ArrayBounds:
         block = src[idx : idx + 3000]
         assert "logger.warning" in block
         assert "exceeds cap" in block
-
-
-# ===========================================================================
-# Fix #4 — STIX re-import honest-NULL
-# ===========================================================================
-
-
-class TestFix4StixReimportHonestNull:
-    def test_no_wall_clock_substitution_for_indicator_reimport(self):
-        """Prior code: ``obj.get("created", datetime.now(...).isoformat())``.
-        Must now pass None through."""
-        src = (REPO_ROOT / "src" / "run_pipeline.py").read_text()
-        # The three problem sites at ~L471, ~L498, ~L628 must NOT use
-        # ``datetime.now(...)`` as a default for STIX ``created`` / ``modified``.
-        # Check that ``obj.get("created", datetime.now`` pattern is gone.
-        assert 'obj.get("created", datetime.now' not in src, (
-            "regression: STIX ``created`` must not default to wall-clock NOW (PR-N5 C7 violation)"
-        )
-        assert 'obj.get("modified", datetime.now' not in src, (
-            "regression: STIX ``modified`` must not default to wall-clock NOW"
-        )
-
-    def test_observable_reimport_uses_none_not_now(self):
-        """The ipv4-addr observable path at ~L628 used to hard-code
-        ``datetime.now(...)``. Must now pass None."""
-        src = (REPO_ROOT / "src" / "run_pipeline.py").read_text()
-        # Find the STIX observables block
-        idx = src.find('obj_type in ["ipv4-addr", "ipv6-addr", "domain-name", "url"]')
-        assert idx != -1, "STIX observable block not found"
-        block = src[idx : idx + 2500]
-        # The observable MERGE must NOT have wall-clock-NOW for first_seen.
-        # It's fine to reference datetime elsewhere in the function.
-        assert '"first_seen": datetime.now(' not in block, (
-            "STIX observable MERGE must pass None for first_seen, not wall-clock NOW"
-        )
-        assert '"last_updated": datetime.now(' not in block, (
-            "STIX observable MERGE must pass None for last_updated, not wall-clock NOW"
-        )
 
 
 # ===========================================================================

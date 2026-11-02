@@ -3194,8 +3194,8 @@ class MISPToNeo4jSync:
         def _with_entity_description(stix_obj: dict) -> dict:
             """2026-10: the description of a threat-actor, malware, attack-pattern, tool or tactic object, as
             the sync takes it (``_entity_comment_description``): never a metadata block's raw text, a
-            placeholder or an OTX pulse's text, which these objects carried as the raw comment and a STIX
-            import of the bundle (``run_pipeline``) stored on the node. No ``description`` without one."""
+            placeholder or an OTX pulse's text, which these objects carried as the raw comment, so a consumer
+            of this bundle does not read one as the description. No ``description`` without one."""
             text = _entity_comment_description(attr.get("comment"), self.extract_source_from_tags(attr_tags))
             if text:
                 stix_obj["description"] = text
@@ -3268,8 +3268,7 @@ class MISPToNeo4jSync:
                 "name": value,
             }
             # 2026-10: never a metadata block's raw text (an NVD_META or OTX_META comment) or a note of
-            # where the CVE was seen; a STIX import of this bundle (``run_pipeline``) would store it as the
-            # CVE description.
+            # where the CVE was seen; a consumer of this bundle would read it as the CVE description.
             vuln_description = _vulnerability_comment_description(attr.get("comment"))
             if vuln_description:
                 stix_obj["description"] = vuln_description
@@ -3298,8 +3297,8 @@ class MISPToNeo4jSync:
                     malware_types.append(tag_name.replace("malware-type:", "").strip())
 
             # 2026-10: named by the base name as ``parse_attribute`` names the node ("Cobalt Strike" for
-            # "Cobalt Strike - S0154"), the original kept as an alias. A STIX import of this bundle
-            # (``run_pipeline``) made the suffixed name a Malware node beside the ATT&CK one.
+            # "Cobalt Strike - S0154"), the original kept as an alias, so a consumer of this bundle does not
+            # make the suffixed name a Malware node beside the ATT&CK one.
             malware_name, attack_software_id = split_attack_software_id(value)
             stix_obj = {
                 "type": "malware",
@@ -3433,9 +3432,9 @@ class MISPToNeo4jSync:
             # PR-G1 Bugbot round-2 (Medium): initial rewrite used
             # ``"type": "attack-pattern"`` for tactics — which turned out
             # to be strictly worse than the prior broken state:
-            # ``run_pipeline.py::load_stix21_to_neo4j`` (line ~567) routes
+            # the STIX loader of ``run_pipeline.py`` (retired 2026-11-02) routed
             # ALL ``attack-pattern`` objects to ``merge_technique()`` and
-            # handles tactics only under ``"x-mitre-tactic"`` (line ~592).
+            # handled tactics only under ``"x-mitre-tactic"``.
             # So the "fix" silently created Technique nodes from Tactic
             # data (previously tactics were silently dropped because the
             # non-standard ``"type": "tactic"`` matched no consumer
@@ -4484,8 +4483,8 @@ class MISPToNeo4jSync:
                 )
 
             # Build EMPLOYS_TECHNIQUE relationships to techniques.
-            # Attribution edge (who uses the TTP). See 2026-04 refactor note
-            # in src/neo4j_client.py create_actor_technique_relationship.
+            # Attribution edge (who uses the TTP), distinct from the capability edge
+            # IMPLEMENTS_TECHNIQUE of Malware/Tool (2026-04 split of a generic USES).
             for technique in techniques:
                 relationships.append(
                     {

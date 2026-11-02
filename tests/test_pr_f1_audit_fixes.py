@@ -200,16 +200,6 @@ class TestBuildRelationshipsDegradedAttributeRemoved:
             offenders
         )
 
-    def test_run_pipeline_uses_structured_log_extra(self):
-        """The replacement is a structured log with ``extra={'degraded': True}``."""
-        with open("src/run_pipeline.py") as fh:
-            src = fh.read()
-        # The ``extra={"degraded": True, "step": "build_relationships"}`` keyword
-        # must be present in the build_relationships failure log calls
-        assert 'extra={"degraded": True, "step": "build_relationships"}' in src, (
-            "expected structured log marker on build_relationships failure path"
-        )
-
 
 # ---------------------------------------------------------------------------
 # Prod Readiness LOW 1.8 — install.sh auto-gens AIRFLOW secrets
