@@ -82,7 +82,7 @@ All EdgeGuard nodes are **ResilMesh-schema compatible** where they overlap.
 | `CVSSv30`, `CVSSv40` | per-version score fields, same pattern as `CVSSv31` | NVD; bidirectional `HAS_CVSS_v30` / `HAS_CVSS_v40` |
 | `Alert` | `alert_id`, `source`, `zone[]`, `timestamp`, `severity`, `indicator`, `indicator_type`, `malware`, `cve`, `enriched`, `received_at` | EdgeGuard's alert processor, from inbound NATS alerts only (none on a baseline). Not in CRUSOE's model, which has `SecurityEvent` — label ownership to agree with ResilMesh |
 
-**Secondary sector labels:** nodes classified into a sector also carry `:Energy` / `:Finance` / `:Healthcare` as additional labels (applied by the sync after each run; on the live graph of 2026-10-11, 7,364 nodes carried `:Energy`). They are a convenience for label-based filtering — the authoritative sector relation is `TARGETS` / `AFFECTS` → `Sector`.
+**Secondary sector labels:** nodes classified into a sector also carry `:Energy` / `:Finance` / `:Healthcare` as additional labels (applied by the sync after each run, and to campaigns by the enrichment job that builds them; on the live graph of 2026-10-11, 7,364 nodes carried `:Energy`). They are a convenience for label-based filtering — the authoritative sector relation is `TARGETS` / `AFFECTS` → `Sector`.
 
 #### ResilMesh Topology Layer (schema-compatible helpers)
 
@@ -787,10 +787,11 @@ RETURN h.hostname AS host, c.cve_id AS cve,
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Secondary sector labels: campaigns get theirs from the enrichment job that builds them.
 - 2026-11-01 — CVE lists: the sync writes them on the `CVE` node in batches, each CVE as `merge_cve` writes it; the note named `merge_cve` as their writer.
 - 2026-11-01 — Node table, `Vulnerability`, and CVSS: NVD data lands as `CVE` + `CVSSv*` through the sync's batched CVE writes (`merge_cves_batch`, each CVE as `merge_cve` writes it); the row and the CVSS section named `merge_cve` as their writer.
 - 2026-11-01 — Node table: `ThreatActor` and `Malware` carry the ATT&CK id of an ATT&CK record (`mitre_id`).

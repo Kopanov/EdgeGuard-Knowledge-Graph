@@ -332,7 +332,7 @@ Runs `src/enrichment_jobs.py` — **six** jobs in sequence (`run_all_enrichment_
 1b. **Actor alias merge** (`merge_alias_duplicate_actors` — folds non-MITRE actors named by an alias of exactly one MITRE actor, or resolved by the canonical threat-actor reference to another actor on the graph, into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`, `EDGEGUARD_CANONICAL_THREAT_ACTORS`)
 1c. **Malware ATT&CK-id twin merge** (`merge_malware_attack_twins` — folds a non-MITRE `Malware` node named after an ATT&CK software id, `cobalt strike - s0154` from OTX's MISP-galaxy naming, into the MITRE `Malware` node of that id or, when its id cannot be read, of that base name, or, for software without one (an ATT&CK tool), into the `Malware` node of its base name; a twin with neither is left and counted; same merge as 1b; `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`; see [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Malware named after an ATT&CK software id")
 2. **Indicator aging** (`decay_ioc_confidence`: the one aging rule for every `Indicator`, evaluated at the database's current time, as in every Indicator write, or at a node's `aging_evaluated_at` when that is later (the time at which its aging values were last written; no task passes a time of the run, so a re-run of an older run, or a baseline overlapping a scheduled sync, evaluates at the time it runs and moves no node backwards; [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md#airflow-task-run_neo4j_sync-edgeguard_neo4j_sync-dag), *Indicator aging time*); writes only the nodes whose values change, so a run right after it writes nothing unless a node reached a tier day; runs before the campaign builder, which links active indicators only)
-3. **Campaign nodes** (`build_campaign_nodes`)
+3. **Campaign nodes** (`build_campaign_nodes`; it also sets each campaign's sector labels from its zones, which the sync, run before it, cannot)
 4. **FIRST EPSS** (`enrich_cve_epss` in `src/cve_feed_enrichment.py` — the day's EPSS score and percentile on the `CVE` nodes that exist, removed from those that left the feed; `EDGEGUARD_ENABLE_EPSS`, default on; a feed outage is logged and skipped, never fails the task; the one source written to Neo4j without MISP, see [DATA_SOURCES.md § 8b](DATA_SOURCES.md)). CISA's SSVC decision points need no job: they come with the NVD records through the sync.
 
 #### Indicator aging
@@ -513,10 +513,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Campaign nodes: `build_campaign_nodes` sets the campaigns' sector labels.
 - 2026-11-01 — Timeouts: a full sync of a 730-day MISP has to fit the 6 hours of the baseline full sync, and its duration with batched CVE writes is to be measured on the next 730-day run. The table had given it as about 6 hours, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs.
 - 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (tier 2 and the per-source limit gave about 1,130 and 1,100 a day, the rate of the keyless 30-day file); a run after a gap of failed runs can spread over parts.
 - 2026-10-25 — The per-event size cost is bounded by the writer's event split (`EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`, `-partN` events, not OTX); tier 2: URLhaus's first push after a wipe spreads over about 4 parts, and a daily run writes the about 1,130 URLs MISP does not hold into one event (the text said partitioning was not implemented, and that URLhaus writes one event).

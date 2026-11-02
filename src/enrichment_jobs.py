@@ -73,6 +73,7 @@ from neo4j_client import (  # noqa: E402
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
 from relationship_provenance import aggregated_prov_set, node_feeds, prov_set, prov_with  # noqa: E402
+from sector_labels import CAMPAIGN_SECTOR_LABELS_CYPHER, SECTOR_LABELS  # noqa: E402
 
 try:
     from metrics_server import record_enrichment_duration
@@ -366,7 +367,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       last_seen       — the latest last seen date of its active indicators
                         (per source, the last-seen claim, else the source's
                         latest report); only moves later
-      zone            — union of all indicator zones
+      zone            — union of all indicator zones; each sector zone is also a label
+                        (``:Finance`` …, Step 6, ``sector_labels``)
       tag             — actor tag (for UNIQUE constraint key)
     """
     if not neo4j_client.driver:
@@ -968,6 +970,24 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             reactivated = record["count"] if record else 0
             if reactivated > 0:
                 logger.info(f"  [OK] {reactivated} campaigns active (updated in this run)")
+            query_pause()
+
+            # Step 6 (2026-11-02): the campaigns' sector labels (:Finance, :Healthcare, :Energy) follow the
+            # zones Step 1 set. The sync labels nodes at its end, before this builder runs, so a campaign
+            # had no label until the next sync (none after a fresh baseline), and kept a label its zones
+            # no longer gave. Labels of the zones are added to every campaign; on a campaign EdgeGuard
+            # created, sector labels its zones no longer give are removed (``sector_labels``).
+            record = session.run(
+                CAMPAIGN_SECTOR_LABELS_CYPHER, sector_labels=list(SECTOR_LABELS), timeout=NEO4J_READ_TIMEOUT
+            ).single()
+            results["sector_labels_added"] = int((record["added"] if record else 0) or 0)
+            results["sector_labels_removed"] = int((record["removed"] if record else 0) or 0)
+            logger.info(
+                "[CAMPAIGN] sector labels: %d added, %d removed on %d campaigns",
+                results["sector_labels_added"],
+                results["sector_labels_removed"],
+                int((record["campaigns"] if record else 0) or 0),
+            )
 
     except Exception as e:
         # PR-N21 BLOCKER (root cause of 2026-04-22 cloud Campaign = 0):

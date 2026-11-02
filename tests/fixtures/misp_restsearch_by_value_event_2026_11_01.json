@@ -1,0 +1,130 @@
+{
+ "_source": "Answer of a MISP 2.5 test instance to POST /attributes/restSearch with eventid and a value list, 2026-11-02, read-only. Event 55 is the OTX event of a 730-day baseline: past about 148,800 attributes MISP answered each push to it with HTTP 500 and stored the batch. The four attributes are among those stored by the batches answered 500; the request also asks the upper-case form of each hash and a value the event does not hold. Comments are cut to 200 characters, Event to id and info.",
+ "event_id": "55",
+ "batch": [
+  {
+   "type": "sha256",
+   "value": "3bf5f07059a24fb803c6fefb874f000e9c300372b1b870e48b4935bd0219fe2b"
+  },
+  {
+   "type": "sha256",
+   "value": "328d92b71034d74c016b1f8e70217be3f432a2ade8fe44522f84980fd0dbb1f9"
+  },
+  {
+   "type": "md5",
+   "value": "008d381652c68883acac1b50f2befd50"
+  },
+  {
+   "type": "threat-actor",
+   "value": "Water Barghest"
+  }
+ ],
+ "request_values": [
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "008D381652C68883ACAC1B50F2BEFD50",
+  "008d381652c68883acac1b50f2befd50",
+  "328D92B71034D74C016B1F8E70217BE3F432A2ADE8FE44522F84980FD0DBB1F9",
+  "328d92b71034d74c016b1f8e70217be3f432a2ade8fe44522f84980fd0dbb1f9",
+  "3BF5F07059A24FB803C6FEFB874F000E9C300372B1B870E48B4935BD0219FE2B",
+  "3bf5f07059a24fb803c6fefb874f000e9c300372b1b870e48b4935bd0219fe2b",
+  "Water Barghest"
+ ],
+ "answer": {
+  "response": {
+   "Attribute": [
+    {
+     "id": "777221",
+     "event_id": "55",
+     "object_id": "0",
+     "object_relation": null,
+     "category": "Payload delivery",
+     "type": "sha256",
+     "value": "3bf5f07059a24fb803c6fefb874f000e9c300372b1b870e48b4935bd0219fe2b",
+     "to_ids": true,
+     "uuid": "fc224d83-0764-4eeb-9494-303dc7430f76",
+     "timestamp": "1793542882",
+     "distribution": "5",
+     "sharing_group_id": "0",
+     "comment": "OTX_META:{\"attack_ids\": [\"T1497.001\", \"T1082\", \"T1106\", \"T1140\", \"T1055\", \"T1027.001\", \"T1059\", \"T1497\", \"T1571\", \"T1027\", \"T1012\", \"T1027.002\"], \"targeted_countries\": [], \"pulse_tags\": [\"babbleloader",
+     "deleted": false,
+     "disable_correlation": false,
+     "first_seen": "2024-11-19T09:46:14.000000+00:00",
+     "last_seen": "2024-11-19T09:49:19.928000+00:00",
+     "Event": {
+      "id": "55",
+      "info": "EdgeGuard-alienvault_otx-2026-11-01"
+     }
+    },
+    {
+     "id": "777222",
+     "event_id": "55",
+     "object_id": "0",
+     "object_relation": null,
+     "category": "Payload delivery",
+     "type": "sha256",
+     "value": "328d92b71034d74c016b1f8e70217be3f432a2ade8fe44522f84980fd0dbb1f9",
+     "to_ids": true,
+     "uuid": "3bf8c22a-2392-4131-b698-ca1434e59157",
+     "timestamp": "1793542882",
+     "distribution": "5",
+     "sharing_group_id": "0",
+     "comment": "OTX_META:{\"attack_ids\": [\"T1497.001\", \"T1082\", \"T1106\", \"T1140\", \"T1055\", \"T1027.001\", \"T1059\", \"T1497\", \"T1571\", \"T1027\", \"T1012\", \"T1027.002\"], \"targeted_countries\": [], \"pulse_tags\": [\"babbleloader",
+     "deleted": false,
+     "disable_correlation": false,
+     "first_seen": "2024-11-19T09:46:14.000000+00:00",
+     "last_seen": "2024-11-19T09:49:19.928000+00:00",
+     "Event": {
+      "id": "55",
+      "info": "EdgeGuard-alienvault_otx-2026-11-01"
+     }
+    },
+    {
+     "id": "777232",
+     "event_id": "55",
+     "object_id": "0",
+     "object_relation": null,
+     "category": "Payload delivery",
+     "type": "md5",
+     "value": "008d381652c68883acac1b50f2befd50",
+     "to_ids": true,
+     "uuid": "dda5e8a5-7fc3-4c91-8085-72019e5e87ad",
+     "timestamp": "1793542882",
+     "distribution": "5",
+     "sharing_group_id": "0",
+     "comment": "OTX_META:{\"attack_ids\": [\"T1497.001\", \"T1082\", \"T1106\", \"T1140\", \"T1055\", \"T1027.001\", \"T1059\", \"T1497\", \"T1571\", \"T1027\", \"T1012\", \"T1027.002\"], \"targeted_countries\": [], \"pulse_tags\": [\"babbleloader",
+     "deleted": false,
+     "disable_correlation": false,
+     "first_seen": "2024-11-19T09:46:14.000000+00:00",
+     "last_seen": "2024-11-19T09:49:19.928000+00:00",
+     "Event": {
+      "id": "55",
+      "info": "EdgeGuard-alienvault_otx-2026-11-01"
+     }
+    },
+    {
+     "id": "777421",
+     "event_id": "55",
+     "object_id": "0",
+     "object_relation": null,
+     "category": "Attribution",
+     "type": "threat-actor",
+     "value": "Water Barghest",
+     "to_ids": false,
+     "uuid": "17e9bacd-9b2c-4fbd-8213-5e0848877c47",
+     "timestamp": "1793542882",
+     "distribution": "5",
+     "sharing_group_id": "0",
+     "comment": "MITRE_USES_TECHNIQUES:{\"rt\":[\"T1133\",\"T1562\",\"T1190\",\"T1205\",\"T1070\",\"T1584\",\"T1497\",\"T1571\",\"T1027\",\"T1132\"],\"pid\":\"673b4d74f0567c0115bd2c97\"}",
+     "deleted": false,
+     "disable_correlation": false,
+     "first_seen": "2024-11-18T14:21:40.330000+00:00",
+     "last_seen": "2024-11-18T16:31:49.164000+00:00",
+     "Event": {
+      "id": "55",
+      "info": "EdgeGuard-alienvault_otx-2026-11-01"
+     }
+    }
+   ]
+  }
+ }
+}

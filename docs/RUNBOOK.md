@@ -138,6 +138,13 @@ Each entry: symptom → detection signal → remediation.
   flap — the adaptive backoff distinguishes them).
 - **Remediation.** Same as (1) — this is usually the early-warning
   before (1) fires.
+- **Not this failure mode.** `[STORED-AFTER-5XX]` warnings on every batch
+  to one large event (the OTX event of a long baseline): MISP saved each
+  batch and then ran out of PHP memory building its answer, which lists the
+  whole event. The writer found the batch in the event and counted it as
+  pushed, so nothing is lost and no cooldown follows. Raise MISP's
+  `memory_limit` ([MISP_TUNING.md § Event size](MISP_TUNING.md#event-size)).
+  Probe: `docker logs edgeguard_airflow 2>&1 | grep -F '[STORED-AFTER-5XX]' | tail -5`.
 
 ### 3. Honest-NULL violation (collector forging timestamps)
 
@@ -1413,10 +1420,11 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Failure mode 2: `[STORED-AFTER-5XX]` warnings (a batch MISP stored although it answered HTTP 5xx) are no loss; raise MISP's `memory_limit`.
 - 2026-11-01 — Failure mode 5: the sync's CVE batches (`merge_cves_batch`) and their lines: `_write_cve_batch` at ERROR and `[CVE-BATCH-FALLBACK]` at WARNING (it was an ERROR when the batch writer itself raised), the run summary's count of batches written one CVE at a time, the counter `edgeguard_neo4j_cve_batch_fallback_total{reason}`, a log probe for `[CVE-BATCH-FALLBACK]` and what to do when batches keep falling back (a batch at its transaction timeout counts as `non_retryable` and is handled as in § Neo4j statement timeouts). Neo4j statement timeouts: a CVE batch is one transaction and its `[NEO4J-TIMEOUT]` line names it (a batch at its timeout had logged only the `_write_cve_batch` error).
 - 2026-11-01 — Requesting a full sync, Duration: a full sync of a 730-day MISP has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run. The section had given it as about 6 hours, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs.
 - 2026-11-01 — New section "Airflow scheduler or triggerer stopped": `airflow standalone` keeps the API server up when the scheduler dies, so the run stays `running`; detection through `EdgeGuardAirflowSchedulerDown`, `EdgeGuardAirflowComponentUnhealthy` and `EdgeGuardAirflowHealthUnreachable`, the `airflow` service healthcheck, `edgeguard dag status` / `doctor` / `preflight` and check `[13]` of `scripts/preflight_baseline.sh`; recovery: restore the metadata database first when it is unhealthy, let a running task end when the time allows (a restart runs it again from its start), restart Airflow and do not pause the DAG; a triggerer or DAG processor alone waits until no run is in progress.

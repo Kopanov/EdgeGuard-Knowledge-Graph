@@ -311,6 +311,7 @@ class TestPruneQueryReceivesRunStartAt:
                 "removed": 0,
                 "deleted": 0,  # 2026-10-16: Step 1b
                 "names": [],
+                "added": 0,  # 2026-11-02: Step 6, the campaigns' sector labels
             }
             # For queries that return iterable results (qualifying_actors_query)
             result.__iter__ = lambda s: iter([])

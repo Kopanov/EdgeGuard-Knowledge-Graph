@@ -511,7 +511,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
       * Step 1 creates 1 Campaign
       * Steps 2/3a/4/5 link malware/indicators, prune stale, cleanup, reactivate
       * The returned `results` dict reflects the per-step counts
-      * All 13 expected session.run() calls fire in the right order
+      * All 14 expected session.run() calls fire in the right order
       * Campaign uuid is computed deterministically from the actor name
 
     Without this test, a refactor that re-orders / silently swallows
@@ -522,7 +522,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
 
     def _build_fake_session(self, actor_name: str = "APT-N31-Test", deleted=None):
         """Construct a MagicMock session that returns happy-path values
-        for each of the 13 session.run() calls build_campaign_nodes
+        for each of the 14 session.run() calls build_campaign_nodes
         makes. Returns ``(client, sess, captured_queries)`` so the test
         can inspect what queries were issued + in what order.
 
@@ -600,6 +600,10 @@ class TestPRN31BuildCampaignNodesHappyPath:
         reactivated_result = MagicMock()
         reactivated_result.single.return_value = {"count": 0}
 
+        # (10) Step 6 the campaigns' sector labels (2026-11-02)
+        sector_labels_result = MagicMock()
+        sector_labels_result.single.return_value = {"campaigns": 1, "added": 2, "removed": 0}
+
         captured_queries = []
         original_side_effect = [
             now_result,
@@ -615,6 +619,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
             prune_result,
             cleanup_result,
             reactivated_result,
+            sector_labels_result,
         ]
         idx_holder = {"i": 0}
 
@@ -654,10 +659,11 @@ class TestPRN31BuildCampaignNodesHappyPath:
             f"results dict must include campaign accounting; got keys: {sorted(results.keys())}"
         )
 
-    def test_happy_path_issues_all_13_queries(self, monkeypatch):
-        """The function must issue all 13 expected session.run() calls (2026-10: the database's
+    def test_happy_path_issues_all_14_queries(self, monkeypatch):
+        """The function must issue all 14 expected session.run() calls (2026-10: the database's
         clock, Step 2b, the malware membership prune, and Step 2c, which settles RUNS; 2026-10-16:
-        Step 1b, which deletes the campaigns without evidence).
+        Step 1b, which deletes the campaigns without evidence; 2026-11-02: Step 6, the campaigns'
+        sector labels).
         Fewer calls means a step was silently skipped (the swallower
         pattern PR-N21 fixed); more means a step duplicated or a new
         step was added without updating this pin (intentional break-
@@ -672,14 +678,14 @@ class TestPRN31BuildCampaignNodesHappyPath:
         finally:
             ej.time.sleep = original_sleep
 
-        assert sess.run.call_count == 13, (
-            f"build_campaign_nodes must issue exactly 13 session.run() calls "
-            f"(1 clock + 1 pre-fetch + 8 step queries + 3 follow-ups); got {sess.run.call_count}. "
+        assert sess.run.call_count == 14, (
+            f"build_campaign_nodes must issue exactly 14 session.run() calls "
+            f"(1 clock + 1 pre-fetch + 9 step queries + 3 follow-ups); got {sess.run.call_count}. "
             f"If you added a step, update this pin AND the fake-session fixture."
         )
 
     def test_happy_path_query_order(self, monkeypatch):
-        """The 13 queries must fire in a specific order (pre-fetch FIRST,
+        """The 14 queries must fire in a specific order (pre-fetch FIRST,
         Campaign create SECOND, etc). A reorder could break the
         backfill-after-create invariant the post-PR-#33 audit caught."""
         ej = self._import_fresh_enrichment_jobs(monkeypatch)
@@ -719,6 +725,22 @@ class TestPRN31BuildCampaignNodesHappyPath:
             assert substr in captured[i], (
                 f"query #{i + 1} must contain '{substr}'; got query starting with: {captured[i][:200]}..."
             )
+        # (10) Step 6 (2026-11-02) — the campaigns' sector labels, last: after Step 1 set the zones
+        assert "apoc.create.addLabels(kept, missing)" in captured[-1]
+
+    def test_step6_sets_the_campaigns_sector_labels(self, monkeypatch):
+        """2026-11-02: the last statement sets the campaigns' sector labels from their zones, with the
+        sector labels as a parameter, and its counts are in the results."""
+        import sector_labels
+
+        ej = self._import_fresh_enrichment_jobs(monkeypatch)
+        client, sess, _captured = self._build_fake_session()
+        monkeypatch.setattr(ej.time, "sleep", lambda *_a: None)
+        results = ej.build_campaign_nodes(client)
+        last = sess.run.call_args_list[-1]
+        assert last.args[0] == sector_labels.CAMPAIGN_SECTOR_LABELS_CYPHER
+        assert last.kwargs["sector_labels"] == ["Energy", "Finance", "Healthcare"]
+        assert (results["sector_labels_added"], results["sector_labels_removed"]) == (2, 0)
 
     def test_happy_path_passes_campaign_uuids_dict(self, monkeypatch):
         """The post-PR-#33 audit (round 21) caught that the create_cypher
@@ -797,12 +819,13 @@ class TestPRN31BuildCampaignNodesHappyPath:
         of the duration, not its length (a campaign stamped two days earlier has 0 minutes). The
         statement's semantics on Neo4j: ``tests/test_explainability_neo4j.py``."""
         _ej, sess, captured, _results = self._run_capturing(monkeypatch)
-        step5 = sess.run.call_args_list[-1]
-        assert "MATCH (c:Campaign)" in captured[-1] and "count(c)" in captured[-1]
-        assert "duration.between" not in captured[-1], "a duration component is not an elapsed time"
-        assert "c.last_updated >= datetime($run_start_at)" in captured[-1]
+        # Step 5 is the last but one statement (2026-11-02: Step 6, the sector labels, follows it).
+        step5 = sess.run.call_args_list[-2]
+        assert "MATCH (c:Campaign)" in captured[-2] and "count(c)" in captured[-2]
+        assert "duration.between" not in captured[-2], "a duration component is not an elapsed time"
+        assert "c.last_updated >= datetime($run_start_at)" in captured[-2]
         assert step5.kwargs.get("run_start_at") == "2026-10-15T12:00:00Z", "the database's clock, read at the start"
-        assert captured[-1] is _ej._CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, "the statement the Neo4j case runs"
+        assert captured[-2] is _ej._CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, "the statement the Neo4j case runs"
 
     def test_every_step_reads_the_same_evidence_definition(self, monkeypatch):
         """2026-10-16: an actor qualifies, a campaign survives, a malware is a member and an indicator

@@ -267,6 +267,7 @@ second, so that expression means more than one cooldown per second
 | What you see | What's wrong | What to change |
 |---|---|---|
 | HTTP 500 on every batch over a certain size | PHP `memory_limit` or `post_max_size` too small | `memory_limit = 4096M`, `post_max_size = 256M` |
+| `[STORED-AFTER-5XX]` on every batch to one event (the OTX event of a long baseline) | MISP saves the batch, then runs out of PHP memory building its answer, which lists the whole event ([Event size](#event-size)) | `memory_limit = 4096M`; nothing is lost, the writer counted the batches as pushed |
 | HTTP 500 with MySQL "Lost connection" or "Lock wait timeout" | InnoDB buffer pool too small for the attribute table | `innodb_buffer_pool_size = 4G`, `innodb_log_file_size = 512M` |
 | HTTP 500 with "MySQL has gone away" | `max_allowed_packet` rejecting the JSON | `max_allowed_packet = 256M` |
 | HTTP 504 / Apache hangs after ~30s | `max_execution_time` truncating the PHP | `max_execution_time = 600` |
@@ -332,6 +333,21 @@ Splitting OTX events needs the sync to link report items across the parts
 of a day:
 [ROADMAP.md § Collection depth and scale](ROADMAP.md#collection-depth-and-scale).
 
+MISP answers a push with the whole event (every attribute it holds), so an
+event can outgrow the answer before it outgrows the store: MISP saves the
+batch, runs out of PHP memory building the answer and responds HTTP 500.
+With `memory_limit = 2048M` that happened on every batch to an OTX event past
+about 148,800 attributes (730-day baseline of 2026-11-01). After a 5xx the
+writer therefore looks the batch's values up in the event
+(`attributes/restSearch` by `eventid` and value). A batch MISP holds in full
+counts as pushed and is not sent again: a WARNING `[STORED-AFTER-5XX]`, the
+writer stat `batches_stored_after_5xx` and a note on the push summary line.
+Of a batch whose retries all fail, only the attributes MISP does not hold
+count as failed. When the lookup fails too, the batch is retried and counted
+as before. `[STORED-AFTER-5XX]` on every batch means the event is past what
+MISP can answer: raise `memory_limit` (the TL;DR's 4096M) so the pushes
+answer 200 again and each batch is checked against the stored event.
+
 ---
 
 ## References
@@ -345,10 +361,11 @@ of a day:
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Event size: MISP answers a push with the whole event and an event can outgrow that answer (HTTP 500 after the save; with 2048M, an OTX event past about 148,800 attributes on 2026-11-01); the writer looks a batch up after a 5xx and counts what MISP holds as pushed (`[STORED-AFTER-5XX]`); a row in the cheat-sheet.
 - 2026-10-25 — Event size and audience: the writer continues a source/date event in `-partN` events of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, except a group with OTX report ids, so the OTX event is the baseline event past 50,000 attributes; with the default thresholds no part reaches the adaptive tiers (a lowered `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` applies them to parts); a knob row for the split, and the prefetch row says the split reads a part's size from it (the page said a baseline writes one event per source, URLhaus one event of about 63,000 URLs, and partitioning is planned).
 - 2026-10-25 — Audience: URLhaus (its whole `recent.csv` export in one baseline event, about 63,000 URLs on 2026-10-24) named among the sources whose baseline events pass 50,000 attributes; ThreatFox (at most 10,000 IOCs per run) removed from them.
 - 2026-10-23 — The page names no deployed MISP image: it said `harvarditsecurity/misp:latest` is deployed, which the repository cannot verify; the README points here for the MISP server settings; the planned event sharding (a shard per 25K attributes) gave way to a pointer to ROADMAP.md, which lists the partitioning of large baseline events by date range.

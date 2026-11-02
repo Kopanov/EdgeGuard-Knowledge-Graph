@@ -2061,6 +2061,8 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime(monkeypatch):
         reactivated_result.single.return_value = {"count": 0}
         now_result = MagicMock()
         now_result.single.return_value = {"now": "2026-10-15T12:00:00Z"}
+        sector_labels_result = MagicMock()
+        sector_labels_result.single.return_value = {"campaigns": 0, "added": 0, "removed": 0}
         sess.run.side_effect = [
             now_result,  # 0 — the database's clock (2026-10)
             actors_result,  # 1
@@ -2075,6 +2077,7 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime(monkeypatch):
             prune_result,  # 7
             cleanup_result,  # 8
             reactivated_result,  # 9
+            sector_labels_result,  # 10 — 2026-11-02 Step 6, the campaigns' sector labels
         ]
         client.driver.session.return_value = sess
 

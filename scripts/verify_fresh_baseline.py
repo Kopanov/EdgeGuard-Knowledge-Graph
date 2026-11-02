@@ -53,7 +53,9 @@ Since 2026-10-25 it fails when a ``Source`` node is keyed by an alias of a regis
 node whose id the registry does not know. Since the campaign seen dates of 2026-10-25 it fails when a
 campaign is first seen later than the first date of one of its indicator members (a source's first-seen
 claim, else its latest report, never after the member's first import) or last seen earlier than a
-member's latest dated report.
+member's latest dated report. Since 2026-11-02 it fails when an EdgeGuard node lacks the sector label of
+one of its zones (``:Finance`` for ``finance``) or carries a sector label its zones do not give
+(``src/sector_labels.py``).
 
 Env (``src/neo4j_http_endpoint.py``):
   NEO4J_HTTP_URL   base URL, then NEO4J_HTTP; neither set: the local Compose Neo4j
@@ -140,6 +142,9 @@ from sector_evidence import (  # noqa: E402
     STATEMENT_LABELS,
     STATING_FEEDS,
 )
+from sector_labels import SECTOR_LABELS_CHECK_QUERY  # noqa: E402  — 2026-11-02, check 10n
+from sector_labels import check_params as sector_labels_check_params  # noqa: E402
+from sector_labels import check_verdict as sector_labels_verdict  # noqa: E402
 from source_registry import SOURCE_REF_SEPARATOR, all_sources, get_source  # noqa: E402
 
 # Labels and relationship types EdgeGuard writes. Anything else on a shared
@@ -1100,6 +1105,14 @@ def run_checks(
     )
     rep.add("sector_coverage", None, cov)
     _sector_evidence_checks(rep, require_cisa_ics, require_otx_industries)
+
+    # 10n. Sector labels follow the zones (2026-11-02): every EdgeGuard node of the kinds the sync labels
+    #      carries the label of each sector zone it has (``:Finance`` for ``finance``) and no sector label
+    #      its zones do not give (``sector_labels``). The sync labels at its end; campaigns, built after it,
+    #      are labelled by ``build_campaign_nodes`` (before 2026-11-02 they had none after a fresh baseline).
+    #      Informational on a graph without zoned or sector-labelled EdgeGuard nodes.
+    r = _one(SECTOR_LABELS_CHECK_QUERY, sector_labels_check_params())
+    rep.add("sector_labels_follow_zones", sector_labels_verdict(r), r)
 
     # 11. ResilMesh-facing schema unchanged.
     types = [x["t"] for x in _post("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t")]
