@@ -1044,7 +1044,16 @@ class TestTriggerBaselineDagHelper:
       - Bug Hunter F2: brittle ``line.split("run_id", 1)[1].strip().split()[0]``
         parser would return ``"=manual__..."`` if Airflow ever uses
         ``run_id=...`` format
+
+    These tests cover the ``docker compose exec`` path, taken when the Compose ``airflow`` service runs;
+    the REST path is tested in ``tests/test_baseline_trigger_gate.py``.
     """
+
+    @pytest.fixture(autouse=True)
+    def _compose_airflow_running(self, monkeypatch):
+        import edgeguard
+
+        monkeypatch.setattr(edgeguard, "_compose_airflow_running", lambda: True)
 
     def test_helper_returns_run_id_on_success(self):
         import subprocess as sp
@@ -1101,10 +1110,14 @@ class TestTriggerBaselineDagHelper:
         assert exit_code == 2
         assert "did not respond" in msg
         assert "docker compose ps airflow" in msg, "must give operator a triage command"
+        # The trigger may have reached Airflow: look the run up before triggering again.
+        assert "the run may have been created" in msg
+        assert "edgeguard dag status --dag-id edgeguard_baseline" in msg
 
     def test_helper_catches_filenotfound(self):
-        """``docker`` binary missing on PATH — give the operator the
-        Airflow UI fallback instead of a bare traceback."""
+        """``docker`` gone between the Compose check and the trigger: nothing reached Airflow. The message
+        says so, points at the run list and at the REST path the command takes without Compose, instead of
+        a bare traceback."""
         import subprocess as sp
 
         from edgeguard import _trigger_baseline_dag
@@ -1113,7 +1126,9 @@ class TestTriggerBaselineDagHelper:
             exit_code, msg = _trigger_baseline_dag('{"baseline_days": 730}')
 
         assert exit_code == 2
-        assert "Airflow UI" in msg
+        assert "nothing was triggered" in msg
+        assert "edgeguard dag status --dag-id edgeguard_baseline" in msg
+        assert "Airflow REST API" in msg
 
     def test_helper_returns_unknown_on_unparseable_run_id(self):
         """If Airflow CLI output ever changes shape entirely, return

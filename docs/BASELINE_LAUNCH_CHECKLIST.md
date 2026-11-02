@@ -457,9 +457,11 @@ clearing:
 If the items above pass, the baseline is cleared to run `edgeguard_baseline`.
 Every launch flow goes through the DAG, on every install — `edgeguard baseline` /
 `edgeguard fresh-baseline` are wrappers that trigger it; they add
-confirmation + backup-gate UX, **not** a mutex, and run `docker compose exec`
-(without Docker, trigger with `airflow dags trigger edgeguard_baseline` in the
-Airflow environment).
+confirmation + backup-gate UX, **not** a mutex. They refuse while the scheduler
+or the metadata database is not healthy or an `edgeguard_baseline` run is
+queued or running, and trigger through `docker compose exec` on the Compose
+host or through the Airflow REST API without it (or trigger with
+`airflow dags trigger edgeguard_baseline` in the Airflow environment).
 See RUNBOOK § "Baseline launch path" for the full procedure:
 
 1. Pause the 5 scheduled DAGs (`edgeguard_daily`, `edgeguard_medium_freq`,
@@ -639,6 +641,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Launch decision: the `edgeguard` wrappers refuse while the scheduler is not healthy or a baseline run is queued or running, and trigger through the Airflow REST API without Docker (they ran `docker compose exec` only).
 - 2026-11-02 — Acceptance check `sector_labels_follow_zones` (the 730-day graph of 2026-11-01 fails it: 433 campaigns without the labels of their zones).
 - 2026-11-01 — Check `[13]`: Airflow's scheduler, triggerer and DAG processor and the metadata database backend (13-check preflight); During the run: `EdgeGuardAirflowSchedulerDown` and the recovery of a stopped scheduler.
 - 2026-11-01 — Preflight without `--launch-path` assumes `dag` (it assumed the in-process CLI path); `--launch-path=cli` warns that the in-process baseline builds a reduced graph; the launch decision names the trigger without Docker; without Docker, checks [5] and [6] only warn and are done by hand.

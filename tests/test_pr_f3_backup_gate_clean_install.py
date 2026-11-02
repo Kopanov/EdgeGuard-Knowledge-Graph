@@ -37,7 +37,19 @@ import sys
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, "src")
+
+
+@pytest.fixture(autouse=True)
+def _airflow_ready(monkeypatch):
+    """The Airflow check before the trigger passes without a request (it has its own tests in
+    ``tests/test_baseline_trigger_gate.py``). The ``MagicMock`` args of this file would otherwise switch on
+    ``--skip-airflow-check`` and send real requests to the Airflow the environment names."""
+    import edgeguard
+
+    monkeypatch.setattr(edgeguard, "_baseline_trigger_gate", lambda **kwargs: None)
 
 
 def _make_state(*, neo4j_count: int, misp_count: int):

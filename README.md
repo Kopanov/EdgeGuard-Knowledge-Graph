@@ -373,7 +373,7 @@ Full lock semantics: [docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#
 
 - A fresh baseline deletes the EdgeGuard-managed nodes in Neo4j (every node with `--wipe-all`), the EdgeGuard events in MISP and the collector checkpoints. Nodes a partner created stay, so a database shared with ResilMesh keeps its data.
 - The backup gate refuses a wipe of non-empty stores unless `EDGEGUARD_LAST_BACKUP_AT` records a backup within `EDGEGUARD_BACKUP_MAX_AGE_HOURS` (240 hours by default). Its bypasses are explicit and logged (`--skip-backup-check`, or `skip_backup_check: true` in the DAG run configuration); an empty Neo4j and MISP need no backup. Backup and restore: [docs/BACKUP.md](docs/BACKUP.md).
-- `edgeguard baseline --days N` and `edgeguard fresh-baseline --days N` trigger the same DAG from the Compose host; `fresh-baseline` shows what it would delete, asks for a typed confirmation and runs the backup gate first.
+- `edgeguard baseline --days N` and `edgeguard fresh-baseline --days N` trigger the same DAG; they refuse while the Airflow scheduler is not healthy or a baseline run is queued or running, and `fresh-baseline` shows what it would delete, asks for a typed confirmation and runs the backup gate first.
 - Before a fresh baseline, deploy the current commit, keep MISP's default Import Regexp rules, take a snapshot, and start with the opt-in sources off, enabling them one at a time afterwards: [docs/BASELINE_LAUNCH_CHECKLIST.md § 6](docs/BASELINE_LAUNCH_CHECKLIST.md#6-fresh-baseline-deploy-misp-import-rule-flags-re-feed).
 
 ### Steps
@@ -486,7 +486,7 @@ docker compose exec airflow python /opt/airflow/src/edgeguard.py <command>
 | `fresh-baseline --days N` | Trigger a destructive baseline |
 | `version` | Release version and commit |
 
-`baseline` and `fresh-baseline` run on the Compose host, because they trigger the DAG through `docker compose exec`. Every command, flag and caveat: [docs/CLI.md](docs/CLI.md).
+`baseline` and `fresh-baseline` trigger the DAG through `docker compose exec` on the Compose host and through the Airflow REST API elsewhere; both refuse while the scheduler is not healthy or a baseline run is queued or running. Every command, flag and caveat: [docs/CLI.md](docs/CLI.md).
 
 ### Monitoring
 
@@ -617,4 +617,4 @@ EdgeGuard is developed by IICT-BAS and Ratio1 and financed by ResilMesh Open Cal
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_

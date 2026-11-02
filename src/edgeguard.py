@@ -2577,19 +2577,292 @@ def _check_recent_backup_timestamp() -> Optional[str]:
     return check_recent_backup_timestamp()
 
 
+_BASELINE_DAG = "edgeguard_baseline"
+_BASELINE_RUN_CHECK = f"edgeguard dag status --dag-id {_BASELINE_DAG}"
+_BASELINE_REFUSE_UNHEALTHY = (
+    f"Not triggering {_BASELINE_DAG}: with the scheduler or metadata database not healthy, the run would stay "
+    "queued and start whenever the scheduler returns. Recover Airflow as above; then run this command again, "
+    f"which refuses while an {_BASELINE_DAG} run is queued or running."
+)
+# Seconds for one ``airflow`` CLI command inside the Compose ``airflow`` container (the CLI starts in a few).
+_CONTAINER_READ_TIMEOUT = 60
+
+
+def _airflow_cli_in_container(args: list[str]) -> tuple[Optional[subprocess.CompletedProcess], str]:
+    """Run ``airflow <args>`` in the Compose ``airflow`` service (``docker compose exec -T``), which reads
+    the metadata database directly and needs no API credentials: ``(result, "")``, or ``(None, reason)``
+    when the command could not be run or gave no answer in time."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "airflow", "airflow", *args],
+            capture_output=True,
+            text=True,
+            timeout=_CONTAINER_READ_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"no answer within {_CONTAINER_READ_TIMEOUT}s"
+    except OSError as e:
+        return None, f"docker compose exec failed: {e}"
+    return result, ""
+
+
+def _cli_failure(result: subprocess.CompletedProcess) -> str:
+    """The exit code and the last line the command printed on stderr, else on stdout: a traceback ends
+    with the error, followed for a SQLAlchemy error by a "(Background on this error at: ...)" link line,
+    which is left out."""
+    for stream in (result.stderr, result.stdout):
+        lines = [
+            line.strip()
+            for line in (stream or "").splitlines()
+            if line.strip() and not line.startswith("(Background on this error")
+        ]
+        if lines:
+            return f"exit {result.returncode}: {lines[-1]}"
+    return f"exit {result.returncode}: no output"
+
+
+def _scheduler_alive_in_container() -> tuple[Optional[bool], str]:
+    """Read in the Compose ``airflow`` container whether a scheduler is alive, with
+    ``airflow jobs check --job-type SchedulerJob``.
+
+    ``(True, ...)`` on exit 0 ("Found one alive job.": the query also reached the metadata database),
+    ``(False, ...)`` when the command answers "No alive jobs found.", and ``(None, reason)`` otherwise
+    (the command did not run, timed out, or failed on the metadata database: no reading).
+    """
+    result, reason = _airflow_cli_in_container(["jobs", "check", "--job-type", "SchedulerJob"])
+    if result is None:
+        return None, reason
+    if result.returncode == 0:
+        return True, (result.stdout or "").strip() or "exit 0"
+    if "No alive jobs found." in f"{result.stdout or ''}\n{result.stderr or ''}":
+        return False, "No alive jobs found."
+    return None, _cli_failure(result)
+
+
+def _json_list_from_cli(stdout: str) -> Optional[list]:
+    """The JSON list an ``airflow ... -o json`` command printed: the whole output, or else its last line
+    that parses as a JSON list (the CLI can print log lines, such as a warning, before it)."""
+    try:
+        whole = json.loads(stdout)
+    except ValueError:
+        whole = None
+    if isinstance(whole, list):
+        return whole
+    for line in reversed(stdout.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(candidate, list):
+            return candidate
+    return None
+
+
+def _pending_runs_in_container() -> tuple[Optional[list[dict]], str]:
+    """The queued and running ``edgeguard_baseline`` runs, read in the Compose ``airflow`` container with
+    ``airflow dags list-runs edgeguard_baseline -o json``: ``(runs, "")`` or ``(None, reason)``.
+
+    One command lists every run of the DAG, so the queued and the running ones come from one answer. Its
+    entries carry ``run_id`` and ``start_date`` (``""`` before the run starts); they are returned with the
+    keys of the REST answer (``dag_run_id``, ``state``, ``start_date``).
+    """
+    result, reason = _airflow_cli_in_container(["dags", "list-runs", _BASELINE_DAG, "-o", "json"])
+    if result is None:
+        return None, reason
+    if result.returncode != 0:
+        return None, _cli_failure(result)
+    runs = _json_list_from_cli(result.stdout or "")
+    if runs is None:
+        return None, "the command printed no JSON list"
+    pending = [
+        {"dag_run_id": run.get("run_id"), "state": run.get("state"), "start_date": run.get("start_date") or None}
+        for run in runs
+        if run.get("state") in ("queued", "running")
+    ]
+    return pending, ""
+
+
+def _baseline_trigger_gate(*, skip_airflow_check: bool = False) -> Optional[int]:
+    """Refuse a trigger of ``edgeguard_baseline`` that Airflow would not start now or that would queue a
+    second run; None when the trigger may go ahead, else exit code 2 after printing why.
+
+    It reads Airflow's health answer and the ``edgeguard_baseline`` runs that are queued or running:
+
+    - A metadata database or scheduler that Airflow does not report healthy refuses: the run would stay
+      queued and start whenever the scheduler returns (a fresh baseline then wipes the stores at once).
+    - A queued or running ``edgeguard_baseline`` run refuses: the DAG has ``max_active_runs=1``, so a
+      second trigger queues a second run, which starts when the first ends and, as a fresh baseline,
+      wipes the graph the first one built.
+    - A reading the REST API does not give (Airflow not reachable, no API credentials in this shell) is
+      taken, when the Compose ``airflow`` service runs in the current directory, inside that container,
+      which needs no credentials: ``airflow jobs check --job-type SchedulerJob`` for the scheduler and
+      ``airflow dags list-runs`` for the runs. This is skipped once a reading refuses.
+    - A reading that neither gives refuses unless ``skip_airflow_check``. One flag covers both readings: they
+      come from the same Airflow, and the flag stands in only for a reading that is missing; it never
+      overrides one that Airflow gives.
+    """
+    import airflow_client as ac
+
+    refused = False
+    health_unread: Optional[str] = None
+    health = ac.airflow_health()
+    if "error" in health:
+        health_unread = str(health["error"])
+    else:
+        component_errors, _ = _report_airflow_components(ac.component_health(health))
+        if component_errors:
+            err(_BASELINE_REFUSE_UNHEALTHY)
+            refused = True
+
+    pending: list[dict] = []
+    runs_unread: Optional[str] = None
+    for state in ("queued", "running"):
+        runs = ac.list_dag_runs(_BASELINE_DAG, state=state, limit=25)
+        if runs and "error" in runs[0]:
+            runs_unread = str(runs[0]["error"])
+            break
+        pending.extend(runs)
+
+    # A Compose host whose shell has no API credentials, or no route to the API server: the airflow
+    # container reads the metadata database itself. It is asked only while no reading refuses.
+    if (health_unread or runs_unread) and not (refused or pending) and _compose_airflow_running():
+        if health_unread:
+            info(
+                f"Airflow health answer not read ({health_unread}); reading the scheduler in the Compose airflow "
+                "container: airflow jobs check --job-type SchedulerJob"
+            )
+            alive, detail = _scheduler_alive_in_container()
+            if alive:
+                ok(f"Airflow scheduler alive and metadata database reachable ({detail})")
+                health_unread = None
+            elif alive is False:
+                err(f"Airflow scheduler not alive ({detail}): {_AIRFLOW_COMPONENT_EFFECT['scheduler']}")
+                info(_AIRFLOW_RECOVER_SCHEDULER)
+                err(_BASELINE_REFUSE_UNHEALTHY)
+                refused = True
+            else:
+                health_unread += f"; in the airflow container: {detail}"
+        if runs_unread and not refused:
+            info(
+                f"{_BASELINE_DAG} runs not read through the API ({runs_unread}); reading them in the Compose "
+                f"airflow container: airflow dags list-runs {_BASELINE_DAG}"
+            )
+            container_runs, detail = _pending_runs_in_container()
+            if container_runs is None:
+                runs_unread += f"; in the airflow container: {detail}"
+            else:
+                pending = container_runs
+                runs_unread = None
+
+    if pending:
+        err(f"{_BASELINE_DAG} already has {len(pending)} run(s) queued or running:")
+        for run in pending:
+            print(
+                f"  {run.get('dag_run_id', '?')}  {run.get('state', '?')}  "
+                f"started {(run.get('start_date') or 'not yet')[:19]}"
+            )
+        info(
+            "  The DAG runs one run at a time (max_active_runs=1): another trigger would queue a second run that "
+            "starts when this one ends and, as a fresh baseline, wipes the graph this one built."
+        )
+        info(
+            f"  Follow it with: {_BASELINE_RUN_CHECK}. To replace it, mark it failed first: "
+            f"edgeguard dag kill --dag-id {_BASELINE_DAG}"
+        )
+        refused = True
+    elif runs_unread is None:
+        ok(f"No {_BASELINE_DAG} run queued or running.")
+
+    if refused:
+        return 2
+    unreadable = [f"health answer: {health_unread}"] if health_unread else []
+    if runs_unread:
+        unreadable.append(f"{_BASELINE_DAG} runs: {runs_unread}")
+    if unreadable:
+        if skip_airflow_check:
+            for reason in unreadable:
+                warn(f"Airflow not read ({reason}); --skip-airflow-check passed, triggering anyway.")
+            logger.warning(
+                "--skip-airflow-check: %s triggered without reading Airflow (%s)", _BASELINE_DAG, "; ".join(unreadable)
+            )
+            return None
+        err(f"Not triggering {_BASELINE_DAG}: Airflow's state could not be read.")
+        for reason in unreadable:
+            print(f"  {reason}")
+        info(
+            "  Check AIRFLOW_WEBSERVER_URL (default http://localhost:8082) and, for the run list, AIRFLOW_API_USER / "
+            "AIRFLOW_API_PASSWORD in this shell. On the Compose host, run the command from the directory of "
+            "docker-compose.yml with the airflow service running: Airflow is then read in that container, without "
+            "API credentials."
+        )
+        info(
+            "  Once you have checked yourself (Airflow UI, or airflow dags list-runs edgeguard_baseline) that the "
+            "scheduler is healthy and no edgeguard_baseline run is queued or running, run the command again with "
+            "--skip-airflow-check."
+        )
+        return 2
+    return None
+
+
+def _compose_airflow_running(timeout: int = 30) -> bool:
+    """True when ``docker compose``, run from the current directory, lists the ``airflow`` service as
+    running; False without the ``docker`` command, without a Compose project here, or with the service
+    stopped. When True, the baseline trigger goes through ``docker compose exec``, and the trigger check
+    reads in that container what the REST API does not give; when False, the trigger goes through the
+    Airflow REST API."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "ps", "--services", "--status", "running"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "airflow" in result.stdout.split()
+
+
+def _trigger_baseline_dag_rest(conf_json: str) -> tuple[int, str]:
+    """Trigger ``edgeguard_baseline`` through the Airflow REST API (``POST .../dagRuns``), once.
+
+    Returns ``(0, run_id)``, or ``(2, message)``. After a timeout the run may exist, so the message
+    says to list the runs first instead of triggering again.
+    """
+    import airflow_client as ac
+
+    result = ac.trigger_dag_run(_BASELINE_DAG, json.loads(conf_json))
+    if "error" not in result:
+        return 0, str(result.get("dag_run_id") or "<unknown>")
+    if result.get("timed_out"):
+        return 2, (
+            f"Airflow did not answer the trigger in time ({result['error']}): the run may have been created.\n"
+            f"Do not trigger again before checking: {_BASELINE_RUN_CHECK}\n"
+            "A queued or running run listed there may be the one this command created."
+        )
+    return 2, (
+        f"Airflow REST trigger of {_BASELINE_DAG} failed: {result['error']}\n"
+        "(No running Compose airflow service in this directory, so the trigger went to AIRFLOW_WEBSERVER_URL.)\n"
+        f"Before triggering again, check that no run was created: {_BASELINE_RUN_CHECK}"
+    )
+
+
 def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, str]:
-    """Invoke ``docker compose exec airflow airflow dags trigger
-    edgeguard_baseline --conf <conf_json>``.
+    """Trigger ``edgeguard_baseline`` with ``conf_json``: ``docker compose exec airflow airflow dags
+    trigger`` when the Compose ``airflow`` service runs here, else the Airflow REST API
+    (:func:`_trigger_baseline_dag_rest`, a bare-metal Airflow or the CLI inside the container).
 
     Returns ``(exit_code, run_id_or_error)``:
       - exit_code 0 + run_id like ``"manual__2026-04-19T..."`` on success
         (or ``"<unknown>"`` if the parser couldn't extract it but the
         trigger succeeded — operator can find it in Airflow UI)
-      - exit_code 2 + error message on docker-not-found, timeout, or
-        non-zero airflow exit
+      - exit_code 2 + error message on a failed or timed-out trigger
     """
     import re
-    import subprocess
+
+    if not _compose_airflow_running():
+        return _trigger_baseline_dag_rest(conf_json)
 
     try:
         result = subprocess.run(
@@ -2612,20 +2885,25 @@ def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, st
             check=False,
         )
     except FileNotFoundError:
+        # ``docker`` answered the Compose check a moment earlier: nothing reached Airflow.
         return 2, (
-            "docker compose not found on PATH. Trigger manually via Airflow UI:\n"
-            f"  Airflow UI → edgeguard_baseline → Trigger DAG w/ Config: {conf_json}"
+            "docker not found on PATH (it listed the Compose airflow service a moment earlier); nothing was "
+            "triggered.\n"
+            f"  Check that no {_BASELINE_DAG} run is queued or running: {_BASELINE_RUN_CHECK}\n"
+            "  Then run this command again: without a running Compose airflow service it triggers through the "
+            "Airflow REST API (AIRFLOW_WEBSERVER_URL)."
         )
     except subprocess.TimeoutExpired:
         # Bug Hunter B2: was uncaught. A busy or unresponsive ``airflow``
         # container raises this with timeout=60 → bare traceback to the
-        # operator's terminal. Caller already saw a successful preflight
-        # 60s earlier; the right next step is to check airflow's health.
+        # operator's terminal. The trigger may have reached Airflow, so the
+        # run is looked up before any new trigger.
         return 2, (
-            f"Airflow CLI did not respond within {timeout}s. Check:\n"
+            f"Airflow CLI did not respond within {timeout}s; the run may have been created. Check:\n"
             "  docker compose ps airflow\n"
             "  docker compose logs --tail 50 airflow\n"
-            "Then re-trigger when airflow is responsive."
+            f"  {_BASELINE_RUN_CHECK}\n"
+            "Trigger again only when that lists no queued or running run."
         )
     except OSError as e:
         return 2, f"docker compose exec failed: {e}"
@@ -2661,9 +2939,9 @@ def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, st
 def cmd_fresh_baseline(args) -> int:
     """edgeguard fresh-baseline --days N
 
-    Trigger a destructive baseline: probe Neo4j+MISP for blast radius, show
-    counts, ask for typed confirmation, then trigger the Airflow
-    edgeguard_baseline DAG with ``dag_run.conf={"fresh_baseline": true,
+    Trigger a destructive baseline: check Airflow (:func:`_baseline_trigger_gate`), probe
+    Neo4j+MISP for blast radius, show counts, ask for typed confirmation, check Airflow again,
+    then trigger the Airflow edgeguard_baseline DAG with ``dag_run.conf={"fresh_baseline": true,
     "baseline_days": N}``.
     """
     from baseline_clean import probe_baseline_state
@@ -2672,6 +2950,15 @@ def cmd_fresh_baseline(args) -> int:
     section("Fresh Baseline (DESTRUCTIVE)")
 
     days = resolve_baseline_days(explicit=getattr(args, "days", None))
+
+    # Airflow first: a stopped scheduler or a pending baseline run refuses before the probes, the
+    # backup gate and the typed confirmation, so no backup is taken and nothing is confirmed for a
+    # trigger that would not start now or would queue a second wipe.
+    skip_airflow_check = getattr(args, "skip_airflow_check", False)
+    refused = _baseline_trigger_gate(skip_airflow_check=skip_airflow_check)
+    if refused is not None:
+        print("No data was changed.", file=sys.stderr)
+        return refused
 
     # Preflight: probe both datastores. If EITHER is unreachable, refuse to
     # proceed — operator can't give informed consent without seeing counts.
@@ -2847,6 +3134,14 @@ def cmd_fresh_baseline(args) -> int:
     else:
         _conf["backup_check_passed_cli"] = True
     conf_json = json.dumps(_conf)
+
+    # Again just before the trigger: the confirmation prompt may have been open for a while.
+    info("Checking Airflow again before the trigger...")
+    refused = _baseline_trigger_gate(skip_airflow_check=skip_airflow_check)
+    if refused is not None:
+        print("No data was changed.", file=sys.stderr)
+        return refused
+
     info("Triggering edgeguard_baseline DAG with conf:")
     info(f"  {conf_json}")
 
@@ -2865,13 +3160,18 @@ def cmd_baseline(args) -> int:
     """edgeguard baseline --days N
 
     Trigger an additive baseline (no destruction). Existing data preserved.
-    No confirmation prompt — this is a safe operation.
+    No confirmation prompt — this is a safe operation. Airflow is checked first
+    (:func:`_baseline_trigger_gate`).
     """
     from baseline_config import resolve_baseline_days
 
     section("Baseline (additive)")
 
     days = resolve_baseline_days(explicit=getattr(args, "days", None))
+
+    refused = _baseline_trigger_gate(skip_airflow_check=getattr(args, "skip_airflow_check", False))
+    if refused is not None:
+        return refused
 
     info(f"Triggering edgeguard_baseline DAG (additive mode, {days} days history)")
     info("Existing Neo4j nodes + MISP events PRESERVED — new data layered on top.")
@@ -3303,6 +3603,12 @@ Examples:
         default=None,
         help="Historical window in days (default 730; resolves via baseline_config)",
     )
+    _skip_airflow_check_help = (
+        "Trigger even when Airflow's health answer or its list of edgeguard_baseline runs cannot be read "
+        "(neither the Airflow API nor a Compose airflow container answers). A scheduler or metadata database reported not healthy, or an "
+        "edgeguard_baseline run queued or running, still refuses"
+    )
+    baseline_p.add_argument("--skip-airflow-check", action="store_true", help=_skip_airflow_check_help)
 
     fresh_baseline_p = subparsers.add_parser(
         "fresh-baseline",
@@ -3334,6 +3640,7 @@ Examples:
         help="Delete EVERY Neo4j node, including nodes created by other producers on a shared database. "
         "Default: only EdgeGuard-managed nodes are deleted (shared-database contract)",
     )
+    fresh_baseline_p.add_argument("--skip-airflow-check", action="store_true", help=_skip_airflow_check_help)
 
     # Preflight
     preflight_parser = subparsers.add_parser("preflight", help="Comprehensive pre-run readiness check")
