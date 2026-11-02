@@ -75,7 +75,8 @@ def writer_steps() -> List[Tuple[str, str]]:
         build_relationships.build_relationships()
     finally:
         mp.undo()
-    assert len(steps) == 20
+    # 19 batched steps: step 2 (Malware.attributed_to, which no writer produces) runs no query.
+    assert len(steps) == 19
     return steps
 
 
@@ -102,7 +103,10 @@ def test_each_technique_claims_statement_reads_the_claims_as_its_writer(
     outer, inner = pairs[0]
     var = outer.split("(", 1)[1].split(":", 1)[0]
     assert f"UNWIND {var}.{claims} AS" in inner
-    assert re.search(r"coalesce\(\$revoked\[toString\((\w+)\)\], \1\) AS \1", inner)
+    # The cited id is translated under another name: no statement re-binds a name to an expression of
+    # itself (on Neo4j 2026.03.1 a subquery in the same WHERE read the untranslated id).
+    translated = re.search(r"coalesce\(\$revoked\[toString\((\w+)\)\], \1\) AS (\w+)", inner)
+    assert translated and translated.group(1) != translated.group(2)
     assert "MATCH (t:Technique {mitre_id: " in inner and f"MERGE ({var})-[r:{rel_type}]->(t)" in inner
     if match_type:
         assert (
