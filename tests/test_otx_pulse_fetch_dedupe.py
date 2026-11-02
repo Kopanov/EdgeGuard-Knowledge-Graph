@@ -203,6 +203,7 @@ def test_a_pulse_on_two_pages_is_processed_once_and_the_repeat_is_logged(caplog)
         "repeated_rows": 1,
         "processed": 3,
         "without_item": 0,
+        "deferred": 0,
     }
     messages = [r.getMessage() for r in records]
     assert any(
@@ -231,6 +232,7 @@ def test_a_fetch_without_repeats_counts_zero_and_logs_no_repeat(caplog):
         "repeated_rows": 0,
         "processed": 3,
         "without_item": 0,
+        "deferred": 0,
     }
     messages = [r.getMessage() for r in records]
     assert any(m.endswith("(3 rows read, 0 of them repeating a pulse already read)") for m in messages)
@@ -269,6 +271,7 @@ def test_a_run_whose_pulses_all_yielded_no_item_still_returns_the_counts(caplog)
         "repeated_rows": 1,
         "processed": 2,
         "without_item": 2,
+        "deferred": 0,
     }
 
 
@@ -286,6 +289,7 @@ def test_an_incremental_repeat_no_longer_takes_a_slot_of_the_limit(caplog):
         "repeated_rows": 1,
         "processed": 3,
         "without_item": 0,
+        "deferred": 0,
     }
     messages = [r.getMessage() for r in records]
     assert (
@@ -311,6 +315,7 @@ def test_rows_and_pulses_are_counted_apart_when_a_pulse_comes_back_twice(caplog)
         "repeated_rows": 3,
         "processed": 3,
         "without_item": 0,
+        "deferred": 0,
     }
     repeats = [r.getMessage() for r in records if r.levelname == "WARNING" and r.getMessage().startswith("[PULSES]")]
     assert len(repeats) == 1
@@ -320,20 +325,24 @@ def test_rows_and_pulses_are_counted_apart_when_a_pulse_comes_back_twice(caplog)
 
 
 def test_a_scheduled_run_counts_only_the_pulses_within_the_limit(caplog):
-    """Three distinct pulses that all yield items, one repeated row, and a limit of 2: P3, the third
-    distinct pulse, is past the limit and not processed in this run. It is counted neither as processed
-    nor as a pulse that yielded no item, and the ``processed`` line names no pulse."""
-    status, pushed, processed, _cursor, records = _run(
+    """Three distinct pulses that all yield items, one repeated row, and a limit of 2: the limit takes the
+    pulses oldest first (P3, then P1), so P2, the newest, is deferred to the next run and the cursor stops at
+    P1, below it. It is counted neither as processed nor as a pulse that yielded no item, and the
+    ``processed`` line names no pulse."""
+    status, pushed, processed, cursor, records = _run(
         caplog, [[_p1(), _p2()], [_p2(), _p3()]], baseline=False, limit=2, count=3
     )
-    assert sorted(processed) == sorted([P1, P2])
-    assert "luckyguys.site" not in _values(pushed)
+    assert sorted(processed) == sorted([P1, P3])
+    assert "luckyguys.site" in _values(pushed)
+    assert "https://api.npoint.io/933a731a5e97f4b45249" not in _values(pushed)
+    cursor.assert_called_once_with("otx", otx_last_pulse_modified="2026-10-15T10:00:00")
     assert status["pulse_counts"] == {
         "rows_read": 4,
         "distinct": 3,
         "repeated_rows": 1,
         "processed": 2,
         "without_item": 0,
+        "deferred": 1,
     }
     lines = [
         r.getMessage() for r in records if " processed, " in r.getMessage() and r.getMessage().startswith("[PULSES]")
@@ -341,6 +350,9 @@ def test_a_scheduled_run_counts_only_the_pulses_within_the_limit(caplog):
     assert lines == ["[PULSES] OTX: 2 pulse(s) processed, 0 of them yielded no item"]
     assert not any(pid in lines[0] for pid in (P1, P2, P3))
     assert not any("yielded no item (" in r.getMessage() for r in records)
+    deferral = [r.getMessage() for r in records if "deferred to the next run" in r.getMessage()]
+    assert len(deferral) == 1
+    assert deferral[0].startswith("[PULSES] OTX: 1 pulse(s) deferred to the next run: the run's limit of 2 ")
 
 
 def test_a_pulse_without_an_id_is_not_named_among_the_pulses_without_an_item():

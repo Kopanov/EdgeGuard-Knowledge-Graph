@@ -138,7 +138,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `MITRE_FORCE_REFETCH` | unset | Skip the ETag check: full download and push |
 | `MITRE_ICS_ATTACK_URL` | the MITRE CTI file | Address of the ATT&CK for ICS bundle |
 | `EDGEGUARD_MITRE_MAX_RELATIONSHIPS` | `0` (no cap) | Relationship edges per ATT&CK sync |
-| `EDGEGUARD_OTX_BASELINE_MAX_PAGES` | `200` | OTX pages (50 pulses each) per baseline |
+| `EDGEGUARD_OTX_BASELINE_MAX_PAGES` | `200` | OTX pages per baseline (50 pulses each, or the baseline limit when one is set) |
 | `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` | `25` | OTX pages per incremental run |
 | `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS` | `3` | First incremental run: `modified_since` look-back |
 | `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC` | `300` | Overlap subtracted from the stored OTX cursor |
@@ -147,6 +147,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 - `MITRE_ICS_ATTACK_URL` unset or empty uses `ics-attack/ics-attack.json` of the `mitre/cti` repository.
 - `EDGEGUARD_MITRE_MAX_RELATIONSHIPS` also reads the older name `MITRE_MAX_RELATIONSHIPS`.
 - A baseline that stops at `EDGEGUARD_OTX_BASELINE_MAX_PAGES` with a full last page logs a warning, because older pulses of the window were not read; raise it for very active subscriptions.
+- A scheduled run that stops at `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` (pages of 100) with pulses left to read (a full last page, or OTX reporting more pulses than were read) logs a warning: OTX returns the newest-modified pulses first, so the pulses not read are the oldest of the window, and the cursor passes them. Raise it, or run a baseline, to read them.
 
 **Indicator feeds**
 
@@ -175,7 +176,7 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `EDGEGUARD_INCREMENTAL_LIMIT` | `200` | Items per source per scheduled run (OTX) |
+| `EDGEGUARD_INCREMENTAL_LIMIT` | `200` | Per scheduled run: OTX pulses modified after the cursor, oldest first |
 | `EDGEGUARD_MAX_ENTRIES` | `0` (off) | Global override of every per-run cap |
 | `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | `500` | Attributes per MISP push batch |
 | `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Pause between push batches and edit groups |
@@ -196,8 +197,8 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `EDGEGUARD_ZONE_ITEM_THRESHOLD` | `1.5` | Minimum combined keyword score of an item |
 | `EDGEGUARD_EARLIEST_IOC_DATE` | `1995-01-01` | Earliest source date accepted as first-seen |
 
-- `EDGEGUARD_INCREMENTAL_LIMIT` applies to the sources without their own per-run rule: OTX, and VirusTotal, which is bounded by its lookup cap of 60 first. NVD, CISA KEV, CISA ICS, MITRE ATT&CK (the whole changed bundle) and the indicator feeds above apply their own rules (`OWN_RUN_CAP_SOURCES` in `src/config.py`). `docker-compose.yml` forwards neither `EDGEGUARD_INCREMENTAL_LIMIT` nor `EDGEGUARD_MAX_ENTRIES`; on that deployment set them in the `airflow` service environment.
-- `EDGEGUARD_MAX_ENTRIES` above `0` caps every source, the own-rule sources included when it is lower.
+- `EDGEGUARD_INCREMENTAL_LIMIT` applies to the sources without their own per-run rule: OTX, and VirusTotal, which is bounded by its lookup cap of 60 first. For OTX it counts the distinct pulses modified after the stored cursor, oldest first, and the rest wait for the next run; the pulses the run re-reads inside the overlap (`EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC`, modified at or before the cursor) and pulses without a readable `modified` are processed without counting ([COLLECTORS.md § Scheduled runs](COLLECTORS.md#scheduled-runs-limit-and-cursor)). NVD, CISA KEV, CISA ICS, MITRE ATT&CK (the whole changed bundle) and the indicator feeds above apply their own rules (`OWN_RUN_CAP_SOURCES` in `src/config.py`). `docker-compose.yml` forwards neither `EDGEGUARD_INCREMENTAL_LIMIT` nor `EDGEGUARD_MAX_ENTRIES`; on that deployment set them in the `airflow` service environment.
+- `EDGEGUARD_MAX_ENTRIES` above `0` caps every source, the own-rule sources included when it is lower. For OTX it takes the place of `EDGEGUARD_INCREMENTAL_LIMIT` and counts the pulses the same way.
 - The large-event tiers depend on the size of the target event, which the duplicate check reads; a cooldown follows sustained 5xx answers. With the default thresholds no event part reaches the tiers, so they apply to OTX events and to every event with the split off. MISP server settings for such events: [MISP_TUNING.md](MISP_TUNING.md).
 - `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`: a source's attributes of one UTC push date go to `EdgeGuard-<source>-<date>` and, once that event holds the limit, to `-part2`, `-part3`, ..., each part taking at most the limit; the push goes to the first part with room, and a new part is created when its first batch is about to be written. A part's size is the event's `attribute_count`, or the larger of that and the duplicate check's count for a part the push lists; a part whose size is unknown counts as full, except with the prefetch off ([COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts)). A (source, date) group with an attribute that names a source report (an OTX pulse) is not split, because the sync links report items only within one event, so OTX events grow without the limit. `0` or less turns the split off (every attribute of a source/date goes to `EdgeGuard-<source>-<date>`; with the default complete cross-event listing nothing already in a part is added again); a value that is not a whole number, or one from 1 to 999, logs a warning and uses 20000. Details: [COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts).
 - `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` also paces every 50 edits of an NVD incremental run, of a CISA KEV run and of the refresh. `0` removes the pause except the large-event floors.
@@ -461,6 +462,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `EDGEGUARD_INCREMENTAL_LIMIT` counts, for OTX, the pulses modified after the cursor, oldest first; the overlap's re-reads and pulses without a readable `modified` do not count (OTX returns the pulses newest-modified first, and the limit took the newest, so the cursor passed the older pulses of a window larger than the limit). `EDGEGUARD_MAX_ENTRIES`, when set, is OTX's limit and counts the same way. `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES`: a scheduled run that stops at it with pulses left to read logs a warning. `EDGEGUARD_OTX_BASELINE_MAX_PAGES`: a baseline page holds the baseline limit when one is set (the row gave 50 pulses).
 - 2026-11-02 — Checked against the code: `NEO4J_URL` (check `[2]` of the baseline preflight) and `NEO4J_DOCKER_CONTAINER` (`src/check_neo4j.sh`) are listed; the baseline lock's run state is read through the Airflow REST API first, on any host (the text named a same-host liveness check); `AIRFLOW_API_PASSWORD` is not needed by `baseline` and `fresh-baseline` on the Compose host; only `EDGEGUARD_CHECKPOINT_DIR` must stay inside the project root, a value outside it being ignored with a warning, and `EDGEGUARD_STATE_DIR` is used as given (the text required both to stay inside it); `EDGEGUARD_STATE_DIR` holds the DAGs' sync state, the VirusTotal ledger and the AbuseIPDB cache, while `edgeguard doctor`, `monitor` and `stats` read `<project root>/state`; the pending full-sync measurement is no longer in the `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS` row; the per-run cap note names the URLhaus export's window, the URLs added in the past 30 days.
 - 2026-11-02 — `EDGEGUARD_BASELINE_REQUIRED_SOURCES` is also checked after the run: the baseline postcheck fails when a listed source with a baseline collector holds no `SOURCED_FROM` edge (INV-6).
 - 2026-11-02 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` and `AIRFLOW_WEBSERVER_URL`: `src/metrics_server.py` reads Airflow's health endpoint as well, as the exporter does.

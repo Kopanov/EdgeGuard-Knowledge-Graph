@@ -778,17 +778,19 @@ SECTOR_TIME_RANGES = {"healthcare": 24, "energy": 24, "finance": 24, "global": 2
 # with MAX_ENTRIES_PER_SOURCE=0.
 MAX_ENTRIES_PER_SOURCE = _env_int("EDGEGUARD_MAX_ENTRIES", 0)
 
-# Incremental (regular cron) collection limit.
+# Incremental (regular cron) collection limit, set by the environment variable
+# EDGEGUARD_INCREMENTAL_LIMIT only (no Airflow Variable overrides it).
 #
-# Applied on every normal scheduled collection run — keeps each 2-3 day
-# window scan fast and lightweight.  Baseline runs use a separate limit
-# (BASELINE_COLLECTION_LIMIT Airflow Variable) and ignore this setting.
+# Applied on every scheduled run of the sources without their own per-run rule
+# (OWN_RUN_CAP_SOURCES below); EDGEGUARD_MAX_ENTRIES, when set, takes its place
+# (get_effective_limit). Baseline runs use a separate limit
+# (BASELINE_COLLECTION_LIMIT Airflow Variable, or EDGEGUARD_BASELINE_COLLECTION_LIMIT)
+# and ignore this setting.
 #
 #   0 → no item cap (only the source's own time window applies)
-#   N → collect at most N items per source per run  (e.g. 200, 500)
-#
-# Can also be set as an Airflow Variable "INCREMENTAL_COLLECTION_LIMIT"
-# at runtime, which takes precedence over the env var.
+#   N → at most N items per source per run (e.g. 200, 500); for OTX, the N
+#       pulses modified after the cursor, oldest first, the rest left to the
+#       next run (docs/COLLECTORS.md § Scheduled runs: limit and cursor)
 INCREMENTAL_COLLECTION_LIMIT = _env_int("EDGEGUARD_INCREMENTAL_LIMIT", 200)
 
 # Sources that bypass the count limit (get all data)

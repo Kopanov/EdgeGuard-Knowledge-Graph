@@ -42,7 +42,7 @@
 | URL | https://otx.alienvault.com/api/v1/pulses/subscribed |
 | Format | JSON API |
 | Auth | API Key required |
-| Update | Every 30 minutes (`edgeguard_pipeline` → `collect_otx`): pulses modified since the stored cursor (`otx_last_pulse_modified` minus `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC`, 300 s; without a cursor the last `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS`, 3), in pages of 100 up to `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` (25), with at most `EDGEGUARD_INCREMENTAL_LIMIT` (200) distinct pulses processed per run. A baseline reads pages of 50 pulses (the baseline limit when one is set) up to `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (200). Both keep one copy of a pulse that comes back on a later page and log the distinct pulses beside the rows read ([COLLECTORS.md](COLLECTORS.md#pages-and-pulse-counts)) |
+| Update | Every 30 minutes (`edgeguard_pipeline` → `collect_otx`): pulses modified since the stored cursor (`otx_last_pulse_modified` minus `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC`, 300 s; without a cursor the last `EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS`, 3), in pages of 100 up to `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` (25). OTX returns them newest-modified first; `EDGEGUARD_INCREMENTAL_LIMIT` (200) counts the distinct pulses modified after the cursor, oldest first, the rest wait for the next run, and the pulses re-read inside the overlap are processed without counting ([COLLECTORS.md](COLLECTORS.md#scheduled-runs-limit-and-cursor)). A baseline reads pages of 50 pulses (the baseline limit when one is set) up to `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (200). Both keep one copy of a pulse that comes back on a later page and log the distinct pulses beside the rows read ([COLLECTORS.md](COLLECTORS.md#pages-and-pulse-counts)) |
 | Classification | ✅ Keyword-based on the whole pulse (name, tags, description, indicators), plus OTX's own `industries` |
 
 **What we get:**
@@ -317,6 +317,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — OTX: the per-run limit counts the pulses modified after the cursor, oldest first, and the overlap's re-reads are processed without counting; OTX returns the pulses newest-modified first, and the limit took the newest, so the cursor passed the older pulses of a window larger than the limit.
 - 2026-11-02 — MITRE ATT&CK (overview row 4, § 5): a run pushes the whole bundle whenever it changed, every technique, tactic, group, malware and tool, one item per graph node, with the G and S ids of groups and software; the daily DAG collects it with an ETag check, and `EDGEGUARD_INCREMENTAL_LIMIT` does not apply; the relationships are listed by type, `USES_MALWARE`, `USES_TOOL`, `SUBTECHNIQUE_OF` and `IN_TACTIC` included (the section gave a periodic update of 500 items, 300 techniques, 100 threat actors and 100 malware, with 1,459 technique edges, and the overview about 300).
 - 2026-11-02 — OTX: the per-run limit counts distinct pulses; a pulse a later page returned again was processed twice and took a slot of the limit.
 - 2026-10-25 — URLhaus: the `recent.csv` export lists the URLs added in the past 30 days, about 2,100 a day on average on 2026-10-24 (the page gave about 1,130 a day, the rate of the keyless 30-day file). MalwareBazaar: the full export is a v2 export with the Auth-Key (the keyless `/export/csv/full/` answers HTTP 410).

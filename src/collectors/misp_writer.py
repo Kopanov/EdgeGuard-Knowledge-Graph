@@ -3364,10 +3364,12 @@ class MISPWriter:
         positions in *items* of the items MISP did not store because their batch, their group's
         event lookup, the creation of their part or the lookup of a further part failed, and of the
         items of a systemic conversion drop (below). A cursor that
-        must not pass them (OTX) stops below them. A batch
-        failed when MISP stored none of it: HTTP 4xx, a batch error, HTTP 429 or 5xx after the
-        retries, and under strict accounting an HTTP 200 that confirms none of it; attributes
-        missing from a batch MISP partly stored are not listed. The items no attribute could be
+        must not pass them (OTX) stops below them. The items of a batch are listed after HTTP
+        4xx, a batch error or HTTP 429 after the retries; after HTTP 5xx and the retries, the
+        attributes the lookup in the event does not find (all of them when that lookup fails); when
+        the event id is empty once sanitised (no request is sent, 2026-11-02); and under strict
+        accounting when an HTTP 200 confirms none of the batch. The attributes missing from a batch
+        MISP answered with HTTP 200 and partly stored are not listed. The items no attribute could be
         built from are listed when their source's drop is systemic (``CONVERT_FAILED_MIN_SHARE``): a
         payload the collector no longer reads, whose items a later run stores once the collector
         reads it again; single bad records below the share are not. Values MISP can never store
@@ -4236,7 +4238,8 @@ class MISPWriter:
                 try:
                     success, failed = self._push_batch(event_id, batch)
                     if success == 0 and failed:
-                        _note_unstored(batch)  # HTTP 4xx, a batch error, or none confirmed (strict): none stored
+                        # HTTP 4xx, a batch error, none confirmed (strict) or an event id empty once sanitised: none stored
+                        _note_unstored(batch)
                     # PR-N4 round 2 (Cross-Checker #2, Bug Hunter #5):
                     # require N CONSECUTIVE FULL SUCCESSES before
                     # resetting the failure counter. Pre-fix, a single
@@ -4446,11 +4449,23 @@ class MISPWriter:
 
         Returns:
             Tuple of (successful_count, failed_count)
+
+        2026-11-02: an event id that is empty once sanitised (MISP answered an id of only whitespace or
+        control characters) sends no request and counts the batch as failed. It returned (0, 0), which
+        ``push_items`` and its callers read as a batch MISP already held: the run passed, and the OTX
+        cursor, which advances after a push without failures, would pass items MISP never received.
         """
+        if not attributes:
+            return 0, 0
         # Sanitize event_id first
         event_id = sanitize_value(event_id, max_length=20)
-        if not event_id or not attributes:
-            return 0, 0
+        if not event_id:
+            logger.error(
+                "MISP push: the event id is empty once sanitised — %d attribute(s) not sent, counted as failed",
+                len(attributes),
+            )
+            self.stats["errors"] += 1
+            return 0, len(attributes)
         storable = _make_attributes_storable(attributes)
         skipped_unstorable = len(attributes) - len(storable)
         attributes = storable

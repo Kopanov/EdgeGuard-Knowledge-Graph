@@ -20,7 +20,7 @@ import sys
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import urllib3
 
@@ -373,6 +373,9 @@ def _dedupe_pulse_items(processed: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 # Pulse ids a run names in its pulse-count log lines (repeated page rows, pulses that yielded no item).
 _MAX_LOGGED_PULSE_IDS = 20
 
+# Pulses per page of a scheduled run's fetch (``limit`` of ``/api/v1/pulses/subscribed``).
+_OTX_INCREMENTAL_PAGE_SIZE = 100
+
 
 def _first_copy_of_each_pulse(rows: List[Dict]) -> Tuple[List[Dict], List[str]]:
     """The page rows with the first copy of each pulse id kept, and the ids of the rows left out, in order.
@@ -405,6 +408,80 @@ def _pulse_ids_for_log(ids: List[str]) -> str:
     shown = ", ".join(distinct[:_MAX_LOGGED_PULSE_IDS])
     more = len(distinct) - _MAX_LOGGED_PULSE_IDS
     return f"{shown}, … ({more} more)" if more > 0 else shown
+
+
+def _pulse_modified_dt(pulse: Dict) -> Optional[datetime]:
+    """The pulse's ``modified`` as a timezone-aware datetime (OTX writes it without a zone: UTC), or ``None``
+    when it is missing or does not parse."""
+    raw = pulse.get("modified")
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+class _IncrementalPulses(NamedTuple):
+    """The pulses of a scheduled run, as ``_incremental_pulses_within_limit`` divides them."""
+
+    process: List[Dict]  # the pulses the run processes, in the order OTX returned them
+    deferred: List[Dict]  # the pulses the limit leaves to a later run, oldest first
+    reread: int  # pulses processed outside the limit: modified at or before the stored cursor
+    undated: List[str]  # ids of the pulses processed outside the limit for want of a readable ``modified``
+
+
+def _incremental_pulses_within_limit(
+    pulses: List[Dict], cursor: Optional[datetime], limit: Optional[int]
+) -> _IncrementalPulses:
+    """The pulses a scheduled run processes and the pulses its limit defers (2026-11-02).
+
+    OTX returns the subscribed pulses newest-modified first (60 pulses read on 2026-11-02 in pages of 20:
+    ``modified`` never rose from one row to the next). Cut at the limit in that order, a window larger than
+    the limit lost its oldest pulses, because the cursor moved to the newest pulse processed and passed
+    them. The limit therefore counts the pulses modified after the stored *cursor* oldest first (by
+    ``modified``, then id), and every pulse it defers is modified at or after the newest pulse it took: the
+    next run reads it again, after its cursor, or at the cursor inside the overlap.
+
+    Processed outside the limit, whenever read:
+
+    - a pulse modified at or before *cursor*: the run reads it only because the request starts
+      ``EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC`` before the cursor. Counted, more re-reads than the limit
+      (pulses that share the cursor's ``modified`` value) would take every slot on every run, and the cursor
+      would never move;
+    - a pulse without a readable ``modified``: it cannot be placed against the cursor or move it.
+
+    With no *cursor* (none stored, or one that does not parse: the look-back window) every pulse with a
+    readable ``modified`` counts. A run thus processes at most *limit* pulses modified after the cursor, plus
+    the re-reads of the overlap and the pulses without a readable ``modified``. The re-reads are every pulse
+    modified in the overlap before the cursor: a few in a sparse window, but while a backlog of more than
+    *limit* pulses per overlap drains, every pulse the previous runs took in that span, so a run can reach the
+    page ceiling. *limit* ``None`` processes every pulse. The pulses processed keep the order OTX returned
+    them in (newest first), so the same-run fold keeps the newest pulse's copy of an item, as a baseline does.
+    """
+    if limit is None:
+        return _IncrementalPulses(list(pulses), [], 0, [])
+    outside: List[Dict] = []
+    undated: List[str] = []
+    counted: List[Tuple[datetime, str, Dict]] = []
+    for pulse in pulses:
+        modified = _pulse_modified_dt(pulse)
+        if modified is None:
+            outside.append(pulse)
+            undated.append(str(pulse.get("id") or "?"))
+        elif cursor is not None and modified <= cursor:
+            outside.append(pulse)
+        else:
+            counted.append((modified, str(pulse.get("id") or ""), pulse))
+    counted.sort(key=lambda entry: (entry[0], entry[1]))
+    chosen = {id(pulse) for pulse in outside} | {id(entry[2]) for entry in counted[:limit]}
+    return _IncrementalPulses(
+        process=[pulse for pulse in pulses if id(pulse) in chosen],
+        deferred=[entry[2] for entry in counted[limit:]],
+        reread=len(outside) - len(undated),
+        undated=undated,
+    )
 
 
 def _pulses_without_item(pulses: List[Dict], items: List[Dict[str, Any]]) -> List[str]:
@@ -479,19 +556,18 @@ class OTXCollector:
 
     @staticmethod
     def _max_pulse_modified_iso(pulses: List[Dict]) -> Optional[str]:
-        """Latest OTX pulse ``modified`` timestamp among *pulses* (ISO string), or None."""
-        best: Optional[datetime] = None
+        """Latest OTX pulse ``modified`` timestamp among *pulses* (ISO string), or None.
+
+        2026-11-02: the values are compared as UTC (``_pulse_modified_dt``: a value without a zone is UTC),
+        so pulses that mix values with and without a zone are compared instead of raising ``TypeError``;
+        the newest is returned as its own value reads (without a zone when OTX wrote it so).
+        """
+        best: Optional[Tuple[datetime, str]] = None
         for p in pulses:
-            raw = p.get("modified")
-            if not raw or not isinstance(raw, str):
-                continue
-            try:
-                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                continue
-            if best is None or dt > best:
-                best = dt
-        return best.isoformat() if best else None
+            dt = _pulse_modified_dt(p)
+            if dt is not None and (best is None or dt > best[0]):
+                best = (dt, p["modified"])
+        return datetime.fromisoformat(best[1].replace("Z", "+00:00")).isoformat() if best else None
 
     @staticmethod
     def _pulses_before_oldest(pulses: List[Dict], held_ids: set) -> List[Dict]:
@@ -503,22 +579,11 @@ class OTXCollector:
         """
         if not held_ids:
             return list(pulses)
-
-        def _modified(p: Dict) -> Optional[datetime]:
-            raw = p.get("modified")
-            if not raw or not isinstance(raw, str):
-                return None
-            try:
-                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                return None
-            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-
-        held = {p.get("id"): _modified(p) for p in pulses if p.get("id") in held_ids}
+        held = {p.get("id"): _pulse_modified_dt(p) for p in pulses if p.get("id") in held_ids}
         if set(held) != set(held_ids) or any(dt is None for dt in held.values()):
             return []
         oldest = min(held.values())
-        return [p for p in pulses if (dt := _modified(p)) is not None and dt < oldest]
+        return [p for p in pulses if (dt := _pulse_modified_dt(p)) is not None and dt < oldest]
 
     def health_check(self) -> Dict[str, Any]:
         """
@@ -638,7 +703,8 @@ class OTXCollector:
         Returns:
             Dict with status and counts if push_to_misp=True, else list of processed items. After a fetch the
             dict carries ``pulse_counts``: the page rows read, the distinct pulses, the rows that repeated a
-            pulse already read, the pulses processed and those that yielded no item.
+            pulse already read, the pulses processed, those that yielded no item and those the limit of a
+            scheduled run deferred to the next run (``deferred``, 0 in a baseline).
         """
         limit = resolve_collection_limit(limit, "otx", baseline=baseline)
 
@@ -669,6 +735,9 @@ class OTXCollector:
             return self._return_status(False, 0, error_msg)
 
         try:
+            # The stored incremental cursor of a scheduled run; None in a baseline, without a stored cursor or
+            # when it does not parse (the run then reads the look-back window).
+            cursor_dt: Optional[datetime] = None
             if baseline:
                 # Baseline mode: collect all historical data with pagination.
                 # No page-based checkpoint — OTX pagination is unstable across
@@ -746,6 +815,7 @@ class OTXCollector:
                         if base_dt.tzinfo is None:
                             base_dt = base_dt.replace(tzinfo=timezone.utc)
                         modified_since = (base_dt - overlap).isoformat()
+                        cursor_dt = base_dt
                     except (ValueError, TypeError):
                         modified_since = (
                             datetime.now(timezone.utc) - timedelta(days=OTX_INCREMENTAL_LOOKBACK_DAYS)
@@ -761,15 +831,17 @@ class OTXCollector:
                 )
                 all_incr: List[Dict] = []
                 page_i = 1
+                last_page_rows = 0
                 while page_i <= OTX_INCREMENTAL_MAX_PAGES:
                     page_pulses = self._fetch_pulses(
-                        limit=100,
+                        limit=_OTX_INCREMENTAL_PAGE_SIZE,
                         modified_since=modified_since,
                         page=page_i,
                     )
                     if not page_pulses:
                         break
                     all_incr.extend(page_pulses)
+                    last_page_rows = len(page_pulses)
                     page_i += 1
                     time.sleep(2)
                 # 2026-11-02: one copy per pulse id, before the per-run limit (a repeated row took a slot).
@@ -781,6 +853,22 @@ class OTXCollector:
                     f"OTX incremental: {len(pulses)} distinct pulses read{of_reported} "
                     f"({rows_read} rows read, {len(repeated_rows)} of them repeating a pulse already read)"
                 )
+                # 2026-11-02: the fetch stopped at its page ceiling with pulses left to read (a full last page,
+                # or OTX reporting more pulses than were read). OTX returns the newest-modified pulses first, so
+                # those not read are the oldest of the window, older than every pulse the run can process.
+                if page_i > OTX_INCREMENTAL_MAX_PAGES and (
+                    last_page_rows >= _OTX_INCREMENTAL_PAGE_SIZE or (reported is not None and reported > len(pulses))
+                ):
+                    logger.warning(
+                        "OTX incremental stopped at its page ceiling (EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES=%d, %d per "
+                        "page): %d distinct pulses read%s. OTX returns the newest-modified pulses first, so the pulses "
+                        "not read are the oldest of the window, and any advance of the cursor passes them; raise "
+                        "EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES or run a baseline to read them",
+                        OTX_INCREMENTAL_MAX_PAGES,
+                        _OTX_INCREMENTAL_PAGE_SIZE,
+                        len(pulses),
+                        of_reported,
+                    )
 
             if repeated_rows:
                 logger.warning(
@@ -807,7 +895,32 @@ class OTXCollector:
             geopolitical_adversary_names: Dict[str, List[str]] = {}
             pulses_with_a_geopolitical_adversary_name = 0
 
-            to_process = pulses if limit is None else pulses[:limit]
+            deferred: List[Dict] = []
+            if baseline:
+                to_process = pulses if limit is None else pulses[:limit]
+            else:
+                # 2026-11-02: the limit counts the pulses modified after the cursor, oldest first; OTX returns
+                # them newest first, and cut in that order the cursor passed the older pulses of the window.
+                selection = _incremental_pulses_within_limit(pulses, cursor_dt, limit)
+                to_process, deferred = selection.process, selection.deferred
+                if selection.undated:
+                    logger.warning(
+                        "[PULSES] OTX: %d pulse(s) without a readable 'modified' processed outside the limit; they "
+                        "cannot move the cursor, so every run that reads them processes them again (ids: %s)",
+                        len(selection.undated),
+                        _pulse_ids_for_log(selection.undated),
+                    )
+                if deferred:
+                    logger.info(
+                        "[PULSES] OTX: %d pulse(s) deferred to the next run: the run's limit of %d "
+                        "(EDGEGUARD_INCREMENTAL_LIMIT, or EDGEGUARD_MAX_ENTRIES when set) counts the pulses modified "
+                        "after the cursor, oldest first, and the run took those modified up to %s; %d pulse(s) "
+                        "re-read inside the overlap window were processed outside the limit",
+                        len(deferred),
+                        limit,
+                        self._max_pulse_modified_iso(to_process),
+                        selection.reread,
+                    )
             for pulse in to_process:
                 # Detect ALL sectors — start with keyword-based detection
                 pulse_text = json.dumps(pulse).lower()
@@ -1093,6 +1206,7 @@ class OTXCollector:
                 "repeated_rows": len(repeated_rows),
                 "processed": len(to_process),
                 "without_item": len(without_item),
+                "deferred": len(deferred),
             }
             if adversaries_named_as_family:
                 logger.info(
@@ -1123,25 +1237,26 @@ class OTXCollector:
                 )
 
             def _advance_otx_incremental_cursor(successful_pulses: Optional[List[Dict]] = None) -> None:
-                """Advance cursor to the last successfully processed pulse timestamp.
+                """Advance the cursor to the newest ``modified`` among the pulses processed.
 
                 Args:
-                    successful_pulses: The pulses that were successfully pushed.
-                        When None (non-MISP mode or no failures), falls back to
-                        the truncated ``to_process`` list — NOT the full fetched
-                        ``pulses`` list.
+                    successful_pulses: After a push with failures, the pulses modified before
+                        the oldest pulse with an unstored item (``_pulses_before_oldest``).
+                        When None (no MISP push, nothing to push, or a push without
+                        failures), the pulses the run processed: ``to_process``, not the full
+                        fetched ``pulses`` list.
 
-                Production-test audit fix (Bug Hunter HIGH BH-H1, post-PR-C-merge):
-                the previous fallback used ``pulses`` (the FULL fetched list)
-                rather than ``to_process`` (after the EDGEGUARD_INCREMENTAL_LIMIT
-                truncation at line 357 above). When the limit bit (e.g., 250
-                modified pulses but limit=200, the default), only the first 200
-                were pushed but the cursor advanced to the latest-modified
-                timestamp of ALL 250. The 50 truncated pulses were lost
-                forever — next run's modified_since filter skipped them
-                (silent data loss in normal operation with default settings).
-                Fall back to ``to_process`` so the cursor only advances over
-                pulses we actually attempted.
+                Audit finding BH-H1: the fallback was ``pulses``, the full fetched
+                list, so when EDGEGUARD_INCREMENTAL_LIMIT cut the run (250 modified
+                pulses, limit 200) the cursor reached the newest of all 250 and the
+                50 left out were never read again. With ``to_process`` the cursor
+                only advances over pulses attempted. 2026-11-02: that alone did not
+                protect the pulses left out, because OTX returns the pulses newest
+                first and the limit kept the newest 200: the cursor still passed
+                the 50 older ones. The limit now takes the pulses modified after the
+                stored cursor oldest first (``_incremental_pulses_within_limit``),
+                so every pulse it leaves out is modified at or after the newest
+                pulse attempted, and the next run reads it again.
                 """
                 if baseline:
                     return
@@ -1170,37 +1285,48 @@ class OTXCollector:
                 if failed > 0:
                     logger.warning(f"[WARN] OTX: Failed to push {failed} items to MISP")
 
-                # Advance cursor only when there were successful items.
-                # On partial failure, advance no further than the pulses
-                # before the oldest pulse with an unstored item, so the
-                # next run collects the failed window again.
-                if success > 0:
-                    if failed == 0:
-                        _advance_otx_incremental_cursor()
-                    else:
-                        # Partial failure (2026-10): the cursor stops below the oldest pulse with an
-                        # item the writer lists as unstored (its batch or event lookup failed, or its
-                        # conversion dropped systemically: a payload change the collector must be
-                        # fixed for), so the next run reads that pulse again. It took the pulses of
-                        # ``unique[:success]`` before, the first items by position, which named the
-                        # failed batch's pulses whenever an earlier batch failed (or items were
-                        # already present), and the cursor passed them. Failures the writer does not
-                        # list (single records no attribute could be built from, values MISP cannot
-                        # store, attributes missing from a batch MISP partly stored) do not hold it.
-                        # A writer that gives no list, or an unstored item of no known pulse, leaves
-                        # the cursor where it is.
-                        unstored = getattr(self.misp_writer, "last_push_unstored_items", None)
-                        held_ids: set = set()
-                        placed = isinstance(unstored, (list, tuple, set))
-                        for pos in unstored if placed else ():
-                            item = unique[pos] if isinstance(pos, int) and 0 <= pos < len(unique) else {}
-                            ids = [pid for pid in [item.get("pulse_id"), *(item.get("report_ids") or [])] if pid]
-                            if not ids:
-                                placed = False  # an unstored item of no known pulse: the cursor stays
-                                break
-                            held_ids.update(ids)
-                        if placed:
-                            _advance_otx_incremental_cursor(self._pulses_before_oldest(to_process, held_ids))
+                # The cursor after the push. Without failures it advances to the newest pulse processed,
+                # also when MISP already held every item (2026-11-02): ``push_items`` counts an item MISP
+                # holds as neither stored nor failed, so such a push returns (0, 0). The cursor moved only
+                # after a push that stored an item before, and with the limit taking the oldest pulses
+                # after the cursor first, a run whose oldest pulses MISP already held (an additive baseline
+                # over an older cursor, pulses re-modified without a new indicator) took the same pulses on
+                # every run while the newer ones waited. After a push with failures, whatever it stored,
+                # it advances no further than the pulses before the oldest pulse with an unstored item, so
+                # the next run collects the failed window again.
+                if failed == 0:
+                    _advance_otx_incremental_cursor()
+                else:
+                    # Failures (2026-10): the cursor stops below the oldest pulse with an item the
+                    # writer lists as unstored (its batch or event lookup failed, or its conversion
+                    # dropped systemically: a payload change the collector must be fixed for), so
+                    # the next run reads that pulse again. It took the pulses of
+                    # ``unique[:success]`` before, the first items by position, which named the
+                    # failed batch's pulses whenever an earlier batch failed (or items were
+                    # already present), and the cursor passed them. Failures the writer does not
+                    # list (values with 4-byte characters, attributes missing from a batch MISP
+                    # answered with HTTP 200 and partly stored) do not hold it; a single record no
+                    # attribute could be built from is reported and not counted as failed, so it
+                    # makes no push one with failures. A writer that gives no list, or an unstored
+                    # item of no known pulse, leaves the cursor where it is. 2026-11-02: the rule
+                    # applies also when the push stored nothing. Such a push left the cursor where
+                    # it was, so a push whose only failures the writer does not list (a value with
+                    # 4-byte characters, which no later run can store either) held it on every run:
+                    # with the oldest-first limit each run took the same pulses and the newer ones
+                    # waited. With every item listed (an event lookup that failed, MISP
+                    # unreachable) the cursor stays below the oldest pulse with an item.
+                    unstored = getattr(self.misp_writer, "last_push_unstored_items", None)
+                    held_ids: set = set()
+                    placed = isinstance(unstored, (list, tuple, set))
+                    for pos in unstored if placed else ():
+                        item = unique[pos] if isinstance(pos, int) and 0 <= pos < len(unique) else {}
+                        ids = [pid for pid in [item.get("pulse_id"), *(item.get("report_ids") or [])] if pid]
+                        if not ids:
+                            placed = False  # an unstored item of no known pulse: the cursor stays
+                            break
+                        held_ids.update(ids)
+                    if placed:
+                        _advance_otx_incremental_cursor(self._pulses_before_oldest(to_process, held_ids))
 
                 self.circuit_breaker.record_success()
                 st = status_after_misp_push("otx", len(unique), success, failed)

@@ -12,6 +12,15 @@ conversion drop is systemic (a payload the collector no longer reads, counted as
 stops below the oldest pulse holding one. A value MISP can never store (4-byte characters) and a
 single record no attribute can be built from are counted as failed or reported but not listed.
 
+A push of items MISP already holds returns (0, 0), and the cursor advances after it as after any push
+without failures (2026-11-02). After a push with failures the rule above applies whatever the push stored: a
+push with failures that stored nothing left the cursor where it was, so a push whose only failure was a value
+MISP can never store held it on every run. A batch whose event id is empty once sanitised sends no request and
+counts as failed, its items listed; it returned (0, 0), the count of a batch MISP already held.
+
+The scheduled-run tests at the end run ``MISPWriter`` against the OTX double and the fixture pulses of
+``test_otx_incremental_order.py``, with a stored cursor and a limit, over several runs.
+
 The clean push, the single bad record and the failed event lookup are guards for the bookkeeping:
 before the change the cursor was already right on the clean push, the event lookup test reads the
 writer only, and the single bad record guards the share rule (``CONVERT_FAILED_MIN_SHARE``). Each
@@ -30,6 +39,8 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest  # noqa: E402
+import requests  # noqa: E402
+from test_otx_incremental_order import ROWS, _collect, _ids, _Otx, _recorded, _utc, _value  # noqa: E402  (its OTX harness)
 
 from collectors import misp_writer as mw  # noqa: E402
 from collectors import otx_collector  # noqa: E402
@@ -323,8 +334,9 @@ def test_a_failed_event_lookup_lists_the_items_of_its_group(event_error):
     Two source groups, interleaved: the second source's event cannot be looked up (HTTP 503 on every
     attempt, raised after the retries) or created (HTTP 403, no event id). Its items are listed by
     their positions; the first source's items are stored. An OTX push is one group per UTC day, so
-    such a failure stores nothing of it and the cursor stays (``success`` 0); a run that crosses
-    midnight pushes two groups, and the listed positions then hold the cursor as in the batch tests.
+    such a failure stores none of the items MISP lacks and lists them all; the cursor then stays below
+    the oldest pulse with one of them, as after a failed batch
+    (``test_with_every_failed_item_listed_the_cursor_stays_below_the_oldest_pulse_with_one``).
     """
     misp = _Misp(event_errors={"threatfox": event_error})
     writer = _writer(misp)
@@ -353,6 +365,128 @@ def test_an_item_shared_by_two_pulses_holds_the_cursor_below_both():
     assert cursor == {"otx_last_pulse_modified": P1[1]}
 
 
+PA = ("6710e46581edfe9bba0da30a", "2026-10-15T11:00:00")
+
+
+@pytest.mark.parametrize("stores", [False, True], ids=["stores nothing", "stores the other items"])
+def test_in_otx_order_an_older_pulse_whose_only_item_a_newer_pulse_lists_holds_the_cursor(monkeypatch, stores):
+    """OTX's order, newest first: P3 (12:00) lists .5 and .3, PA (11:00) .7, P2 (10:00) only .3, P1 (08:00) .1.
+    The same-run fold keeps P3's copy of .3 and names P2 only in its ``report_ids``. MISP refuses .3 (HTTP 500
+    on every attempt), so the writer lists it. Whether the push stores the other items or MISP already holds
+    them (a first run stored them), the cursor stops below P2, the oldest pulse the listed item names, at P1.
+    Taking the listed item's ``pulse_id`` alone, the cursor would stop below P3, at PA, and pass P2 by an hour,
+    beyond the 300 s overlap: P2's only item would never be read again."""
+    monkeypatch.setenv("EDGEGUARD_MISP_PUSH_BATCH_SIZE", "1")  # .3 alone in its batch
+    p3 = _pulse(*P3, ["198.51.100.5", "198.51.100.3"])
+    pa = _pulse(*PA, ["198.51.100.7"])
+    p2 = _pulse(*P2, ["198.51.100.3"])
+    p1 = _pulse(*P1, ["198.51.100.1"])
+    misp = _HoldingMisp(refused_values=("198.51.100.3",))
+    if not stores:
+        _run([_pulse(*P3, ["198.51.100.5"]), pa, p1], _writer(misp))
+        assert sorted(misp.stored) == ["198.51.100.1", "198.51.100.5", "198.51.100.7"]
+    writer = _writer(misp)
+    counts = _counted(writer)
+    with patch("collectors.collector_utils.time.sleep"):
+        status, cursor = _run([p3, pa, p2, p1], writer)
+
+    assert counts == [(3 if stores else 0, 1)]
+    (listed,) = [writer.pushed[pos] for pos in writer.last_push_unstored_items]
+    assert (listed["value"], listed["pulse_id"], listed["report_ids"]) == ("198.51.100.3", P3[0], [P2[0]])
+    assert status["success"] is False
+    assert cursor == {"otx_last_pulse_modified": P1[1]}, "below P2 (10:00): the next run reads P2 again"
+
+
+class _HoldingMisp(_Misp):
+    """The double holding the attributes it stored: ``attributes/restSearch`` lists them (one short page,
+    so the listing is complete) whatever the filter, so the writer's duplicate checks find them."""
+
+    def __init__(self, **kw: Any):
+        super().__init__(**kw)
+        self.attributes: List[Dict[str, Any]] = []
+
+    def post(self, url: str, json: Optional[dict] = None, **kw: Any):
+        if url.endswith("/attributes/restSearch"):
+            r = MagicMock()
+            r.status_code = 200
+            r.text = ""
+            r.headers = {}
+            r.json.return_value = {"response": {"Attribute": [dict(a) for a in self.attributes]}}
+            return r
+        r = super().post(url, json=json, **kw)
+        if "/events/" in url and not url.endswith("/events/restSearch") and r.status_code == 200:
+            self.attributes.extend(dict(a) for a in (json or {}).get("Attribute") or [])
+        return r
+
+
+def _counted(writer: mw.MISPWriter) -> List[Any]:
+    """Record what each ``push_items`` call of *writer* returns. ``writer.pushed`` keeps the items of the last
+    call: the pulses ``_collect`` (``test_otx_incremental_order.py``) reports as processed."""
+    counts: List[Any] = []
+    push = writer.push_items
+
+    def spy(items, *args, **kwargs):
+        writer.pushed = list(items)  # type: ignore[attr-defined]
+        counts.append(push(items, *args, **kwargs))
+        return counts[-1]
+
+    writer.push_items = spy  # type: ignore[method-assign]
+    return counts
+
+
+def test_a_push_of_items_misp_already_holds_returns_nothing_counted_and_advances_the_cursor():
+    """The writer counts an item MISP already holds as neither stored nor failed, so a push of such items
+    only returns (0, 0) (what the ``_HoldingWriter`` double of ``test_otx_incremental_order.py`` answers).
+
+    A first run stores the three pulses' six indicators. A second run, without a stored cursor, reads the
+    same pulses: the cross-event listing finds every attribute, nothing is looked up, sent or failed, and
+    the cursor advances to P3. The cursor used to move only after a push that stored an item, so it stayed;
+    with the limit taking the oldest pulses first, the next run would take the same pulses again.
+    """
+    misp = _HoldingMisp()
+    _run(_three("newest first"), _writer(misp))
+    assert len(misp.attributes) == 6
+
+    writer = _writer(misp)
+    counts = _counted(writer)
+    status, cursor = _run(_three("newest first"), writer)
+
+    assert counts == [(0, 0)]
+    assert writer.last_push_unstored_items == []
+    assert len(misp.attributes) == 6
+    assert status["success"] is True
+    assert cursor == {"otx_last_pulse_modified": P3[1]}
+
+
+def test_an_event_id_empty_once_sanitised_counts_the_batch_as_failed_and_holds_the_cursor():
+    """MISP answers the creation of the day's event with an id of only whitespace. ``_push_batch`` sanitises
+    the id to nothing and sends no request; the batch counts as failed and its items are listed, so the
+    push fails and the cursor stays: the listed items hold it below P1, the oldest of the three pulses.
+    Before the change the batch returned (0, 0): the push read as one MISP
+    already held, the run passed, and the cursor (now advancing after a push without failures) would pass
+    items MISP never received."""
+
+    class _BlankIdMisp(_Misp):
+        def post(self, url: str, json: Optional[dict] = None, **kw: Any):
+            r = super().post(url, json=json, **kw)
+            if url.endswith("/events"):
+                name = (json or {})["Event"]["info"]
+                self.events[name] = " "
+                r.json.return_value = {"Event": {"id": " ", "info": name}}
+            return r
+
+    misp = _BlankIdMisp()
+    writer = _writer(misp)
+    counts = _counted(writer)
+    status, cursor = _run(_three("newest first"), writer)
+
+    assert counts == [(0, 6)]
+    assert writer.last_push_unstored_items == [0, 1, 2, 3, 4, 5]
+    assert misp.stored == [] and misp.batch_no == 0, "no batch was sent"
+    assert status["success"] is False
+    assert cursor == {}
+
+
 def test_a_writer_that_does_not_list_unstored_items_leaves_the_cursor():
     """A writer that gives no list of unstored items (here a double): the failed items are unknown."""
     writer = MagicMock()
@@ -360,3 +494,111 @@ def test_a_writer_that_does_not_list_unstored_items_leaves_the_cursor():
     _status, cursor = _run(_three("newest first"), writer)
 
     assert cursor == {}
+
+
+# --------------------------------------------------------------------------- scheduled runs, with MISPWriter
+
+
+class _UnreachableMisp(_HoldingMisp):
+    """``_HoldingMisp`` that, while ``unreachable`` is set, answers no request (a connection error on each)."""
+
+    def __init__(self, **kw: Any):
+        super().__init__(**kw)
+        self.unreachable = False
+
+    def post(self, url: str, json: Optional[dict] = None, **kw: Any):
+        if self.unreachable:
+            raise requests.exceptions.ConnectionError("MISP unreachable")
+        return super().post(url, json=json, **kw)
+
+
+def _baseline(pulses: List[Dict[str, Any]], misp: _Misp, caplog) -> None:
+    """A baseline run into *misp*: it stores the pulses' items and never moves the cursor."""
+    state: Dict[str, Any] = {}
+    _collect(_Otx(pulses), state, caplog, limit=None, baseline=True, writer=_writer(misp))
+    assert state == {}
+
+
+def _misp_values(misp: _HoldingMisp) -> set:
+    return {a["value"] for a in misp.attributes}
+
+
+def test_a_push_whose_only_failure_is_a_value_misp_cannot_store_advances_the_cursor(caplog):
+    """A baseline stored pulses 40-59 and could not store pulse 39's only indicator, a URL with a 4-byte
+    character. The scheduled runs start from a cursor at pulse 59 with a limit of 20. Run 1 takes pulses 39-58
+    (and pulse 59 as a re-read): MISP holds every item but the URL, which the writer counts as failed and does
+    not list, so the push returns (0, 1) and the run fails, but the cursor advances to pulse 39. Run 2 takes the
+    new pulses 19-38 (pulse 39 as a re-read, its URL failing again) and run 3 pulses 0-18.
+
+    The gate on main left the cursor after a push with failures that stored nothing, so with the oldest-first
+    limit every run would take pulses 39-58 again and fail while pulses 0-38 waited. (On main the limit took the
+    newest pulses, the push stored them, and the cursor passed pulses 20-58.)"""
+    url = "https://example.test/\U0001f600"
+    pulses = _recorded(range(60))
+    pulses[39]["indicators"][0].update({"indicator": url, "type": "URL"})
+    misp = _HoldingMisp()
+    _baseline(pulses[39:], misp, caplog)
+    assert _misp_values(misp) == {_value(i) for i in range(40, 60)}
+
+    state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[59]["modified"]}
+    writer = _writer(misp)
+    counts = _counted(writer)
+    first = _collect(_Otx(pulses), state, caplog, limit=20, writer=writer)
+    assert sorted(first.processed) == sorted(_ids(range(39, 60)))
+    assert counts == [(0, 1)] and writer.last_push_unstored_items == []
+    assert first.status["success"] is False
+    assert first.cursor == ROWS[39]["modified"]
+
+    later = [_collect(_Otx(pulses), state, caplog, limit=20, writer=writer) for _ in range(2)]
+    assert counts == [(0, 1), (20, 1), (19, 0)]
+    assert [r.cursor for r in later] == [ROWS[19]["modified"], ROWS[0]["modified"]]
+    assert {_value(i) for i in range(39)} <= _misp_values(misp), "the new pulses 0-38 are stored"
+    assert url not in _misp_values(misp)
+    assert [r.status["pulse_counts"]["deferred"] for r in [first, *later]] == [39, 19, 0]
+
+
+def test_with_every_failed_item_listed_the_cursor_stays_below_the_oldest_pulse_with_one(caplog):
+    """A baseline stored pulses 49-59; the scheduled runs start from a cursor at pulse 59 with a limit of 20 and
+    take pulses 39-58 (and pulse 59 as a re-read). The first two pushes store nothing, and every item they fail
+    is listed.
+
+    Run 1, MISP unreachable: the cross-event listing finds nothing, so every item, those MISP holds included,
+    goes to the event lookup, which fails; all 21 items are listed. No pulse the run processed is older than
+    the oldest pulse with a listed item (59, at the cursor), so the cursor stays where it was.
+
+    Run 2, MISP reachable but the lookup of the day's event answering HTTP 503 after the retries: the listing
+    finds the items of pulses 49-59, and the items of pulses 39-48 fail and are listed. The cursor moves to pulse
+    49, below the oldest pulse with a listed item (48). The gate on main left it at pulse 59 after a push with
+    failures that stored nothing, and the next runs would take pulses 39-58 again.
+
+    Run 3, MISP answering again, takes the oldest pulses after the cursor first, 29-48, and stores them."""
+    pulses = _recorded(range(60))
+    misp = _UnreachableMisp()
+    _baseline(pulses[49:], misp, caplog)
+    state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[59]["modified"]}
+    writer = _writer(misp)
+    counts = _counted(writer)
+
+    misp.unreachable = True
+    with patch("collectors.collector_utils.time.sleep"):
+        unreachable = _collect(_Otx(pulses), state, caplog, limit=20, writer=writer)
+    assert sorted(unreachable.processed) == sorted(_ids(range(39, 60)))
+    assert counts == [(0, 21)] and writer.last_push_unstored_items == list(range(21))
+    assert unreachable.status["success"] is False
+    assert unreachable.cursor == ROWS[59]["modified"]
+
+    misp.unreachable = False
+    misp.event_errors = {"alienvault_otx": ("lookup", 503)}
+    with patch("collectors.collector_utils.time.sleep"):
+        lookup_failed = _collect(_Otx(pulses), state, caplog, limit=20, writer=writer)
+    listed = {writer.pushed[pos]["pulse_id"] for pos in writer.last_push_unstored_items}
+    assert counts[1] == (0, 10) and listed == set(_ids(range(39, 49)))
+    assert lookup_failed.status["success"] is False
+    assert lookup_failed.cursor == ROWS[49]["modified"]
+    assert all(_utc(ROWS[i]["modified"]) > _utc(lookup_failed.cursor) for i in range(39, 49))
+
+    misp.event_errors = {}
+    answered = _collect(_Otx(pulses), state, caplog, limit=20, writer=writer)
+    assert counts[2] == (20, 0)
+    assert answered.cursor == ROWS[29]["modified"]
+    assert {_value(i) for i in range(29, 49)} <= _misp_values(misp)

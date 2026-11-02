@@ -189,7 +189,7 @@ Every baseline, a 7-day smoke run or the 730-day run, additive or fresh, runs th
 #### High Frequency (Every 30 minutes)
 | Source | DAG | Rate Limit | Items/Run |
 |--------|-----|------------|-----------|
-| AlienVault OTX | `edgeguard_pipeline` | 30 req/min | 50 pulses |
+| AlienVault OTX | `edgeguard_pipeline` | 30 req/min | ≤ 200 pulses modified after the cursor (`EDGEGUARD_INCREMENTAL_LIMIT`), oldest first, in pages of 100; the overlap's re-reads come on top ([COLLECTORS.md](COLLECTORS.md#scheduled-runs-limit-and-cursor)) |
 
 #### Medium Frequency (Every 4 hours)
 | Source | DAG | Rate Limit | Items/Run |
@@ -742,6 +742,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Source schedules: an OTX run counts up to 200 pulses modified after the cursor, oldest first (`EDGEGUARD_INCREMENTAL_LIMIT`), the overlap's re-reads on top; the table gave 50 pulses.
 - 2026-11-02 — Checked against the code: `airflow standalone` runs its four components as subprocesses and neither restarts nor exits when one dies (the topology note placed them inside one process); `baseline_clean` documents its `BASELINE_CLEAN: deleted …` line; the postcheck's WARNING table lists every collector that delivered nothing, also one not run or without a returned status (it named skipped and failed only); MITRE ATT&CK pushes the whole bundle when it changed and nothing otherwise (the table gave 500 items); the MISP dedup logging names `[CASE-VARIANT]`; a SQLite metadata database is Airflow's default only when neither the environment nor `airflow.cfg` names a backend; the Airflow 3 commands take the DAG id as a positional argument and task logs are read in the UI or the log files (the page gave `list-runs -d` and `airflow logs`, which Airflow 3 rejects); the full-sync measurement still to be made is no longer named.
 - 2026-11-02 — Baseline DAG: `baseline_postcheck` fails the run on INV-4 (ATT&CK links of the claims on the nodes; the claims themselves on an unlimited run), INV-5 (CVE score coverage after an NVD delivery) and INV-6 (each collector's delivery at its `Source` node, and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES`), with the acceptance script's statements, and lists the collectors that delivered nothing. It had checked INV-1 to INV-3 only, and INV-3 holds whenever the sync connects.
 - 2026-11-02 — § One baseline path (was § In-process CLI baseline): `python src/run_pipeline.py` runs the collectors into MISP only and exits 2 on `--baseline`, `--fresh-baseline`, `--baseline-days` and `--stix-flow`; its in-process baseline, which loaded Neo4j through a STIX import and built a reduced graph, is retired. The fresh-baseline line names the DAG's `baseline_clean`; the troubleshooting row and the MISP preflight no longer name the in-process fresh baseline or `run_pipeline_misp_spt.py` (deleted). Check `[13]` of the preflight script fails on a scheduler that is not healthy (it named the DAG launch path, now the only one).
