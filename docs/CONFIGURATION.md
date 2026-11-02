@@ -70,11 +70,11 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 | `VIRUSTOTAL_API_KEY` | unset | VirusTotal lookups; skipped without it |
 | `EDGEGUARD_COLLECT_SOURCES` | unset (all) | Comma-separated allowlist of collectors |
 | `EDGEGUARD_SOURCE_KEY_CHECK` | `true` | Ask each provider whether it accepts the key |
-| `EDGEGUARD_BASELINE_REQUIRED_SOURCES` | empty | Keyed sources a baseline must not start without |
+| `EDGEGUARD_BASELINE_REQUIRED_SOURCES` | empty | Keyed sources a baseline must not start or end without |
 
 - `THREATFOX_API_KEY` is also the key of the URLhaus and MalwareBazaar exports, part of the export URL path (redacted in every log line); without it both are skipped.
 - The key check runs in `edgeguard preflight`, `scripts/preflight_baseline.sh` and the baseline task `source_key_check`, one authenticated request per key; `false` reports configured keys as unverified. One ThreatFox query checks the abuse.ch key, and its line names each of ThreatFox, URLhaus and MalwareBazaar that is switched on.
-- `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `otx`, `nvd`, `virustotal`, `threatfox`, `urlhaus`, `malwarebazaar` and `abuseipdb`; `urlhaus` and `malwarebazaar` are judged by `THREATFOX_API_KEY`. A listed source without a key, with a rejected key or switched off (for MalwareBazaar also `EDGEGUARD_ENABLE_MALWAREBAZAAR=false`) fails `source_key_check`, before the lock and the wipe, and is an error in `edgeguard preflight`.
+- `EDGEGUARD_BASELINE_REQUIRED_SOURCES` takes `otx`, `nvd`, `virustotal`, `threatfox`, `urlhaus`, `malwarebazaar` and `abuseipdb`; `urlhaus` and `malwarebazaar` are judged by `THREATFOX_API_KEY`. A listed source without a key, with a rejected key or switched off (for MalwareBazaar also `EDGEGUARD_ENABLE_MALWAREBAZAAR=false`) fails `source_key_check`, before the lock and the wipe, and is an error in `edgeguard preflight`. After the run, `baseline_postcheck` fails when a listed source that has a collector in the baseline DAG (all but `virustotal`) holds no `SOURCED_FROM` edge, for example after its collector was skipped or failed during the run (INV-6, [RUNBOOK.md § 7](RUNBOOK.md#7-baseline-chain-stopped-after-a-failed-step-postcheck)). A source not listed fails neither check when it delivers nothing.
 - How to obtain each key: [API_KEYS_SETUP.md](API_KEYS_SETUP.md).
 
 ---
@@ -459,6 +459,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — `EDGEGUARD_BASELINE_REQUIRED_SOURCES` is also checked after the run: the baseline postcheck fails when a listed source with a baseline collector holds no `SOURCED_FROM` edge (INV-6).
 - 2026-11-02 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` and `AIRFLOW_WEBSERVER_URL`: `src/metrics_server.py` reads Airflow's health endpoint as well, as the exporter does.
 - 2026-11-01 — `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`: a full sync has to fit the 6 h of `full_neo4j_sync`, and its duration with batched CVE writes is to be measured on the next 730-day run; the row had named about 6 h as the full-sync estimate, the estimate for one `merge_cve` call per CVE: about 8 NVD CVEs per second in the 7-day baseline of 2026-11-01 on the test instance put a 730-day MISP at about 5.7 h, about 5.2 h of it CVEs. `EDGEGUARD_NEO4J_READ_TIMEOUT` limits the statements of a multi-statement transaction together, the sync's CVE batches included.
 - 2026-11-01 — `EDGEGUARD_METRICS_AIRFLOW_HEALTH` (Airflow component health on `/metrics`) and the fixed Airflow address of the `metrics` service; the `AIRFLOW_WEBSERVER_URL` row names all its readers.

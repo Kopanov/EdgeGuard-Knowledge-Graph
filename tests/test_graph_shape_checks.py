@@ -301,3 +301,29 @@ def test_family_statement_judges_the_links_step_9_writes(writer_steps):
 )
 def test_family_indicates_verdict(row, verdict):
     assert gsc.family_indicates_verdict(row) is verdict
+
+
+@pytest.mark.parametrize(
+    "delivered, sourced_from, verdict",
+    [
+        # the 730-day baseline of 2026-11-01: ThreatFox (lowest share), OTX, NVD
+        (10000, 9774, True),
+        (150857, 150615, True),
+        (151186, 151186, True),
+        (10000, 9000, True),
+        (10000, 8999, False),
+        (150857, 0, False),
+        (0, 0, None),
+        (0, 150615, None),
+    ],
+)
+def test_source_delivery_verdict(delivered, sourced_from, verdict):
+    assert gsc.source_delivery_verdict(delivered, sourced_from) is verdict
+    assert gsc.SOURCE_DELIVERY_MIN_SHARE == 0.9
+
+
+def test_the_source_statement_counts_the_edges_into_each_source_by_its_key():
+    assert gsc.SOURCE_SOURCED_FROM_QUERY == (
+        "MATCH (s:Source) RETURN s.source_id AS source_id, COUNT { (s)<-[:SOURCED_FROM]-() } AS sourced_from "
+        "ORDER BY source_id"
+    )

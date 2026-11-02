@@ -239,38 +239,34 @@ class TestPRN30TestCoverageRECB1BehaviouralSentinel:
         )
         # Patch Neo4jClient — imported INSIDE the function, so patch at
         # the source module, not at the DAG module.
+        # 2026-11-02: the test asserts the outcome. It swallowed every exception other than the skip, so it
+        # passed whatever the invariants did; the session now answers each statement with a non-violating
+        # row, and the postcheck must complete without any exception.
         with patch("neo4j_client.Neo4jClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_session = MagicMock()
             mock_session.__enter__.return_value = mock_session
             mock_session.__exit__.return_value = None
-            # Return non-violating invariant counts — the single() result is
-            # dict-like for ``row["key"]`` access in the invariant body.
+            # Non-violating counts for INV-1 to INV-3, and empty graph-shape rows (INV-4 to INV-6 judge
+            # nothing without input: no Technique, no claim, no collector status in this context).
             mock_session.run.return_value.single.return_value = {
                 "qualifying_actors": 0,
                 "campaigns": 0,
                 "n": 10,  # Indicator/Source count
             }
+            mock_session.run.return_value.data.return_value = []
             mock_client.driver.session.return_value = mock_session
             mock_client_cls.return_value = mock_client
 
-            # The CORE contract being pinned: should NOT raise
-            # AirflowSkipException. The invariants might still raise other
-            # errors due to mock-session interaction quirks — that's fine,
-            # we only pin the NON-skip behaviour here.
-            from airflow.exceptions import AirflowSkipException
+            # The CORE contract being pinned: the postcheck does not raise
+            # AirflowSkipException when only collectors failed (PR-N26 audit, round 2),
+            # nor any other exception on a graph that holds the invariants.
+            assert ep.assert_baseline_postconditions(**ctx) is None
+            statements = [c.args[0] for c in mock_session.run.call_args_list]
+            assert "MATCH (s:Source) RETURN count(s) AS n" in statements
+            import graph_shape_checks
 
-            try:
-                ep.assert_baseline_postconditions(**ctx)
-            except AirflowSkipException as skip_exc:
-                raise AssertionError(
-                    "PR-N27 sentinel must NOT raise AirflowSkipException "
-                    "when only collectors failed. Bugbot round 2 HIGH."
-                ) from skip_exc
-            except Exception:
-                # Non-skip exceptions (e.g. from invariant body touching
-                # mock session internals) are OK for this test.
-                pass
+            assert graph_shape_checks.SOURCE_SOURCED_FROM_QUERY in statements
 
     def test_critical_chain_failure_DOES_skip_postcheck(self):
         """Positive side of the contract: when full_neo4j_sync fails,

@@ -489,7 +489,13 @@ See RUNBOOK § "Baseline launch path" for the full procedure:
 3. Watch `baseline_complete` and `baseline_release_lock`; unpause the 5
    scheduled DAGs after the lock is released. After a failed run the lock
    stays until the run is resumed and succeeds or 48 h have passed, and
-   until then the scheduled DAGs skip.
+   until then the scheduled DAGs skip. `baseline_postcheck`, before them,
+   fails the run when the graph lacks the ATT&CK links of the claims on the
+   nodes (on a run with `collection_limit` 0 also the claims), the CVE scores
+   after an NVD delivery, or what a collector delivered in this run, or when a
+   source named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES` holds no data; its log
+   lists the collectors that were skipped or failed
+   ([RUNBOOK § 7](RUNBOOK.md#7-baseline-chain-stopped-after-a-failed-step-postcheck), 7d).
 
 **Baseline lock:** the `edgeguard_baseline`
 DAG takes the lock itself. `baseline_acquire_lock` writes
@@ -673,6 +679,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Launch step 3: `baseline_postcheck` fails the run on the ATT&CK links of the claims, the CVE scores after an NVD delivery, each collector's delivery and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES`, and lists the collectors that delivered nothing.
 - 2026-11-02 — Acceptance checks `family_indicates_complete` (step 9 resolves the feed family labels once per run, with a fallback without separators) and `attack_tool_named_malware` (informational); the note on the checks that fail by design between a sync and the next `build_relationships` run names `family_indicates_complete` and `pulse_indicates_complete` (it named `uses_technique_complete` and `sector_links_complete` only). On the 730-day graph of 2026-11-01, before step 9 resolved the labels: 13,900 links judged, 695 missing (the labels found without separators), 2,687 indicators with a label that names no node (IClickFix 2,296), 1,202 with a placeholder label; 26 `Malware` nodes named after an ATT&CK tool with 12,807 `INDICATES` (23 with the tool's name but for case, 11,646). The statement takes about 3 s on that graph.
 - 2026-11-02 — Check `[13]` reads the metadata database backend from `airflow.cfg` as well, in Airflow's order, and reports Airflow's default, SQLite, when it is set nowhere; it read only the environment variable (and, on the DAG path, the Compose airflow service), so on a bare-metal install with the default configuration it printed "not checked" instead of the SQLite warning.
 - 2026-11-02 — Acceptance checks of the graph's shape: `in_tactic_complete`, `employs_technique_complete`, `implements_technique_complete`, `uses_technique_complete`, `sector_links_complete` and `cve_cvss_coverage` (a run that lost `IN_TACTIC`, the `mitre_explicit` technique links or every CVSS sub-node passed every check before, with the verdicts of a complete graph). `in_tactic_same_domain`, `mitre_explicit_only_from_mitre_nodes`, `attributed_to_has_match_type`, `attributed_to_fanout_plausible`, `cvss_bidirectional` and the two sector-provenance checks are informational on an empty set (they passed it); the checks report the size of the set they judge; `cvss_bidirectional` covers CVSSv2. The technique-link checks are informational when no claim reaches an existing `Technique`; the script is run when no sync and no `build_relationships` run is in progress. On the 730-day graph of 2026-11-01: in_tactic_complete 824 techniques, 1,024 phases with a tactic, 0 missing; ATT&CK claims 4,854 / 10,895 + 869 / 1,587,886, 0 missing (21,207 indicator claims name a technique the graph does not hold); sector_links_complete 61,538 zoned nodes, 78,262 node sectors, 0 missing; cve_cvss_coverage 142,236 of 146,858 (0.969), newest day 49 of 81 (0.60).

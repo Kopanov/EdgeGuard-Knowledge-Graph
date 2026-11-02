@@ -26,11 +26,16 @@ the scores still passes on it.
 ``Malware`` nodes named after an ATT&CK ``Tool`` (``family_resolution.tool_named_malware``): those indicators link
 to the ``Malware`` node only, as no writer links an indicator to a ``Tool``.
 
+The per-source delivery (``SOURCE_SOURCED_FROM_QUERY``) is the number of ``SOURCED_FROM`` edges each
+``Source`` node holds: a collector's items that the MISP push or the sync lost leave their source short.
+
 The acceptance script (``scripts/verify_fresh_baseline.py``) runs these statements and reports their
-verdicts. Standard library and the stdlib-only ``relationship_provenance`` at import, like the other modules
-that script reads. The statements take no parameter but ``$revoked`` (the revoked-id map, the same the
-writers read: ``attack_revoked.technique_successors``), ``$sector_zones`` (``SECTOR_ZONES``), ``$family_targets``
-(the map step 9 runs with, ``family_resolution.resolve_feed_families``) and ``$names`` (Malware node names).
+verdicts; the postcheck of the baseline DAG (``assert_baseline_postconditions``, invariants INV-4 to INV-6)
+runs the same statements over Bolt and fails the run. Standard library and the stdlib-only
+``relationship_provenance`` at import, like the other modules that script reads. The statements take no
+parameter but ``$revoked`` (the revoked-id map, the same the writers read:
+``attack_revoked.technique_successors``), ``$sector_zones`` (``SECTOR_ZONES``), ``$family_targets`` (the map
+step 9 runs with, ``family_resolution.resolve_feed_families``) and ``$names`` (Malware node names).
 """
 
 from __future__ import annotations
@@ -183,6 +188,17 @@ CVE_CVSS_COVERAGE_QUERY = (
     "sum(CASE WHEN EXISTS { (c)-[:" + "|".join(CVSS_REL_TYPES) + "]->() } THEN 1 ELSE 0 END) AS nvd_cves_with_cvss"
 )
 
+# The SOURCED_FROM edges of every Source node, by its key (``source_id``, the canonical id of
+# ``source_registry``; one row per node, an alias or unregistered node included).
+SOURCE_SOURCED_FROM_QUERY = (
+    "MATCH (s:Source) RETURN s.source_id AS source_id, COUNT { (s)<-[:SOURCED_FROM]-() } AS sourced_from "
+    "ORDER BY source_id"
+)
+# A collector that delivered N items in a baseline run leaves at least this share of N SOURCED_FROM edges at
+# its Source node (the baseline postcheck, INV-6). Below it, items were lost between the collector and the
+# graph: in the MISP push or in the sync.
+SOURCE_DELIVERY_MIN_SHARE = 0.9
+
 
 def technique_params(successors: Mapping[str, str]) -> Dict[str, Any]:
     """The parameters of the technique statements: the revoked-id map (``{}`` when it cannot be read, so a
@@ -248,3 +264,11 @@ def cvss_coverage_verdict(row: Mapping[str, Any]) -> Optional[bool]:
     if judged < CVE_CVSS_COVERAGE_MIN_CVES:
         return None
     return (row.get("nvd_cves_with_cvss") or 0) / judged >= CVE_CVSS_COVERAGE_MIN_SHARE
+
+
+def source_delivery_verdict(delivered: int, sourced_from: int) -> Optional[bool]:
+    """Informational when the collector delivered nothing; else passes when the Source node holds at least
+    ``SOURCE_DELIVERY_MIN_SHARE`` of the delivered count in SOURCED_FROM edges."""
+    if delivered <= 0:
+        return None
+    return sourced_from >= SOURCE_DELIVERY_MIN_SHARE * delivered

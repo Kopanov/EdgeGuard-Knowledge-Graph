@@ -162,7 +162,8 @@ from family_resolution import (  # noqa: E402
 )
 
 # 2026-11-02: the completeness of the links the writers build from the claims on the nodes, and the CVE score
-# coverage (checks 9c, 10a7-10a9, 10o and 14c). Standard library and ``relationship_provenance`` only.
+# coverage (checks 9c, 10a7-10a9, 10o and 14c); the SOURCED_FROM edges per Source node (checks 12c, 12d and 15).
+# The baseline DAG's postcheck runs the same statements. Standard library and ``relationship_provenance`` only.
 from graph_shape_checks import (  # noqa: E402
     CVE_CVSS_COVERAGE_QUERY,
     EMPLOYS_TECHNIQUE_COMPLETE_QUERY,
@@ -171,6 +172,7 @@ from graph_shape_checks import (  # noqa: E402
     IN_TACTIC_COMPLETE_QUERY,
     MALWARE_INDICATES_COUNTS_QUERY,
     SECTOR_LINKS_COMPLETE_QUERY,
+    SOURCE_SOURCED_FROM_QUERY,
     TOOL_NAMES_READ,
     USES_TECHNIQUE_COMPLETE_QUERY,
     combined_verdict,
@@ -1410,10 +1412,7 @@ def run_checks(
     #      wins), ``source_ids`` (evidence names) or ``report_ids`` (OTX only) on a relationship of
     #      an EdgeGuard type; other types are reported, never failed on. ``Source`` nodes keep
     #      ``source_id``: it is their key, and every ``SOURCED_FROM`` write matches on it.
-    source_rows = _post(
-        "MATCH (s:Source) RETURN s.source_id AS source_id, COUNT { (s)<-[:SOURCED_FROM]-() } AS sourced_from "
-        "ORDER BY source_id"
-    )
+    source_rows = _post(SOURCE_SOURCED_FROM_QUERY)
     legacy = [{"type": x["type"], "edges": x["legacy_keys"]} for x in rel_rows if x.get("legacy_keys")]
     keyless = sum(1 for x in source_rows if x.get("source_id") is None)
     rep.add(
