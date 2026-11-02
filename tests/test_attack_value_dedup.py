@@ -94,14 +94,16 @@ def test_prefetch_keys_fold_the_colon_form_and_leave_the_rest():
     assert _writer_with_rows(rows)._get_existing_source_attribute_keys("source:mitre") == expected
 
 
-def test_stored_copy_lookup_still_uses_the_exact_key():
-    # Stored copies are asked for by the exact key of a re-reported indicator; folding must not hide one,
-    # and a colon row must not answer a question asked for the hyphen form.
+def test_stored_copy_lookup_uses_the_dedup_key():
+    # 2026-11: stored copies are asked for by the key the duplicate check skips an attribute by
+    # (``_dedup_key``), so the copy of a value the check counts as present is the one found: a colon row
+    # answers the hyphen key, and no copy is filed under the colon form, which no push asks for.
     rows = [{"type": "text", "value": COLON, "uuid": "u1", "timestamp": "1", "Event": {"info": EARLIER_EVENT[1]}}]
-    asked: Dict[Any, Any] = {("text", COLON): None, ("text", HYPHEN): None}
+    asked: Dict[Any, Any] = {mw._dedup_key("text", HYPHEN): None}
+    assert list(asked) == [("text", HYPHEN)]
     _writer_with_rows(rows)._get_existing_source_attribute_keys("source:mitre", stored_copy_of=asked)
-    assert asked[("text", COLON)] is not None
-    assert asked[("text", HYPHEN)] is None
+    assert list(asked) == [("text", HYPHEN)]
+    assert asked[("text", HYPHEN)] is not None and asked[("text", HYPHEN)].uuid == "u1"
 
 
 # --------------------------------------------------------------------------- push_items

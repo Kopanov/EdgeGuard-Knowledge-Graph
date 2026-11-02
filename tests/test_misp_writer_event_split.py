@@ -145,6 +145,30 @@ class TestSplit:
         assert push(misp, batch) == (0, 0)
         assert sizes(misp) == before == {BASE: 100, f"{BASE}-part2": 50}
 
+    def test_a_value_an_earlier_part_holds_in_another_case_is_not_added_again(self, monkeypatch):
+        # 2026-11: the parts' listings and the check compare as MISP compares values (``_dedup_key``). Part 1
+        # is full and holds a hash as MISP stores it (lower case); the push goes to part 2, which has room,
+        # and does not add the hash again in upper case.
+        monkeypatch.setenv("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE", "100")
+        md5 = "2c36a2a36a747ee8e1393724c2558b14"  # an MD5 of the OTX event of 2026-11-01 (tests/fixtures)
+        held = existing(99, "200") + [
+            {
+                "id": "999",
+                "uuid": "u200-md5",
+                "event_id": "200",
+                "type": "md5",
+                "value": md5,
+                "timestamp": "1",
+                "Tag": [],
+            }
+        ]
+        misp = FakeMisp(held + existing(10, "201", offset=500), event_info=BASE)
+        misp.events["201"] = f"{BASE}-part2"
+        batch = [{"indicator_type": "md5", "value": md5.upper(), "tag": "urlhaus", "zone": ["global"]}]
+        assert push(misp, batch + items(5, offset=1000)) == (5, 0)
+        assert sizes(misp) == {BASE: 100, f"{BASE}-part2": 15}
+        assert md5.upper() not in misp.added_values()
+
     def test_rerun_with_one_new_item_goes_to_the_highest_part(self, monkeypatch):
         monkeypatch.setenv("EDGEGUARD_MISP_EVENT_SPLIT_ABOVE", "100")
         misp = FakeMisp([], event_info=BASE)

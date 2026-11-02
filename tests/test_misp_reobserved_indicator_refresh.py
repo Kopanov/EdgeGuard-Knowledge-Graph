@@ -83,6 +83,8 @@ def _stored(
     event: str = "41",
     info: str = OWN_EVENT,
     first_seen: Optional[str] = STORED_FIRST_SEEN,
+    attr_type: str = "ip-dst",
+    tag: str = TAG,
 ) -> dict:
     """One row of MISP 2.5 ``attributes/restSearch`` (returnFormat json)."""
     return {
@@ -91,7 +93,7 @@ def _stored(
         "object_id": "0",
         "object_relation": None,
         "category": "Network activity",
-        "type": "ip-dst",
+        "type": attr_type,
         "to_ids": False,
         "uuid": uuid,
         "timestamp": str(int(written.timestamp())),
@@ -104,7 +106,7 @@ def _stored(
         "last_seen": _misp_iso(last_seen),
         "value": value,
         "Event": {"org_id": "1", "distribution": "0", "id": event, "info": info},
-        "Tag": [{"name": TAG}, {"name": "tlp:white"}],
+        "Tag": [{"name": tag}, {"name": "tlp:white"}],
     }
 
 
@@ -659,6 +661,203 @@ def test_the_push_summary_names_the_refreshed_attributes(caplog):
         "0 new attributes to push" in r.message and "1 existing attribute(s) refreshed" in r.message
         for r in caplog.records
     )
+
+
+# --------------------------------------------------------------------------- the case rule (2026-11)
+
+# Real values: the OTX pulses of the 730-day baseline of 2026-11-01 (``tests/fixtures``). MISP stores a hash
+# in lower case whatever case it was sent in, and a URL as given.
+_CASE_FIXTURE = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "otx_case_variants_2026_11_01.json").read_text(encoding="utf-8")
+)
+_QILIN_PULSE = _CASE_FIXTURE["qilin_pulses"][0]
+MD5 = next(i["indicator"] for i in _QILIN_PULSE["indicators"] if i["type"] == "FileHash-MD5")
+_URL_PULSES = {p["id"]: [i["indicator"] for i in p["indicators"]] for p in _CASE_FIXTURE["url_pulses"]}
+OTX_TAG = "source:AlienVault-OTX"
+OTX_EARLIER_EVENT = "EdgeGuard-alienvault_otx-2026-07-01"
+THREATFOX_TAG = "source:ThreatFox"
+
+
+def _otx_item(value: str, indicator_type: str = "hash", tag: str = "alienvault_otx") -> Dict[str, Any]:
+    """An OTX indicator item as ``OTXCollector`` emits it (the fields the writer reads)."""
+    return {
+        "indicator_type": indicator_type,
+        "value": value,
+        "zone": ["global"],
+        "tag": tag,
+        "source": [tag],
+        "confidence_score": 0.5,
+        "pulse_id": _QILIN_PULSE["id"],
+        "pulse_name": _QILIN_PULSE["name"][:100],
+        "pulse_tlp": "white",
+        "last_seen": "2026-10-30T10:00:00",
+    }
+
+
+def _threatfox_item(value: str) -> Dict[str, Any]:
+    """A ThreatFox ``md5_hash`` IOC as ``ThreatFoxCollector`` emits it (no last_seen: ThreatFox gives none)."""
+    return {
+        "indicator_type": "md5",
+        "value": value,
+        "zone": ["global"],
+        "tag": "threatfox",
+        "source": ["threatfox"],
+        "first_seen": "2026-10-28 08:00:00 UTC",
+        "last_seen": None,
+        "confidence_score": 0.75,
+        "malware_family": "Qilin",
+        "threat_type": "payload",
+    }
+
+
+def _stored_md5(uuid: str, tag: str, info: str, **kwargs: Any) -> dict:
+    return _stored(MD5, uuid, attr_type="md5", tag=tag, info=info, **kwargs)
+
+
+def test_a_case_variant_the_push_drops_is_present_and_its_stored_copy_refreshed(caplog):
+    """Bugbot on PR #293: the dedup within the push keeps the first spelling (``ABC…``) and drops ``abc…``.
+    MISP holds ``abc…`` in an earlier event. The existing-attribute check compares as MISP does, so the kept
+    ``ABC…`` is present (it was pushed again, and nothing was skipped, so no refresh was considered) and the
+    stored copy, which MISP last wrote 90 days ago, is refreshed: by its own uuid, ``last_seen`` only."""
+    stored = _stored_md5(
+        "u-md5",
+        THREATFOX_TAG,
+        "EdgeGuard-threatfox-2026-07-01",
+        last_seen=NOW - timedelta(days=95),
+        written=NOW - timedelta(days=90),
+    )
+    misp = _Misp([stored], tag=THREATFOX_TAG)
+    with caplog.at_level(logging.WARNING, logger=mw.logger.name):
+        (ok, failed), pushed, writer = _push([_threatfox_item(MD5.upper()), _threatfox_item(MD5)], misp)
+    assert pushed == [] and (ok, failed) == (0, 0), "MISP holds the hash: neither spelling is pushed"
+    assert [uuid for uuid, _ in misp.edits] == ["u-md5"]
+    assert misp.edits[0][1]["Attribute"] == {"last_seen": _misp_iso(NOW - timedelta(days=95))}
+    assert misp.stored[0]["value"] == MD5, "the stored copy keeps the value MISP stored"
+    assert writer.stats["attributes_refreshed"] == 1
+    assert writer.stats["attrs_skipped_existing"] == 1
+    variant_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[CASE-VARIANT]")]
+    assert len(variant_lines) == 1 and f"md5 {MD5!r} (pushed: {MD5.upper()!r})" in variant_lines[0]
+
+
+def test_an_upper_case_hash_reported_again_is_present_and_its_stored_copy_refreshed():
+    """A pulse lists a hash in upper case that MISP holds, lower-cased, from an earlier run: it is the copy
+    MISP holds, so it is not pushed again (it was, every run, into the day's event) and the stored copy is
+    refreshed with the source's later ``last_seen``; the edit names the stored copy's uuid and sends no value."""
+    stored = _stored_md5(
+        "u-md5", OTX_TAG, OTX_EARLIER_EVENT, last_seen=NOW - timedelta(days=400), written=NOW - timedelta(days=60)
+    )
+    misp = _Misp([stored], tag=OTX_TAG)
+    (ok, failed), pushed, writer = _push([_otx_item(MD5.upper())], misp)
+    assert pushed == [] and (ok, failed) == (0, 0)
+    assert [uuid for uuid, _ in misp.edits] == ["u-md5"]
+    changes = misp.edits[0][1]["Attribute"]
+    assert set(changes) == {"last_seen"} and datetime.fromisoformat(changes["last_seen"]) == datetime(
+        2026, 10, 30, 10, tzinfo=timezone.utc
+    ), "the source's later claim; no value, type, tags or comment"
+    assert misp.stored[0]["value"] == MD5
+    assert writer.stats["attributes_refreshed"] == 1
+
+
+def test_one_stored_copy_is_edited_once_whatever_the_spellings_that_report_it():
+    """Two groups of one push share a source tag (aliases: ``otx`` and ``alienvault_otx`` both write
+    ``source:AlienVault-OTX``, as ``cisa`` and ``cisa_kev`` share ``source:CISA-KEV``) and report one stored hash
+    in two spellings. The dedup within the push is per group, so both reach the check; both are the stored copy,
+    which is due once: one edit."""
+    stored = _stored_md5("u-md5", OTX_TAG, OTX_EARLIER_EVENT, last_seen=None, written=NOW - timedelta(days=60))
+    misp = _Misp([stored], tag=OTX_TAG)
+    items = [_otx_item(MD5.upper(), tag="otx"), _otx_item(MD5, tag="alienvault_otx")]
+    (ok, failed), pushed, writer = _push(items, misp)
+    assert pushed == [] and (ok, failed) == (0, 0)
+    assert [uuid for uuid, _ in misp.edits] == ["u-md5"]
+    assert writer.stats["attributes_refreshed"] == 1
+
+
+@pytest.mark.parametrize("failure", _LISTING_FAILURES)
+def test_an_upper_case_hash_is_present_when_the_cross_event_check_runs_last(failure):
+    """A listing that stopped early: the cross-event check runs after the per-event one, with the same rule,
+    and the stale copy it read on page 1 is refreshed."""
+    misp = _PartialListingMisp(
+        page_one=[_stored_md5("u-md5", OTX_TAG, OTX_EARLIER_EVENT, last_seen=None, written=NOW - timedelta(days=200))],
+        today=[],
+        failure=failure,
+    )
+    (ok, failed), pushed = _push_partial([_otx_item(MD5.upper())], misp)
+    assert (ok, failed) == (0, 0) and pushed == []
+    assert [uuid for uuid, _ in misp.edits] == ["u-md5"]
+
+
+def test_an_upper_case_hash_is_present_in_todays_event_without_the_cross_event_check(monkeypatch):
+    """Cross-event dedup off: the per-event check reads today's event, which holds the hash in lower case."""
+    monkeypatch.setattr(mw, "MISP_CROSS_EVENT_DEDUP", False)
+    today = f"EdgeGuard-alienvault_otx-{NOW.strftime('%Y-%m-%d')}"
+    misp = _PartialListingMisp(
+        page_one=[],
+        today=[_stored_md5("u-today", OTX_TAG, today, last_seen=None, written=NOW, event="50")],
+        failure=500,
+    )
+    (ok, failed), pushed = _push_partial([_otx_item(MD5.upper())], misp)
+    assert (ok, failed) == (0, 0) and pushed == [], "the copy in today's event is the same value"
+    assert ("listing", 1) not in misp.calls and misp.edits == []
+
+
+def test_a_url_is_compared_as_given():
+    """MISP stores a URL as given, so the check compares it exactly (surrounding whitespace aside): another
+    case of the host or of the path is another value, pushed, and leaves the stored copy alone; the URL MISP
+    holds, re-reported, is present and refreshed."""
+    setseta, setseta_host_case = "http://setseta.com/set.exe", "http://Setseta.com/set.exe"
+    installed, installed_lower = "http://twizt.net/Installed", "http://twizt.net/installed"
+    assert {setseta, setseta_host_case} <= set(_URL_PULSES["5d8dcf197ec3aea4d3e338df"])
+    assert {installed, installed_lower} <= set(_URL_PULSES["679a2613007f9da5db46eb5f"])
+    old = NOW - timedelta(days=60)
+    misp = _Misp(
+        [
+            _stored(
+                setseta_host_case,
+                "u-setseta",
+                attr_type="url",
+                tag=OTX_TAG,
+                info=OTX_EARLIER_EVENT,
+                last_seen=None,
+                written=old,
+            ),
+            _stored(
+                installed,
+                "u-installed",
+                attr_type="url",
+                tag=OTX_TAG,
+                info=OTX_EARLIER_EVENT,
+                last_seen=None,
+                written=old,
+            ),
+        ],
+        tag=OTX_TAG,
+    )
+    items = [_otx_item(setseta, "url"), _otx_item(installed_lower, "url"), _otx_item(f" {installed} ", "url")]
+    (ok, failed), pushed, _writer = _push(items, misp)
+    assert [a["value"] for a in pushed] == [setseta, installed_lower]
+    assert (ok, failed) == (2, 0)
+    assert [uuid for uuid, _ in misp.edits] == ["u-installed"]
+
+
+@pytest.mark.parametrize(
+    "attr_type, value, key",
+    [
+        ("md5", MD5.upper(), ("md5", MD5)),
+        ("domain", " Wikileaks2.SITE ", ("domain", "wikileaks2.site")),
+        ("vulnerability", "CVE-2026-48710", ("vulnerability", "cve-2026-48710")),
+        ("url", " http://Setseta.com/set.exe ", ("url", "http://Setseta.com/set.exe")),
+        ("malware-type", "DCRAT", ("malware-type", "DCRAT")),
+        ("text", "T1059.003: Windows Command Shell", ("text", "T1059.003 - Windows Command Shell")),
+        ("text", "T1059.00%WINDIR%\\Command Shell", ("text", "T1059.00%WINDIR%\\Command Shell")),
+        ("text", " plain note ", ("text", "plain note")),
+    ],
+)
+def test_the_dedup_key_compares_as_misp_does(attr_type, value, key):
+    """One key for the existing-attribute check, the stored-copy index and the refresh lookup: the rule of the
+    dedup within the push (``_within_push_key``), ATT&CK ``text`` values in their current form."""
+    assert mw._dedup_key(attr_type, value) == key
+    if attr_type != "text":
+        assert mw._dedup_key(attr_type, value) == mw._within_push_key({"type": attr_type, "value": value})
 
 
 # --------------------------------------------------------------------------- the prefetch
