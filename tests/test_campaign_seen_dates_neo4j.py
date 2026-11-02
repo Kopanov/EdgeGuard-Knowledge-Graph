@@ -12,6 +12,12 @@ missing stored date and one that does not compare (a String). With every member 
 build no member is dated by an edge, and an import-time date is no longer caught (``edge_dated_members``
 is then 0, which the script reports as informational).
 
+2026-11-02: an edge's last date is the source's own date first (``indicator_seen_dates.edge_last``):
+a feed that sends no last-seen date (MalwareBazaar, often ThreatFox) has the MISP record time, the time
+of the push, as its report, which ordered its items above indicators their sources reported later in
+the campaign's sample of 100 and gave the campaign a last seen no source reported. The sample, the
+campaign's last seen, the alert enrichment and check 13e now take its first-seen claim instead.
+
 The indicators are written as production writes them: an item shaped as the collector emits it, the
 attribute ``MISPWriter`` builds from it with the fields MISP adds when it stores it (the key set of a
 stored OTX attribute, 2026-10-25), ``parse_attribute`` and ``merge_indicators_batch``. The OTX test
@@ -28,6 +34,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -53,6 +60,7 @@ FAMILY = "it-seen-family"
 FIXTURE = f"""
 CREATE (:Source:{LABEL} {{source_id: 'alienvault_otx'}})
 CREATE (:Source:{LABEL} {{source_id: 'threatfox'}})
+CREATE (:Source:{LABEL} {{source_id: 'malwarebazaar'}})
 CREATE (a:ThreatActor:{LABEL} {{name: '{ACTOR}', uuid: 'u-seen-actor', source: ['alienvault_otx']}})
 CREATE (m:Malware:{LABEL} {{name: '{FAMILY}', uuid: 'u-seen-family', source: ['alienvault_otx']}})
 CREATE (m)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx']}}]->(a)
@@ -152,8 +160,9 @@ def _otx_item(value: str, created: datetime, modified: datetime) -> dict:
     }
 
 
-def _threatfox_item(value: str, first: datetime, last: datetime) -> dict:
-    """An IOC as the ThreatFox collector emits it (``"YYYY-MM-DD HH:MM:SS UTC"`` dates)."""
+def _threatfox_item(value: str, first: datetime, last: Optional[datetime]) -> dict:
+    """An IOC as the ThreatFox collector emits it (``"YYYY-MM-DD HH:MM:SS UTC"`` dates; ``last_seen``
+    None when the API gives null, as it does for most IOCs)."""
     return {
         "indicator_type": "domain",
         "value": value,
@@ -161,7 +170,7 @@ def _threatfox_item(value: str, first: datetime, last: datetime) -> dict:
         "tag": "threatfox",
         "source": ["threatfox"],
         "first_seen": first.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "last_seen": last.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "last_seen": last.strftime("%Y-%m-%d %H:%M:%S UTC") if last is not None else None,
         "last_updated": _now().isoformat(),
         "confidence_score": 0.75,
         "malware_family": FAMILY,
@@ -174,6 +183,28 @@ def _threatfox_item(value: str, first: datetime, last: datetime) -> dict:
         "reference": "",
         "tags": [],
     }
+
+
+def _malwarebazaar_item(sha256: str, first: datetime, family: str, reporter: str, file_type: str, mime: str) -> dict:
+    """A sample as the MalwareBazaar collector emits it from a row of its export (the real export
+    shape: quoted fields separated by ``", "``, ``n/a`` placeholders). The export gives the first-seen
+    date only, so the item has no last-seen date."""
+    from collectors.global_feed_collector import MalwareBazaarCollector
+
+    line = (
+        f'"{first.strftime("%Y-%m-%d %H:%M:%S")}", "{sha256}", "n/a", "n/a", "{reporter}", "n/a", '
+        f'"{file_type}", "{mime}", "{family}", "n/a", "n/a", "n/a", "n/a", "n/a"'
+    )
+    (row,) = MalwareBazaarCollector.parse_export(line)
+    item = MalwareBazaarCollector(api_key="", misp_writer=MagicMock()).build_item(row)
+    assert item is not None and item["first_seen"] == first.isoformat() and "last_seen" not in item
+    return item
+
+
+# Two samples of the 730-day baseline of 2026-11-01 (their MISP record time was the time of the push,
+# 1 November 16:05, and their first-seen claims 1 November 06:58 and 30 October 19:17).
+SHA_PURERAT = "cab8bacba10160205866f91c19b5404b3bd6d4de2154621bc6a3a45f842a51f4"
+SHA_XWORM = "1d728fc31a5d3d595821906ad71ed416cda0e1a87e6aaef42616feea12786c2b"
 
 
 def _merge(client, raw_driver, source_id: str, attrs: list) -> None:
@@ -232,12 +263,12 @@ def _node_times(raw_driver) -> dict:
         }
 
 
-def _alert_dates(client, value: str) -> tuple:
+def _alert_dates(client, value: str, ioc_type: str = "domain") -> tuple:
     """``first_seen`` / ``last_updated`` of the alert enrichment's answer for ``value``."""
     from alert_processor import AlertProcessor
 
     answer = AlertProcessor(neo4j_client=client).enrich_alert_read_only(
-        {"alert_id": "it-seen", "zone": "global", "threat": {"indicator": value, "type": "domain"}}
+        {"alert_id": "it-seen", "zone": "global", "threat": {"indicator": value, "type": ioc_type}}
     )
     assert answer.query_metadata["indicator_found"] is True
     return _parse(answer.enrichment["first_seen"]), _parse(answer.enrichment["last_updated"])
@@ -247,17 +278,31 @@ def _alert_dates(client, value: str) -> tuple:
 _CUTOFF = "WHERE r.updated_at <= m.updated_at AND r.updated_at <= c.last_updated "
 
 
-def _acceptance(raw_driver, without_cutoff: bool = False) -> dict:
+# The last date per edge in check 13e (2026-11-02), and the one before: the latest report, which is the
+# MISP record time for a feed that sends no last-seen date.
+_MEMBER_LAST = (
+    "max(coalesce(r.source_reported_last_at, "
+    "CASE WHEN r.last_reported_at < r.last_recorded_at THEN r.last_reported_at END, "
+    "r.source_reported_first_at, r.last_reported_at)) AS member_last "
+)
+_MEMBER_LAST_BY_RECORD_TIME = "max(coalesce(r.source_reported_last_at, r.last_reported_at)) AS member_last "
+
+
+def _acceptance(raw_driver, without_cutoff: bool = False, by_record_time: bool = False) -> dict:
     """Check 13e of the acceptance script on this database (its statement as the script sends it);
-    ``without_cutoff`` drops its cutoff, to show what the cutoff keeps out."""
+    ``without_cutoff`` drops its cutoff, to show what the cutoff keeps out; ``by_record_time`` dates an
+    edge by its latest report when the source gave no last-seen claim (the check before 2026-11-02),
+    to show that the fixture tells the two apart."""
     spec = importlib.util.spec_from_file_location("verify_fresh_baseline_seen_dates", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     statement = module.CAMPAIGN_SEEN_DATES_CHECK_QUERY
-    assert _CUTOFF in statement
+    assert _CUTOFF in statement and _MEMBER_LAST in statement
     if without_cutoff:
         statement = statement.replace(_CUTOFF, "")
+    if by_record_time:
+        statement = statement.replace(_MEMBER_LAST, _MEMBER_LAST_BY_RECORD_TIME)
     with raw_driver.session() as session:
         return dict(session.run(statement).single())
 
@@ -556,3 +601,303 @@ def test_with_every_member_edge_written_after_the_build_no_member_is_dated_by_an
     assert (r["members"], r["edge_dated_members"]) == (2, 0)
     assert (r["first_seen_after_members"], r["last_seen_before_members"]) == (0, 0), "not caught without an edge"
     assert (r["campaigns_without_edge_dated_member"], r["campaigns_without_edge_dated_member_names"]) == (1, [CAMPAIGN])
+
+
+def _edges(raw_driver, source_id: str) -> dict:
+    """The report properties of the suite's indicators' edges to ``source_id``, by value."""
+    with raw_driver.session() as session:
+        return {
+            r["v"]: {k: (r[k].to_native() if r[k] is not None else None) for k in ("first", "last", "rep", "rec")}
+            for r in session.run(
+                f"MATCH (i:Indicator:{LABEL})-[r:SOURCED_FROM]->(:Source {{source_id: $s}}) "
+                "RETURN i.value AS v, r.source_reported_first_at AS first, r.source_reported_last_at AS last, "
+                "r.last_reported_at AS rep, r.last_recorded_at AS rec",
+                s=source_id,
+            )
+        }
+
+
+def _members(raw_driver) -> set:
+    with raw_driver.session() as session:
+        return {
+            r["v"]
+            for r in session.run(
+                "MATCH (i:Indicator)-[:PART_OF_CAMPAIGN]->(c:Campaign {name: $name}) RETURN i.value AS v",
+                name=CAMPAIGN,
+            )
+        }
+
+
+def _hundred_otx(client, raw_driver, now: datetime) -> dict:
+    """A hundred OTX indicators reported by OTX ten days ago, a minute apart (``it-sample-000`` the
+    latest), which MISP recorded two days ago: a full sample of 100 before a test adds candidates.
+    Their reports by value."""
+    otx = {f"it-sample-{k:03d}.example": now - timedelta(days=10, minutes=k) for k in range(100)}
+    attrs = [
+        _stored(_otx_item(value, report - timedelta(days=3), report), 100 + k, now - timedelta(days=2))
+        for k, (value, report) in enumerate(otx.items())
+    ]
+    _merge(client, raw_driver, "alienvault_otx", attrs)
+    return otx
+
+
+def test_the_sample_takes_the_sources_dates_not_the_misp_record_time(client, raw_driver):
+    """2026-11-02. A hundred OTX indicators reported by OTX ten days ago (a minute apart; MISP recorded
+    them two days ago) and a MalwareBazaar sample first seen forty days ago, which the export gives
+    without a last-seen date, so its report is its MISP record time of one day ago. By the node's report
+    time (the order before 2026-11-02) the sample is the newest candidate and takes a place in the
+    sample of 100, pushing out the oldest OTX indicator; by the sources' own dates it is the oldest and
+    stays out. The campaign's last seen is OTX's latest report, not the record time, the alert
+    enrichment dates the sample by its first-seen claim, and check 13e passes on the build."""
+    now = _now()
+    otx = _hundred_otx(client, raw_driver, now)
+    mb_first, mb_recorded = now - timedelta(days=40), now - timedelta(days=1)
+    mb = _malwarebazaar_item(SHA_PURERAT, mb_first, "PureRAT", "Tuxxin", "exe", "application/x-dosexec")
+    _merge(client, raw_driver, "malwarebazaar", [_stored(mb, 300, mb_recorded)])
+
+    # The edge shapes of the baseline: OTX gives no claim and its report is OTX's date, earlier than the
+    # record time; MalwareBazaar gives its first-seen claim, and its report is the record time.
+    otx_edges = _edges(raw_driver, "alienvault_otx")
+    assert set(otx_edges) == set(otx)
+    for value, report in otx.items():
+        assert otx_edges[value] == {
+            "first": None,
+            "last": None,
+            "rep": report,
+            "rec": now - timedelta(days=2),
+        }
+    assert _edges(raw_driver, "malwarebazaar") == {
+        SHA_PURERAT: {"first": mb_first, "last": None, "rep": mb_recorded, "rec": mb_recorded}
+    }
+    # By the node's report time the sample is the newest candidate (what the old order took first).
+    with raw_driver.session() as session:
+        newest = session.run(
+            f"MATCH (i:Indicator:{LABEL}) RETURN i.value AS v ORDER BY i.last_reported_at DESC, i.value LIMIT 1"
+        ).single()["v"]
+    assert newest == SHA_PURERAT
+    _indicates(raw_driver, *otx, SHA_PURERAT)
+
+    campaign = _build(client, raw_driver)
+
+    assert campaign["indicators"] == 101
+    assert _members(raw_driver) == set(otx), "the 100 OTX indicators, not the sample dated by the record time"
+    assert campaign["last"] == otx["it-sample-000.example"], "OTX's latest report, not the record time"
+    assert campaign["first"] == mb_first
+    assert _alert_dates(client, SHA_PURERAT, "hash") == (mb_first, mb_first)
+    r = _acceptance(raw_driver)
+    assert (r["campaigns"], r["members"], r["edge_dated_members"]) == (1, 100, 100)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"], r["examples"]) == (0, 0, [])
+
+
+def test_an_indicator_with_two_sources_takes_one_place_in_the_sample_by_its_latest_date(client, raw_driver):
+    """2026-11-02. The hundred OTX indicators and two indicators that OTX and ThreatFox both report. The
+    first has an OTX report five days ago and a ThreatFox last-seen claim six days ago, both later than
+    every OTX-only indicator: it takes one place in the sample of 100, not one per edge (the sample
+    takes 100 indicators, not 100 paths). The second has an OTX report four days ago and a ThreatFox
+    first-seen claim forty days ago without a last-seen date (its report there is the MISP record time):
+    the latest of its edges' dates enters it, the earliest would leave it out. The sample is the two
+    and the 98 latest OTX-only indicators."""
+    now = _now()
+    d = {k: now - timedelta(days=k) for k in (1, 2, 4, 5, 6, 30, 40)}
+    otx = _hundred_otx(client, raw_driver, now)
+    both, latest = "it-sample-two-edges.example", "it-sample-latest-edge.example"
+    _merge(
+        client,
+        raw_driver,
+        "alienvault_otx",
+        [
+            _stored(_otx_item(both, d[5] - timedelta(days=3), d[5]), 300, d[2]),
+            _stored(_otx_item(latest, d[4] - timedelta(days=3), d[4]), 301, d[2]),
+        ],
+    )
+    _merge(
+        client,
+        raw_driver,
+        "threatfox",
+        [
+            _stored(_threatfox_item(both, d[30], d[6]), 302, d[1]),
+            _stored(_threatfox_item(latest, d[40], None), 303, d[1]),
+        ],
+    )
+    # Two SOURCED_FROM edges each: OTX's report, and ThreatFox's claims with the record time as the
+    # report where the last-seen date is missing.
+    otx_edges = _edges(raw_driver, "alienvault_otx")
+    assert otx_edges[both] == {"first": None, "last": None, "rep": d[5], "rec": d[2]}
+    assert otx_edges[latest] == {"first": None, "last": None, "rep": d[4], "rec": d[2]}
+    assert _edges(raw_driver, "threatfox") == {
+        both: {"first": d[30], "last": d[6], "rep": d[6], "rec": d[1]},
+        latest: {"first": d[40], "last": None, "rep": d[1], "rec": d[1]},
+    }
+    _indicates(raw_driver, *otx, both, latest)
+
+    campaign = _build(client, raw_driver)
+
+    assert campaign["indicators"] == 102
+    members = _members(raw_driver)
+    expected = {both, latest} | {f"it-sample-{k:03d}.example" for k in range(98)}
+    assert members == expected, (sorted(members - expected), sorted(expected - members))
+    assert (campaign["first"], campaign["last"]) == (d[40], d[4])
+    r = _acceptance(raw_driver)
+    assert (r["campaigns"], r["members"], r["edge_dated_members"]) == (1, 100, 100)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"], r["examples"]) == (0, 0, [])
+
+
+def test_an_indicator_no_source_dated_enters_the_sample_by_its_first_import(client, raw_driver):
+    """2026-11-02. The hundred OTX indicators and two indicators without a SOURCED_FROM edge (as an alert
+    creates them): one EdgeGuard first imported five days ago, which enters the sample of 100 ahead of
+    the OTX indicators, and one first imported forty days ago and written again an hour ago, which stays
+    out (``sample_date``: the first import, as ``last_updated`` moves with every write). Ordered by the
+    last write the second would take the place of an OTX indicator, and so would both without a date.
+    The campaign's last seen still takes an undated indicator's last write (``last_seen``)."""
+    now = _now()
+    otx = _hundred_otx(client, raw_driver, now)
+    recent, rewritten = "it-sample-alert-recent.example", "it-sample-alert-rewritten.example"
+    with raw_driver.session() as session:
+        session.run(
+            f"UNWIND $rows AS row CREATE (:Indicator:{LABEL} {{indicator_type: 'domain', value: row.value, "
+            "source: ['resilmesh'], zone: ['global'], edgeguard_managed: true, active: true, "
+            "first_imported_at: datetime(row.imported), last_updated: datetime(row.written)})",
+            rows=[
+                {
+                    "value": recent,
+                    "imported": (now - timedelta(days=5)).isoformat(),
+                    "written": (now - timedelta(days=5)).isoformat(),
+                },
+                {
+                    "value": rewritten,
+                    "imported": (now - timedelta(days=40)).isoformat(),
+                    "written": (now - timedelta(hours=1)).isoformat(),
+                },
+            ],
+        )
+    _indicates(raw_driver, *otx, recent, rewritten)
+
+    campaign = _build(client, raw_driver)
+
+    assert campaign["indicators"] == 102
+    members = _members(raw_driver)
+    expected = {recent} | {f"it-sample-{k:03d}.example" for k in range(99)}
+    assert members == expected, (sorted(members - expected), sorted(expected - members))
+    times = _node_times(raw_driver)
+    assert times[rewritten] == (now - timedelta(days=40), now - timedelta(hours=1)), "the build left the node"
+    assert (campaign["first"], campaign["last"]) == (now - timedelta(days=40), now - timedelta(hours=1))
+    r = _acceptance(raw_driver)
+    assert (r["campaigns"], r["members"], r["edge_dated_members"]) == (1, 100, 99)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"], r["examples"]) == (0, 0, [])
+
+
+def test_a_feed_without_a_last_seen_date_dates_the_campaign_by_its_first_seen_claim(client, raw_driver):
+    """2026-11-02. One indicator each, all recorded by MISP one or two days ago: OTX reported ten days
+    ago; a MalwareBazaar sample first seen forty days ago (no last-seen date); a ThreatFox IOC first seen
+    thirty days ago whose last seen the API gives as null; a ThreatFox IOC first seen twenty and last
+    seen fifteen days ago. Each edge's last date is the source's own (the first-seen claim where the
+    feed gives no other), so the campaign's last seen is OTX's report, the latest date a source gave,
+    and the alert enrichment gives each indicator its source's dates. Check 13e passes; with the record
+    time as the last date of an edge (the check before 2026-11-02) it would fail this build."""
+    now = _now()
+    recorded = now - timedelta(days=1)
+    otx_report = now - timedelta(days=10)
+    mb_first = now - timedelta(days=40)
+    tf_null = ("it-seen-tf-null.example", now - timedelta(days=30))
+    tf_claims = ("it-seen-tf-last.example", now - timedelta(days=20), now - timedelta(days=15))
+    _merge(
+        client,
+        raw_driver,
+        "alienvault_otx",
+        [
+            _stored(
+                _otx_item("it-seen-otx.example", otx_report - timedelta(days=3), otx_report),
+                60,
+                now - timedelta(days=2),
+            )
+        ],
+    )
+    mb = _malwarebazaar_item(SHA_XWORM, mb_first, "XWorm", "abuse_ch", "vbs", "text/plain")
+    _merge(client, raw_driver, "malwarebazaar", [_stored(mb, 61, recorded)])
+    _merge(
+        client,
+        raw_driver,
+        "threatfox",
+        [
+            _stored(_threatfox_item(tf_null[0], tf_null[1], None), 62, recorded),
+            _stored(_threatfox_item(tf_claims[0], tf_claims[1], tf_claims[2]), 63, recorded),
+        ],
+    )
+    # The record time is the report of the MalwareBazaar edge and of the ThreatFox edge without a
+    # last-seen claim; a last-seen claim is the ThreatFox report.
+    tf_edges = _edges(raw_driver, "threatfox")
+    assert tf_edges[tf_null[0]] == {"first": tf_null[1], "last": None, "rep": recorded, "rec": recorded}
+    assert tf_edges[tf_claims[0]] == {"first": tf_claims[1], "last": tf_claims[2], "rep": tf_claims[2], "rec": recorded}
+    assert _edges(raw_driver, "malwarebazaar")[SHA_XWORM] == {
+        "first": mb_first,
+        "last": None,
+        "rep": recorded,
+        "rec": recorded,
+    }
+    _indicates(raw_driver, "it-seen-otx.example", SHA_XWORM, tf_null[0], tf_claims[0])
+
+    campaign = _build(client, raw_driver)
+
+    assert campaign["indicators"] == 4
+    assert (campaign["first"], campaign["last"]) == (mb_first, otx_report)
+    assert _alert_dates(client, SHA_XWORM, "hash") == (mb_first, mb_first)
+    assert _alert_dates(client, tf_null[0]) == (tf_null[1], tf_null[1])
+    assert _alert_dates(client, tf_claims[0]) == (tf_claims[1], tf_claims[2])
+    assert _alert_dates(client, "it-seen-otx.example") == (otx_report, otx_report)
+    r = _acceptance(raw_driver)
+    assert (r["campaigns"], r["members"], r["edge_dated_members"]) == (1, 4, 4)
+    assert (r["first_seen_after_members"], r["last_seen_before_members"], r["examples"]) == (0, 0, [])
+    # The record time of the two edges without a last-seen date is later than the campaign's last seen.
+    assert _acceptance(raw_driver, by_record_time=True)["last_seen_before_members"] == 1
+
+
+def test_the_last_date_of_each_stored_edge_shape(client, raw_driver):
+    """2026-11-02: ``indicator_seen_dates.edge_last`` on stored edges of every shape the writers leave
+    (the properties of the edges of the 730-day baseline of 2026-11-01, dates relative to the run), read
+    as the build reads them. The record time is the last date only of an edge no source dated."""
+    import indicator_seen_dates
+
+    now = _now()
+    d = {k: now - timedelta(days=k) for k in (1, 2, 5, 10, 20, 30, 40)}
+    shapes = {
+        # source, first-seen claim, last-seen claim, latest report, record time -> last date
+        "otx-source-date": ("alienvault_otx", None, None, d[10], d[2], d[10]),
+        "otx-record-time": ("alienvault_otx", None, None, d[2], d[2], d[2]),
+        "malwarebazaar": ("malwarebazaar", d[40], None, d[1], d[1], d[40]),
+        "threatfox-no-last-seen": ("threatfox", d[30], None, d[1], d[1], d[30]),
+        "threatfox-last-seen": ("threatfox", d[20], d[5], d[5], d[1], d[5]),
+        # The source's last-seen date later than the record time: the report is capped at the record time.
+        "last-seen-after-record": ("threatfox", d[20], now, d[1], d[1], now),
+        # A pair another writer pushed with last_seen before first_seen: the claim extraction drops the
+        # last-seen claim, the report keeps the source's date.
+        "pair-inverted": ("threatfox", d[10], None, d[20], d[1], d[20]),
+        # The STIX import records no report.
+        "stix-import": ("threatfox", d[30], None, None, None, d[30]),
+    }
+    with raw_driver.session() as session:
+        session.run(
+            f"UNWIND $rows AS row MATCH (s:Source:{LABEL} {{source_id: row.source}}) "
+            f"CREATE (i:Indicator:{LABEL} {{indicator_type: 'domain', value: row.value}}) "
+            "CREATE (i)-[r:SOURCED_FROM]->(s) "
+            "SET r.source_reported_first_at = datetime(row.first), r.source_reported_last_at = datetime(row.last), "
+            "r.last_reported_at = datetime(row.rep), r.last_recorded_at = datetime(row.rec)",
+            rows=[
+                {
+                    "value": value,
+                    "source": source,
+                    **{
+                        k: (t.isoformat() if t is not None else None)
+                        for k, t in zip(("first", "last", "rep", "rec"), times, strict=True)
+                    },
+                }
+                for value, (source, *times, _) in shapes.items()
+            ],
+        )
+        got = {
+            r["v"]: r["d"].to_native()
+            for r in session.run(
+                f"MATCH (i:Indicator:{LABEL})-[r:SOURCED_FROM]->(:Source) "
+                f"RETURN i.value AS v, {indicator_seen_dates.edge_last('r')} AS d"
+            )
+        }
+    assert got == {value: shape[-1] for value, shape in shapes.items()}

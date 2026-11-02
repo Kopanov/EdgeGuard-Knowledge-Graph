@@ -7,6 +7,14 @@ all came from OTX took EdgeGuard's import time as its first and last seen. The s
 first seen date is never later than the indicator's first import; the indicator's own times only
 when no edge dates it. The campaign build and the alert enrichment read the one definition.
 
+2026-11-02: an edge's last date is the source's own date first: the last-seen claim, else the latest
+report when it is earlier than the edge's MISP record time (then the source dated it), else the
+first-seen claim, else the latest report (the record time). A feed that sends no last-seen date
+(MalwareBazaar, SSL Blacklist, often ThreatFox) has the record time, the time of the push, as the
+report of every item, which put its items above indicators their sources reported later in the
+campaign sample and gave campaigns a last seen no source reported. The sample takes the same last date
+(``sample_date``), so the sample and the campaign dates follow one definition.
+
 Here: the fragments and the statements that carry them, without a database. What the dates come out
 as on a real Neo4j (an OTX-only campaign written through the sync's write path, a report after the
 first import, the guards of a stored campaign, the alert enrichment) is checked in
@@ -35,7 +43,13 @@ if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "n
 import indicator_seen_dates  # noqa: E402
 
 FIRST_CLAIM = "coalesce(r.source_reported_first_at, r.last_reported_at)"
-LAST_CLAIM = "coalesce(r.source_reported_last_at, r.last_reported_at)"
+# 2026-11-02: the source's own date first; the latest report only when it is the source's date
+# (earlier than the record time), the first-seen claim before the record time.
+LAST_DATE = (
+    "coalesce(r.source_reported_last_at, "
+    "CASE WHEN r.last_reported_at < r.last_recorded_at THEN r.last_reported_at END, "
+    "r.source_reported_first_at, r.last_reported_at)"
+)
 
 
 def _flat(statement: str) -> str:
@@ -70,9 +84,15 @@ def _recording_session(rows_for):
 
 
 class TestFragments:
-    def test_each_edge_gives_the_claim_else_the_latest_report(self):
+    def test_each_edge_gives_the_first_seen_claim_else_the_latest_report(self):
         assert indicator_seen_dates.edge_first("r") == FIRST_CLAIM
-        assert indicator_seen_dates.edge_last("r") == LAST_CLAIM
+
+    def test_each_edge_gives_the_source_s_own_last_date_before_the_record_time(self):
+        assert indicator_seen_dates.edge_last("r") == LAST_DATE
+        assert indicator_seen_dates.edge_last("_sf") == LAST_DATE.replace("r.", "_sf.")
+
+    def test_the_sample_falls_back_to_the_first_import_not_the_last_write(self):
+        assert indicator_seen_dates.sample_date("e", "i") == "coalesce(e, i.first_imported_at)"
 
     def test_the_first_seen_date_is_never_later_than_the_first_import(self):
         assert indicator_seen_dates.first_seen("x", "i") == (
@@ -88,6 +108,7 @@ class TestFragments:
             indicator_seen_dates.edge_last("r"),
             indicator_seen_dates.first_seen("x", "i"),
             indicator_seen_dates.last_seen("y", "i"),
+            indicator_seen_dates.sample_date("e", "i"),
         ):
             assert "'" not in fragment and '"' not in fragment
 
@@ -115,7 +136,7 @@ class TestCampaignBuild:
         flat = _flat(create)
         per_indicator = (
             "OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source) WITH a, malware_list, i, "
-            f"min({FIRST_CLAIM}) AS i_edges_first, max({LAST_CLAIM}) AS i_edges_last"
+            f"min({FIRST_CLAIM}) AS i_edges_first, max({LAST_DATE}) AS i_edges_last"
         )
         per_campaign = (
             "WITH a, malware_list, count(DISTINCT i) AS indicator_total, collect(DISTINCT i) AS all_indicators, "
@@ -134,6 +155,47 @@ class TestCampaignBuild:
         # The stored values still only move earlier / later.
         assert "AND (c.first_seen IS NULL OR first_seen < c.first_seen)" in flat
         assert "AND (c.last_seen IS NULL OR last_seen > c.last_seen)" in flat
+
+    def test_step_3a_takes_the_sample_by_the_same_last_date(self, monkeypatch):
+        """2026-11-02: the sample of up to 100 indicators is ordered by the latest last date of the
+        indicator's edges (the definition the campaign's last_seen reads), else its first import, not
+        by the node's report time, which is the MISP record time for a feed that sends no last-seen
+        date. The tie-break stays value, then type."""
+        import enrichment_jobs
+
+        counts = {
+            "campaigns": 0,
+            "backfilled": 0,
+            "deleted": 0,
+            "names": [],
+            "links": 0,
+            "removed": 0,
+            "pruned": 0,
+            "added": 0,
+        }
+        driver, statements, _ = _recording_session(lambda q: {**counts, "count": 0})
+        client = MagicMock()
+        client.driver = driver
+        monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+        enrichment_jobs.build_campaign_nodes(client)
+        (link,) = [s for s in statements if "collect(i)[0..100] AS _top" in s]
+        flat = _flat(link)
+        sample = (
+            "WITH DISTINCT c, a, i OPTIONAL MATCH (i)-[_sf:SOURCED_FROM]->(:Source) "
+            f"WITH c, a, i, max({LAST_DATE.replace('r.', '_sf.')}) AS _edges_last "
+            "WITH c, a, i, coalesce(_edges_last, i.first_imported_at) AS _sample_date "
+            "ORDER BY _sample_date DESC, i.value ASC, i.indicator_type ASC "
+            "WITH c, a, collect(i)[0..100] AS _top"
+        )
+        assert sample in flat
+        # The node's report time no longer orders the sample.
+        assert "i.last_reported_at" not in flat
+        # The inner statement is one double-quoted string: the fragments add no quote to it.
+        inner = flat.split('"MATCH (c:Campaign) RETURN c", "', 1)[1].split('", {batchSize', 1)[0]
+        assert '"' not in inner and sample in inner
+        # One definition: Step 1 reads the same last date per edge.
+        (create,) = [s for s in statements if "MERGE (c:Campaign" in s]
+        assert f"max({LAST_DATE}) AS i_edges_last" in _flat(create)
 
 
 class TestAlertEnrichment:
@@ -163,7 +225,7 @@ class TestAlertEnrichment:
         _, statements, session_kwargs = self._enrich(None)
         (query,) = [s for s in statements if "RETURN i {" in s]
         flat = _flat(query)
-        assert f"min({FIRST_CLAIM}) AS edges_first, max({LAST_CLAIM}) AS edges_last" in flat
+        assert f"min({FIRST_CLAIM}) AS edges_first, max({LAST_DATE}) AS edges_last" in flat
         assert (
             "CASE WHEN edges_first IS NULL OR i.first_imported_at < edges_first "
             "THEN i.first_imported_at ELSE edges_first END AS first_seen"

@@ -309,7 +309,9 @@ _CVE_BEST_CVSS = (
 # the latest dated report of one; the stored values only move earlier / later. A member's first date
 # is, per SOURCED_FROM edge, the source's first-seen claim, else its latest report
 # (``r.last_reported_at``), and never later than the member's first import; its last date, per edge,
-# the last-seen claim, else the latest report (docs/TIMESTAMPS.md, "Seen dates of an indicator").
+# the source's own date (2026-11-02): the last-seen claim, else the latest report when it is earlier
+# than the edge's MISP record time (``r.last_recorded_at``; then the source dated it), else the
+# first-seen claim, else the latest report (docs/TIMESTAMPS.md, "Seen dates of an indicator").
 # Written here apart from ``indicator_seen_dates``, so the check also catches a change to that shared
 # definition. The members are the indicators linked by the last build (``PART_OF_CAMPAIGN``, a sample
 # of up to 100 per campaign; each was counted by the build that linked it), and only the edges no
@@ -329,7 +331,9 @@ CAMPAIGN_SEEN_DATES_CHECK_QUERY = (
     "OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source) "
     "WHERE r.updated_at <= m.updated_at AND r.updated_at <= c.last_updated "
     "WITH c, i, collect(coalesce(r.source_reported_first_at, r.last_reported_at)) AS edge_firsts, "
-    "max(coalesce(r.source_reported_last_at, r.last_reported_at)) AS member_last "
+    "max(coalesce(r.source_reported_last_at, "
+    "CASE WHEN r.last_reported_at < r.last_recorded_at THEN r.last_reported_at END, "
+    "r.source_reported_first_at, r.last_reported_at)) AS member_last "
     "WITH c, i, member_last, size(edge_firsts) > 0 OR member_last IS NOT NULL AS edge_dated, "
     "[d IN edge_firsts + [i.first_imported_at] WHERE d IS NOT NULL] AS firsts "
     "WITH c, i, member_last, edge_dated, "

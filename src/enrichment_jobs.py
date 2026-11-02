@@ -338,7 +338,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
     by it, and an active indicator of such a malware, we create a Campaign node and link:
       ThreatActor -[:RUNS]-> Campaign
       Malware     -[:PART_OF_CAMPAIGN]-> Campaign
-      Indicator   -[:PART_OF_CAMPAIGN]-> Campaign  (sampled — up to 100 per campaign)
+      Indicator   -[:PART_OF_CAMPAIGN]-> Campaign  (sampled — up to 100 per campaign, the most
+                                                     recently reported by the sources' own dates)
 
     The links follow the evidence (2026-10): a campaign whose actor has neither link left is
     deleted with its links (Step 1b, 2026-10-16), a malware link without either link is pruned
@@ -365,8 +366,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                         claim, else the source's latest report; never later
                         than the indicator's first import); only moves earlier
       last_seen       — the latest last seen date of its active indicators
-                        (per source, the last-seen claim, else the source's
-                        latest report); only moves later
+                        (per source, the source's own date: the last-seen
+                        claim, else the latest report when the source dated
+                        it, else the first-seen claim, else the MISP record
+                        time); only moves later
       zone            — union of all indicator zones; each sector zone is also a label
                         (``:Finance`` …, Step 6, ``sector_labels``)
       tag             — actor tag (for UNIQUE constraint key)
@@ -472,6 +475,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             // claims, so a campaign whose indicators all came from OTX took EdgeGuard's import time as
             // its first and last seen. The first seen date of an indicator is never later than its
             // first import (``indicator_seen_dates``, shared with the alert enrichment).
+            // 2026-11-02: an edge's last date is the source's own date first; the MISP record time
+            // (the time of the push) only when the source gave none (``edge_last``).
             OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
             WITH a, malware_list, i,
                  min({indicator_seen_dates.edge_first("r")}) AS i_edges_first,
@@ -769,9 +774,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # any member malware; the indicator type breaks a tie of date and value (the indicator
             # key is type and value), so the order is total.
             #
-            # 2026-10-16 (indicator aging): newest first by the latest report of any source, or when
-            # EdgeGuard created the node (``coalesce(i.last_reported_at, i.first_imported_at)``), so the
-            # sample follows the MISP data, not the time a sync happened to write the node.
+            # 2026-11-02: newest first by the sources' own dates, the latest last date of the
+            # indicator's SOURCED_FROM edges (``indicator_seen_dates.edge_last``, the definition the
+            # campaign's last_seen reads), or when EdgeGuard created the node when no edge dates it
+            # (``indicator_seen_dates.sample_date``). The node's ``last_reported_at`` is the MISP
+            # record time, the time of the push, for every item of a feed that sends no last-seen
+            # date (MalwareBazaar, SSL Blacklist, often ThreatFox), so ordering by it put those items
+            # above indicators their sources reported later (an OTX report carries OTX's own date).
             #
             # PR-N21 (next-baseline robustness): wrap in
             # ``apoc.periodic.iterate`` with one Campaign per batch so the
@@ -795,7 +804,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                MATCH (m)<-[:INDICATES]-(i:Indicator)
                WHERE i.active = true
                WITH DISTINCT c, a, i
-               ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC, i.value ASC, i.indicator_type ASC
+               OPTIONAL MATCH (i)-[_sf:SOURCED_FROM]->(:Source)
+               WITH c, a, i, max(__EDGE_LAST__) AS _edges_last
+               WITH c, a, i, __SAMPLE_DATE__ AS _sample_date
+               ORDER BY _sample_date DESC, i.value ASC, i.indicator_type ASC
                WITH c, a, collect(i)[0..100] AS _top
                UNWIND _top AS i
                WITH c, a, i, __PATHS__ AS _paths
@@ -821,6 +833,15 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                     # them, each ``[INDICATES, ATTRIBUTED_TO or USES_MALWARE]`` (``campaign_evidence``).
                     "__MEMBERS__",
                     campaign_evidence.member_malware("a"),
+                )
+                .replace(
+                    # 2026-11-02: the sample's order, by the sources' own dates (``indicator_seen_dates``).
+                    "__EDGE_LAST__",
+                    indicator_seen_dates.edge_last("_sf"),
+                )
+                .replace(
+                    "__SAMPLE_DATE__",
+                    indicator_seen_dates.sample_date("_edges_last", "i"),
                 )
                 .replace(
                     "__PATHS__",
