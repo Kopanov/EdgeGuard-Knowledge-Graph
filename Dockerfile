@@ -71,8 +71,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 EXPOSE 8000
 
-# Default command: start the query API.
-# Override with "python src/run_pipeline.py" to run the pipeline instead.
+# Default command: start the query API. The pipeline runs as the Airflow DAGs (the airflow
+# service of docker-compose.yml), not in this image.
 #
 # PR-A audit fix (Bugbot HIGH on commit ce37238): the previous CMD was
 # ``["python", "-m", "uvicorn", "src.query_api:app", "--host", "0.0.0.0", ...]``

@@ -366,19 +366,6 @@ class TestNodeScoreFromSubNodes:
         assert sync._sync_single_item(_parse(syncer, MISP["CVE-2026-6039__source:NVD"])) is not False
         assert _score_derivations(session) == ["CVE-2026-6039"]
 
-    def test_stix_import_derives(self):
-        from run_pipeline import EdgeGuardPipeline
-
-        client, session = _recording_client()
-        pipeline = EdgeGuardPipeline()
-        pipeline.neo4j = client
-        bundle = {
-            "type": "bundle",
-            "objects": [{"type": "vulnerability", "id": "vulnerability--1", "name": "CVE-2025-21042"}],
-        }
-        pipeline.load_stix21_to_neo4j(bundle)
-        assert _score_derivations(session) == ["CVE-2025-21042"]
-
 
 # ---------------------------------------------------------------- 6. read paths
 class TestReadPaths:

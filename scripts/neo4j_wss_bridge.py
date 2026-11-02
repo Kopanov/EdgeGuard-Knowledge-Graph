@@ -24,7 +24,6 @@ import sys
 import threading
 
 import websocket
-
 from neo4j import GraphDatabase
 
 

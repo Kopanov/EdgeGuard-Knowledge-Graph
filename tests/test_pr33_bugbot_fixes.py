@@ -41,7 +41,7 @@ from stub_cleanup import drop_modules_for_test  # noqa: E402
 
 
 def test_standalone_helpers_use_bound_endpoint_vars_not_row():
-    """The 6 single-row create_*_relationship functions are NOT UNWIND queries
+    """The single-row create_*_relationship functions are NOT UNWIND queries
     — referencing ``row.src_uuid`` / ``row.trg_uuid`` would crash with
     "Variable `row` not defined". They must use the MATCHed node's bound
     variable name (``a``, ``m``, ``i``, ``v``, ``s``, ``t``, ``tool``)."""
@@ -51,9 +51,10 @@ def test_standalone_helpers_use_bound_endpoint_vars_not_row():
     with open(src_path) as fh:
         source = fh.read()
 
-    # Range covering the standalone helpers (between the merge_tool function
-    # end and the start of create_misp_relationships_batch).
-    helper_start = source.find("def create_actor_technique_relationship")
+    # Range covering the standalone helpers (from the first of them to the start of
+    # create_misp_relationships_batch). The actor-technique, malware-actor and
+    # indicator-malware helpers were removed with the in-process STIX loader (2026-11-02).
+    helper_start = source.find("def create_indicator_vulnerability_relationship")
     helper_end = source.find("def create_misp_relationships_batch")
     assert helper_start > 0 and helper_end > helper_start, "helper region not found"
     helper_block = source[helper_start:helper_end]
@@ -67,10 +68,6 @@ def test_standalone_helpers_use_bound_endpoint_vars_not_row():
     )
 
     # Bound-variable form must be present (one of these per query).
-    assert "coalesce(r.src_uuid, a.uuid)" in helper_block, "expected a.uuid endpoint stamp (actor_technique)"
-    assert "coalesce(r.src_uuid, m.uuid)" in helper_block, (
-        "expected m.uuid endpoint stamp (malware_actor / indicator_malware)"
-    )
     assert "coalesce(r.src_uuid, i.uuid)" in helper_block, "expected i.uuid endpoint stamp (indicator_*)"
     assert "coalesce(r.src_uuid, v.uuid)" in helper_block, "expected v.uuid endpoint stamp (vulnerability_sector)"
 

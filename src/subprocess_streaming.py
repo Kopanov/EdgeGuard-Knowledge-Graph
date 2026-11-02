@@ -3,8 +3,8 @@ Bounded-memory subprocess runner for long-lived child processes.
 
 PR-K3 §1-4 — addresses the flow-audit finding that
 ``subprocess.run(..., capture_output=True, timeout=18000)`` was
-being used for ``build_relationships.py`` in both the Airflow DAG
-and the CLI baseline path. ``capture_output=True`` buffers the
+being used for ``build_relationships.py`` in the Airflow DAG.
+``capture_output=True`` buffers the
 ENTIRE child stdout + stderr in the parent's memory until the child
 exits — on a 5-hour APOC-heavy run against a 344K-node graph, the
 buffer grows to tens of megabytes of log text and adds real OOM
@@ -24,9 +24,9 @@ error-context logging on failure — no unbounded buffer.
 PR-L's regression tests (``tests/test_tier1_sequential_robustness.py``)
 source-pin that ``src/run_pipeline.py`` has no ``threading.Thread``
 — part of the tier-1 sequential-execution robustness guarantee.
-Putting the reader thread in a dedicated module keeps that pin
-happy: the CLI's ``run_pipeline.py`` only *calls* the helper, never
-spawns raw threads itself.
+Putting the reader thread in a dedicated module keeps raw threads out
+of the code that runs the collectors; the DAG's
+``run_build_relationships`` only *calls* the helper.
 
 ## Scope
 

@@ -16,6 +16,8 @@ from typing import Any, Dict, List, NoReturn, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from neo4j import exceptions as _neo4j_exceptions
+from neo4j import time as _neo4j_time
 
 # OpenTelemetry imports
 from opentelemetry import trace
@@ -25,9 +27,6 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-
-from neo4j import exceptions as _neo4j_exceptions
-from neo4j import time as _neo4j_time
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

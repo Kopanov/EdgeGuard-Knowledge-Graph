@@ -14,7 +14,6 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
-
 from neo4j import Query
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))

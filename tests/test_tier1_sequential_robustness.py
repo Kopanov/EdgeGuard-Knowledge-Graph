@@ -8,10 +8,11 @@ invariants** that must ALSO hold for the tier-1 serial mitigation to
 actually protect MISP from PHP-FPM exhaustion during a 730-day
 baseline:
 
-1. **CLI baseline path (`run_pipeline.py --baseline`) stays sequential.**
-   The baseline CLI uses a plain Python ``for`` loop over collectors;
-   no ``ThreadPool`` / ``asyncio.gather`` / ``concurrent.futures``
-   that could re-parallelize writes to MISP.
+1. **The CLI collection run (`run_pipeline.py`) stays sequential.**
+   It uses a plain Python ``for`` loop over collectors; no
+   ``ThreadPool`` / ``asyncio.gather`` / ``concurrent.futures`` that
+   could re-parallelize writes to MISP. (Its in-process baseline is
+   retired, 2026-11-02.)
 
 2. **`MISPWriter.push_items` has zero internal concurrency primitives.**
    All write-path fan-out is nested synchronous loops with an explicit
@@ -30,9 +31,9 @@ baseline:
    gap is closed, the xfails auto-promote to xpass and CI surfaces
    that the fix has landed — time to flip the marker off.
 
-4. **`baseline_lock` sentinel coverage under the DAG path.** CLI
-   ``--baseline`` acquires the sentinel (``run_pipeline.py:1077``);
-   the DAG-triggered baseline does NOT (de-scoped to Issue #57 per
+4. **`baseline_lock` sentinel coverage under the DAG path.** The
+   retired CLI ``--baseline`` acquired the sentinel; the DAG-triggered
+   baseline did NOT (de-scoped to Issue #57 per
    ``dags/edgeguard_pipeline.py:2656-2679``). Incremental DAGs check
    ``baseline_skip_reason()`` which reads a sentinel nothing writes
    on the DAG path → they do NOT skip during a DAG-triggered 730-day
@@ -64,15 +65,14 @@ def _read(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. CLI baseline path stays sequential (no ThreadPool / asyncio concurrency)
+# 1. The collection loop of run_pipeline.py stays sequential (no ThreadPool / asyncio concurrency)
 # ---------------------------------------------------------------------------
 
 
-class TestCliBaselineLoopStaysSequential:
-    """``run_pipeline.py`` drives the CLI ``--baseline`` path. The
+class TestRunPipelineCollectionLoopStaysSequential:
+    """``run_pipeline.py`` runs the collectors into MISP. The
     collector iteration MUST stay a plain synchronous ``for`` loop
-    so a CLI-run 730-day baseline can't re-introduce concurrent
-    MISP writes.
+    so a CLI run can't re-introduce concurrent MISP writes.
 
     A future "optimization" that adds ``concurrent.futures.ThreadPoolExecutor``
     or ``asyncio.gather`` to speed up the collector dispatch would
@@ -86,13 +86,13 @@ class TestCliBaselineLoopStaysSequential:
     def test_run_pipeline_has_no_threadpool_executor(self, source: str) -> None:
         """``ThreadPoolExecutor`` / ``ProcessPoolExecutor`` / bare
         ``Thread`` imports would indicate a future refactor has
-        added concurrency to the baseline path."""
+        added concurrency to the collection loop."""
         # Strip comments so a cautionary mention in a docstring doesn't
         # trigger the pin. We only reject ACTIVE use.
         code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
         assert "ThreadPoolExecutor" not in code, (
-            "run_pipeline.py must not use ThreadPoolExecutor — the baseline CLI "
-            "path MUST stay single-threaded to preserve PR-F4's MISP concurrency "
+            "run_pipeline.py must not use ThreadPoolExecutor — its collection "
+            "loop MUST stay single-threaded to preserve PR-F4's MISP concurrency "
             "guarantee (cuts 4 concurrent writers to 1)."
         )
         assert "ProcessPoolExecutor" not in code
@@ -111,20 +111,6 @@ class TestCliBaselineLoopStaysSequential:
         # Match ``threading.Thread(`` and ``from threading import Thread``.
         assert "threading.Thread" not in code, "run_pipeline.py must not spawn raw threads for collector dispatch"
         assert not re.search(r"\bfrom\s+threading\s+import\s+Thread\b", code)
-
-    def test_baseline_acquires_lock_sentinel(self, source: str) -> None:
-        """The CLI path ``--baseline`` MUST call ``acquire_baseline_lock()``
-        before running collectors. This is the sentinel that incremental
-        DAGs check via ``baseline_skip_reason()``. Without it, scheduled
-        incrementals race the baseline — same failure mode as the DAG
-        path gap (see Issue #57)."""
-        assert "acquire_baseline_lock" in source, (
-            "run_pipeline.py --baseline must acquire the baseline_lock "
-            "sentinel so incremental DAGs correctly skip via "
-            "baseline_skip_reason()"
-        )
-        # And the release call must be present too.
-        assert "release_baseline_lock" in source
 
 
 # ---------------------------------------------------------------------------

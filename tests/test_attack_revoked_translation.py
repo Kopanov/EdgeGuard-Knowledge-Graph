@@ -441,7 +441,7 @@ def _technique_attribute(value: str) -> Dict[str, Any]:
 
 class TestRevokedTechniqueNodesAreNotRebuilt:
     """An attribute written before the collector skipped revoked techniques must not bring the node
-    back: the sync and the two readers of the legacy CLI path skip a technique id the map lists."""
+    back: the sync and the MISP reader ``misp_collector`` skip a technique id the map lists."""
 
     def test_the_sync_skips_a_revoked_technique_attribute(self):
         item, rels = _syncer().parse_attribute(_technique_attribute("T1086: PowerShell"), _EVENT)
@@ -452,42 +452,6 @@ class TestRevokedTechniqueNodesAreNotRebuilt:
     def test_without_the_map_the_sync_keeps_it(self, no_map):
         item, _rels = _syncer().parse_attribute(_technique_attribute("T1086: PowerShell"), _EVENT)
         assert item is not None and item["mitre_id"] == "T1086"
-
-    def test_the_cli_stix_import_skips_the_node_and_links_the_successor(self):
-        from run_pipeline import EdgeGuardPipeline
-
-        pipeline = EdgeGuardPipeline.__new__(EdgeGuardPipeline)
-        pipeline.neo4j = MagicMock()
-
-        def pattern(stix_id, mitre_id, name):
-            return {
-                "type": "attack-pattern",
-                "id": stix_id,
-                "name": name,
-                "external_references": [{"source_name": "mitre-attack", "external_id": mitre_id}],
-            }
-
-        bundle = {
-            "objects": [
-                pattern("attack-pattern--old", "T1086", "PowerShell"),
-                pattern("attack-pattern--new", "T1059.001", "PowerShell"),
-                {
-                    "type": "threat-actor",
-                    "id": "threat-actor--a",
-                    "name": "APT29",
-                },  # the import reads threat-actor SDOs
-                {
-                    "type": "relationship",
-                    "relationship_type": "uses",
-                    "source_ref": "threat-actor--a",
-                    "target_ref": "attack-pattern--old",
-                },
-            ]
-        }
-        stats = pipeline.load_stix21_to_neo4j(bundle)
-        merged = [c.args[0]["mitre_id"] for c in pipeline.neo4j.merge_technique.call_args_list]
-        assert merged == ["T1059.001"] and stats["revoked_techniques_skipped"] == 1
-        pipeline.neo4j.create_actor_technique_relationship.assert_called_once_with("APT29", "T1059.001")
 
     def test_the_cli_misp_reader_emits_no_revoked_technique(self):
         from collectors.misp_collector import MISPCollector

@@ -1113,8 +1113,8 @@ _NVD_CVSS_VERSIONS = (
 # only where the node has none (``_set_if_absent_clause``), so NVD's dates win whatever the order in which
 # records are merged. Until 2026-10 the record merged last set them (a CISA ICS record the advisory's
 # dates). The dates stay outside the description's source ranking (2026-10-16): another record's dates
-# are not the CVE's (a CISA ICS record gives the advisory's release dates; KEV, OTX and the STIX flow give
-# none), and CISA ICS is the only other source in MISP that gives them, one attribute per CVE (MISPWriter
+# are not the CVE's (a CISA ICS record gives the advisory's release dates; KEV and OTX give none), and
+# CISA ICS is the only other source in MISP that gives them, one attribute per CVE (MISPWriter
 # skips an advisory's CVE that MISP already holds), so the first record that fills them is the same in
 # any order. The description and its source: ``description_ranking``.
 _CVE_RECORD_DATE_PROPS = ("published", "last_modified")
@@ -3246,9 +3246,10 @@ class Neo4jClient:
             first_seen_at_source = data.get("first_seen_at_source")
             last_seen_at_source = data.get("last_seen_at_source")
             # 2026-10-16 (indicator aging): an Indicator keeps the highest confidence a source gave
-            # (``source_confidence``), records the report the data carries (MISP sync items carry
-            # one; the STIX import and the VirusTotal re-enrichment do not, so they never advance
-            # the basis) and gets its ``confidence_score`` and lifecycle from the one rule. Any
+            # (``source_confidence``), records the report the data carries (the items of the
+            # MISP -> Neo4j sync, the one writer of an Indicator through this method, carry one; data
+            # without one never advances the basis) and gets its ``confidence_score`` and lifecycle
+            # from the one rule. Any
             # other label keeps the max-wins confidence and gets ``active`` on create only.
             is_indicator = label == "Indicator"
             if is_indicator:
@@ -3438,7 +3439,7 @@ class Neo4jClient:
                     # commonly (misp_collector.py:385,410,478,498);
                     # this bug fired on every overlap and broke
                     # downstream alias-based relationship MATCHes
-                    # (Q2/Q9 + create_malware_actor_relationship).
+                    # (Q2/Q9).
                     if prop_name in _ARRAY_ACCUMULATE_PROPS:
                         if isinstance(prop_value, (list, tuple)):
                             prop_value = list(prop_value)
@@ -3709,8 +3710,8 @@ class Neo4jClient:
         2026-10 (source revisions): ``r.raw_data`` is written when the edge is created and, with
         ``refresh_raw_data`` (a CVE write from a MISP attribute, ``merge_cve``), replaced on every write,
         so the edge of a CVE holds its source's latest record: a KEV or NVD copy edited in MISP reaches
-        the edge at the next sync. Other labels, and the CVE write of the opt-in STIX import (a reduced
-        record, not the source's), keep the record that created the edge.
+        the edge at the next sync. Other labels, and a CVE write with ``refresh_raw_data=False`` (no caller
+        passes it), keep the record that created the edge.
 
         2026-10-16 (sector evidence): the edge accumulates the zones this source's records gave the node
         (``r.zones``), the part of them the source stated itself (``r.stated_zones``) and which record
@@ -3909,8 +3910,8 @@ class Neo4jClient:
         via ``canonicalize_merge_key`` BEFORE the MERGE, matching the
         treatment in ``merge_indicators_batch`` and ``merge_malware``/
         ``merge_actor``. Without this, indicators arriving through the
-        single-item path (VirusTotal enrichment, STIX pipeline import,
-        ``_sync_single_item`` fallback) retained original casing in the
+        single-item path (today the ``_sync_single_item`` fallback of the
+        MISP -> Neo4j sync) retained original casing in the
         Cypher MERGE while UUID was computed case-insensitively → two
         Neo4j nodes sharing ONE uuid. The audit-driven batch fix was
         applied in PR #37 commit 3 but the single-item path was missed
@@ -3985,8 +3986,7 @@ class Neo4jClient:
         KEV record and only filled by any other (``_KEV_OWNED_CVE_PROPS``, 2026-10). The
         ``SOURCED_FROM`` edge's ``raw_data`` is replaced with the record on every write (2026-10), so
         the edge holds the source's latest record; ``refresh_raw_data=False`` writes it only when the
-        edge is created, for a caller whose record is not the source's (the STIX import of
-        ``run_pipeline``, a reduced record under the MISP event's source id).
+        edge is created, for a caller whose record is not the source's (no caller passes it).
 
         Returns False when the node's MERGE or one of the sub-writes (CVSS sub-nodes, NVD-owned data,
         score) fails with a terminal error (2026-10); a retryable error that outlasts its retries is
@@ -5436,132 +5436,6 @@ class Neo4jClient:
             logger.warning(f"Link to source failed: {e}")
             return False
 
-    def create_actor_technique_relationship(
-        self, actor_name: str, technique_mitre_id: str, source_id: str = "mitre_attck"
-    ) -> bool:
-        """Create EMPLOYS_TECHNIQUE relationship: ThreatActor -> Technique.
-
-        Matches actors by name or alias and techniques by mitre_id, cross-source
-        (no tag filter) so that enrichment links work regardless of which collector
-        ingested each node.
-
-        Semantic note: ``EMPLOYS_TECHNIQUE`` is the attribution edge ("who uses
-        this TTP"), distinct from ``IMPLEMENTS_TECHNIQUE`` (the capability edge
-        on Malware/Tool). Split from a previously-generic ``USES`` in the
-        2026-04 refactor to improve GraphRAG retrieval and Cypher clarity.
-        """
-        if not self.driver:
-            return False
-        # 2026-10 (relationship provenance): ``r.sources`` names the feed (canonical registry id).
-        source_id = source_registry.canonical_source_id(source_id) or "misp"
-
-        an = nonempty_graph_string(actor_name)
-        tid = nonempty_graph_string(technique_mitre_id)
-        if not an or not tid:
-            logger.debug("Skipping actor↔technique link: missing actor name or technique id")
-            return False
-
-        logger.debug(f"Creating actor-technique relationship: {an} -> {tid}")
-
-        query = f"""
-        MATCH (a:ThreatActor)
-        WHERE a.name = $actor_name OR $actor_name IN coalesce(a.aliases, [])
-        MATCH (t:Technique {{mitre_id: $technique_mitre_id}})
-        MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
-        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = 0.7,
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, a.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    actor_name=an,
-                    technique_mitre_id=tid,
-                    source_id=source_id,
-                    timeout=NEO4J_READ_TIMEOUT,
-                ).consume()
-                logger.debug(f"Actor-technique relationship created: {an} -> {tid}")
-            return True
-        except Exception as e:
-            logger.warning(f"Actor-technique relationship error: {e}")
-            return False
-
-    def create_malware_actor_relationship(
-        self,
-        malware_name: str,
-        actor_name: str,
-        source_id: str = "mitre_attck",
-        match_type: Optional[str] = None,
-    ) -> bool:
-        """Create ATTRIBUTED_TO relationship: Malware -> ThreatActor.
-
-        Legacy direct-write path (``run_pipeline.py``; the Airflow DAGs go through
-        MISP → ``run_misp_to_neo4j``). 2026-10 (fresh-baseline PR): the edge now
-        carries the ownership marker and an evidence label so
-        ``scripts/verify_fresh_baseline.py`` holds on this path too. When
-        ``match_type`` is not given it is derived from ``source_id``:
-        ``mitre_attck`` → ``mitre_explicit`` (MITRE's own STIX ``attributed-to``),
-        ``mitre_derived`` → ``mitre_derived`` (inferred from a MITRE ``uses`` malware
-        row); any other source leaves the label unset rather than inventing one.
-
-
-        Matches by name or alias, cross-source (no tag filter).
-        Each OR group is wrapped in parentheses to avoid the Cypher operator
-        precedence bug where AND binds tighter than OR, which previously
-        caused incorrect Cartesian matches.
-        """
-        if not self.driver:
-            return False
-
-        mn = nonempty_graph_string(malware_name)
-        an = nonempty_graph_string(actor_name)
-        if not mn or not an:
-            logger.debug("Skipping malware↔actor link: missing malware or actor name")
-            return False
-
-        if match_type is None:
-            match_type = {"mitre_attck": "mitre_explicit", "mitre_derived": "mitre_derived"}.get(source_id)
-        # 2026-10 (relationship provenance): ``mitre_derived`` names how the link was made, not a
-        # feed; the feed is MITRE ATT&CK. ``r.sources`` carries the canonical registry id.
-        source_id = "mitre_attck" if source_id == "mitre_derived" else source_id
-        source_id = source_registry.canonical_source_id(source_id) or "misp"
-        logger.debug(f"Creating malware-actor relationship: {mn} -> {an}")
-
-        query = f"""
-        MATCH (m:Malware)
-        WHERE (m.name = $malware_name OR $malware_name IN coalesce(m.aliases, []))
-        MATCH (a:ThreatActor)
-        WHERE (a.name = $actor_name OR $actor_name IN coalesce(a.aliases, []))
-        MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.match_type = coalesce(r.match_type, $match_type),
-            r.edgeguard_managed = true,
-            r.confidence_score = 0.7,
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, m.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, a.uuid)
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    malware_name=mn,
-                    actor_name=an,
-                    source_id=source_id,
-                    match_type=match_type,
-                    timeout=NEO4J_READ_TIMEOUT,
-                ).consume()
-                logger.debug(f"Malware-actor relationship created: {mn} -> {an}")
-            return True
-        except Exception as e:
-            logger.warning(f"Malware-actor relationship error: {e}")
-            return False
-
     def create_indicator_vulnerability_relationship(
         self,
         indicator_value: str,
@@ -5633,67 +5507,6 @@ class Neo4jClient:
             return True
         except Exception as e:
             logger.warning(f"Indicator-vulnerability relationship error: {e}")
-            return False
-
-    def create_indicator_malware_relationship(
-        self,
-        indicator_value: str,
-        malware_name: str,
-        source_id: str = "misp",
-        indicator_type: Optional[str] = None,
-    ) -> bool:
-        """Create INDICATES relationship: Indicator -> Malware.
-
-        Matches Malware by name or aliases, cross-source (no tag filter).
-
-        PR-M3a §5-MD-C1: Indicator value canonicalization when
-        ``indicator_type`` is provided. See
-        ``create_indicator_vulnerability_relationship`` for the rationale.
-        Malware name is ALWAYS canonicalized (lowercase + NFC + strip) since
-        Malware natural-key case-sensitivity is fixed by the project schema.
-        """
-        if not self.driver:
-            return False
-        # 2026-10 (relationship provenance): ``r.sources`` names the feed (canonical registry id).
-        source_id = source_registry.canonical_source_id(source_id) or "misp"
-
-        iv = nonempty_graph_string(indicator_value)
-        if iv and indicator_type:
-            iv = canonicalize_merge_key("Indicator", {"indicator_type": indicator_type, "value": iv}).get("value", iv)
-        mn = nonempty_graph_string(malware_name)
-        if mn:
-            mn = canonicalize_merge_key("Malware", {"name": mn}).get("name", mn)
-        if not iv or not mn:
-            logger.debug("Skipping indicator↔malware link: missing indicator value or malware name")
-            return False
-
-        logger.debug(f"Creating indicator-malware relationship: {iv} -> {mn}")
-
-        query = f"""
-        MATCH (i:Indicator {{value: $indicator_value}})
-        MATCH (m:Malware)
-        WHERE (m.name = $malware_name OR $malware_name IN coalesce(m.aliases, []))
-        MERGE (i)-[r:INDICATES]->(m)
-        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.confidence_score = 0.6,
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, i.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, m.uuid)
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    indicator_value=iv,
-                    malware_name=mn,
-                    source_id=source_id,
-                    timeout=NEO4J_READ_TIMEOUT,
-                ).consume()
-                logger.debug(f"Indicator-malware relationship created: {iv} -> {mn}")
-            return True
-        except Exception as e:
-            logger.warning(f"Indicator-malware relationship error: {e}")
             return False
 
     def create_indicator_sector_relationship(
@@ -5868,10 +5681,8 @@ class Neo4jClient:
         """
         Create MISP-derived relationships in bulk via UNWIND.
 
-        Mirrors the semantics of ``create_actor_technique_relationship``,
-        ``create_malware_actor_relationship``, ``create_indicator_malware_relationship``,
-        ``create_indicator_sector_relationship`` and ``create_vulnerability_sector_relationship``
-        (null/blank endpoints skipped). Indicator -> INDICATES -> CVE (2026-10-18, the sync's
+        Mirrors the semantics of ``create_indicator_sector_relationship`` and
+        ``create_vulnerability_sector_relationship`` (null/blank endpoints skipped). Indicator -> INDICATES -> CVE (2026-10-18, the sync's
         same-report rows) MATCHes the ``CVE`` node by ``cve_id`` and writes the row's label,
         confidence and provenance like every other row; ``create_indicator_vulnerability_relationship``
         (no caller) writes neither.

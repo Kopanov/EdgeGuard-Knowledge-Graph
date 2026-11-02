@@ -5,7 +5,8 @@ Test script for STIX 2.1 integration in EdgeGuard pipeline.
 This script tests:
 1. STIX library availability
 2. PyMISP to_stix2() functionality
-3. The STIX flow methods of the pipeline (MISP → STIX 2.1 → Neo4j)
+3. The MISP → STIX 2.1 conversion of the sync module; the pipeline's STIX import into Neo4j is
+   retired (2026-11-02)
 """
 
 import logging
@@ -69,19 +70,11 @@ def test_pymisp_stix_conversion():
 
 
 def test_pipeline_stix_integration():
-    """Test the pipeline STIX integration imports."""
-    logger.info("\nTesting pipeline STIX integration...")
+    """The pipeline has no STIX path left: its STIX import into Neo4j is retired (2026-11-02), and the
+    MISP-event STIX file export is removed; the outward STIX surface is GET /stix/export."""
+    from run_pipeline import EdgeGuardPipeline
 
-    from run_pipeline import STIX_AVAILABLE, EdgeGuardPipeline
-
-    assert STIX_AVAILABLE, "STIX integration must be available (stix2 installed)"
-    logger.info("✅ STIX integration available in pipeline")
-
-    for method in ("load_stix21_to_neo4j", "_run_stix_flow"):
-        assert hasattr(EdgeGuardPipeline, method), f"EdgeGuardPipeline.{method} missing"
-        logger.info(f"✅ EdgeGuardPipeline.{method}() available")
-    # The MISP-event STIX file export is removed; the outward STIX surface is GET /stix/export.
-    for method in ("export_to_stix21", "export_single_event_to_stix21"):
+    for method in ("load_stix21_to_neo4j", "_run_stix_flow", "export_to_stix21", "export_single_event_to_stix21"):
         assert not hasattr(EdgeGuardPipeline, method), f"EdgeGuardPipeline.{method} is removed"
 
 

@@ -80,6 +80,7 @@ class TestFix1RetryableClassifier:
 
     def test_transient_error_is_retryable(self):
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _is_retryable_neo4j_error
 
         # Construct a bare TransientError — the driver's usual
@@ -89,6 +90,7 @@ class TestFix1RetryableClassifier:
 
     def test_service_unavailable_is_retryable(self):
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _is_retryable_neo4j_error
 
         exc = neo4j_exc.ServiceUnavailable("leader gone")
@@ -104,6 +106,7 @@ class TestFix1RetryableClassifier:
         """THE PRIMARY PR-N15 FIX: a DatabaseError whose ``.code``
         contains ``Neo.TransientError`` must classify as retryable."""
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _is_retryable_neo4j_error
 
         exc = neo4j_exc.DatabaseError("statement execution failed")
@@ -116,6 +119,7 @@ class TestFix1RetryableClassifier:
 
     def test_database_error_with_lock_timeout_is_retryable(self):
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _is_retryable_neo4j_error
 
         exc = neo4j_exc.DatabaseError("lock timeout")
@@ -124,6 +128,7 @@ class TestFix1RetryableClassifier:
 
     def test_cluster_failover_is_retryable(self):
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _is_retryable_neo4j_error
 
         exc = neo4j_exc.DatabaseError("not a leader")
@@ -134,6 +139,7 @@ class TestFix1RetryableClassifier:
         """Terminal errors (schema / syntax / constraint) must NOT
         retry — they'll never succeed."""
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _is_retryable_neo4j_error
 
         exc = neo4j_exc.CypherSyntaxError("bad syntax")
@@ -144,6 +150,7 @@ class TestFix1RetryableClassifier:
         false-terminal is safer than a false-retryable (infinite retry
         on a bug)."""
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _is_retryable_neo4j_error
 
         exc = neo4j_exc.DatabaseError("unknown")
@@ -259,6 +266,7 @@ class TestFix2_3BatchRetryHelper:
         """On a transient error (TransientError raised first 2 times,
         succeeds 3rd), helper must retry, not give up after the first."""
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _execute_batch_with_retry
 
         # Skip the sleep delays for fast tests.
@@ -300,6 +308,7 @@ class TestFix2_3BatchRetryHelper:
         import logging
 
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _execute_batch_with_retry
 
         monkeypatch.setattr("neo4j_client.time.sleep", lambda *_args, **_kwargs: None)
@@ -338,6 +347,7 @@ class TestFix2_3BatchRetryHelper:
         import logging
 
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _execute_batch_with_retry
 
         monkeypatch.setattr("neo4j_client.time.sleep", lambda *_args, **_kwargs: None)
@@ -373,6 +383,7 @@ class TestFix2_3BatchRetryHelper:
         """The PR-N15 BLOCK fix core: a DatabaseError with a retryable
         ``.code`` must retry (was silent-pass-through before)."""
         from neo4j import exceptions as neo4j_exc
+
         from neo4j_client import _execute_batch_with_retry
 
         monkeypatch.setattr("neo4j_client.time.sleep", lambda *_args, **_kwargs: None)

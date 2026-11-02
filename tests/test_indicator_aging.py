@@ -549,9 +549,9 @@ class TestWriters:
         assert ia.aging_set_clause("n") in query
 
     @pytest.mark.parametrize("source_id", ["stix_import", "virustotal"])
-    def test_command_line_writers_record_no_report(self, source_id):
-        """The STIX import and the VirusTotal re-enrichment go through ``merge_indicator``: the same
-        rule, no report time (a new node ages from first_imported_at)."""
+    def test_a_single_write_without_a_report_records_none(self, source_id):
+        """A ``merge_indicator`` write without a MISP report applies the same rule with no report time
+        (a new node ages from first_imported_at)."""
         client, session = _capturing_client()
         client.merge_indicator(
             {"indicator_type": "ipv4", "value": "203.0.113.41", "zone": ["global"], "tag": source_id},

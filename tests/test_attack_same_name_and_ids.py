@@ -426,17 +426,3 @@ class TestDeprecatedFlagPerCaller:
         client = self._client()
         assert client.merge_malware(parsed, source_id=parsed["tag"])
         assert "deprecated" not in client.merge_node_with_source.call_args.kwargs["extra_props"]
-
-    def test_the_stix_import_does_not_clear_the_flag(self):
-        """``run_pipeline.load_stix21_to_neo4j`` states no status, even for an object of the ATT&CK source."""
-        from run_pipeline import EdgeGuardPipeline
-
-        pipeline = EdgeGuardPipeline.__new__(EdgeGuardPipeline)
-        pipeline.neo4j = self._client()
-        killdisk = next(o for o in _BUNDLES["enterprise"] if o.get("name") == "KillDisk")
-        pipeline.load_stix21_to_neo4j(
-            {"type": "bundle", "objects": [{**killdisk, "x_edgeguard_source": "mitre_attck"}]}
-        )
-        call = pipeline.neo4j.merge_node_with_source.call_args
-        assert call.args[0] == "Malware" and call.args[3] == "mitre_attck"
-        assert "deprecated" not in call.kwargs["extra_props"]

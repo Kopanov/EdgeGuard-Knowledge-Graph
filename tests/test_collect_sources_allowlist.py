@@ -61,7 +61,7 @@ def test_unknown_tokens_dropped_fail_open(monkeypatch):
 
 
 def test_is_enabled_with_pre_parsed_allowlist(monkeypatch):
-    """Second arg avoids re-parsing env each iteration (run_pipeline Step 2)."""
+    """Second arg avoids re-parsing env each iteration (the collector loop of run_pipeline.py)."""
     monkeypatch.setenv("EDGEGUARD_COLLECT_SOURCES", "otx")
     parsed = collect_sources_allowlist_from_env()
     assert parsed == frozenset({"otx"})

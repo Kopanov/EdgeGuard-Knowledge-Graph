@@ -39,13 +39,13 @@ for _p in (TESTS.parent / "src", TESTS):
         sys.path.insert(0, str(_p))
 
 from build_rel_queries import assigned_query  # noqa: E402
+from neo4j import READ_ACCESS  # noqa: E402
 from test_actor_alias_merge_neo4j import LABEL, URI, open_test_database  # noqa: E402  (same guards)
 
 import build_relationships  # noqa: E402
 import family_resolution as fr  # noqa: E402
 import graph_shape_checks as gsc  # noqa: E402
 import neo4j_client  # noqa: E402
-from neo4j import READ_ACCESS  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not URI, reason="EDGEGUARD_IT_NEO4J_URI is not set (no throwaway Neo4j)")
 

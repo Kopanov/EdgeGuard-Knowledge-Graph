@@ -79,7 +79,7 @@ def test_scheduled_dags_and_other_runs_still_skip(lock_path, running) -> None:
 
 
 def test_a_process_held_lock_is_never_own_for_a_dag_task(lock_path) -> None:
-    assert baseline_lock.acquire_baseline_lock() is True, "in-process baseline (run_pipeline --baseline)"
+    assert baseline_lock.acquire_baseline_lock() is True, "a process holder (no DAG run)"
     try:
         assert baseline_lock.baseline_skip_reason(own_holder=RUN) is not None
     finally:

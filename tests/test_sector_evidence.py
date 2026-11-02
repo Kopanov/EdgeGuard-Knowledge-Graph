@@ -16,8 +16,7 @@ never gave their sector. This module follows a CISA advisory from the collector 
   names on each row only the advisories that name its sector (``cisa_ics:<id>``, ``stated_refs``), in a
   paged event as in a small one, and keeps everything else ``zone_classification``;
 * the ``SOURCED_FROM`` writers record each source's zones, stated zones and which record stated which;
-* the STIX export links an advisory reference to cisa.gov, and the optional STIX flow states the sectors
-  as the attribute flow does.
+* the STIX export links an advisory reference to cisa.gov.
 
 The rendered Cypher of steps 7a-7d runs against a real Neo4j in ``tests/test_sector_evidence_neo4j.py``.
 """
@@ -609,25 +608,6 @@ class TestStixLinksTheAdvisory:
     def test_record_url(self, record_id, url):
         assert sx._record_url("cisa_ics", record_id) == url
         assert cisa_ics_advisory_url(record_id) == url
-
-    def test_the_stix_flow_states_the_sectors_as_the_attribute_flow(self, writer, syncer):
-        """``run_pipeline.py --stix-flow`` loads the STIX objects of a CISA ICS event: the CVE's
-        ``SOURCED_FROM`` edge gets the stated zones as in the attribute flow, so step 7b labels the link
-        ``advisory_sector`` whichever flow loaded it."""
-        from run_pipeline import EdgeGuardPipeline
-
-        pipeline = EdgeGuardPipeline.__new__(EdgeGuardPipeline)
-        pipeline.neo4j = MagicMock()
-        attr = {k: v for k, v in _cisa_attribute(writer).items()}
-        sdo = syncer._attribute_to_stix21(attr, "00000000-0000-4000-8000-000000000000", ["global"])
-        sdo["x_edgeguard_source"] = "cisa_ics"  # as the STIX flow stamps the objects of a CISA ICS event
-        nvd_sdo = dict(sdo, x_edgeguard_source="nvd", id=sdo["id"].replace("-0", "-1", 1))
-        pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [sdo, nvd_sdo]})
-        calls = pipeline.neo4j.merge_cve.call_args_list
-        assert [c.kwargs["source_id"] for c in calls] == ["cisa_ics", "nvd"]
-        cisa, nvd = (c.args[0] for c in calls)
-        assert cisa["zone"] == ["energy", "healthcare"] and cisa["stated_zones"] == ["energy", "healthcare"]
-        assert nvd["zone"] == ["energy", "healthcare"] and "stated_zones" not in nvd
 
     def test_the_collector_uses_the_same_rule(self):
         assert ics.advisory_url("ICSMA-26-283-01", {"references": []}, "raw") == cisa_ics_advisory_url(

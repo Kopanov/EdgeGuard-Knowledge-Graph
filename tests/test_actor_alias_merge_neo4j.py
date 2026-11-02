@@ -37,9 +37,10 @@ if URI:
     os.environ.setdefault("NEO4J_PASSWORD", "integration-test")
     os.environ.setdefault("MISP_API_KEY", "integration-test")
 
+from neo4j import GraphDatabase  # noqa: E402
+
 import enrichment_jobs  # noqa: E402
 import neo4j_client  # noqa: E402
-from neo4j import GraphDatabase  # noqa: E402
 
 LABEL = "EdgeGuardIT"
 

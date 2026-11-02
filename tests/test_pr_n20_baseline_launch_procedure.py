@@ -71,18 +71,17 @@ class TestFix1RunbookLaunchPath:
     def test_runbook_documents_cli_launch_option(self):
         rb = self._runbook()
         section = rb.split("#### What about the CLI commands?", 1)[1].split("\n---", 1)[0]
-        # The CLI wrappers trigger the baseline DAG (which holds the lock);
-        # the legacy in-process path takes the in-process baseline_lock, and
-        # every scheduled DAG then self-skips via baseline_skip_reason().
+        # The CLI wrappers trigger the baseline DAG (which holds the lock), and
+        # every scheduled DAG then self-skips via baseline_skip_reason(); the
+        # in-process baseline of run_pipeline.py is retired (2026-11-02).
         assert "edgeguard baseline --days N" in section and "edgeguard fresh-baseline" in section, (
             "RUNBOOK must document the CLI launch commands"
         )
         assert "trigger" in section and "`edgeguard_baseline` DAG" in section, (
             "RUNBOOK must say that the CLI wrappers trigger the edgeguard_baseline DAG"
         )
-        assert "python src/run_pipeline.py --baseline" in section, (
-            "RUNBOOK must name the legacy in-process path that takes the in-process baseline_lock"
-        )
+        assert "run_pipeline" not in section, "the retired in-process baseline is no launch path"
+        assert "The `baseline_in_progress.lock` sentinel is held by the DAG" in " ".join(section.split())
 
     def test_runbook_documents_dag_pause_option(self):
         rb = self._runbook()

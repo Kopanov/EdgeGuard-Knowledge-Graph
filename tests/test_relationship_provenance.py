@@ -302,12 +302,11 @@ class TestWriters:
 
     def test_single_writers_canonicalise_the_feed_and_drop_source_id(self):
         client, calls = _client_with_fake_driver()
-        client.create_actor_technique_relationship("apt29", "T1566", source_id="mitre")
-        client.create_malware_actor_relationship("m", "a", source_id="mitre_derived")
-        for query, params in calls:
+        assert client.create_indicator_sector_relationship("1.2.3.4", "energy", source_id="otx", indicator_type="ipv4")
+        assert client.create_vulnerability_sector_relationship("CVE-2024-1234", "energy", source_id="cisa")
+        for query, _params in calls:
             assert "r.source_id" not in query
-            assert params["source_id"] == "mitre_attck", "mitre_derived names a method, the feed is MITRE ATT&CK"
-        assert calls[1][1]["match_type"] == "mitre_derived"
+        assert {params["source_id"] for _, params in calls if "source_id" in params} == {"alienvault_otx", "cisa_kev"}
 
     def test_sourced_from_edge_keeps_per_source_events_and_records(self):
         client, calls = _client_with_fake_driver()

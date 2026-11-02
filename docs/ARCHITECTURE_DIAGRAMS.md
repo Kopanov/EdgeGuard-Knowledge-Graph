@@ -248,14 +248,12 @@ flowchart TD
 
     DEC -->|retries exhausted<br/>neo4j: 3 retries, 2s base<br/>misp: 4 retries, 10s base| RAISE[Re-raise exception]
     RAISE --> CALLER{Caller handles}
-    CALLER -->|run_pipeline| RECONNECT[Reconnect loop<br/>3 attempts]
     CALLER -->|run_misp_to_neo4j| CIRCUIT[Circuit breaker<br/>record_failure]
     CALLER -->|Airflow DAG<br/>incremental tasks: retries=2| AIRFLOW[AirflowException<br/>task marked FAILED]
     CALLER -->|Airflow DAG<br/>baseline critical chain<br/>retries=0| BASELINE_FAIL[AirflowException<br/>FAILS IMMEDIATELY<br/>no retry — operator pages<br/>via EdgeGuardMispFetchFallbackHardError]
 
     style DEC fill:#7c3aed,stroke:#6d28d9,color:#fff
     style RAISE fill:#dc2626,stroke:#b91c1c,color:#fff
-    style RECONNECT fill:#f59e0b,stroke:#d97706,color:#fff
     style CIRCUIT fill:#f59e0b,stroke:#d97706,color:#fff
     style BASELINE_FAIL fill:#dc2626,stroke:#b91c1c,color:#fff
 ```
@@ -345,10 +343,11 @@ campaign builder and 6/6 FIRST EPSS. Jobs 2/6, 3/6 and 6/6 are not drawn above.
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — § 6: the reconnect loop of `run_pipeline.py` is gone with its Neo4j load (it now runs the collectors into MISP only).
 - 2026-11-01 — § 3: the `HAS_CVSS_v*` edges are written by `merge_cve` and, in the sync, by the CVSS statement of its CVE batches (`merge_cves_batch`); the note named `merge_cve` alone.
 - 2026-10-25 — The sync chain labels the `run_neo4j_sync` limit as the default 8 h (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`).
 - 2026-10-25 — § 5: `check_neo4j_quality` is labelled with node counts, the only counts it logs (it was labelled node/edge counts).

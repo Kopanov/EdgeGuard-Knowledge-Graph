@@ -1,7 +1,8 @@
 """Unit tests for src/baseline_lock.py.
 
 Covers the three load-bearing behaviors of the cross-process mutex
-between CLI baseline runs and scheduled Airflow DAGs:
+between a running baseline and the scheduled Airflow DAGs (here with the
+sentinel of the legacy process kind, whose liveness is its PID):
 
 1. Acquire / release lifecycle — both the write and the idempotent
    release path.

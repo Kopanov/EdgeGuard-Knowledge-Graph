@@ -377,8 +377,8 @@ Each entry: symptom → detection signal → remediation.
   collectors, `full_neo4j_sync`, `build_relationships` and
   `run_enrichment_jobs` then refuse with `no baseline holds the baseline
   lock`; clear `baseline_start`, which takes it, then those tasks. While
-  another baseline holds the lock (another DAG run, or
-  `run_pipeline --baseline`), the collectors of this run stand down
+  another baseline holds the lock (another DAG run), the collectors of this
+  run stand down
   (`[BASELINE] <SOURCE> NOT collected — the baseline lock is held by another
   run`; the task succeeds), but `full_neo4j_sync`, `build_relationships` and
   `run_enrichment_jobs` run whatever the collectors' outcome, so they refuse
@@ -646,7 +646,7 @@ Each entry: symptom → detection signal → remediation.
 - **Detection.**
   - `EdgeGuardAirflowSchedulerDown` (critical) after 5 minutes; `EdgeGuardAirflowComponentUnhealthy` (warning) for the triggerer, the DAG processor or the metadata database after 10 minutes; `EdgeGuardAirflowHealthUnreachable` (warning) when the metrics service has had no answer for 10 minutes ([PROMETHEUS_SETUP.md § Airflow Component Health](PROMETHEUS_SETUP.md#airflow-component-health)).
   - `docker compose ps` shows the `airflow` service `unhealthy`: its healthcheck reads the scheduler status, and five failed checks 30 seconds apart mark it. Docker does not restart an unhealthy container.
-  - `edgeguard dag status` still lists the runs and exits 1 with "runs shown as running or queued are not progressing"; `edgeguard doctor` and `edgeguard preflight` count a scheduler or metadata database that is not healthy as an error and a triggerer or DAG processor reported unhealthy as a warning; check `[13]` of `scripts/preflight_baseline.sh` fails on the DAG launch path. A triggerer or DAG processor that Airflow lists without status runs no job of its own (Airflow 2 parses the DAG files inside the scheduler by default); it is reported as information and has no alert.
+  - `edgeguard dag status` still lists the runs and exits 1 with "runs shown as running or queued are not progressing"; `edgeguard doctor` and `edgeguard preflight` count a scheduler or metadata database that is not healthy as an error and a triggerer or DAG processor reported unhealthy as a warning; check `[13]` of `scripts/preflight_baseline.sh` fails. A triggerer or DAG processor that Airflow lists without status runs no job of its own (Airflow 2 parses the DAG files inside the scheduler by default); it is reported as information and has no alert.
   - By hand: `docker compose exec airflow curl -s http://localhost:8082/api/v2/monitor/health` gives each component's `status` and last heartbeat; `docker compose exec airflow airflow jobs check --job-type SchedulerJob` exits non-zero when no scheduler is alive.
 - **Log probe.** `airflow standalone` prefixes every line with the subprocess name (`scheduler`, `triggerer`, `dag-processor`, `api-server`); the cause is near the last scheduler heartbeat:
   ```bash
@@ -915,19 +915,15 @@ or `edgeguard dag kill --dag-id <dag>`) until none of them has a running run
 
 **A baseline runs through the DAG on every install**, with Docker or
 without it: triggered from the Airflow UI, the API, `airflow dags trigger`
-or the CLI wrappers, the DAG takes the lock. The in-process
-`python src/run_pipeline.py --baseline` takes it too, but it is a
-development path that builds a reduced graph (no ATT&CK tactic, software
-or technique-implementation links, no indicator-malware links or
-campaigns, few actor-technique or attribution links, no CVSS scores) and
-is not a way to run a baseline
-([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)).
+or the CLI wrappers, the DAG takes the lock. `python src/run_pipeline.py`
+runs no baseline: it runs the collectors into MISP only and refuses
+`--baseline`
+([AIRFLOW_DAGS.md § One baseline path](AIRFLOW_DAGS.md#one-baseline-path)).
 Pausing the scheduled DAGs stops new tasks and retries only; a task that
 is already running keeps running.
 
 > **Note:** the `baseline_in_progress.lock` sentinel is written by the
-> baseline DAG itself (`baseline_acquire_lock`) and by the in-process
-> `python src/run_pipeline.py --baseline` (development only). The
+> baseline DAG itself (`baseline_acquire_lock`). The
 > `edgeguard baseline` / `edgeguard fresh-baseline` wrappers trigger the
 > DAG and add safety UX; they do not pause anything.
 
@@ -1034,9 +1030,7 @@ triggering:
 A trigger that timed out is not repeated: the run may exist, so check
 `edgeguard dag status --dag-id edgeguard_baseline` before triggering
 again. The `baseline_in_progress.lock` sentinel is held by the DAG
-(`baseline_acquire_lock`) and by the in-process
-`python src/run_pipeline.py --baseline` run, a development path that
-builds a reduced graph.
+(`baseline_acquire_lock`).
 
 ---
 
@@ -1356,7 +1350,7 @@ Every `Indicator` ages by one rule, whoever supplied it ([KNOWLEDGE_GRAPH.md](KN
 - **Clearing a failed enrichment task or sync (the aging time).** Nothing needs to be checked first. Every evaluation, a write or the aging job, applies the rule at the database's current time, lifted to the node's `aging_evaluated_at` (the time at which its aging values were last written) when that is later; no DAG run passes a time. A cleared `run_enrichment_jobs` or sync therefore evaluates at the time it runs, no earlier than the node's stored time, and moves nothing backwards: no retired indicator becomes active again, no tier falls, no `aging_since` or STIX `modified` moves back. The same holds for a baseline that overlaps a scheduled sync, in either order, and the aging job locks each node it changes before it reads it, so a write that commits before the job takes that lock is what the job evaluates. One case leaves a node behind the latest evaluation for a while, without moving it backwards: the database reads the time once per statement, when it starts, and an aging job that changes nothing on a node neither locks it nor stores a time, so a write whose statement started before such a job and which commits a newer report after it evaluates that report at its statement's start, earlier than the job's time. The next write or aging job evaluates the node at its own time; the gap lasts as long as that write's statement ran, lock waits included. To see the time of a node: `MATCH (n:Indicator {value: $v}) RETURN n.aging_evaluated_at, n.aging_tier, n.active`; a job run that changes nothing leaves `aging_evaluated_at` as it was. A stored time later than the database's current time holds the node at that time's state until the clock passes it: a database clock set back keeps the later states this way, and only a hand-made call of `decay_ioc_confidence` with a future `as_of` (a parameter for tests) can store a time in the future.
 - **Changing the rule.** `EDGEGUARD_AGING_TIER_DAYS` (`90,180,365`), `EDGEGUARD_AGING_FACTORS` (`0.85,0.70,0.55`) and `EDGEGUARD_AGING_RETIRE_DAYS` (`730`), forwarded by `docker-compose.yml`. A value that fails validation (days not strictly ascending, a factor outside (0, 1], one factor per tier day, retirement not above the last tier day) stops the sync's indicator writes and the job with an error naming the variable. The next `run_enrichment_jobs` recomputes every Indicator under a new setting; no full sync is needed, the values are recomputed from `source_confidence` and the basis.
 - **Re-reported indicators.** The collectors' refresh of a stored copy (`EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS`, [COLLECTORS.md](COLLECTORS.md#re-reported-indicators)) makes an indicator younger only when the source's `last_seen` moved, or, for a source without a date, to the time of the edit; one re-reported within the 30-day interval keeps its older date until the interval has passed (the first tier starts at 90 days).
-- **Known limit.** The alert path (no subscriber is deployed) and the command-line writers (STIX import, VirusTotal re-enrichment) record no report: what they create ages from `first_imported_at`. The alert's time is to be designed with the ResilMesh alert integration.
+- **Known limit.** The alert path (no subscriber is deployed) records no report: what it creates ages from `first_imported_at`. The alert's time is to be designed with the ResilMesh alert integration.
 
 ## Descriptions and dates of CVEs and entities
 
@@ -1367,7 +1361,7 @@ A `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tact
 - **Ranking.** NVD > CISA KEV > CISA ICS > any other source. A CVE without an NVD record shows the KEV's text when the KEV lists it, else CISA ICS's, else another source's, whatever the order of the events.
 - **Revised records.** The KEV text is the catalogue's latest: every KEV run edits the stored copy of an entry CISA revised ([CISA KEV revisions](#cisa-kev-revisions)), and the sync's rule, under which a source's revised record replaces its own text, carries it to the node. The CISA ICS text is that of the first record MISP stored: MISPWriter skips a CISA ICS attribute its source already holds, so a revised ICS advisory reaches neither MISP nor the graph.
 - **What is no description.** For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the pulse reference "Referenced in OTX pulse: <name>", the comment of a `cve_references` attribute written without an `OTX_META` block; MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP").
-- **Dates.** A CVE's `published` and `last_modified` come from NVD's record: a record from any other source (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has none. Without an NVD record the dates are the CISA ICS record's (the advisory's release dates), the only other record in MISP that gives dates: MISP holds one CISA ICS attribute per CVE, from the first advisory that named it (MISPWriter skips the CVE in later advisories), so the dates do not depend on the order either. They stay outside the ranking, since they are the advisory's dates rather than the CVE's, and NVD's record replaces them.
+- **Dates.** A CVE's `published` and `last_modified` come from NVD's record: a record from any other source (CISA KEV, CISA ICS, an OTX pulse, a partner write) fills them only where the node has none. Without an NVD record the dates are the CISA ICS record's (the advisory's release dates), the only other record in MISP that gives dates: MISP holds one CISA ICS attribute per CVE, from the first advisory that named it (MISPWriter skips the CVE in later advisories), so the dates do not depend on the order either. They stay outside the ranking, since they are the advisory's dates rather than the CVE's, and NVD's record replaces them.
 - **CVSS sub-nodes and list properties.** NVD's record also comes first for a CVE's CVSS sub-nodes and its lists (`cwe`, `ref_tags`, `cpe_type`, `result_impacts`, `reference_urls`, `affected_products`): a sub-node NVD has asserted keeps NVD's payload and a CISA ICS payload only fills a property it lacks, and NVD's record sets the lists while any other record only fills a list the node does not have ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), the `CVE` properties). The CISA ICS collector sends no impact and exploitability sub-scores, which a CSAF advisory does not give. When NVD's record drops a CVSS version CISA ICS also gives, NVD leaves `sources` and its event leaves `misp_event_ids` of that sub-node's edges, and CISA ICS's next record (at the latest the next full sync) sets its values and the CVE's score; until then the sub-node keeps NVD's values, and its impact and exploitability sub-scores, which CSAF does not give, keep NVD's on a graph that is kept.
 
 **Malware, ThreatActor, Tool, Technique and Tactic.**
@@ -1439,12 +1433,7 @@ attribute (its properties minus the node's key, as a JSON string) in
 (`src/neo4j_client.py:_upsert_sourced_relationship`). Useful when you
 need the source's record without a round-trip to MISP. On a `CVE` the
 edge holds the source's latest record, replaced on every write from a MISP
-attribute; on other labels, the record that created the edge. The
-STIX import of the `run_pipeline.py` CLI (always on there; the Airflow DAGs
-do not use it; a development path,
-[AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only))
-writes a reduced record under the MISP event's source id only
-when it creates the edge, never over the record the sync wrote.
+attribute; on other labels, the record that created the edge.
 
 ```cypher
 MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'})
@@ -1522,6 +1511,7 @@ _Last updated: 2026-11-02_
 
 - 2026-11-02 — Failure mode 7d: the baseline postcheck fails the run on three more invariants, read with the acceptance script's statements: INV-4 (the `IN_TACTIC` and `mitre_explicit` technique links of the claims on the nodes, and on an unlimited run the claims themselves), INV-5 (CVE score coverage after an NVD delivery) and INV-6 (each collector's delivery reaches its `Source` node, and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES` hold data); a WARNING table lists the collectors that delivered nothing. INV-3 holds whenever the sync connects, so a run that lost a relationship family or a whole source had passed the postcheck. On the 730-day graph of 2026-11-01 with that run's collector counts the postcheck passes in about 3 s: 1,024 tactic phases, 4,854 / 10,895 / 869 technique claims, 0 links missing; 142,236 of 146,858 CVEs scored (0.969); lowest delivery share ThreatFox 9,774 of 10,000 (0.977). It fails the same graph read without `IN_TACTIC`, the technique links and the CVSS sub-nodes, and with the OTX `SOURCED_FROM` edges read as 0 or as 0.85 of their number. Recovery per invariant, acceptance of a graph, abandonment of a run. AbuseIPDB daily blacklist quota (429): a failed `collect_abuseipdb` is listed in the postcheck's WARNING table, and fails the run with the lock held when `EDGEGUARD_BASELINE_REQUIRED_SOURCES` names `abuseipdb` and the graph holds no AbuseIPDB data; the remediation for that case is § 7d's.
 - 2026-11-02 — Post-run summary grep: the `[BUILD_RELATIONSHIPS SUMMARY]` line reports `relationships_created` and `outer_rows` (it reported the outer rows as `total_edges`), `per_query` gives both per step and marks `[PARTIAL]` steps; the technique steps' `[SKIP]` counts are taken after the revoked-id translation (they counted a revoked id whose successor exists, 44,268 instead of 21,207 for step 8 on the 730-day baseline); a failed `[SKIP]` count is a WARNING; child lines keep their level in the task log; step 2 runs no query; step 2d no longer reads the dropped relationship property `report_ids` (the 730-day baseline of 2026-11-01 logged 8 `UnknownPropertyKeyWarning` notices for it). On the 730-day baseline of 2026-11-01, step 8 processed 130,419 indicator rows and created 1,565,094 links.
+- 2026-11-02 — Baseline launch path: `run_pipeline.py` runs the collectors into MISP only and refuses `--baseline`; the in-process baseline, which took the baseline lock and built a reduced graph, is retired. Aging, CVE dates and `r.raw_data` no longer name the command-line STIX import or VirusTotal re-enrichment (both removed). Scheduler or triggerer stopped: check `[13]` of the preflight script fails (it named the DAG launch path, now the only one).
 - 2026-11-02 — Baseline launch path: the `edgeguard baseline` / `fresh-baseline` wrappers refuse to trigger while the scheduler or metadata database is not healthy, while an `edgeguard_baseline` run is queued or running (a second fresh run would wipe the first one's graph), or when Airflow cannot be read (`--skip-airflow-check`), and trigger through the Airflow REST API without a running Compose `airflow` service (they needed Compose); a timed-out trigger is not repeated. On the Compose host they read in the `airflow` container what the REST API does not give, so they need no API credentials there. Scheduler recovery step 3 names the refusal.
 - 2026-11-02 — Failure mode 2: `[STORED-AFTER-5XX]` warnings (a batch MISP stored although it answered HTTP 5xx) are no loss; raise MISP's `memory_limit`.
 - 2026-11-01 — Failure mode 5: the sync's CVE batches (`merge_cves_batch`) and their lines: `_write_cve_batch` at ERROR and `[CVE-BATCH-FALLBACK]` at WARNING (it was an ERROR when the batch writer itself raised), the run summary's count of batches written one CVE at a time, the counter `edgeguard_neo4j_cve_batch_fallback_total{reason}`, a log probe for `[CVE-BATCH-FALLBACK]` and what to do when batches keep falling back (a batch at its transaction timeout counts as `non_retryable` and is handled as in § Neo4j statement timeouts). Neo4j statement timeouts: a CVE batch is one transaction and its `[NEO4J-TIMEOUT]` line names it (a batch at its timeout had logged only the `_write_cve_batch` error).

@@ -4,7 +4,6 @@ EdgeGuard — Baseline Clean (destructive)
 
 Single source of truth for the 3-step "clean slate" used by:
 
-  - CLI ``--fresh-baseline`` flag in ``src/run_pipeline.py``
   - new ``edgeguard fresh-baseline`` operator command in ``src/edgeguard.py``
   - new ``baseline_clean`` Airflow task in ``dags/edgeguard_pipeline.py``
     (gated on ``dag_run.conf={"fresh_baseline": true}``)
@@ -12,8 +11,8 @@ Single source of truth for the 3-step "clean slate" used by:
 Wipe order: checkpoints → Neo4j graph → MISP EdgeGuard events. Each step is
 **all-or-nothing** — if any step fails, the function raises
 :class:`BaselineCleanError` and downstream collectors MUST NOT run. The
-previous in-line code in run_pipeline.py:1117-1198 logged warnings on
-failures and continued, leaving operators with a half-cleaned state that
+in-line wipe of the in-process fresh baseline of run_pipeline.py (retired
+2026-11-02) logged warnings on failures and continued, leaving operators with a half-cleaned state that
 was harder to debug than a clean failure (audit Prod Readiness HIGH).
 
 After the wipe the helper settles briefly (configurable; default 5s) and

@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import types
@@ -962,31 +963,42 @@ class TestPreflightScriptCheck13:
         (bin_dir / "curl").write_text(
             '#!/bin/sh\necho "$*" >> "$STUB_DIR/curl_args"\n[ -n "$STUB_BODY" ] || exit 7\ncat "$STUB_BODY"\n'
         )
-        # docker compose exec -T airflow airflow config get-value database sql_alchemy_conn
-        (bin_dir / "docker").write_text(
+        # The check never runs the airflow CLI: its first call writes an airflow.cfg and logs/ (2026-11).
+        (bin_dir / "airflow").write_text('#!/bin/sh\necho "$*" >> "$STUB_DIR/airflow_args"\necho "sqlite:////x.db"\n')
+        # A Compose install: docker compose exec -T airflow airflow config get-value database sql_alchemy_conn
+        compose_dir = tmp_path / "compose"
+        compose_dir.mkdir()
+        (compose_dir / "docker").write_text(
             '#!/bin/sh\necho "$*" >> "$STUB_DIR/docker_args"\n'
             'echo "[2026-11-01T12:00:00] {configuration.py} WARNING - a log line"\n'
             'echo "$STUB_CONN"\n'
         )
-        # The check never runs the airflow CLI: its first call writes an airflow.cfg and logs/ (2026-11).
-        (bin_dir / "airflow").write_text('#!/bin/sh\necho "$*" >> "$STUB_DIR/airflow_args"\necho "sqlite:////x.db"\n')
-        for stub in bin_dir.iterdir():
+        for stub in [*bin_dir.iterdir(), *compose_dir.iterdir()]:
             stub.chmod(0o755)
+        # The other commands the check and the stubs run, and nothing else: no docker of this host is reachable.
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        for tool in ("python3", "tr", "cat"):
+            found = shutil.which(tool)
+            assert found is not None, tool
+            (tools_dir / tool).symlink_to(os.path.realpath(found))
+        bash = shutil.which("bash")
+        assert bash is not None
         (tmp_path / "home").mkdir()
+        # No LAUNCH_PATH: the DAG is the only launch path, and under ``set -u`` the check fails if it reads one.
         harness = (
             "set -uo pipefail\n"
             'pass() { echo "PASS|$*"; }\nwarn() { echo "WARN|$*"; }\nfail() { echo "FAIL|$*"; }\nhdr() { :; }\n' + block
         )
 
-        def _run(
-            payload, launch_path="dag", conn_env=None, docker_conn=None, url=None, api_version=None, extra_env=None
-        ):
+        def _run(payload, compose=True, conn_env=None, docker_conn=None, url=None, api_version=None, extra_env=None):
+            """``compose=False``: an install without Compose, with no ``docker`` on the PATH."""
+            path = [bin_dir, compose_dir, tools_dir] if compose else [bin_dir, tools_dir]
             env = {
-                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PATH": os.pathsep.join(str(directory) for directory in path),
                 "STUB_DIR": str(tmp_path),
                 "STUB_BODY": "",
                 "STUB_CONN": docker_conn or "",
-                "LAUNCH_PATH": launch_path,
                 # An empty home: the check never reads the developer's ~/airflow/airflow.cfg.
                 "HOME": str(tmp_path / "home"),
                 **(extra_env or {}),
@@ -1002,7 +1014,7 @@ class TestPreflightScriptCheck13:
             if api_version is not None:
                 env["AIRFLOW_API_VERSION"] = api_version
             done = subprocess.run(
-                ["bash", "-c", harness], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60
+                [bash, "-c", harness], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60
             )
             assert done.returncode == 0, done.stderr
             assert _SECRET not in done.stdout + done.stderr, "the connection string is never printed"
@@ -1048,10 +1060,14 @@ class TestPreflightScriptCheck13:
             "http://localhost:8082/api/v2/monitor/health",
         ]
 
-    def test_dead_scheduler_is_a_warning_on_the_cli_path(self, run_check):
-        lines = run_check(UNHEALTHY, launch_path="cli")
-        assert self._kinds(lines)[:4] == ["PASS", "WARN", "WARN", "PASS"]
-        assert "the scheduled DAGs do not run" in lines[1]
+    def test_dead_scheduler_fails_without_compose_too(self, run_check, tmp_path):
+        """The ``edgeguard_baseline`` DAG is the only launch path, with Compose or without it: a scheduler that is
+        not healthy fails the check on every install (it was a warning on the retired ``cli`` path)."""
+        lines = run_check(UNHEALTHY, compose=False)
+        assert self._kinds(lines)[:4] == ["PASS", "FAIL", "WARN", "PASS"]
+        assert lines[1].startswith("FAIL|Airflow scheduler: unhealthy")
+        assert "no task starts and DAG runs do not progress" in lines[1]
+        assert not (tmp_path / "docker_args").exists()
 
     def test_healthy_airflow_passes(self, run_check):
         lines = run_check(HEALTHY, url="http://airflow.test:8082/")
@@ -1093,7 +1109,7 @@ class TestPreflightScriptCheck13:
         )
 
     def test_sqlite_from_the_environment_is_a_warning(self, run_check):
-        lines = run_check(HEALTHY, launch_path="cli", conn_env="sqlite:////Users/x/airflow/airflow.db")
+        lines = run_check(HEALTHY, compose=False, conn_env="sqlite:////Users/x/airflow/airflow.db")
         sqlite = lines[-1]
         assert sqlite.startswith("WARN|Airflow metadata database is SQLite (AIRFLOW__DATABASE__SQL_ALCHEMY_CONN)")
         assert "development only" in sqlite and "PostgreSQL" in sqlite and "?timeout=60" in sqlite
@@ -1110,8 +1126,10 @@ class TestPreflightScriptCheck13:
             == "PASS|Airflow metadata database is postgresql (airflow config get-value database sql_alchemy_conn)"
         )
 
-    def test_the_cli_path_without_the_variable_does_not_ask_docker(self, run_check, tmp_path):
-        lines = run_check(HEALTHY, launch_path="cli", docker_conn="postgresql://airflow@db/airflow")
+    def test_without_compose_the_check_goes_on_to_the_cfg_and_the_default(self, run_check, tmp_path):
+        """No ``docker`` on the PATH: no Compose service is asked, and the lookup goes on to airflow.cfg and
+        Airflow's default (it does not stop at a ``docker compose`` that cannot run)."""
+        lines = run_check(HEALTHY, compose=False, docker_conn="postgresql://airflow@db/airflow")
         assert lines[-1].startswith("WARN|Airflow metadata database is SQLite (not set in this shell, and no ")
         assert not (tmp_path / "docker_args").exists()
 
@@ -1120,7 +1138,7 @@ class TestPreflightScriptCheck13:
     # variable and printed "not checked" there, the case its SQLite warning exists for.
     def test_sqlite_in_airflow_cfg_is_a_warning(self, run_check, tmp_path):
         cfg = self._cfg(tmp_path / "afhome")
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
         assert lines[-1].startswith(f"WARN|Airflow metadata database is SQLite ([database] sql_alchemy_conn in {cfg}):")
         assert "development only" in lines[-1] and "?timeout=60" in lines[-1]
 
@@ -1133,17 +1151,17 @@ class TestPreflightScriptCheck13:
     def test_the_cfg_is_where_airflow_looks_for_it(self, run_check, tmp_path):
         """``AIRFLOW_CONFIG``, else ``$AIRFLOW_HOME/airflow.cfg``, else ``~/airflow/airflow.cfg``."""
         home_cfg = self._cfg(tmp_path / "home" / "airflow")
-        lines = run_check(HEALTHY, launch_path="cli")
+        lines = run_check(HEALTHY, compose=False)
         assert lines[-1].startswith(
             f"WARN|Airflow metadata database is SQLite ([database] sql_alchemy_conn in {home_cfg})"
         )
         self._cfg(tmp_path / "afhome", conn="postgresql://airflow@db/airflow")
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
         assert lines[-1].startswith("PASS|Airflow metadata database is postgresql")
         other = self._cfg(tmp_path / "elsewhere", conn="mysql://airflow@db/airflow")
         lines = run_check(
             HEALTHY,
-            launch_path="cli",
+            compose=False,
             extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), "AIRFLOW_CONFIG": str(other)},
         )
         assert lines[-1] == f"PASS|Airflow metadata database is mysql ([database] sql_alchemy_conn in {other})"
@@ -1152,7 +1170,7 @@ class TestPreflightScriptCheck13:
         self._cfg(tmp_path / "afhome")
         lines = run_check(
             HEALTHY,
-            launch_path="cli",
+            compose=False,
             conn_env=f"postgresql+psycopg2://airflow:{_SECRET}@db/airflow",
             extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")},
         )
@@ -1171,7 +1189,7 @@ class TestPreflightScriptCheck13:
     def test_set_nowhere_is_airflows_default_sqlite(self, run_check, tmp_path):
         """No variable and no airflow.cfg: an Airflow started from this shell would use its default, SQLite. The
         check says so without running the airflow CLI, which would write a cfg and logs/ there."""
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
         assert lines[-1].startswith(
             f"WARN|Airflow metadata database is SQLite (not set in this shell, and no {tmp_path}/afhome/airflow.cfg: "
             "Airflow's default):"
@@ -1198,7 +1216,7 @@ class TestPreflightScriptCheck13:
         self._cfg(tmp_path / "afhome")
         lines = run_check(
             HEALTHY,
-            launch_path="cli",
+            compose=False,
             extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), variable: f"echo sqlite:////{_SECRET}.db"},
         )
         assert lines[-1] == (
@@ -1210,7 +1228,7 @@ class TestPreflightScriptCheck13:
         self._cfg(tmp_path / "afhome", conn="postgresql://airflow@db/airflow")
         lines = run_check(
             HEALTHY,
-            launch_path="cli",
+            compose=False,
             extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), "AIRFLOW__CORE__SQL_ALCHEMY_CONN": "sqlite:////x.db"},
         )
         assert lines[-1].startswith("WARN|Airflow metadata database is SQLite (AIRFLOW__CORE__SQL_ALCHEMY_CONN)")
@@ -1231,7 +1249,7 @@ class TestPreflightScriptCheck13:
     )
     def test_a_cfg_without_the_value(self, run_check, tmp_path, line, expected):
         cfg = self._cfg(tmp_path / "afhome", line=line)
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
         assert lines[-1].startswith(expected.format(cfg=cfg))
 
     def test_the_deprecated_core_option_in_the_cfg_is_read(self, run_check, tmp_path):
@@ -1239,14 +1257,14 @@ class TestPreflightScriptCheck13:
         cfg.write_text(
             cfg.read_text().replace("[core]\n", f"[core]\nsql_alchemy_conn = postgresql://airflow:{_SECRET}@db/af\n")
         )
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
         assert lines[-1] == f"PASS|Airflow metadata database is postgresql ([core] sql_alchemy_conn in {cfg})"
 
     def test_an_unreadable_cfg_is_not_determined(self, run_check, tmp_path):
         directory = tmp_path / "afhome"
         directory.mkdir()
         (directory / "airflow.cfg").write_text("sql_alchemy_conn = sqlite:////x.db\n")  # no section header
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(directory)})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(directory)})
         assert lines[-1] == (
             f"WARN|Airflow metadata database backend not determined ({directory}/airflow.cfg could not be read)"
         )
@@ -1333,7 +1351,7 @@ class TestPreflightScriptCheck13:
         names = list(self._ENV_ORDER)
         variables = {name: self._ENV_ORDER[name] for name in names[names.index(first) :]}
         self._cfg(tmp_path / "afhome", conn="postgresql://airflow@db/airflow")
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), **variables})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome"), **variables})
         assert lines[-1].startswith(expected)
 
     @pytest.mark.parametrize(
@@ -1377,7 +1395,7 @@ class TestPreflightScriptCheck13:
         ``core`` at the start of its ``[core]`` section."""
         cfg = self._cfg(tmp_path / "afhome", line=database)
         cfg.write_text(cfg.read_text().replace("[core]\n", "[core]\n" + core, 1))
-        lines = run_check(HEALTHY, launch_path="cli", extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
+        lines = run_check(HEALTHY, compose=False, extra_env={"AIRFLOW_HOME": str(tmp_path / "afhome")})
         assert lines[-1].startswith(expected.format(cfg=cfg))
 
     def test_the_header_and_the_help_list_check_13(self):

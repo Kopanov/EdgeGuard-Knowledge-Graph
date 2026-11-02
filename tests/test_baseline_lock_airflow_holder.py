@@ -308,21 +308,6 @@ exit 2
         for dag in self._DAGS:
             assert f"compose exec -T airflow airflow dags list-runs {dag} --state running -o json" in calls
 
-    def test_the_cli_launch_path_checks_running_runs_too(self, tmp_path):
-        # The in-process baseline wipes as well, and a task already running keeps writing whatever the path.
-        out, calls = self._run_check(tmp_path, launch_path="cli")
-        assert not [c for c in calls if " details " in f" {c} "], "the CLI path does not read the pause state"
-        for dag in self._DAGS:
-            assert f"compose exec -T airflow airflow dags list-runs {dag} --state running -o json" in calls
-        (failure,) = [line for line in out if line.startswith("FAIL|")]
-        assert "edgeguard_neo4j_sync has 1 running run(s)" in failure
-        assert "PASS|DAG edgeguard_daily has no running run" in out
-        # The lock facts stay; the path itself is development only (a reduced graph).
-        assert "PASS|The scheduled DAGs skip tasks that start while the baseline lock is held" in out
-        (reduced,) = [line for line in out if line.startswith("WARN|") and "reduced graph" in line]
-        assert "python src/run_pipeline.py --baseline is a development path" in reduced
-        assert "runs the edgeguard_baseline DAG (--launch-path=dag" in reduced
-
     def test_the_dag_launch_path_has_no_reduced_graph_warning(self, tmp_path):
         out, _calls = self._run_check(tmp_path)
         assert not [line for line in out if "reduced graph" in line or "CLI launch path" in line]

@@ -332,40 +332,17 @@ def _statement_strings(path: Path):
 
 class TestStixImport:
     """2026-10-25: the objects of an external STIX bundle that name no EdgeGuard source are attributed
-    to ``stix_import``, now a registered source: ``ensure_sources`` creates its node, so the loader's
-    records get their ``SOURCED_FROM`` edge (until then the edge's MATCH found no node)."""
+    to ``stix_import``, a registered source: ``ensure_sources`` creates its node. No code path writes it
+    since the in-process STIX loader of ``run_pipeline.py`` is retired (2026-11-02); the node stays."""
 
     def test_stix_import_is_a_registered_source_with_a_node(self):
-        from run_pipeline import STIX_IMPORT_SOURCE_ID
-
-        src = source_registry.get_source(STIX_IMPORT_SOURCE_ID)
-        assert src is not None and src.canonical_id == STIX_IMPORT_SOURCE_ID == "stix_import"
+        src = source_registry.get_source("stix_import")
+        assert src is not None and src.canonical_id == "stix_import"
         assert src.source_type == "import" and src.cli_id is None and src.reliable_first_seen is False
         client = _client()
         assert client.ensure_sources() is True
         merged = {p["source_id"]: p["source_uuid"] for q, p in client.driver.runs if "MERGE (s:Source" in q}
         assert merged["stix_import"] == _source_uuid("stix_import")
-
-    def test_the_loader_writes_an_external_bundles_records_to_the_stix_import_node(self):
-        """End to end: ``EdgeGuardPipeline.load_stix21_to_neo4j`` with a real ``Neo4jClient`` whose
-        driver records each statement."""
-        from run_pipeline import EdgeGuardPipeline
-
-        pipeline = EdgeGuardPipeline()
-        pipeline.neo4j = _client()
-        bundle = {
-            "type": "bundle",
-            "objects": [
-                {"type": "indicator", "id": "indicator--1", "pattern": "[ipv4-addr:value = '203.0.113.21']"},
-                {"type": "malware", "id": "malware--1", "name": "ExampleRAT"},
-            ],
-        }
-        pipeline.load_stix21_to_neo4j(bundle)
-        upserts = [p for q, p in pipeline.neo4j.driver.runs if "MERGE (n)-[r:SOURCED_FROM]->(s)" in q]
-        assert len(upserts) == 2, "one SOURCED_FROM edge per imported object"
-        assert {p["source_id"] for p in upserts} == {"stix_import"}
-        assert {p["trg_uuid"] for p in upserts} == {_source_uuid("stix_import")}
-        assert "stix_import" in nc.SOURCES, "ensure_sources creates the node the edges MATCH"
 
 
 class TestNodeSourceListsAreCanonical:
@@ -403,31 +380,6 @@ class TestNodeSourceListsAreCanonical:
         ((_, params),) = [r for r in client.driver.runs if "UNWIND $batch as item" in r[0]]
         assert [row["source_array"] for row in params["batch"]] == [["cisa_kev"]]
 
-    def test_a_stix_bundle_that_names_a_variant(self):
-        """End to end: an object whose ``x_edgeguard_source`` is a variant reaches the canonical
-        ``Source`` node and names it in its ``source`` list."""
-        from run_pipeline import EdgeGuardPipeline
-
-        pipeline = EdgeGuardPipeline()
-        pipeline.neo4j = _client()
-        bundle = {
-            "type": "bundle",
-            "objects": [
-                {
-                    "type": "indicator",
-                    "id": "indicator--2",
-                    "pattern": "[ipv4-addr:value = '203.0.113.33']",
-                    "x_edgeguard_source": "otx",
-                }
-            ],
-        }
-        pipeline.load_stix21_to_neo4j(bundle)
-        runs = pipeline.neo4j.driver.runs
-        ((_, node),) = [r for r in runs if "MERGE (n:Indicator" in r[0]]
-        ((_, edge),) = [r for r in runs if "MERGE (n)-[r:SOURCED_FROM]->(s)" in r[0]]
-        assert node["source_array"] == ["alienvault_otx"]
-        assert (edge["source_id"], edge["trg_uuid"]) == ("alienvault_otx", _source_uuid("alienvault_otx"))
-
 
 class TestMetricSourceLabels:
     """2026-10-25: the writer metrics carry the canonical id (docs/PROMETHEUS_SETUP.md, "Source label
@@ -446,144 +398,6 @@ class TestMetricSourceLabels:
         assert getattr(client, merge)({"name": "unknown", "zone": ["global"]}, source_id="otx") is False
         assert count("alienvault_otx") == before_canonical + 1
         assert count("otx") == before_variant
-
-
-def _curated_importer():
-    """``scripts/import_curated_package.py``, whose ``build_event`` gives the MISP event of a package."""
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "import_curated_package_for_stix_flow", _SRC.parent / "scripts" / "import_curated_package.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-def _curated_package_event(name: str, source: str = "coreideas") -> dict:
-    """The MISP event (flat ``Event`` dict, as ``fetch_event_details`` returns it) of a package whose
-    ``name`` (the event info ``scripts/import_curated_package.py`` writes) is *name*: tags ``EdgeGuard``,
-    the package source's ``source:*`` tag and ``tlp:<level>``."""
-    package = {
-        "name": name,
-        "source": source,
-        "tlp": "amber",
-        "entities": [{"kind": "threat_actor", "name": "apt29", "claims": [{"p": "uses_technique", "o": "T1566"}]}],
-    }
-    return _curated_importer().build_event(package)["Event"]
-
-
-def _run_stix_flow(events: dict):
-    """Drive ``EdgeGuardPipeline._run_stix_flow`` over ``{event info: full event}`` with a fake exporter.
-    Returns ``(converted event infos, loaded objects)``."""
-    import run_pipeline
-
-    pipeline = run_pipeline.EdgeGuardPipeline.__new__(run_pipeline.EdgeGuardPipeline)
-    converted: list = []
-    bundles: list = []
-
-    class _Exporter:
-        def fetch_edgeguard_events(self):
-            return [{"id": str(i), "info": info} for i, info in enumerate(events, start=1)]
-
-        def fetch_event_details(self, event_id):
-            return dict(list(events.values())[int(event_id) - 1])
-
-        def convert_to_stix21(self, event):
-            info = event.get("Event", event).get("info")
-            converted.append(info)
-            return {"objects": [{"type": "threat-actor", "id": f"threat-actor--{len(converted)}", "name": info}]}
-
-    class _Neo4j:
-        def run(self, _query):
-            return [{"ok": 1}]
-
-    pipeline.stix_exporter = _Exporter()
-    pipeline.neo4j = _Neo4j()
-    pipeline.load_stix21_to_neo4j = lambda bundle: bundles.append(bundle) or {}
-    pipeline._run_stix_flow()
-    return converted, [obj for bundle in bundles for obj in bundle["objects"]]
-
-
-class TestStixFlowEventSource:
-    """The STIX flow of the ``run_pipeline.py`` CLI names each object's source, as a canonical id, from
-    its MISP event's own ``source:*`` tag, else (a collector's event, tagged ``EdgeGuard`` only) from
-    the event's name; a name that gives no registered source is attributed to ``misp``. A curated
-    package's event is skipped: its claims are links the MISP -> Neo4j sync makes between existing
-    nodes, and a package never creates nodes."""
-
-    @pytest.mark.parametrize(
-        "event_info,expected",
-        [
-            ("EdgeGuard-alienvault_otx-2026-10-22", "alienvault_otx"),
-            ("EdgeGuard-otx-2026-10-22", "alienvault_otx"),
-            ("EdgeGuard-nvd-2026-10-22-part2", "nvd"),
-            ("EdgeGuard-cisa_ics-2026-10-20", "cisa_ics"),
-        ],
-    )
-    def test_a_registered_source_in_the_event_name(self, event_info, expected):
-        from run_pipeline import _misp_event_source
-
-        assert _misp_event_source(event_info) == expected
-
-    @pytest.mark.parametrize("event_info", ["A partner's report", "", None, "EdgeGuard-notasource-2026-10-22"])
-    def test_no_registered_source_falls_back_to_misp(self, event_info, caplog):
-        from run_pipeline import _misp_event_source
-
-        with caplog.at_level("WARNING"):
-            assert _misp_event_source(event_info) == "misp"
-        assert "attributing it to 'misp'" in caplog.text
-        assert "misp" in nc.SOURCES
-
-    @pytest.mark.parametrize(
-        "name", ["2026-10-24_EdgeGuard_CoreIdeas_package", "2026-10-24_EdgeGuard_CoreIdeas_galaxy_package"]
-    )
-    def test_a_curated_package_event_is_skipped(self, name, caplog):
-        event = _curated_package_event(name)
-        assert {t["name"] for t in event["Tag"]} == {"EdgeGuard", "source:CoreIdeas", "tlp:amber"}
-        from run_pipeline import _misp_event_source, _misp_event_tag_source
-
-        assert _misp_event_source(name) == "misp", "the package's name names no source"
-        assert _misp_event_tag_source(event) == "coreideas"
-        with caplog.at_level("INFO", logger="run_pipeline"):
-            converted, objects = _run_stix_flow({name: event})
-        assert converted == [] and objects == [], "no object of a curated package is loaded"
-        assert f"Skipping event 1 ({name!r}): a curated package of coreideas creates no nodes" in caplog.text
-
-    @pytest.mark.parametrize("source", source_registry.curated_source_ids())
-    def test_every_registered_curated_source_is_skipped(self, source, caplog):
-        event = _curated_package_event("2026-10-24_EdgeGuard_CoreIdeas_package", source=source)
-        assert source_registry.get_source(source).misp_tag in {t["name"] for t in event["Tag"]}
-        with caplog.at_level("INFO", logger="run_pipeline"):
-            converted, objects = _run_stix_flow({event["info"]: event})
-        assert converted == [] and objects == []
-        assert f"a curated package of {source} creates no nodes" in caplog.text
-
-    def test_a_collector_event_beside_a_curated_package_takes_its_source_from_its_name(self):
-        package = _curated_package_event("2026-10-24_EdgeGuard_CoreIdeas_package")
-        collector = {"id": "2", "info": "EdgeGuard-nvd-2026-10-22-part2", "Tag": [{"name": "EdgeGuard"}]}
-        converted, objects = _run_stix_flow({package["info"]: package, collector["info"]: {"Event": collector}})
-        assert converted == ["EdgeGuard-nvd-2026-10-22-part2"]
-        assert [o["x_edgeguard_source"] for o in objects] == ["nvd"]
-
-    def test_the_events_source_tag_comes_before_its_name(self):
-        event = {"info": "A partner's report", "Tag": [{"name": "EdgeGuard"}, {"name": "source:ThreatFox"}]}
-        converted, objects = _run_stix_flow({event["info"]: event})
-        assert converted == ["A partner's report"]
-        assert [o["x_edgeguard_source"] for o in objects] == ["threatfox"]
-
-    def test_an_unregistered_source_tag_is_attributed_to_misp_as_in_the_sync(self, caplog):
-        event = {"info": "EdgeGuard-nvd-2026-10-22", "Tag": [{"name": "EdgeGuard"}, {"name": "source:Retired-Feed"}]}
-        with caplog.at_level("WARNING", logger="run_pipeline"):
-            converted, objects = _run_stix_flow({event["info"]: event})
-        assert [o["x_edgeguard_source"] for o in objects] == ["misp"]
-        assert "'source:Retired-Feed' names no registered source" in caplog.text
-
-    def test_the_flow_never_names_unknown(self):
-        text = (_SRC / "run_pipeline.py").read_text()
-        assert "source_from_event = _misp_event_tag_source(full_event) or _misp_event_source(event_info)" in text
-        assert 'source_from_event = "unknown"' not in text
 
 
 def test_no_writer_creates_a_source_node():

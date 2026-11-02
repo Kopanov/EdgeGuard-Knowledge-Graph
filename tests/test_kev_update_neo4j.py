@@ -8,8 +8,7 @@ reads the records:
   ``cisa_vulnerability_name``: it sets them, NVD's record only fills them (NVD did not move
   ``lastModified`` when CISA moved the due date of CVE-2022-0995, so NVD's copy keeps the old date);
 - ``SOURCED_FROM.raw_data`` of a CVE is replaced on every write from a MISP attribute, so the edge holds
-  the source's latest record; the edge of any other label keeps the record that created it, and so does a
-  CVE edge against the reduced record of the opt-in STIX import (``run_pipeline``).
+  the source's latest record; the edge of any other label keeps the record that created it.
 
 What ``CASE`` with ``NULL`` and ``''`` and the ``ON CREATE SET`` / ``SET`` order do cannot be shown with a
 mocked session, so this module runs the real writers (the collector's item → MISPWriter's attribute → the
@@ -176,26 +175,6 @@ def test_a_revised_kev_record_replaces_the_node_fields_and_the_edge_record(clien
             cve=FLIP,
         ).single()["c"]
     assert edges == 1
-
-
-def test_a_stix_import_keeps_the_kev_record_on_the_edge(client, raw_driver):
-    """The opt-in STIX flow (``run_pipeline --stix-flow``) merges a reduced record of the KEV event's
-    attribute under ``cisa_kev``: the record the sync wrote on the edge stays."""
-    from run_pipeline import EdgeGuardPipeline
-
-    _cve_node(raw_driver, DUE)
-    kev = _kev_item("2026-10-16", DUE)
-    _sync(client, kev, KEV_EVENT)
-    sdo = MISPToNeo4jSync(neo4j_client=MagicMock())._attribute_to_stix21(
-        _attribute(kev), "00000000-0000-4000-8000-000000000135", ["global"]
-    )
-    sdo["x_edgeguard_source"] = "cisa_kev"
-    pipeline = EdgeGuardPipeline.__new__(EdgeGuardPipeline)
-    pipeline.neo4j = client
-    assert pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [sdo]})["vulnerabilities"] == 1
-    raw = _raw_data(raw_driver, DUE, "cisa_kev")
-    assert (raw["cisa_action_due"], raw["known_ransomware_use"]) == ("2026-08-29", "Unknown")
-    assert _node(raw_driver, DUE)["cisa_action_due"] == "2026-08-29"
 
 
 def test_an_indicator_edge_keeps_the_record_that_created_it(client, raw_driver):

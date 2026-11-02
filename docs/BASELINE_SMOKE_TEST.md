@@ -2,7 +2,7 @@
 
 Use a **short** history window and optional **item cap** before running a full 1–2 year baseline.
 
-A smoke run is a baseline like the full one: it runs through the **`edgeguard_baseline`** DAG on every install. With Docker Compose use Option A or B; without Docker, Airflow runs with a PostgreSQL metadata database ([SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker)) and Option B applies. Option C does not test the baseline: it builds a reduced graph.
+A smoke run is a baseline like the full one: it runs through the **`edgeguard_baseline`** DAG on every install. With Docker Compose use Option A or B; without Docker, Airflow runs with a PostgreSQL metadata database ([SETUP_GUIDE.md § 4](SETUP_GUIDE.md#4-path-b--python--venv-no-docker)) and Option B applies.
 
 **Where you are in the docs:** Step **3** of the operator path — after **[SETUP_GUIDE.md](SETUP_GUIDE.md)** and **[AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)**. Full order: [SETUP_GUIDE.md § Start here](SETUP_GUIDE.md#start-here--then-read-these-next-operator-path).
 
@@ -68,24 +68,9 @@ The `baseline_start` task log prints the effective item limit and history window
 
 ---
 
-## Option C — in-process CLI (`run_pipeline.py`): development only
+## Checking the result
 
-`python src/run_pipeline.py --baseline` does not run the `edgeguard_baseline` DAG and builds a reduced graph: no ATT&CK tactic, software or technique-implementation links (`IN_TACTIC`, `USES_MALWARE`, `USES_TOOL`, `IMPLEMENTS_TECHNIQUE`), no `INDICATES` or `USES_TECHNIQUE` from indicators, few `EMPLOYS_TECHNIQUE` and `ATTRIBUTED_TO`, no campaigns and no CVSS scores ([AIRFLOW_DAGS.md § In-process CLI baseline](AIRFLOW_DAGS.md#in-process-cli-baseline-development-only)). A smoke run of it says nothing about the baseline, and its graph is not one to query or validate. Use it only to work on the collectors or the in-process pipeline itself.
-
-From the repo root with `src` on `PYTHONPATH` and `.env` loaded:
-
-```bash
-cd /path/to/EdgeGuard-Knowledge-Graph
-export EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000   # optional cap per source
-python src/run_pipeline.py --baseline --baseline-days 7
-```
-
-**For a true clean slate** (wipes Neo4j graph + MISP events + checkpoints, then re-collects; no backup gate, no confirmation):
-```bash
-python src/run_pipeline.py --baseline --fresh-baseline --baseline-days 7
-```
-
-> **For a smoke test of the baseline:** Option A or B, or `edgeguard fresh-baseline --days 7` (through `docker compose exec` on the Compose host, through the Airflow REST API without it) — it triggers the `edgeguard_baseline` DAG (the path the hosted pipeline runs), enforces the backup-timestamp gate, and is what `scripts/verify_fresh_baseline.py` is written for. The in-process `run_pipeline.py` commands above serve development only.
+`edgeguard fresh-baseline --days 7` triggers the same DAG, the path the hosted pipeline runs (through `docker compose exec` on the Compose host, through the Airflow REST API without it), and enforces the backup-timestamp gate; `scripts/verify_fresh_baseline.py` is written for the graph of such a run. `python src/run_pipeline.py` runs no baseline: it runs the collectors into MISP only and exits 2 on `--baseline` ([CLI.md § Pipeline modules run on their own](CLI.md#pipeline-modules-run-on-their-own)).
 
 On a 7-day window the acceptance script reports the CVE-properties check as *informational*: NVD assigns reference tags and CPE configurations weeks after publication, so day-old CVEs legitimately lack them.
 
@@ -105,6 +90,7 @@ _Last updated: 2026-11-02_
 
 ## History
 
+- 2026-11-02 — Option C (`python src/run_pipeline.py --baseline`, development only, a reduced graph) removed: `run_pipeline.py` runs the collectors into MISP only and refuses `--baseline`; its notes on checking a smoke run are under § Checking the result.
 - 2026-11-02 — `edgeguard fresh-baseline` for a smoke run also without Compose (it triggers through the Airflow REST API there).
 - 2026-11-01 — A smoke run goes through the `edgeguard_baseline` DAG on every install; Option B covers installs without Docker, with a run configuration for `airflow dags trigger`; Option C (`run_pipeline.py`, offered as the route without Airflow) is development only and builds a reduced graph. The fresh trigger of Option B states where its backup gate reads `EDGEGUARD_LAST_BACKUP_AT`.
 - 2026-10-23 — The reading order points to SETUP_GUIDE.md; the README section it named was removed.

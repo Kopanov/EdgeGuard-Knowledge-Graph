@@ -212,8 +212,9 @@ class TestIndicatorCanonicalizationInBatchDispatch:
 
 
 class TestSingleItemHelpersAcceptIndicatorType:
-    """The three single-item rel helpers grew an optional
-    ``indicator_type`` kwarg in PR-M3a. When the caller provides it,
+    """The single-item rel helpers grew an optional
+    ``indicator_type`` kwarg in PR-M3a (the indicator-malware one was removed with the
+    in-process STIX loader, 2026-11-02). When the caller provides it,
     the value is canonicalized via ``canonicalize_merge_key`` before
     the Cypher runs."""
 
@@ -232,12 +233,6 @@ class TestSingleItemHelpersAcceptIndicatorType:
         assert "indicator_type" in signature
         assert "Optional[str] = None" in signature or "indicator_type: Optional[str]" in signature
 
-    def test_indicator_malware_helper_accepts_indicator_type(self, source: str) -> None:
-        idx = source.find("def create_indicator_malware_relationship")
-        end = source.find(") -> bool:", idx)
-        signature = source[idx:end]
-        assert "indicator_type" in signature
-
     def test_indicator_sector_helper_accepts_indicator_type(self, source: str) -> None:
         idx = source.find("def create_indicator_sector_relationship")
         end = source.find(") -> bool:", idx)
@@ -245,16 +240,12 @@ class TestSingleItemHelpersAcceptIndicatorType:
         assert "indicator_type" in signature
 
     def test_helpers_call_canonicalize_merge_key_when_type_given(self, source: str) -> None:
-        """All three helpers must invoke ``canonicalize_merge_key`` so
+        """Both helpers must invoke ``canonicalize_merge_key`` so
         the caller's optional type argument actually changes behaviour."""
-        # Count occurrences inside the three helper bodies.  Shortcut:
-        # just verify the pattern appears at least 3 times across the
-        # file's helper definitions (one per helper) in the context
-        # of ``"Indicator"``.
-        assert source.count('canonicalize_merge_key("Indicator",') >= 4, (
-            "expected ``canonicalize_merge_key('Indicator', ...)`` to appear at "
-            "least 4 times (once per single-item helper + once in batch dispatch)"
-        )
+        for helper in ("create_indicator_vulnerability_relationship", "create_indicator_sector_relationship"):
+            start = source.find(f"def {helper}")
+            body = source[start : source.find("\n    def ", start + 1)]
+            assert 'canonicalize_merge_key("Indicator",' in body, helper
 
 
 class TestSourcePinBatchDispatchCanonicalizes:

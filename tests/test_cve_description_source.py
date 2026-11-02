@@ -35,7 +35,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -637,33 +637,3 @@ class TestOtherWritePaths:
             assert f"{var}.{prop} = coalesce(${prop}, {var}.{prop})" in query
             assert f"{var}.{prop} = ${prop}" not in query
             assert params[prop] is None
-
-
-# ---------------------------------------------------------------- the opt-in STIX flow
-class TestStixImport:
-    """``run_pipeline.load_stix21_to_neo4j`` (MISP → STIX → Neo4j, ``--stix-flow``): the vulnerability SDO
-    of an NVD event carries NVD's text and NVD as its source, so the CVE gets the description the attribute
-    flow gives it (until 2026-10-16 the SDO, which carries no NVD record, only filled it)."""
-
-    def test_an_nvd_sdo_gives_the_description_the_attribute_flow_gives(self):
-        from run_pipeline import EdgeGuardPipeline
-
-        client, session = _recording_client()
-        pipeline = EdgeGuardPipeline()
-        pipeline.neo4j = client
-        attr = {k: v for k, v in attribute("CVE-2025-21042__source:NVD").items() if k != "_event"}
-        sdo = MISPToNeo4jSync(neo4j_client=MagicMock())._attribute_to_stix21(
-            attr, "00000000-0000-4000-8000-000000000000", ["global"]
-        )
-        sdo["x_edgeguard_source"] = "nvd"  # as the STIX flow stamps the objects of an NVD event
-        with patch.object(client, "merge_cve", wraps=client.merge_cve) as merge_cve:
-            pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [sdo]})
-        ((data,), kwargs) = merge_cve.call_args
-        assert kwargs["source_id"] == "nvd"
-        assert not data.get("nvd_record")
-        node = {"description": "KEV text", "description_source": "cisa_kev"}
-        _apply(node, *_node_statement(session, "CVE"))
-        attribute_flow = _merged("CVE-2025-21042__source:CISA-KEV", "CVE-2025-21042__source:NVD")
-        expected = (synced_key("CVE-2025-21042__source:NVD")["description"], "nvd")
-        assert (node["description"], node["description_source"]) == expected
-        assert (attribute_flow["description"], attribute_flow["description_source"]) == expected

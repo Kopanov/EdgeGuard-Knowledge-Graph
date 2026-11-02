@@ -379,38 +379,6 @@ def test_zone_override_global_helper_drops_global_when_specifics_present(monkeyp
 # ---------------------------------------------------------------------------
 
 
-def test_run_pipeline_edges_stamp_endpoint_uuids(monkeypatch):
-    """Round 28 (bugbot MED): the CLI path in ``run_pipeline.py`` creates
-    INDICATES (co-occurrence) and EXPLOITS edges via its own
-    apoc.periodic.iterate blocks. Before round 28 these did NOT stamp
-    r.src_uuid/r.trg_uuid — so edges created via the CLI path had NULL
-    endpoint uuids, silently breaking cross-environment delta sync for
-    any operator who preferred the CLI over the Airflow path.
-
-    Pin both edges' stamping via source-grep on the two apoc inner
-    queries."""
-    import importlib
-
-    drop_modules_for_test(monkeypatch, "run_pipeline")
-    run_pipeline = importlib.import_module("run_pipeline")
-    src_path = run_pipeline.__file__
-    with open(src_path) as fh:
-        source = fh.read()
-
-    # 2026-10 (fresh-baseline PR): the whole-event co-occurrence INDICATES block was
-    # removed from this CLI path — only the EXPLOITS (cve tag) block remains and must
-    # still stamp the endpoint uuids. Pin the removal too.
-    assert 'r.source_id = "misp_cooccurrence"' not in source, "CLI co-occurrence INDICATES must stay removed"
-    for endpoint_var, edge_name in [("c", "EXPLOITS")]:
-        assert f"r.src_uuid = i.uuid, r.trg_uuid = {endpoint_var}.uuid" in source, (
-            f"{edge_name} edge in run_pipeline.py must stamp src=i.uuid trg={endpoint_var}.uuid "
-            "on ON CREATE (round-28 fix)"
-        )
-        assert f"coalesce(r.src_uuid, i.uuid)" in source and (  # noqa: F541
-            f"coalesce(r.trg_uuid, {endpoint_var}.uuid)" in source
-        ), f"{edge_name} edge in run_pipeline.py must coalesce src/trg uuids on SET (idempotent)"
-
-
 def test_build_relationships_summary_denominator_matches_query_count(monkeypatch):
     """Round 28 (bugbot LOW): the ``[BUILD_RELATIONSHIPS SUMMARY]`` log
     line used to hardcode ``failures=%d/11`` but there were 12 independent

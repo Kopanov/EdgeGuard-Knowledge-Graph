@@ -334,7 +334,6 @@ def test_merge_indicators_batch_writes_the_folded_url_and_its_uuid(client, monke
     "method, args, param",
     [
         ("create_indicator_vulnerability_relationship", ("CVE-2024-3400",), "value"),
-        ("create_indicator_malware_relationship", ("KPOT Stealer",), "indicator_value"),
         ("create_indicator_sector_relationship", ("finance",), "indicator_value"),
     ],
 )

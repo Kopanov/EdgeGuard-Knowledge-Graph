@@ -491,8 +491,8 @@ After setup, set these environment variables:
     print()
     print(f"{Colors.BOLD}Next steps:{Colors.RESET}")
     print("  1. Review your config at: credentials/config.yaml")
-    print("  2. Ensure Neo4j is running")
-    print("  3. Run: python src/run_pipeline.py")
+    print("  2. Ensure Neo4j, MISP and Airflow are running")
+    print("  3. Run a baseline through the edgeguard_baseline DAG: docs/BASELINE_SMOKE_TEST.md")
     print()
 
     return True

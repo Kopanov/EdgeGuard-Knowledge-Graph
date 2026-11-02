@@ -35,7 +35,7 @@ whose (type, value) its source already holds in any event (cross-event deduplica
 ``MISPWriter._get_existing_source_attribute_keys``) and in the event being written, and NVD's update
 edits NVD's stored copies in place (``MISPWriter.plan_vulnerability_update``). Each source therefore
 gives one text, the highest-ranked text wins whatever the order in which the sync merges the records,
-and a full and an incremental sync, or the attribute and the STIX flow, give the same node. Where MISP
+and a full and an incremental sync give the same node. Where MISP
 holds two attributes of one source for one node (the cross-event check switched off or its prefetch
 failed, both logged; a MITRE technique, tactic or tool ATT&CK renamed, whose attribute value carries the
 name), the one merged last is kept.
