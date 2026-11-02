@@ -116,8 +116,8 @@ def _pulse_value_key(indicator_type: Any, value: Any) -> str:
     stores it: CVE ids and the other ``_UPPER_CASED_TYPES`` upper-cased, hashes, domains, IP and e-mail
     addresses lower-cased; a URL with its scheme and host lower-cased (``fold_url_scheme_and_host``, the
     graph's ``url`` key); any other value as given. NFC-normalised and trimmed, as the graph keys it; a
-    defanged value stays as it is. A CVE indicator and a pulse's CVE reference therefore share the key
-    ``cve:CVE-...`` and fold into one item."""
+    defanged value stays as it is. A CVE indicator and a pulse's CVE reference of the same id therefore
+    share one key (the upper-cased id) and fold into one item."""
     if not isinstance(value, str):
         return str(value)
     text = unicodedata.normalize("NFC", value).strip()
