@@ -2547,6 +2547,24 @@ _BASELINE_CRITICAL_CHAIN: frozenset[str] = frozenset(
     }
 )
 
+# The collector tasks of the baseline DAG (2026-11-02): collector name, as EDGEGUARD_COLLECT_SOURCES and
+# EDGEGUARD_BASELINE_REQUIRED_SOURCES name it, -> task id. The postcheck reads their states and the status
+# dicts they return (``collector_utils.make_status``) for INV-4 to INV-6; a test pins the map against the
+# DAG's tasks.
+_BASELINE_COLLECTOR_TASKS: dict[str, str] = {
+    "cisa": "tier1_core.collect_cisa",
+    "mitre": "tier1_core.collect_mitre",
+    "otx": "tier1_core.collect_otx",
+    "nvd": "tier1_core.collect_nvd",
+    "abuseipdb": "tier2_feeds.collect_abuseipdb",
+    "threatfox": "tier2_feeds.collect_threatfox",
+    "urlhaus": "tier2_feeds.collect_urlhaus",
+    "feodo": "tier2_feeds.collect_feodo",
+    "sslbl": "tier2_feeds.collect_sslblacklist",
+    "cisa_ics": "tier2_feeds.collect_cisa_ics",
+    "malwarebazaar": "tier2_feeds.collect_malwarebazaar",
+}
+
 
 def _validate_baseline_dag_conf(conf: object, *, source_label: str = "dag_run.conf") -> None:
     """Emit a WARNING for each unrecognized key in the baseline DAG conf.
@@ -3142,6 +3160,281 @@ def run_baseline_enrichment(**context):
     return {"enriched": True}
 
 
+# Where the recovery from a postcheck violation is described.
+_POSTCHECK_RUNBOOK = "docs/RUNBOOK.md § 7d"
+
+
+def _baseline_collector_outcomes(context) -> dict[str, dict]:
+    """What each collector task of this run did (2026-11-02): ``{collector: {"task_id", "state", "status"}}``.
+
+    ``state`` is the task's state in this run as Airflow 3 reports it (``_live_task_states``): ``not run``
+    for a task without a state, ``unknown`` where Airflow reports none (Airflow 2, a failed call).
+    ``status`` is the status dict the task returned (``collector_utils.make_status``), read only when the
+    state is ``success`` or ``unknown``: a cleared task keeps the XCom of its earlier run until it runs again.
+    """
+    ti = context.get("ti") or context.get("task_instance")
+    states = _live_task_states(context, list(_BASELINE_COLLECTOR_TASKS.values()))
+    outcomes: dict[str, dict] = {}
+    for name, task_id in _BASELINE_COLLECTOR_TASKS.items():
+        state = "unknown" if states is None else (states.get(task_id) or "not run")
+        status = None
+        if ti is not None and state in ("success", "unknown"):
+            try:
+                pulled = ti.xcom_pull(task_ids=task_id)
+            except Exception as e:  # API drift: the collector then counts as without a status
+                logger.warning("[BASELINE-POSTCHECK] XCom pull for %s failed: %s", task_id, e)
+                pulled = None
+            status = pulled if isinstance(pulled, dict) else None
+        outcomes[name] = {"task_id": task_id, "state": state, "status": status}
+    return outcomes
+
+
+def _delivered_items(outcome: Optional[dict]) -> int:
+    """The items a collector delivered in this run: the ``count`` of its status (read only for a task that
+    succeeded or whose state Airflow does not report, ``_baseline_collector_outcomes``) when the status says
+    ``success`` and not ``skipped``; else 0."""
+    status = (outcome or {}).get("status") or {}
+    if status.get("success") is not True or status.get("skipped") is True:
+        return 0
+    count = status.get("count")
+    return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
+
+
+def _undelivered_reason(outcome: Optional[dict]) -> Optional[str]:
+    """Why a collector delivered nothing (the postcheck's table): its task state, a missing status, a skip
+    with its ``skip_reason_class`` or a failed status. None for a collector that ran and was not skipped."""
+    if not outcome:
+        return "task not run"
+    state, status = outcome.get("state"), outcome.get("status")
+    if state not in ("success", "unknown"):
+        return f"task {state}"
+    if not status:
+        return "no status returned"
+    if status.get("skipped") is True:
+        return f"skipped ({status.get('skip_reason_class') or 'no reason class'})"
+    if status.get("success") is not True:
+        return "failed (status success=false)"
+    return None
+
+
+def _row(session, query: str, parameters: Optional[dict] = None) -> dict:
+    """The one row of a statement of ``graph_shape_checks``, as a dict (empty without a row)."""
+    record = session.run(query, parameters=parameters).single()
+    return dict(record) if record else {}
+
+
+def _num(row: dict, key: str) -> int:
+    value = row.get(key)
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def _examples(row: dict) -> str:
+    return ", ".join(str(x) for x in (row.get("examples") or [])[:5]) or "none listed"
+
+
+def _attack_shape_violations(session, *, unlimited: bool, mitre_items: int) -> list[str]:
+    """INV-4 (2026-11-02): the ATT&CK links ``build_relationships`` derives from the claims on the nodes.
+
+    The statements of ``graph_shape_checks``, as the acceptance script runs them. A claim whose target exists
+    and has no link (``edge_missing``: a kill-chain phase without its ``IN_TACTIC``, a ``uses_techniques``
+    claim of a ThreatActor without its ``EMPLOYS_TECHNIQUE`` or of a Malware or Tool without its
+    ``IMPLEMENTS_TECHNIQUE``, ``match_type`` ``mitre_explicit``) fails every run. On an unlimited run
+    (``collection_limit`` 0) the claims are judged too, as the acceptance verdicts judge them: techniques
+    with phases reach their Tactic and some phase reaches one, MITRE nodes of a label carry
+    ``uses_techniques`` claims, and the graph holds a Technique when the MITRE collector delivered. A
+    collection limit cuts the ATT&CK actors and software and leaves claims without their nodes, so a
+    limited run is judged on the links alone.
+    """
+    from attack_revoked import technique_successors
+    from graph_shape_checks import (
+        EMPLOYS_TECHNIQUE_COMPLETE_QUERY,
+        IMPLEMENTS_TECHNIQUE_COMPLETE_QUERIES,
+        IN_TACTIC_COMPLETE_QUERY,
+        technique_params,
+    )
+
+    violations: list[str] = []
+    recovery_links = (
+        "build_relationships did not link them: clear build_relationships with its downstream tasks "
+        f"({_POSTCHECK_RUNBOOK})"
+    )
+    recovery_claims = (
+        "They were lost between collect_mitre and the graph: read the collect_mitre and full_neo4j_sync logs "
+        f"({_POSTCHECK_RUNBOOK})"
+    )
+    tactics = _row(session, IN_TACTIC_COMPLETE_QUERY)
+    techniques, edge_missing = _num(tactics, "techniques"), _num(tactics, "edge_missing")
+    with_target, tactic_missing = _num(tactics, "claims_with_target"), _num(tactics, "tactic_missing")
+    summary = [
+        f"IN_TACTIC {techniques:,} techniques, {_num(tactics, 'with_phases'):,} with phases, {with_target:,} "
+        f"phases with a Tactic, {edge_missing:,} missing, {tactic_missing:,} techniques without a Tactic"
+    ]
+    if techniques == 0:
+        if unlimited and mitre_items > 0:
+            violations.append(
+                f"[INV-4] ATT&CK shape: the MITRE collector delivered {mitre_items:,} items in this run and the "
+                f"graph holds no Technique. {recovery_claims}."
+            )
+    else:
+        if edge_missing:
+            violations.append(
+                f"[INV-4] IN_TACTIC: {edge_missing:,} of the {with_target:,} kill-chain phases whose Tactic exists "
+                f"have no IN_TACTIC link (e.g. {_examples(tactics)}). {recovery_links}."
+            )
+        if unlimited and (tactic_missing or not with_target):
+            violations.append(
+                f"[INV-4] tactic claims: of {techniques:,} techniques {_num(tactics, 'with_phases'):,} carry "
+                f"tactic_phases, {with_target:,} phases reach a Tactic and {tactic_missing:,} techniques with "
+                "phases reach none; an unlimited run collects every technique with its phases and every tactic. "
+                f"{recovery_claims}."
+            )
+
+    revoked = technique_params(technique_successors())
+    claim_rows = {("ThreatActor", "EMPLOYS_TECHNIQUE"): _row(session, EMPLOYS_TECHNIQUE_COMPLETE_QUERY, revoked)}
+    for label, query in IMPLEMENTS_TECHNIQUE_COMPLETE_QUERIES.items():
+        claim_rows[(label, "IMPLEMENTS_TECHNIQUE")] = _row(session, query, revoked)
+    for (label, rel_type), row in claim_rows.items():
+        claims, mitre_nodes = _num(row, "claims"), _num(row, "mitre_nodes")
+        with_target, edge_missing = _num(row, "claims_with_target"), _num(row, "edge_missing")
+        summary.append(
+            f"{rel_type} from {label} {claims:,} claims, {with_target:,} with a Technique, {edge_missing:,} "
+            f"missing, {mitre_nodes:,} MITRE nodes"
+        )
+        if edge_missing:
+            violations.append(
+                f"[INV-4] {rel_type} (mitre_explicit): {edge_missing:,} of the {with_target:,} uses_techniques "
+                f"claims of {label} nodes whose Technique exists have no link (e.g. {_examples(row)}). "
+                f"{recovery_links}."
+            )
+        if unlimited and not claims and mitre_nodes:
+            violations.append(
+                f"[INV-4] {label} claims: {mitre_nodes:,} MITRE {label} nodes and not one uses_techniques claim; "
+                f"an unlimited run collects every claim. {recovery_claims}."
+            )
+    logger.info(
+        "[BASELINE-POSTCHECK] INV-4 ATT&CK shape (%s; MITRE delivered %d items): %s",
+        "unlimited run" if unlimited else "limited run: links only",
+        mitre_items,
+        "; ".join(summary),
+    )
+    return violations
+
+
+def _cve_score_violations(session, *, nvd_items: int) -> list[str]:
+    """INV-5 (2026-11-02): the share of NVD's non-rejected CVEs with a CVSS sub-node, judged when the NVD
+    collector delivered in this run and the graph holds at least ``CVE_CVSS_COVERAGE_MIN_CVES`` of them
+    (``graph_shape_checks.cvss_coverage_verdict``, the acceptance verdict)."""
+    from graph_shape_checks import CVE_CVSS_COVERAGE_MIN_SHARE, CVE_CVSS_COVERAGE_QUERY, cvss_coverage_verdict
+
+    if nvd_items <= 0:
+        logger.info("[BASELINE-POSTCHECK] INV-5 CVE score coverage: not judged, the NVD collector delivered nothing")
+        return []
+    row = _row(session, CVE_CVSS_COVERAGE_QUERY)
+    judged, scored = _num(row, "nvd_cves_not_rejected"), _num(row, "nvd_cves_with_cvss")
+    share = scored / judged if judged else 0.0
+    verdict = cvss_coverage_verdict(row)
+    logger.info(
+        "[BASELINE-POSTCHECK] INV-5 CVE score coverage: %d of %d non-rejected NVD CVEs have a CVSS sub-node (%.3f)%s",
+        scored,
+        judged,
+        share,
+        "; not judged, too few CVEs" if verdict is None else "",
+    )
+    if verdict is not False:
+        return []
+    return [
+        f"[INV-5] CVE score coverage: {scored:,} of the {judged:,} non-rejected NVD CVEs have a CVSS sub-node "
+        f"({share:.3f}; at least {CVE_CVSS_COVERAGE_MIN_SHARE} required) after the NVD collector delivered "
+        f"{nvd_items:,} items in this run. The scores were not written: read the full_neo4j_sync log (CVE batch "
+        f"errors) and the collect_nvd log, then clear full_neo4j_sync with its downstream tasks "
+        f"({_POSTCHECK_RUNBOOK})."
+    ]
+
+
+def _source_delivery_violations(session, outcomes: dict[str, dict]) -> list[str]:
+    """INV-6 (2026-11-02): what this run's collectors delivered reached the graph.
+
+    (a) A collector task that succeeded with a status of ``success``, not ``skipped``, and a ``count`` above 0
+        leaves at least ``SOURCE_DELIVERY_MIN_SHARE`` of that count in SOURCED_FROM edges at its Source node
+        (the canonical id of the status's ``source``, ``source_registry.get_source``).
+    (b) A source named in ``EDGEGUARD_BASELINE_REQUIRED_SOURCES`` (the keyed sources ``source_key_check``
+        accepts) that has a collector task in this DAG holds a SOURCED_FROM edge; VirusTotal has none and is
+        not judged. A source not named there may be skipped or fail without failing the run.
+    (c) One WARNING table lists the collectors that were skipped (with ``skip_reason_class``) or failed.
+    """
+    from graph_shape_checks import SOURCE_DELIVERY_MIN_SHARE, SOURCE_SOURCED_FROM_QUERY, source_delivery_verdict
+    from source_key_check import KEYED_SOURCES, required_sources
+    from source_registry import get_source
+
+    sourced_from = {
+        r.get("source_id"): int(r.get("sourced_from") or 0) for r in session.run(SOURCE_SOURCED_FROM_QUERY).data()
+    }
+    undelivered = [(o["task_id"], reason) for o in outcomes.values() if (reason := _undelivered_reason(o))]
+    if undelivered:
+        logger.warning(
+            "[BASELINE-POSTCHECK] collectors that delivered nothing in this run (a failure of the run only for a "
+            "source named in EDGEGUARD_BASELINE_REQUIRED_SOURCES):\n%s",
+            "\n".join(f"  {task_id:<36} {reason}" for task_id, reason in undelivered),
+        )
+
+    violations: list[str] = []
+    summary: list[str] = []
+    for name, outcome in outcomes.items():
+        items = _delivered_items(outcome)
+        if not items:
+            continue
+        task_id, source_name = outcome["task_id"], str(outcome["status"].get("source") or name)
+        src = get_source(source_name)
+        if src is None:
+            violations.append(
+                f"[INV-6] {task_id} delivered {items:,} items under the source name '{source_name}', which "
+                f"src/source_registry.py does not know: no Source node holds them ({_POSTCHECK_RUNBOOK})."
+            )
+            continue
+        edges = sourced_from.get(src.canonical_id, 0)
+        summary.append(f"{src.canonical_id} {edges:,}/{items:,}")
+        if source_delivery_verdict(items, edges) is False:
+            violations.append(
+                f"[INV-6] {src.canonical_id}: {edges:,} SOURCED_FROM edges for the {items:,} items {task_id} "
+                f"delivered in this run ({edges / items:.3f}; at least {SOURCE_DELIVERY_MIN_SHARE} required). Items "
+                "were lost in the MISP push or in full_neo4j_sync: compare the collector's count with the source's "
+                "MISP events, clear the collector task alone when MISP lacks them, then full_neo4j_sync with its "
+                f"downstream tasks ({_POSTCHECK_RUNBOOK})."
+            )
+
+    keyed = {source for keyed_source in KEYED_SOURCES for source in keyed_source.sources}
+    named = sorted(name for name in required_sources() if name in keyed)  # source_key_check ignores the rest
+    for name in named:
+        if name not in _BASELINE_COLLECTOR_TASKS:
+            logger.info(
+                "[BASELINE-POSTCHECK] INV-6: %s (EDGEGUARD_BASELINE_REQUIRED_SOURCES) is not judged: the baseline "
+                "DAG has no collector for it",
+                name,
+            )
+    required = [name for name in named if name in _BASELINE_COLLECTOR_TASKS]
+    for name in required:
+        outcome = outcomes.get(name)
+        if _delivered_items(outcome):
+            continue  # judged by (a)
+        src = get_source(name)
+        canonical = src.canonical_id if src else name
+        edges = sourced_from.get(canonical, 0)
+        if edges == 0:
+            task_id = _BASELINE_COLLECTOR_TASKS[name]
+            violations.append(
+                f"[INV-6] {name} is named in EDGEGUARD_BASELINE_REQUIRED_SOURCES and {canonical} holds no "
+                f"SOURCED_FROM edge ({task_id}: {_undelivered_reason(outcome) or 'delivered 0 items'}). Correct the "
+                f"cause (key, outage), clear {task_id} alone, then full_neo4j_sync with its downstream tasks "
+                f"({_POSTCHECK_RUNBOOK})."
+            )
+    logger.info(
+        "[BASELINE-POSTCHECK] INV-6 delivery (SOURCED_FROM edges / items delivered): %s; required sources: %s",
+        ", ".join(summary) or "no collector delivered",
+        ", ".join(required) or "none",
+    )
+    return violations
+
+
 def assert_baseline_postconditions(**context):
     """PR-N21: post-baseline data-integrity assertion.
 
@@ -3168,6 +3461,27 @@ def assert_baseline_postconditions(**context):
       [INV-3] Source > 0.
         Bootstrap created the Source nodes. Zero Sources means
         ``ensure_sources()`` never ran.
+
+      [INV-4] ATT&CK shape (2026-11-02, ``_attack_shape_violations``).
+        Every kill-chain phase whose Tactic exists has its IN_TACTIC, every
+        ``uses_techniques`` claim whose Technique exists its mitre_explicit
+        EMPLOYS_TECHNIQUE (ThreatActor) or IMPLEMENTS_TECHNIQUE (Malware, Tool);
+        on an unlimited run the claims themselves are present as well.
+
+      [INV-5] CVE score coverage (2026-11-02, ``_cve_score_violations``).
+        When NVD delivered in this run: at least half of NVD's non-rejected
+        CVEs (from 100) have a CVSS sub-node.
+
+      [INV-6] Delivery (2026-11-02, ``_source_delivery_violations``).
+        What each collector of this run delivered reached its Source node
+        (SOURCED_FROM >= 0.9 x its count), and every source named in
+        ``EDGEGUARD_BASELINE_REQUIRED_SOURCES`` holds data; the collectors
+        that delivered nothing are listed in one WARNING table.
+
+    INV-4 to INV-6 run the statements of ``graph_shape_checks`` that the
+    acceptance script runs. A failed run keeps the baseline lock
+    (``baseline_release_lock`` runs only after a successful run);
+    docs/RUNBOOK.md § 7d gives the recovery of each invariant.
 
     PR-N27 (Bravo's 2026-04-23 post-mortem follow-up): pre-N27 the task
     was gated by ``trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS`` (PR-N24 H2)
@@ -3344,12 +3658,26 @@ def assert_baseline_postconditions(**context):
                     "Run `python -m src.neo4j_client --bootstrap-sources` and re-trigger enrichment."
                 )
 
+            # INV-4 to INV-6 (2026-11-02): the links the writers derive from the claims on the nodes, the
+            # CVE scores and what this run's collectors delivered. INV-3 holds once the sync connects
+            # (``ensure_sources`` creates every Source node before an event is read).
+            outcomes = _baseline_collector_outcomes(context)
+            unlimited = get_baseline_config(context=context)[0] is None
+            violations.extend(
+                _attack_shape_violations(session, unlimited=unlimited, mitre_items=_delivered_items(outcomes["mitre"]))
+            )
+            violations.extend(_cve_score_violations(session, nvd_items=_delivered_items(outcomes["nvd"])))
+            violations.extend(_source_delivery_violations(session, outcomes))
+
         if violations:
             joined = "\n  - " + "\n  - ".join(violations)
             logger.error("[BASELINE-POSTCHECK] %d invariant violation(s):%s", len(violations), joined)
+            invariants = sorted({v[1 : v.index("]")] for v in violations if v.startswith("[") and "]" in v})
             raise AirflowException(
-                f"Baseline post-check failed ({len(violations)} violations). "
-                "DAG marked FAILED so the operator sees this immediately. Details above."
+                f"Baseline post-check failed ({len(violations)} violations) — {', '.join(invariants)}. "
+                "DAG marked FAILED so the operator sees this immediately. Details above. The baseline lock stays "
+                "held (baseline_release_lock runs only after a successful run): "
+                f"{_POSTCHECK_RUNBOOK} gives the recovery of each invariant."
             )
 
         logger.info(

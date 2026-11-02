@@ -2902,6 +2902,22 @@ class TestGraphShape:
         assert seen[gsc.SECTOR_LINKS_COMPLETE_QUERY] == {"sector_zones": ["energy", "finance", "healthcare"]}
         assert seen[gsc.CVE_CVSS_COVERAGE_QUERY] in (None, {})
 
+    def test_the_script_reads_the_source_rows_the_baseline_postcheck_reads(self, vfb, monkeypatch):
+        """2026-11-02: checks 12c, 12d and 15 read the SOURCED_FROM edges per Source node with the statement the
+        baseline DAG's postcheck (INV-6) runs, ``graph_shape_checks.SOURCE_SOURCED_FROM_QUERY``."""
+        import graph_shape_checks as gsc
+
+        seen: List[str] = []
+
+        def fake_post(statement, params=None, timeout=180):
+            seen.append(statement)
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        rep = vfb.run_checks(False, False, False, False)
+        assert seen.count(gsc.SOURCE_SOURCED_FROM_QUERY) == 1
+        assert _check(rep, "default_sources_delivered")["detail"]["sourced_from_by_source"] == _SOURCE_ROWS
+
 
 class TestInTacticComplete:
     def test_a_phase_without_its_link_fails_and_names_the_technique(self, vfb, monkeypatch):
