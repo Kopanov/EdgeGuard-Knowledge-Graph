@@ -36,34 +36,21 @@ sys.path.insert(0, "src")
 
 
 class TestOtxCursorAdvanceUsesProcessedSet:
-    """``_advance_otx_incremental_cursor`` must fall back to the truncated
-    ``to_process`` list when ``successful_pulses`` is None — not the FULL
-    fetched ``pulses`` list. The previous bug advanced the cursor past
-    the latest-modified timestamp of pulses we never actually processed,
-    silently losing them on the next incremental run."""
+    """The OTX cursor advances over the pulses the run processed (``to_process``), not over every pulse it
+    read (``pulses``). The previous bug advanced the cursor past the latest-modified timestamp of pulses we
+    never actually processed, silently losing them on the next incremental run."""
 
-    def test_otx_collector_source_uses_to_process_not_pulses(self):
-        """Source-pin (acknowledged trade-off): the closure can't be
-        unit-tested without instantiating the entire collector + mocking
-        OTX HTTP. Pin the actual line that addresses the bug.
+    def test_the_cursor_advances_over_the_pulses_processed_not_over_every_pulse_read(self, caplog):
+        """Behaviour, not source (2026-11-02: the cursor is now computed by ``_cursor_after`` in ``collect``, and
+        ``test_otx_incremental_order.py`` drives ``collect`` with an OTX double): 60 pulses read and a limit of
+        20, so the run processes the 20 oldest (fixture rows 40-59). The cursor goes to row 40, the newest pulse
+        processed; taken over every pulse read, it would go to row 0 and pass the 40 pulses left to the next
+        run."""
+        from test_otx_incremental_order import ROWS, _collect, _Otx, _recorded
 
-        If a future refactor renames `to_process` or changes the closure
-        shape, this test fires. The literal-pin is justified because
-        the bug is silent data loss in the most-common operational mode."""
-        with open("src/collectors/otx_collector.py") as fh:
-            src = fh.read()
-
-        # Strip comment lines so the explanatory comment doesn't false-pass
-        code_only = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-
-        # Negative — the buggy fallback must not be in code
-        assert "source = successful_pulses if successful_pulses is not None else pulses" not in code_only, (
-            "BH-H1: cursor advance must use `to_process` (truncated set), not full `pulses`"
-        )
-        # Positive — the fixed fallback must be present
-        assert "source = successful_pulses if successful_pulses is not None else to_process" in code_only, (
-            "expected `else to_process` fallback (the truncated set after EDGEGUARD_INCREMENTAL_LIMIT)"
-        )
+        run = _collect(_Otx(_recorded(range(60))), {}, caplog, limit=20)
+        assert run.status["pulse_counts"]["deferred"] == 40
+        assert run.cursor == ROWS[40]["modified"] != ROWS[0]["modified"]
 
 
 # ---------------------------------------------------------------------------

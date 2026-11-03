@@ -584,10 +584,21 @@ def _wipe_checkpoints() -> None:
     Uses ``include_incremental=True`` so the "true clean slate" semantics
     promised by docs/AIRFLOW_DAGS.md are honored (operator triggering
     fresh-baseline expects EVERYTHING gone, not just baseline cursors).
+
+    2026-11-02: the OTX retry list (``otx_retry_pulses``) goes with the incremental state, so its gauges
+    are set to an empty list here; otherwise they kept the list until the first scheduled OTX run after the
+    baseline, and ``EdgeGuardOtxRetryPulsesWaiting`` could fire for a list that no longer exists. A
+    metrics failure is logged at DEBUG and never fails the wipe.
     """
     from baseline_checkpoint import clear_checkpoint
 
     clear_checkpoint(include_incremental=True)
+    try:
+        from metrics_server import record_otx_retry_list
+
+        record_otx_retry_list(0, 0.0, 0)
+    except Exception as exc:
+        logger.debug("OTX retry gauges not reset: %s", exc)
 
 
 # Neo4j wipe scope of the destructive step (2026-10, shared-database contract). On a database

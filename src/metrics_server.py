@@ -9,6 +9,8 @@ Metrics exposed:
 - edgeguard_indicators_collected_total - Total indicators collected by source/zone
 - edgeguard_collection_failures_total - Collection failures by source
 - edgeguard_collection_duration_seconds - Collection duration histogram
+- edgeguard_otx_retry_pulses / edgeguard_otx_retry_oldest_failure_timestamp_seconds - OTX retry list after a run
+- edgeguard_otx_retry_given_up_total - OTX pulses given up from the retry list
 - edgeguard_misp_events_total - MISP events by source
 - edgeguard_misp_attributes_total - MISP attributes by type
 - edgeguard_neo4j_nodes - Neo4j node counts by label
@@ -105,6 +107,34 @@ COLLECTOR_LAST_RUN_OUTCOME = Gauge(
     "collected, empty (success, nothing collected), not_modified (HTTP 304), skipped, failed",
     ["source", "outcome"],
     multiprocess_mode="mostrecent",
+)
+
+# 2026-11-02: the OTX retry list (``otx_collector``). A scheduled OTX run whose push left items unstored in
+# batches MISP answered moves its cursor on and puts the pulses of those items on a list in the incremental
+# state; each later run fetches some of them by id and pushes them again. The gauges are set after every
+# scheduled run and by the fresh baseline's wipe (``baseline_clean._wipe_checkpoints``), the counter counts the
+# pulses a run gave up (older than EDGEGUARD_OTX_RETRY_MAX_DAYS and tried since, or beyond
+# EDGEGUARD_OTX_RETRY_MAX_PULSES), which no scheduled run collects any more. Read by
+# EdgeGuardOtxRetryPulsesWaiting and EdgeGuardOtxRetryPulsesGivenUp.
+OTX_RETRY_PULSES = Gauge(
+    "edgeguard_otx_retry_pulses",
+    "OTX pulses on the retry list after the latest scheduled OTX run: pulses with items MISP did not store, "
+    "which later runs fetch by id and push again",
+    multiprocess_mode="mostrecent",
+)
+
+OTX_RETRY_OLDEST_FAILURE = Gauge(
+    "edgeguard_otx_retry_oldest_failure_timestamp_seconds",
+    "First failure (Unix time) of the pulse that has waited longest on the OTX retry list after the latest "
+    "scheduled OTX run; 0 when the list is empty",
+    multiprocess_mode="mostrecent",
+)
+
+OTX_RETRY_GIVEN_UP = Counter(
+    "edgeguard_otx_retry_given_up_total",
+    "OTX pulses given up from the retry list ([OTX-RETRY-GAVE-UP]): still failing EDGEGUARD_OTX_RETRY_MAX_DAYS "
+    "after their first failure, or beyond EDGEGUARD_OTX_RETRY_MAX_PULSES; a baseline whose window reaches their "
+    "modified collects them again",
 )
 
 COLLECTION_DURATION = Histogram(
@@ -821,6 +851,15 @@ def record_collector_outcome(source: str, outcome: str) -> None:
         raise ValueError(f"unknown collector outcome {outcome!r}; expected one of {COLLECTOR_RUN_OUTCOMES}")
     for candidate in COLLECTOR_RUN_OUTCOMES:
         COLLECTOR_LAST_RUN_OUTCOME.labels(source=source, outcome=candidate).set(1 if candidate == outcome else 0)
+
+
+def record_otx_retry_list(pending: int, oldest_first_failure: float, given_up: int) -> None:
+    """Record the OTX retry list after a scheduled OTX run (2026-11-02): the pulses on it, the first failure
+    (Unix time, 0 for an empty list) of the one that has waited longest, and the pulses the run gave up."""
+    OTX_RETRY_PULSES.set(max(0, pending))
+    OTX_RETRY_OLDEST_FAILURE.set(oldest_first_failure if pending > 0 else 0)
+    if given_up > 0:
+        OTX_RETRY_GIVEN_UP.inc(given_up)
 
 
 def record_collection_duration(source: str, zone: str, duration: float):
