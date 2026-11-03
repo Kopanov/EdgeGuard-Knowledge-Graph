@@ -971,12 +971,15 @@ class NVDCollector:
 
         added = add_failed = 0
         not_written: List[str] = []  # CVE ids whose addition or edit MISP did not confirm
+        # 2026-11-03: the push stopped because MISP kept failing (``MISPWriter.last_push_stopped``).
+        push_stopped = False
         if to_add:
             stats = self.misp_writer.stats if isinstance(getattr(self.misp_writer, "stats", None), dict) else {}
             unconfirmed_before = int(stats.get("attributes_unconfirmed", 0) or 0)
             unverified_before = int(stats.get("batches_unverified", 0) or 0)
             known_keys = {("vulnerability", value) for value in (known or {})}
             added, add_failed = self.misp_writer.push_items(to_add, known_source_keys={source_tag: known_keys})
+            push_stopped = add_failed > 0 and getattr(self.misp_writer, "last_push_stopped", False) is True
             unconfirmed = int(stats.get("attributes_unconfirmed", 0) or 0) - unconfirmed_before
             unverified = int(stats.get("batches_unverified", 0) or 0) - unverified_before
             if add_failed or unconfirmed or unverified:
@@ -994,15 +997,27 @@ class NVDCollector:
                 not_written.extend(missing)
         updated = update_failed = 0
         pause = misp_batch_throttle_seconds()
-        for done, (cve_id, stored_copy, changes) in enumerate(edits, 1):
-            if self.misp_writer.update_attribute(stored_copy.uuid, changes):
-                updated += 1
-            else:
-                update_failed += 1
-                not_written.append(cve_id)
-            if pause and done % EDITS_PER_THROTTLE == 0 and done < len(edits):
-                # Paced like push_items' batches: EDGEGUARD_MISP_BATCH_THROTTLE_SEC after every 50 edits.
-                time.sleep(pause)
+        if push_stopped and edits:
+            # 2026-11-03: the edits have no stop rule of their own (up to EDGEGUARD_NVD_MAX_PER_RUN, each with three
+            # attempts); after a push that stopped on a failing MISP none is attempted. They count as not written,
+            # so the cursor stays and the next run plans them again.
+            update_failed = len(edits)
+            not_written.extend(cve_id for cve_id, _stored_copy, _changes in edits)
+            logger.error(
+                "NVD incremental: the MISP push stopped because MISP kept failing ([MISP-PUSH-STOPPED]); the %d "
+                "planned edit(s) of stored CVEs are not attempted and count as not written",
+                len(edits),
+            )
+        else:
+            for done, (cve_id, stored_copy, changes) in enumerate(edits, 1):
+                if self.misp_writer.update_attribute(stored_copy.uuid, changes):
+                    updated += 1
+                else:
+                    update_failed += 1
+                    not_written.append(cve_id)
+                if pause and done % EDITS_PER_THROTTLE == 0 and done < len(edits):
+                    # Paced like push_items' batches: EDGEGUARD_MISP_BATCH_THROTTLE_SEC after every 50 edits.
+                    time.sleep(pause)
         failed = add_failed + update_failed
 
         new_cursor = stopped_at or now

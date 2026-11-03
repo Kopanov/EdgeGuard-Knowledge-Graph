@@ -578,7 +578,10 @@ class TestFailures:
 
         def liveness():
             calls.append(1)
-            if len(calls) == 5:  # the second 30 s chunk of the cooldown
+            # Calls 1-3: part 1's batches; call 4: the first 30 s chunk of the cooldown. FakeMisp answers the probe
+            # that follows that chunk (2026-11-03, ``_misp_answers``), which ends the cooldown, so a later call
+            # would be the check before part 2's first batch, after the cooldown.
+            if len(calls) == 4:
                 raise Aborted()
 
         writer.liveness_callback = liveness

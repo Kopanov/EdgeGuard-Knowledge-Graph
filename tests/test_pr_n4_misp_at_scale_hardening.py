@@ -239,6 +239,8 @@ class TestRunbookExistsAndCoversCriticalSettings:
             "EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD",
             "EDGEGUARD_MISP_BACKOFF_THRESHOLD",
             "EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC",
+            "EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC",
+            "EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE",
         ):
             assert env in src, f"runbook missing env knob: {env}"
 

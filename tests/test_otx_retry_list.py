@@ -340,7 +340,7 @@ def test_a_value_misp_refuses_fails_its_batch_and_the_retries_in_batches_of_thei
     with patch("collectors.collector_utils.time.sleep"):
         first = _collect(otx, state, caplog, limit=20, writer=writer)
     assert sorted(first.processed) == sorted(_ids(range(8)))
-    assert counts == [(0, 8)] and misp.refused_attempts == 5
+    assert counts == [(0, 8)] and misp.refused_attempts == 4
     assert writer.last_push_unstored_items == list(range(8)) and writer.last_push_event_failed_items == []
     assert first.cursor == ROWS[0]["modified"]
     assert _listed(first) == sorted(_ids(range(8)))
@@ -348,7 +348,7 @@ def test_a_value_misp_refuses_fails_its_batch_and_the_retries_in_batches_of_thei
     with patch("collectors.collector_utils.time.sleep"):
         second = _collect(otx, state, caplog, limit=20, writer=writer)
     assert sorted(otx.by_id_requests) == sorted(_ids(range(2, 8)))
-    assert counts[1] == (7, 1) and misp.refused_attempts == 10
+    assert counts[1] == (7, 1) and misp.refused_attempts == 8
     assert misp.batch_no == 7, "seven batches stored, one per pulse"
     assert _misp_values(misp) == {_value(i) for i in range(8)} - {_value(2)}
     assert _listed(second) == [IDS[2]] and second.retry[0]["attempts"] == 2
@@ -380,7 +380,7 @@ def test_while_misp_refuses_a_listed_pulse_the_new_pulses_are_stored_and_the_cur
     with patch("collectors.collector_utils.time.sleep"):
         runs = [_collect(otx, state, caplog, limit=20, writer=writer) for _ in range(3)]
 
-    assert counts == [(0, 1), (20, 0), (0, 1), (19, 0), (0, 1)] and misp.refused_attempts == 15
+    assert counts == [(0, 1), (20, 0), (0, 1), (19, 0), (0, 1)] and misp.refused_attempts == 12
     assert [r.cursor for r in runs] == [ROWS[39]["modified"], ROWS[19]["modified"], ROWS[0]["modified"]]
     assert [[(e["id"], e["attempts"]) for e in r.retry] for r in runs] == [[(IDS[39], n)] for n in (1, 2, 3)]
     assert otx.by_id_requests == [IDS[39]], "read in the window on run 2, fetched by id on run 3"
@@ -1163,10 +1163,13 @@ def test_the_push_of_the_listed_pulses_stops_at_its_time_budget_and_the_others_k
 
     The window is pushed first and its 20 items (pulse 50's aside) are stored; the cursor advances to pulse 39.
     The twenty pulses fetched by id and pulse 50 are pushed after it, each in a batch of its own, those tried
-    longest ago first, pulse 50 last. Each batch takes 150 s of back-off over its five attempts (the clock sums
-    the pauses; the requests take no time here); before the fourth, the cooldown and the throttle would end past
-    the budget, so the push stops after three pulses, about 460 s after it began. The three pulses pushed count
-    an attempt; the eighteen others keep their entries unchanged and are pushed first by the next run.
+    longest ago first, pulse 50 last. Each batch takes 70 s of back-off over its four attempts (the clock sums
+    the pauses; the requests take no time here). The cooldown after the third ends after its first 30 s step,
+    because MISP answers the light request the writer then sends (2026-11-03, ``_misp_answers``: MISP refuses
+    the batches, not every request). Before the seventh batch the throttle and the next cooldown would end past
+    the budget, so the push stops after six pulses, about 490 s after it began; the push's cap on failure time
+    (900 s) is not reached. The six pulses pushed count an attempt; the fifteen others keep their entries
+    unchanged and are pushed first by the next run.
 
     The earlier revision pushed the twenty pulses' batches one after another in the window's push: about 5,000 s
     of pauses (cooldowns every three batches), past the task's one-hour limit, so the run was killed before it
@@ -1203,24 +1206,234 @@ def test_the_push_of_the_listed_pulses_stops_at_its_time_budget_and_the_others_k
     assert [n for n, _start, _end in calls] == [20, 21], "the window's push, then the listed pulses' push"
     assert counts[0] == (20, 0) and run.cursor == ROWS[39]["modified"]
     (_n, retry_start, retry_end) = calls[1]
-    assert 460 <= retry_end - retry_start <= 480, "three batches: 3 x 150 s + 2 x 5 s, and the rate limiter"
-    assert misp.refused_attempts == 15 and counts[1] == (0, 3)
+    assert 475 <= retry_end - retry_start <= 500, (
+        "six batches: 6 x 70 s + 5 x 5 s + 30 s of cooldown, and the rate limiter"
+    )
+    assert misp.refused_attempts == 24 and counts[1] == (0, 6)
+    assert writer.last_push_stopped is False, "the time budget, not the cap on failure time, ended the push"
 
     by_id = {e["id"]: e for e in run.retry}
-    pushed = [p["id"] for p in listed[:3]]
+    pushed = [p["id"] for p in listed[:6]]
     assert all(by_id[pid]["attempts"] == 5 and _utc(by_id[pid]["last_tried_at"]) > _utc(_ago(0.01)) for pid in pushed)
-    assert [by_id[e["id"]] for e in entries[3:]] == entries[3:], "the others keep their entries unchanged"
-    assert run.status["pulse_counts"]["retry_fetched"] == 20 and run.status["pulse_counts"]["retry_not_pushed"] == 18
+    assert [by_id[e["id"]] for e in entries[6:]] == entries[6:], "the others keep their entries unchanged"
+    assert run.status["pulse_counts"]["retry_fetched"] == 20 and run.status["pulse_counts"]["retry_not_pushed"] == 15
     (budget_line,) = [m for m in run.warnings if "reached its time budget" in m]
     assert budget_line.startswith(
         "[OTX-RETRY] OTX: the push of the retry list's pulses reached its time budget "
         "(EDGEGUARD_OTX_RETRY_MAX_SECONDS=600) after 4"
     )
-    assert "18 pulse(s) were not pushed; they keep their entries and are pushed first by the next run" in budget_line
+    assert "15 pulse(s) were not pushed; they keep their entries and are pushed first by the next run" in budget_line
 
     nxt = _collect(otx, state, caplog, limit=20, writer=writer, sleep=clock.sleep)
     tried_again = sorted(e["id"] for e in nxt.retry if e["attempts"] == 5 and e["id"] not in pushed)
-    assert tried_again == sorted(p["id"] for p in listed[3:6]), "the pulses not pushed go first"
+    assert tried_again == sorted(p["id"] for p in listed[6:12]), "the pulses not pushed go first"
+
+
+# --------------------------------------------------------------------------- a push that stopped (2026-11-03)
+
+
+def test_a_window_push_that_stopped_holds_the_pulses_of_the_items_it_did_not_send(caplog, monkeypatch):
+    """``MISPWriter`` with one item a batch and its cap on failure time at the default (900 s). A baseline stored
+    pulses 52-59; the cursor is at pulse 59 with a limit of 20, so the window holds pulses 39-58 (59 re-read).
+    Pulse 50 is on the list (first failed 8 days ago, last tried 7.5 days ago) and shares its only value with
+    pulse 51, so that item goes in the window's push; a pulse outside the window is on the list too. MISP answers
+    HTTP 500 to every batch of pulses 39-51 and of the listed pulse, and answers light requests.
+
+    The window's push sends nine batches (pulses 39-47), each failing after its four attempts, and stops before
+    the tenth, when the cooldown due would take the failing streak past 900 s: the items of pulses 48-51 are not
+    sent. Those pulses are held as after a failure at the MISP event: the cursor moves below the oldest of them
+    (to pulse 52), and none goes on the list. Pulses 39-47, whose batches MISP answered with an error, go on it.
+    The push of the list's pulses does not run, and both listed pulses keep their entries unchanged, pulse 50
+    not given up. Before the change every batch was sent and failed: the cursor advanced to pulse 39 and pulses
+    39-51 went on the list."""
+    pulses = _recorded(range(60))
+    pulses[50]["indicators"][0]["indicator"] = _value(51)
+    (outside,) = _listed_pulses(1)
+    misp = _HoldingMisp(refused_values=(*(_value(i) for i in range(39, 52)), outside["indicators"][0]["indicator"]))
+    _baseline(pulses[52:], misp, caplog)
+    clock = _on_the_clock(monkeypatch)
+    monkeypatch.setenv("EDGEGUARD_MISP_PUSH_BATCH_SIZE", "1")
+    otx = _Otx(pulses)
+    otx.by_id_only = {outside["id"]: outside}
+    entries = [
+        _entry(50, days=8, attempts=3, tried_days=7.5),
+        {
+            "id": outside["id"],
+            "modified": outside["modified"],
+            "first_failed_at": _ago(3),
+            "last_tried_at": _ago(2),
+            "attempts": 4,
+            "last_reason": "1 item(s) listed as unstored; an earlier run",
+        },
+    ]
+    state: Dict[str, Any] = {
+        "otx_last_pulse_modified": ROWS[59]["modified"],
+        "otx_retry_pulses": copy.deepcopy(entries),
+    }
+    writer = _writer(misp)
+    counts = _counted(writer)
+    given_up = _sample(GIVEN_UP)
+    run = _collect(otx, state, caplog, limit=20, writer=writer, sleep=clock.sleep)
+
+    assert counts == [(0, 12)], "the window's push only: 9 items sent and failed, 3 not sent"
+    assert misp.refused_attempts == 36 and writer.last_push_stopped is True
+    assert run.cursor == ROWS[52]["modified"], "below pulse 51, the oldest pulse with an item not sent"
+    by_id = {e["id"]: e for e in run.retry}
+    assert sorted(by_id) == sorted([*_ids(range(39, 48)), IDS[50], outside["id"]])
+    assert [by_id[e["id"]] for e in entries] == entries, "the listed pulses keep their entries"
+    assert all(by_id[IDS[i]]["attempts"] == 1 for i in range(39, 48))
+    assert _sample(GIVEN_UP) == given_up
+    assert run.status["success"] is False and run.status["failed"] == 12
+    counts_of_run = run.status["pulse_counts"]
+    assert counts_of_run["held_unsent"] == 4 and counts_of_run["retry_added"] == 9
+    assert counts_of_run["retry_not_pushed"] == 2
+    (held,) = [m for m in run.warnings if "the MISP push stopped because MISP kept failing" in m]
+    assert held.startswith(
+        "[OTX-RETRY] OTX: the MISP push stopped because MISP kept failing ([MISP-PUSH-STOPPED]): the items of 4 "
+        "pulse(s) of the window were not sent; those pulses do not go on the retry list, and the cursor moves to "
+        f"{ROWS[52]['modified']}, below the oldest pulse of the window with an item not sent"
+    )
+
+
+def test_a_window_push_that_stopped_with_a_row_without_an_id_keeps_the_listed_pulse_it_did_not_send(
+    caplog, monkeypatch
+):
+    """The test above with pulse 49 an OTX row without an id. Its item is not sent and names no pulse, so the
+    push's failures are unknown: the cursor stays and no pulse goes on the list, as #302 rules. Pulse 50 is on the
+    list, and its only item (shared with pulse 51) is not sent either: it keeps its entry unchanged, with no
+    attempt and no ``last_tried_at``, and is not given up by age although it first failed eight days ago. Before
+    the fix the unknown failures took the branch without the stop, and pulse 50 got an attempt and was given up
+    with ``[OTX-RETRY-GAVE-UP]`` although none of its items reached MISP."""
+    pulses = _recorded(range(60))
+    pulses[50]["indicators"][0]["indicator"] = _value(51)
+    pulses[49]["id"] = None
+    (outside,) = _listed_pulses(1)
+    misp = _HoldingMisp(refused_values=(*(_value(i) for i in range(39, 52)), outside["indicators"][0]["indicator"]))
+    _baseline(pulses[52:], misp, caplog)
+    clock = _on_the_clock(monkeypatch)
+    monkeypatch.setenv("EDGEGUARD_MISP_PUSH_BATCH_SIZE", "1")
+    otx = _Otx(pulses)
+    otx.by_id_only = {outside["id"]: outside}
+    entries = [_entry(50, days=8, attempts=3, tried_days=7.5)]
+    state: Dict[str, Any] = {
+        "otx_last_pulse_modified": ROWS[59]["modified"],
+        "otx_retry_pulses": copy.deepcopy(entries),
+    }
+    writer = _writer(misp)
+    counts = _counted(writer)
+    given_up = _sample(GIVEN_UP)
+    run = _collect(otx, state, caplog, limit=20, writer=writer, sleep=clock.sleep)
+
+    assert counts == [(0, 12)] and writer.last_push_stopped is True
+    assert writer.last_push_unsent_items == [9, 10, 11], "the items of pulses 48, 49 (no id) and 50/51"
+    assert run.cursor == ROWS[59]["modified"], "unknown failures: the cursor stays"
+    assert run.retry == entries, "pulse 50 keeps its entry; no pulse goes on the list"
+    assert _sample(GIVEN_UP) == given_up and not [m for m in run.errors if "OTX-RETRY-GAVE-UP" in m]
+    counts_of_run = run.status["pulse_counts"]
+    assert counts_of_run["held_unsent"] == 3, "pulses 48, 50 and 51; pulse 49 has no id"
+    assert counts_of_run["retry_not_pushed"] == 1 and counts_of_run["retry_given_up"] == 0
+    (line,) = [m for m in run.warnings if "the writer did not name" in m]
+    assert "the push stopped because MISP kept failing ([MISP-PUSH-STOPPED])" in line
+    assert f"those an item not sent names keep their entries (ids: {IDS[50]})" in line
+
+
+def test_a_window_push_that_stopped_without_a_list_of_the_items_it_did_not_send_holds_everything(caplog):
+    """A writer that reports a stop but no list of the items it did not send (a writer double; ``MISPWriter``
+    always gives one): which pulses those items name is unknown, so the cursor stays and no pulse goes on the
+    list, not even the pulses whose items the writer lists as unstored."""
+
+    class _StoppedWithoutList(_Writer):
+        def push_items(self, items, batch_key=None, **kw):
+            result = super().push_items(items, batch_key=batch_key, **kw)
+            self.last_push_stopped = True
+            self.last_push_unsent_items = None
+            return result
+
+    otx = _Otx(_recorded(range(60)))
+    state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[59]["modified"]}
+    run = _collect(otx, state, caplog, limit=20, writer=_StoppedWithoutList(failing=[IDS[44], IDS[45]]))
+    assert run.cursor == ROWS[59]["modified"], "the cursor stays"
+    assert run.retry == [], "no pulse goes on the list"
+    assert run.status["pulse_counts"]["held_unsent"] == 2
+
+
+def test_the_warning_of_a_stopped_window_push_says_which_listed_pulses_keep_their_entries(caplog, monkeypatch):
+    """Pulse 50 is on the list and read in the window; its only value is pulse 51's, sent and stored. The window's
+    push stops later (pulses 55-58 not sent). Pulse 50 leaves the list as recovered, as its items were stored: the
+    WARNING says that the listed pulses an item not sent names keep their entries, not every listed pulse."""
+
+    class _Stopping(_Writer):
+        def push_items(self, items, batch_key=None, **kw):
+            self.pushed += list(items)
+            unsent = [n for n, item in enumerate(items) if item.get("pulse_id") in {IDS[i] for i in range(55, 59)}]
+            self.last_push_unsent_items = unsent
+            self.last_push_unstored_items = list(unsent)
+            self.last_push_event_failed_items = []
+            self.last_push_skipped_items = []
+            self.last_push_stopped = bool(unsent)
+            return len(items) - len(unsent), len(unsent)
+
+    pulses = _recorded(range(60))
+    pulses[50]["indicators"][0]["indicator"] = _value(51)
+    otx = _Otx(pulses)
+    state: Dict[str, Any] = {
+        "otx_last_pulse_modified": ROWS[59]["modified"],
+        "otx_retry_pulses": [_entry(50, days=2, attempts=3, tried_days=1)],
+    }
+    run = _collect(otx, state, caplog, limit=20, writer=_Stopping())
+    assert run.retry == [] and run.status["pulse_counts"]["retry_recovered"] == 1
+    (line,) = [m for m in run.warnings if "the MISP push stopped because MISP kept failing" in m]
+    assert "those an item not sent names keep their entries, and those read in the window otherwise follow" in line
+
+
+def test_a_push_of_the_listed_pulses_that_stopped_keeps_the_entries_of_the_pulses_it_did_not_send(caplog, monkeypatch):
+    """The listed pulses of the time-budget test above, with ``EDGEGUARD_OTX_RETRY_MAX_SECONDS`` out of reach: the
+    window is stored and the cursor advances to pulse 39; the twenty listed pulses fetched by id and pulse 50 are
+    pushed, each in a batch of its own, and MISP answers HTTP 500 to each. After nine batches the cooldown due
+    would take the failing streak past the cap of 900 s, so the push stops. The nine pulses pushed count an
+    attempt; the twelve whose items were not sent keep their entries unchanged and go first at the next run, as
+    after the time budget. Before the change all 21 were pushed, five attempts each, and each counted an
+    attempt."""
+    clock = _on_the_clock(monkeypatch)
+    monkeypatch.setenv("EDGEGUARD_OTX_RETRY_MAX_SECONDS", "100000")
+    listed = _listed_pulses(20)
+    otx = _Otx(_recorded(range(60)))
+    otx.by_id_only = {p["id"]: p for p in listed}
+    entries = [
+        {
+            "id": p["id"],
+            "modified": p["modified"],
+            "first_failed_at": _ago(3),
+            "last_tried_at": _ago(2 - n / 100),
+            "attempts": 4,
+            "last_reason": "1 item(s) listed as unstored; an earlier run",
+        }
+        for n, p in enumerate(listed)
+    ]
+    entries.append({**_entry(50, days=3, attempts=4, tried_days=0.5)})
+    state: Dict[str, Any] = {
+        "otx_last_pulse_modified": ROWS[59]["modified"],
+        "otx_retry_pulses": copy.deepcopy(entries),
+    }
+    misp = _HoldingMisp(refused_values=(*(p["indicators"][0]["indicator"] for p in listed), _value(50)))
+    writer = _writer(misp)
+    counts = _counted(writer)
+    run = _collect(otx, state, caplog, limit=20, writer=writer, sleep=clock.sleep)
+
+    assert counts == [(20, 0), (0, 21)] and run.cursor == ROWS[39]["modified"]
+    assert misp.refused_attempts == 36 and writer.last_push_stopped is True
+    by_id = {e["id"]: e for e in run.retry}
+    pushed = [p["id"] for p in listed[:9]]
+    assert all(by_id[pid]["attempts"] == 5 and _utc(by_id[pid]["last_tried_at"]) > _utc(_ago(0.01)) for pid in pushed)
+    assert [by_id[e["id"]] for e in entries[9:]] == entries[9:], "the others keep their entries unchanged"
+    assert run.status["pulse_counts"]["retry_not_pushed"] == 12 and run.status["pulse_counts"]["held_unsent"] == 0
+    assert not [m for m in run.warnings if "reached its time budget" in m]
+    (stopped,) = [m for m in run.warnings if "the push of the retry list's pulses stopped" in m]
+    assert stopped.startswith(
+        "[OTX-RETRY] OTX: the push of the retry list's pulses stopped because MISP kept failing "
+        "([MISP-PUSH-STOPPED]) after "
+    )
+    assert "12 pulse(s) were not pushed; they keep their entries and are pushed first by the next run" in stopped
 
 
 class _OutOfTime(_Writer):

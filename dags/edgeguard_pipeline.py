@@ -2902,6 +2902,23 @@ def _require_baseline_lock(context, step: str, *, own: bool = False) -> None:
         )
 
 
+def _task_ends_at(context) -> Optional[float]:
+    """When this task's ``execution_timeout`` ends (a ``time.time()`` value; 2026-11-03), or None without one.
+
+    The task's start is the task instance's ``start_date`` when the context gives a timezone-aware one, otherwise
+    now (the callable runs at the start of the task), plus the task's ``execution_timeout``. The baseline's writer
+    stops a push on a failing MISP before this end (``MISPWriter``'s ``task_ends_at``), so the collector returns
+    its status instead of being killed with the push.
+    """
+    limit = getattr((context or {}).get("task"), "execution_timeout", None)
+    if not isinstance(limit, timedelta) or limit.total_seconds() <= 0:
+        return None
+    ti = (context or {}).get("ti") or (context or {}).get("task_instance")
+    started = getattr(ti, "start_date", None)
+    start = started.timestamp() if isinstance(started, datetime) and started.tzinfo is not None else time.time()
+    return start + limit.total_seconds()
+
+
 def run_baseline_collector(collector_name: str, collector_class, context=None, **kwargs):
     """
     Run a single collector in baseline mode.
@@ -2958,7 +2975,9 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
             e,
         )
 
-    writer = MISPWriter(liveness_callback=liveness_cb)
+    # 2026-11-03: the baseline's writer stops a push on a failing MISP after
+    # EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE, and before this task's execution_timeout ends.
+    writer = MISPWriter(liveness_callback=liveness_cb, baseline=True, task_ends_at=_task_ends_at(context))
     logger.info(f"[BASELINE] Starting {collector_name} — limit={limit or 'unlimited'}, baseline_days={baseline_days}")
 
     # Identity of this DAG run: the baseline lock it holds must not skip its own collectors.

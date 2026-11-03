@@ -430,6 +430,20 @@ def test_enriched_hash_is_remembered_only_after_the_misp_push_succeeded(collecto
     assert json.loads(ledger_path.read_text())["looked_up"] == {H1: "ok", H2: "ok"}
 
 
+def test_a_push_that_stopped_on_a_failing_misp_remembers_no_hash(collector, ledger_path: Path) -> None:
+    """2026-11-03: a push that stopped because MISP kept failing (``MISPWriter.last_push_stopped``) counts the items
+    it did not send as failed; the ledger remembers hashes only after a push without failures, so both stay
+    eligible. Guard: the ledger rule is older than the stop."""
+    collector.misp_writer.session.post.return_value = _misp_rows(H1, H2)
+    collector._test_responses.update({H1: FakeResponse(200, _vt_file(H1)), H2: FakeResponse(200, _vt_file(H2))})
+    collector.misp_writer.push_items.return_value = (1, 1)
+    collector.misp_writer.last_push_stopped = True
+    collector.misp_writer.last_push_unsent_items = [1]
+    collector.collect(limit=10, push_to_misp=True)
+    on_disk = json.loads(ledger_path.read_text())
+    assert H1 not in on_disk["looked_up"] and H2 not in on_disk["looked_up"]
+
+
 @pytest.mark.parametrize(
     "error",
     [

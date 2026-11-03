@@ -142,9 +142,9 @@ def test_partly_stored_batch_is_retried_and_reports_what_misp_holds(sleeps):
     writer = _writer(misp)
     with pytest.raises(mw.MispTransientError) as raised:
         writer._push_batch(EVENT, BATCH)
-    assert misp.pushes() == 5, "first attempt + 4 retries, as before"
-    assert len(misp.lookups()) == 5, "each 5xx is looked up"
-    assert [s for s in sleeps if s >= 10.0] == [10.0, 20.0, 40.0, 80.0]
+    assert misp.pushes() == 4, "first attempt + 3 retries"
+    assert len(misp.lookups()) == 4, "each 5xx is looked up"
+    assert [s for s in sleeps if s >= 10.0] == [10.0, 20.0, 40.0]
     stored, unstored = raised.value.stored_after_error
     assert stored == 3
     assert unstored == [a for a in BATCH if a["type"] == "md5"]

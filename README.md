@@ -429,7 +429,7 @@ done
 
 For a fresh baseline triggered this way, set `EDGEGUARD_LAST_BACKUP_AT` in `.env` and run `docker compose up -d airflow` first, unless Neo4j and MISP are empty. The run configuration also takes `baseline_days` and `wipe_scope` ([docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md)).
 
-**4. Monitor.** Watch the `edgeguard` alert groups in Prometheus at `http://localhost:9090` (45 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume; on `EdgeGuardAirflowSchedulerDown` do not pause, since after the restart a paused DAG's run does not continue until it is resumed ([docs/RUNBOOK.md](docs/RUNBOOK.md), "Airflow scheduler or triggerer stopped"). Logs:
+**4. Monitor.** Watch the `edgeguard` alert groups in Prometheus at `http://localhost:9090` (46 alert rules across 9 groups in `prometheus/alerts.yml`), above all `edgeguard_pipeline_observability` and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. On a critical alert, pause the DAG, triage, then resume; on `EdgeGuardAirflowSchedulerDown` do not pause, since after the restart a paused DAG's run does not continue until it is resumed ([docs/RUNBOOK.md](docs/RUNBOOK.md), "Airflow scheduler or triggerer stopped"). Logs:
 
 ```bash
 docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'
@@ -617,4 +617,4 @@ EdgeGuard is developed by IICT-BAS and Ratio1 and financed by ResilMesh Open Cal
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-03_

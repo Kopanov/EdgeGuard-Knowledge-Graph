@@ -203,8 +203,10 @@ environment, and `docker-compose.yml` forwards every one of them from
 `.env` to the Airflow service; an empty value of
 `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD`,
 `EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD`,
-`EDGEGUARD_MISP_BACKOFF_THRESHOLD` or
-`EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC` means the code default.
+`EDGEGUARD_MISP_BACKOFF_THRESHOLD`,
+`EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC`,
+`EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` or
+`EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE` means the code default.
 
 | Env var | Default | When to change |
 |---|---|---|
@@ -214,7 +216,9 @@ environment, and `docker-compose.yml` forwards every one of them from
 | `EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD` | `100000` | Above this, switches to `batch_size=50, throttle=30s`. |
 | `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` | `20000` | Most attributes per event of a source/date; the writer continues in `-part2`, `-part3`, ... ([Event size](#event-size)). While it is not above `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD`, no part reaches the tiers below. Lower it (1000 at least) to keep parts smaller on an undersized MISP; it does not change the OTX event. `0` turns the split off. |
 | `EDGEGUARD_MISP_BACKOFF_THRESHOLD` | `3` | Number of consecutive 5xx batch failures before EdgeGuard inserts an extended cooldown. **Valid range: 2–100.** Setting `1` would trigger the 5-min cooldown after a single failure (which `@retry_with_backoff` already handles internally), turning every transient 5xx into a multi-hour stall — values below 2 are silently clamped to the default 3 with a WARN. |
-| `EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC` | `300.0` | Cooldown duration. 5 min is enough for MISP's PHP to recycle and MySQL to free transaction locks. |
+| `EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC` | `300.0` | Cooldown duration. 5 min is enough for MISP's PHP to recycle and MySQL to free transaction locks. The writer sleeps it in 30 s steps and, after a step while at least 40 s of the cooldown is left (the request's 10 s connect and 30 s read timeouts), asks MISP a light request (one page of the day's event lookup, event headers only): an HTTP 200 ends the cooldown, so while MISP answers light requests and fails the batches to one event (the event's size), a cooldown lasts 30 s. The time a light request takes counts toward the cooldown, so it never lasts longer than this value, and the parent-DAG liveness check runs every 30 s, or up to 70 s apart while light requests wait out their timeouts. |
+| `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` | `900` | The longest one push goes on while MISP keeps failing, in seconds (`0` = no cap; valid range 0–86400). The time is the wall time from the start of the first request that failed (a batch answered HTTP 429 or 5xx, a timeout, a failed event lookup), with the lookups after a 5xx, the back-off (10, 20 and 40 s between a batch's four attempts), the `Retry-After` waits, the throttle pauses and the cooldowns that follow; a batch MISP answers ends it, and so does the group's event lookup when it returns. A `Retry-After` wait and the lookups after a 5xx get only the time left, and no batch starts once its throttle pause and the cooldown due would end at or after the cap. The cap is checked between requests and never cuts one short, so a push stops at most one request after it (a batch request takes up to 330 s). When it is spent the push stops: the items not sent count as failed, `[MISP-PUSH-STOPPED]` names the stop, `EdgeGuardMispPushStopped` fires, and the run goes on; the next runs send the items, since no collector moves its state past them ([COLLECTORS.md § MISP push](COLLECTORS.md#misp-push-attribute-types-and-characters)). 15 minutes is a quarter of `collect_otx`'s limit (1 hour). Raise it while a MISP that recovers slowly should be waited for; `0` lets a failing push run until the task's `execution_timeout` kills it, which saves nothing. |
+| `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE` | `3600` | The same for the baseline's writer, whose OTX and NVD pushes run hours into a 5-hour task: a failing streak also gets at most the time until 10 minutes before the task's `execution_timeout` ends (at least 60 s); the 10 minutes cover the request in flight, so the collector returns its status instead of being killed. |
 | `EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS` | `true` | Master switch of the duplicate check before a push: existing `(type, value)` on the target event (its count also drives the adaptive tier) and, with `EDGEGUARD_MISP_CROSS_EVENT_DEDUP` (default `true`), among the attributes that carry the source's tag in any MISP event. **Leave on** — the adaptive scaling tier resolution depends on `existing_attrs_count` which is computed from the prefetch result, and the event split takes a part's size from it (with prefetch off, from the event's `attribute_count` alone; without a count the part counts as empty and can take up to one more limit). With prefetch off, the writer has no per-event size signal for an event it does not split (OTX, or every event with the split off) and falls back to the configured default batch/throttle for it, which is the non-adaptive behaviour the scaling exists to avoid. Turning it off only makes sense if you have an external dedup layer (rare). |
 
 ### Adaptive scaling tiers (the rule EdgeGuard applies per event)
@@ -234,12 +238,13 @@ small CISA event uses default batching.
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `edgeguard_misp_push_permanent_failure_total` | `source` | Each increment = one batch (default 500 attrs) that still failed with HTTP 5xx or 429 after `@retry_with_backoff(max_retries=4)` exhausted. Of it, the attributes MISP does not hold count as failed: after a 5xx the writer looks the batch up in the event, and after a 429, or when that lookup fails, the whole batch counts as failed. A batch MISP stored in full despite a 5xx counts as pushed and is not counted here (`[STORED-AFTER-5XX]`). **Non-zero rate is the operator signal that backend is undersized.** Labelled by `source` only, without `event_id`, to keep cardinality bounded — each MISP run creates a date-stamped event, which would generate one new time series per source per day. |
-| `edgeguard_misp_push_backoff_triggered_total` | `source` | Each increment = EdgeGuard entered an extended cooldown (default 5 min) after N consecutive 5xx failures. Distinguishes "occasional flap" from "sustained backend overload." |
+| `edgeguard_misp_push_permanent_failure_total` | `source` | Each increment = one batch (default 500 attrs) that still failed with HTTP 5xx or 429 after `@retry_with_backoff(max_retries=3)` exhausted (four attempts, fewer when the push's cap on failure time cut them short). Of it, the attributes MISP does not hold count as failed: after a 5xx the writer looks the batch up in the event, and after a 429, or when that lookup fails, the whole batch counts as failed. A batch MISP stored in full despite a 5xx counts as pushed and is not counted here (`[STORED-AFTER-5XX]`). **Non-zero rate is the operator signal that backend is undersized.** Labelled by `source` only, without `event_id`, to keep cardinality bounded — each MISP run creates a date-stamped event, which would generate one new time series per source per day. |
+| `edgeguard_misp_push_backoff_triggered_total` | `source` | Each increment = EdgeGuard entered an extended cooldown (up to 5 min by default; MISP answering a light request ends it) after N consecutive 5xx failures. Distinguishes "occasional flap" from "sustained backend overload." |
+| `edgeguard_misp_push_stopped_total` | `source` | Each increment = one push that stopped because MISP kept failing for longer than its cap (`EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`, `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`); its items not sent count as failed and are not counted in `edgeguard_misp_push_permanent_failure_total`. |
 
 ### Alert rules (shipped)
 
-Both rules ship in `prometheus/alerts.yml` (group
+The three rules ship in `prometheus/alerts.yml` (group
 `edgeguard_pipeline_observability`), one series per `source`:
 
 ```yaml
@@ -249,12 +254,31 @@ Both rules ship in `prometheus/alerts.yml` (group
   labels:
     severity: critical
 
+- alert: EdgeGuardMispPushStopped
+  expr: |
+    sum by (source) (increase(edgeguard_misp_push_stopped_total[1h])) > 0
+    or
+    (
+      sum by (source) (edgeguard_misp_push_stopped_total) > 0
+        unless
+      sum by (source) (edgeguard_misp_push_stopped_total offset 1h)
+    )
+  for: 0m
+  labels:
+    severity: critical
+
 - alert: EdgeGuardMispSustainedBackoff
   expr: sum by (source) (increase(edgeguard_misp_push_backoff_triggered_total[15m])) > 1
   for: 15m
   labels:
     severity: warning
 ```
+
+A push increments `edgeguard_misp_push_stopped_total` at most once, so
+its rule fires on one increment: `increase()` over an hour, and the
+second clause for a series that has just been created (`increase()` is 0
+for it). See [RUNBOOK.md](RUNBOOK.md), "MISP push stopped (MISP kept
+failing)".
 
 Do not use `rate(...) > 1` for the backoff rule: `rate()` is per
 second, so that expression means more than one cooldown per second
@@ -364,10 +388,11 @@ answer 200 again and each batch is checked against the stored event.
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-03_
 
 ## History
 
+- 2026-11-03 — `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` (900 s) and `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE` (3600 s, and 10 minutes before the baseline task's end): a push stops once MISP has kept failing that long, counts the items not sent as failed and lets the run go on, with `edgeguard_misp_push_stopped_total` and the alert `EdgeGuardMispPushStopped` (critical). Nothing stopped a push before, so a long push against a failing MISP ran until the task was killed. A batch has three retries (four attempts; it had five), and a cooldown ends early when MISP answers a light request, whose time counts toward the cooldown.
 - 2026-11-02 — `edgeguard_misp_push_permanent_failure_total`: of a counted batch only the attributes MISP does not hold count as failed, and a batch MISP stored in full despite a 5xx is not counted (the row called every counted batch lost). Troubleshooting: a push that saved only some attributes is told apart into values skipped before the push and values MISP did not store (`[UNCONFIRMED]`) (the row named MISP's silent dedup only). Event size: the text states why every further batch to an event past that size fails, and how a batch counts when the lookup fails too (it said "as before").
 - 2026-11-02 — Event size: MISP answers a push with the whole event and an event can outgrow that answer (HTTP 500 after the save; with 2048M, an OTX event past about 148,800 attributes on 2026-11-01); the writer looks a batch up after a 5xx and counts what MISP holds as pushed (`[STORED-AFTER-5XX]`); a row in the cheat-sheet.
 - 2026-10-25 — Event size and audience: the writer continues a source/date event in `-partN` events of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000) attributes, except a group with OTX report ids, so the OTX event is the baseline event past 50,000 attributes; with the default thresholds no part reaches the adaptive tiers (a lowered `EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD` applies them to parts); a knob row for the split, and the prefetch row says the split reads a part's size from it (the page said a baseline writes one event per source, URLhaus one event of about 63,000 URLs, and partitioning is planned).

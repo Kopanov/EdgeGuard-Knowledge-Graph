@@ -865,7 +865,8 @@ groups:
           summary: "EdgeGuard losing MISP batches permanently ({{ $labels.source }})"
           description: |
             MISPWriter rejected one or more attribute batches after
-            ``@retry_with_backoff(max_retries=4)`` exhausted. Each
+            ``@retry_with_backoff(max_retries=3)`` exhausted (four attempts, or
+            fewer when the push's cap on failure time cut them short). Each
             failure is ~500 attributes lost. Pre-PR-N4 this was a
             hand-counted log-line; now alertable.
 
@@ -873,6 +874,37 @@ groups:
               1. Check MISP backend RAM / PHP memory_limit
               2. Check MySQL innodb_buffer_pool_size
               3. See docs/MISP_TUNING.md and docs/RUNBOOK.md § "1. MISP batch permanent failure (5xx exhaustion)"
+
+      - alert: EdgeGuardMispPushStopped
+        # 2026-11-03: a MISP push stopped because MISP kept failing for longer than its cap
+        # (EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC, 900 s; EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE, 3600 s, for the
+        # baseline's writer): the items not sent count as failed and the run goes on ([MISP-PUSH-STOPPED]). A push
+        # increments the counter at most once, so one increment fires the rule: increase() over an hour, and the
+        # second clause for a series that has just been created, for which increase() is 0. Critical, as
+        # EdgeGuardMispBatchPermanentFailure: MISP is failing and the items not sent wait for a later run.
+        expr: |
+          sum by (source) (increase(edgeguard_misp_push_stopped_total[1h])) > 0
+          or
+          (
+            sum by (source) (edgeguard_misp_push_stopped_total) > 0
+              unless
+            sum by (source) (edgeguard_misp_push_stopped_total offset 1h)
+          )
+        for: 0m
+        labels:
+          severity: critical
+          component: misp_writer
+        annotations:
+          summary: "EdgeGuard MISP push stopped: MISP kept failing ({{ $labels.source }})"
+          description: |
+            A MISPWriter push stopped because MISP kept failing (HTTP 5xx or 429, timeouts, failed event lookups)
+            for longer than its cap (EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC, or
+            EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE in a baseline). The items it did not send count as
+            failed and the run went on; a later run sends them (the cursors of OTX, NVD and CISA ICS and the MITRE
+            ETag stay below them, OTX's listed pulses keep their entries, and the other sources read their feeds
+            again). Find the [MISP-PUSH-STOPPED] line in the collector's task log, check
+            MISP's health and logs, and fix the cause. The rule clears an hour after the last stop.
+            See docs/RUNBOOK.md § "MISP push stopped (MISP kept failing)".
 
       - alert: EdgeGuardMispSustainedBackoff
         # Use `increase()` (absolute count over window), NOT `rate()`
@@ -888,9 +920,10 @@ groups:
           summary: "EdgeGuard MISPWriter in extended cooldown >1×/15min ({{ $labels.source }})"
           description: |
             MISPWriter is hitting consecutive 5xx failures often enough
-            to enter the 5-minute extended cooldown more than once per
-            15 minutes. Backend is sustained-degraded. Distinguishes
-            "occasional flap" from "sustained overload."
+            to enter the extended cooldown (up to 5 minutes; MISP answering
+            a light request ends it) more than once per 15 minutes. Backend
+            is sustained-degraded. Distinguishes "occasional flap" from
+            "sustained overload."
 
       - alert: EdgeGuardMispHonestNullViolation
         # Use `increase()` (absolute count over window), NOT `rate()`

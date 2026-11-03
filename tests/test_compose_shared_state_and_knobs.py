@@ -69,6 +69,8 @@ AIRFLOW_KNOBS = [
     ("AIRFLOW_WEBSERVER_URL", "http://localhost:8082"),
     ("EDGEGUARD_MISP_PUSH_BATCH_SIZE", None),
     ("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", None),
+    ("EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC", None),  # 2026-11-03: empty is the code default (900 s)
+    ("EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE", None),  # empty is the code default (3600 s)
     ("EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC", None),
     ("EDGEGUARD_MISP_EVENT_LOCK_PATH", "/tmp/edgeguard_misp_get_or_create_event.lock"),
     ("EDGEGUARD_MAX_EVENT_ATTRIBUTES", "50000"),

@@ -35,6 +35,7 @@ from config import (
     MISP_URL,
     SSL_VERIFY,
     apply_misp_http_host_header,
+    misp_push_max_failing_seconds,
     misp_refresh_last_seen_days,
     misp_refresh_max_per_run,
     misp_refresh_max_seconds,
@@ -67,12 +68,21 @@ try:
         # metrics that ARE available.
         _MISP_HONEST_NULL_VIOLATIONS = None  # type: ignore[assignment]
 
+    try:
+        from metrics_server import (
+            MISP_PUSH_STOPPED as _MISP_PUSH_STOPPED,
+        )
+    except ImportError:
+        # Older metrics_server without the 2026-11-03 counter of stopped pushes.
+        _MISP_PUSH_STOPPED = None  # type: ignore[assignment]
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
     _MISP_PUSH_PERMANENT_FAILURES = None  # type: ignore[assignment]
     _MISP_BACKOFF_TRIGGERED = None  # type: ignore[assignment]
     _MISP_HONEST_NULL_VIOLATIONS = None  # type: ignore[assignment]
+    _MISP_PUSH_STOPPED = None  # type: ignore[assignment]
 
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
@@ -739,6 +749,86 @@ _TRANSIENT_HTTP_ERRORS = (
     requests.exceptions.ChunkedEncodingError,
     MispTransientError,
 )
+
+# 2026-11-03: the cap on the time one ``push_items`` call goes on while MISP keeps failing
+# (``config.misp_push_max_failing_seconds``). A failing streak starts at the start of the first request of the push
+# that fails (a batch answered HTTP 429 or 5xx, a timeout or a connection error, a failed attempt of an event or part
+# lookup) and covers what follows it: the lookups after a 5xx, the back-off, ``Retry-After`` and cooldown waits, and
+# the requests that fail again. A batch ``_push_batch`` returns from (stored, refused with HTTP 4xx, partly stored)
+# ends it, and so does the group's event lookup before the batches when it returns; the next failure starts a new
+# streak with the whole cap. Successful requests and the throttle pause between batches never start one, so time
+# alone never stops a push; within a streak its time is wall time, the throttle pauses between its failing batches
+# included. The cap is checked between requests, never by cutting one short: a stop comes at most one request
+# after the cap (a batch request takes up to ``CONNECT_TIMEOUT`` + ``READ_TIMEOUT``, 330 s), except that the lookups
+# after a 5xx get only the time left (``_stored_after_server_error``), and a cooldown is never longer than the time
+# left. The listings before a group's first batch are not counted. The writer keeps the cap of the call in
+# ``_misp_push_failing_cap`` (seconds; 0 or unset:
+# no cap), the start of the streak in ``_misp_push_failing_since`` (``time.monotonic()``; unset: none) and, for a
+# writer given its task's end (the baseline's), ``_misp_push_failing_end_by``; all are read with ``getattr``
+# defaults that mean no cap, because many tests build the writer without ``__init__`` and ``_push_batch`` is also
+# called outside a push.
+
+# A writer given its task's end stops a push this long before the task's ``execution_timeout`` ends, so the
+# collector returns its status before Airflow kills the task (a killed task saves nothing). It covers the request in
+# flight when the cap is reached (up to 330 s, above) and the summary that follows.
+PUSH_TASK_END_MARGIN_SEC = 600.0
+# The least cap a streak gets near its task's end: a few attempts, so one failed request does not stop a push.
+PUSH_FAILING_FLOOR_SEC = 60.0
+_PUSH_CAP_SETTING = "EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC"
+_PUSH_CAP_SETTING_BASELINE = "EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE"
+
+
+def _is_seconds(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _failing_streak(writer: Any, failed_attempt_started: Optional[float] = None) -> Optional[Tuple[float, float]]:
+    """The cap of *writer*'s failing streak and the seconds it has lasted (2026-11-03), or None when no cap
+    applies or, without *failed_attempt_started*, no streak is on. *failed_attempt_started*: the
+    ``time.monotonic()`` at which a request that failed started; when no streak is on, the streak starts there. The
+    cap is the push's (``_misp_push_failing_cap``); for a writer given its task's end it is at most the time from the
+    streak's start to ``_misp_push_failing_end_by`` (the task's end less ``PUSH_TASK_END_MARGIN_SEC``), and at least
+    ``PUSH_FAILING_FLOOR_SEC``. The clock is read only while a streak is on."""
+    cap = getattr(writer, "_misp_push_failing_cap", None)
+    if not _is_seconds(cap) or cap <= 0:
+        return None
+    since = getattr(writer, "_misp_push_failing_since", None)
+    if not _is_seconds(since):
+        if failed_attempt_started is None:
+            return None
+        since = failed_attempt_started
+        writer._misp_push_failing_since = since
+    end_by = getattr(writer, "_misp_push_failing_end_by", None)
+    if _is_seconds(end_by):
+        cap = min(cap, max(PUSH_FAILING_FLOOR_SEC, end_by - since))
+    return cap, time.monotonic() - since
+
+
+def _push_cap_text(writer: Any, cap: float) -> str:
+    """The setting behind the cap *cap* of *writer*'s streak, for the log lines (2026-11-03)."""
+    setting = getattr(writer, "_misp_push_failing_setting", None) or _PUSH_CAP_SETTING
+    value = getattr(writer, "_misp_push_failing_cap", None)
+    text = f"{setting}={value:g}" if _is_seconds(value) else setting
+    if _is_seconds(value) and cap < value:
+        text += f"; {cap:.0f}s to {PUSH_TASK_END_MARGIN_SEC:.0f}s before the task's end"
+    return text
+
+
+def _misp_retry_gives_up(args: tuple, attempt_started: float, delay: float) -> Optional[str]:
+    """``retry_with_backoff``'s *give_up* for the writer's requests (2026-11-03): no retry when its delay would reach
+    the cap of the push's failing streak (``_failing_streak``), which the failed attempt starts when none is on. The
+    decorator then re-raises the attempt's error, as after the last attempt."""
+    writer = args[0] if args else None
+    streak = _failing_streak(writer, attempt_started)
+    if streak is None:
+        return None
+    cap, failing_for = streak
+    if failing_for + delay < cap:
+        return None
+    return (
+        f"MISP has kept failing for {failing_for:.0f}s, and the retry in {delay:.0f}s would reach the push's cap of "
+        f"{cap:.0f}s on failure time ({_push_cap_text(writer, cap)})"
+    )
 
 
 class KnownAttribute(NamedTuple):
@@ -1497,6 +1587,9 @@ class MISPWriter:
     # Timeout constants for MISP API calls (defined before use)
     CONNECT_TIMEOUT = 30  # seconds
     READ_TIMEOUT = 300  # seconds — MISP needs time for large events (95K+ attributes)
+    # 2026-11-03: (connect, read) timeout of the light request that ends a back-off cooldown early when MISP
+    # answers it (``_misp_answers``).
+    COOLDOWN_PROBE_TIMEOUT = (10, 30)
 
     # Mapping from EdgeGuard indicator types to MISP attribute types. MISP's ``ip-dst`` holds
     # IPv4 and IPv6 addresses alike (there is no IPv6 type); the sync reads the family back
@@ -1544,6 +1637,8 @@ class MISPWriter:
         api_key: str = None,
         verify_ssl: bool = None,
         liveness_callback: Optional[Callable[[], None]] = None,
+        baseline: bool = False,
+        task_ends_at: Optional[float] = None,
     ):
         """
         Initialize MISP writer.
@@ -1559,6 +1654,12 @@ class MISPWriter:
                 parent-DAG-liveness orphan-process safeguard. ``None``
                 (default) preserves legacy behavior — push_items runs
                 to completion regardless of parent-DAG state.
+            baseline: 2026-11-03, the baseline's writer (``run_baseline_collector``): its pushes stop after
+                ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`` of failure time instead of
+                ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`` (``config.misp_push_max_failing_seconds``).
+            task_ends_at: 2026-11-03, when the task's ``execution_timeout`` ends (a ``time.time()`` value), or
+                None: a failing streak then gets at most the time from its start to ``PUSH_TASK_END_MARGIN_SEC``
+                before that end, and at least ``PUSH_FAILING_FLOOR_SEC`` (``_failing_streak``).
         """
         self.url = url or MISP_URL
         self.api_key = api_key or MISP_API_KEY
@@ -1612,6 +1713,12 @@ class MISPWriter:
         # ``None`` = no check (legacy / incremental DAGs); a callable
         # = check before each batch. See src/parent_dag_liveness.py.
         self.liveness_callback = liveness_callback
+        # 2026-11-03: the cap on failure time of a push (``_arm_push_cap``); read with ``getattr`` defaults.
+        self.baseline = bool(baseline)
+        self.task_ends_at = task_ends_at
+        # 2026-11-03: set by each ``push_items`` call (see its docstring); defaults for a writer that pushed nothing.
+        self.last_push_unsent_items: List[int] = []
+        self.last_push_stopped = False
 
     def _restsearch_events_for_name(self, event_name: str) -> List[Any]:
         """Look up the event named ``event_name`` through ``/events/restSearch``.
@@ -1650,8 +1757,12 @@ class MISPWriter:
             f"Event lookup for {event_name!r} reached the page cap ({EVENT_LOOKUP_MAX_PAGES} pages) without a result"
         )
 
-    def _restsearch_event_page(self, event_name: str, page: int) -> List[Any]:
-        """One page of the event lookup; returns the ``response`` list (see ``_restsearch_events_for_name``)."""
+    def _restsearch_event_page(
+        self, event_name: str, page: int, timeout: Optional[Tuple[float, float]] = None, quiet: bool = False
+    ) -> List[Any]:
+        """One page of the event lookup; returns the ``response`` list (see ``_restsearch_events_for_name``).
+        *timeout*: (connect, read), the writer's own by default; *quiet*: an answer other than HTTP 200 is logged
+        at DEBUG, not as a failed lookup (2026-11-03, both for ``_misp_answers``)."""
         response = self.session.post(
             f"{self.url}/events/restSearch",
             json={
@@ -1662,7 +1773,7 @@ class MISPWriter:
                 "page": page,
             },
             verify=self.verify_ssl,
-            timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
+            timeout=timeout or (self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
         )
         if response.status_code != 200:
             detail = (response.text or "")[:500]
@@ -1671,7 +1782,8 @@ class MISPWriter:
                 # exponential backoff. No sleep here: the confirming lookup runs inside the
                 # cross-process event-creation lock, and a Retry-After wait taken there would hold
                 # the lock against every parallel collector.
-                logger.warning(
+                logger.log(
+                    logging.DEBUG if quiet else logging.WARNING,
                     "MISP restSearch for event lookup answered HTTP %s — the caller retries with backoff: %s",
                     response.status_code,
                     detail,
@@ -1679,7 +1791,8 @@ class MISPWriter:
                 raise MispTransientError(
                     f"MISP {response.status_code} on event lookup for {event_name!r}", response=response
                 )
-            logger.error(
+            logger.log(
+                logging.DEBUG if quiet else logging.ERROR,
                 "MISP restSearch for event lookup failed: HTTP %s — %s; no event is created after a failed lookup",
                 response.status_code,
                 detail,
@@ -1687,6 +1800,37 @@ class MISPWriter:
             raise MispLookupError(f"MISP {response.status_code} on event lookup for {event_name!r}")
         data = response.json()
         return data.get("response") or []
+
+    def _misp_answers(self, source: str) -> bool:
+        """Whether MISP answers a light request with HTTP 200 (2026-11-03): the first page of the lookup of the
+        source's event of the day (``_restsearch_event_page``: event headers only, nothing written, failures logged
+        at DEBUG), with the short ``COOLDOWN_PROBE_TIMEOUT``. Any other answer and any exception is no.
+        ``push_items`` asks it during a back-off cooldown, after each 30 s step while the cooldown has at least the
+        probe's timeouts left, and ends the cooldown when MISP answers."""
+        try:
+            name = _event_name(
+                sanitize_value(str(source), max_length=50), datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+            self._restsearch_event_page(name, 1, timeout=self.COOLDOWN_PROBE_TIMEOUT, quiet=True)
+            return True
+        except Exception as e:
+            logger.debug("MISP did not answer the cooldown's probe (%s: %s)", type(e).__name__, e)
+            return False
+
+    def _arm_push_cap(self) -> None:
+        """Set the cap on failure time of the ``push_items`` call that starts (2026-11-03, ``_failing_streak``):
+        ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC``, or ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`` for the
+        baseline's writer (``config.misp_push_max_failing_seconds``); a writer given its task's end
+        (``task_ends_at``) also stops a streak ``PUSH_TASK_END_MARGIN_SEC`` before that end. No streak is on."""
+        baseline = getattr(self, "baseline", False) is True
+        cap = misp_push_max_failing_seconds(baseline=baseline)
+        self._misp_push_failing_cap = cap
+        self._misp_push_failing_setting = _PUSH_CAP_SETTING_BASELINE if baseline else _PUSH_CAP_SETTING
+        self._misp_push_failing_since = None
+        self._misp_push_failing_end_by = None
+        ends_at = getattr(self, "task_ends_at", None)
+        if cap > 0 and _is_seconds(ends_at):
+            self._misp_push_failing_end_by = time.monotonic() + (ends_at - time.time()) - PUSH_TASK_END_MARGIN_SEC
 
     def _get_existing_source_attribute_keys(
         self,
@@ -2056,9 +2200,12 @@ class MISPWriter:
         found.discard("")
         return found
 
-    def _attributes_by_value(self, filters: Dict[str, Any], values: Sequence[str], what: str) -> List[Dict[str, Any]]:
+    def _attributes_by_value(
+        self, filters: Dict[str, Any], values: Sequence[str], what: str, until: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
         """The attribute rows ``attributes/restSearch`` answers for *values* under *filters*, asked 500
-        values at a time, 2,000 rows a page. Raises ``MispTransientError`` / ``MispLookupError``."""
+        values at a time, 2,000 rows a page. Raises ``MispTransientError`` / ``MispLookupError``.
+        *until*: see ``_post_with_retries`` (2026-11-03)."""
         found: List[Dict[str, Any]] = []
         wanted = [str(v) for v in values if str(v or "").strip()]
         for i in range(0, len(wanted), 500):
@@ -2069,6 +2216,7 @@ class MISPWriter:
                     f"{self.url}/attributes/restSearch",
                     {"returnFormat": "json", **filters, "value": chunk, "page": page, "limit": 2000},
                     context=f"lookup of {len(chunk)} {what}",
+                    until=until,
                 )
                 if response.status_code != 200:
                     raise MispLookupError(f"MISP attributes/restSearch by value answered HTTP {response.status_code}")
@@ -2085,7 +2233,9 @@ class MISPWriter:
                 page += 1
         return found
 
-    def _stored_after_server_error(self, event_id: str, attributes: List[Dict]) -> Optional[Tuple[int, List[Dict]]]:
+    def _stored_after_server_error(
+        self, event_id: str, attributes: List[Dict], until: Optional[float] = None
+    ) -> Optional[Tuple[int, List[Dict]]]:
         """Which attributes of a batch MISP stored although it answered the push with HTTP 5xx (2026-11-02).
 
         MISP answers an event edit with the whole event (``_push_batch``). An event too large for its PHP
@@ -2096,7 +2246,18 @@ class MISPWriter:
         the lower- and upper-case forms of the types MISP changes in case) and matched as a 200 answer is
         (``_attribute_match_key``). Returns ``(stored count, unstored attributes)``, or None when the lookup
         fails (then nothing is known and the batch is retried as before).
+
+        2026-11-03, *until* (a ``time.monotonic()`` value, or None): the time left of the push's cap on failure
+        time (``_failing_streak``). The lookup gets no more (``_post_with_retries``); with none left it is not
+        made and None is returned, so the batch counts as failed when its retries end there.
         """
+        if until is not None and time.monotonic() >= until:
+            logger.warning(
+                "MISP push to event %s: no lookup of the batch after the server error, the push's cap on failure "
+                "time has no time left — the batch counts as not stored",
+                event_id,
+            )
+            return None
         values: set = set()
         for attribute in attributes:
             value = str(attribute.get("value") or "").strip()
@@ -2106,7 +2267,9 @@ class MISPWriter:
             if str(attribute.get("type") or "").strip().lower() in _CASE_NORMALISED_TYPES:
                 values.update((value.lower(), value.upper()))
         try:
-            rows = self._attributes_by_value({"eventid": event_id}, sorted(values), f"value(s) of event {event_id}")
+            rows = self._attributes_by_value(
+                {"eventid": event_id}, sorted(values), f"value(s) of event {event_id}", until=until
+            )
         except (MispLookupError, *_TRANSIENT_HTTP_ERRORS) as e:
             logger.warning(
                 "MISP push to event %s: lookup of the batch after the server error failed (%s: %s) — retrying the batch",
@@ -2119,20 +2282,37 @@ class MISPWriter:
         unstored = [a for a in attributes if _attribute_match_key(a) not in present]
         return len(attributes) - len(unstored), unstored
 
-    def _post_with_retries(self, url: str, payload: Dict[str, Any], *, context: str, attempts: int = 3):
+    def _post_with_retries(
+        self, url: str, payload: Dict[str, Any], *, context: str, attempts: int = 3, until: Optional[float] = None
+    ):
         """POST *payload*; a timeout, connection error, HTTP 429 or 5xx is retried (5 s, then 10 s).
 
         Returns the response of the first attempt that is not transient. Raises
         ``MispTransientError`` when every attempt was.
+
+        2026-11-03, *until* (a ``time.monotonic()`` value, or None): the lookups after a 5xx inside a push get only
+        the time left of the push's cap on failure time (``_stored_after_server_error``). No attempt or pause
+        starts at or after it, and each attempt's timeouts are at most the time left; then it raises
+        ``MispTransientError`` as after the last attempt.
         """
         last_problem = ""
+        made = 0
         for attempt in range(attempts):
+            timeout: Tuple[float, float] = (self.CONNECT_TIMEOUT, self.READ_TIMEOUT * 2)
+            if until is not None:
+                left = until - time.monotonic()
+                if left <= 0:
+                    last_problem = f"{last_problem}; " if last_problem else ""
+                    last_problem += "no time left of the push's cap on failure time"
+                    break
+                timeout = (min(timeout[0], left), min(timeout[1], left))
+            made += 1
             try:
                 response = self.session.post(
                     url,
                     json=payload,
                     verify=self.verify_ssl,
-                    timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT * 2),
+                    timeout=timeout,
                 )
             except _TRANSIENT_HTTP_ERRORS as e:
                 last_problem = f"{type(e).__name__}: {e}"
@@ -2142,10 +2322,14 @@ class MISPWriter:
                 last_problem = f"HTTP {response.status_code}"
             logger.warning("MISP %s: %s (attempt %d of %d)", context, last_problem, attempt + 1, attempts)
             if attempt + 1 < attempts:
-                time.sleep(5.0 * (2**attempt))
-        raise MispTransientError(f"MISP {context} failed after {attempts} attempts: {last_problem}")
+                pause = 5.0 * (2**attempt)
+                if until is not None and time.monotonic() + pause >= until:
+                    last_problem += "; no time left of the push's cap on failure time for another attempt"
+                    break
+                time.sleep(pause)
+        raise MispTransientError(f"MISP {context} failed after {made} attempt(s): {last_problem}")
 
-    @retry_with_backoff(max_retries=4, base_delay=10.0)
+    @retry_with_backoff(max_retries=4, base_delay=10.0, give_up=_misp_retry_gives_up)
     def _get_or_create_event(self, source: str, date: str = None, part: int = 1, **_kwargs) -> Optional[str]:
         """Get or create a MISP event for a source/date combination.
 
@@ -2247,7 +2431,7 @@ class MISPWriter:
             self.stats["errors"] += 1
             return None
 
-    @retry_with_backoff(max_retries=4, base_delay=10.0)
+    @retry_with_backoff(max_retries=4, base_delay=10.0, give_up=_misp_retry_gives_up)
     def _find_event_id(self, event_name: str) -> Optional[str]:
         """The id of the event named exactly ``event_name``, or None; never creates one. Notes the
         event's ``attribute_count`` (``_note_event_size``)."""
@@ -3357,7 +3541,7 @@ class MISPWriter:
 
         Plus an adaptive backoff: after N consecutive HTTP 5xx batch
         failures (default 3, env ``EDGEGUARD_MISP_BACKOFF_THRESHOLD``)
-        the writer inserts a longer cooldown (default 5min, env
+        the writer inserts a longer cooldown (up to 5min, env
         ``EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC``) before the next batch
         — gives MISP time to fully recover instead of hammering a
         struggling worker.  The failure counter persists across
@@ -3367,6 +3551,11 @@ class MISPWriter:
         During the cooldown the writer wakes every 30s to call the
         parent-DAG liveness callback so a sibling task failure is
         detected within ~30s rather than after the full cooldown.
+        2026-11-03: after a 30 s step, while the cooldown has at least
+        ``COOLDOWN_PROBE_TIMEOUT`` (10 + 30 s) left, it also sends a light
+        request (``_misp_answers``); an HTTP 200 ends the cooldown. The
+        request's time counts toward the cooldown, so the liveness
+        callback can then run up to 70 s apart.
 
         See docs/MISP_TUNING.md for the full playbook (php.ini /
         my.cnf settings + when to apply each EdgeGuard env knob).
@@ -3421,12 +3610,42 @@ class MISPWriter:
         event lookups and listings before the first batch are not bounded by it. Without a deadline the
         push is unchanged. The OTX collector passes one for the push of the pulses of its retry list
         (``EDGEGUARD_OTX_RETRY_MAX_SECONDS``).
+
+        2026-11-03 (a cap on failure time): a push stops once MISP has kept failing for
+        ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`` (900 s; ``0``: no cap), or for the baseline's writer
+        ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`` (3600 s), which also stops a streak
+        ``PUSH_TASK_END_MARGIN_SEC`` before its task's end (``_failing_streak``). The time is that of the current
+        failing streak: from the start of the first request that fails (a batch answered HTTP 429 or 5xx, a timeout
+        or a connection error, a failed attempt of an event or part lookup) through the lookups, waits and attempts
+        that follow, the throttle pauses between its failing batches included; a batch ``_push_batch`` returns from
+        ends it, and so does the group's event lookup before the batches. A batch's retries stop when the next wait
+        would reach the cap (the decorator's *give_up*), a ``Retry-After`` wait is cut to the time left, the lookups
+        after a 5xx get only the time left, and before a batch the push stops when the batch would start at or after
+        the cap: the streak has reached it, or the throttle pause and the back-off cooldown due before the batch
+        would (they are not slept); the check runs again right before the batch is sent. In a push of several
+        sources the push also stops before a group's listings and event lookup once the streak has reached the cap.
+        The cap is checked between requests: a stop comes at most one request after it (a batch request takes up
+        to 330 s). A stopped push sends nothing more and creates no part. The items of the batches not sent, of the
+        current group and of every later one, count as failed and are listed in ``last_push_unstored_items`` and in
+        ``self.last_push_unsent_items``;
+        ``self.last_push_stopped`` is True, one ERROR ``[MISP-PUSH-STOPPED]`` names the stop,
+        ``edgeguard_misp_push_stopped_total`` counts it, the back-off counters are reset (the next push on the
+        writer starts without a cooldown), and the refresh of re-reported indicators is left for a later run. The
+        batch whose retries the cap cut short is a failed batch like any other (it was sent and answered). The
+        push returns its counts as usual. A timeout or a connection error after the retries still raises out of
+        ``push_items``, sooner with the cap. During a back-off cooldown, after a 30 s step while the cooldown has at
+        least the probe's timeouts left, a light request (``_misp_answers``) ends the cooldown when MISP answers it
+        with HTTP 200; its time counts toward the cooldown, which never runs longer than its length.
         """
         self.last_push_unstored_items: List[int] = []
         self.last_push_event_failed_items: List[int] = []
         self.last_push_skipped_items: List[int] = []
+        self.last_push_unsent_items = []
+        self.last_push_stopped = False
         if not items:
             return 0, 0
+        # 2026-11-03: the cap on failure time of this call (``_failing_streak``).
+        self._arm_push_cap()
 
         total_items = len(items)
 
@@ -3471,14 +3690,18 @@ class MISPWriter:
         event_failed_positions: set = set()
         # 2026-11-02: the positions of the items not sent because *deadline* came (``last_push_skipped_items``).
         skipped_positions: set = set()
+        # 2026-11-03: the positions of the items not sent because the push stopped (``last_push_unsent_items``).
+        unsent_positions: set = set()
 
-        def _note_unstored(attrs: List[Dict], at_the_event: bool = False) -> None:
+        def _note_unstored(attrs: List[Dict], at_the_event: bool = False, unsent: bool = False) -> None:
             for a in attrs:
                 if _value_is_storable(a):
                     positions = item_positions_by_key.get(_within_push_key(a), ())
                     unstored_positions.update(positions)
                     if at_the_event:
                         event_failed_positions.update(positions)
+                    if unsent:
+                        unsent_positions.update(positions)
 
         def _note_skipped(attrs: List[Dict]) -> None:
             for a in attrs:
@@ -3589,6 +3812,9 @@ class MISPWriter:
         present_ct = 0
         processed_batches = 0
         start_time = time.time()
+        # 2026-11-03: the push stopped because MISP kept failing past the cap (``_failing_streak``): the source and
+        # the batch it stopped at, the streak's cap and length (set before a group's lookup or before a batch).
+        stop: Optional[Tuple[str, int, float, float]] = None
         # 2026-11-02: the batches of this push MISP stored although it answered HTTP 5xx (summary line).
         stored_after_5xx_before = self.__dict__.get("stats", {}).get("batches_stored_after_5xx", 0)
         # PR-N4 round 2 (Bugbot R2-A): widened from 2-tuple to 4-tuple
@@ -3669,6 +3895,19 @@ class MISPWriter:
                     ),
                 )
 
+            # 2026-11-03 (a cap on failure time, ``_failing_streak``): once a streak a group before began (its
+            # event or part lookup failing) has reached its cap, the push stops before this group's listings and
+            # event lookup. The group goes to the queue unlooked-up, and the push loop counts its attributes, with
+            # those of every other entry, as not sent. Only a push of several sources has a group after another.
+            if stop is None:
+                streak = _failing_streak(self)
+                if streak is not None and streak[1] >= streak[0]:
+                    stop = (str(source), 1, streak[0], streak[1])
+            if stop is not None:
+                if unique_attrs:
+                    push_queue.append((source, "", 0, unique_attrs))
+                continue
+
             # PR-F7: the cache key is the RESOLVED ``source_tag`` — not the raw ``source``
             # string. Two sources can share a tag via the registry's alias
             # map (e.g. ``cisa`` and ``cisa_kev`` both map to
@@ -3738,6 +3977,8 @@ class MISPWriter:
             # source group; the remaining groups are pushed.
             try:
                 event_id = self._get_or_create_event(source, date)
+                # 2026-11-03: MISP answered the lookup, so a failing streak it began ends (``_failing_streak``).
+                self._misp_push_failing_since = None
             except _TRANSIENT_HTTP_ERRORS as e:
                 logger.error(
                     "Event lookup/creation for source %r failed after retries (%s: %s) — %d attribute(s) counted as failed",
@@ -4096,6 +4337,18 @@ class MISPWriter:
         failed_part_groups: set = set()
         # 2026-11-02: the batch before which *deadline* stopped the push (0: not stopped); no later batch is sent.
         stopped_before_batch = 0
+        # 2026-11-03: the batches and attributes not sent because the push stopped (``stop``).
+        unsent_batches = unsent_attrs = 0
+
+        def _note_unsent(attrs: List[Dict], batch_count: int) -> None:
+            # 2026-11-03: attributes not sent because the push stopped; they count as failed, as ``_push_batch``
+            # counts a failed batch (values that cannot be stored included), and their items are listed.
+            nonlocal total_failed, unsent_batches, unsent_attrs
+            total_failed += len(attrs)
+            unsent_attrs += len(attrs)
+            unsent_batches += batch_count
+            _note_unstored(attrs, unsent=True)
+
         for source, event_id, existing_attrs_count, unique_attrs in push_queue:
             if stopped_before_batch:
                 _note_skipped(unique_attrs)
@@ -4115,6 +4368,10 @@ class MISPWriter:
                     total_failed += len(unique_attrs)
                     _note_unstored(unique_attrs, at_the_event=True)
                     continue
+            if stop is not None:
+                # 2026-11-03: after a stop no batch of a later entry is sent and no part is created.
+                _note_unsent(unique_attrs, len(_batches(unique_attrs, _adaptive_for(existing_attrs_count)[0], _key_of)))
+                continue
             # PR-N4: ADAPTIVE SCALING. ``existing_attrs_count`` was
             # captured during the dedup loop above (we already paid for
             # ``_get_existing_attribute_keys(event_id)`` there) and
@@ -4143,6 +4400,24 @@ class MISPWriter:
             # Send attributes in batches (2026-11-02: apart per *batch_key*, ``_batches``)
             queue_batches = _batches(unique_attrs, effective_batch_size, _key_of)
             for i, batch in enumerate(queue_batches):
+                # 2026-11-03 (a cap on failure time, ``_failing_streak``): while MISP keeps failing, the push stops
+                # before this batch when the batch would start at or after the streak's cap: the streak has reached
+                # it, or the throttle pause and the back-off cooldown due before the batch would reach it (they are
+                # not slept). Nothing more is sent: the attributes of this batch and of every later one count as
+                # failed (``_note_unsent``). Read only while a streak is on, so a push MISP answers is never
+                # stopped by time alone.
+                streak = _failing_streak(self)
+                if streak is not None:
+                    cap, failing_for = streak
+                    pause = effective_throttle if (i > 0 or processed_batches > 0) and effective_throttle > 0 else 0.0
+                    if self._misp_push_consecutive_failures >= _backoff_threshold and _backoff_cooldown_sec > 0:
+                        pause += _backoff_cooldown_sec
+                    if failing_for + pause >= cap:
+                        stop = (str(source), processed_batches + 1, cap, failing_for)
+                        rest = queue_batches[i:]
+                        _note_unsent([a for b in rest for a in b], len(rest))
+                        break
+
                 # 2026-11-02 (*deadline*): the batch starts only when the throttle pause before it, and the
                 # back-off cooldown when one is due, end before the deadline. Otherwise nothing more is sent:
                 # the items of this batch and of every later one are skipped, neither stored nor failed.
@@ -4163,7 +4438,7 @@ class MISPWriter:
                 # failures (instance-scoped via self._misp_push_*), insert
                 # an extended cooldown BEFORE retrying. The
                 # @retry_with_backoff decorator on _push_batch retries
-                # internally with 10s × 2^n delay (max ~150s budget per
+                # internally with 10s × 2^n delay (max ~70s budget per
                 # batch); that's not enough when the underlying MISP is
                 # stuck OOMing. The cooldown gives MISP a real chance to
                 # recover before we send the next request.
@@ -4219,6 +4494,21 @@ class MISPWriter:
                         # if parent DAG died (per PR-F6 contract).
                         if _liveness_cb_in_cooldown is not None:
                             _liveness_cb_in_cooldown()
+                        # 2026-11-03: after a step, while the cooldown has at least the probe's timeouts left, a
+                        # light request (``_misp_answers``): MISP answering it with HTTP 200 ends the cooldown
+                        # early. The time the request takes counts toward the cooldown, so a probe that waits out
+                        # its timeouts never makes the cooldown longer than its length.
+                        if _backoff_cooldown_sec - _slept >= sum(self.COOLDOWN_PROBE_TIMEOUT):
+                            _probe_started = time.monotonic()
+                            _answered = self._misp_answers(source)
+                            _slept += max(0.0, time.monotonic() - _probe_started)
+                            if _answered:
+                                logger.info(
+                                    "[PUSH] MISP answered after %.0fs of the %.0fs cooldown — the push goes on",
+                                    _slept,
+                                    _backoff_cooldown_sec,
+                                )
+                                break
                     # Reset the counter so we don't immediately re-pause
                     # if the next batch ALSO fails — the @retry_with_backoff
                     # gives it 4 attempts; if those fail, we'll re-trigger
@@ -4250,6 +4540,16 @@ class MISPWriter:
                 liveness_cb = getattr(self, "liveness_callback", None)
                 if liveness_cb is not None:
                     liveness_cb()
+
+                # 2026-11-03: checked again after the pause, the cooldown and the liveness check: a batch is never
+                # sent once the streak has reached its cap (a request of the cooldown or the liveness check can take
+                # longer than counted above).
+                streak = _failing_streak(self)
+                if streak is not None and streak[1] >= streak[0]:
+                    stop = (str(source), processed_batches + 1, streak[0], streak[1])
+                    rest = queue_batches[i:]
+                    _note_unsent([a for b in rest for a in b], len(rest))
+                    break
 
                 # 2026-10: a new part of the event split is created here, after the throttle pause, the
                 # back-off cooldown and the liveness check of its first batch, so a push that stops before it
@@ -4318,6 +4618,8 @@ class MISPWriter:
                 # bad event doesn't destroy a whole NVD push.
                 try:
                     success, failed = self._push_batch(event_id, batch)
+                    # 2026-11-03: MISP answered the batch, so a failing streak ends (``_failing_streak``).
+                    self._misp_push_failing_since = None
                     if success == 0 and failed:
                         # HTTP 4xx, a batch error, none confirmed (strict) or an event id empty once sanitised: none
                         # stored. 2026-11-02: an empty id sent no request, so its items failed at the event.
@@ -4412,8 +4714,51 @@ class MISPWriter:
                 len(skipped_positions),
             )
 
+        stopped_note = ""
+        if stop is not None:
+            # 2026-11-03: one ERROR and one count per stopped push. The back-off counters are reset here only, so
+            # the next push on this writer does not begin with a cooldown; otherwise they carry over between calls.
+            stop_source, stop_batch, stop_cap, stop_failing = stop
+            self._misp_push_consecutive_failures = 0
+            self._misp_push_consecutive_successes = 0
+            logger.error(
+                "[MISP-PUSH-STOPPED] MISP push %s: MISP kept failing for %.0fs (%s), so the push stopped before "
+                "batch %d of %d: %d batch(es) with %d attribute(s) not sent, counted as failed; the push ends and "
+                "the run goes on",
+                stop_source,
+                stop_failing,
+                _push_cap_text(self, stop_cap),
+                stop_batch,
+                total_batches,
+                unsent_batches,
+                unsent_attrs,
+            )
+            if _METRICS_AVAILABLE and _MISP_PUSH_STOPPED is not None:
+                try:
+                    _MISP_PUSH_STOPPED.labels(source=stop_source).inc()
+                except Exception as _metric_err:
+                    logger.debug("MISP push-stopped metric increment failed: %s", _metric_err, exc_info=True)
+            stopped_note = (
+                f"; stopped after {stop_failing:.0f}s of MISP failing, {unsent_attrs} attribute(s) not sent "
+                "([MISP-PUSH-STOPPED])"
+            )
+
         refreshed_note = ""
-        if refresh_due:
+        if refresh_due and stop is not None:
+            # 2026-11-03: no refresh edit after a stop: each would meet the MISP that stopped the push. The edits due
+            # are left for a later run that reports the indicators again, as the refresh's own limits leave them.
+            self.stats["attributes_refresh_deferred"] = self.stats.get("attributes_refresh_deferred", 0) + len(
+                refresh_due
+            )
+            logger.warning(
+                "[REFRESH] %d re-reported indicator(s) whose stored copy MISP last wrote more than %d days ago: "
+                "0 refreshed, 0 failed, %d left for a later run (the push stopped: MISP kept failing)",
+                len(refresh_due),
+                refresh_days,
+                len(refresh_due),
+            )
+            refreshed_note = f"; {len(refresh_due)} refresh(es) of existing attributes left for a later run"
+        elif refresh_due:
             refreshed, _refresh_failed = self._refresh_stored_copies(refresh_due, refresh_days, deadline=deadline)
             refreshed_note = f"; {refreshed} existing attribute(s) refreshed"
         skipped_note = (
@@ -4436,7 +4781,7 @@ class MISPWriter:
         if total_success > 0 or total_failed > 0:
             logger.info(
                 f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed{reported_note}"
-                f"{stored_note}{refreshed_note}{skipped_note} in {total_elapsed:.1f}s"
+                f"{stored_note}{refreshed_note}{skipped_note}{stopped_note} in {total_elapsed:.1f}s"
             )
         elif skipped_positions:
             logger.info(
@@ -4458,6 +4803,11 @@ class MISPWriter:
         self.last_push_unstored_items = sorted(unstored_positions)
         self.last_push_event_failed_items = sorted(event_failed_positions)
         self.last_push_skipped_items = sorted(skipped_positions)
+        self.last_push_unsent_items = sorted(unsent_positions)
+        self.last_push_stopped = stop is not None
+        # 2026-11-03: the cap belongs to this call; a request made outside a push has none.
+        self._misp_push_failing_cap = None
+        self._misp_push_failing_since = None
         return total_success, total_failed
 
     def _refresh_stored_copies(
@@ -4547,7 +4897,8 @@ class MISPWriter:
         )
         return refreshed, failed
 
-    @retry_with_backoff(max_retries=4, base_delay=10.0)
+    # 2026-11-03: three retries (four attempts, 10/20/40 s apart); they were four. The event lookups keep four.
+    @retry_with_backoff(max_retries=3, base_delay=10.0, give_up=_misp_retry_gives_up)
     @rate_limited(max_per_second=2.0)
     def _push_batch(self, event_id: str, attributes: List[Dict]) -> Tuple[int, int]:
         """
@@ -4582,6 +4933,10 @@ class MISPWriter:
         if not attributes:
             return 0, skipped_unstorable
 
+        # 2026-11-03: the start of this attempt, for the push's cap on failure time (``_failing_streak``); read only
+        # while a push with a cap runs.
+        cap = getattr(self, "_misp_push_failing_cap", None)
+        attempt_started = time.monotonic() if _is_seconds(cap) and cap > 0 else None
         try:
             # Prepare payload
             payload = {"Attribute": attributes}
@@ -4679,6 +5034,19 @@ class MISPWriter:
                         # Rate limited: honour Retry-After (bounded by collector_utils) before the
                         # decorator's exponential backoff retries the batch.
                         wait = retry_after_sleep_seconds(response, fallback=0.0)
+                        # 2026-11-03: at most the time left of the push's cap on failure time; none left, no wait.
+                        streak = (
+                            _failing_streak(self, attempt_started) if wait and attempt_started is not None else None
+                        )
+                        if streak is not None and wait > streak[0] - streak[1]:
+                            wait = max(0.0, streak[0] - streak[1])
+                            logger.warning(
+                                "MISP rate limit (HTTP 429) on event %s: the Retry-After wait is cut to %.0fs, the "
+                                "time left of the push's cap on failure time (%s)",
+                                event_id,
+                                wait,
+                                _push_cap_text(self, streak[0]),
+                            )
                         if wait:
                             logger.warning(
                                 "MISP rate limit (HTTP 429) on event %s — sleeping %.0fs (Retry-After) before the retry",
@@ -4688,8 +5056,11 @@ class MISPWriter:
                             time.sleep(wait)
                     else:
                         # 2026-11-02: a 5xx can come after the save (``_stored_after_server_error``): a batch
-                        # MISP stored in full is pushed, not sent again.
-                        stored = self._stored_after_server_error(event_id, attributes)
+                        # MISP stored in full is pushed, not sent again. 2026-11-03: the lookup gets only the time
+                        # left of the push's cap on failure time; this attempt starts the streak when none is on.
+                        streak = _failing_streak(self, attempt_started) if attempt_started is not None else None
+                        until = None if streak is None else time.monotonic() + streak[0] - streak[1]
+                        stored = self._stored_after_server_error(event_id, attributes, until=until)
                         if stored is not None and not stored[1]:
                             self.stats["attributes_added"] += stored[0]
                             self.stats["batches_sent"] += 1
