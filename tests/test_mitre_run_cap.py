@@ -11,7 +11,7 @@ The bundle is synthetic and follows the mitre/cti STIX layout the collector pars
 
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -94,13 +94,19 @@ def run(monkeypatch):
     monkeypatch.setattr(mc, "update_source_incremental", lambda _source, **kw: etags.append(kw))
     monkeypatch.setattr(mc, "request_with_rate_limit_retries", lambda *_a, **_k: _Resp(_bundle(), '"v2"'))
 
-    def _run():
+    def _run(stopped_after: Optional[int] = None):
+        # *stopped_after*: the push stops after that many items (2026-11-03, ``MISPWriter.last_push_stopped``): the
+        # rest count as failed and are listed as not sent.
         pushed: List[Dict[str, Any]] = []
         writer = MagicMock()
 
         def push_items(items, *_a, **_k):
             pushed.extend(items)
-            return len(items), 0
+            if stopped_after is None:
+                return len(items), 0
+            writer.last_push_stopped = True
+            writer.last_push_unsent_items = list(range(stopped_after, len(items)))
+            return stopped_after, len(items) - stopped_after
 
         writer.push_items.side_effect = push_items
         collector = mc.MITRECollector(misp_writer=writer)
@@ -134,3 +140,14 @@ def test_a_run_cut_by_the_global_item_limit_does_not_store_the_etag(monkeypatch,
     assert len(pushed) < 1 + N_TECHNIQUES + N_GROUPS + N_MALWARE + N_TOOLS
     assert etags == []
     assert any("ETag is not stored" in r.getMessage() for r in caplog.records)
+
+
+def test_a_push_that_stopped_on_a_failing_misp_does_not_store_the_etag(monkeypatch, run):
+    """2026-11-03: a push that stopped because MISP kept failing counts the objects it did not send as failed; the
+    ETag is stored only after a push without failures, so the next run reads the bundle again. Guard: the ETag rule
+    is older than the stop."""
+    monkeypatch.setattr(config, "MAX_ENTRIES_PER_SOURCE", 0)
+    monkeypatch.setattr(config, "INCREMENTAL_COLLECTION_LIMIT", 200)
+    status, _pushed, etags = run(stopped_after=10)
+    assert status["success"] is False
+    assert etags == []

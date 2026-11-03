@@ -340,7 +340,8 @@ def _passed_by_the_cursor(read: Iterable[Dict[str, Any]], stored: Iterable[str],
     return [p["id"] for p in read if p["id"] not in stored_ids and (dt := _utc(p["modified"])) is not None and dt < at]
 
 
-# The retry-list counts of a scheduled run that pushed and whose retry list stayed empty (2026-11-02).
+# The retry-list counts of a scheduled run that pushed and whose retry list stayed empty (2026-11-02), and the
+# window pulses a stopped push held (``held_unsent``, 2026-11-03), none here.
 NO_RETRY = {
     "retry_pending": 0,
     "retry_added": 0,
@@ -350,6 +351,7 @@ NO_RETRY = {
     "retry_not_found": 0,
     "retry_fetch_failed": 0,
     "retry_not_pushed": 0,
+    "held_unsent": 0,
 }
 
 

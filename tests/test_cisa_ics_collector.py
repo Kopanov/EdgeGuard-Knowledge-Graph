@@ -678,6 +678,22 @@ def test_incremental_uses_changes_csv_and_advances_cursor_only_after_clean_push(
     mod.update_source_incremental.assert_not_called()
 
 
+def test_incremental_cursor_stays_after_a_push_that_stopped_on_a_failing_misp(monkeypatch):
+    """2026-11-03: a push that stopped because MISP kept failing (``MISPWriter.last_push_stopped``) counts the items
+    it did not send as failed, so the cursor, which moves only after a push without failures, stays. Guard: the
+    cursor rule is older than the stop."""
+    from datetime import datetime, timedelta, timezone
+
+    newer = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    http = _FakeHTTP({"changes.csv": _changes(("2026/a.json", newer)), "2026/a.json": copy.deepcopy(SAMPLE_ADVISORY)})
+    c = _collector(http, monkeypatch, push_ok=1, push_failed=1)
+    c.misp_writer.last_push_stopped = True
+    c.misp_writer.last_push_unsent_items = [1]
+    st = c.collect(push_to_misp=True, baseline=False)
+    assert st["success"] is False
+    mod.update_source_incremental.assert_not_called()
+
+
 def test_incremental_empty_run_does_not_advance_cursor_past_a_failed_fetch(monkeypatch):
     """Bugbot on #136: the empty-result path advanced the cursor whenever any advisory was fetched,
     ignoring ``fetch_failed`` — a later file's timestamp moved the cursor past an earlier failed

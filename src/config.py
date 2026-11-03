@@ -715,6 +715,30 @@ def misp_refresh_max_seconds() -> int:
     return max(0, _env_int("EDGEGUARD_MISP_REFRESH_MAX_SECONDS", 600))
 
 
+# 2026-11-03: the bounds of the two caps on the time a MISP push spends on a failing MISP (below).
+MISP_PUSH_MAX_FAILING_SEC_HI = 86400.0
+
+
+def misp_push_max_failing_seconds(baseline: bool = False) -> float:
+    """``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`` (default 900; ``0`` = no cap), or for the baseline's writer
+    ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`` (default 3600; ``0`` = no cap): the longest one
+    ``MISPWriter.push_items`` call goes on while MISP keeps failing (2026-11-03); it never cuts a request short, and
+    slow event and part lookups, a new part's creation, the listings and the refresh are not cut at it
+    (docs/MISP_TUNING.md). The time is the wall time from the start of the first request that fails
+    (a batch answered HTTP 429 or 5xx, a timeout or a connection error, a failed event lookup) and includes the
+    back-off, ``Retry-After``, throttle and cooldown waits that follow; a batch MISP answers ends it, and so does
+    the day's event lookup when it returns; the next failure starts it again. When it is spent the push stops: the
+    items not sent count as failed, and the run goes on (``[MISP-PUSH-STOPPED]``). 15 minutes is a quarter of
+    ``collect_otx``'s limit (1 hour); the baseline's writer takes 60 minutes, less when its task ends sooner.
+    An empty value is unset; a value that is not a number, not finite or outside [0, 86400] uses the default
+    with a WARNING."""
+    if baseline:
+        return _bounded_env_float(
+            "EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE", 3600.0, lo=0.0, hi=MISP_PUSH_MAX_FAILING_SEC_HI
+        )
+    return _bounded_env_float("EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC", 900.0, lo=0.0, hi=MISP_PUSH_MAX_FAILING_SEC_HI)
+
+
 # OTX incremental: first-run / no-checkpoint lookback; overlap subtracted from stored cursor to avoid gaps.
 OTX_INCREMENTAL_LOOKBACK_DAYS = _env_int("EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS", 3)
 OTX_INCREMENTAL_OVERLAP_SEC = _env_int("EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC", 300)
@@ -743,7 +767,7 @@ def otx_retry_max_seconds() -> int:
     due before it would end at or after the limit, and no refresh edit starts after it; the pulses whose items
     were not sent keep their entries unchanged and are pushed first by the next run. A batch already sent is
     not interrupted, so the push can exceed the limit by one batch's attempts (``MISPWriter._push_batch``:
-    five, with 150 s of pauses between them after HTTP 5xx). 10 minutes is a sixth of the task's limit (1
+    four, with 70 s of pauses between them after HTTP 5xx). 10 minutes is a sixth of the task's limit (1
     hour), as for ``EDGEGUARD_MISP_REFRESH_MAX_SECONDS``."""
     return max(1, _env_int("EDGEGUARD_OTX_RETRY_MAX_SECONDS", 600))
 

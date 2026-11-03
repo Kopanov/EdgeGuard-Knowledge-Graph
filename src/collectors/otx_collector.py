@@ -719,7 +719,9 @@ class _WindowSettled(NamedTuple):
     saved: List[Dict[str, Any]]  # the list as the incremental state holds it now
     items: List[Dict[str, Any]]  # the items of the push of the list's pulses, in ``_retry_order``
     order: Dict[str, Tuple[datetime, str]]  # ``_retry_order`` of the pulses read on the list and still on it
-    pushes: bool  # the run pushes *items* (there are some, and the window's push did not fail at the event)
+    pushes: bool  # the run pushes *items* (there are some, and the window's push neither failed at the event
+    # nor stopped because MISP kept failing)
+    held: Set[str]  # 2026-11-03: the pulses the items that stopped push did not send name (``last_push_unsent_items``)
 
 
 def _settle_retry_list(
@@ -1158,7 +1160,9 @@ class OTXCollector:
             ``retry_fetched`` (fetched by id and processed), ``retry_recovered``, ``retry_given_up``,
             ``retry_not_found`` (HTTP 404, left the list), ``retry_fetch_failed`` and ``retry_not_pushed``
             (pulses of the list the run read but did not push: ``EDGEGUARD_OTX_RETRY_MAX_SECONDS`` ran out,
-            or the window's push failed at the MISP event).
+            the window's push failed at the MISP event, or a push stopped because MISP kept failing). 2026-11-03:
+            ``held_unsent``, the pulses of the window held because the window's push stopped before sending items
+            of theirs (``[MISP-PUSH-STOPPED]``).
         """
         limit = resolve_collection_limit(limit, "otx", baseline=baseline)
 
@@ -1821,6 +1825,15 @@ class OTXCollector:
                 - A writer that gives no list, or a listed item that names no pulse the run processed (and not every
                   listed item failed at its event): the failed items are unknown, the cursor stays and no pulse goes
                   on the list.
+                - 2026-11-03: a push that stopped because MISP kept failing (``last_push_stopped``,
+                  ``[MISP-PUSH-STOPPED]``) did not send the items it lists in ``last_push_unsent_items``, which say
+                  nothing about their pulses (an outage, not a refusal). The pulses those items name are held: the
+                  cursor stops below the oldest of them in the window, stays when that pulse has no readable
+                  ``modified``, and none of them goes on the list; the pulses whose items were sent and failed go on
+                  it as above. A pulse already on the list that an unsent item names keeps its entry unchanged, also
+                  when the push's other failures are unknown (a listed item names no pulse the run processed: the
+                  cursor stays and no pulse goes on the list), and the pulses of the list are not pushed in this
+                  run; a listed pulse read in the window whose items were all sent follows that push.
 
                 The pulses with unstored items come from the writer's list, never from the items' positions: the
                 pulses of ``unique[:success]`` (2026-10) named a failed batch's pulses whenever an earlier batch
@@ -1839,6 +1852,21 @@ class OTXCollector:
                     return None
                 now_iso = _utc_iso(run_started)
                 failing, whole = _outcome(window_items, failed)
+                # 2026-11-03: a push that stopped because MISP kept failing (``[MISP-PUSH-STOPPED]``) did not send
+                # the items it lists in ``last_push_unsent_items``: an outage, not a refusal, for their pulses. The
+                # pulses those items name are held whatever else the push's failures say (``_named_pulses`` needs
+                # no known ids, so a window row without an id does not undo it); without that list they are
+                # unknown, and every pulse of the window with a listed item, or else every pulse of the window,
+                # is held.
+                stopped = failed > 0 and getattr(self.misp_writer, "last_push_stopped", False) is True
+                unsent_list = getattr(self.misp_writer, "last_push_unsent_items", None) if stopped else None
+                unsent_known = isinstance(unsent_list, (list, tuple, set))
+                unsent_held: Set[str] = set()
+                if stopped:
+                    if unsent_known:
+                        unsent_held = _named_pulses(window_items, unsent_list)
+                    else:
+                        unsent_held = set(failing) if failing is not None else set(window_ids)
                 if whole:
                     held = set(failing or {}) & window_ids
                     new_cursor = (
@@ -1864,8 +1892,42 @@ class OTXCollector:
                     logger.warning(
                         "[OTX-RETRY] OTX: the push failed %d item(s) the writer did not name (no list of unstored "
                         "items, or a listed item of no pulse this run processed): the cursor stays, and no pulse "
-                        "goes on the retry list",
+                        "goes on the retry list%s",
                         failed,
+                        (
+                            "; the push stopped because MISP kept failing ([MISP-PUSH-STOPPED]): the pulses of the "
+                            "retry list are not pushed in this run, and those an item not sent names keep their "
+                            f"entries (ids: {_pulse_ids_for_log(sorted(unsent_held & listed_ids))})"
+                        )
+                        if stopped
+                        else "",
+                    )
+                elif stopped:
+                    # 2026-11-03: the pulses the unsent items name are held as after a failure at the event: the
+                    # cursor stops below the oldest of them in the window and none goes on the list; the pulses
+                    # whose items were sent and failed go on it as after any batch failure. Without a list of the
+                    # unsent items they are unknown: the cursor stays and no pulse goes on the list.
+                    held_window = unsent_held & window_ids
+                    new_cursor = (
+                        _cursor_after(self._pulses_before_oldest(to_process, held_window)) if unsent_known else None
+                    )
+                    failing = {pid: keys for pid, keys in failing.items() if pid not in unsent_held}
+                    reason = f"MISP push of the run started {now_iso}: {failed} of {len(window_items)} item(s) failed"
+                    if new_cursor and not held_window:
+                        where = f"advances to {new_cursor} (no pulse of the window has an item not sent)"
+                    elif new_cursor:
+                        where = f"moves to {new_cursor}, below the oldest pulse of the window with an item not sent"
+                    else:
+                        where = "stays where it was"
+                    logger.warning(
+                        "[OTX-RETRY] OTX: the MISP push stopped because MISP kept failing ([MISP-PUSH-STOPPED]): the "
+                        "items of %d pulse(s) of the window were not sent; those pulses do not go on the retry list, "
+                        "and the cursor %s, so the next run reads them again. The pulses of the retry list are not "
+                        "pushed in this run: those an item not sent names keep their entries, and those read in the "
+                        "window otherwise follow its push (ids not sent: %s)",
+                        len(held_window),
+                        where,
+                        _pulse_ids_for_log(sorted(held_window)),
                     )
                 else:
                     new_cursor = _cursor_after(to_process)
@@ -1889,7 +1951,7 @@ class OTXCollector:
                 keyed = [(pid, item) for item in retry_items if (pid := _list_pulse(item, order))]
                 keyed.sort(key=lambda pair: order[pair[0]])
                 list_items = [item for _pid, item in keyed]
-                pushes = bool(list_items) and not whole
+                pushes = bool(list_items) and not whole and not stopped
                 updates: Dict[str, Any] = {}
                 saved = copy.deepcopy(settled.entries)
                 if pushes:
@@ -1914,7 +1976,7 @@ class OTXCollector:
                         len(settled.added),
                         _pulse_ids_for_log(settled.added),
                     )
-                return _WindowSettled(failing, whole, settled, saved, list_items, order, pushes)
+                return _WindowSettled(failing, whole, settled, saved, list_items, order, pushes, unsent_held)
 
             def _push_and_settle_the_list(window: _WindowSettled, window_failed: int) -> Tuple[int, int]:
                 """Push the items of the pulses of the retry list (``window.items``) and settle the list; returns the
@@ -1927,7 +1989,8 @@ class OTXCollector:
                 EDGEGUARD_OTX_RETRY_MAX_SECONDS has passed since the push began (``push_items``' ``deadline``; its
                 event lookup and listings count toward it). The pulses whose items were not all sent
                 (``last_push_skipped_items``), or not pushed at all, keep their entries unchanged: no attempt, no
-                ``last_tried_at``, first at the next run.
+                ``last_tried_at``, first at the next run. 2026-11-03: so do the pulses whose items a push that stopped
+                because MISP kept failing did not send (``last_push_unsent_items``, this push's or the window's).
 
                 A pulse of the list the run pushed (fetched by id, or read again in the window) leaves the list when
                 none of its items is listed and the items recorded as failed were pushed (recovered), and stays
@@ -1946,6 +2009,7 @@ class OTXCollector:
                 list_items = window.items
                 pushes = window.pushes
                 skipped: Any = []
+                unsent: Any = []
                 failing_retries: Optional[Dict[str, List[str]]] = {}
                 whole_retries = False
                 if pushes:
@@ -1956,23 +2020,42 @@ class OTXCollector:
                     )
                     spent = time.monotonic() - started
                     skipped = getattr(self.misp_writer, "last_push_skipped_items", None) or []
+                    # 2026-11-03: the items a push that stopped because MISP kept failing did not send.
+                    if failed > 0 and getattr(self.misp_writer, "last_push_stopped", False) is True:
+                        unsent = getattr(self.misp_writer, "last_push_unsent_items", None) or []
                     failing_retries, whole_retries = _outcome(list_items, failed)
                     if success > 0:
                         logger.info(f"[OK] OTX: Successfully pushed {success} items of the retry list to MISP")
                     if failed > 0:
                         logger.warning(f"[WARN] OTX: Failed to push {failed} items of the retry list to MISP")
-                not_pushed = set(window.order) & _named_pulses(
-                    list_items, skipped if pushes else range(len(list_items))
+                out_of_time = set(window.order) & _named_pulses(list_items, skipped) if pushes else set()
+                stopped = set(window.order) & _named_pulses(list_items, unsent) if pushes else set()
+                not_pushed = (
+                    out_of_time | stopped
+                    if pushes
+                    else set(window.order) & _named_pulses(list_items, range(len(list_items)))
                 )
-                if pushes and not_pushed:
+                # 2026-11-03: a pulse of the list that an item the window's stopped push did not send names keeps
+                # its entry too.
+                not_pushed |= window.held & listed_ids
+                if pushes and out_of_time:
                     logger.warning(
                         "[OTX-RETRY] OTX: the push of the retry list's pulses reached its time budget "
                         "(EDGEGUARD_OTX_RETRY_MAX_SECONDS=%d) after %.0f s: %d pulse(s) were not pushed; they keep "
                         "their entries and are pushed first by the next run (ids: %s)",
                         budget,
                         spent,
-                        len(not_pushed),
-                        _pulse_ids_for_log(sorted(not_pushed)),
+                        len(out_of_time),
+                        _pulse_ids_for_log(sorted(out_of_time)),
+                    )
+                if pushes and stopped:
+                    logger.warning(
+                        "[OTX-RETRY] OTX: the push of the retry list's pulses stopped because MISP kept failing "
+                        "([MISP-PUSH-STOPPED]) after %.0f s: %d pulse(s) were not pushed; they keep their entries and "
+                        "are pushed first by the next run (ids: %s)",
+                        spent,
+                        len(stopped),
+                        _pulse_ids_for_log(sorted(stopped)),
                     )
                 if whole_retries:
                     logger.warning(
@@ -2040,6 +2123,7 @@ class OTXCollector:
                     retry_not_found=len(retry_not_found),
                     retry_fetch_failed=len(retry_fetch_failed),
                     retry_not_pushed=len(not_pushed),
+                    held_unsent=len(window.held & window_ids),
                 )
                 if settled.entries or stored_retry or added or gave_up or retried or retry_not_found:
                     oldest = settled.entries[0]["first_failed_at"] if settled.entries else None
@@ -2047,7 +2131,7 @@ class OTXCollector:
                         logging.WARNING if settled.entries else logging.INFO,
                         "[OTX-RETRY] OTX: %d pulse(s) on the retry list after the run%s; this run fetched %d by "
                         "id, recovered %d, added %d and gave up %d; %d answered HTTP 404, %d could not be fetched "
-                        "or read, %d were not pushed (time budget, or a failure at the MISP event)",
+                        "or read, %d were not pushed (time budget, a stopped push, or a failure at the MISP event)",
                         len(settled.entries),
                         f" (the first failure of the longest waiting: {oldest})" if settled.entries else "",
                         len(retried),
@@ -2074,7 +2158,8 @@ class OTXCollector:
                 # The cursor and the retry list after the pushes (``_after_window_push``, then
                 # ``_push_and_settle_the_list``). The status below is unchanged: a push with failures fails the run
                 # when it stored nothing or falls below EDGEGUARD_MISP_MIN_SUCCESS_RATE, whatever happens to the
-                # cursor. Items the time budget left unsent count neither way.
+                # cursor. Items the time budget left unsent count neither way; 2026-11-03: the items a push that
+                # stopped because MISP kept failing did not send count as failed (``last_push_unsent_items``).
                 window = _after_window_push(success, failed)
                 if window is not None:
                     retry_success, retry_failed = _push_and_settle_the_list(window, failed)

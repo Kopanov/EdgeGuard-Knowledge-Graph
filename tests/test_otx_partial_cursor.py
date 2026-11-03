@@ -288,7 +288,7 @@ def test_a_batch_answering_5xx_after_the_retries_puts_its_pulse_on_the_retry_lis
     with patch("collectors.collector_utils.time.sleep"):
         _status, cursor = _run(_three("newest first"), writer)
 
-    assert misp.refused_attempts == 5, "the first attempt and four retries"
+    assert misp.refused_attempts == 4, "the first attempt and three retries"
     assert "198.51.100.3" not in misp.stored and "198.51.100.4" not in misp.stored
     assert writer.last_push_unstored_items == [2, 3] and writer.last_push_event_failed_items == []
     assert cursor["otx_last_pulse_modified"] == P3[1] and _listed(cursor) == [P2[0]]

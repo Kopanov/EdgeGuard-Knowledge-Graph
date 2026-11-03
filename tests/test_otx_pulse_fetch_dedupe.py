@@ -33,8 +33,8 @@ if _SRC not in sys.path:
 from collectors import otx_collector  # noqa: E402
 from collectors.otx_collector import OTXCollector  # noqa: E402
 
-# The retry-list counts a scheduled run that pushed adds to ``pulse_counts`` (2026-11-02); none of these runs
-# has a pulse on the list.
+# The retry-list counts a scheduled run that pushed adds to ``pulse_counts`` (2026-11-02), and the window pulses a
+# stopped push held (``held_unsent``, 2026-11-03); none of these runs has a pulse on the list or a stopped push.
 NO_RETRY = {
     "retry_pending": 0,
     "retry_added": 0,
@@ -44,6 +44,7 @@ NO_RETRY = {
     "retry_not_found": 0,
     "retry_fetch_failed": 0,
     "retry_not_pushed": 0,
+    "held_unsent": 0,
 }
 
 

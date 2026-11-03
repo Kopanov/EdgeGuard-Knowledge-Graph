@@ -247,7 +247,7 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 # Then update the mount target in docker-compose.yml accordingly.
 ```
 
-**4. Retry backoff:** MISP-facing operations use `retry_with_backoff(max_retries=4, base_delay=10.0)` — retries at **10s → 20s → 40s → 80s**. This gives MISP time to recover from memory pressure between retries. Read timeouts are set to **300s** (5 minutes) to accommodate large event processing.
+**4. Retry backoff:** a MISP push batch uses `retry_with_backoff(max_retries=3, base_delay=10.0)` — retries at **10s → 20s → 40s** — and the event lookups `max_retries=4` (**10s → 20s → 40s → 80s**). This gives MISP time to recover from memory pressure between retries. Read timeouts are set to **300s** (5 minutes) to accommodate large event processing. One push stops once MISP has kept failing for `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` (900 s; 3600 s for the baseline, `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`): the items not sent count as failed and the run goes on ([MISP_TUNING.md](MISP_TUNING.md)).
 
 **5. Signs of MISP memory pressure:**
 - `ReadTimeout` or `ConnectionError` in pipeline logs
@@ -285,10 +285,11 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 ---
 
-_Last updated: 2026-10-25_
+_Last updated: 2026-11-03_
 
 ## History
 
+- 2026-11-03 — MISP performance tuning, retry backoff: a push batch has three retries (10, 20 and 40 s; it had four), the event lookups four, and a push stops once MISP has kept failing for `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`.
 - 2026-10-25 — MISP performance tuning: the OTX event (about 150,000 attributes in a 730-day baseline) is the example of a large event, since the writer splits other sources' events at `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (the text named an NVD event of about 95K CVEs).
 - 2026-10-23 — § 7 points to CONFIGURATION.md and to the documentation index docs/README.md, which replaced the README's documentation section.
 - 2026-10-18 — § 4 builds every image and recreates every container (`docker compose build`, then `docker compose up -d --force-recreate`; the start command built only the Airflow image) and records the deployed commit in `.env` (`scripts/record_deployed_commit.sh` writes `EDGEGUARD_GIT_SHA`, which both `/health` responses report as `git_sha`).

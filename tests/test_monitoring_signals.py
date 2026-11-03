@@ -897,6 +897,9 @@ class TestFullSyncRequestPendingAlert:
         rules = [r for g in _RULES["groups"] for r in g["rules"] if "alert" in r]
         readme = (_ROOT / "README.md").read_text()
         assert f"({len(rules)} alert rules across {len(_RULES['groups'])} groups in `prometheus/alerts.yml`)" in readme
+        # 2026-11-03: the Prometheus guide states the count too.
+        setup = (_ROOT / "docs" / "PROMETHEUS_SETUP.md").read_text()
+        assert f"defines **{len(rules)} alert rules**" in setup
 
     def test_it_says_it_clears_three_days_after_the_last_failure(self):
         # 2026-10: the rule reads a counter over a 3-day window, so it keeps firing after the request was

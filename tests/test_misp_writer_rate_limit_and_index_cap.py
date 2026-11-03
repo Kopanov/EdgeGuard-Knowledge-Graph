@@ -282,9 +282,9 @@ class TestBatchPushRateLimit:
         writer, posted, sleeps = _writer(monkeypatch, [_Resp(429, headers={"Retry-After": "1"})])
         with pytest.raises(mw.MispTransientError):
             writer._push_batch("5", ATTRS)
-        assert len(posted) == 5, "first attempt + 4 retries"
-        assert sleeps.count(1.0) == 5, "Retry-After honoured on every attempt"
-        assert [s for s in sleeps if s >= 10.0] == [10.0, 20.0, 40.0, 80.0], "exponential backoff of the decorator"
+        assert len(posted) == 4, "first attempt + 3 retries"
+        assert sleeps.count(1.0) == 4, "Retry-After honoured on every attempt"
+        assert [s for s in sleeps if s >= 10.0] == [10.0, 20.0, 40.0], "exponential backoff of the decorator"
 
     def test_500_is_still_transient_and_400_still_permanent(self, monkeypatch):
         writer, _posted, _sleeps = _writer(monkeypatch, [_Resp(500, text="boom")])

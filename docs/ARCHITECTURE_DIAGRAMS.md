@@ -246,7 +246,7 @@ flowchart TD
     FN -->|transient error<br/>ServiceUnavailable<br/>TransientError<br/>ConnectionError<br/>TimeoutError| DEC
     FN -->|non-transient error<br/>DatabaseError<br/>CypherSyntaxError| ERR[Log + return default]
 
-    DEC -->|retries exhausted<br/>neo4j: 3 retries, 2s base<br/>misp: 4 retries, 10s base| RAISE[Re-raise exception]
+    DEC -->|retries exhausted<br/>neo4j: 3 retries, 2s base<br/>misp batch: 3 retries, event lookup: 4, 10s base<br/>misp: fewer at the push's cap on failure time| RAISE[Re-raise exception]
     RAISE --> CALLER{Caller handles}
     CALLER -->|run_misp_to_neo4j| CIRCUIT[Circuit breaker<br/>record_failure]
     CALLER -->|Airflow DAG<br/>incremental tasks: retries=2| AIRFLOW[AirflowException<br/>task marked FAILED]
@@ -343,10 +343,11 @@ campaign builder and 6/6 FIRST EPSS. Jobs 2/6, 3/6 and 6/6 are not drawn above.
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-03_
 
 ## History
 
+- 2026-11-03 — Retry diagram: a MISP batch has three retries (it had four), the event lookups keep four, and the retries end sooner when the next wait would reach the push's cap on failure time (`EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`).
 - 2026-11-02 — § 6: the reconnect loop of `run_pipeline.py` is gone with its Neo4j load (it now runs the collectors into MISP only).
 - 2026-11-01 — § 3: the `HAS_CVSS_v*` edges are written by `merge_cve` and, in the sync, by the CVSS statement of its CVE batches (`merge_cves_batch`); the note named `merge_cve` alone.
 - 2026-10-25 — The sync chain labels the `run_neo4j_sync` limit as the default 8 h (`EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`).

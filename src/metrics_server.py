@@ -13,6 +13,7 @@ Metrics exposed:
 - edgeguard_otx_retry_given_up_total - OTX pulses given up from the retry list
 - edgeguard_misp_events_total - MISP events by source
 - edgeguard_misp_attributes_total - MISP attributes by type
+- edgeguard_misp_push_stopped_total - MISP pushes stopped because MISP kept failing past the push's cap
 - edgeguard_neo4j_nodes - Neo4j node counts by label
 - edgeguard_neo4j_relationships - Neo4j relationship counts
 - edgeguard_neo4j_sync_duration_seconds - Neo4j sync duration
@@ -209,7 +210,7 @@ MISP_PUSH_DURATION = Histogram(
 )
 
 # PR-N4: permanent batch failure after exhausting MISPWriter's
-# @retry_with_backoff(max_retries=4) on 5xx. The on-call report from
+# @retry_with_backoff on 5xx (2026-11-03: max_retries=3, four attempts). The on-call report from
 # Bravo Vanko on 2026-04-21 had 7 OTX + 16 NVD batches × 500 attrs ≈
 # 11,500 attrs silently dropped during a 730-day baseline; Bravo had
 # to hand-count from the logs because no metric existed. A non-zero
@@ -241,6 +242,18 @@ MISP_PUSH_BACKOFF_TRIGGERED = Counter(
     "Number of times MISPWriter entered extended-cooldown mode after "
     "N consecutive HTTP 5xx batch failures (default N=3, see "
     "EDGEGUARD_MISP_BACKOFF_THRESHOLD).",
+    ["source"],
+)
+
+# 2026-11-03: a MISP push that stopped because MISP kept failing for longer than its cap
+# (EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC, or EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE for the baseline's writer;
+# ``[MISP-PUSH-STOPPED]``): the items not sent count as failed and the run goes on. One increment per stopped
+# push, labelled by source only (as the counters above). Read by EdgeGuardMispPushStopped.
+MISP_PUSH_STOPPED = Counter(
+    "edgeguard_misp_push_stopped_total",
+    "MISP pushes that stopped because MISP kept failing for longer than the push's cap "
+    "(EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC, or EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE for the baseline); "
+    "the items not sent count as failed and the run goes on.",
     ["source"],
 )
 

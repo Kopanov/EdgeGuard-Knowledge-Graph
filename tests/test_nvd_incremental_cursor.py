@@ -402,6 +402,73 @@ class TestIncrementalRun:
         assert edited == [stored_attribute(ANALYSED)["uuid"]], "the edit that succeeded is not repeated"
         assert status["success"] is True and store.data[NVD_CURSOR_KEY] == NOW.isoformat()
 
+    def test_a_push_that_stopped_on_a_failing_misp_skips_the_edits_and_keeps_the_cursor(self, env, caplog):
+        """2026-11-03: five new CVEs to add, one a batch, and two stored CVEs to edit. MISP answers the additions
+        with HTTP 500 after 50 s each; with a cap on failure time of 40 s the first batch gets no retry and the
+        push stops before the second (``[MISP-PUSH-STOPPED]``). The edits have no stop rule of their own, so none
+        is attempted after the stop: they count as not written and the cursor stays. Before the change every
+        batch was sent five times and both edits were sent to the failing MISP."""
+        clock = {"now": 1_000.0}
+
+        def sleep(seconds):
+            clock["now"] += max(0.0, float(seconds))
+
+        env.setattr(misp_writer.time, "sleep", sleep)
+        env.setattr(misp_writer.time, "monotonic", lambda: clock["now"])
+        env.setenv("EDGEGUARD_MISP_PUSH_BATCH_SIZE", "1")
+        env.setenv("EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC", "40")
+        nvd = FakeNvd([nvd_record(REJECTED), nvd_record(ANALYSED), *_many(5)])
+        misp = FakeMisp([stored_attribute_with_ssvc(c) for c in (REJECTED, ANALYSED)])
+        stored_events = {a["event_id"] for a in misp.attributes}
+        real_post = misp.post
+        additions = []
+
+        def post(url, json=None, **kw):
+            path = url.split(misp.url, 1)[1]
+            if path.startswith("/events/") and path != "/events/restSearch" and path[8:] not in stored_events:
+                additions.append(path)
+                clock["now"] += 50
+                return _Response(500, {"name": "An Internal Error Has Occurred."})
+            return real_post(url, json=json, **kw)
+
+        misp.post = post
+        store = CursorStore("2026-10-13T12:00:00+00:00")
+        with caplog.at_level("ERROR", logger=nvd_collector.logger.name):
+            status = run(env, nvd, misp, store)
+
+        assert len(additions) == 1, "one attempt of the first batch; the other four batches are not sent"
+        assert misp.edits() == [], "no edit after the stop"
+        assert store.writes == [] and status["success"] is False
+        assert status["nvd_incremental"]["failed"] == 7 and status["nvd_incremental"]["updated"] == 0
+        assert any(
+            "the MISP push stopped because MISP kept failing ([MISP-PUSH-STOPPED]); the 2 planned edit(s)"
+            in r.getMessage()
+            for r in caplog.records
+        )
+        (line,) = [r.getMessage() for r in caplog.records if "the cursor stays at" in r.getMessage()]
+        assert REJECTED in line and ANALYSED in line, "the edits not attempted are named with the writes not confirmed"
+
+    def test_the_edits_run_after_a_push_that_failed_without_stopping(self, env):
+        """2026-11-03, a guard (passes before the change too): only a stopped push skips the edits. MISP refuses the
+        additions with HTTP 400 (no retry, no stop): both edits of stored CVEs are still made."""
+        env.setenv("EDGEGUARD_MISP_PUSH_BATCH_SIZE", "1")
+        nvd = FakeNvd([nvd_record(REJECTED), nvd_record(ANALYSED), *_many(2)])
+        misp = FakeMisp([stored_attribute_with_ssvc(c) for c in (REJECTED, ANALYSED)])
+        stored_events = {a["event_id"] for a in misp.attributes}
+        real_post = misp.post
+
+        def post(url, json=None, **kw):
+            path = url.split(misp.url, 1)[1]
+            if path.startswith("/events/") and path != "/events/restSearch" and path[8:] not in stored_events:
+                return _Response(400, {"name": "Refused"})
+            return real_post(url, json=json, **kw)
+
+        misp.post = post
+        store = CursorStore("2026-10-13T12:00:00+00:00")
+        status = run(env, nvd, misp, store)
+        assert len(misp.edits()) == 2 and status["nvd_incremental"]["updated"] == 2
+        assert store.writes == [], "the refused additions keep the cursor"
+
     def test_an_edit_misp_does_not_store_counts_as_failed(self, env):
         nvd, misp, store = self._fakes(cursor="2026-10-13T12:00:00+00:00")
         misp.edits_not_stored.add(stored_attribute(REJECTED)["uuid"])

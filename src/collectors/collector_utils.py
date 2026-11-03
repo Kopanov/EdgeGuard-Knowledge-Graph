@@ -58,7 +58,12 @@ class TransientServerError(requests.exceptions.HTTPError):
 # ---------------------------------------------------------------------------
 
 
-def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
+def retry_with_backoff(
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+    *,
+    give_up: Optional[Callable[[tuple, float, float], Optional[str]]] = None,
+):
     """Decorator for retry logic with exponential backoff.
 
     Retries on transient network errors
@@ -70,6 +75,12 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
     Args:
         max_retries:  Number of retry attempts after the first failure.
         base_delay:   Initial delay in seconds; doubles on each retry.
+        give_up:      2026-11-03, optional: called before each retry's sleep with the call's positional
+                      arguments, the ``time.monotonic()`` at which the failed attempt started and the delay
+                      about to be slept. A non-empty string it returns ends the retries: the last exception
+                      is re-raised at once, as after the final attempt, and the string is logged as the
+                      reason. Without it nothing changes and no clock is read. ``MISPWriter`` passes one
+                      that bounds the time a push spends on a failing MISP.
 
     Usage::
 
@@ -83,6 +94,7 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
         def wrapper(*args, **kwargs):
             last_exception = None
             for attempt in range(max_retries + 1):
+                attempt_started = time.monotonic() if give_up is not None else 0.0
                 try:
                     return func(*args, **kwargs)
                 except (
@@ -95,6 +107,13 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
                     last_exception = exc
                     if attempt < max_retries:
                         delay = base_delay * (2**attempt)
+                        reason = give_up(args, attempt_started, delay) if give_up is not None else None
+                        if reason:
+                            logger.error(
+                                f"{func.__name__} failed (attempt {attempt + 1}/{max_retries + 1}): {exc}. "
+                                f"No retry: {reason}"
+                            )
+                            break
                         logger.warning(
                             f"{func.__name__} failed "
                             f"(attempt {attempt + 1}/{max_retries + 1}): "
