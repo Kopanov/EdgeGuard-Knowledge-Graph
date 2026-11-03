@@ -758,19 +758,25 @@ _TRANSIENT_HTTP_ERRORS = (
 # ends it, and so does the group's event lookup before the batches when it returns; the next failure starts a new
 # streak with the whole cap. Successful requests and the throttle pause between batches never start one, so time
 # alone never stops a push; within a streak its time is wall time, the throttle pauses between its failing batches
-# included. The cap is checked between requests, never by cutting one short: a stop comes at most one request
-# after the cap (a batch request takes up to ``CONNECT_TIMEOUT`` + ``READ_TIMEOUT``, 330 s), except that the lookups
-# after a 5xx get only the time left (``_stored_after_server_error``), and a cooldown is never longer than the time
-# left. The listings before a group's first batch are not counted. The writer keeps the cap of the call in
+# included. The cap is checked before each batch, before a group of a push of several sources and before each
+# retry (``_misp_retry_gives_up``), never by cutting a request short (a read timeout limits each wait for data, not
+# the whole answer). The lookups after a 5xx get timeouts of at most the time left (``_stored_after_server_error``),
+# and a cooldown that would reach the cap is not slept. The day's event lookup, the lookups of later event parts and
+# a new part's creation (made after the last check before its first batch) stop retrying at the cap but keep their
+# full timeouts; the listings (no retries) and the refresh of re-reported indicators are not limited by it. So a MISP
+# that answers slowly can keep a push going past the cap, most of all through the parts of a large day
+# (``_event_split_above``). The writer keeps the cap of the call in
 # ``_misp_push_failing_cap`` (seconds; 0 or unset:
 # no cap), the start of the streak in ``_misp_push_failing_since`` (``time.monotonic()``; unset: none) and, for a
 # writer given its task's end (the baseline's), ``_misp_push_failing_end_by``; all are read with ``getattr``
 # defaults that mean no cap, because many tests build the writer without ``__init__`` and ``_push_batch`` is also
 # called outside a push.
 
-# A writer given its task's end stops a push this long before the task's ``execution_timeout`` ends, so the
-# collector returns its status before Airflow kills the task (a killed task saves nothing). It covers the request in
-# flight when the cap is reached (up to 330 s, above) and the summary that follows.
+# A writer given its task's end gives a failing streak at most the time until this long before the task's
+# ``execution_timeout`` ends (at least ``PUSH_FAILING_FLOOR_SEC``), so a push it stops lets the collector return its
+# status before Airflow kills the task (a killed task saves nothing). It leaves room for a batch request in flight
+# whose answer comes within its timeouts and for the summary; a streak that starts in the task's last minutes, an
+# answer that keeps arriving slowly, and the requests the cap does not limit (above) can still reach the task's end.
 PUSH_TASK_END_MARGIN_SEC = 600.0
 # The least cap a streak gets near its task's end: a few attempts, so one failed request does not stop a push.
 PUSH_FAILING_FLOOR_SEC = 60.0
@@ -3620,22 +3626,25 @@ class MISPWriter:
         that follow, the throttle pauses between its failing batches included; a batch ``_push_batch`` returns from
         ends it, and so does the group's event lookup before the batches. A batch's retries stop when the next wait
         would reach the cap (the decorator's *give_up*), a ``Retry-After`` wait is cut to the time left, the lookups
-        after a 5xx get only the time left, and before a batch the push stops when the batch would start at or after
-        the cap: the streak has reached it, or the throttle pause and the back-off cooldown due before the batch
-        would (they are not slept); the check runs again right before the batch is sent. In a push of several
+        after a 5xx get timeouts of at most the time left, and before a batch the push stops when the batch would
+        start at or after the cap: the streak has reached it, or the throttle pause and the back-off cooldown due
+        before the batch would (they are not slept); the check runs again after the pause, the cooldown and the
+        liveness check (a new part is created after it). In a push of several
         sources the push also stops before a group's listings and event lookup once the streak has reached the cap.
-        The cap is checked between requests: a stop comes at most one request after it (a batch request takes up
-        to 330 s). A stopped push sends nothing more and creates no part. The items of the batches not sent, of the
-        current group and of every later one, count as failed and are listed in ``last_push_unstored_items`` and in
-        ``self.last_push_unsent_items``;
+        The cap never cuts a request short; the event and part lookups and a new part's creation stop retrying at it
+        but keep their full timeouts, and the listings and the refresh are not limited by it, so a MISP that answers
+        slowly can keep a push going past the cap (``_failing_streak``). A stopped push sends nothing more and
+        creates no part. The items of the batches not sent, of the current group and of every later one, count as
+        failed and are listed in ``last_push_unstored_items`` and in ``self.last_push_unsent_items``;
         ``self.last_push_stopped`` is True, one ERROR ``[MISP-PUSH-STOPPED]`` names the stop,
-        ``edgeguard_misp_push_stopped_total`` counts it, the back-off counters are reset (the next push on the
-        writer starts without a cooldown), and the refresh of re-reported indicators is left for a later run. The
-        batch whose retries the cap cut short is a failed batch like any other (it was sent and answered). The
-        push returns its counts as usual. A timeout or a connection error after the retries still raises out of
-        ``push_items``, sooner with the cap. During a back-off cooldown, after a 30 s step while the cooldown has at
-        least the probe's timeouts left, a light request (``_misp_answers``) ends the cooldown when MISP answers it
-        with HTTP 200; its time counts toward the cooldown, which never runs longer than its length.
+        ``edgeguard_misp_push_stopped_total`` counts it, the back-off counters are reset (the next push on the writer
+        starts without a cooldown), and the refresh of re-reported indicators is left for a later run. The batch
+        whose retries the cap cut short is a failed batch like any other (it was sent and answered). The push returns
+        its counts as usual. A timeout or a connection error after the retries still raises out of ``push_items``,
+        sooner with the cap. During a back-off cooldown, after a 30 s step while the cooldown has at least the
+        probe's timeouts left, a light request (``_misp_answers``) ends the cooldown when MISP answers it with HTTP
+        200; its time counts toward the cooldown, so the light requests never make it longer than its length (the
+        liveness checks between the steps are not counted).
         """
         self.last_push_unstored_items: List[int] = []
         self.last_push_event_failed_items: List[int] = []
@@ -4541,9 +4550,9 @@ class MISPWriter:
                 if liveness_cb is not None:
                     liveness_cb()
 
-                # 2026-11-03: checked again after the pause, the cooldown and the liveness check: a batch is never
-                # sent once the streak has reached its cap (a request of the cooldown or the liveness check can take
-                # longer than counted above).
+                # 2026-11-03: checked again after the pause, the cooldown and the liveness check, which can take longer
+                # than counted above: no batch starts here once the streak has reached its cap. A new part is created
+                # after this check, so a slow creation lets its first batch start past the cap.
                 streak = _failing_streak(self)
                 if streak is not None and streak[1] >= streak[0]:
                     stop = (str(source), processed_batches + 1, streak[0], streak[1])

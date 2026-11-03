@@ -11,15 +11,16 @@ saves no state. Now:
   10 minutes before its task's end. The time is the wall time of the current failing streak: from the start of
   the first request that fails, through the waits, pauses and attempts that follow, until a batch MISP answers
   or the day's event lookup returns;
-* a batch's retries stop when the next wait would reach the cap, a ``Retry-After`` wait and the lookups after a
-  5xx get only the time left, and before a batch (and again right before it is sent) the push stops when the
-  batch would start at or after the cap, the throttle pause and the cooldown due included; in a push of several
-  sources it also stops before a group. The items not sent count as failed and are listed
+* a batch's retries stop when the next wait would reach the cap, a ``Retry-After`` wait is cut to the time left,
+  the lookups after a 5xx get timeouts of at most the time left, and before a batch (and again after the pause,
+  the cooldown and the liveness check) the push stops when the batch would start at or after the cap, the
+  throttle pause and the cooldown due included; in a push of several sources it also stops before a group. The
+  items not sent count as failed and are listed
   (``last_push_unstored_items``, ``last_push_unsent_items``), one ERROR ``[MISP-PUSH-STOPPED]`` and
   ``edgeguard_misp_push_stopped_total`` report it, and the run goes on;
 * during a back-off cooldown, a light request after a 30 s step, while its 40 s of timeouts fit in what is left,
-  ends the cooldown when MISP answers; its time counts toward the cooldown, which never runs longer than its
-  length.
+  ends the cooldown when MISP answers; its time counts toward the cooldown, so the light requests never make it
+  longer than its length.
 
 The tests drive ``MISPWriter.push_items`` against a MISP double on a virtual clock: ``time.sleep`` advances it,
 ``time.monotonic`` reads it, and a failing batch request takes ``push_seconds`` of it. ``rate_limited`` reads the
@@ -402,10 +403,10 @@ def test_the_throttle_pause_before_a_cooldown_counts_in_the_check_before_the_bat
 
 
 def test_a_batch_is_not_sent_once_the_streak_has_reached_the_cap_after_the_liveness_check(clock, monkeypatch):
-    """The check before a batch runs again right before the batch is sent. Here each liveness check of the parent
-    DAG takes 100 s; with a cap of 150 s the first batch fails after its four attempts (70 s), the check before
-    the second passes, and the liveness check takes the streak to 170 s: the second batch is not sent. Before the
-    fix it was sent once, after the cap."""
+    """The check before a batch runs again after the pause, the cooldown and the liveness check. Here each liveness
+    check of the parent DAG takes 100 s; with a cap of 150 s the first batch fails after its four attempts (70 s),
+    the check before the second passes, and the liveness check takes the streak to 170 s: the second batch is not
+    sent. Before the fix it was sent once, after the cap."""
     monkeypatch.setenv("EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC", "150")
 
     def liveness() -> None:
@@ -661,6 +662,15 @@ def test_the_lookup_of_a_later_part_stops_its_retries_at_the_cap(clock, monkeypa
     writer = _writer(misp)
     writer.push_items(_items(30))
     assert len(part2) == 2, part2
+
+
+def test_a_lookup_after_a_5xx_with_no_time_left_sends_no_request(clock):
+    """``_post_with_retries`` given an *until* already past makes no attempt and raises."""
+    misp = _Misp(clock)
+    writer = _writer(misp)
+    with pytest.raises(mw.MispTransientError, match="no time left"):
+        writer._post_with_retries(f"{URL}/attributes/restSearch", {}, context="lookup", until=clock.now - 1)
+    assert clock.log == []
 
 
 def test_the_decorator_without_a_hook_reads_no_clock(monkeypatch):

@@ -1337,24 +1337,42 @@ def test_a_window_push_that_stopped_with_a_row_without_an_id_keeps_the_listed_pu
     assert f"those an item not sent names keep their entries (ids: {IDS[50]})" in line
 
 
-def test_a_window_push_that_stopped_without_a_list_of_the_items_it_did_not_send_holds_everything(caplog):
+class _StoppedWithoutList(_Writer):
     """A writer that reports a stop but no list of the items it did not send (a writer double; ``MISPWriter``
-    always gives one): which pulses those items name is unknown, so the cursor stays and no pulse goes on the
-    list, not even the pulses whose items the writer lists as unstored."""
+    always gives one)."""
 
-    class _StoppedWithoutList(_Writer):
-        def push_items(self, items, batch_key=None, **kw):
-            result = super().push_items(items, batch_key=batch_key, **kw)
-            self.last_push_stopped = True
-            self.last_push_unsent_items = None
-            return result
+    def push_items(self, items, batch_key=None, **kw):
+        result = super().push_items(items, batch_key=batch_key, **kw)
+        self.last_push_stopped = True
+        self.last_push_unsent_items = None
+        return result
 
+
+def test_a_window_push_that_stopped_without_a_list_of_the_items_it_did_not_send_holds_everything(caplog):
+    """A writer that reports a stop but no list of the items it did not send: which pulses those items name is
+    unknown, so the cursor stays and no pulse goes on the list, not even the pulses whose items the writer lists
+    as unstored."""
     otx = _Otx(_recorded(range(60)))
     state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[59]["modified"]}
     run = _collect(otx, state, caplog, limit=20, writer=_StoppedWithoutList(failing=[IDS[44], IDS[45]]))
     assert run.cursor == ROWS[59]["modified"], "the cursor stays"
     assert run.retry == [], "no pulse goes on the list"
     assert run.status["pulse_counts"]["held_unsent"] == 2
+
+
+def test_a_window_push_that_stopped_without_that_list_and_with_unknown_failures_holds_every_window_pulse(caplog):
+    """As above, but the item that failed is that of pulse 45, an OTX row without an id: the failures are unknown
+    as well, so every pulse of the window with an id is held (20 of the 21 it processed), and none goes on the
+    list."""
+    pulses = _recorded(range(60))
+    pulses[45]["id"] = None
+    otx = _Otx(pulses)
+    state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[59]["modified"]}
+    run = _collect(otx, state, caplog, limit=20, writer=_StoppedWithoutList(failing=[None]))
+    assert run.cursor == ROWS[59]["modified"], "the cursor stays"
+    assert run.retry == [], "no pulse goes on the list"
+    counts = run.status["pulse_counts"]
+    assert counts["processed"] == 21 and counts["held_unsent"] == 20
 
 
 def test_the_warning_of_a_stopped_window_push_says_which_listed_pulses_keep_their_entries(caplog, monkeypatch):

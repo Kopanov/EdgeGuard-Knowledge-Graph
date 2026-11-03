@@ -2907,8 +2907,9 @@ def _task_ends_at(context) -> Optional[float]:
 
     The task's start is the task instance's ``start_date`` when the context gives a timezone-aware one, otherwise
     now (the callable runs at the start of the task), plus the task's ``execution_timeout``. The baseline's writer
-    stops a push on a failing MISP before this end (``MISPWriter``'s ``task_ends_at``), so the collector returns
-    its status instead of being killed with the push.
+    gives a failing streak at most the time until ``PUSH_TASK_END_MARGIN_SEC`` before this end, and at least 60 s
+    (``MISPWriter``'s ``task_ends_at``), so a push it stops lets the collector return its status; requests the cap
+    does not cut short can still run to the end.
     """
     limit = getattr((context or {}).get("task"), "execution_timeout", None)
     if not isinstance(limit, timedelta) or limit.total_seconds() <= 0:
@@ -2976,7 +2977,8 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
         )
 
     # 2026-11-03: the baseline's writer stops a push on a failing MISP after
-    # EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE, and before this task's execution_timeout ends.
+    # EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE, a failing streak at most until 10 minutes before this task's
+    # execution_timeout ends (at least 60 s; requests the cap does not cut short can run past that).
     writer = MISPWriter(liveness_callback=liveness_cb, baseline=True, task_ends_at=_task_ends_at(context))
     logger.info(f"[BASELINE] Starting {collector_name} — limit={limit or 'unlimited'}, baseline_days={baseline_days}")
 

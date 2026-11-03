@@ -920,7 +920,7 @@ groups:
           summary: "EdgeGuard MISPWriter in extended cooldown >1×/15min ({{ $labels.source }})"
           description: |
             MISPWriter is hitting consecutive 5xx failures often enough
-            to enter the extended cooldown (up to 5 minutes; MISP answering
+            to enter the extended cooldown (about 5 minutes; MISP answering
             a light request ends it) more than once per 15 minutes. Backend
             is sustained-degraded. Distinguishes "occasional flap" from
             "sustained overload."
