@@ -1166,12 +1166,15 @@ class TestCommittedReference:
             ("hellokitty", "HelloKitty"),
             ("payouts king", "Payouts King"),
             ("elpaco-team", "ELPACO-team"),
-            ("global group", "Global Group"),
         ):
             actor = by_key[key]
             assert (actor["name"], actor["origins"], actor["records"]) == (name, ["override"], []), key
             assert actor["mitre_attack"] is None and actor["synonyms"] == [], key
         index = gen.build_index(committed)
+        # Reference 2026.11.05: the threat-actor galaxy's BlackLock record lists GLOBAL GROUP among its
+        # synonyms, so the 2026-10-20 decision that made Global Group an actor of its own was removed.
+        assert "global group" not in by_key
+        assert gen.resolve(index, "global group").actor == "blacklock"
         # An operation the galaxies attribute to an actor the reference holds as its developer or operator
         # is a name of that actor (merge into the operator's key).
         assert gen.resolve(index, "conti").actor == "wizard spider"
@@ -1182,6 +1185,46 @@ class TestCommittedReference:
         # which malpedia also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
         for name in ("kraken", "osiris", "nitrogen", "morpheus"):
             assert gen.resolve(index, name).how == "unresolved", name
+
+    def test_decisions_of_2026_11_05(self, gen, committed, committed_overrides):
+        # Taken on the fresh 730-day baseline of 2026-11-03 (review of the names the reference did not resolve),
+        # with the MISP galaxies of 2026-11-05.
+        by_key = {a["key"]: a for a in committed["actors"]}
+        index = gen.build_index(committed)
+        # Names of actors the reference holds: galaxy synonyms (also of the upstream threat-actor galaxy v359),
+        # ATT&CK statements and spelling variants.
+        for name, actor in (
+            ("kongtuke", "tag-124"),
+            ("inc", "inc ransom"),
+            ("static tundra", "dragonfly"),
+            ("tomiris", "storm-0473"),
+            ("lapdogs", "uat-7810"),
+            ("apt-c-01", "greenspot"),
+            ("calypso apt", "calypso"),
+            ("donot", "viceroy tiger"),
+            ("ung002", "ung0002"),
+            ("armory castle", "uta0178"),
+            ("cl-sta-0954", "unc5820"),
+        ):
+            assert gen.resolve(index, name).actor == actor, name
+            assert by_key[actor]["synonym_origins"]["override"].count(name) == 1, name
+        assert by_key["inc ransom"]["mitre_attack"] == "G1032"
+        assert by_key["dragonfly"]["mitre_attack"] == "G0035"
+        # A spacing variant of an ATT&CK alias that the galaxies give to two actors stays away from both.
+        assert gen.resolve(index, "fire ant").how == "never_merge"
+        assert gen.resolve(index, "fireant").actor == "mustang panda"
+        pairs = {(p["name"], p["actor"]) for p in committed["never_merge_pairs"]}
+        assert ("fire ant", "mustang panda") in pairs
+        # A string joining two actors' names is no name of either.
+        assert gen.resolve(index, "scattered lapsus$ hunters - shinyhunters").how == "never_merge"
+        assert gen.resolve(index, "scattered lapsus$ hunters").actor == "scattered lapsus hunters"
+        assert gen.resolve(index, "shinyhunters").actor == "shinyhunters"
+        # Taken from the galaxies of 2026-11-05, without a decision.
+        assert gen.resolve(index, "longlegs").actor == "storm-2603"
+        assert gen.resolve(index, "mamona").actor == "blacklock"
+        assert {"blacklock", "ta419", "storm-2992"} <= set(by_key)
+        dated = [d for kind in ("merge", "never_merge") for d in committed_overrides[kind] if d["date"] == "2026-11-05"]
+        assert len(dated) == 13 and {d["status"] for d in dated} == {"proposed"}
 
     def test_decisions_of_2026_10_22(self, gen, committed, committed_overrides):
         # Taken before the fresh baseline: the OTX collector decides with the reference, at collection time,
@@ -1230,6 +1273,7 @@ class TestCommittedReference:
         # Not merged: the galaxies link the Cuba ransomware operation to two actors of the reference.
         assert gen.resolve(index, "cuba ransomware gang").how == "unresolved"
         assert gen.resolve(index, "tropical scorpius").how == "ambiguous"
-        # Actors created by override decisions: 29 ransomware operations (2026-10-20), 8 OTX-only actors (2026-10-15).
+        # Actors created by override decisions: 28 ransomware operations (2026-10-20; Global Group, the 29th,
+        # is a galaxy synonym of BlackLock since reference 2026.11.05), 8 OTX-only actors (2026-10-15).
         created = [a["key"] for a in committed["actors"] if a["origins"] == ["override"]]
-        assert len(created) == 37
+        assert len(created) == 36

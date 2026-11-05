@@ -80,12 +80,16 @@ KNOWN_BEFORE = (
 # decisions), written as their display name.
 RANSOMWARE_OPERATIONS = (
     "BlackNevas", "BlackSuit", "Brain Cipher", "Cactus", "Cicada3301", "CrazyHunter", "DeadLock", "DEVMAN",
-    "ELPACO-team", "Embargo", "Everest", "Global Group", "Gunra", "HellCat", "HellDown", "HelloKitty", "Kyber",
+    "ELPACO-team", "Embargo", "Everest", "Gunra", "HellCat", "HellDown", "HelloKitty", "Kyber",
     "Lynx", "Makop", "Mallox", "NightSpire", "Payouts King", "Rhysida", "SECP0", "Termite", "Trigona", "Vect",
     "Warlock", "Yurei",
 )  # fmt: skip
 # Ransomware operations the galaxies attribute to an actor the reference holds as their developer or
 # operator: since 2026-10-20 (override decisions) the name counts as that actor.
+# Ransomware operations a galaxy gives to an actor the reference holds: since reference 2026.11.05 the
+# threat-actor galaxy's BlackLock record lists GLOBAL GROUP (and Mamona, El Dorado) among its synonyms, so the
+# override decision of 2026-10-20 that made Global Group an actor of its own was removed.
+OPERATIONS_A_GALAXY_GIVES_TO_AN_ACTOR = (("Global Group", "blacklock"),)
 OPERATIONS_OF_A_KNOWN_OPERATOR = (
     ("Conti", "wizard spider"), ("LockBit", "bitwise spider"), ("Nefilim", "gold mansard"),
 )  # fmt: skip
@@ -195,7 +199,7 @@ class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
         ioc = _ioc(items, "203.0.113.47")
         assert ioc["pulse_malware_actor_pairs"] == [f"{name}::{name}::p-ransom"], "the pulse attributes"
 
-    @pytest.mark.parametrize("name,operator", OPERATIONS_OF_A_KNOWN_OPERATOR)
+    @pytest.mark.parametrize("name,operator", OPERATIONS_OF_A_KNOWN_OPERATOR + OPERATIONS_A_GALAXY_GIVES_TO_AN_ACTOR)
     def test_a_ransomware_operation_of_a_known_operator_stays_an_actor_counted_as_the_operator(
         self, reference, name, operator
     ):
@@ -243,14 +247,16 @@ class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:
         assert ioc["pulse_malware_actor_pairs"] == ["Conti::Wizard Spider::p-one", "Conti::Conti::p-one"]
 
     def test_the_operations_are_the_override_decisions_of_2026_10_20(self):
-        # The lists above and the docs count 29 operations, each one merge into a new key, and 3 operations
-        # merged into the key of their operator.
+        # The lists above and the docs count 28 operations, each one merge into a new key, and 3 operations
+        # merged into the key of their operator (2026-10-20 decided 29; reference 2026.11.05 removed Global
+        # Group, which the threat-actor galaxy now gives to BlackLock).
         overrides = json.loads((_SRC / "reference" / "canonical_threat_actor_overrides.json").read_text())
         decisions = [d for d in overrides["merge"] if d["date"] == "2026-10-20"]
         own = {d["into"] for d in decisions if d["names"] == [d["into"]]}
         into_operator = {(n, d["into"]) for d in decisions if d["names"] != [d["into"]] for n in d["names"]}
         assert own == {cta.name_key(n) for n in RANSOMWARE_OPERATIONS}
-        assert len(RANSOMWARE_OPERATIONS) == 29
+        assert len(RANSOMWARE_OPERATIONS) == 28
+        assert not [d for d in overrides["merge"] + overrides["canonical_name"] if "global group" in str(d)]
         assert into_operator == {(cta.name_key(n), op) for n, op in OPERATIONS_OF_A_KNOWN_OPERATOR}
         assert own.isdisjoint(cta.name_key(n) for n in RANSOMWARE_NAMES_LEFT_OUT)
 
