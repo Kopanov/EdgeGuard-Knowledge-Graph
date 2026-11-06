@@ -4423,7 +4423,8 @@ class MISPToNeo4jSync:
             # attribute MISP already holds (pushed before the name was listed) or that another source wrote is
             # skipped here, whatever its source. Without the reference nothing is skipped (logged once).
             _actor_reference = self._report_actor_reference()
-            if _actor_reference is not None and _actor_reference.is_not_actor(actor_name):
+            # Compared as the hygiene compares (the cleaned, whitespace-collapsed name), as the OTX collector does.
+            if _actor_reference is not None and _actor_reference.is_not_actor(_cleaned_names[0]):
                 logger.info(
                     "Skipping threat-actor attribute %r: the canonical threat-actor reference lists it as no actor",
                     actor_name[:80],

@@ -952,7 +952,15 @@ class TestParseAttributeActorNameHygiene:
 
     @pytest.mark.parametrize(
         "value,comment",
-        [("ClickFix", _OTX_COMMENT), ("Proton66", _OTX_COMMENT), ("Agent Tesla", ""), ("  breachforums ", "")],
+        [
+            ("ClickFix", _OTX_COMMENT),
+            ("Proton66", _OTX_COMMENT),
+            ("Agent Tesla", ""),
+            ("  breachforums ", ""),
+            # Compared as the hygiene compares, after whitespace collapse, as the OTX collector does.
+            ("Agent  Tesla", ""),
+            ("Operation\tStandoff", ""),
+        ],
     )
     def test_a_name_the_reference_lists_as_no_actor_is_skipped(self, syncer, caplog, value, comment):
         # 2026-11-05: a threat-actor attribute that MISP already holds (pushed before the name was listed)
