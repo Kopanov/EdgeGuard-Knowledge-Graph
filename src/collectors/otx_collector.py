@@ -283,12 +283,30 @@ def _adversaries_not_named_as_pulse_families(
     return kept, dropped
 
 
+def _adversaries_not_listed_as_no_actors(
+    adversaries: List[str], reference: Optional[CanonicalReference]
+) -> Tuple[List[str], List[str]]:
+    """``(kept, dropped)`` of a pulse's adversary names (2026-11-05): a name the canonical threat-actor
+    reference lists as no actor (``reference.is_not_actor``: a technique, malware, a kit, a hosting
+    network, a forum, a company or a campaign that a report gave as its adversary, reviewed in
+    ``src/reference/canonical_threat_actor_overrides.json``) is dropped, whatever families the pulse
+    lists. Without the reference (``None``) nothing is dropped."""
+    if reference is None or not adversaries:
+        return list(adversaries), []
+    kept: List[str] = []
+    dropped: List[str] = []
+    for name in adversaries:
+        (dropped if reference.is_not_actor(name) else kept).append(name)
+    return kept, dropped
+
+
 _MAX_LOGGED_PULSES_PER_NAME = 3
 
 
 def _dropped_name_with_pulses(name: str, pulse_ids: List[str]) -> str:
-    """``"north korea (2 pulses: p1, p2)"``: a name of the ``[ACTOR-NAMES]`` country line with the number
-    of pulses that carried it and the first ``_MAX_LOGGED_PULSES_PER_NAME`` of their ids (2026-10-22)."""
+    """``"north korea (2 pulses: p1, p2)"``: a name of an ``[ACTOR-NAMES]`` line (the country line, 2026-10-22;
+    the not-actor line, 2026-11-05) with the number of pulses that carried it and the first
+    ``_MAX_LOGGED_PULSES_PER_NAME`` of their ids."""
     shown = ", ".join(pulse_ids[:_MAX_LOGGED_PULSES_PER_NAME])
     more = ", …" if len(pulse_ids) > _MAX_LOGGED_PULSES_PER_NAME else ""
     noun = "pulse" if len(pulse_ids) == 1 else "pulses"
@@ -895,11 +913,13 @@ class OTXCollector:
         self._actor_reference_loaded = False
 
     def _report_actor_reference(self):
-        """The canonical threat-actor reference that tells whether a pulse's adversaries are one actor
-        and whether an adversary the pulse also lists as a malware family is an actor, or ``None`` when
-        it is unavailable (logged once): the names are then told apart as written, so the aliases of one
-        actor count as several and the pulse attributes nothing, and an adversary named like one of the
-        pulse's families is kept as an actor (``_adversaries_not_named_as_pulse_families``)."""
+        """The canonical threat-actor reference that tells whether a pulse's adversaries are one actor,
+        whether an adversary the pulse also lists as a malware family is an actor, and which adversary
+        names were reviewed as no actors, or ``None`` when it is unavailable (logged once): the names are
+        then told apart as written, so the aliases of one actor count as several and the pulse attributes
+        nothing, an adversary named like one of the pulse's families is kept as an actor
+        (``_adversaries_not_named_as_pulse_families``), and no name is dropped as no actor
+        (``_adversaries_not_listed_as_no_actors``)."""
         if not getattr(self, "_actor_reference_loaded", False):
             self._actor_reference_loaded = True
             self._actor_reference = None
@@ -908,7 +928,8 @@ class OTXCollector:
             except ReferenceUnavailable as exc:
                 logger.warning(
                     "[ATTRIBUTION] canonical reference unavailable (%s): a pulse's adversaries are told apart by "
-                    "name, and an adversary the pulse also lists as a malware family is kept as an actor",
+                    "name, an adversary the pulse also lists as a malware family is kept as an actor, and no "
+                    "adversary is dropped as a name the reference lists as no actor",
                     exc,
                 )
         return getattr(self, "_actor_reference", None)
@@ -1364,6 +1385,11 @@ class OTXCollector:
             # whose common name is a country can be noticed and written under a qualified name.
             geopolitical_adversary_names: Dict[str, List[str]] = {}
             pulses_with_a_geopolitical_adversary_name = 0
+            # 2026-11-05: adversary names the canonical reference lists as no actors
+            # (``_adversaries_not_listed_as_no_actors``), per run: name -> the pulses that carried it, and the
+            # number of such pulses. Logged once, below.
+            not_actor_adversary_names: Dict[str, List[str]] = {}
+            pulses_with_a_not_actor_adversary_name = 0
 
             deferred: List[Dict] = []
             if baseline:
@@ -1407,7 +1433,7 @@ class OTXCollector:
             def _process_pulse(pulse: Dict) -> None:
                 """Append the items of *pulse* to ``processed``."""
                 nonlocal non_file_hashes, pulses_naming_an_adversary_as_family
-                nonlocal pulses_with_a_geopolitical_adversary_name
+                nonlocal pulses_with_a_geopolitical_adversary_name, pulses_with_a_not_actor_adversary_name
                 # Detect ALL sectors — start with keyword-based detection
                 pulse_text = json.dumps(pulse).lower()
                 sectors = self.detect_sectors(pulse_text)
@@ -1503,9 +1529,18 @@ class OTXCollector:
                 # junk, descriptions and country / state names ("APT37, North Korea" is one actor), and a
                 # name the pulse also lists as a malware family is an actor only when the canonical
                 # reference resolves it (``_adversaries_not_named_as_pulse_families``; kept without it).
+                # 2026-11-05: before that rule, a name the reference lists as no actor (ClickFix, Proton66)
+                # is dropped (``_adversaries_not_listed_as_no_actors``; kept without the reference).
                 actor_reference = self._report_actor_reference()
+                _adversary_names, _not_actors = _adversaries_not_listed_as_no_actors(
+                    clean_actor_names(pulse_adversary or ""), actor_reference
+                )
+                if _not_actors:
+                    pulses_with_a_not_actor_adversary_name += 1
+                    for _dropped in {n.lower() for n in _not_actors}:
+                        not_actor_adversary_names.setdefault(_dropped, []).append(str(pulse.get("id") or "?"))
                 pulse_all_actor_names, _named_as_family = _adversaries_not_named_as_pulse_families(
-                    clean_actor_names(pulse_adversary or ""), pulse.get("malware_families", []), actor_reference
+                    _adversary_names, pulse.get("malware_families", []), actor_reference
                 )
                 if _named_as_family:
                     adversaries_named_as_family.update(n.lower() for n in _named_as_family)
@@ -1733,14 +1768,25 @@ class OTXCollector:
                 )
             if geopolitical_adversary_names:
                 logger.info(
-                    "[ACTOR-NAMES] OTX: %d distinct country, state or nationality name(s) in %d pulse(s), dropped "
-                    "from the adversary field by the actor-name hygiene (never actor names; a group named after a "
-                    "country needs a qualified name): %s",
+                    "[ACTOR-NAMES] OTX: %d distinct country, state, nationality or state-agency name(s) in %d "
+                    "pulse(s), dropped from the adversary field by the actor-name hygiene (never actor names; a "
+                    "group named after a country or an agency needs a qualified name): %s",
                     len(geopolitical_adversary_names),
                     pulses_with_a_geopolitical_adversary_name,
                     "; ".join(
                         _dropped_name_with_pulses(name, geopolitical_adversary_names[name])
                         for name in sorted(geopolitical_adversary_names)
+                    ),
+                )
+            if not_actor_adversary_names:
+                logger.info(
+                    "[ACTOR-NAMES] OTX: %d distinct adversary name(s) in %d pulse(s) that the canonical threat-actor "
+                    "reference lists as no actors, dropped from the adversary field: %s",
+                    len(not_actor_adversary_names),
+                    pulses_with_a_not_actor_adversary_name,
+                    "; ".join(
+                        _dropped_name_with_pulses(name, not_actor_adversary_names[name])
+                        for name in sorted(not_actor_adversary_names)
                     ),
                 )
             if non_file_hashes:

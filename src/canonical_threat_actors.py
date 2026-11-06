@@ -6,9 +6,13 @@ ATT&CK groups, the public MISP galaxies (CC0) and reviewed decisions, and versio
 actor alias merge (``enrichment_jobs.merge_alias_duplicate_actors``) uses it to fold duplicate
 ``ThreatActor`` nodes into their canonical node.
 
-Every name in the file has one place: the key of one actor, a synonym of one actor, or an entry of
-``ambiguous`` (a name that points to more than one actor, or was marked never_merge). A name is
-looked up by the key EdgeGuard writes for it (``node_identity.canonicalize_merge_key``).
+Every name in the file has one place: the key of one actor, a synonym of one actor, an entry of
+``ambiguous`` (a name that points to more than one actor, or was marked never_merge), or an entry of
+``not_actors`` (2026-11-05: a reviewed name that is no threat actor, such as a technique, malware, a
+kit, a hosting network, a forum, a company or a campaign that a report gave as its adversary; the OTX
+collector drops it from a pulse's adversary field). A reference without ``not_actors`` lists no such
+name. A name is looked up by the key EdgeGuard writes for it
+(``node_identity.canonicalize_merge_key``).
 
 ``EDGEGUARD_CANONICAL_THREAT_ACTORS`` overrides the path. A file that is missing, unreadable,
 larger than ``MAX_REFERENCE_BYTES``, of another ``schema_version`` or inconsistent raises
@@ -65,6 +69,7 @@ class CanonicalReference:
     owners: Mapping[str, str]  # name key -> canonical key (an actor key maps to itself)
     blocked: FrozenSet[str]  # ambiguous or never_merge: never resolved
     attack_actors: FrozenSet[str] = field(default_factory=frozenset)
+    not_actors: FrozenSet[str] = field(default_factory=frozenset)  # reviewed names that are no actors
 
     def canonical_for(self, name: Any) -> Optional[str]:
         """The canonical key of ``name``, or ``None`` when it is unknown, ambiguous or never_merge."""
@@ -72,6 +77,11 @@ class CanonicalReference:
         if not key or key in self.blocked:
             return None
         return self.owners.get(key)
+
+    def is_not_actor(self, name: Any) -> bool:
+        """Whether the reference lists ``name`` as no actor (``not_actors``, 2026-11-05), by its key."""
+        key = name_key(name)
+        return bool(key) and key in self.not_actors
 
 
 def actor_identities(names: Iterable[Any], reference: Optional[CanonicalReference]) -> FrozenSet[str]:
@@ -261,6 +271,17 @@ def validate_reference(doc: Any, path: str = "") -> CanonicalReference:
         _require(key not in owners, f"ambiguous name {key!r} belongs to actor {owners.get(key)!r}")
         _require(key not in blocked, f"ambiguous name {key!r} appears twice")
         blocked.add(key)
+    not_actors: Set[str] = set()
+    listed = doc.get("not_actors", [])  # absent from a reference built before 2026-11-05
+    _require(isinstance(listed, list), "not_actors is not a list")
+    for entry in listed:
+        _require(isinstance(entry, Mapping), "a not_actors entry is not an object")
+        key = entry.get("key")
+        _require(_normalised(key), f"not-actor name {key!r} is not normalised")
+        _require(key not in owners, f"not-actor name {key!r} belongs to actor {owners.get(key)!r}")
+        _require(key not in blocked, f"not-actor name {key!r} is ambiguous")
+        _require(key not in not_actors, f"not-actor name {key!r} appears twice")
+        not_actors.add(key)
     return CanonicalReference(
         version=str(version),
         path=path,
@@ -268,6 +289,7 @@ def validate_reference(doc: Any, path: str = "") -> CanonicalReference:
         owners=owners,
         blocked=frozenset(blocked),
         attack_actors=frozenset(attack),
+        not_actors=frozenset(not_actors),
     )
 
 

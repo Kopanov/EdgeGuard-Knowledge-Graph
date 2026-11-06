@@ -61,6 +61,10 @@ class TestSplitCompositeActorName:
             ("apt28 and, apt29", ["apt28", "apt29"]),
             # Mixed separators.
             ("apt28, apt29 and apt30; apt31", ["apt28", "apt29", "apt30", "apt31"]),
+            # "&&" joins two names like "&" (2026-11-05: an OTX adversary field of the 3 Nov baseline).
+            ("BlackHatSect0r && DXQRTXX", ["BlackHatSect0r", "DXQRTXX"]),
+            ("apt28 && apt29 and apt30", ["apt28", "apt29", "apt30"]),
+            ("lockbit, && cl0p", ["lockbit", "cl0p"]),
         ],
     )
     def test_splits_composites(self, composite, expected):
@@ -93,6 +97,8 @@ class TestSplitCompositeActorName:
             "Operation Hack and Leak",
             "a and b",  # sides shorter than AND_SPLIT_MIN_SIDE_LEN
             "ab & cd",
+            "ab && cd",
+            "apt28&&apt29",  # no whitespace around the ampersands
             "at&t",  # no whitespace around the ampersand
             "C&C",
             "apt28/fancy bear",  # bare slash is NOT a separator
@@ -116,6 +122,7 @@ class TestSplitCompositeActorName:
         assert split_composite_actor_name("") == []
         assert split_composite_actor_name("   ") == []
         assert split_composite_actor_name("and") == []
+        assert split_composite_actor_name("&&") == []
 
     def test_dedup_case_insensitive_preserves_first_spelling_and_order(self):
         assert split_composite_actor_name("APT28, apt28, Apt29, APT28") == ["APT28", "Apt29"]
@@ -180,6 +187,12 @@ class TestIsGenericActorName:
             # Sponsorship / origin qualifiers.
             "china-based actor",
             "china nexus actor",
+            # A language qualifier (2026-11-05: OTX adversary fields of the 3 Nov baseline).
+            "chinese-speaking group",
+            "Chinese-Speaking Threat Group",
+            "russian-speaking actors",
+            "chinese speaking group",
+            "russian-speaking",
             "iran-affiliated",
             "kremlin-linked",
             "state-sponsored",
@@ -534,6 +547,120 @@ class TestCountryAndStateNames:
 
 
 # ===========================================================================
+# State intelligence and security agencies (2026-11-05)
+# ===========================================================================
+
+# A state agency on its own, also behind a country or nationality or followed by "of" and a country:
+# never an actor name (rule (c)). The first three are OTX adversary fields of the 3 Nov baseline.
+STATE_AGENCY_NAMES_ON_THEIR_OWN = (
+    "MOIS",
+    "Russian Federal Security Service",
+    "russian intelligence services",
+    "mois",
+    "FSB",
+    "the FSB",
+    "GRU",
+    "SVR",
+    "MSS",
+    "F.S.B.",
+    "Federal Security Service",
+    "Federal Security Service of the Russian Federation",
+    "Main Intelligence Directorate",
+    "Foreign Intelligence Service",
+    "Russian Foreign Intelligence Service",
+    "Ministry of State Security",
+    "Chinese Ministry of State Security",
+    "Ministry of State Security of the People's Republic of China",
+    "Ministry of Intelligence and Security",
+    "Iran's Ministry of Intelligence and Security",
+    "Iranian Ministry of Intelligence",
+    "russian gru",
+    "Russia's FSB",
+    "chinese mss",
+    "Russian intelligence service",
+    "U.S. intelligence services",
+    "north korean intelligence agencies",
+    "russian special services",
+    "Security Service of Ukraine",
+)
+
+
+class TestStateAgencies:
+    """A state intelligence or security agency says who is said to sponsor an actor, never which actor
+    it is: the galaxies name several groups of each (APT28 and Sandworm Team of GRU units, MuddyWater
+    and APT39 of Iran's MOIS)."""
+
+    @pytest.mark.parametrize("name", STATE_AGENCY_NAMES_ON_THEIR_OWN)
+    def test_generic(self, name):
+        assert is_generic_actor_name(name) is True, name
+        assert clean_actor_names(name) == [], name
+        assert dropped_geopolitical_names(name) == [" ".join(name.split())], "logged like a country name"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # A proper name that contains an agency stays a name.
+            "GRU Unit 26165",
+            "Russian GRU Unit 74455",
+            "fsb center 16",
+            "APT28",
+            "MuddyWater",
+            "Nasir Security",
+            "Security Service Hackers Team",
+            "GRUnt",  # an acronym inside a word
+        ],
+    )
+    def test_names_containing_an_agency_stay_names(self, name):
+        assert is_generic_actor_name(name) is False, name
+        assert clean_actor_names(name) == [name], name
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # A pulse naming the actor and its sponsor names one actor.
+            ("APT28, GRU", ["APT28"]),
+            ("Sandworm, GRU, Russia", ["Sandworm"]),
+            ("MuddyWater; MOIS", ["MuddyWater"]),
+            ("Turla and FSB", ["Turla"]),
+            ("FSB and GRU", []),
+            ("FSB && GRU", []),
+            # The spelled-out name with "and" is one name, also inside an "and" list.
+            ("Ministry of Intelligence and Security", []),
+            ("APT34 and Ministry of Intelligence and Security", ["APT34"]),
+            ("MOIS (Ministry of Intelligence and Security)", []),
+            # The actor in parentheses behind an agency is the name, as behind a country.
+            ("FSB (Turla)", ["Turla"]),
+            ("Turla (FSB)", ["Turla"]),
+            ("Ministry of State Security (MSS)", []),
+        ],
+    )
+    def test_an_agency_beside_an_actor_is_dropped(self, raw, expected):
+        assert clean_actor_names(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("APT28, GRU", ["GRU"]),
+            ("Sandworm, GRU, Russia", ["GRU", "Russia"]),
+            ("APT34 and Ministry of Intelligence and Security", ["Ministry of Intelligence and Security"]),
+            ("MOIS (Ministry of Intelligence and Security)", ["MOIS"]),
+            ("FSB (Turla)", []),
+            ("GRU Unit 26165", []),
+        ],
+    )
+    def test_dropped_agencies_are_returned_like_country_names(self, raw, expected):
+        assert dropped_geopolitical_names(raw) == expected
+
+    def test_the_list_is_lower_case_trimmed_and_small(self):
+        from actor_name_hygiene import STATE_AGENCY_NAMES
+
+        for name in STATE_AGENCY_NAMES:
+            assert name == " ".join(name.lower().split()), name
+        assert {"fsb", "gru", "svr", "mss", "mois"} <= STATE_AGENCY_NAMES
+        assert len(STATE_AGENCY_NAMES) < 25
+
+
+# ===========================================================================
 # No name of the canonical threat-actor reference is generic
 # ===========================================================================
 
@@ -544,18 +671,31 @@ class TestCountryAndStateNames:
 REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE = frozenset(
     {"[unnamed group]", "hacking team", "unnamed actor", "unnamed actor group", "unnamed actor team"}
 )
+# Names of the reference that clean_actor_names does not keep as they are: the generic names above, and
+# the threat-actor galaxy's record "Stealth Mango and Tangelo", which the and-split makes two names, with its
+# suffix-rule variants. Pinned so that a rule change that alters any
+# other name of the reference (2026-11-05: the "&&" separator, the "-speaking" qualifier, state agencies
+# changed none) is a decision taken here.
+REFERENCE_NAMES_NOT_KEPT_AS_THEY_ARE = REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE | {
+    "stealth mango and tangelo",
+    "stealth mango and tangelo group",
+    "stealth mango and tangelo team",
+}
 
 
 class TestTheCanonicalReferenceIsNeverGeneric:
     @pytest.fixture(scope="class")
-    def reference_names(self):
+    def reference_doc(self):
         import json
 
         from canonical_threat_actors import DEFAULT_REFERENCE_PATH
 
-        doc = json.loads(DEFAULT_REFERENCE_PATH.read_text(encoding="utf-8"))
+        return json.loads(DEFAULT_REFERENCE_PATH.read_text(encoding="utf-8"))
+
+    @pytest.fixture(scope="class")
+    def reference_names(self, reference_doc):
         names = set()
-        for actor in doc["actors"]:
+        for actor in reference_doc["actors"]:
             names.add(actor["key"])
             names.update(actor["synonyms"])
         assert len(names) > 5000, "every key and synonym of the shipped reference"
@@ -565,12 +705,21 @@ class TestTheCanonicalReferenceIsNeverGeneric:
         generic = {n for n in reference_names if is_generic_actor_name(n)}
         assert generic == REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE
 
-    def test_the_reference_resolves_no_country_state_or_nationality_name(self):
-        from actor_name_hygiene import COUNTRY_AND_STATE_NAMES, NATIONALITY_ADJECTIVES
+    def test_every_name_of_the_reference_is_kept_as_it_is(self, reference_doc, reference_names):
+        """Every actor key and synonym, ambiguous name and not-actor name of the committed reference comes
+        out of clean_actor_names unchanged, except the pinned names."""
+        listed = {e["key"] for e in reference_doc["ambiguous"]} | {e["key"] for e in reference_doc["not_actors"]}
+        changed = {n for n in reference_names | listed if clean_actor_names(n) != [n]}
+        assert changed == REFERENCE_NAMES_NOT_KEPT_AS_THEY_ARE
+        assert len(listed) > 100
+
+    def test_the_reference_resolves_no_country_state_nationality_or_agency_name(self):
+        from actor_name_hygiene import COUNTRY_AND_STATE_NAMES, NATIONALITY_ADJECTIVES, STATE_AGENCY_NAMES
         from canonical_threat_actors import load_canonical_reference
 
         reference = load_canonical_reference()
-        resolved = sorted(n for n in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES if reference.canonical_for(n))
+        names = COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES | STATE_AGENCY_NAMES
+        resolved = sorted(n for n in names if reference.canonical_for(n))
         assert resolved == []
 
     def test_the_lists_are_lower_case_and_trimmed(self):
@@ -686,7 +835,7 @@ def test_every_fixture_of_this_module_is_checked():
 @pytest.mark.parametrize("raw", FIXTURE_INPUTS)
 def test_dropped_geopolitical_names_agrees_with_clean_actor_names(raw):
     """On every fixture of this module: no dropped name is a name ``clean_actor_names`` keeps, every
-    dropped name is a country, state or nationality name that ``clean_actor_names`` drops on its own,
+    dropped name is a country, state, nationality or agency name that ``clean_actor_names`` drops on its own,
     the dropped names together yield no name and drop the same names again, and no kept name drops
     anything."""
     names = clean_actor_names(raw)

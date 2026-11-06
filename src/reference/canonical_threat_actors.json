@@ -2,7 +2,7 @@
  "schema_version": 1,
  "version": "2026.11.05",
  "generated_at": "2026-11-05",
- "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged.",
+ "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged. Names listed under 'not_actors' were reviewed and are no threat actors (a technique, malware, a kit, a hosting network, a forum, a company or a campaign that a source gave as its adversary); the OTX collector drops them from a pulse's adversary field.",
  "generator": "scripts/build_canonical_threat_actors.py",
  "key_normalisation": "NFC, trimmed, lower-case (node_identity.canonicalize_merge_key for ThreatActor)",
  "inputs": [
@@ -93,8 +93,8 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "5d68847e1e49f80eef38a4d2a0473909149b7266c6bc55ba6ee96b97a9e13680",
-   "decisions": 121
+   "sha256": "14be9c088430758394ea9c8e8a31306648f1493c7c646ff063bc2d6b0a186934",
+   "decisions": 139
   }
  ],
  "attribution": [
@@ -115,13 +115,15 @@
   "Synonyms never merge two actors.",
   "A name claimed by several actors goes to the actor whose own name it is (actor key, then loaded ATT&CK alias, then galaxy ATT&CK alias, revoked name or record name, then galaxy synonym); a tie makes it ambiguous. Spellings of one name held by different actors stay with the actor holding the strongest spelling and are ambiguous for the others (all of them on a tie). ATT&CK ids, placeholder names and lists of names are not synonyms; a synonym is taken as EdgeGuard's actor-name hygiene writes it.",
   "Suffix rule: the variant with or without a trailing ' group' / ' team' of an actor key or ATT&CK name is a synonym when no other actor claims it, and ambiguous when another actor holds it only by a galaxy synonym (a shortened name keeps at least three characters and a letter; nothing is added to a name that already contains 'group' or 'team').",
-  "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name."
+  "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name.",
+  "Names an override lists as not_actor are no actor names: they are listed under not_actors and are never an actor key, a synonym or an ambiguous name."
  ],
  "counts": {
   "actors": 1177,
   "attack_groups": 191,
   "synonyms": 4528,
-  "ambiguous": 82
+  "ambiguous": 82,
+  "not_actors": 38
  },
  "actors": [
   {
@@ -33580,6 +33582,236 @@
    "actor": "void blizzard",
    "reason": "Not merged: the threat-actor galaxy lists TA488 as a synonym of Void Blizzard, a vendor equivalence that is not universally accepted; the two graph nodes share no malware or pulse. A wrong merge is worse than a missed one.",
    "date": "2026-10-15",
+   "status": "proposed"
+  }
+ ],
+ "not_actors": [
+  {
+   "key": "agent tesla",
+   "reason": "Information stealers available to many actors, not groups. ATT&CK lists Agent Tesla (S0331) as a spyware Trojan written for the .NET framework, and malpedia as a .NET information stealer readily available to actors due to leaked builders. ATT&CK lists Lumma Stealer (S1213) as malware-as-a-service; the reference marks 'lumma stealer' never_merge because an actor node named after the stealer gathers the reports on its many distributors, and the bare 'lumma' is the same case. No galaxy has an actor record of either name. The OTX report on 'agent tesla' gives it as the adversary without listing a malware family, so the rule for an adversary the same report lists as a family does not apply; the report on 'lumma' pairs it with Lumma Stealer. On the graph of 2026-11-03 the actor nodes have 10 and 15 relationships, beside the Malware nodes 'agent tesla' (ATT&CK and eight OTX reports) and 'lumma' (15 OTX reports).",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "amos",
+   "reason": "macOS information stealers, not groups. Malpedia lists AMOS with the synonym Atomic macOS Stealer, whose references describe the stealer sold on Telegram, and BANSHEE (osx.banshee), a macOS stealer whose source code leaked. No galaxy has an actor record named AMOS or Banshee; Black Banshee (a Kimsuky synonym) and Void Banshee are other actors, which the reference holds under their own names. On the graph of 2026-11-03 'amos' (10 relationships) and 'amos threat group' (21 relationships, the stealer's name with 'threat group' appended) come from OTX reports that list no malware family, while eight OTX Malware nodes carry the stealer under its names (amos, atomic macos stealer, atomic stealer and others). The report on 'banshee' (26 relationships) lists Banshee Stealer and Lumma Stealer as its families; the adversary differs from the family by the type word, so the rule for an adversary the same report lists as a family does not catch it.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "amos threat group",
+   "reason": "macOS information stealers, not groups. Malpedia lists AMOS with the synonym Atomic macOS Stealer, whose references describe the stealer sold on Telegram, and BANSHEE (osx.banshee), a macOS stealer whose source code leaked. No galaxy has an actor record named AMOS or Banshee; Black Banshee (a Kimsuky synonym) and Void Banshee are other actors, which the reference holds under their own names. On the graph of 2026-11-03 'amos' (10 relationships) and 'amos threat group' (21 relationships, the stealer's name with 'threat group' appended) come from OTX reports that list no malware family, while eight OTX Malware nodes carry the stealer under its names (amos, atomic macos stealer, atomic stealer and others). The report on 'banshee' (26 relationships) lists Banshee Stealer and Lumma Stealer as its families; the adversary differs from the family by the type word, so the rule for an adversary the same report lists as a family does not catch it.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "andromeda/gamarue",
+   "reason": "Botnets, not groups. ATT&CK lists ANDROMEDA (S1074) as commodity malware, and the botnet galaxy describes the Andromeda botnet, also known as Gamarue or Wauchos, as used to distribute large quantities of malware; the threat-actor galaxy's ANDROMEDA SPIDER is another name, which the reference holds as an actor of its own. The botnet galaxy's BadBox record and malpedia's BADBOX describe a cybercriminal operation selling Android devices with preinstalled malware; 'BADBOX 2.0' is that name with a version, and its OTX report pairs it with the BADBOX family. The botnet galaxy describes Prometei as a cryptocurrency-mining botnet, and malpedia lists its Windows and ELF variants. No galaxy has an actor record of these names. On the graph of 2026-11-03 the actor node 'andromeda/gamarue' (17 relationships) is attributed the ATT&CK Malware node 'andromeda', 'badbox 2.0' (12) is the only actor the Malware node 'badbox' is attributed to, and 'prometei' (19, techniques only) stands beside a Malware node of four other OTX reports.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "badbox 2.0",
+   "reason": "Botnets, not groups. ATT&CK lists ANDROMEDA (S1074) as commodity malware, and the botnet galaxy describes the Andromeda botnet, also known as Gamarue or Wauchos, as used to distribute large quantities of malware; the threat-actor galaxy's ANDROMEDA SPIDER is another name, which the reference holds as an actor of its own. The botnet galaxy's BadBox record and malpedia's BADBOX describe a cybercriminal operation selling Android devices with preinstalled malware; 'BADBOX 2.0' is that name with a version, and its OTX report pairs it with the BADBOX family. The botnet galaxy describes Prometei as a cryptocurrency-mining botnet, and malpedia lists its Windows and ELF variants. No galaxy has an actor record of these names. On the graph of 2026-11-03 the actor node 'andromeda/gamarue' (17 relationships) is attributed the ATT&CK Malware node 'andromeda', 'badbox 2.0' (12) is the only actor the Malware node 'badbox' is attributed to, and 'prometei' (19, techniques only) stands beside a Malware node of four other OTX reports.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "banshee",
+   "reason": "macOS information stealers, not groups. Malpedia lists AMOS with the synonym Atomic macOS Stealer, whose references describe the stealer sold on Telegram, and BANSHEE (osx.banshee), a macOS stealer whose source code leaked. No galaxy has an actor record named AMOS or Banshee; Black Banshee (a Kimsuky synonym) and Void Banshee are other actors, which the reference holds under their own names. On the graph of 2026-11-03 'amos' (10 relationships) and 'amos threat group' (21 relationships, the stealer's name with 'threat group' appended) come from OTX reports that list no malware family, while eight OTX Malware nodes carry the stealer under its names (amos, atomic macos stealer, atomic stealer and others). The report on 'banshee' (26 relationships) lists Banshee Stealer and Lumma Stealer as its families; the adversary differs from the family by the type word, so the rule for an adversary the same report lists as a family does not catch it.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "batavia",
+   "reason": "A rootkit, a backdoor and spyware, not groups. Malpedia lists Cloud Snooper (synonym Snoopy) as a Linux rootkit and backdoor family (elf.cloud_snooper); no actor galaxy has the name. Squidoor and Batavia have no galaxy record; on the graph each is a Malware node of another OTX report, Squidoor attributed to REF7707 (the threat-actor galaxy's REF7707, synonyms CL-STA-0049 and Jewelbug), and another report gives Batavia both as its adversary and as its malware family. On the graph of 2026-11-03 the actor nodes 'cloud snooper' (19 relationships), 'squidoor' (8) and 'batavia' (17) carry techniques only, from OTX reports that list no malware family; their techniques are those of a backdoor (server software component, exfiltration over the C2 channel) or of spyware (screen capture, data from the local system).",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "breachforums",
+   "reason": "A cybercrime forum, not a group. The threat-actor galaxy describes it as a place where actors post and sell stolen data: its IntelBroker record names 'underground forums like BreachForums', Nam3L3ss is described as 'distributing this data on BreachForums', and the GhostR and MORH4x records name it the same way. No galaxy has an actor record named BreachForums. On the graph of 2026-11-03 the actor node 'breachforums' (9 relationships, one OTX report) carries techniques only and no malware.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "clawhavoc",
+   "reason": "Campaign names, not groups. The OTX report on 'Operation STANDOFF' lists only commodity families sold or rented to many actors (RedLine, Raccoon Stealer, Amadey, SmokeLoader, Socelars, Glupteba, XMRig), and no galaxy record contains the name; the threat-actor galaxy holds some operations as actors (the reference has 'operation c-major'), so the decision rests on the name form and the commodity toolset. ClawHavoc names a campaign of malicious add-ons that distribute the AMOS macOS stealer: no galaxy record has the name, the report that gives it as the adversary pairs it only with Atomic Stealer (AMOS), and another OTX report lists ClawHavoc as a malware family. On the graph of 2026-11-03 the nodes have 37 and 15 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "clickfix",
+   "reason": "A social-engineering technique, not a group: a fake CAPTCHA or 'fix' prompt that makes the user paste and run a command. The galaxies describe many actors as using it: the threat-actor galaxy's GrayBravo 'employs the ClickFix technique to distribute malware', Hive0163 uses 'ClickFix social engineering for initial access', and TAG-124, UAC-0227, TAG-140 and GrayCharlie are described the same way; malpedia's IClickFix uses 'the ClickFix social engineering tactic'. No galaxy has an actor record named ClickFix. On the graph of 2026-11-03 the actor node 'clickfix' (38 relationships, three OTX reports) carries CrashFix, ModeloRAT, CastleLoader, CastleStealer, Lumma Stealer, NetSupport RAT and SectopRAT, payloads of several actors, and eleven other OTX reports list ClickFix as a malware family.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "cloud snooper",
+   "reason": "A rootkit, a backdoor and spyware, not groups. Malpedia lists Cloud Snooper (synonym Snoopy) as a Linux rootkit and backdoor family (elf.cloud_snooper); no actor galaxy has the name. Squidoor and Batavia have no galaxy record; on the graph each is a Malware node of another OTX report, Squidoor attributed to REF7707 (the threat-actor galaxy's REF7707, synonyms CL-STA-0049 and Jewelbug), and another report gives Batavia both as its adversary and as its malware family. On the graph of 2026-11-03 the actor nodes 'cloud snooper' (19 relationships), 'squidoor' (8) and 'batavia' (17) carry techniques only, from OTX reports that list no malware family; their techniques are those of a backdoor (server software component, exfiltration over the C2 channel) or of spyware (screen capture, data from the local system).",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "danabot",
+   "reason": "Malware that the galaxies give to an operator and that several actors use, not groups. ATT&CK lists SocGholish (S1124) as JavaScript-based loader malware operated by Mustard Tempest (G1020); malpedia lists it under FAKEUPDATES, and the tool galaxy uses the name for both the drive-by download network and the loader. The banker galaxy describes DanaBot as a Trojan with banking web injections and stealer functions, and the threat-actor galaxy mentions SCULLY SPIDER as its operator. Neither is merged into its operator: on the graph of 2026-11-03 the Malware node 'socgholish' is attributed to Mustard Tempest, RansomHub, Water Scylla, UNC4108 and RomCom, and 'danabot' to Storm-1865 and Mustard Tempest, so a synonym of one operator would give the other actors' reports to it. The actor nodes 'socgholish' (8 relationships) and 'danabot' (2) come from one OTX report each.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "darcula",
+   "reason": "Tools offered to many customers, not groups. Malpedia describes GhostSocks as a Golang-based proxy malware first advertised as malware-as-a-service; on the graph its Malware node is attributed to Storm-3075 and Water Kurita. Darcula is a phishing kit: the threat-actor galaxy's XinXin record says that XinXin also develops and uses other phishing kits like Lighthouse and Darcula, and the graph holds a Malware node 'darcula' from an OTX report on phishing kits. Shanya has no galaxy record; the OTX report on it attributes to it ten families of unrelated operations, among them the Qilin, Medusa and Akira ransomware, which the reference gives to three different actors, and its seven techniques are those of a packer or crypter (DLL side-loading, rundll32, obfuscation, process injection, disabling security tools). As for 'lumma stealer' (never_merge), an actor node named after a product gathers the reports on its many users. On the graph of 2026-11-03 the actor nodes have 8, 13 and 19 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "darkcloud",
+   "reason": "Information stealers, not groups. Malpedia and the stealer galaxy list DarkCloud Stealer, a stealer written in Visual Basic. Malpedia lists TamperedChef (win.tampered_chef) as a malware family, with references titled 'tamperedchef-the-bad-pdf-editor' and 'hunting-for-tamperedchef-infostealer', and its BaoLoader record tells BaoLoader apart from TamperedChef. No galaxy has an actor record of either name. On the graph of 2026-11-03 the actor nodes 'darkcloud' (15 relationships, techniques only) and 'tamperedchef' (31 relationships, three OTX reports, with the trojanized applications CalendarOMatic and ImageLooker) stand beside the Malware nodes 'darkcloud', 'darkcloud stealer' and 'tamperedchef' of other OTX reports.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "ghostsocks",
+   "reason": "Tools offered to many customers, not groups. Malpedia describes GhostSocks as a Golang-based proxy malware first advertised as malware-as-a-service; on the graph its Malware node is attributed to Storm-3075 and Water Kurita. Darcula is a phishing kit: the threat-actor galaxy's XinXin record says that XinXin also develops and uses other phishing kits like Lighthouse and Darcula, and the graph holds a Malware node 'darcula' from an OTX report on phishing kits. Shanya has no galaxy record; the OTX report on it attributes to it ten families of unrelated operations, among them the Qilin, Medusa and Akira ransomware, which the reference gives to three different actors, and its seven techniques are those of a packer or crypter (DLL side-loading, rundll32, obfuscation, process injection, disabling security tools). As for 'lumma stealer' (never_merge), an actor node named after a product gathers the reports on its many users. On the graph of 2026-11-03 the actor nodes have 8, 13 and 19 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "glassworm",
+   "reason": "Self-propagating supply-chain worms, not groups. ATT&CK lists Shai-Hulud (S9008) as a supply chain worm first reported in September 2025, Mini Shai-Hulud (S9043) as a credential stealer and self-replicating supply chain worm derived from Shai-Hulud that TeamPCP (G1056) has used, and GlassWorm (S9010) as a worm that propagated through supply chain attacks by compromising repository credentials; malpedia lists Shai-Hulud and GlassWorm as malware families. No galaxy has an actor record of these names. OTX reports give the worms as their adversary: on the graph of 2026-11-03 the actor nodes 'shai-hulud' (35 relationships, four OTX reports, four of its five families also on the TeamPCP node), 'mini shai-hulud' (16) and 'glassworm' (29) stand beside the Malware nodes of the same names, which come from ATT&CK and OTX.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "grelosgtm",
+   "reason": "Malware or toolset names, not groups; the evidence is the name form and the graph. 'GrelosGTM' is malpedia's Grelos, 'a skimmer used for magecart-style attacks', with 'GTM' appended; its OTX report pairs it only with the generic family 'JavaScript sniffer' on five domains. 'GroozaV2' is the report's own family Grooza with a version suffix: all 242 indicators of the report carry the pair Grooza::GroozaV2, and the Malware node 'grooza' comes from this report only. 'PCPJack' is a malware family of another OTX report (container, SSH and cron techniques); the report that gives it as the adversary attributes to it only the public tools Chisel and Sliver. No galaxy has an actor record of these names. On the graph of 2026-11-03 the actor nodes have 21, 13 and 16 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "groozav2",
+   "reason": "Malware or toolset names, not groups; the evidence is the name form and the graph. 'GrelosGTM' is malpedia's Grelos, 'a skimmer used for magecart-style attacks', with 'GTM' appended; its OTX report pairs it only with the generic family 'JavaScript sniffer' on five domains. 'GroozaV2' is the report's own family Grooza with a version suffix: all 242 indicators of the report carry the pair Grooza::GroozaV2, and the Malware node 'grooza' comes from this report only. 'PCPJack' is a malware family of another OTX report (container, SSH and cron techniques); the report that gives it as the adversary attributes to it only the public tools Chisel and Sliver. No galaxy has an actor record of these names. On the graph of 2026-11-03 the actor nodes have 21, 13 and 16 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "ipidea",
+   "reason": "Network infrastructure, not groups. Proton66 is a bulletproof hosting network: twelve malpedia records cite the report 'PROSPERO & Proton66: Uncovering the links between bulletproof networks' or a report filed as 'proton66-part-2-compromised-wordpress-pages-and-malware-campaigns', on campaigns its address space hosted. IPIDEA has no galaxy record; the OTX report that gives it as the adversary attributes to it Kimwolf (malpedia: Android malware that 'uses compromised systems to relay malicious and abusive Internet traffic'; the botnet galaxy: a dual-purpose residential proxy and DDoS botnet), the BADBOX operation and the Mirai-derived Aisuru botnet, and its techniques include Proxy (T1090) and Compromise Infrastructure (T1584): the residential proxy network these botnets feed, not their author. No galaxy has an actor record of either name. On the graph of 2026-11-03 the node 'proton66' (34 relationships, two OTX reports) carries SuperBlack, Strela Stealer, Weaxor, Remcos and XWorm, families other actors also carry, and 'ipidea' (20) carries Kimwolf, Aisuru and BADBOX 2.0.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "lumma",
+   "reason": "Information stealers available to many actors, not groups. ATT&CK lists Agent Tesla (S0331) as a spyware Trojan written for the .NET framework, and malpedia as a .NET information stealer readily available to actors due to leaked builders. ATT&CK lists Lumma Stealer (S1213) as malware-as-a-service; the reference marks 'lumma stealer' never_merge because an actor node named after the stealer gathers the reports on its many distributors, and the bare 'lumma' is the same case. No galaxy has an actor record of either name. The OTX report on 'agent tesla' gives it as the adversary without listing a malware family, so the rule for an adversary the same report lists as a family does not apply; the report on 'lumma' pairs it with Lumma Stealer. On the graph of 2026-11-03 the actor nodes have 10 and 15 relationships, beside the Malware nodes 'agent tesla' (ATT&CK and eight OTX reports) and 'lumma' (15 OTX reports).",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "mini shai-hulud",
+   "reason": "Self-propagating supply-chain worms, not groups. ATT&CK lists Shai-Hulud (S9008) as a supply chain worm first reported in September 2025, Mini Shai-Hulud (S9043) as a credential stealer and self-replicating supply chain worm derived from Shai-Hulud that TeamPCP (G1056) has used, and GlassWorm (S9010) as a worm that propagated through supply chain attacks by compromising repository credentials; malpedia lists Shai-Hulud and GlassWorm as malware families. No galaxy has an actor record of these names. OTX reports give the worms as their adversary: on the graph of 2026-11-03 the actor nodes 'shai-hulud' (35 relationships, four OTX reports, four of its five families also on the TeamPCP node), 'mini shai-hulud' (16) and 'glassworm' (29) stand beside the Malware nodes of the same names, which come from ATT&CK and OTX.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "operation standoff",
+   "reason": "Campaign names, not groups. The OTX report on 'Operation STANDOFF' lists only commodity families sold or rented to many actors (RedLine, Raccoon Stealer, Amadey, SmokeLoader, Socelars, Glupteba, XMRig), and no galaxy record contains the name; the threat-actor galaxy holds some operations as actors (the reference has 'operation c-major'), so the decision rests on the name form and the commodity toolset. ClawHavoc names a campaign of malicious add-ons that distribute the AMOS macOS stealer: no galaxy record has the name, the report that gives it as the adversary pairs it only with Atomic Stealer (AMOS), and another OTX report lists ClawHavoc as a malware family. On the graph of 2026-11-03 the nodes have 37 and 15 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "pcpjack",
+   "reason": "Malware or toolset names, not groups; the evidence is the name form and the graph. 'GrelosGTM' is malpedia's Grelos, 'a skimmer used for magecart-style attacks', with 'GTM' appended; its OTX report pairs it only with the generic family 'JavaScript sniffer' on five domains. 'GroozaV2' is the report's own family Grooza with a version suffix: all 242 indicators of the report carry the pair Grooza::GroozaV2, and the Malware node 'grooza' comes from this report only. 'PCPJack' is a malware family of another OTX report (container, SSH and cron techniques); the report that gives it as the adversary attributes to it only the public tools Chisel and Sliver. No galaxy has an actor record of these names. On the graph of 2026-11-03 the actor nodes have 21, 13 and 16 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "phantomcaptcha",
+   "reason": "Campaign names, not groups: the galaxies know each only from the title of a report on one campaign. Malpedia's Cobalt Strike and Merlin records cite a report filed as 'taoth-campaign'; its Cobalt Strike and MimiKatz records cite 'from-cobalt-strike-to-mimikatz-slowtempest', a name in the WORD#WORD form its vendor gives campaigns (the threat-actor galaxy's UAC-0154 record speaks of 'the STARK#VORTEX phishing campaign'); its Princess record cites a report filed as 'phantomcaptcha-multi-stage-websocket-rat-targets-ukraine-in-single-day-spearphishing-operation'. No galaxy names an actor of these names. One name of the WORD#WORD form, DEV#POPPER, is an ATT&CK alias of Contagious Interview (G1052); no galaxy gives SLOW#TEMPEST to an actor. On the graph of 2026-11-03 the nodes 'taoth' (29 relationships), 'slow#tempest' (24, with Cobalt Strike only) and 'phantomcaptcha' (20) come from one or two OTX reports on that campaign.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "polaredge",
+   "reason": "Botnets of routers and IoT devices, not groups. Malpedia describes PolarEdge as a TLS backdoor on Cisco, Asus, QNAP and Synology devices, possibly used as operational relay boxes, and cites a report on an IoT botnet. RondoDox has no galaxy record; on the graph it is a Malware node of eleven OTX reports, often with other botnet and miner families (Kinsing, Mirai, XMRig). No galaxy has an actor record of either name. On the graph of 2026-11-03 the actor nodes 'polaredge' and 'rondodox' (14 relationships each, techniques only) come from OTX reports that list no malware family, beside the Malware nodes of the same names.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "prometei",
+   "reason": "Botnets, not groups. ATT&CK lists ANDROMEDA (S1074) as commodity malware, and the botnet galaxy describes the Andromeda botnet, also known as Gamarue or Wauchos, as used to distribute large quantities of malware; the threat-actor galaxy's ANDROMEDA SPIDER is another name, which the reference holds as an actor of its own. The botnet galaxy's BadBox record and malpedia's BADBOX describe a cybercriminal operation selling Android devices with preinstalled malware; 'BADBOX 2.0' is that name with a version, and its OTX report pairs it with the BADBOX family. The botnet galaxy describes Prometei as a cryptocurrency-mining botnet, and malpedia lists its Windows and ELF variants. No galaxy has an actor record of these names. On the graph of 2026-11-03 the actor node 'andromeda/gamarue' (17 relationships) is attributed the ATT&CK Malware node 'andromeda', 'badbox 2.0' (12) is the only actor the Malware node 'badbox' is attributed to, and 'prometei' (19, techniques only) stands beside a Malware node of four other OTX reports.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "proton66",
+   "reason": "Network infrastructure, not groups. Proton66 is a bulletproof hosting network: twelve malpedia records cite the report 'PROSPERO & Proton66: Uncovering the links between bulletproof networks' or a report filed as 'proton66-part-2-compromised-wordpress-pages-and-malware-campaigns', on campaigns its address space hosted. IPIDEA has no galaxy record; the OTX report that gives it as the adversary attributes to it Kimwolf (malpedia: Android malware that 'uses compromised systems to relay malicious and abusive Internet traffic'; the botnet galaxy: a dual-purpose residential proxy and DDoS botnet), the BADBOX operation and the Mirai-derived Aisuru botnet, and its techniques include Proxy (T1090) and Compromise Infrastructure (T1584): the residential proxy network these botnets feed, not their author. No galaxy has an actor record of either name. On the graph of 2026-11-03 the node 'proton66' (34 relationships, two OTX reports) carries SuperBlack, Strela Stealer, Weaxor, Remcos and XWorm, families other actors also carry, and 'ipidea' (20) carries Kimwolf, Aisuru and BADBOX 2.0.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "rondodox",
+   "reason": "Botnets of routers and IoT devices, not groups. Malpedia describes PolarEdge as a TLS backdoor on Cisco, Asus, QNAP and Synology devices, possibly used as operational relay boxes, and cites a report on an IoT botnet. RondoDox has no galaxy record; on the graph it is a Malware node of eleven OTX reports, often with other botnet and miner families (Kinsing, Mirai, XMRig). No galaxy has an actor record of either name. On the graph of 2026-11-03 the actor nodes 'polaredge' and 'rondodox' (14 relationships each, techniques only) come from OTX reports that list no malware family, beside the Malware nodes of the same names.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "shai-hulud",
+   "reason": "Self-propagating supply-chain worms, not groups. ATT&CK lists Shai-Hulud (S9008) as a supply chain worm first reported in September 2025, Mini Shai-Hulud (S9043) as a credential stealer and self-replicating supply chain worm derived from Shai-Hulud that TeamPCP (G1056) has used, and GlassWorm (S9010) as a worm that propagated through supply chain attacks by compromising repository credentials; malpedia lists Shai-Hulud and GlassWorm as malware families. No galaxy has an actor record of these names. OTX reports give the worms as their adversary: on the graph of 2026-11-03 the actor nodes 'shai-hulud' (35 relationships, four OTX reports, four of its five families also on the TeamPCP node), 'mini shai-hulud' (16) and 'glassworm' (29) stand beside the Malware nodes of the same names, which come from ATT&CK and OTX.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "shanya",
+   "reason": "Tools offered to many customers, not groups. Malpedia describes GhostSocks as a Golang-based proxy malware first advertised as malware-as-a-service; on the graph its Malware node is attributed to Storm-3075 and Water Kurita. Darcula is a phishing kit: the threat-actor galaxy's XinXin record says that XinXin also develops and uses other phishing kits like Lighthouse and Darcula, and the graph holds a Malware node 'darcula' from an OTX report on phishing kits. Shanya has no galaxy record; the OTX report on it attributes to it ten families of unrelated operations, among them the Qilin, Medusa and Akira ransomware, which the reference gives to three different actors, and its seven techniques are those of a packer or crypter (DLL side-loading, rundll32, obfuscation, process injection, disabling security tools). As for 'lumma stealer' (never_merge), an actor node named after a product gathers the reports on its many users. On the graph of 2026-11-03 the actor nodes have 8, 13 and 19 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "slow#tempest",
+   "reason": "Campaign names, not groups: the galaxies know each only from the title of a report on one campaign. Malpedia's Cobalt Strike and Merlin records cite a report filed as 'taoth-campaign'; its Cobalt Strike and MimiKatz records cite 'from-cobalt-strike-to-mimikatz-slowtempest', a name in the WORD#WORD form its vendor gives campaigns (the threat-actor galaxy's UAC-0154 record speaks of 'the STARK#VORTEX phishing campaign'); its Princess record cites a report filed as 'phantomcaptcha-multi-stage-websocket-rat-targets-ukraine-in-single-day-spearphishing-operation'. No galaxy names an actor of these names. One name of the WORD#WORD form, DEV#POPPER, is an ATT&CK alias of Contagious Interview (G1052); no galaxy gives SLOW#TEMPEST to an actor. On the graph of 2026-11-03 the nodes 'taoth' (29 relationships), 'slow#tempest' (24, with Cobalt Strike only) and 'phantomcaptcha' (20) come from one or two OTX reports on that campaign.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "smartapesg",
+   "reason": "A cluster of fake-update campaigns, not a group: malpedia's SmartApeSG record (js.smartapesg, synonyms HANEYMANEY and ZPHP) describes a cluster of fake update campaigns delivering payloads like NetSupportManager RAT and Lumma Stealer, and names no operator; no galaxy has an actor record of the name. On the graph of 2026-11-03 the actor node 'smartapesg' (30 relationships, two OTX reports) carries its payloads (NetSupport RAT, SmartRAT, StealC, Remcos, SectopRAT), and a Malware node 'smartapesg' comes from another OTX report.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "socgholish",
+   "reason": "Malware that the galaxies give to an operator and that several actors use, not groups. ATT&CK lists SocGholish (S1124) as JavaScript-based loader malware operated by Mustard Tempest (G1020); malpedia lists it under FAKEUPDATES, and the tool galaxy uses the name for both the drive-by download network and the loader. The banker galaxy describes DanaBot as a Trojan with banking web injections and stealer functions, and the threat-actor galaxy mentions SCULLY SPIDER as its operator. Neither is merged into its operator: on the graph of 2026-11-03 the Malware node 'socgholish' is attributed to Mustard Tempest, RansomHub, Water Scylla, UNC4108 and RomCom, and 'danabot' to Storm-1865 and Mustard Tempest, so a synonym of one operator would give the other actors' reports to it. The actor nodes 'socgholish' (8 relationships) and 'danabot' (2) come from one OTX report each.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "squidoor",
+   "reason": "A rootkit, a backdoor and spyware, not groups. Malpedia lists Cloud Snooper (synonym Snoopy) as a Linux rootkit and backdoor family (elf.cloud_snooper); no actor galaxy has the name. Squidoor and Batavia have no galaxy record; on the graph each is a Malware node of another OTX report, Squidoor attributed to REF7707 (the threat-actor galaxy's REF7707, synonyms CL-STA-0049 and Jewelbug), and another report gives Batavia both as its adversary and as its malware family. On the graph of 2026-11-03 the actor nodes 'cloud snooper' (19 relationships), 'squidoor' (8) and 'batavia' (17) carry techniques only, from OTX reports that list no malware family; their techniques are those of a backdoor (server software component, exfiltration over the C2 channel) or of spyware (screen capture, data from the local system).",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "stryker",
+   "reason": "A victim company, not an actor. ATT&CK's VOID MANTICORE (G1055) record names Handala Hack as the group's current primary persona and lists a March 2026 attack against Stryker Corporation among its operations; no galaxy has an actor or malware record named Stryker. An OTX report of 2026-04-06 gives the victim as its adversary. On the graph of 2026-11-03 the node 'stryker' has one relationship, to its source; VOID MANTICORE, with Handala Hack among its aliases, is on the graph with 105 relationships.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "tamperedchef",
+   "reason": "Information stealers, not groups. Malpedia and the stealer galaxy list DarkCloud Stealer, a stealer written in Visual Basic. Malpedia lists TamperedChef (win.tampered_chef) as a malware family, with references titled 'tamperedchef-the-bad-pdf-editor' and 'hunting-for-tamperedchef-infostealer', and its BaoLoader record tells BaoLoader apart from TamperedChef. No galaxy has an actor record of either name. On the graph of 2026-11-03 the actor nodes 'darkcloud' (15 relationships, techniques only) and 'tamperedchef' (31 relationships, three OTX reports, with the trojanized applications CalendarOMatic and ImageLooker) stand beside the Malware nodes 'darkcloud', 'darkcloud stealer' and 'tamperedchef' of other OTX reports.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "taoth",
+   "reason": "Campaign names, not groups: the galaxies know each only from the title of a report on one campaign. Malpedia's Cobalt Strike and Merlin records cite a report filed as 'taoth-campaign'; its Cobalt Strike and MimiKatz records cite 'from-cobalt-strike-to-mimikatz-slowtempest', a name in the WORD#WORD form its vendor gives campaigns (the threat-actor galaxy's UAC-0154 record speaks of 'the STARK#VORTEX phishing campaign'); its Princess record cites a report filed as 'phantomcaptcha-multi-stage-websocket-rat-targets-ukraine-in-single-day-spearphishing-operation'. No galaxy names an actor of these names. One name of the WORD#WORD form, DEV#POPPER, is an ATT&CK alias of Contagious Interview (G1052); no galaxy gives SLOW#TEMPEST to an actor. On the graph of 2026-11-03 the nodes 'taoth' (29 relationships), 'slow#tempest' (24, with Cobalt Strike only) and 'phantomcaptcha' (20) come from one or two OTX reports on that campaign.",
+   "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "videostrong technology co.",
+   "reason": "A company name, not a threat-actor name: it carries the designator 'Technology Co.', and no galaxy names it as an actor. The OTX report that gives it as the adversary lists 19 proxyware and bandwidth-monetisation SDK families, among them Honeygain, Gaganode and Traffmonetizer (malpedia describes Gaganode as a decentralized bandwidth monetization service). On the graph of 2026-11-03 the node (41 relationships, one OTX report) carries all 19 families.",
+   "date": "2026-11-05",
    "status": "proposed"
   }
  ]
