@@ -1,29 +1,29 @@
 {
  "schema_version": 1,
- "version": "2026.10.22",
- "generated_at": "2026-10-22",
+ "version": "2026.11.05",
+ "generated_at": "2026-11-05",
  "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged.",
  "generator": "scripts/build_canonical_threat_actors.py",
  "key_normalisation": "NFC, trimmed, lower-case (node_identity.canonicalize_merge_key for ThreatActor)",
  "inputs": [
   {
    "role": "galaxy",
-   "file": "galaxy_threat_actors_20261013.json",
-   "sha256": "eba1bf621ab79a81799ad50cc1ac46e8402619b071607c53b111c6bd4e7cfd3e",
+   "file": "galaxy_threat_actors_20261105.json",
+   "sha256": "99d6dacef5769d8028bcaf791ab422361fe8fc5f47b24ca24101b4d091925588",
    "dataset": "galaxy_threat_actors",
    "schema_version": "1.0",
-   "generated_at": "2026-10-13T00:34:25+02:00",
-   "record_count": 1474,
-   "misp_version": "2.5.45",
+   "generated_at": "2026-11-05T23:57:56+01:00",
+   "record_count": 1486,
+   "misp_version": "2.5.50",
    "galaxies": [
     {
      "galaxy": "threat-actor",
-     "version": "galaxy threat-actor v3; cluster v350",
-     "records": 1048,
+     "version": "galaxy threat-actor v3; cluster v352",
+     "records": 1060,
      "raw_files": [
       {
-       "file": "misp_galaxy_threat-actor_20261013.json",
-       "sha256": "6a571af0c355d7226f3238c386b8a049997e9bf449136963fe63dd307b80b6a5"
+       "file": "misp_galaxy_threat-actor_20261105.json",
+       "sha256": "61e31fcfc16ea8f08301fe03a72e17c3c414ddaec0dd783f89af472991ee5646"
       }
      ]
     },
@@ -33,8 +33,8 @@
      "records": 179,
      "raw_files": [
       {
-       "file": "misp_galaxy_microsoft-activity-group_20261013.json",
-       "sha256": "c1a615e3bb85fd216e1e47a290435e0e7c7fe332b85e8dd954a6b11ef3d3cd71"
+       "file": "misp_galaxy_microsoft-activity-group_20261105.json",
+       "sha256": "bcef12d69c6588cf9b8495d23f797fd95767ff5c86fb68584e60247520b9cd47"
       }
      ]
     },
@@ -44,8 +44,8 @@
      "records": 42,
      "raw_files": [
       {
-       "file": "misp_galaxy_360net-threat-actor_20261013.json",
-       "sha256": "f4d067d2e0657b9055b5d71f8a28d72e1593b9137d52f7009728175a40a303c8"
+       "file": "misp_galaxy_360net-threat-actor_20261105.json",
+       "sha256": "2ae897c563e2fc8fdde58a94fdc4abb0f75fc394f3dc48956f64eddb2672593d"
       }
      ]
     },
@@ -55,8 +55,8 @@
      "records": 10,
      "raw_files": [
       {
-       "file": "misp_galaxy_mitre-ics-groups_20261013.json",
-       "sha256": "50452f7b6919416e93170b7220ec39bb50d014fae2401aef272121554a783d61"
+       "file": "misp_galaxy_mitre-ics-groups_20261105.json",
+       "sha256": "4202f79402c7cd223c51ee7808d3e043b9abacd2c3aaac7fe00e40f8c11d46c6"
       }
      ]
     },
@@ -66,8 +66,8 @@
      "records": 195,
      "raw_files": [
       {
-       "file": "misp_galaxy_mitre-intrusion-set_20261013.json",
-       "sha256": "721fe3d3de269688c70014aefb67eb7cb5c59aedfc551517c12ee50a959928bd"
+       "file": "misp_galaxy_mitre-intrusion-set_20261105.json",
+       "sha256": "f34a12a74843431d5b77eb08ed434fca5e8d3aa5a8b8fc444a94d38ce97d9a4b"
       }
      ]
     }
@@ -75,16 +75,16 @@
   },
   {
    "role": "attack_revocations",
-   "file": "misp_galaxy_mitre-intrusion-set_20261013.json",
-   "sha256": "721fe3d3de269688c70014aefb67eb7cb5c59aedfc551517c12ee50a959928bd",
+   "file": "misp_galaxy_mitre-intrusion-set_20261105.json",
+   "sha256": "f34a12a74843431d5b77eb08ed434fca5e8d3aa5a8b8fc444a94d38ce97d9a4b",
    "revoked_groups": 6
   },
   {
    "role": "loaded_attack",
-   "file": "graph_threat_actors_20261017.json",
-   "sha256": "52b19d740a10309ab16639166bbbc83c6c35d3d3073d719962a8a5f976a6b131",
-   "exported_at": "2026-10-17T05:25:58+00:00",
-   "threat_actor_nodes": 859,
+   "file": "graph_threat_actors_20261105.json",
+   "sha256": "eb87e7369c4e737ec235ecc1422e60784f9a21305178dc24844dfa1b88a54c89",
+   "exported_at": "2026-11-05T21:37:45+00:00",
+   "threat_actor_nodes": 764,
    "attack_nodes": 189,
    "attack_nodes_with_id": 188,
    "attack_nodes_with_delivered_aliases": 189,
@@ -93,8 +93,8 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "d924141f268f77f656bd5bc3dab10b4770d0387fde45264432b1b68e50ba4029",
-   "decisions": 110
+   "sha256": "5d68847e1e49f80eef38a4d2a0473909149b7266c6bc55ba6ee96b97a9e13680",
+   "decisions": 121
   }
  ],
  "attribution": [
@@ -118,10 +118,10 @@
   "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name."
  ],
  "counts": {
-  "actors": 1166,
+  "actors": 1177,
   "attack_groups": 191,
-  "synonyms": 4484,
-  "ambiguous": 80
+  "synonyms": 4528,
+  "ambiguous": 82
  },
  "actors": [
   {
@@ -3849,6 +3849,39 @@
    }
   },
   {
+   "name": "BlackLock",
+   "key": "blacklock",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/eb8fb25d-ba4f-4970-ae8a-b0020b2b9841"
+   ],
+   "synonyms": [
+    "blacklock group",
+    "blacklock team",
+    "blacklocks",
+    "el dorado",
+    "eldorado",
+    "global group",
+    "mamona"
+   ],
+   "synonym_origins": {
+    "misp_galaxy:threat-actor": [
+     "blacklocks",
+     "el dorado",
+     "eldorado",
+     "global group",
+     "mamona"
+    ],
+    "suffix_rule": [
+     "blacklock group",
+     "blacklock team"
+    ]
+   }
+  },
+  {
    "name": "BlackMaskers",
    "key": "blackmaskers",
    "mitre_attack": null,
@@ -4785,6 +4818,7 @@
    ],
    "synonyms": [
     "bronze medley",
+    "calypso apt",
     "calypso group",
     "calypso team",
     "red lamassu"
@@ -4793,6 +4827,9 @@
     "misp_galaxy:threat-actor": [
      "bronze medley",
      "red lamassu"
+    ],
+    "override": [
+     "calypso apt"
     ],
     "suffix_rule": [
      "calypso group",
@@ -5304,6 +5341,27 @@
    "records": [],
    "synonyms": [],
    "synonym_origins": {}
+  },
+  {
+   "name": "CikLeak",
+   "key": "cikleak",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/55dd69cb-a166-46f7-af51-d09e3657a191"
+   ],
+   "synonyms": [
+    "cikleak group",
+    "cikleak team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "cikleak group",
+     "cikleak team"
+    ]
+   }
   },
   {
    "name": "Cinnamon Tempest",
@@ -6431,6 +6489,27 @@
    }
   },
   {
+   "name": "CRPxO",
+   "key": "crpxo",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/15162648-c1f4-4da6-90ac-4bc7b8ec9406"
+   ],
+   "synonyms": [
+    "crpxo group",
+    "crpxo team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "crpxo group",
+     "crpxo team"
+    ]
+   }
+  },
+  {
    "name": "CryptoChameleon",
    "key": "cryptochameleon",
    "mitre_attack": null,
@@ -7159,6 +7238,27 @@
     "suffix_rule": [
      "danti group",
      "danti team"
+    ]
+   }
+  },
+  {
+   "name": "DaOnlySpark",
+   "key": "daonlyspark",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/9775d015-39d4-4759-b6d0-2e5413cfe3f3"
+   ],
+   "synonyms": [
+    "daonlyspark group",
+    "daonlyspark team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "daonlyspark group",
+     "daonlyspark team"
     ]
    }
   },
@@ -8093,6 +8193,7 @@
     "iron liberty team",
     "itg15",
     "koala team",
+    "static tundra",
     "temp.isotope",
     "temp.isotope group",
     "temp.isotope team",
@@ -8159,6 +8260,9 @@
      "dragonfly 2.0",
      "dymalloy",
      "iron liberty"
+    ],
+    "override": [
+     "static tundra"
     ],
     "suffix_rule": [
      "berserk bear group",
@@ -10821,17 +10925,6 @@
    }
   },
   {
-   "name": "Global Group",
-   "key": "global group",
-   "mitre_attack": null,
-   "origins": [
-    "override"
-   ],
-   "records": [],
-   "synonyms": [],
-   "synonym_origins": {}
-  },
-  {
    "name": "GlobalSecretGroup",
    "key": "globalsecretgroup",
    "mitre_attack": null,
@@ -11582,6 +11675,7 @@
     "threat-actor/cff9cc85-6f34-4deb-9239-730e34e639f3"
    ],
    "synonyms": [
+    "apt-c-01",
     "apt-q-20",
     "greenspot group",
     "greenspot team",
@@ -11591,6 +11685,9 @@
     "misp_galaxy:threat-actor": [
      "apt-q-20",
      "poisonvine"
+    ],
+    "override": [
+     "apt-c-01"
     ],
     "suffix_rule": [
      "greenspot group",
@@ -11724,6 +11821,27 @@
     "suffix_rule": [
      "gtg-1002 group",
      "gtg-1002 team"
+    ]
+   }
+  },
+  {
+   "name": "GTG-20006",
+   "key": "gtg-20006",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/edc11644-6375-4760-8403-0153bd092aa0"
+   ],
+   "synonyms": [
+    "gtg-20006 group",
+    "gtg-20006 team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "gtg-20006 group",
+     "gtg-20006 team"
     ]
    }
   },
@@ -12610,6 +12728,27 @@
    }
   },
   {
+   "name": "IAmNotAVillain",
+   "key": "iamnotavillain",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/46b65f4d-9550-4164-a500-2c32ea243b92"
+   ],
+   "synonyms": [
+    "iamnotavillain group",
+    "iamnotavillain team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "iamnotavillain group",
+     "iamnotavillain team"
+    ]
+   }
+  },
+  {
    "name": "IcePeony",
    "key": "icepeony",
    "mitre_attack": null,
@@ -12666,6 +12805,7 @@
     "gold ionic",
     "gold ionic group",
     "gold ionic team",
+    "inc",
     "inc ransom group",
     "inc ransom team"
    ],
@@ -12675,6 +12815,9 @@
     ],
     "mitre_loaded": [
      "gold ionic"
+    ],
+    "override": [
+     "inc"
     ],
     "suffix_rule": [
      "gold ionic group",
@@ -13200,9 +13343,13 @@
    ],
    "synonyms": [
     "jadepuffer group",
-    "jadepuffer team"
+    "jadepuffer team",
+    "storm-3168"
    ],
    "synonym_origins": {
+    "misp_galaxy:threat-actor": [
+     "storm-3168"
+    ],
     "suffix_rule": [
      "jadepuffer group",
      "jadepuffer team"
@@ -15037,11 +15184,13 @@
     "luna moth group",
     "luna moth team",
     "silent ransom",
+    "silentransomgroup",
     "tg2729"
    ],
    "synonym_origins": {
     "misp_galaxy:threat-actor": [
      "silent ransom",
+     "silentransomgroup",
      "tg2729"
     ],
     "suffix_rule": [
@@ -21386,6 +21535,27 @@
    }
   },
   {
+   "name": "ShadowByt3$",
+   "key": "shadowbyt3$",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/be618f7e-e6bf-4dcb-b805-695224885c49"
+   ],
+   "synonyms": [
+    "shadowbyt3$ group",
+    "shadowbyt3$ team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "shadowbyt3$ group",
+     "shadowbyt3$ team"
+    ]
+   }
+  },
+  {
    "name": "ShadowSyndicate",
    "key": "shadowsyndicate",
    "mitre_attack": null,
@@ -23126,11 +23296,15 @@
    "synonyms": [
     "storm-0473 group",
     "storm-0473 team",
+    "tomiris",
     "unc2849"
    ],
    "synonym_origins": {
     "misp_galaxy:threat-actor": [
      "unc2849"
+    ],
+    "override": [
+     "tomiris"
     ],
     "suffix_rule": [
      "storm-0473 group",
@@ -24382,10 +24556,14 @@
     "threat-actor/981402be-3b2d-4310-a7c6-c773aec869c1"
    ],
    "synonyms": [
+    "longlegs",
     "storm-2603 group",
     "storm-2603 team"
    ],
    "synonym_origins": {
+    "misp_galaxy:threat-actor": [
+     "longlegs"
+    ],
     "suffix_rule": [
      "storm-2603 group",
      "storm-2603 team"
@@ -24500,6 +24678,27 @@
     "suffix_rule": [
      "storm-2981 group",
      "storm-2981 team"
+    ]
+   }
+  },
+  {
+   "name": "Storm-2992",
+   "key": "storm-2992",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/b687defa-308c-4f9e-bb9e-d9d30fb4b1a0"
+   ],
+   "synonyms": [
+    "storm-2992 group",
+    "storm-2992 team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "storm-2992 group",
+     "storm-2992 team"
     ]
    }
   },
@@ -24961,6 +25160,27 @@
     "suffix_rule": [
      "ta410 group",
      "ta410 team"
+    ]
+   }
+  },
+  {
+   "name": "TA419",
+   "key": "ta419",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/d7140683-7af8-41c6-8938-18a69bb809e3"
+   ],
+   "synonyms": [
+    "ta419 group",
+    "ta419 team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "ta419 group",
+     "ta419 team"
     ]
    }
   },
@@ -25672,6 +25892,7 @@
     "threat-actor/8a1b831c-e07e-43ad-933a-7fe7a9a1e449"
    ],
    "synonyms": [
+    "kongtuke",
     "landupdate808",
     "tag-124 group",
     "tag-124 team"
@@ -25679,6 +25900,9 @@
    "synonym_origins": {
     "misp_galaxy:threat-actor": [
      "landupdate808"
+    ],
+    "override": [
+     "kongtuke"
     ],
     "suffix_rule": [
      "tag-124 group",
@@ -27993,10 +28217,14 @@
     "threat-actor/accc7fd6-3f77-471c-aec1-78662beba2b7"
    ],
    "synonyms": [
+    "lapdogs",
     "uat-7810 group",
     "uat-7810 team"
    ],
    "synonym_origins": {
+    "override": [
+     "lapdogs"
+    ],
     "suffix_rule": [
      "uat-7810 group",
      "uat-7810 team"
@@ -28876,10 +29104,14 @@
     "threat-actor/e13e36e7-a75b-42fa-8d51-35f9eeafebfc"
    ],
    "synonyms": [
+    "cl-sta-0954",
     "unc5820 group",
     "unc5820 team"
    ],
    "synonym_origins": {
+    "override": [
+     "cl-sta-0954"
+    ],
     "suffix_rule": [
      "unc5820 group",
      "unc5820 team"
@@ -29261,9 +29493,13 @@
    ],
    "synonyms": [
     "ung0002 group",
-    "ung0002 team"
+    "ung0002 team",
+    "ung002"
    ],
    "synonym_origins": {
+    "override": [
+     "ung002"
+    ],
     "suffix_rule": [
      "ung0002 group",
      "ung0002 team"
@@ -29585,6 +29821,7 @@
     "threat-actor/f288f686-b5b3-4c86-9960-5f8fb18709a3"
    ],
    "synonyms": [
+    "armory castle",
     "red dev 61",
     "unc5221",
     "uta0178 group",
@@ -29594,6 +29831,9 @@
     "misp_galaxy:threat-actor": [
      "red dev 61",
      "unc5221"
+    ],
+    "override": [
+     "armory castle"
     ],
     "suffix_rule": [
      "uta0178 group",
@@ -29749,6 +29989,27 @@
    }
   },
   {
+   "name": "V0idix",
+   "key": "v0idix",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/20200364-8b07-488a-a1e2-7b5e8be6a785"
+   ],
+   "synonyms": [
+    "v0idix group",
+    "v0idix team"
+   ],
+   "synonym_origins": {
+    "suffix_rule": [
+     "v0idix group",
+     "v0idix team"
+    ]
+   }
+  },
+  {
    "name": "Vanilla Tempest",
    "key": "vanilla tempest",
    "mitre_attack": null,
@@ -29778,6 +30039,31 @@
     "suffix_rule": [
      "vanilla tempest group",
      "vanilla tempest team"
+    ]
+   }
+  },
+  {
+   "name": "VantaCore",
+   "key": "vantacore",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/f668a512-ecf2-40ef-b75d-51b3aa9a121a"
+   ],
+   "synonyms": [
+    "thor",
+    "vantacore group",
+    "vantacore team"
+   ],
+   "synonym_origins": {
+    "misp_galaxy:threat-actor": [
+     "thor"
+    ],
+    "suffix_rule": [
+     "vantacore group",
+     "vantacore team"
     ]
    }
   },
@@ -29925,6 +30211,7 @@
    ],
    "synonyms": [
     "apt-c-35",
+    "donot",
     "donot team",
     "orange kala",
     "sectore02",
@@ -29937,6 +30224,9 @@
      "donot team",
      "orange kala",
      "sectore02"
+    ],
+    "override": [
+     "donot"
     ],
     "suffix_rule": [
      "viceroy tiger group",
@@ -31739,6 +32029,30 @@
    }
   },
   {
+   "name": "ZaWoo",
+   "key": "zawoo",
+   "mitre_attack": null,
+   "origins": [
+    "misp_galaxy:threat-actor"
+   ],
+   "records": [
+    "threat-actor/afd10845-ea76-4251-b385-f51a32c2dcec"
+   ],
+   "synonyms": [
+    "zawoo group",
+    "zawoo team"
+   ],
+   "synonym_origins": {
+    "misp_galaxy:threat-actor": [
+     "zawoo team"
+    ],
+    "suffix_rule": [
+     "zawoo group",
+     "zawoo team"
+    ]
+   }
+  },
+  {
    "name": "ZeffSec",
    "key": "zeffsec",
    "mitre_attack": null,
@@ -32270,6 +32584,17 @@
    }
   },
   {
+   "key": "fire ant",
+   "actors": [],
+   "origins": {},
+   "never_merge": {
+    "reason": "Not merged: 'fire ant' differs only by a space from FIREANT, an ATT&CK alias of Mustang Panda (G0129), but the galaxies give that spelling to two different actors: ATT&CK to Mustang Panda, and the microsoft-activity-group galaxy, as 'FireAnt', to Pink Sandstorm (Agrius, G1030). The name therefore does not identify one actor by its spelling. On the graph of 2026-11-03 the 'fire ant' node (21 relationships, OTX only) has no malware, only techniques, and its only OTX report also names Salt Typhoon. The name is kept away from Mustang Panda and counts as itself. A wrong merge is worse than a missed one.",
+    "date": "2026-11-05",
+    "status": "proposed",
+    "actor": "mustang panda"
+   }
+  },
+  {
    "key": "fruity armor",
    "actors": [
     "daffodil gust",
@@ -32770,6 +33095,16 @@
    }
   },
   {
+   "key": "scattered lapsus$ hunters - shinyhunters",
+   "actors": [],
+   "origins": {},
+   "never_merge": {
+    "reason": "Not merged: an OTX adversary string that joins two names with ' - ', which the actor-name hygiene keeps as one name. Its parts are two actors the reference holds apart: Scattered Lapsus Hunters, from the threat-actor galaxy's record 'Scattered Lapsus Hunters' (c216b83d-f298-438c-be47-0506ec773d8f, v352, synonym Scattered Lapsus$ Hunters), which describes an alliance of Scattered Spider, LAPSUS$ and ShinyHunters, and ShinyHunters (G1057; mitre-intrusion-set 'ShinyHunters - G1057', 5e30362d-935b-4b1c-8bf2-96c7b7b7e299, v44), whose description gives Scattered Lapsus Hunters as one of the names public reporting uses for operations of ShinyHunters members with members of other groups, not as an alias. A list of names is not a synonym, and a merge into either actor would drop the other. The name is listed as ambiguous and counts as itself. On the graph of 2026-11-03 its node has 5 relationships (four techniques and the source, no malware) from one OTX report of 2025-09-10. A wrong merge is worse than a missed one.",
+    "date": "2026-11-05",
+    "status": "proposed"
+   }
+  },
+  {
    "key": "shamoon",
    "actors": [
     "shamoon group"
@@ -33210,6 +33545,13 @@
    "actor": "wagemole",
    "reason": "Not merged: the threat-actor galaxy lists Famous Chollima as a synonym of Wagemole, a vendor equivalence that is not universally accepted (both name overlapping North Korean IT-worker and fake-interview activity). A wrong merge is worse than a missed one.",
    "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "name": "fire ant",
+   "actor": "mustang panda",
+   "reason": "Not merged: 'fire ant' differs only by a space from FIREANT, an ATT&CK alias of Mustang Panda (G0129), but the galaxies give that spelling to two different actors: ATT&CK to Mustang Panda, and the microsoft-activity-group galaxy, as 'FireAnt', to Pink Sandstorm (Agrius, G1030). The name therefore does not identify one actor by its spelling. On the graph of 2026-11-03 the 'fire ant' node (21 relationships, OTX only) has no malware, only techniques, and its only OTX report also names Salt Typhoon. The name is kept away from Mustang Panda and counts as itself. A wrong merge is worse than a missed one.",
+   "date": "2026-11-05",
    "status": "proposed"
   },
   {
