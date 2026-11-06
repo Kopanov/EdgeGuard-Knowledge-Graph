@@ -201,7 +201,7 @@ Defects found in the code; each is fixed in its own change.
 - `src/edgeguard.py`: with `--json`, `stats`, `checkpoint status`, `dag status` and `preflight` print a text banner to stdout before the JSON, and `preflight` its report too.
 - `src/edgeguard.py` (`cmd_preflight`): the circuit-breaker check reads the breakers of the CLI process only, so it always passes.
 - `src/edgeguard.py` and `pyproject.toml`: describe `edgeguard monitor` as a real-time or live display; it prints one snapshot.
-- `install.sh`: the hint for the pip path prints `apache-airflow[postgres]~=3.2` (the pin is `~=3.3`) and a pull-request number.
+- `install.sh`: the hint for the pip path prints `apache-airflow[postgres]~=3.2` (the pin is `~=3.3.2`) and a pull-request number.
 - `Makefile` (`lint`, `type-check`, `test`, `ci`): run `python3` from `PATH`, so `make ci` after `./install.sh --python --dev` uses the system interpreter unless `.venv` is activated.
 - `scripts/preflight_ci.sh`: `DagBag(include_examples=...)` raises `TypeError` on Airflow 3.3, so the script, `scripts/deployment_wiring_check.sh` and `make deploy-check` stop at the DAG parse step.
 - `scripts/preflight_baseline.sh` (check `[11]`, part c): runs `.venv/bin/python`; without the repository's `.venv` it reports the three critical-chain tasks as missing `retries=0`.

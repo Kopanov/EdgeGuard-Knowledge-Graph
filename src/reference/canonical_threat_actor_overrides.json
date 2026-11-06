@@ -938,6 +938,12 @@
    "status": "proposed"
   },
   {
+   "names": ["videostrong technology co., ltd."],
+   "reason": "The full name of the company the decision on 'videostrong technology co.' lists as no actor. An OTX report created on 2026-11-03 on a Badbox operation gives 'Videostrong Technology Co., Ltd.' as its adversary and lists eleven proxyware and SDK families, among them Honeygain and Gaganode. The actor-name hygiene split the name at the comma into 'Videostrong Technology Co.' and 'Ltd.' until 2026-11-06; since then it keeps a legal form with its name, so the full name needs an entry of its own to stay no actor.",
+   "date": "2026-11-06",
+   "status": "proposed"
+  },
+  {
    "names": ["taoth", "slow#tempest", "phantomcaptcha"],
    "reason": "Campaign names, not groups: the galaxies know each only from the title of a report on one campaign. Malpedia's Cobalt Strike and Merlin records cite a report filed as 'taoth-campaign'; its Cobalt Strike and MimiKatz records cite 'from-cobalt-strike-to-mimikatz-slowtempest', a name in the WORD#WORD form its vendor gives campaigns (the threat-actor galaxy's UAC-0154 record speaks of 'the STARK#VORTEX phishing campaign'); its Princess record cites a report filed as 'phantomcaptcha-multi-stage-websocket-rat-targets-ukraine-in-single-day-spearphishing-operation'. No galaxy names an actor of these names. One name of the WORD#WORD form, DEV#POPPER, is an ATT&CK alias of Contagious Interview (G1052); no galaxy gives SLOW#TEMPEST to an actor. On the graph of 2026-11-03 the nodes 'taoth' (29 relationships), 'slow#tempest' (24, with Cobalt Strike only) and 'phantomcaptcha' (20) come from one or two OTX reports on that campaign.",
    "date": "2026-11-05",

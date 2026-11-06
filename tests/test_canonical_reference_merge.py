@@ -178,7 +178,8 @@ class TestLoader:
         ref = cta.load_canonical_reference()
         assert ref.is_not_actor("ClickFix") and ref.is_not_actor("Proton66") and ref.is_not_actor("Agent Tesla")
         assert not ref.is_not_actor("APT28") and not ref.is_not_actor("Mustard Tempest")
-        assert len(ref.not_actors) == 38
+        assert ref.is_not_actor("Videostrong Technology Co., Ltd.") and ref.is_not_actor("Videostrong Technology Co.")
+        assert len(ref.not_actors) == 39
 
     @pytest.mark.parametrize(
         "doc, reason",
