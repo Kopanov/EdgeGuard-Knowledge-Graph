@@ -130,7 +130,9 @@ class TestParentheticalActorNames:
             ("apt28 (fancy bear)", ["apt28"]),
             ("kimsuky (apt43)", ["kimsuky"]),
             ("apt-c-00 (ocean lotus)", ["apt-c-00"]),
-            ("mois (ministry of intelligence and security)", ["mois"]),
+            # A state agency is no actor name (2026-11-05): dropped whole, never split inside the parenthesis.
+            ("mois (ministry of intelligence and security)", []),
+            ("apt29 (cozy bear and the dukes)", ["apt29"]),
             ("sidecopy, transparent tribe (apt36)", ["sidecopy", "transparent tribe"]),
             ("NoName057(16)", ["NoName057(16)"]),  # real group name: no whitespace before "("
             ("team (2024)", ["team (2024)"]),  # digits only inside → not an alias

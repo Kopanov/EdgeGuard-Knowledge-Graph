@@ -411,7 +411,7 @@ Node keys like `"unknown"`, `"malware"`, `"trojan"`, `"backdoor"`, `"virus"`, `"
 
 Flag any `MERGE` or `merge_node_with_source()` call where the primary key property could be one of these generic terms. Check the name with `node_identity.is_placeholder_name()` (`_REJECTED_PLACEHOLDER_NAMES`, which holds every term above) before writing, as `merge_malware` and `merge_actor` do (aliases are filtered the same way). Flag a new merge path for a name-keyed label that does not call it, and a second blocklist.
 
-`ThreatActor` names also pass `actor_name_hygiene.clean_actor_names` (composites split; descriptions, country and state names and nationality adjectives dropped) in the OTX collector, the MISP→Neo4j sync and the reference builder. In the OTX collector the actor items, the `family::adversary::pulse` pairs and the several-actor decision use one list per pulse (`pulse_all_actor_names`), from which an adversary the same pulse lists as a malware family is removed unless the canonical reference resolves it. Flag an actor path that skips the hygiene, a second country list, and an OTX actor path that recomputes the names instead of using that list.
+`ThreatActor` names also pass `actor_name_hygiene.clean_actor_names` (composites split; descriptions, country and state names, nationality adjectives and state agencies dropped) in the OTX collector, the MISP→Neo4j sync and the reference builder. In the OTX collector the actor items, the `family::adversary::pulse` pairs and the several-actor decision use one list per pulse (`pulse_all_actor_names`), from which a name the canonical reference lists as no actor (`not_actors`, `CanonicalReference.is_not_actor`) and an adversary the same pulse lists as a malware family, unless the canonical reference resolves it, are removed. The sync skips a threat-actor attribute of a listed name, and `canonical_threat_actors.actor_identities` counts it as no actor. Flag an actor path that skips the hygiene, a second country or agency list, a second not-actor list (the list lives in the reference's overrides file), and an OTX actor path that recomputes the names instead of using that list.
 
 ### Zone keyword false positives — single generic words must not trigger sector tagging
 
@@ -1058,10 +1058,11 @@ When code changes affect user-visible behavior (CLI commands, env vars, DAG sett
 
 ---
 
-_Last updated: 2026-11-03_
+_Last updated: 2026-11-05_
 
 ## History
 
+- 2026-11-05 — Generic entity names: the actor-name hygiene also drops state agencies; names the canonical reference lists as no actors (`not_actors`) leave the OTX collector's per-pulse list, are skipped by the sync and count as no actors in `actor_identities`; flag a second agency or not-actor list.
 - 2026-11-03 — Push cap on failure time: new section (where the stop is decided, how the items not sent are counted and listed, what to flag); OTX cursor rule after a stopped push; the `give_up` keyword of `collector_utils.retry_with_backoff`.
 - 2026-11-02 — OTX cursor rule: after a push with failures in batches MISP answered, the pulses with a listed item go on the retry list and the cursor moves on (the rule had the cursor stop below them); only a push whose listed items all failed at their MISP event holds it, and the pulses of the list are pushed in batches of their own.
 - 2026-11-02 — Sector label rule: the labelled kinds are `SECTOR_LABELLED_NODE_LABELS` in `src/sector_labels.py`, and Step 6 of `build_campaign_nodes` labels the campaigns, removing stale labels on `edgeguard_managed` ones only (the rule named the local `edgeguard_labels` list and the sync's call only). Merge return values: the CVE loops check the per-CVE outcomes of `merge_cves_batch()` (the rule named `merge_cve()` only).

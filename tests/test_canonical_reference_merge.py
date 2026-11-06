@@ -155,6 +155,31 @@ class TestLoader:
         ref = cta.CanonicalReference("2026.10.15", "x", 1, {"x": "x", "y": "x"}, frozenset({"y"}))
         assert ref.canonical_for("y") is None and ref.canonical_for("x") == "x"
 
+    def test_names_listed_as_no_actors(self):
+        # 2026-11-05: ``not_actors`` holds reviewed names that are no threat actors.
+        ref = cta.validate_reference(reference_doc(not_actors=[{"key": "clickfix"}, {"key": "proton66"}]), "x")
+        assert ref.is_not_actor("ClickFix") and ref.is_not_actor("  proton66 ")
+        assert not ref.is_not_actor("lazarus") and not ref.is_not_actor("qilin")
+        assert not ref.is_not_actor(None) and not ref.is_not_actor("")
+        assert ref.canonical_for("clickfix") is None
+        # A listed name is no actor of a report (2026-11-05): left out of actor_identities, also as the
+        # report's only name; without the reference it counts as itself.
+        assert cta.actor_identities(["clickfix", "Lazarus"], ref) == {"lazarus group"}
+        assert cta.actor_identities(["ClickFix", "Proton66"], ref) == frozenset()
+        assert cta.actor_identities(["clickfix", "Lazarus"], None) == {"clickfix", "lazarus"}
+
+    def test_a_reference_without_the_list_lists_no_name(self, reference):
+        assert "not_actors" not in reference_doc()
+        assert reference.not_actors == frozenset() and not reference.is_not_actor("clickfix")
+        assert not cta.CanonicalReference("2026.10.15", "x", 1, {"x": "x"}, frozenset()).is_not_actor("x")
+
+    def test_the_committed_reference_lists_the_reviewed_names(self, monkeypatch):
+        monkeypatch.delenv(ENV, raising=False)
+        ref = cta.load_canonical_reference()
+        assert ref.is_not_actor("ClickFix") and ref.is_not_actor("Proton66") and ref.is_not_actor("Agent Tesla")
+        assert not ref.is_not_actor("APT28") and not ref.is_not_actor("Mustard Tempest")
+        assert len(ref.not_actors) == 38
+
     @pytest.mark.parametrize(
         "doc, reason",
         [
@@ -177,6 +202,13 @@ class TestLoader:
             ({k: v for k, v in reference_doc().items() if k != "schema_version"}, "schema_version None"),
             (reference_doc(version="2026.10.15\n"), "not CalVer"),
             (reference_doc(version="٢٠٢٦.10.15"), "not CalVer"),  # Arabic-Indic digits
+            (reference_doc(not_actors=None), "not_actors is not a list"),
+            (reference_doc(not_actors=["clickfix"]), "not_actors entry is not an object"),
+            (reference_doc(not_actors=[{"key": "ClickFix"}]), "not-actor name 'ClickFix' is not normalised"),
+            (reference_doc(not_actors=[{"key": "lazarus"}]), "belongs to actor 'lazarus group'"),
+            (reference_doc(not_actors=[{"key": "sandworm team"}]), "belongs to actor 'sandworm team'"),
+            (reference_doc(not_actors=[{"key": "medusa"}]), "not-actor name 'medusa' is ambiguous"),
+            (reference_doc(not_actors=[{"key": "x"}, {"key": "x"}]), "appears twice"),
         ],
     )
     def test_inconsistent_files_are_refused(self, tmp_path, doc, reason):

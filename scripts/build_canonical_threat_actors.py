@@ -87,6 +87,13 @@ name on write: NFC, trimmed, lower-case. The ``name_key`` of the input is not us
      ambiguous;
    - ``canonical_name`` sets the display name. A name with another key re-keys an actor that is
      not an ATT&CK group and keeps the old key as a synonym.
+7. ``not_actor`` lists names a review found to be no threat actor: a technique, malware, a kit, a
+   hosting network, a forum, a company or a campaign that a source gave as its adversary. They are
+   copied into the reference's ``not_actors``; the OTX collector drops them from a pulse's adversary
+   field, and the MISP→Neo4j sync skips threat-actor attributes of these names. A listed name must
+   be no actor key, synonym or ambiguous name after rule 6, no name another decision names, and a
+   name EdgeGuard's actor-name hygiene keeps as it is (a name the hygiene drops or rewrites never
+   reaches the collector's check).
 
 The output is deterministic: the same inputs and ``--version`` give a byte-identical file.
 ``--version`` defaults to the build date (CalVer ``YYYY.MM.DD``); ``generated_at`` is that date.
@@ -100,6 +107,7 @@ The build prints the counts, the rule effects and every override decision. With
 - it reports the ATT&CK aliases the reference gives elsewhere;
 - it lists names that differ only in spelling (``triage_key``) and the suffix-rule short forms
   that exist on the graph;
+- it lists the graph names the reference lists as no actors;
 - it ranks the unresolved names by relationship count: the first 50 in the report, all of them
   with ``--unresolved-out``.
 
@@ -196,7 +204,11 @@ DESCRIPTION = (
     "ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py "
     "from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the "
     "hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed "
-    "under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged."
+    "under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged. "
+    "Names listed under 'not_actors' were reviewed and are no threat actors (a technique, malware, a kit, "
+    "a hosting network, a forum, a company or a campaign that a source gave as its adversary); the OTX "
+    "collector drops them from a pulse's adversary field, and the MISP to Neo4j sync skips threat-actor "
+    "attributes of these names."
 )
 RULES: Tuple[str, ...] = (
     "Records with the same ATT&CK id are one actor named after the ATT&CK group; a record whose own "
@@ -223,6 +235,8 @@ RULES: Tuple[str, ...] = (
     "it only by a galaxy synonym (a shortened name keeps at least three characters and a letter; "
     "nothing is added to a name that already contains 'group' or 'team').",
     "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name.",
+    "Names an override lists as not_actor are no actor names: they are listed under not_actors and are "
+    "never an actor key, a synonym or an ambiguous name.",
 )
 ATTRIBUTION: Tuple[Dict[str, str], ...] = (
     {
@@ -568,8 +582,8 @@ def load_loaded_attack(
 
 @dataclass(frozen=True)
 class OverrideDecision:
-    kind: str  # "merge" | "never_merge" | "canonical_name"
-    names: Tuple[str, ...]  # merge / never_merge: the names as written
+    kind: str  # "merge" | "never_merge" | "canonical_name" | "not_actor"
+    names: Tuple[str, ...]  # merge / never_merge / not_actor: the names as written
     into: str  # merge: target key; canonical_name: the actor key
     display_name: str  # canonical_name: the display name
     reason: str
@@ -585,6 +599,8 @@ class OverrideDecision:
             out["names"] = list(self.names)
             if self.actor:
                 out["actor"] = self.actor
+        elif self.kind == "not_actor":
+            out["names"] = list(self.names)
         else:
             out.update({"key": self.into, "name": self.display_name})
         out.update({"reason": self.reason, "date": self.date, "status": self.status})
@@ -622,7 +638,7 @@ def _names(entry: Mapping[str, Any], where: str) -> Tuple[str, ...]:
 
 def load_overrides(doc: Mapping[str, Any]) -> List[OverrideDecision]:
     """Validate the overrides document and return its decisions in file order."""
-    unknown = set(doc) - {"schema_version", "description", "merge", "never_merge", "canonical_name"}
+    unknown = set(doc) - {"schema_version", "description", "merge", "never_merge", "canonical_name", "not_actor"}
     if unknown:
         raise ReferenceInputError(f"overrides: unknown sections {sorted(unknown)}")
     decisions: List[OverrideDecision] = []
@@ -652,13 +668,39 @@ def load_overrides(doc: Mapping[str, Any]) -> List[OverrideDecision]:
         if not _usable(key) or not isinstance(display, str) or not _usable(actor_key(display)):
             raise ReferenceInputError(f"{where}: 'key' and 'name' are required")
         decisions.append(OverrideDecision("canonical_name", (), key, display.strip(), reason, date, status))
+    for i, entry in enumerate(doc.get("not_actor") or []):
+        where = f"overrides not_actor[{i}]"
+        reason, date, status = _check_common(entry, where)
+        names = _names(entry, where)
+        for name in names:
+            how, _key = clean_synonym(name)
+            if how != "ok":
+                raise ReferenceInputError(
+                    f"{where}: EdgeGuard's actor-name hygiene does not keep {name!r} as it is ({how}), so no "
+                    "adversary field reaches the check with it"
+                )
+        decisions.append(OverrideDecision("not_actor", names, "", "", reason, date, status))
 
     merged_into: Dict[str, str] = {}
     never: Set[str] = set()
     kept_away: Set[Tuple[str, str]] = set()
+    not_actor: Set[str] = set()
+    named: Set[str] = set()  # every name a merge, never_merge or canonical_name decision names
     for d in decisions:
+        if d.kind == "canonical_name":
+            named.update({d.into, actor_key(d.display_name)})
+        elif d.kind == "merge":
+            named.add(d.into)
+        elif d.actor:
+            named.add(d.actor)
         for name in d.names:
             k = actor_key(name)
+            if d.kind == "not_actor":
+                if k in not_actor:
+                    raise ReferenceInputError(f"overrides: {name!r} is listed as not_actor twice")
+                not_actor.add(k)
+                continue
+            named.add(k)
             if d.kind == "merge":
                 if merged_into.get(k, d.into) != d.into:
                     raise ReferenceInputError(f"overrides: {name!r} is merged into two actors")
@@ -667,6 +709,11 @@ def load_overrides(doc: Mapping[str, Any]) -> List[OverrideDecision]:
                 kept_away.add((k, d.actor))
             elif d.kind == "never_merge":
                 never.add(k)
+    listed_and_named = sorted(not_actor & named)
+    if listed_and_named:
+        raise ReferenceInputError(
+            f"overrides: {listed_and_named} are listed as not_actor and named by another decision"
+        )
     both = sorted(never & (set(merged_into) | set(merged_into.values())))
     if both:
         raise ReferenceInputError(f"overrides: {both} are both merged and never_merge")
@@ -1257,6 +1304,37 @@ def _apply_overrides(
                 }
 
 
+def _not_actor_entries(
+    actors: Mapping[str, _Actor],
+    ambiguous: Mapping[str, Mapping[str, Set[str]]],
+    decisions: Sequence[OverrideDecision],
+    stats: BuildStats,
+) -> List[Dict[str, Any]]:
+    """Rule 7: the ``not_actors`` entries, sorted by key. A listed name that the reference gives a place
+    after rule 6 (an actor key, a synonym, an ambiguous name) is refused: the galaxies make it the name
+    of an actor, which the list would drop from the OTX adversary field. A name another decision names
+    is refused earlier (``load_overrides``)."""
+    owners = {synonym: actor.key for actor in actors.values() for synonym in actor.synonyms}
+    entries: List[Dict[str, Any]] = []
+    for d in (d for d in decisions if d.kind == "not_actor"):
+        effects = []
+        for name in d.names:
+            k = actor_key(name)
+            if k in actors:
+                raise ReferenceInputError(f"override not_actor {k!r}: it is the key of an actor")
+            if k in owners:
+                raise ReferenceInputError(f"override not_actor {k!r}: it is a synonym of {owners[k]!r}")
+            if k in ambiguous:
+                claimants = ", ".join(sorted(ambiguous[k]))
+                raise ReferenceInputError(
+                    f"override not_actor {k!r}: the reference lists it as ambiguous ({claimants})"
+                )
+            entries.append({"key": k, "reason": d.reason, "date": d.date, "status": d.status})
+            effects.append(f"{k!r} listed as no actor")
+        stats.overrides.append({**d.as_record(), "effect": effects})
+    return sorted(entries, key=lambda e: e["key"])
+
+
 def _check_invariants(actors: Mapping[str, _Actor], ambiguous: Mapping[str, Any]) -> None:
     seen: Dict[str, str] = {}
 
@@ -1316,6 +1394,7 @@ def build_reference(
     pairs: List[Dict[str, Any]] = []
     _apply_overrides(actors, ambiguous, never_merge, pairs, decisions, stats)
     _check_invariants(actors, ambiguous)
+    not_actors = _not_actor_entries(actors, ambiguous, decisions, stats)
 
     actor_entries: List[Dict[str, Any]] = []
     revoked_entries: List[Dict[str, Any]] = []
@@ -1373,11 +1452,13 @@ def build_reference(
             "attack_groups": sum(1 for a in actor_entries if a["mitre_attack"] or ORIGIN_MITRE_LOADED in a["origins"]),
             "synonyms": sum(len(a["synonyms"]) for a in actor_entries),
             "ambiguous": len(ambiguous_entries),
+            "not_actors": len(not_actors),
         },
         "actors": actor_entries,
         "ambiguous": ambiguous_entries,
         "revoked_attack_groups": sorted(revoked_entries, key=lambda e: e["mitre_attack"]),
         "never_merge_pairs": sorted(pairs, key=lambda p: (p["name"], p["actor"])),
+        "not_actors": not_actors,
     }
     return reference, stats
 
@@ -1392,7 +1473,7 @@ def serialize_reference(reference: Mapping[str, Any]) -> str:
 @dataclass(frozen=True)
 class Resolution:
     actor: Optional[str]  # canonical key, None when ambiguous or unknown
-    how: str  # "key" | "synonym" | "ambiguous" | "never_merge" | "unresolved"
+    how: str  # "key" | "synonym" | "ambiguous" | "never_merge" | "not_actor" | "unresolved"
 
 
 def build_index(reference: Mapping[str, Any]) -> Dict[str, Resolution]:
@@ -1403,6 +1484,8 @@ def build_index(reference: Mapping[str, Any]) -> Dict[str, Resolution]:
             index[synonym] = Resolution(actor["key"], "synonym")
     for entry in reference["ambiguous"]:
         index[entry["key"]] = Resolution(None, "never_merge" if "never_merge" in entry else "ambiguous")
+    for entry in reference.get("not_actors", []):
+        index[entry["key"]] = Resolution(None, "not_actor")
     return index
 
 
@@ -1502,6 +1585,7 @@ def build_report(
             "actors_created_by_overrides": sum(1 for a in actors if a["origins"] == [ORIGIN_OVERRIDE]),
             "synonyms_by_origin": _count_origins(actors),
             "never_merge_pairs": len(reference.get("never_merge_pairs", [])),
+            "not_actors": len(reference.get("not_actors", [])),
         },
         "rules": {
             "records_by_galaxy": dict(sorted(stats.records_by_galaxy.items())),
@@ -1539,6 +1623,7 @@ def build_report(
             "spelling_variants_made_ambiguous": stats.spelling_variants_ambiguous,
         },
         "overrides": stats.overrides,
+        "not_actors": [e["key"] for e in reference.get("not_actors", [])],
     }
     if graph_actors is None:
         return report
@@ -1596,6 +1681,10 @@ def build_report(
 
     unresolved = sorted(
         (r for r in rows if r["how"] == "unresolved"),
+        key=lambda r: (-r["relationships"], -r["pulses"], r["key"]),
+    )
+    not_actor_rows = sorted(
+        (r for r in rows if r["how"] == "not_actor"),
         key=lambda r: (-r["relationships"], -r["pulses"], r["key"]),
     )
     candidates = []
@@ -1714,6 +1803,14 @@ def build_report(
             ],
             "suffix_variant_candidates": candidates,
         },
+        "not_actors": {
+            "count": len(not_actor_rows),
+            "relationships": sum(r["relationships"] for r in not_actor_rows),
+            "all": [
+                {"name": r["key"], "relationships": r["relationships"], "pulses": r["pulses"], "source": r["source"]}
+                for r in not_actor_rows
+            ],
+        },
         "spelling_variants": spelling,
         "suffix_short_forms_on_graph": shortened_on_graph,
         "graph_attack_aliases_resolving_elsewhere": alias_conflicts,
@@ -1770,7 +1867,7 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
     lines.append(
         f"  actors {c['actors']} (ATT&CK groups {c['attack_groups']}, standalone {c['standalone_actors']}, "
         f"created by overrides {c['actors_created_by_overrides']}); synonyms {c['synonyms']}; "
-        f"ambiguous {c['ambiguous']}; never_merge pairs {c['never_merge_pairs']}"
+        f"ambiguous {c['ambiguous']}; never_merge pairs {c['never_merge_pairs']}; not actors {c['not_actors']}"
     )
     lines.append(f"  synonym origins: {json.dumps(c['synonyms_by_origin'])}")
     lines.append(f"  records by galaxy: {json.dumps(r['records_by_galaxy'])}; skipped {len(r['skipped_records'])}")
@@ -1836,6 +1933,8 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
         key = f" {d['key']!r}" if d["decision"] == "canonical_name" else ""
         lines.append(f"  [{d['status']}] {d['decision']}{key} {what}{target}{away}: {'; '.join(d['effect'])}")
         lines.append(f"      reason: {d['reason']}")
+    listed = report["not_actors"]
+    lines.append(f"Not actors ({len(listed)})" + (f": {', '.join(listed)}" if listed else ""))
 
     g = report.get("graph")
     if not g:
@@ -1866,6 +1965,10 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
             f"    {group['canonical']}{attack} <- {group['duplicates']} ({group['relationships_moved']} of "
             f"{group['relationships']} rels move)"
         )
+    n = g["not_actors"]
+    lines.append(f"  listed as no actors: {n['count']} names ({n['relationships']} relationships)")
+    for item in n["all"]:
+        lines.append(f"    {item['relationships']:5d} rels {item['pulses']:3d} pulses  {item['name']}")
     u = g["unresolved"]
     lines.append(f"  unresolved: {u['count']} names ({u['relationships']} relationships); top {min(top, u['count'])}:")
     for item in u["top"][:top]:
@@ -2099,7 +2202,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "role": "overrides",
                 "file": args.overrides.name,
                 "sha256": _sha256(args.overrides),
-                "decisions": sum(len(overrides_doc.get(k) or []) for k in ("merge", "never_merge", "canonical_name")),
+                "decisions": sum(
+                    len(overrides_doc.get(k) or []) for k in ("merge", "never_merge", "canonical_name", "not_actor")
+                ),
             }
         )
         reference, stats = build_reference(

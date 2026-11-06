@@ -84,13 +84,14 @@ def doc(*records):
     return {"dataset": "galaxy_threat_actors", "schema_version": "1.0", "records": list(records)}
 
 
-def overrides(merge=(), never_merge=(), canonical_name=()):
+def overrides(merge=(), never_merge=(), canonical_name=(), not_actor=()):
     common = {"reason": "test decision", "date": "2026-10-15", "status": "proposed"}
     return {
         "schema_version": 1,
         "merge": [{**common, **m} for m in merge],
         "never_merge": [{**common, **n} for n in never_merge],
         "canonical_name": [{**common, **c} for c in canonical_name],
+        "not_actor": [{**common, **n} for n in not_actor],
     }
 
 
@@ -553,11 +554,109 @@ class TestOverrides:
             ),
             ({"merge": [{"names": ["a"], "into": "b", "date": "2026-10-15", "status": "proposed"}]}, "reason"),
             ({"unknown": []}, "unknown sections"),
+            # 2026-11-05: a not_actor name is named by no other decision, listed once, and kept as it is by
+            # the actor-name hygiene.
+            (overrides(merge=[{"names": ["clickfix"], "into": "x"}], not_actor=[{"names": ["ClickFix"]}]), "named by"),
+            (overrides(merge=[{"names": ["y"], "into": "clickfix"}], not_actor=[{"names": ["clickfix"]}]), "named by"),
+            (overrides(never_merge=[{"names": ["clickfix"]}], not_actor=[{"names": ["clickfix"]}]), "named by"),
+            (
+                overrides(never_merge=[{"names": ["y"], "actor": "clickfix"}], not_actor=[{"names": ["clickfix"]}]),
+                "named by",
+            ),
+            (
+                overrides(canonical_name=[{"key": "x", "name": "ClickFix"}], not_actor=[{"names": ["clickfix"]}]),
+                "named by",
+            ),
+            (overrides(not_actor=[{"names": ["clickfix"]}, {"names": ["ClickFix"]}]), "not_actor twice"),
+            (overrides(not_actor=[{"names": ["chinese-speaking group"]}]), "hygiene does not keep"),
+            (overrides(not_actor=[{"names": ["MOIS"]}]), "hygiene does not keep"),
+            (overrides(not_actor=[{"names": ["clickfix, proton66"]}]), "hygiene does not keep"),
+            (overrides(not_actor=[{"names": ["ClickFix (lure)"]}]), "hygiene does not keep"),
+            (overrides(not_actor=[{"names": ["G0007"]}]), "hygiene does not keep"),
+            (overrides(not_actor=[{"names": []}]), "non-empty list"),
+            ({"not_actor": [{"names": ["clickfix"], "date": "2026-11-05", "status": "proposed"}]}, "reason"),
         ],
     )
     def test_invalid_overrides_are_refused(self, gen, ovr, message):
         with pytest.raises(gen.ReferenceInputError, match=message):
             gen.load_overrides(ovr)
+
+
+class TestNotActor:
+    """2026-11-05: names a review found to be no threat actor are copied into the reference's
+    ``not_actors``; the OTX collector drops them from a pulse's adversary field."""
+
+    def test_names_are_copied_sorted_counted_and_reported(self, gen):
+        ovr = overrides(not_actor=[{"names": ["Proton66", "ClickFix"]}, {"names": ["andromeda/gamarue"]}])
+        ref, stats = build(gen, *_sample(gen), ovr=ovr)
+        assert [e["key"] for e in ref["not_actors"]] == ["andromeda/gamarue", "clickfix", "proton66"]
+        assert ref["counts"]["not_actors"] == 3
+        assert ref["not_actors"][1] == {
+            "key": "clickfix",
+            "reason": "test decision",
+            "date": "2026-10-15",
+            "status": "proposed",
+        }
+        assert ref["rules"][-1].startswith("Names an override lists as not_actor are no actor names")
+        assert [owner(ref, "clickfix")] == [None], "no actor key, synonym or ambiguous name"
+        decisions = [d for d in stats.overrides if d["decision"] == "not_actor"]
+        assert [d["names"] for d in decisions] == [["Proton66", "ClickFix"], ["andromeda/gamarue"]]
+        assert decisions[0]["effect"] == ["'proton66' listed as no actor", "'clickfix' listed as no actor"]
+        report = gen.build_report(ref, stats)
+        assert report["counts"]["not_actors"] == 3
+        text = gen.format_report(report)
+        assert "; not actors 3" in text
+        assert "Not actors (3): andromeda/gamarue, clickfix, proton66" in text
+        assert "[proposed] not_actor ['Proton66', 'ClickFix']: 'proton66' listed as no actor" in text
+
+    def test_without_decisions_the_list_is_empty(self, gen):
+        ref, stats = build(gen, *_sample(gen))
+        assert ref["not_actors"] == [] and ref["counts"]["not_actors"] == 0
+        assert "\nNot actors (0)\n" in gen.format_report(gen.build_report(ref, stats))
+        ref, _ = gen.build_reference(
+            doc(*_sample(gen)), {k: v for k, v in overrides().items() if k != "not_actor"}, version="2026.10.15"
+        )
+        assert ref["not_actors"] == []
+
+    @pytest.mark.parametrize(
+        "name, message",
+        [
+            ("Sandworm Team", "it is the key of an actor"),
+            ("Telebots", "it is a synonym of 'sandworm team'"),
+            ("lazarus", "it is a synonym of 'lazarus group'"),
+            ("Andariel Group", "it is a synonym of 'andariel'"),  # a suffix-rule variant
+            ("Aurora Panda", "lists it as ambiguous (apt17, heart typhoon)"),
+        ],
+    )
+    def test_a_name_the_reference_gives_a_place_is_refused(self, gen, name, message):
+        with pytest.raises(gen.ReferenceInputError, match=re.escape(f"override not_actor {gen.actor_key(name)!r}: ")):
+            build(gen, *_sample(gen), ovr=overrides(not_actor=[{"names": [name]}]))
+        with pytest.raises(gen.ReferenceInputError, match=re.escape(message)):
+            build(gen, *_sample(gen), ovr=overrides(not_actor=[{"names": [name]}]))
+
+    def test_the_graph_report_lists_the_graph_names_it_holds(self, gen):
+        ovr = overrides(not_actor=[{"names": ["clickfix", "proton66"]}])
+        ref, stats = build(gen, *_sample(gen), ovr=ovr)
+        graph = gen.load_graph_actors(
+            [
+                node("sandworm team", relationships=118),
+                node("clickfix", source=("alienvault_otx",), relationships=38),
+                node("qilin", source=("alienvault_otx",), relationships=71),
+            ]
+        )
+        g = gen.build_report(ref, stats, graph)["graph"]
+        assert g["resolution"]["not_actor"] == 1
+        assert (g["not_actors"]["count"], g["not_actors"]["relationships"]) == (1, 38)
+        assert [u["name"] for u in g["unresolved"]["all"]] == ["qilin"], "a listed name is not unresolved"
+        assert gen.resolve(gen.build_index(ref), "ClickFix") == gen.Resolution(None, "not_actor")
+        text = gen.format_report(gen.build_report(ref, stats, graph))
+        assert "  listed as no actors: 1 names (38 relationships)" in text
+
+    def test_the_loader_reads_the_built_list(self, gen):
+        ref, _ = build(gen, *_sample(gen), ovr=overrides(not_actor=[{"names": ["ClickFix"]}]))
+        loaded = gen.reference_lookup.validate_reference(ref, "built")
+        assert loaded.is_not_actor(" clickfix ") and not loaded.is_not_actor("sandworm")
+        assert loaded.canonical_for("clickfix") is None
 
 
 # --------------------------------------------------------------------------- ATT&CK revocations
@@ -990,6 +1089,29 @@ class TestReport:
 
 # --------------------------------------------------------------------------- the committed file
 
+NOT_ACTORS_OF_2026_11_05 = frozenset(
+    {
+        "clickfix",
+        "shai-hulud", "mini shai-hulud", "glassworm",
+        "agent tesla", "lumma",
+        "amos", "amos threat group", "banshee",
+        "darkcloud", "tamperedchef",
+        "andromeda/gamarue", "badbox 2.0", "prometei",
+        "polaredge", "rondodox",
+        "socgholish", "danabot",
+        "cloud snooper", "squidoor", "batavia",
+        "ghostsocks", "darcula", "shanya",
+        "grelosgtm", "groozav2", "pcpjack",
+        "proton66", "ipidea",
+        "breachforums",
+        "stryker",
+        "videostrong technology co.",
+        "taoth", "slow#tempest", "phantomcaptcha",
+        "operation standoff", "clawhavoc",
+        "smartapesg",
+    }
+)  # fmt: skip
+
 
 @pytest.fixture(scope="module")
 def committed():
@@ -1037,6 +1159,9 @@ class TestCommittedReference:
         for entry in committed["ambiguous"]:
             assert entry["key"] not in seen, f"{entry['key']!r} is ambiguous and belongs to {seen.get(entry['key'])}"
             seen[entry["key"]] = "ambiguous"
+        for entry in committed["not_actors"]:
+            assert entry["key"] not in seen, f"{entry['key']!r} is no actor and belongs to {seen.get(entry['key'])}"
+            seen[entry["key"]] = "not_actors"
         for name in seen:
             assert name == gen.actor_key(name), f"{name!r} is not normalised"
             assert name and not gen.is_placeholder_name(name)
@@ -1045,10 +1170,12 @@ class TestCommittedReference:
         keys = [a["key"] for a in committed["actors"]]
         assert keys == sorted(keys)
         assert [e["key"] for e in committed["ambiguous"]] == sorted(e["key"] for e in committed["ambiguous"])
+        assert [e["key"] for e in committed["not_actors"]] == sorted(e["key"] for e in committed["not_actors"])
         counts = committed["counts"]
         assert counts["actors"] == len(keys)
         assert counts["synonyms"] == sum(len(a["synonyms"]) for a in committed["actors"])
         assert counts["ambiguous"] == len(committed["ambiguous"])
+        assert counts["not_actors"] == len(committed["not_actors"])
         assert counts["attack_groups"] == sum(
             1 for a in committed["actors"] if a["mitre_attack"] or "mitre_loaded" in a["origins"]
         )
@@ -1137,7 +1264,17 @@ class TestCommittedReference:
         for decision in committed_overrides["canonical_name"]:
             key = gen.actor_key(decision["name"])
             assert by_key[key]["name"] == decision["name"]
-        for section in ("merge", "never_merge", "canonical_name"):
+        not_actors = {e["key"]: e for e in committed["not_actors"]}
+        for decision in committed_overrides["not_actor"]:
+            for name in decision["names"]:
+                entry = not_actors[gen.actor_key(name)]
+                assert (entry["reason"], entry["date"], entry["status"]) == (
+                    decision["reason"],
+                    decision["date"],
+                    decision["status"],
+                )
+        assert len(not_actors) == sum(len(d["names"]) for d in committed_overrides["not_actor"])
+        for section in ("merge", "never_merge", "canonical_name", "not_actor"):
             for decision in committed_overrides[section]:
                 assert decision["status"] in ("proposed", "accepted")
 
@@ -1153,6 +1290,7 @@ class TestCommittedReference:
         assert gen.resolve(index, "callisto").actor == "star blizzard"
         assert gen.resolve(index, "famous chollima").how == "never_merge"
         assert gen.resolve(index, "silverfox").actor == "silver fox"
+        assert gen.resolve(index, "clickfix").how == "not_actor"  # 2026-11-05
         assert gen.resolve(index, "no such actor").how == "unresolved"
 
     def test_ransomware_operations_named_after_their_ransomware_are_actors(self, gen, committed):
@@ -1225,6 +1363,34 @@ class TestCommittedReference:
         assert {"blacklock", "ta419", "storm-2992"} <= set(by_key)
         dated = [d for kind in ("merge", "never_merge") for d in committed_overrides[kind] if d["date"] == "2026-11-05"]
         assert len(dated) == 13 and {d["status"] for d in dated} == {"proposed"}
+
+    def test_not_actors_of_2026_11_05(self, gen, committed, committed_overrides):
+        # The OTX adversary names of the 730-day baseline of 2026-11-03 that a review found to be no actors
+        # (a technique, malware, kits and tools, hosting networks, a forum, companies, campaign names).
+        listed = {e["key"] for e in committed["not_actors"]}
+        assert listed == NOT_ACTORS_OF_2026_11_05
+        index = gen.build_index(committed)
+        for name in sorted(listed):
+            assert gen.resolve(index, name) == gen.Resolution(None, "not_actor"), name
+            assert gen.clean_synonym(name) == ("ok", name), "the OTX collector reads the name as it is listed"
+        decisions = committed_overrides["not_actor"]
+        assert len(decisions) == 18
+        assert {(d["date"], d["status"]) for d in decisions} == {("2026-11-05", "proposed")}
+        # Names of the review that the actor-name hygiene drops since 2026-11-05 are not listed: a language
+        # qualifier and state agencies. Nor is a disputed name ('leeme', the name of a ransomware the same
+        # report lists as its family, which no galaxy lists).
+        for name in (
+            "chinese-speaking group",
+            "chinese-speaking threat group",
+            "mois",
+            "russian intelligence services",
+            "russian federal security service",
+        ):
+            assert name not in listed and gen.clean_synonym(name)[0] == "not a name", name
+        assert "leeme" not in listed
+        # Actor names of the same review stay actors.
+        assert gen.resolve(index, "mustard tempest").actor == "mustard tempest"
+        assert gen.resolve(index, "void manticore").actor == "void manticore"
 
     def test_decisions_of_2026_10_22(self, gen, committed, committed_overrides):
         # Taken before the fresh baseline: the OTX collector decides with the reference, at collection time,

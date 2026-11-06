@@ -11,8 +11,9 @@ produced three kinds of junk ``ThreatActor`` nodes:
    ``"lockbit, cl0p, refined kitten, wicked panda, fancy bear"``).
 2. **Generic descriptions** that are not names at all
    (``"multiple russian state-backed groups"``, ``"russian cybercrime groups"``,
-   ``"russia-nexus apt"``), and country or state names standing beside the
-   actor (``"apt37, north korea"``).
+   ``"russia-nexus apt"``, ``"chinese-speaking group"``), and country or state
+   names or state agencies standing beside the actor (``"apt37, north korea"``,
+   ``"apt28, gru"``).
 3. Alias-duplicates of a canonical MITRE actor (``"reddelta"`` next to
    ``"mustang panda"``) — handled downstream by
    ``enrichment_jobs.merge_alias_duplicate_actors``, not here.
@@ -30,9 +31,9 @@ passes these rules (``"Cuba Ransomware Gang"``). That name counts as itself
 unless the canonical threat-actor reference gives it to an actor, through a
 galaxy synonym or a ``merge`` decision of its overrides file
 (``docs/RUNBOOK.md``, "Canonical threat-actor reference").
-:func:`dropped_geopolitical_names` returns the country and state names and
-nationality adjectives the rules drop from a name, so the OTX collector can
-log those its adversary fields carried in a run.
+:func:`dropped_geopolitical_names` returns the country and state names,
+nationality adjectives and state agencies the rules drop from a name, so the
+OTX collector can log those its adversary fields carried in a run.
 
 Design rule: **prefer not splitting / not flagging over doing so wrongly**.
 A real actor name that slips through unchanged is a cosmetic problem; a real
@@ -67,25 +68,36 @@ from node_identity import is_placeholder_name
 # left alone because it is more likely a single token than a list.
 _LIST_SEPARATOR_RE = re.compile(r"[,;，；、]|\s+/\s+")
 
-# Word separators — ``" and "`` / ``" & "`` with whitespace on both sides,
-# case-insensitive. ``"at&t"`` / ``"c&c"`` (no whitespace) never match.
-_WORD_SEPARATOR_RE = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
+# Word separators — ``" and "`` / ``" & "`` / ``" && "`` with whitespace on
+# both sides, case-insensitive. ``"at&t"`` / ``"c&c"`` (no whitespace) never
+# match. 2026-11-05: OTX wrote two handles as ``"BlackHatSect0r && DXQRTXX"``.
+_WORD_SEPARATOR_RE = re.compile(r"\s+(?:and|&&?)\s+", re.IGNORECASE)
 
 # Oxford-comma residue: after a comma split a fragment may start or end with
 # a dangling conjunction (``"lockbit, cl0p, and fancy bear"`` →
 # ``"and fancy bear"``; ``"apt28 and, apt29"`` → ``"apt28 and"``). Strip it;
 # a fragment that IS just the conjunction becomes empty and is dropped.
-_LEADING_CONJUNCTION_RE = re.compile(r"^(?:and|&|aka|a\.k\.a\.?|also known as)(?:\s+|$)", re.IGNORECASE)
-_TRAILING_CONJUNCTION_RE = re.compile(r"(?:^|\s+)(?:and|&)$", re.IGNORECASE)
+_LEADING_CONJUNCTION_RE = re.compile(r"^(?:and|&&?|aka|a\.k\.a\.?|also known as)(?:\s+|$)", re.IGNORECASE)
+_TRAILING_CONJUNCTION_RE = re.compile(r"(?:^|\s+)(?:and|&&?)$", re.IGNORECASE)
 
-# Minimum length (characters, after trim) of EACH side of an ``and`` / ``&``
+# Minimum length (characters, after trim) of EACH side of an ``and`` / ``&`` / ``&&``
 # split. Shorter sides (``"a and b"``) are not names and the split is refused.
 AND_SPLIT_MIN_SIDE_LEN = 3
 
 # Names starting with one of these prefixes are campaign / operation titles
-# where ``and`` is part of the title (``"operation search and destroy"``).
-# Compared lower-cased, after whitespace collapse. Tunable.
-AND_SPLIT_PROTECTED_PREFIXES: tuple = ("operation ", "op. ", "op ")
+# where ``and`` is part of the title (``"operation search and destroy"``),
+# and (2026-11-05) the one actor name of the canonical threat-actor reference
+# that the split made two names: the threat-actor galaxy's record
+# ``"Stealth Mango and Tangelo"``, also written with ``&`` and with a trailing
+# ``group`` / ``team``. Compared lower-cased, after whitespace collapse. Tunable.
+AND_SPLIT_PROTECTED_PREFIXES: tuple = (
+    "operation ",
+    "op. ",
+    "op ",
+    "stealth mango and tangelo",
+    "stealth mango & tangelo",
+    "stealth mango && tangelo",
+)
 
 # If EITHER side of an ``and`` / ``&`` split is one of these (lower-cased,
 # trimmed) the split is refused — they are halves of idioms / brand-like
@@ -109,6 +121,7 @@ GENERIC_ACTOR_PHRASES: frozenset = frozenset(
     {
         "and",
         "&",
+        "&&",
         "or",
         "other",
         "others",
@@ -198,7 +211,10 @@ GENERIC_LAST_WORDS: frozenset = frozenset(
 # lower-cased, whitespace-collapsed name. Each is a sponsorship / origin
 # qualifier no proper name contains: ``"russia-nexus apt"``,
 # ``"china nexus actor"``, ``"iran-affiliated"``, ``"pro-russia aligned"``,
-# ``"kremlin-linked"``, ``"china-based"``, ``"state-backed"``.
+# ``"kremlin-linked"``, ``"china-based"``, ``"state-backed"``, and
+# (2026-11-05) a language qualifier: ``"chinese-speaking group"``,
+# ``"russian-speaking actors"`` (the threat-actor galaxy describes several
+# different groups as "a Chinese-speaking threat group").
 # ``"nexus zeta"`` (a real persona) does NOT match: the bare word needs a
 # nationality in front of it.
 GENERIC_SIGNAL_PATTERNS: tuple = (
@@ -208,6 +224,7 @@ GENERIC_SIGNAL_PATTERNS: tuple = (
         r"vietnam|india|pakistan|turkey|israel|belarus|syria|ukraine)[ -]nexus\b"
     ),
     re.compile(r"\b[a-z]+-based\b"),
+    re.compile(r"\b[a-z]+-speaking\b"),
     re.compile(
         r"\b(?:state|government|nation|kremlin|gru|fsb|svr|mss|pla|irgc|mois)[ -]"
         r"(?:sponsored|backed|aligned|affiliated|linked|associated|directed|run)\b"
@@ -239,7 +256,7 @@ GENERIC_DESCRIPTOR_WORDS: frozenset = frozenset(
     "spammers mercenary mercenaries contractor contractors "
     # sponsorship / alignment
     "state nation sponsored backed aligned affiliated linked associated government "
-    "military intelligence nexus based pro anti "
+    "military intelligence nexus based speaking pro anti "
     # nationality / region ADJECTIVES (not nouns)
     "russian chinese iranian north south korean dprk vietnamese indian pakistani turkish "
     "israeli palestinian ukrainian belarusian syrian lebanese american european asian "
@@ -269,7 +286,8 @@ def _names(text: str) -> frozenset:
 # lower-cased, whitespace-collapsed, edge punctuation stripped, without apostrophes (``"people's"`` =
 # ``"peoples"``), with dots and hyphens read as spaces and a run of single letters joined (``"u.s."`` =
 # ``"us"``, ``"n. korea"`` = ``"n korea"``, ``"north-korea"`` = ``"north korea"``), ``&`` as ``and`` and a
-# leading ``"the "`` ignored (``"the netherlands"``). No entry of either list is a name the canonical
+# leading ``"the "`` ignored (``"the netherlands"``). State agencies (``STATE_AGENCY_NAMES``, below,
+# 2026-11-05) are compared the same way. No entry of these lists is a name the canonical
 # threat-actor reference resolves (tests/test_actor_name_hygiene.py checks it). Rule (c) does not
 # consult the reference, and no name is taken out of these lists for an actor: a group whose common
 # name is a country or state is written under a qualified name (``"Cuba Ransomware Gang"``, not
@@ -355,20 +373,41 @@ NATIONALITY_ADJECTIVES: frozenset = _names(
     "yemeni|zambian|zimbabwean|soviet|"
 )
 
+# State intelligence and security agencies, as the WHOLE name (2026-11-05), also part of rule (c). Like a
+# country, an agency says who is said to sponsor an actor, never which actor it is: ATT&CK attributes
+# Turla (G0010), Gamaredon Group (G0047) and Dragonfly (G0035) to the FSB, APT28 (G0007) and Sandworm Team
+# (G0034) to GRU units, APT29 (G0016) to the SVR, and MuddyWater (G0069), APT39 (G0087) and VOID MANTICORE
+# (G1055) to Iran's MOIS. OTX adversary fields list ``"MOIS"``, ``"Russian Federal Security Service"`` and
+# ``"Russian intelligence services"``. An entry also matches behind a country name or nationality adjective,
+# possessive or not (``"russian fsb"``, ``"iran's mois"``), and followed by "of" and a country name
+# (``"federal security service of the russian federation"``). A name that contains an agency beside a
+# proper name stays a name (``"gru unit 26165"``, ``"fsb center 16"``), and so does a name with the
+# agency in its parenthetical (``"turla (fsb)"`` is ``"turla"``). Deliberately small: the five agencies
+# the galaxies name as sponsors of several groups, their spelled-out names, and a country's intelligence
+# or security services in general.
+STATE_AGENCY_NAMES: frozenset = _names(
+    "fsb|federal security service|gru|main intelligence directorate|svr|foreign intelligence service|"
+    "mss|ministry of state security|mois|ministry of intelligence and security|ministry of intelligence|"
+    "intelligence service|intelligence services|intelligence agency|intelligence agencies|"
+    "security service|security services|special services|"
+)
+
 
 _APOSTROPHES = "'\u2018\u2019\u02bc"
+_AMPERSAND_RE = re.compile(r"&&?")
 
 
 def _geo_key(name: str) -> str:
-    """The form rule (c) compares: lower-case, no apostrophes, dots and hyphens as spaces, ``&`` as
-    ``and``, whitespace collapsed, a run of single letters joined (``"u s a"`` = ``"usa"``), a
-    leading ``"the "`` dropped."""
+    """The form rule (c) compares: lower-case, no apostrophes, dots and hyphens as spaces, ``&`` and
+    ``&&`` as ``and`` (the word separators, 2026-11-05: ``"trinidad && tobago"``), whitespace
+    collapsed, a run of single letters joined (``"u s a"`` = ``"usa"``), a leading ``"the "``
+    dropped."""
     text = name.lower()
     for mark in _APOSTROPHES:
         text = text.replace(mark, "")
     words: List[str] = []
     letters = ""
-    for word in text.replace(".", " ").replace("-", " ").replace("&", " and ").split():
+    for word in _AMPERSAND_RE.sub(" and ", text.replace(".", " ").replace("-", " ")).split():
         if len(word) == 1 and word.isalpha():
             letters += word
             continue
@@ -383,10 +422,37 @@ def _geo_key(name: str) -> str:
 
 
 _GEOPOLITICAL_KEYS: frozenset = frozenset(_geo_key(n) for n in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES)
+_STATE_AGENCY_KEYS: frozenset = frozenset(_geo_key(n) for n in STATE_AGENCY_NAMES)
+
+
+def _is_country_key(key: str) -> bool:
+    """``key`` (``_geo_key`` form) is a country or state or a nationality adjective, also possessive
+    (``"russias"``: the apostrophe is gone)."""
+    return key in _GEOPOLITICAL_KEYS or (key.endswith("s") and key[:-1] in _GEOPOLITICAL_KEYS)
+
+
+def _is_state_agency_key(key: str) -> bool:
+    """``key`` (``_geo_key`` form) is a state agency (``STATE_AGENCY_NAMES``) on its own, behind a country or
+    nationality (``"russian fsb"``, ``"irans mois"``) or followed by "of" and a country
+    (``"ministry of state security of the peoples republic of china"``)."""
+    if key in _STATE_AGENCY_KEYS:
+        return True
+    words = key.split(" ")
+    for i in range(1, len(words)):
+        head, tail = " ".join(words[:i]), " ".join(words[i:])
+        if tail in _STATE_AGENCY_KEYS and _is_country_key(head):
+            return True
+        if words[i] == "of" and head in _STATE_AGENCY_KEYS:
+            country = " ".join(words[i + 1 :])
+            if (country[4:] if country.startswith("the ") else country) in _GEOPOLITICAL_KEYS:
+                return True
+    return False
 
 
 def _is_geopolitical_name(name: str) -> bool:
-    return _geo_key(name) in _GEOPOLITICAL_KEYS
+    """Rule (c) on ``name`` as a whole: a country or state, a nationality adjective or a state agency."""
+    key = _geo_key(name)
+    return key in _GEOPOLITICAL_KEYS or _is_state_agency_key(key)
 
 
 _WORD_SPLIT_RE = re.compile(r"[\s\-]+")
@@ -418,7 +484,8 @@ _TRAILING_PAREN_RE = re.compile(r"^(?P<head>.+?)\s+\((?P<inner>[^()]*[A-Za-z][^(
 def strip_trailing_parenthetical(fragment: str) -> str:
     """``"Name (Alias)"`` -> ``"Name"``; anything else unchanged. When the head is a country or state
     (rule (c)) and the parenthetical yields a name, the parenthetical is the name (2026-10-18):
-    ``"North Korea (APT37)"`` -> ``"APT37"``. A parenthetical that yields no name, a description or a
+    ``"North Korea (APT37)"`` -> ``"APT37"``, and so for a state agency (2026-11-05):
+    ``"FSB (Turla)"`` -> ``"Turla"``. A parenthetical that yields no name, a description or a
     placeholder, leaves the country, which rule (c) then drops (2026-10-22):
     ``"Cuba (Ransomware)"`` -> ``"Cuba"``, ``"North Korea (unknown)"`` -> ``"North Korea"``."""
     m = _TRAILING_PAREN_RE.match(fragment)
@@ -442,8 +509,10 @@ def strip_trailing_parenthetical(fragment: str) -> str:
 
 
 def _rejoin_country_names(sides: List[str]) -> List[str]:
-    """Join adjacent ``and``-split sides back into a country or state name that contains "and"
-    (``["apt28", "bosnia", "herzegovina"]`` -> ``["apt28", "bosnia and herzegovina"]``)."""
+    """Join adjacent ``and``-split sides back into a country or state name or a state agency that
+    contains "and" (``["apt28", "bosnia", "herzegovina"]`` -> ``["apt28", "bosnia and herzegovina"]``,
+    ``["apt34", "ministry of intelligence", "security"]`` -> ``["apt34", "ministry of intelligence and
+    security"]``)."""
     out: List[str] = []
     i = 0
     while i < len(sides):
@@ -457,13 +526,14 @@ def _rejoin_country_names(sides: List[str]) -> List[str]:
 
 
 def _try_and_split(fragment: str) -> List[str]:
-    """Split ``fragment`` on ``" and "`` / ``" & "`` if every guard passes,
+    """Split ``fragment`` on ``" and "`` / ``" & "`` / ``" && "`` if every guard passes,
     else return ``[fragment]`` unchanged.
 
     Guards (all must hold for the split to happen):
       * at least one separator present;
       * the name does not start with an ``AND_SPLIT_PROTECTED_PREFIXES`` entry;
-      * the name is not a country or state (``"trinidad and tobago"``, rule (c));
+      * the name is not a country or state or a state agency (``"trinidad and tobago"``,
+        ``"ministry of intelligence and security"``, rule (c));
       * every resulting side is >= ``AND_SPLIT_MIN_SIDE_LEN`` chars;
       * no side (lower-cased) is in ``AND_SPLIT_PROTECTED_SIDES``.
     """
@@ -531,8 +601,8 @@ def _dedupe_casefold(names: List[str]) -> List[str]:
 
 
 def _is_country_or_state_name(name: str) -> bool:
-    """Rule (c) of :func:`is_generic_actor_name`: the whole name is a country or state, or a
-    nationality adjective (edge punctuation ignored)."""
+    """Rule (c) of :func:`is_generic_actor_name`: the whole name is a country or state, a nationality
+    adjective or a state agency (edge punctuation ignored)."""
     canonical = _normalise(name).lower()
     return _is_geopolitical_name(canonical) or _is_geopolitical_name(canonical.strip(_EDGE_PUNCT))
 
@@ -600,10 +670,12 @@ def is_generic_actor_name(name: str) -> bool:
            hyphen) is in ``GENERIC_DESCRIPTOR_WORDS`` (``"ransomware group"``,
            ``"chinese apt"``, ``"apt groups"``) — one unknown word keeps it;
       (c)  the whole name is a country or state (``COUNTRY_AND_STATE_NAMES``:
-           ``"north korea"``, ``"dprk"``, ``"u.s."``, ``"russian federation"``)
-           or a nationality adjective (``NATIONALITY_ADJECTIVES``: ``"russian"``,
-           ``"north korean"``) — a name that contains one stays a name
-           (``"cyber army of russia reborn"``).
+           ``"north korea"``, ``"dprk"``, ``"u.s."``, ``"russian federation"``),
+           a nationality adjective (``NATIONALITY_ADJECTIVES``: ``"russian"``,
+           ``"north korean"``) or a state agency (``STATE_AGENCY_NAMES``:
+           ``"mois"``, ``"gru"``, ``"russian federal security service"``,
+           ``"russian intelligence services"``) — a name that contains one
+           stays a name (``"cyber army of russia reborn"``, ``"gru unit 26165"``).
 
     Single-word names are only generic through rules (a) and (c): ``"apt28"``,
     ``"sandworm"``, ``"play"`` are names (or at least not provably not).
@@ -623,7 +695,7 @@ def is_generic_actor_name(name: str) -> bool:
         return True
     if core in GENERIC_ACTOR_PHRASES or is_placeholder_name(core):
         return True
-    # (c) a country or state, or a nationality adjective, as the whole name.
+    # (c) a country or state, a nationality adjective or a state agency, as the whole name.
     if _is_country_or_state_name(canonical):
         return True
     space_words = core.split(" ")
@@ -659,7 +731,8 @@ def clean_actor_names(name: str) -> List[str]:
 
 def dropped_geopolitical_names(name: str) -> List[str]:
     """The fragments of ``name`` that :func:`clean_actor_names` drops because they are, as the whole
-    fragment, a country or state or a nationality adjective (rule (c) of :func:`is_generic_actor_name`).
+    fragment, a country or state, a nationality adjective or a state agency (rule (c) of
+    :func:`is_generic_actor_name`; ``"APT28, GRU"`` -> ``["GRU"]``).
 
     Computed from the same fragments as :func:`clean_actor_names`, so no returned name is one of its
     names: ``"APT37, North Korea"`` -> ``["North Korea"]``, ``"Russia"`` -> ``["Russia"]``,
@@ -691,6 +764,7 @@ __all__ = [
     "GENERIC_LEADING_WORDS",
     "GENERIC_SIGNAL_PATTERNS",
     "NATIONALITY_ADJECTIVES",
+    "STATE_AGENCY_NAMES",
     "clean_actor_names",
     "dropped_geopolitical_names",
     "is_generic_actor_name",

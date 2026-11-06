@@ -106,6 +106,19 @@ class TestActorIdentities:
     def test_names_without_a_key_are_left_out(self, reference):
         assert cta.actor_identities(["", None, 7, " APT28 "], reference) == {"apt28"}
 
+    def test_names_the_reference_lists_as_no_actors_are_left_out(self, reference):
+        # 2026-11-05: a ThreatActor node the graph holds under a listed name (written before the name was
+        # listed) does not make its pulse name several actors: step 2d and the acceptance check judge the
+        # pulse as the OTX collector does, which drops the name from the adversary field.
+        assert cta.actor_identities(["TAG-124", "ClickFix"], reference) == {"tag-124"}
+        assert cta.actor_identities(["Proton66"], reference) == frozenset()
+        rows = [
+            {"pid": "p-listed", "names": ["tag-124", "clickfix"]},
+            {"pid": "p-groups", "names": ["gamaredon", "turla", "clickfix"]},
+        ]
+        assert cta.reports_naming_several_actors(rows, reference) == ["p-groups"]
+        assert cta.reports_naming_several_actors(rows, None) == ["p-groups", "p-listed"]
+
     def test_several_actor_reports_is_the_union_with_the_indicator_marks(self, reference):
         # 2026-10: the graph-derived pulses are judged with the reference; a mark is the OTX collector's
         # judgement of the pulse's whole adversary list and is taken as it is.
@@ -608,6 +621,33 @@ class TestTheSync:
         syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
         rels = _rels(syncer, _items("p-two", ["Gamaredon", "Turla"], ["PteroLNK", "Kazuar"]))
         assert "ATTRIBUTED_TO" not in rels, "not the first actor's: the pulse names two"
+
+    @pytest.mark.parametrize("with_reference", [True, False])
+    def test_a_listed_name_in_misp_names_no_actor_of_its_report(self, monkeypatch, with_reference):
+        # 2026-11-05: MISP still holds threat-actor attributes of a pulse "TAG-124, ClickFix" written before
+        # ClickFix was listed (a scheduled sync, an additive baseline). The sync skips the listed name, so the
+        # report names one actor and its malware is attributed to it, as the collector judges the pulse now.
+        def unavailable(*_a, **_k):
+            raise cta.ReferenceUnavailable("test: not found")
+
+        if not with_reference:
+            monkeypatch.setattr(run_misp_to_neo4j, "load_canonical_reference", unavailable)
+        syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
+        comment = 'MITRE_USES_TECHNIQUES:{"rt":["T1204"],"pid":"p-listed"}'
+        parsed = [
+            syncer.parse_attribute({"type": "threat-actor", "value": v, "comment": comment, "Tag": []}, _EVENT)[0]
+            for v in ("TAG-124", "ClickFix")
+        ]
+        actors = [i for i in parsed if i is not None]
+        assert [a["name"] for a in actors] == (["TAG-124"] if with_reference else ["TAG-124", "ClickFix"])
+        items = _items("p-listed", [], ["MintsLoader"]) + actors
+        rels = _rels(syncer, items)
+        if with_reference:
+            assert [(r["from_key"]["name"], r["to_key"]["name"]) for r in rels["ATTRIBUTED_TO"]] == [
+                ("MintsLoader", "TAG-124")
+            ]
+        else:
+            assert "ATTRIBUTED_TO" not in rels, "without the reference ClickFix counts as a second actor"
 
     def test_without_the_reference_aliases_count_as_several_and_it_is_logged_once(self, monkeypatch, caplog):
         def unavailable(*_a, **_k):

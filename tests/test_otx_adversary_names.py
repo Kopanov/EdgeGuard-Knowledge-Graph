@@ -1,12 +1,17 @@
 """Which names of an OTX pulse's ``adversary`` field become actors (2026-10-18).
 
-Two rules act before the collector builds its actor items, its ``family::adversary::pulse`` pairs and
+Three rules act before the collector builds its actor items, its ``family::adversary::pulse`` pairs and
 its decision whether the pulse names several actors, so all three see the same names:
 
-* A country or state name, or a nationality adjective on its own, is never an actor name
-  (``actor_name_hygiene``, rule (c) of ``is_generic_actor_name``): a pulse on APT37 whose adversary
-  field reads "APT37, North Korea" names one actor. The run logs the distinct names dropped this way
-  (2026-10-22), so that a group whose common name is a country can be noticed.
+* A country or state name, a nationality adjective or (2026-11-05) a state agency on its own is never
+  an actor name (``actor_name_hygiene``, rule (c) of ``is_generic_actor_name``): a pulse on APT37 whose
+  adversary field reads "APT37, North Korea" names one actor, and so does a pulse naming "APT28, GRU".
+  The run logs the distinct names dropped this way (2026-10-22), so that a group whose common name is a
+  country can be noticed.
+* A name the canonical threat-actor reference lists as no actor (2026-11-05: ``not_actors``, reviewed
+  names of the 730-day baseline of 2026-11-03 such as ClickFix, a technique, and Proton66, a hosting
+  network) is dropped, and the run logs the distinct names dropped this way. Without the reference
+  nothing is dropped.
 * A name the same pulse lists both as adversary and as a malware family is an actor only when the
   canonical threat-actor reference resolves it. On the hosted graph of 2026-10-18, 181 of 859
   ThreatActor names were also Malware names. Reference 2026.10.17 knew 34 of them (Kimsuky, Akira,
@@ -97,6 +102,12 @@ OPERATIONS_OF_A_KNOWN_OPERATOR = (
 # trojan or backdoor (Aurora: ATT&CK Hydraq; Anubis, Kraken, Osiris, Chaos; Nitrogen and Morpheus, which
 # malpedia also gives to a loader: 'Nitrogen Loader', 'Morpheus Loader').
 RANSOMWARE_NAMES_LEFT_OUT = ("Aurora", "Anubis", "Kraken", "Osiris", "Chaos", "Nitrogen", "Morpheus")
+# The names of the overrides file's not_actor decisions (2026-11-05), as written there.
+NOT_ACTOR_DECISION_NAMES = sorted(
+    name
+    for decision in json.loads((_SRC / "reference" / "canonical_threat_actor_overrides.json").read_text())["not_actor"]
+    for name in decision["names"]
+)
 
 
 class TestCountryNamesInTheAdversaryField:
@@ -130,12 +141,13 @@ class TestCountryNamesInTheAdversaryField:
         )
         assert sorted(set(_actors(items))) == ["APT37", "Cuba Ransomware Gang", "Kimsuky", "Lazarus Group"]
         messages = [r.getMessage() for r in caplog.records if "[ACTOR-NAMES]" in r.getMessage()]
-        country = [m for m in messages if "country, state or nationality" in m]
+        country = [m for m in messages if "country, state, nationality or state-agency" in m]
         assert len(country) == 1, "one line per run"
         line = country[0]
         assert line.startswith(
-            "[ACTOR-NAMES] OTX: 4 distinct country, state or nationality name(s) in 5 pulse(s), dropped from "
-            "the adversary field by the actor-name hygiene"
+            "[ACTOR-NAMES] OTX: 4 distinct country, state, nationality or state-agency name(s) in 5 pulse(s), "
+            "dropped from the adversary field by the actor-name hygiene (never actor names; a group named after "
+            "a country or an agency needs a qualified name): "
         )
         assert line.endswith(
             ": cuba (1 pulse: p-9); dprk (1 pulse: p-4); north korea (2 pulses: p-1, p-7); russia (1 pulse: p-3)"
@@ -152,11 +164,125 @@ class TestCountryNamesInTheAdversaryField:
     def test_a_run_without_country_names_logs_no_country_line(self, caplog):
         caplog.set_level(logging.INFO, logger=oc.logger.name)
         _HARNESS._collect([_pulse("p-1", ["ROKRAT"], "North Korea (APT37)", ["203.0.113.68"])])
-        assert "country, state or nationality" not in caplog.text
+        assert "country, state, nationality" not in caplog.text
 
     def test_a_name_lists_at_most_three_pulse_ids(self):
         assert oc._dropped_name_with_pulses("dprk", ["a", "b", "c", "d"]) == "dprk (4 pulses: a, b, c, …)"
         assert oc._dropped_name_with_pulses("dprk", ["a"]) == "dprk (1 pulse: a)"
+
+
+class TestStateAgenciesInTheAdversaryField:
+    def test_an_actor_beside_its_sponsor_is_one_actor_and_the_pulse_attributes(self, caplog):
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        items = _HARNESS._collect([_pulse("p-gru", ["X-Agent"], "APT28, GRU", ["203.0.113.80"])])
+        assert _actors(items) == ["APT28"]
+        ioc = _ioc(items, "203.0.113.80")
+        assert ioc["pulse_malware_actor_pairs"] == ["X-Agent::APT28::p-gru"], "one actor: the pulse attributes"
+        assert all(i["several_actor_pulses"] == [] and i["several_actor_pulses_by_name"] == [] for i in items)
+        country = [r.getMessage() for r in caplog.records if "state-agency name(s)" in r.getMessage()]
+        assert len(country) == 1 and country[0].endswith("qualified name): gru (1 pulse: p-gru)")
+
+    def test_a_pulse_naming_only_a_sponsor_names_no_actor(self):
+        items = _HARNESS._collect(
+            [
+                _pulse("p-mois", ["DinDoor"], "MOIS", ["203.0.113.81"]),
+                _pulse("p-fsb", ["Monokle"], "Russian Federal Security Service", ["203.0.113.82"]),
+                _pulse("p-ris", ["Agent Tesla"], "Russian intelligence services", ["203.0.113.83"]),
+            ]
+        )
+        assert _actors(items) == []
+        assert all(i.get("pulse_malware_actor_pairs", []) == [] for i in items)
+
+    def test_a_unit_of_an_agency_stays_an_actor(self):
+        items = _HARNESS._collect([_pulse("p-unit", ["X-Agent"], "GRU Unit 26165", ["203.0.113.84"])])
+        assert _actors(items) == ["GRU Unit 26165"]
+
+
+class TestNamesTheReferenceListsAsNoActors:
+    @pytest.mark.parametrize("name, family", [("ClickFix", "Lumma Stealer"), ("Proton66", "SuperBlack")])
+    def test_a_listed_name_gives_no_actor_item_and_no_pair(self, reference, name, family):
+        assert reference.is_not_actor(name) and reference.canonical_for(name) is None
+        items = _HARNESS._collect([_pulse("p-listed", [family], name, ["203.0.113.90"])])
+        assert _actors(items) == []
+        assert _malware(items) == [family], "the pulse's malware family item is unchanged"
+        ioc = _ioc(items, "203.0.113.90")
+        assert ioc["pulse_malware_actor_pairs"] == []
+        assert all(i["several_actor_pulses"] == [] and i["several_actor_pulses_by_name"] == [] for i in items)
+
+    def test_a_listed_name_beside_an_actor_leaves_one_actor_and_the_pulse_attributes(self):
+        # Before 2026-11-05 "ClickFix" counted as a second actor: the pulse attributed nothing.
+        items = _HARNESS._collect([_pulse("p-tag", ["MintsLoader"], "TAG-124, ClickFix", ["203.0.113.91"])])
+        assert _actors(items) == ["TAG-124"]
+        ioc = _ioc(items, "203.0.113.91")
+        assert ioc["pulse_malware_actor_pairs"] == ["MintsLoader::TAG-124::p-tag"]
+        assert ioc["several_actor_pulses"] == []
+
+    def test_a_listed_name_the_pulse_also_lists_as_a_family_is_logged_as_listed(self, caplog):
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        items = _HARNESS._collect([_pulse("p-at", ["Agent Tesla"], "Agent Tesla", ["203.0.113.92"])])
+        assert _actors(items) == [] and _malware(items) == ["Agent Tesla"]
+        lines = [r.getMessage() for r in caplog.records if "[ACTOR-NAMES]" in r.getMessage()]
+        assert len(lines) == 1 and "lists as no actors" in lines[0], "not also on the malware-family line"
+
+    def test_the_run_logs_the_listed_names_once(self, caplog):
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        items = _HARNESS._collect(
+            [
+                _pulse("p-1", ["Lumma Stealer"], "ClickFix", ["203.0.113.93"]),
+                _pulse("p-2", ["SuperBlack"], "Proton66, Mora_001", ["203.0.113.94"]),
+                _pulse("p-3", ["NetSupport RAT"], "clickfix; SmartApeSG", ["203.0.113.95"]),
+                _pulse("p-4", ["ROKRAT"], "APT37, North Korea", ["203.0.113.96"]),
+                _pulse("p-5", ["Lumma Stealer"], "Lumma Stealer", ["203.0.113.97"]),
+            ]
+        )
+        assert sorted(set(_actors(items))) == ["APT37", "Mora_001"]
+        lines = [r.getMessage() for r in caplog.records if "[ACTOR-NAMES]" in r.getMessage()]
+        listed = [m for m in lines if "lists as no actors" in m]
+        assert listed == [
+            "[ACTOR-NAMES] OTX: 3 distinct adversary name(s) in 3 pulse(s) that the canonical threat-actor "
+            "reference lists as no actors, dropped from the adversary field: clickfix (2 pulses: p-1, p-3); "
+            "proton66 (1 pulse: p-2); smartapesg (1 pulse: p-3)"
+        ]
+        others = " ".join(m for m in lines if m not in listed).lower()
+        assert "north korea (1 pulse: p-4)" in others and "lumma stealer" in others
+        for name in ("clickfix", "proton66", "smartapesg"):
+            assert name not in others, name
+
+    def test_a_run_without_listed_names_logs_no_line(self, caplog):
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        _HARNESS._collect([_pulse("p-1", ["ROKRAT"], "APT37", ["203.0.113.98"])])
+        assert "lists as no actors" not in caplog.text
+
+    def test_without_the_reference_nothing_is_dropped(self, monkeypatch, caplog):
+        def unavailable(*_a, **_k):
+            raise cta.ReferenceUnavailable("test: not found")
+
+        monkeypatch.setattr(oc, "load_canonical_reference", unavailable)
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        items = _HARNESS._collect(
+            [
+                _pulse("p-1", ["Lumma Stealer"], "ClickFix", ["203.0.113.99"]),
+                _pulse("p-2", ["SuperBlack"], "Proton66", ["203.0.113.100"]),
+            ]
+        )
+        assert _actors(items) == ["ClickFix", "Proton66"], "the list is read from the reference"
+        assert "lists as no actors" not in caplog.text
+        warnings = [r.getMessage() for r in caplog.records if "canonical reference unavailable" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "no adversary is dropped as a name the reference lists as no actor" in warnings[0]
+
+    @pytest.mark.parametrize("name", NOT_ACTOR_DECISION_NAMES)
+    def test_every_listed_name_reaches_no_actor(self, name):
+        items = _HARNESS._collect([_pulse("p-each", [], name, ["203.0.113.101"])])
+        assert _actors(items) == [], name
+
+    def test_the_helper(self, reference):
+        assert oc._adversaries_not_listed_as_no_actors(["APT28", "ClickFix", "Proton66"], reference) == (
+            ["APT28"],
+            ["ClickFix", "Proton66"],
+        )
+        assert oc._adversaries_not_listed_as_no_actors(["ClickFix"], None) == (["ClickFix"], [])
+        assert oc._adversaries_not_listed_as_no_actors([], reference) == ([], [])
 
 
 class TestAnAdversaryTheSamePulseListsAsAMalwareFamily:

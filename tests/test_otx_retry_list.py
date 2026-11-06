@@ -683,6 +683,39 @@ def test_an_answer_by_id_that_cannot_be_processed_keeps_the_pulse_and_the_run_go
     )
 
 
+@pytest.mark.parametrize("readable", [True, False], ids=["processed", "cannot be processed"])
+def test_an_answer_by_id_that_cannot_be_processed_counts_on_no_actor_names_or_skip_line(caplog, readable):
+    """Pulse 12 on the list, answered by id with the adversaries ``"ClickFix, Russia, Lumma Stealer"`` (a name
+    the canonical reference lists as no actor, a country, a name the pulse also lists as its malware family)
+    and a non-file hash before its IPv4 indicator. Processed, it is named on the three ``[ACTOR-NAMES]`` lines
+    and counted on the ``[SKIP]`` line. When a null indicator after them makes it unprocessable, its items are
+    dropped and it stays on the list, and since 2026-11-05 it is named and counted on none of those lines: the
+    pulse's tallies are added once all its items are built (they were added as its adversaries were read)."""
+    body = _recorded([12])[0]
+    body["adversary"] = "ClickFix, Russia, Lumma Stealer"
+    body["malware_families"] = ["Lumma Stealer"]
+    nonfile = {"id": 1, "indicator": "a" * 32, "type": "FileHash-IMPHASH", "created": body["created"]}
+    body["indicators"] = [nonfile, *body["indicators"]] + ([] if readable else [None])
+    otx = _Otx(_recorded(range(60)))
+    otx.fetch_errors[IDS[12]] = body
+    state: Dict[str, Any] = {"otx_last_pulse_modified": ROWS[5]["modified"], "otx_retry_pulses": [_entry(12, days=2)]}
+    run = _collect(otx, state, caplog, limit=20)
+
+    assert run.status["success"] is True
+    assert (IDS[12] in run.processed) is readable
+    lines = [m for m in run.messages if m.startswith(("[ACTOR-NAMES] OTX:", "[SKIP] OTX:"))]
+    if readable:
+        assert len(lines) == 4, lines
+        assert all(IDS[12] in m for m in lines if "country" in m or "lists as no actors" in m), lines
+        assert any("lists as no actors" in m and f"clickfix (1 pulse: {IDS[12]})" in m for m in lines)
+        assert any("country, state" in m and f"russia (1 pulse: {IDS[12]})" in m for m in lines)
+        assert any("malware family" in m and m.endswith(": lumma stealer") for m in lines)
+        assert any(m.startswith("[SKIP] OTX: 1 indicators of a non-file hash type") for m in lines)
+    else:
+        assert lines == []
+        assert any(m.startswith(f"[OTX-RETRY] OTX: the answer by id for pulse {IDS[12]}") for m in run.warnings)
+
+
 def test_retries_per_run_take_the_pulses_tried_longest_ago(caplog, monkeypatch):
     """``EDGEGUARD_OTX_RETRY_PER_RUN=2`` with three pulses on the list: the two tried longest ago are fetched;
     with ``0`` none is, and the list is unchanged."""
