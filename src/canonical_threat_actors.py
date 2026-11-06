@@ -10,8 +10,9 @@ Every name in the file has one place: the key of one actor, a synonym of one act
 ``ambiguous`` (a name that points to more than one actor, or was marked never_merge), or an entry of
 ``not_actors`` (2026-11-05: a reviewed name that is no threat actor, such as a technique, malware, a
 kit, a hosting network, a forum, a company or a campaign that a report gave as its adversary; the OTX
-collector drops it from a pulse's adversary field). A reference without ``not_actors`` lists no such
-name. A name is looked up by the key EdgeGuard writes for it
+collector drops it from a pulse's adversary field, the MISP→Neo4j sync skips a threat-actor attribute
+of that name, and ``actor_identities`` counts it as no actor). A reference without ``not_actors``
+lists no such name. A name is looked up by the key EdgeGuard writes for it
 (``node_identity.canonicalize_merge_key``).
 
 ``EDGEGUARD_CANONICAL_THREAT_ACTORS`` overrides the path. A file that is missing, unreadable,
@@ -91,12 +92,16 @@ def actor_identities(names: Iterable[Any], reference: Optional[CanonicalReferenc
     (``Storm-2697`` and ``The Gentlemen``). A name the reference does not resolve (unknown,
     ambiguous or never_merge) counts as itself, by the ``ThreatActor`` key EdgeGuard writes for it;
     without a reference every distinct key is an actor of its own. Names without a key (empty, not
-    a string) are left out.
+    a string) are left out, and so (2026-11-05) are names the reference lists as no actors
+    (``not_actors``): the OTX collector drops them from a pulse's adversaries before it judges the
+    pulse, and a ``ThreatActor`` node of such a name that the graph still holds (written before the
+    name was listed) does not make its pulse name several actors in ``build_relationships`` step 2d
+    or the acceptance check either.
     """
     actors: Set[str] = set()
     for name in names:
         key = name_key(name)
-        if not key:
+        if not key or (reference is not None and reference.is_not_actor(name)):
             continue
         canonical = reference.canonical_for(name) if reference is not None else None
         actors.add(canonical or key)

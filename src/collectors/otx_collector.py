@@ -1531,25 +1531,18 @@ class OTXCollector:
                 # reference resolves it (``_adversaries_not_named_as_pulse_families``; kept without it).
                 # 2026-11-05: before that rule, a name the reference lists as no actor (ClickFix, Proton66)
                 # is dropped (``_adversaries_not_listed_as_no_actors``; kept without the reference).
+                # The names dropped here, like the pulse's non-file hashes, reach the run's tallies (the
+                # [ACTOR-NAMES] and [SKIP] lines) at the end of this function, once every item of the pulse is
+                # built (2026-11-05): a pulse of the retry list whose answer cannot be processed (below)
+                # leaves no item and no count.
                 actor_reference = self._report_actor_reference()
                 _adversary_names, _not_actors = _adversaries_not_listed_as_no_actors(
                     clean_actor_names(pulse_adversary or ""), actor_reference
                 )
-                if _not_actors:
-                    pulses_with_a_not_actor_adversary_name += 1
-                    for _dropped in {n.lower() for n in _not_actors}:
-                        not_actor_adversary_names.setdefault(_dropped, []).append(str(pulse.get("id") or "?"))
                 pulse_all_actor_names, _named_as_family = _adversaries_not_named_as_pulse_families(
                     _adversary_names, pulse.get("malware_families", []), actor_reference
                 )
-                if _named_as_family:
-                    adversaries_named_as_family.update(n.lower() for n in _named_as_family)
-                    pulses_naming_an_adversary_as_family += 1
                 _geopolitical_names = dropped_geopolitical_names(pulse_adversary or "")
-                if _geopolitical_names:
-                    pulses_with_a_geopolitical_adversary_name += 1
-                    for _dropped in {n.lower() for n in _geopolitical_names}:
-                        geopolitical_adversary_names.setdefault(_dropped, []).append(str(pulse.get("id") or "?"))
                 pulse_several_actors = len(actor_identities(pulse_all_actor_names, actor_reference)) > 1
                 pulse_mark = [str(pulse.get("id"))] if pulse_several_actors and pulse.get("id") else []
                 pulse_actor_names = pulse_all_actor_names[:_MAX_PULSE_ADVERSARIES]
@@ -1573,9 +1566,10 @@ class OTXCollector:
                 }
                 # Extract indicators - one entry per indicator (zone holds all matched sectors)
                 indicators = pulse.get("indicators", [])
+                pulse_non_file_hashes = 0
                 for ind in indicators:
                     if ind.get("type") in _NON_FILE_HASH_TYPES:
-                        non_file_hashes += 1
+                        pulse_non_file_hashes += 1
                         continue
                     indicator_type = self.map_indicator_type(ind.get("type"), ind.get("indicator"))
                     indicator_value = ind.get("indicator")
@@ -1704,6 +1698,21 @@ class OTXCollector:
                     if pulse_modified:
                         actor_item["last_seen"] = pulse_modified
                     processed.append(actor_item)
+
+                # The pulse's tallies, now that all its items are built (see the adversary names above).
+                non_file_hashes += pulse_non_file_hashes
+                _pulse_id = str(pulse.get("id") or "?")
+                if _not_actors:
+                    pulses_with_a_not_actor_adversary_name += 1
+                    for _dropped in {n.lower() for n in _not_actors}:
+                        not_actor_adversary_names.setdefault(_dropped, []).append(_pulse_id)
+                if _named_as_family:
+                    adversaries_named_as_family.update(n.lower() for n in _named_as_family)
+                    pulses_naming_an_adversary_as_family += 1
+                if _geopolitical_names:
+                    pulses_with_a_geopolitical_adversary_name += 1
+                    for _dropped in {n.lower() for n in _geopolitical_names}:
+                        geopolitical_adversary_names.setdefault(_dropped, []).append(_pulse_id)
 
             for pulse in to_process:
                 _process_pulse(pulse)

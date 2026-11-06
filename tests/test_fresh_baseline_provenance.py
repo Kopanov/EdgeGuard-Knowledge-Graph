@@ -950,6 +950,31 @@ class TestParseAttributeActorNameHygiene:
         item, _ = syncer.parse_attribute(_attr("threat-actor", value), _EVENT)
         assert item is not None and item["type"] == "actor"
 
+    @pytest.mark.parametrize(
+        "value,comment",
+        [("ClickFix", _OTX_COMMENT), ("Proton66", _OTX_COMMENT), ("Agent Tesla", ""), ("  breachforums ", "")],
+    )
+    def test_a_name_the_reference_lists_as_no_actor_is_skipped(self, syncer, caplog, value, comment):
+        # 2026-11-05: a threat-actor attribute that MISP already holds (pushed before the name was listed)
+        # or that another source wrote is skipped like a name the hygiene drops, whatever its source.
+        caplog.set_level(logging.INFO)
+        item, rels = syncer.parse_attribute(_attr("threat-actor", value, comment=comment), _EVENT)
+        assert (item, rels) == (None, [])
+        assert "the canonical threat-actor reference lists it as no actor" in caplog.text
+
+    def test_a_listed_name_inside_a_proper_name_still_parses(self, syncer):
+        item, _ = syncer.parse_attribute(_attr("threat-actor", "ClickFix Group", comment=_OTX_COMMENT), _EVENT)
+        assert item is not None and item["name"] == "ClickFix Group"
+
+    def test_without_the_reference_a_listed_name_parses(self, syncer, caplog, monkeypatch, tmp_path):
+        monkeypatch.setenv("EDGEGUARD_CANONICAL_THREAT_ACTORS", str(tmp_path / "missing.json"))
+        caplog.set_level(logging.INFO)
+        for value in ("ClickFix", "Proton66"):
+            item, _ = syncer.parse_attribute(_attr("threat-actor", value, comment=_OTX_COMMENT), _EVENT)
+            assert item is not None and item["name"] == value
+        assert caplog.text.count("canonical reference unavailable") == 1
+        assert "no threat-actor attribute is skipped as a name the reference lists as no actor" in caplog.text
+
 
 # ===========================================================================
 # 6. OTX collector — reported_techniques + one actor per cleaned adversary name

@@ -85,9 +85,18 @@ _TRAILING_CONJUNCTION_RE = re.compile(r"(?:^|\s+)(?:and|&&?)$", re.IGNORECASE)
 AND_SPLIT_MIN_SIDE_LEN = 3
 
 # Names starting with one of these prefixes are campaign / operation titles
-# where ``and`` is part of the title (``"operation search and destroy"``).
-# Compared lower-cased, after whitespace collapse. Tunable.
-AND_SPLIT_PROTECTED_PREFIXES: tuple = ("operation ", "op. ", "op ")
+# where ``and`` is part of the title (``"operation search and destroy"``),
+# and (2026-11-05) the one actor name of the canonical threat-actor reference
+# that the split made two names: the threat-actor galaxy's record
+# ``"Stealth Mango and Tangelo"``, also written with ``&`` and with a trailing
+# ``group`` / ``team``. Compared lower-cased, after whitespace collapse. Tunable.
+AND_SPLIT_PROTECTED_PREFIXES: tuple = (
+    "operation ",
+    "op. ",
+    "op ",
+    "stealth mango and tangelo",
+    "stealth mango & tangelo",
+)
 
 # If EITHER side of an ``and`` / ``&`` split is one of these (lower-cased,
 # trimmed) the split is refused — they are halves of idioms / brand-like
@@ -384,18 +393,20 @@ STATE_AGENCY_NAMES: frozenset = _names(
 
 
 _APOSTROPHES = "'\u2018\u2019\u02bc"
+_AMPERSAND_RE = re.compile(r"&&?")
 
 
 def _geo_key(name: str) -> str:
-    """The form rule (c) compares: lower-case, no apostrophes, dots and hyphens as spaces, ``&`` as
-    ``and``, whitespace collapsed, a run of single letters joined (``"u s a"`` = ``"usa"``), a
-    leading ``"the "`` dropped."""
+    """The form rule (c) compares: lower-case, no apostrophes, dots and hyphens as spaces, ``&`` and
+    ``&&`` as ``and`` (the word separators, 2026-11-05: ``"trinidad && tobago"``), whitespace
+    collapsed, a run of single letters joined (``"u s a"`` = ``"usa"``), a leading ``"the "``
+    dropped."""
     text = name.lower()
     for mark in _APOSTROPHES:
         text = text.replace(mark, "")
     words: List[str] = []
     letters = ""
-    for word in text.replace(".", " ").replace("-", " ").replace("&", " and ").split():
+    for word in _AMPERSAND_RE.sub(" and ", text.replace(".", " ").replace("-", " ")).split():
         if len(word) == 1 and word.isalpha():
             letters += word
             continue

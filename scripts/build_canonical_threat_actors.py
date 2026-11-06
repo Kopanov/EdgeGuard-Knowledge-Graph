@@ -89,10 +89,11 @@ name on write: NFC, trimmed, lower-case. The ``name_key`` of the input is not us
      not an ATT&CK group and keeps the old key as a synonym.
 7. ``not_actor`` lists names a review found to be no threat actor: a technique, malware, a kit, a
    hosting network, a forum, a company or a campaign that a source gave as its adversary. They are
-   copied into the reference's ``not_actors``, and the OTX collector drops them from a pulse's
-   adversary field. A listed name must be no actor key, synonym or ambiguous name after rule 6, no
-   name another decision names, and a name EdgeGuard's actor-name hygiene keeps as it is (a name the
-   hygiene drops or rewrites never reaches the collector's check).
+   copied into the reference's ``not_actors``; the OTX collector drops them from a pulse's adversary
+   field, and the MISP→Neo4j sync skips threat-actor attributes of these names. A listed name must
+   be no actor key, synonym or ambiguous name after rule 6, no name another decision names, and a
+   name EdgeGuard's actor-name hygiene keeps as it is (a name the hygiene drops or rewrites never
+   reaches the collector's check).
 
 The output is deterministic: the same inputs and ``--version`` give a byte-identical file.
 ``--version`` defaults to the build date (CalVer ``YYYY.MM.DD``); ``generated_at`` is that date.
@@ -206,7 +207,8 @@ DESCRIPTION = (
     "under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged. "
     "Names listed under 'not_actors' were reviewed and are no threat actors (a technique, malware, a kit, "
     "a hosting network, a forum, a company or a campaign that a source gave as its adversary); the OTX "
-    "collector drops them from a pulse's adversary field."
+    "collector drops them from a pulse's adversary field, and the MISP to Neo4j sync skips threat-actor "
+    "attributes of these names."
 )
 RULES: Tuple[str, ...] = (
     "Records with the same ATT&CK id are one actor named after the ATT&CK group; a record whose own "

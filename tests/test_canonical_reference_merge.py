@@ -162,7 +162,11 @@ class TestLoader:
         assert not ref.is_not_actor("lazarus") and not ref.is_not_actor("qilin")
         assert not ref.is_not_actor(None) and not ref.is_not_actor("")
         assert ref.canonical_for("clickfix") is None
-        assert cta.actor_identities(["clickfix", "Lazarus"], ref) == {"clickfix", "lazarus group"}
+        # A listed name is no actor of a report (2026-11-05): left out of actor_identities, also as the
+        # report's only name; without the reference it counts as itself.
+        assert cta.actor_identities(["clickfix", "Lazarus"], ref) == {"lazarus group"}
+        assert cta.actor_identities(["ClickFix", "Proton66"], ref) == frozenset()
+        assert cta.actor_identities(["clickfix", "Lazarus"], None) == {"clickfix", "lazarus"}
 
     def test_a_reference_without_the_list_lists_no_name(self, reference):
         assert "not_actors" not in reference_doc()

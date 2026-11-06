@@ -2040,9 +2040,10 @@ class MISPToNeo4jSync:
         self._actor_reference_loaded = False
 
     def _report_actor_reference(self) -> Optional[CanonicalReference]:
-        """The canonical threat-actor reference that tells how many actors a report names, or
-        ``None`` when it is unavailable (logged once): the actors are then told apart by name, so the
-        aliases of one actor count as several and their report attributes nothing."""
+        """The canonical threat-actor reference that tells how many actors a report names and which
+        threat-actor names were reviewed as no actors, or ``None`` when it is unavailable (logged once):
+        the actors are then told apart by name, so the aliases of one actor count as several and their
+        report attributes nothing, and no threat-actor attribute is skipped as no actor."""
         if not getattr(self, "_actor_reference_loaded", False):
             self._actor_reference_loaded = True
             self._actor_reference = None
@@ -2050,7 +2051,8 @@ class MISPToNeo4jSync:
                 self._actor_reference = load_canonical_reference()
             except ReferenceUnavailable as exc:
                 logger.warning(
-                    "[ATTRIBUTION] canonical reference unavailable (%s): a report's actors are told apart by name",
+                    "[ATTRIBUTION] canonical reference unavailable (%s): a report's actors are told apart by name, "
+                    "and no threat-actor attribute is skipped as a name the reference lists as no actor",
                     exc,
                 )
         return getattr(self, "_actor_reference", None)
@@ -4413,6 +4415,18 @@ class MISPToNeo4jSync:
                     "Skipping threat-actor attribute %r: %s",
                     actor_name[:80],
                     "generic phrase, not a name" if not _cleaned_names else "composite name — split at collection",
+                )
+                return None, []
+            # 2026-11-05: nor must a name the canonical threat-actor reference lists as no actor (its
+            # ``not_actors``: a technique, malware, a kit, a hosting network, a forum, a company or a campaign
+            # that a report gave as its adversary). The OTX collector drops such a name before MISP; an
+            # attribute MISP already holds (pushed before the name was listed) or that another source wrote is
+            # skipped here, whatever its source. Without the reference nothing is skipped (logged once).
+            _actor_reference = self._report_actor_reference()
+            if _actor_reference is not None and _actor_reference.is_not_actor(actor_name):
+                logger.info(
+                    "Skipping threat-actor attribute %r: the canonical threat-actor reference lists it as no actor",
+                    actor_name[:80],
                 )
                 return None, []
 

@@ -95,6 +95,10 @@ class TestSplitCompositeActorName:
             "search and destroy",
             "operation search and destroy",  # protected prefix
             "Operation Hack and Leak",
+            # 2026-11-05: the threat-actor galaxy's actor "Stealth Mango and Tangelo" is one name.
+            "Stealth Mango and Tangelo",
+            "Stealth Mango & Tangelo",
+            "stealth mango and tangelo group",
             "a and b",  # sides shorter than AND_SPLIT_MIN_SIDE_LEN
             "ab & cd",
             "ab && cd",
@@ -123,6 +127,14 @@ class TestSplitCompositeActorName:
         assert split_composite_actor_name("   ") == []
         assert split_composite_actor_name("and") == []
         assert split_composite_actor_name("&&") == []
+
+    def test_a_protected_name_in_a_list_is_one_of_its_names(self):
+        # 2026-11-05: the comma split still applies; only the and-split of the name itself is refused.
+        assert split_composite_actor_name("APT36, Stealth Mango and Tangelo") == ["APT36", "Stealth Mango and Tangelo"]
+        assert clean_actor_names("Stealth Mango and Tangelo; Transparent Tribe") == [
+            "Stealth Mango and Tangelo",
+            "Transparent Tribe",
+        ]
 
     def test_dedup_case_insensitive_preserves_first_spelling_and_order(self):
         assert split_composite_actor_name("APT28, apt28, Apt29, APT28") == ["APT28", "Apt29"]
@@ -485,6 +497,10 @@ class TestCountryAndStateNames:
             ("APT28 and Bosnia and Herzegovina", ["APT28"]),
             ("Lazarus and Saint Kitts and Nevis", ["Lazarus"]),
             ("Trinidad & Tobago and APT41", ["APT41"]),
+            # 2026-11-05: "&&" inside a country name reads as "and", as in the other spellings.
+            ("Trinidad && Tobago", []),
+            ("APT41, Trinidad && Tobago", ["APT41"]),
+            ("Trinidad && Tobago and APT41", ["APT41"]),
             # Ordinary "and" lists still split.
             ("Head Mare and Twelve", ["Head Mare", "Twelve"]),
             ("APT28 and APT29", ["APT28", "APT29"]),
@@ -628,6 +644,11 @@ class TestStateAgencies:
             ("Ministry of Intelligence and Security", []),
             ("APT34 and Ministry of Intelligence and Security", ["APT34"]),
             ("MOIS (Ministry of Intelligence and Security)", []),
+            # 2026-11-05: also with "&" or "&&", on its own, after a comma and inside an "and" list.
+            ("Ministry of Intelligence & Security", []),
+            ("Ministry of Intelligence && Security", []),
+            ("APT34, Ministry of Intelligence && Security", ["APT34"]),
+            ("APT34 && Ministry of Intelligence && Security", ["APT34"]),
             # The actor in parentheses behind an agency is the name, as behind a country.
             ("FSB (Turla)", ["Turla"]),
             ("Turla (FSB)", ["Turla"]),
@@ -671,16 +692,12 @@ class TestStateAgencies:
 REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE = frozenset(
     {"[unnamed group]", "hacking team", "unnamed actor", "unnamed actor group", "unnamed actor team"}
 )
-# Names of the reference that clean_actor_names does not keep as they are: the generic names above, and
-# the threat-actor galaxy's record "Stealth Mango and Tangelo", which the and-split makes two names, with its
-# suffix-rule variants. Pinned so that a rule change that alters any
-# other name of the reference (2026-11-05: the "&&" separator, the "-speaking" qualifier, state agencies
-# changed none) is a decision taken here.
-REFERENCE_NAMES_NOT_KEPT_AS_THEY_ARE = REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE | {
-    "stealth mango and tangelo",
-    "stealth mango and tangelo group",
-    "stealth mango and tangelo team",
-}
+# Names of the reference that clean_actor_names does not keep as they are: the generic names above, and no
+# other. Pinned so that a rule change that alters any other name of the reference is a decision taken here
+# (2026-11-05: the "&&" separator, the "-speaking" qualifier and state agencies changed none, and the
+# threat-actor galaxy's record "Stealth Mango and Tangelo", which the and-split made two names, became a
+# protected prefix).
+REFERENCE_NAMES_NOT_KEPT_AS_THEY_ARE = REFERENCE_NAMES_GENERIC_BEFORE_COUNTRY_RULE
 
 
 class TestTheCanonicalReferenceIsNeverGeneric:
@@ -749,6 +766,8 @@ class TestDroppedGeopoliticalNames:
             ("apt28, Bosnia and Herzegovina", ["Bosnia and Herzegovina"]),
             ("APT28 and Bosnia and Herzegovina", ["Bosnia and Herzegovina"]),
             ("Trinidad & Tobago and APT41", ["Trinidad and Tobago"]),  # rejoined from the "&"-split sides
+            ("Trinidad && Tobago", ["Trinidad && Tobago"]),
+            ("APT34, Ministry of Intelligence && Security", ["Ministry of Intelligence && Security"]),
             # A country on its own, as the adversary of a group whose common name is that country.
             ("Russia", ["Russia"]),
             ("Cuba", ["Cuba"]),
