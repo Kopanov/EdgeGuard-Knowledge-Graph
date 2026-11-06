@@ -2,11 +2,17 @@
 # =============================================================================
 # Install with: pip install -r requirements.txt
 #
-# Version policy: ~= (compatible release) pins to the current major.minor and
-# allows only patch upgrades.  This blocks neo4j 6.x, Airflow 4.x, etc. from
-# silently breaking the pipeline on a fresh install.
+# Version policy: ~= (compatible release).
+#   - "~=X.Y" (two parts, the default) admits every release from X.Y up to the
+#     next major: compatible minor and security releases install without an
+#     edit, and neo4j 6.x, pymisp 3.x etc. cannot silently break the pipeline
+#     on a fresh install.
+#   - "~=X.Y.Z" (three parts) admits only X.Y patch releases. It is used where a
+#     minor release is not compatible with this code: apache-airflow, whose minor
+#     releases migrate the metadata database and change internals the DAGs and
+#     tests use (Airflow 3.4.0 broke tests/test_monitoring_signals.py).
 #
-# To upgrade intentionally, update the minor version and re-test.
+# To upgrade past a pin, update it and re-test.
 # Airflow was bumped 2.11 → 3.2 in a deliberate upgrade (see Airflow block
 # below and docs/AIRFLOW_DAGS.md for migration notes).
 # =============================================================================

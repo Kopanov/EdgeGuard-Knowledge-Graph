@@ -12,10 +12,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 
-# Version policy: ~= compatible-release pins — allows only patch upgrades
-# within the stated major.minor, blocking silent breaking-version upgrades
-# (e.g. neo4j 6.x, Airflow 4.x). Airflow was bumped 2.11→3.2 in a deliberate,
-# reviewed upgrade (see [project.optional-dependencies] → airflow block).
+# Version policy: ~= compatible-release pins, as in requirements.txt. "~=X.Y"
+# (the default) admits compatible minor releases up to the next major, blocking
+# silent breaking-version upgrades (e.g. neo4j 6.x); "~=X.Y.Z" admits only
+# patch releases, for Airflow, whose minor releases are not compatible. Airflow
+# was bumped 2.11→3.2 in a deliberate, reviewed upgrade (see
+# [project.optional-dependencies] → airflow block).
 dependencies = [
     # Core
     "neo4j~=5.27",
