@@ -95,9 +95,10 @@ LEGAL_FORM_WORDS: frozenset = frozenset(
     "gmbh s.a. s.a.s. s.l. s.r.l. s.p.a. b.v. n.v. a.g. pte pte. pty pty. sdn sdn. bhd bhd. "
     "jsc pjsc ojsc cjsc".split()
 )
-# One legal-form word: it ends after its dot or before a character that is no letter or digit, so
-# ``"co.ltd."`` is two of them and ``"ltda"`` none. Longest first, so ``"ltd."`` wins over ``"ltd"``.
-_LEGAL_FORM_WORD_RE = r"(?:{})(?:(?<=\.)|(?![^\W_]))".format(
+# One legal-form word, with or without a final dot (``"llc."``, ``"gmbh."``): it ends after its dot or
+# before a character that is no letter or digit, so ``"co.ltd."`` is two of them and ``"ltda"`` none.
+# Longest first, so ``"ltd."`` wins over ``"ltd"``.
+_LEGAL_FORM_WORD_RE = r"(?:{})\.?(?:(?<=\.)|(?![^\W_]))".format(
     "|".join(re.escape(w) for w in sorted(LEGAL_FORM_WORDS, key=lambda w: (-len(w), w)))
 )
 _LEGAL_FORM_ONLY_RE = re.compile(

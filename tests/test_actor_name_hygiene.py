@@ -209,6 +209,8 @@ class TestParenthesesAndLegalForms:
             ("Integrity Technology Group, Inc. and APT41", ["Integrity Technology Group, Inc.", "APT41"]),
             ("Sichuan Silence Information Technology Co.,Ltd.", ["Sichuan Silence Information Technology Co.,Ltd."]),
             ("Example Holdings, LLC", ["Example Holdings, LLC"]),
+            ("Example Holdings, LLC.", ["Example Holdings, LLC."]),
+            ("Example Systems, GmbH.", ["Example Systems, GmbH."]),
             ("Example Systems, GmbH", ["Example Systems, GmbH"]),
             ("Example Systems, S.A.", ["Example Systems, S.A."]),
             ("Example Systems, Corp.", ["Example Systems, Corp."]),
@@ -221,6 +223,11 @@ class TestParenthesesAndLegalForms:
             ("Co., Ltd.", []),
             ("LLC", []),
             ("Inc.", []),
+            # A word stored without a final dot also counts with one.
+            ("LLC.", []),
+            ("GmbH.", []),
+            ("PLC.", []),
+            ("JSC.", []),
             ("Ltd., APT41", ["APT41"]),
             # The bare "INC" is INC Ransom in the canonical reference: a name, also in a list.
             ("INC", ["INC"]),
@@ -283,7 +290,24 @@ class TestParenthesesAndLegalForms:
         assert dropped_geopolitical_names(raw) == ["mois"]
 
     @pytest.mark.parametrize(
-        "name", ["Ltd.", "ltd", "Co., Ltd.", "Co.Ltd.", "LLC", "l.l.c.", "Inc.", "GmbH", "S.A.", "PLC", "Pty Ltd"]
+        "name",
+        [
+            "Ltd.",
+            "ltd",
+            "Co., Ltd.",
+            "Co.Ltd.",
+            "LLC",
+            "LLC.",
+            "l.l.c.",
+            "Inc.",
+            "GmbH",
+            "GmbH.",
+            "S.A.",
+            "PLC",
+            "PLC.",
+            "JSC.",
+            "Pty Ltd",
+        ],
     )
     def test_a_legal_form_on_its_own_is_generic(self, name):
         assert is_generic_actor_name(name) is True
@@ -360,7 +384,7 @@ def _parentheses_balance(name: str) -> bool:
 
 
 # Written apart from the module's LEGAL_FORM_WORDS, so the check does not read the rule it checks.
-_LEGAL_FORM_RE_WORD = r"(?:co\.|ltd\.?|inc\.|corp\.|llc|gmbh|plc|s\.a\.|limited)"
+_LEGAL_FORM_RE_WORD = r"(?:co\.|ltd\.?|inc\.|corp\.|llc\.?|gmbh\.?|plc\.?|jsc\.?|s\.a\.|limited\.?)"
 _ONLY_A_LEGAL_FORM_RE = re.compile(rf"{_LEGAL_FORM_RE_WORD}(?:(?:[\s,]+|(?<=\.)){_LEGAL_FORM_RE_WORD})*")
 
 
@@ -392,6 +416,7 @@ _FUZZ_TOKENS = (
     "INC",
     "Co., Ltd.",
     "Co.Ltd.",
+    "LLC.",
     " （",
     " aka ",
     "aka",
@@ -401,7 +426,7 @@ _FUZZ_TOKENS = (
 
 
 def test_every_combination_of_names_separators_parentheses_and_legal_forms_gives_clean_names():
-    """All 8,420 strings of up to three of the tokens (2026-11-06: on the code before, 4-token strings of a
+    """All 9,723 strings of up to three of the tokens (2026-11-06: on the code before, 4-token strings of a
     similar set gave 22,445 names with unbalanced parentheses and 374 that the hygiene changed again)."""
     import itertools
 
@@ -410,7 +435,7 @@ def test_every_combination_of_names_separators_parentheses_and_legal_forms_gives
         for combo in itertools.product(_FUZZ_TOKENS, repeat=size):
             _assert_clean_names("".join(combo))
             count += 1
-    assert count == 20 + 20**2 + 20**3
+    assert count == 21 + 21**2 + 21**3
 
 
 # ===========================================================================
@@ -999,7 +1024,8 @@ class TestTheCanonicalReferenceIsNeverGeneric:
 
         listed = {e["key"] for e in reference_doc["ambiguous"]} | {e["key"] for e in reference_doc["not_actors"]}
         first_words = {n.replace(",", " ").split()[0] for n in reference_names | listed if n.split()}
-        assert not first_words & LEGAL_FORM_WORDS
+        # A legal-form word also counts with a final dot ("llc.").
+        assert not (first_words | {w[:-1] for w in first_words if w.endswith(".")}) & LEGAL_FORM_WORDS
         assert "inc" in reference_names and clean_actor_names("LockBit, INC") == ["LockBit", "INC"]
 
 
