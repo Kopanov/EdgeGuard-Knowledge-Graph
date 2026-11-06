@@ -14,7 +14,7 @@
 |---|---|
 | Base image | `apache/airflow:3.3.2-python3.12` (`Dockerfile.airflow`) |
 | Custom image tag | `edgeguard-airflow:3.3.2-python3.12` (`docker-compose.yml`) |
-| Python packages | `apache-airflow[postgres]~=3.3` + `apache-airflow-providers-standard~=1.5` (`requirements.txt`, `pyproject.toml`). The image installs `requirements-airflow-docker.txt`, which carries the same `fastapi!=0.136.3` exclusion as the root manifest, because the 3.3.2 base bundles that flagged release |
+| Python packages | `apache-airflow[postgres]~=3.3.2` (3.3.x only; `~=3.3` would admit 3.4) + `apache-airflow-providers-standard~=1.5` (`requirements.txt`, `pyproject.toml`). The image installs `requirements-airflow-docker.txt`, which carries the same `fastapi!=0.136.3` exclusion as the root manifest, because the 3.3.2 base bundles that flagged release |
 | Version check | `RECOMMENDED_VERSIONS["airflow"] = "3.3"`, so `edgeguard doctor` reports Airflow `3.3.x` without a drift warning |
 | Operators | `airflow.providers.standard.operators.bash.BashOperator`, `airflow.providers.standard.operators.python.PythonOperator` / `ShortCircuitOperator` |
 | `Variable`, `TaskGroup` | `airflow.sdk.Variable` and `airflow.sdk.TaskGroup`, each with a `try/except ImportError` fallback; `Variable.get(...)` takes its default positionally (2.x and 3.x both accept it) |
@@ -739,10 +739,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-11-03_
+_Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — Python packages: `apache-airflow[postgres]~=3.3.2`. The two-part `~=3.3` admits every 3.x release, and CI installed Airflow 3.4.0 on its release; the image runs 3.3.2.
 - 2026-11-03 — Baseline troubleshooting: the baseline's writer stops a push on a failing MISP after `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE` (3600 s), a failing streak at most until 10 minutes before its task's end (at least 60 s), so a push it stops lets the collector return its status (slow lookups and listings can still take the task to its `execution_timeout`); the scheduled writers stop after `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` (900 s).
 - 2026-11-02 — Source schedules: an OTX run counts up to 200 pulses modified after the cursor, oldest first (`EDGEGUARD_INCREMENTAL_LIMIT`), the overlap's re-reads on top; the table gave 50 pulses; MISP push accounting: OTX puts the pulses with unstored items on its retry list and moves its cursor on, unless every unstored item failed at its MISP event (the text had the cursor held below them until the collector was fixed).
 - 2026-11-02 — Checked against the code: `airflow standalone` runs its four components as subprocesses and neither restarts nor exits when one dies (the topology note placed them inside one process); `baseline_clean` documents its `BASELINE_CLEAN: deleted …` line; the postcheck's WARNING table lists every collector that delivered nothing, also one not run or without a returned status (it named skipped and failed only); MITRE ATT&CK pushes the whole bundle when it changed and nothing otherwise (the table gave 500 items); the MISP dedup logging names `[CASE-VARIANT]`; a SQLite metadata database is Airflow's default only when neither the environment nor `airflow.cfg` names a backend; the Airflow 3 commands take the DAG id as a positional argument and task logs are read in the UI or the log files (the page gave `list-runs -d` and `airflow logs`, which Airflow 3 rejects); the full-sync measurement still to be made is no longer named.

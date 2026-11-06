@@ -422,7 +422,7 @@ Each entry: symptom → detection signal → remediation.
 
 - **Applies to.** Only an Airflow 2 deployment, whose task instance has
   `get_dagrun()`. EdgeGuard runs on Airflow 3 (`requirements.txt` pins
-  `apache-airflow~=3.3`; the image, `Dockerfile.airflow`, runs 3.3.2), where
+  `apache-airflow~=3.3.2`; the image, `Dockerfile.airflow`, runs 3.3.2), where
   this path cannot run: the postcheck fails the run as described in 7b.
 - **Symptom.** Airflow `baseline_postcheck` task log contains a
   `[BASELINE-POSTCHECK-SKIPPED]` ERROR line; postcheck task state =
@@ -1614,6 +1614,7 @@ _Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — 7c: `requirements.txt` pins `apache-airflow~=3.3.2` (`~=3.3` admitted 3.4).
 - 2026-11-06 — Canonical threat-actor reference: version `2026.11.06` lists `Videostrong Technology Co., Ltd.` as no actor beside `Videostrong Technology Co.` (39 names in 19 decisions). The actor-name hygiene no longer splits inside parentheses or before a legal form, so that OTX adversary field is one name, which the 2026-11-05 decision did not cover; built from the same galaxies and graph export, the reference is otherwise unchanged.
 - 2026-11-06 — INV-1 counts the qualifying actors with the shared malware of `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`; the campaign job's `[CAMPAIGN] shared malware:` line (also with the rule off), the campaigns without an indicator that counts, and how to bring a graph built without the rule to a build with it; removing a curated layer: a campaign is deleted when its actor has no campaign evidence left.
 - 2026-11-05 — Canonical threat-actor reference: version `2026.11.05` and its counts, built from the MISP galaxies of 2026-11-05 (MISP 2.5.50; 12 new threat-actor records, among them BlackLock and TA419) and the graph of the 730-day baseline of 2026-11-03. Thirteen decisions on the names that baseline left unresolved: eleven merges (`Static Tundra` into Dragonfly and `INC` into INC Ransom from ATT&CK, `Tomiris` into Storm-0473, `KongTuke` into TAG-124, `LapDogs` into UAT-7810, `APT-C-01` into GreenSpot, `DONOT` into VICEROY TIGER, `ARMORY CASTLE` into UTA0178 and `CL-STA-0954` into UNC5820 from galaxy synonyms, two from the upstream threat-actor galaxy v359; `Calypso APT` and `UNG002` as spelling variants) and two never_merges (`Fire Ant`, which the galaxies give to two actors, and a string joining the names of Scattered Lapsus Hunters and ShinyHunters). The decision that made `Global Group` an actor of its own was removed: the galaxies give it to BlackLock. The overrides file gains `not_actor` decisions, copied into the reference's `not_actors`: 38 OTX adversary names of that baseline that a review found to be no actors (a technique, malware, kits and tools, hosting networks, a forum, companies, campaign names), which the OTX collector drops from adversary fields with an `[ACTOR-NAMES]` line of its own, the MISP→Neo4j sync skips as threat-actor attributes (also those MISP holds from before), and step 2d and the acceptance check count as no actors; state intelligence and security agencies on their own are dropped by the hygiene and listed on the country line.

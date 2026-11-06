@@ -477,7 +477,7 @@ No base-plus-bonus confidence formula is implemented. How `confidence_score` is 
 
 ```bash
 # Install Airflow + PostgreSQL driver (matches docker-compose metadata backend)
-pip install "apache-airflow[postgres]~=3.3" "apache-airflow-providers-standard~=1.5"
+pip install "apache-airflow[postgres]~=3.3.2" "apache-airflow-providers-standard~=1.5"
 # or from repo root:
 # pip install ".[airflow]"
 
@@ -516,6 +516,7 @@ _Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — The pip line pins `apache-airflow[postgres]~=3.3.2` (`~=3.3` admitted 3.4).
 - 2026-11-06 — Campaign Node Builder: an indicator of a malware many actors share counts only through a link that a record reporting it cites (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`); a campaign is deleted when its actor has no campaign evidence left; `shared_malware_actors` and `shared_malware`.
 - 2026-11-02 — Incremental Collection Limit: for OTX the limit counts the pulses modified after the cursor, oldest first, and the overlap's re-reads are processed outside it (the text gave every other collector at most 200 items per run).
 - 2026-11-02 — The provenance-property table no longer lists `validation_status`, which no code writes or reads; the timeout row no longer names a full-sync measurement still to be made.

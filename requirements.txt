@@ -79,7 +79,9 @@ stix2~=3.0
 #
 # [postgres] still pulls psycopg + the postgres provider for LocalExecutor
 # against airflow_postgres. Production metadata is PostgreSQL only.
-apache-airflow[postgres]~=3.3
+# Three parts on purpose: "~=3.3" admits every 3.x release (Airflow 3.4.0 reached CI on
+# 2026-11-06), "~=3.3.2" only 3.3.x from the 3.3.2 the image runs (Dockerfile.airflow).
+apache-airflow[postgres]~=3.3.2
 # Ships BashOperator / PythonOperator / ShortCircuitOperator and the other
 # formerly-bundled operators. Required on Airflow 3.x — in 2.x they were
 # built into the core package.

@@ -62,11 +62,11 @@ dev = [
 #   - Scheduler + API server are now separate processes; see docker-compose
 #     for the updated service topology.
 #
-# [postgres] still pulls psycopg + the postgres provider. Keep ~=3.3 for
-# patch upgrades within the stable 3.3 line; a bump to 3.4 or 4.x is a
-# separate review.
+# [postgres] still pulls psycopg + the postgres provider. Keep ~=3.3.2 (three
+# parts: ~=3.3 admits 3.4) for patch upgrades within the stable 3.3 line; a
+# bump to 3.4 or 4.x is a separate review.
 airflow = [
-    "apache-airflow[postgres]~=3.3",
+    "apache-airflow[postgres]~=3.3.2",
     # Ships BashOperator, PythonOperator, ShortCircuitOperator etc. that
     # this repo imports from dags/. Required on Airflow 3.x.
     "apache-airflow-providers-standard~=1.5",
