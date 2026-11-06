@@ -53,11 +53,15 @@ Since 2026-10-25 it fails when a ``Source`` node is keyed by an alias of a regis
 node whose id the registry does not know. Since the campaign seen dates of 2026-10-25 it fails when a
 campaign is first seen later than the first date of one of its indicator members (a source's first-seen
 claim, else its latest report, never after the member's first import) or last seen earlier than a
-member's latest dated report. Since 2026-11-02 it fails when an EdgeGuard node lacks the sector label of
-one of its zones (``:Finance`` for ``finance``) or carries a sector label its zones do not give
-(``src/sector_labels.py``). Since 2026-11-02 it also judges the shape of the graph against the claims stored
-on the nodes (``src/graph_shape_checks.py``): it fails when a technique's kill-chain phase whose Tactic
-exists has no ``IN_TACTIC``, when a technique MITRE says a group, a malware or a tool uses has no
+member's latest dated report. Since the shared-malware rule of 2026-11-06 the campaign evidence checks
+take an indicator of a malware that at least ``EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`` (default 7)
+actors share as evidence only through a link a record reporting it cites, each campaign judged with the
+list of shared malware its build recorded, and the script fails when an indicator member of a campaign
+has no path to the campaign's actor through such evidence. Since 2026-11-02 it fails when an EdgeGuard
+node lacks the sector label of one of its zones (``:Finance`` for ``finance``) or carries a sector label its
+zones do not give (``src/sector_labels.py``). Since 2026-11-02 it also judges the shape of the graph against
+the claims stored on the nodes (``src/graph_shape_checks.py``): it fails when a technique's kill-chain
+phase whose Tactic exists has no ``IN_TACTIC``, when a technique MITRE says a group, a malware or a tool uses has no
 ``EMPLOYS_TECHNIQUE`` / ``IMPLEMENTS_TECHNIQUE`` labelled ``mitre_explicit`` while the Technique exists (or
 MITRE nodes carry no such claim at all), when an ATT&CK id of an indicator's OTX report has no
 ``USES_TECHNIQUE`` to its existing Technique, when a sector a feed gave a node has no ``TARGETS`` /
@@ -83,6 +87,11 @@ Env (``src/neo4j_http_endpoint.py``):
   NEO4J_PASSWORD   basic-auth password
   NEO4J_HTTP_USER_AGENT  User-Agent (default: a browser's)
 
+Env of the deployment the checks follow (``src/campaign_evidence.py``):
+  EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS  actors from which a malware is shared (default 7; 0 = off):
+                   the list for a campaign without the one its build recorded (a partner's, or one
+                   built before 2026-11-06), and the list the recorded ones are compared with
+
 Usage, the Compose Neo4j (http://127.0.0.1:7474) with the credentials of .env:
   set -a; . ./.env; set +a
   python scripts/verify_fresh_baseline.py                 # human-readable
@@ -105,6 +114,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -121,7 +131,8 @@ import neo4j_http_endpoint  # noqa: E402
 
 # Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b, the ATT&CK
 # software ids in malware family names of checks 10a4 / 10a5, and (2026-10-16) the campaign evidence
-# of checks 13c / 13d, which ``build_campaign_nodes`` reads from the same module.
+# of checks 13c / 13d / 13f, which ``build_campaign_nodes`` reads from the same module (2026-11-06: with
+# the shared malware, by the same query and the same setting).
 from attack_revoked import load_revoked_ids  # noqa: E402
 from attack_software_names import (  # noqa: E402
     CYPHER_BASE_NODES_READ,
@@ -134,7 +145,16 @@ from attack_software_names import (  # noqa: E402
     plan_twin_folds,
     twin_base_names,
 )
-from campaign_evidence import CAMPAIGN_EVIDENCE_CHECK_QUERY, MALWARE_MEMBERSHIP_CHECK_QUERY  # noqa: E402
+from campaign_evidence import (  # noqa: E402
+    CAMPAIGN_EVIDENCE_CHECK_QUERY,
+    INDICATOR_MEMBERSHIP_CHECK_QUERY,
+    MALWARE_MEMBERSHIP_CHECK_QUERY,
+    RECORDED_SHARED_MALWARE_QUERY,
+    SHARED_MALWARE_ACTORS_SETTING,
+    SHARED_MALWARE_QUERY,
+    shared_malware_actors,
+    shared_malware_names,
+)
 from canonical_threat_actors import (  # noqa: E402
     ATTRIBUTION_CHECK_QUERY,
     INDICATOR_MARKED_REPORTS_QUERY,
@@ -454,6 +474,47 @@ class Report:
 def _one(statement: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     rows = _post(statement, params)
     return rows[0] if rows else {}
+
+
+def _shared_malware_rule(setting: Optional[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Checks 13c, 13d and 13f (2026-11-06): the parameters and the report detail of the shared-malware
+    rule. Each campaign is judged with the list of shared malware its build recorded on it
+    (``c.shared_malware``, ``campaign_evidence.recorded_shared_malware``), so a link a sync wrote after the
+    build cannot fail a campaign built correctly; ``$shared_malware`` is the list computed now, with
+    ``setting`` (``EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`` in this script's environment), for a
+    campaign without one. The detail gives that setting and list, the recorded lists with their
+    campaigns, and the names the graph now shares or no longer shares at the main recorded setting."""
+    min_actors = shared_malware_actors(setting)
+    current = shared_malware_names(_one(SHARED_MALWARE_QUERY, {"min_actors": min_actors}).get("malware"))
+    rows = _post(RECORDED_SHARED_MALWARE_QUERY)
+    recorded = [r for r in rows if r.get("min_actors") is not None]
+    detail: Dict[str, Any] = {
+        "shared_malware_actors": min_actors,
+        "shared_malware": len(current),
+        "recorded": [
+            {
+                "shared_malware_actors": r["min_actors"],
+                "shared_malware": len(r.get("names") or []),
+                "campaigns": r.get("campaigns"),
+            }
+            for r in recorded
+        ],
+        "campaigns_without_recorded_list": sum(
+            int(r.get("campaigns") or 0) for r in rows if r.get("min_actors") is None
+        ),
+    }
+    if recorded:
+        main = recorded[0]
+        now = current
+        if main["min_actors"] != min_actors:
+            now = shared_malware_names(_one(SHARED_MALWARE_QUERY, {"min_actors": main["min_actors"]}).get("malware"))
+        built = set(main.get("names") or [])
+        if built != set(now):
+            detail["shared_since_build"] = {
+                "added": sorted(set(now) - built)[:10],
+                "removed": sorted(built - set(now))[:10],
+            }
+    return {"shared_malware": current}, detail
 
 
 def _judged(defects: Any, judged: Any) -> Optional[bool]:
@@ -1513,20 +1574,28 @@ def run_checks(
         attribution_ok = not r.get("resting_on_several_actor_reports") and not r.get("naming_several_actor_reports")
     rep.add("attribution_from_single_actor_reports", attribution_ok, r)
 
+    # 13c-13f (2026-11-06): the shared malware (``campaign_evidence``): an indicator of a malware that
+    #      many actors share is evidence only through a link a record reporting it cites. Checks 13c, 13d
+    #      and 13f judge each campaign with the list its build recorded, else with the list computed now
+    #      (``EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`` in this script's environment, default 7; 0 = off),
+    #      and report both (``_shared_malware_rule``).
+    shared_params, shared_detail = _shared_malware_rule(os.environ.get(SHARED_MALWARE_ACTORS_SETTING))
+
     # 13c. Campaign membership follows the evidence (2026-10): a malware is part of a campaign only
     #      while it is attributed to the campaign's actor or (2026-10-16) used by it
-    #      (``campaign_evidence``; build_campaign_nodes step 2b prunes the rest). Named
+    #      (``campaign_evidence``; build_campaign_nodes step 2b prunes the rest); a shared malware
+    #      (2026-11-06) only while a record a link cites reported one of its indicators. Named
     #      ``campaign_malware_attributed`` until 2026-10-16, when it read ATTRIBUTED_TO only.
-    r = _one(MALWARE_MEMBERSHIP_CHECK_QUERY)
+    r = dict(_one(MALWARE_MEMBERSHIP_CHECK_QUERY, shared_params), **shared_detail)
     rep.add("campaign_malware_has_evidence", None if not r.get("malware_links") else r.get("without_evidence") == 0, r)
 
     # 13d. No campaign without evidence (2026-10-16): every campaign EdgeGuard built has an actor with
-    #      an ATTRIBUTED_TO or USES_MALWARE link (build_campaign_nodes step 1b deletes the others)
-    #      and that actor's RUNS, and no RUNS comes from an actor that is not the campaign's or has
-    #      neither link (step 2c removes it). Informational while there is no campaign EdgeGuard built
+    #      an ATTRIBUTED_TO or USES_MALWARE link that is campaign evidence (build_campaign_nodes step 1b
+    #      deletes the others) and that actor's RUNS, and no RUNS comes from an actor that is not the
+    #      campaign's or has no campaign evidence (step 2c removes it). Informational while there is no campaign EdgeGuard built
     #      and no RUNS without evidence: a RUNS without evidence into any campaign (a partner's or one
     #      written before) fails even on a graph without EdgeGuard campaigns.
-    r = _one(CAMPAIGN_EVIDENCE_CHECK_QUERY)
+    r = dict(_one(CAMPAIGN_EVIDENCE_CHECK_QUERY, shared_params), **shared_detail)
     defects = ("without_evidence", "without_runs", "runs_without_evidence")
     judged = r.get("campaigns") or r.get("runs_without_evidence")
     rep.add("campaigns_have_evidence", all(r.get(k) == 0 for k in defects) if judged else None, r)
@@ -1548,6 +1617,18 @@ def run_checks(
         elif r.get("edge_dated_members"):
             seen_dates_ok = True
     rep.add("campaign_seen_dates_cover_members", seen_dates_ok, r)
+
+    # 13f. Indicator membership follows the evidence (2026-11-06): every indicator member of a campaign
+    #      has a path to the campaign's actor through a member malware whose link counts for it
+    #      (``campaign_evidence.indicator_paths``: an indicator of a shared malware only through a link
+    #      a record reporting it cites; build_campaign_nodes step 3a links only such indicators and
+    #      step 3b removes the rest). Informational without indicator members.
+    r = dict(_one(INDICATOR_MEMBERSHIP_CHECK_QUERY, shared_params), **shared_detail)
+    rep.add(
+        "campaign_indicators_have_evidence",
+        None if not r.get("indicator_links") else r.get("without_evidence") == 0,
+        r,
+    )
 
     # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from
     #     its CVSS sub-nodes (``_CVSS_SELECTION_ORDER``): with a valid sub-node, the score and

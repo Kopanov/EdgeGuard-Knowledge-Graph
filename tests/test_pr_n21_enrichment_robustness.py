@@ -226,7 +226,10 @@ class TestFix6BaselinePostcheck:
         from campaign_evidence import QUALIFYING_ACTORS_QUERY
 
         post_body = _function_body(src, "assert_baseline_postconditions")
-        assert "session.run(QUALIFYING_ACTORS_QUERY)" in post_body, "INV-1 must count the qualifying actors"
+        # 2026-11-06: with the shared malware of the builder's setting.
+        assert "session.run(QUALIFYING_ACTORS_QUERY, shared_malware=shared_malware)" in post_body, (
+            "INV-1 must count the qualifying actors"
+        )
         assert "ATTRIBUTED_TO" in QUALIFYING_ACTORS_QUERY, "INV-1 must check ATTRIBUTED_TO edges"
         assert ":Campaign" in post_body, "INV-1 must check Campaign nodes"
         # Must raise AirflowException on violation (not just log)
@@ -464,7 +467,7 @@ class TestBugbotRound1Fixes:
         # count is ``campaign_evidence.QUALIFYING_ACTORS_QUERY``, the builder's own definition.
         from campaign_evidence import QUALIFYING_ACTORS_QUERY
 
-        assert post_body.count("RETURN count") >= 3 and "session.run(QUALIFYING_ACTORS_QUERY)" in post_body, (
+        assert post_body.count("RETURN count") >= 3 and "session.run(QUALIFYING_ACTORS_QUERY," in post_body, (
             "INV-1 + INV-2 + INV-3 must each use a standalone count query"
         )
         assert QUALIFYING_ACTORS_QUERY.endswith("RETURN count(a) AS qualifying_actors")
@@ -489,14 +492,15 @@ class TestBugbotRound1Fixes:
         post_body = _function_body(src, "assert_baseline_postconditions")
 
         # 2026-10-16: INV-1 runs the builder's qualifying-actor definition (``campaign_evidence``):
-        # an ATTRIBUTED_TO or a USES_MALWARE link to a malware an active indicator INDICATES.
-        assert "session.run(QUALIFYING_ACTORS_QUERY)" in post_body
+        # an ATTRIBUTED_TO or a USES_MALWARE link to a malware an active indicator INDICATES (2026-11-06:
+        # through a shared malware only for an indicator the link's record reported).
+        assert "session.run(QUALIFYING_ACTORS_QUERY, shared_malware=shared_malware)" in post_body
         # Positive: must reference INDICATES + active filter (qualifying-actor logic)
         assert QUALIFYING_ACTORS_QUERY.count("<-[:INDICATES]-(i:Indicator) WHERE i.active = true") == 2, (
             "INV-1 must include INDICATES traversal and the i.active filter of build_campaign_nodes, for both links"
         )
-        assert "(a)<-[:ATTRIBUTED_TO]-(:Malware)" in QUALIFYING_ACTORS_QUERY
-        assert "(a)-[:USES_MALWARE]->(:Malware)" in QUALIFYING_ACTORS_QUERY
+        assert "(a)<-[_ql:ATTRIBUTED_TO]-(m:Malware)" in QUALIFYING_ACTORS_QUERY
+        assert "(a)-[_ql:USES_MALWARE]->(m:Malware)" in QUALIFYING_ACTORS_QUERY
         # Negative: the naive ATTRIBUTED_TO-only count must NOT appear
         assert "MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) RETURN count(*)" not in post_body, (
             "INV-1 must not use the naive ATTRIBUTED_TO-only count — that's the Bugbot round 2 false-positive shape"

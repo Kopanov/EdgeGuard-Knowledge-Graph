@@ -187,6 +187,22 @@ _MARKED_PULSES = ["68cd617b3eb5b1212d11643d", "6a4fdf500b5e6dffde939998"]
 # 2026-10-16: check 13d on a correct graph: every campaign EdgeGuard built rests on its actor's
 # ATTRIBUTED_TO or USES_MALWARE links and has the actor's RUNS.
 _CAMPAIGN_EVIDENCE_ROW = {"campaigns": 210, "without_evidence": 0, "without_runs": 0, "runs_without_evidence": 0}
+# 2026-11-06: the shared malware (checks 13c, 13d, 13f), the two most shared of the 42 on the 730-day graph of
+# 2026-11-03 (the first with a spelling of its own), the list the build recorded on the campaigns (the same),
+# and check 13f on a correct graph: every indicator member has a path through evidence that counts for it.
+_SHARED_MALWARE = (
+    {"name": "cobalt strike", "names": ["cobalt strike", "cobaltstrike"], "actors": 64},
+    {"name": "plugx", "names": ["plugx"], "actors": 21},
+)
+_SHARED_NAMES = ["cobalt strike", "cobaltstrike", "plugx"]
+_RECORDED_SHARED = ({"min_actors": 7, "names": list(_SHARED_NAMES), "campaigns": 510},)
+_SHARED_DETAIL = {
+    "shared_malware_actors": 7,
+    "shared_malware": 3,
+    "recorded": [{"shared_malware_actors": 7, "shared_malware": 3, "campaigns": 510}],
+    "campaigns_without_recorded_list": 0,
+}
+_INDICATOR_MEMBERSHIP_ROW = {"indicator_links": 34374, "without_evidence": 0}
 # 2026-10-25: check 13e on a correct graph: no campaign is first seen after an indicator member's first
 # date or last seen before a member's latest dated report; most members are dated by an edge.
 _CAMPAIGN_SEEN_DATES_ROW = {
@@ -458,6 +474,13 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
     # statements name that relationship.
     if "AS malware_links" in s:
         return [{"malware_links": 1600, "without_evidence": 0}]
+    # 2026-11-06: the shared malware and check 13f; before the USES_MALWARE branch below, since both name it.
+    if "AS indicator_links" in s:
+        return [dict(_INDICATOR_MEMBERSHIP_ROW)]
+    if "collect({name: names[0], names: names, actors: actors}) AS malware" in s:
+        return [{"malware": [dict(m) for m in _SHARED_MALWARE]}]
+    if "c.shared_malware_actors AS min_actors" in s:
+        return [dict(r) for r in _RECORDED_SHARED]
     # 2026-10-25: check 13e (campaign seen dates).
     if "AS first_seen_after_members" in s:
         return [dict(_CAMPAIGN_SEEN_DATES_ROW)]
@@ -1511,7 +1534,7 @@ class TestAttributionFromSingleActorReports:
 
         assert seen["campaign"] == campaign_evidence.MALWARE_MEMBERSHIP_CHECK_QUERY
         assert "MATCH (a:ThreatActor {name: c.actor_name})" in seen["campaign"]
-        assert "(a)<-[:ATTRIBUTED_TO]-(m)" in seen["campaign"] and "(a)-[:USES_MALWARE]->(m)" in seen["campaign"]
+        assert "(a)<-[_hv:ATTRIBUTED_TO]-(m)" in seen["campaign"] and "(a)-[_hv:USES_MALWARE]->(m)" in seen["campaign"]
 
 
 def _record(seen, statement, params, override):
@@ -1559,12 +1582,12 @@ class TestCampaignMembership:
 class TestCampaignEvidence:
     """2026-10-16: no campaign without evidence. Every campaign EdgeGuard built rests on an
     ATTRIBUTED_TO or USES_MALWARE link of its actor and has that actor's RUNS; no RUNS comes from an
-    actor that is not the campaign's or has neither link. Informational while there is no campaign."""
+    actor that is not the campaign's or has no campaign evidence. Informational while there is no campaign."""
 
     def test_a_correct_graph_passes(self, vfb, monkeypatch):
         c = _check(_run(vfb, monkeypatch), "campaigns_have_evidence")
         assert c["ok"] is True and c["mandatory"] is True
-        assert c["detail"] == _CAMPAIGN_EVIDENCE_ROW
+        assert c["detail"] == dict(_CAMPAIGN_EVIDENCE_ROW, **_SHARED_DETAIL)
 
     @pytest.mark.parametrize("column", ["without_evidence", "without_runs", "runs_without_evidence"])
     def test_each_defect_fails(self, vfb, monkeypatch, column):
@@ -1600,11 +1623,126 @@ class TestCampaignEvidence:
 
         _run(vfb, monkeypatch, override=capture)
         assert seen["st"] == campaign_evidence.CAMPAIGN_EVIDENCE_CHECK_QUERY
-        # The campaigns EdgeGuard built; the actor by the campaign's name; either link; RUNS from it.
+        # The campaigns EdgeGuard built; the actor by the campaign's name; either link, judged with the shared
+        # malware the campaign's build recorded (2026-11-06); RUNS from it.
         assert "MATCH (c:Campaign) WHERE c.edgeguard_managed = true" in seen["st"]
-        assert campaign_evidence.has_evidence("a") in seen["st"]
+        assert campaign_evidence.has_evidence("a", shared=campaign_evidence.recorded_shared_malware("c")) in seen["st"]
         assert "(:ThreatActor {name: c.actor_name})-[:RUNS]->(c)" in seen["st"]
         assert "coalesce(a.name = rc.actor_name, false)" in seen["st"]
+
+
+class TestCampaignSharedMalware:
+    """2026-11-06: checks 13c, 13d and 13f judge each campaign with the shared malware its build recorded on
+    it (``c.shared_malware``), else with the list of the builder's query and setting computed now
+    (``EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`` in the script's environment, default 7; 0 = off), and 13f
+    fails when an indicator member of a campaign has no path to its actor through evidence that counts for it
+    (``campaign_evidence.indicator_paths``). tests/test_campaign_shared_malware_neo4j.py runs the statements on
+    campaigns ``build_campaign_nodes`` built, also after a sync linked a seventh actor to a malware."""
+
+    @staticmethod
+    def _run_seen(vfb, monkeypatch, override=None):
+        seen: Dict[str, Any] = {}
+
+        def fake_post(statement, params=None, timeout=180):
+            seen.setdefault(statement, params)
+            rows = _healthy_rows(statement, params or {})
+            return override(statement, rows) if override else rows
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        return vfb.run_checks(False, False, False, False), seen
+
+    def test_the_checks_judge_with_the_builders_list(self, vfb, monkeypatch):
+        import campaign_evidence as ce
+
+        monkeypatch.delenv(ce.SHARED_MALWARE_ACTORS_SETTING, raising=False)
+        rep, seen = self._run_seen(vfb, monkeypatch)
+        assert seen[ce.SHARED_MALWARE_QUERY] == {"min_actors": 7}
+        assert ce.RECORDED_SHARED_MALWARE_QUERY in seen
+        for statement in (
+            ce.MALWARE_MEMBERSHIP_CHECK_QUERY,
+            ce.CAMPAIGN_EVIDENCE_CHECK_QUERY,
+            ce.INDICATOR_MEMBERSHIP_CHECK_QUERY,
+        ):
+            # The list computed now, for the campaigns without a recorded one; each statement reads the
+            # campaign's own first (``campaign_evidence.recorded_shared_malware``).
+            assert seen[statement] == {"shared_malware": _SHARED_NAMES}
+            assert "coalesce(c.shared_malware, $shared_malware)" in statement
+        c = _check(rep, "campaign_indicators_have_evidence")
+        assert c["ok"] is True and c["mandatory"] is True
+        assert c["detail"] == dict(_INDICATOR_MEMBERSHIP_ROW, **_SHARED_DETAIL)
+        assert _check(rep, "campaign_malware_has_evidence")["detail"]["shared_malware"] == 3
+
+    @pytest.mark.parametrize("value, expected", [("0", 0), ("1", 2), ("12", 12), ("x", 7), ("", 7), ("-3", 0)])
+    def test_the_setting_is_read_as_the_builder_reads_it(self, vfb, monkeypatch, value, expected):
+        import campaign_evidence as ce
+        import config
+
+        monkeypatch.setenv(ce.SHARED_MALWARE_ACTORS_SETTING, value)
+        rep, seen = self._run_seen(vfb, monkeypatch)
+        assert (
+            seen[ce.SHARED_MALWARE_QUERY]
+            == {"min_actors": expected}
+            == {"min_actors": config.campaign_shared_malware_actors()}
+        )
+        assert _check(rep, "campaigns_have_evidence")["detail"]["shared_malware_actors"] == expected
+
+    def test_the_names_shared_since_the_build_are_reported_not_judged(self, vfb, monkeypatch):
+        """A sync after the build linked a seventh actor to a malware: the list computed now has a name the
+        build did not judge with. The checks still judge with the build's list (they pass), and the detail
+        names the difference."""
+        import campaign_evidence as ce
+
+        monkeypatch.delenv(ce.SHARED_MALWARE_ACTORS_SETTING, raising=False)
+        now = [*_SHARED_MALWARE, {"name": "amadey", "names": ["amadey"], "actors": 7}]
+        rep, seen = self._run_seen(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [{"malware": now}] if st == ce.SHARED_MALWARE_QUERY else rows,
+        )
+        assert rep.failed == []
+        detail = _check(rep, "campaigns_have_evidence")["detail"]
+        assert detail["shared_since_build"] == {"added": ["amadey"], "removed": []}
+        assert detail["shared_malware"] == 4 and detail["recorded"][0]["shared_malware"] == 3
+        assert seen[ce.CAMPAIGN_EVIDENCE_CHECK_QUERY] == {"shared_malware": [*_SHARED_NAMES, "amadey"]}
+
+    def test_campaigns_without_a_recorded_list_are_counted(self, vfb, monkeypatch):
+        """Campaigns built before 2026-11-06 (or by a run that failed before Step 7) carry no list: they are
+        judged with the list computed now and counted; a second recorded rule is listed with its campaigns."""
+        import campaign_evidence as ce
+
+        rows = [
+            {"min_actors": 7, "names": list(_SHARED_NAMES), "campaigns": 500},
+            {"min_actors": None, "names": None, "campaigns": 12},
+            {"min_actors": 0, "names": [], "campaigns": 3},
+        ]
+        rep, _seen = self._run_seen(
+            vfb, monkeypatch, override=lambda st, r: rows if st == ce.RECORDED_SHARED_MALWARE_QUERY else r
+        )
+        detail = _check(rep, "campaign_malware_has_evidence")["detail"]
+        assert detail["campaigns_without_recorded_list"] == 12
+        assert detail["recorded"] == [
+            {"shared_malware_actors": 7, "shared_malware": 3, "campaigns": 500},
+            {"shared_malware_actors": 0, "shared_malware": 0, "campaigns": 3},
+        ]
+        assert "shared_since_build" not in detail
+
+    def test_an_indicator_member_without_evidence_fails(self, vfb, monkeypatch):
+        rep, _seen = self._run_seen(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [dict(rows[0], without_evidence=3)] if "AS indicator_links" in st else rows,
+        )
+        assert [c["check"] for c in rep.failed] == ["campaign_indicators_have_evidence"]
+
+    def test_no_indicator_member_is_informational(self, vfb, monkeypatch):
+        rep, _seen = self._run_seen(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [{"indicator_links": 0, "without_evidence": 0}] if "AS indicator_links" in st else rows
+            ),
+        )
+        assert _check(rep, "campaign_indicators_have_evidence")["ok"] is None and rep.failed == []
 
 
 class TestCampaignSeenDates:

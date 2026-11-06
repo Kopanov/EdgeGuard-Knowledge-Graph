@@ -302,8 +302,16 @@ def _snapshot(raw_driver) -> tuple:
 
 
 def _one(raw_driver, query: str) -> dict:
+    """One row of ``query``; a statement of ``campaign_evidence`` gets the shared malware the builder
+    reads (2026-11-06; none in these fixtures)."""
     with raw_driver.session() as session:
-        return dict(session.run(query).single())
+        params = {}
+        if "$shared_malware" in query:
+            row = session.run(
+                campaign_evidence.SHARED_MALWARE_QUERY, min_actors=campaign_evidence.SHARED_MALWARE_ACTORS_DEFAULT
+            ).single()
+            params["shared_malware"] = campaign_evidence.shared_malware_names(row["malware"])
+        return dict(session.run(query, params).single())
 
 
 def test_an_actor_that_uses_malware_has_a_campaign_resting_on_that_link(client, raw_driver, monkeypatch):

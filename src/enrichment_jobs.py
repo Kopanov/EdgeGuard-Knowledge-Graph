@@ -311,6 +311,51 @@ def _links_evidence(rel_var: str, links: str, quote: str = '"') -> str:
     )
 
 
+def _shared_malware_summary(
+    min_actors: int, shared: List[Dict[str, Any]], link_rows: List[Dict[str, Any]]
+) -> Tuple[str, Dict[str, int]]:
+    """The log line and the counts of the shared-malware rule of one run (2026-11-06,
+    ``campaign_evidence``): ``shared`` is the row of ``SHARED_MALWARE_QUERY`` (``{name, names, actors}``,
+    most shared first), ``link_rows`` those of ``SHARED_LINKS_QUERY`` (one per link type). Both lines start
+    with ``[CAMPAIGN] shared malware:``."""
+    setting = campaign_evidence.SHARED_MALWARE_ACTORS_SETTING
+    if min_actors <= 0:
+        line = f"[CAMPAIGN] shared malware: rule off ({setting}=0): every linked malware counts for all its indicators"
+        return line, {
+            "shared_malware": 0,
+            "shared_malware_names": 0,
+            "shared_malware_links": 0,
+            "report_scoped_links": 0,
+        }
+    names = campaign_evidence.shared_malware_names(shared)
+    links = sum(int(r.get("links") or 0) for r in link_rows)
+    shared_links = sum(int(r.get("shared_links") or 0) for r in link_rows)
+    scoped_links = sum(int(r.get("report_scoped_links") or 0) for r in link_rows)
+    per_type = [
+        f"{r.get('link_type')} {int(r.get('shared_links') or 0)}, "
+        + (f"{int(r.get('report_scoped_links') or 0)} with such indicators" if r.get("report_scoped_links") else "none")
+        for r in link_rows
+        if r.get("shared_links")
+    ]
+    line = (
+        f"[CAMPAIGN] shared malware: {len(shared)} with {min_actors} or more actors ({setting}; {len(names)} names "
+        f"with their spellings); {shared_links} of {links} actor links are to one and count only for the "
+        f"indicators of their own records"
+    )
+    if per_type:
+        line += f" ({'; '.join(per_type)})"
+    if shared:
+        line += "; most shared: " + ", ".join(
+            f"{'/'.join(m.get('names') or [m.get('name')])} ({m.get('actors')})" for m in shared[:10]
+        )
+    return line, {
+        "shared_malware": len(shared),
+        "shared_malware_names": len(names),
+        "shared_malware_links": shared_links,
+        "report_scoped_links": scoped_links,
+    }
+
+
 # Step 5 of ``build_campaign_nodes`` (2026-10-16): the active campaigns this run stamped. Step 1 stamps
 # ``c.last_updated`` with the database's clock, from which ``$run_start_at`` is read when the run
 # starts. The condition was ``duration.between(c.last_updated, datetime()).minutes < 5``, and
@@ -322,6 +367,17 @@ MATCH (c:Campaign)
 WHERE c.active = true
   AND c.last_updated >= datetime($run_start_at)
 RETURN count(c) as count
+"""
+
+
+# Step 7 of ``build_campaign_nodes`` (2026-11-06): the shared-malware rule of the run, on every campaign
+# EdgeGuard created (``campaign_evidence.RECORDED_SHARED_MALWARE_QUERY`` reads it back).
+_RECORD_SHARED_MALWARE_CYPHER = """
+MATCH (c:Campaign)
+WHERE c.edgeguard_managed = true
+SET c.shared_malware_actors = $min_actors,
+    c.shared_malware = $shared_malware
+RETURN count(c) AS campaigns
 """
 
 
@@ -341,16 +397,27 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       Indicator   -[:PART_OF_CAMPAIGN]-> Campaign  (sampled — up to 100 per campaign, the most
                                                      recently reported by the sources' own dates)
 
-    The links follow the evidence (2026-10): a campaign whose actor has neither link left is
-    deleted with its links (Step 1b, 2026-10-16), a malware link without either link is pruned
+    A malware that many actors share (2026-11-06: at least ``EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS``,
+    default 7, distinct actors with either link, spellings of one name together; ``campaign_evidence``)
+    is not evidence for all its indicators: an indicator a source tagged with it joins a campaign only
+    through a link of the actor that a record reporting it cites (an OTX pulse that attributes the
+    malware to the actor and lists the indicator), whichever member it reaches, and the shared malware
+    is a member only while it has such an indicator. The list is read once per run, before Step 1, every
+    step judges by it, and Step 7 records it on the campaigns for the acceptance checks; an ATT&CK
+    ``uses`` or a curated claim of such a malware is no campaign evidence.
+
+    The links follow the evidence (2026-10): a campaign whose actor has no campaign evidence left is
+    deleted with its links (Step 1b, 2026-10-16), a malware link that is no evidence is pruned
     (Step 2b), a RUNS whose actor is not the campaign's or has no evidence is removed (Step 2c), and
     every link's provenance is replaced on each run by that of the links it currently rests on;
     ``r.evidence_types`` names their relationship types. Every link and the campaign also carry the
     most restrictive ``tlp`` of the links they rest on (2026-10: a curated-package claim carries the
     package's level, so the campaign built on it is exported at that level, not at the default;
     recomputed on every run, ``_campaign_tlp``). A campaign with evidence whose indicators
-    all expired stays, inactive (Step 4). A re-created campaign keeps its ``uuid``: it is computed
-    from the actor's name (``compute_node_uuid``), never stored elsewhere.
+    all expired, or (2026-11-06) all belong to a shared malware no record of the actor's links reported,
+    stays, inactive (Step 4), with ``indicator_count`` 0 and no zone (Step 3c). A re-created campaign
+    keeps its ``uuid``: it is computed from the actor's name (``compute_node_uuid``), never stored
+    elsewhere.
 
     ``PART_OF_CAMPAIGN`` was ``PART_OF`` until 2026-10: ResilMesh uses ``PART_OF`` for its own
     asset model (IP → Subnet, the OrganizationUnit hierarchy), and in the shared database one
@@ -373,6 +440,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       zone            — union of all indicator zones; each sector zone is also a label
                         (``:Finance`` …, Step 6, ``sector_labels``)
       tag             — actor tag (for UNIQUE constraint key)
+      shared_malware_actors, shared_malware
+                      — the shared-malware rule the last run judged with (2026-11-06, Step 7):
+                        the setting (0 = off) and the names of the shared malware
     """
     if not neo4j_client.driver:
         logger.error("build_campaign_nodes: no Neo4j connection")
@@ -404,20 +474,45 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 server_now = None
             if isinstance(server_now, str) and server_now:
                 run_start_at = server_now
+            # 2026-11-06: the shared malware (``campaign_evidence``), read once, so every step below
+            # judges by one list. A link of an actor to a malware that many actors share made every
+            # indicator of the family evidence of the actor's campaign: 30 ATT&CK groups that use
+            # Cobalt Strike had its 2,238 active indicators as candidates (730-day graph of
+            # 2026-11-03), and a curated claim that an actor uses such a malware gives its campaign the
+            # family's dates and zones the same way. An indicator of such a malware now counts only
+            # through a link of the actor that a record reporting it cites.
+            min_actors = config.campaign_shared_malware_actors()
+            shared_record = session.run(
+                campaign_evidence.SHARED_MALWARE_QUERY, min_actors=min_actors, timeout=NEO4J_READ_TIMEOUT
+            ).single()
+            shared_rows = [dict(m) for m in ((shared_record["malware"] if shared_record else None) or [])]
+            shared_malware = campaign_evidence.shared_malware_names(shared_rows)
+            link_rows = [
+                dict(r)
+                for r in session.run(
+                    campaign_evidence.SHARED_LINKS_QUERY, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT
+                )
+            ]
+            shared_line, shared_counts = _shared_malware_summary(min_actors, shared_rows, link_rows)
+            logger.info(shared_line)
+            results.update(shared_counts)
             # Pre-fetch the names of every qualifying ThreatActor so we can
             # compute deterministic Campaign uuids in Python (Campaign name is
             # ``"<actor> Campaign"``). Without this, the MERGE below would
             # create Campaign nodes with NULL uuid — silently breaking the
             # cross-environment traceability contract this PR exists for.
             # Caught in the post-PR-#33 fresh-eyes audit.
-            # 2026-10-16: an actor qualifies with either evidence link (ATTRIBUTED_TO or USES_MALWARE).
+            # 2026-10-16: an actor qualifies with either evidence link (ATTRIBUTED_TO or USES_MALWARE);
+            # 2026-11-06: one that counts as campaign evidence (``campaign_evidence.has_evidence``).
             qualifying_actors_query = f"""
             MATCH (a:ThreatActor)
             WHERE {campaign_evidence.has_evidence("a")}
             RETURN a.name AS name
             """
             actor_names = [
-                r["name"] for r in session.run(qualifying_actors_query, timeout=NEO4J_READ_TIMEOUT) if r["name"]
+                r["name"]
+                for r in session.run(qualifying_actors_query, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT)
+                if r["name"]
             ]
             campaign_uuids = {name: compute_node_uuid("Campaign", {"name": f"{name} Campaign"}) for name in actor_names}
 
@@ -441,6 +536,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             #
             # 2026-10-16: the members are the malware with either evidence link to the actor
             # (``campaign_evidence``); an indicator counts through INDICATES to any member, once.
+            # 2026-11-06: an indicator of a shared malware only when a link of the actor to the member
+            # counts for it (``campaign_evidence.indicator_joins``), so the counts, dates and zones read
+            # the indicators the sample (Step 3a) is taken from.
             create_cypher = f"""
             MATCH (a:ThreatActor)
             WHERE {campaign_evidence.has_evidence("a")}
@@ -448,7 +546,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, {campaign_evidence.member_malware("a")} AS malware_list
             UNWIND malware_list AS _member
             OPTIONAL MATCH (_member)<-[:INDICATES]-(i:Indicator)
-            WHERE i.active = true
+            WHERE i.active = true AND {campaign_evidence.indicator_joins("i", "_member", "a")}
             // PR (S5) (bugbot c9bb277 MED + architecture redesign):
             // per-source timestamps live on SOURCED_FROM edges, not on
             // the node. We want "earliest claim across ALL sources for
@@ -585,7 +683,12 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 {_links_evidence("r_runs", "actor_evidence")}
             RETURN count(DISTINCT c) AS campaigns
             """
-            result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
+            result = session.run(
+                create_cypher,
+                campaign_uuids=campaign_uuids,
+                shared_malware=shared_malware,
+                timeout=NEO4J_READ_TIMEOUT,
+            )
             record = result.single()
             results["campaigns_created"] = record["campaigns"] if record else 0
 
@@ -610,8 +713,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
             # Step 1b (2026-10-16): a campaign without evidence is deleted, not kept. When no
             # ThreatActor of the campaign's actor name has an ATTRIBUTED_TO or USES_MALWARE link left
-            # (build_relationships step 2d removed its same-pulse attributions, or the actor alias
-            # merge folded the actor into another, so no actor of that name remains), the Campaign
+            # that counts as evidence (build_relationships step 2d removed its same-pulse attributions,
+            # the actor alias merge folded the actor into another, so no actor of that name remains,
+            # or, since 2026-11-06, its links are to shared malware none of whose indicators their
+            # records reported), the Campaign
             # node goes with every link it has (RUNS, PART_OF_CAMPAIGN) in this run. Only campaigns
             # EdgeGuard created: a partner's node keeps existing, and Steps 2b, 2c and 3b remove
             # EdgeGuard's links to it. A campaign with evidence whose indicators all expired stays
@@ -632,11 +737,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             RETURN count(*) AS deleted, sum(runs) AS runs_removed, sum(members) AS members_removed,
                    collect(name)[0..20] AS names
             """
-            deleted_record = session.run(delete_without_evidence, timeout=NEO4J_READ_TIMEOUT).single()
+            deleted_record = session.run(
+                delete_without_evidence, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT
+            ).single()
             campaigns_deleted = int((deleted_record["deleted"] if deleted_record else 0) or 0)
             if campaigns_deleted:
                 logger.info(
-                    "[CAMPAIGN] deleted %d campaigns whose actor has no ATTRIBUTED_TO or USES_MALWARE link left "
+                    "[CAMPAIGN] deleted %d campaigns whose actor has no campaign evidence left "
                     "(with %s RUNS and %s PART_OF_CAMPAIGN links); first names: %s",
                     campaigns_deleted,
                     deleted_record["runs_removed"],
@@ -650,7 +757,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # n.uuid by now (Malware via merge_node_with_source, Campaign via
             # step 1 above) so the edge SET reads bound .uuid directly.
             # 2026-10-16: every malware with an evidence link to the campaign's actor (ATTRIBUTED_TO
-            # or USES_MALWARE) is a member; the link rests on those links (one or both).
+            # or USES_MALWARE) is a member; the link rests on those links (one or both). 2026-11-06: a
+            # shared malware only through a link that counts for one of its indicators, and the member
+            # link rests on those links only.
             link_malware = f"""
             MATCH (c:Campaign)
             MATCH (a:ThreatActor {{name: c.actor_name}})
@@ -672,7 +781,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 {_links_evidence("r", "member_evidence")}
             RETURN count(*) AS links
             """
-            result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
+            result = session.run(link_malware, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
             query_pause()
@@ -680,8 +789,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # Step 2b (2026-10): prune the malware membership that no evidence supports any more: the
             # malware has neither an ATTRIBUTED_TO nor (2026-10-16) a USES_MALWARE link to the
             # campaign's actor (build_relationships step 2d removed a same-pulse attribution, or the
-            # actor is gone). Judged by the same definition as Step 2 (``campaign_evidence``), not by
-            # the time Step 2 last touched the link.
+            # actor is gone), or (2026-11-06) it is shared and no indicator of it was reported in a
+            # record its links cite. Judged by the same definition as Step 2 (``campaign_evidence``),
+            # not by the time Step 2 last touched the link.
             prune_malware = f"""
             MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign)
             WHERE NOT EXISTS {{
@@ -691,12 +801,14 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             DELETE r
             RETURN count(r) AS pruned
             """
-            prune_record = session.run(prune_malware, timeout=NEO4J_READ_TIMEOUT).single()
+            prune_record = session.run(
+                prune_malware, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT
+            ).single()
             malware_pruned = prune_record["pruned"] if prune_record else 0
             if malware_pruned:
                 logger.info(
-                    "[CAMPAIGN] pruned %d malware PART_OF_CAMPAIGN edges with no ATTRIBUTED_TO or USES_MALWARE "
-                    "link to the campaign's actor",
+                    "[CAMPAIGN] pruned %d malware PART_OF_CAMPAIGN edges with no campaign evidence linking them "
+                    "to the campaign's actor",
                     malware_pruned,
                 )
             results["malware_links_pruned"] = malware_pruned
@@ -704,7 +816,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
             # Step 2c (2026-10): RUNS follows the evidence too. Step 1 rewrites RUNS only for actors
             # that still qualify (evidence and an active indicator); every RUNS is settled here:
-            # removed when its actor is not the campaign's actor or has neither link left (after
+            # removed when its actor is not the campaign's actor or has no campaign evidence left (after
             # Step 1b, a campaign EdgeGuard did not create, or the RUNS the alias merge moved onto
             # another actor), otherwise its evidence and provenance are recomputed from the actor's
             # current links. Either way RUNS names no link step 2d removed or trimmed.
@@ -727,12 +839,12 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                     {_links_evidence("r_runs", "actor_evidence")}, {_campaign_tlp("c", "actor_evidence")})
             RETURN sum(CASE WHEN evidenced THEN 0 ELSE 1 END) AS removed
             """
-            runs_record = session.run(settle_runs, timeout=NEO4J_READ_TIMEOUT).single()
+            runs_record = session.run(settle_runs, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT).single()
             runs_removed = runs_record["removed"] if runs_record else 0
             if runs_removed:
                 logger.info(
                     "[CAMPAIGN] removed %d RUNS edges whose actor is not the campaign's or has no "
-                    "ATTRIBUTED_TO or USES_MALWARE link left",
+                    "campaign evidence left",
                     runs_removed,
                 )
             results["runs_removed"] = runs_removed
@@ -782,6 +894,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # date (MalwareBazaar, SSL Blacklist, often ThreatFox), so ordering by it put those items
             # above indicators their sources reported later (an OTX report carries OTX's own date).
             #
+            # 2026-11-06: the candidates are those of Step 1: an indicator of a shared malware joins
+            # only through a link of the actor that its record reported it with, whichever member it
+            # reaches, and its paths (confidence, evidence types, provenance, TLP) are those links
+            # only. The list of shared malware reaches the batches through ``params``. Without it a
+            # Cobalt Strike family of 2,238 active indicators filled the 100 places of every campaign
+            # whose actor ATT&CK says uses it, ahead of the actor's own indicators.
+            #
             # PR-N21 (next-baseline robustness): wrap in
             # ``apoc.periodic.iterate`` with one Campaign per batch so the
             # cartesian explosion (Campaign × Malware × Indicator) doesn't
@@ -802,7 +921,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
               "MATCH (a:ThreatActor {name: c.actor_name})
                UNWIND __MEMBERS__ AS m
                MATCH (m)<-[:INDICATES]-(i:Indicator)
-               WHERE i.active = true
+               WHERE i.active = true AND __JOINS__
                WITH DISTINCT c, a, i
                OPTIONAL MATCH (i)-[_sf:SOURCED_FROM]->(:Source)
                WITH c, a, i, max(__EDGE_LAST__) AS _edges_last
@@ -822,7 +941,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                    __CAMPAIGN_EVIDENCE__,
                    __INHERITED_PROV__,
                    r.tlp = __TLP_OF_PATHS__",
-              {batchSize: 25, parallel: false, retries: 2}
+              {batchSize: 25, parallel: false, retries: 2, params: {shared_malware: $shared_malware}}
             )
             YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
                   batch, operations, updateStatistics
@@ -833,6 +952,12 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                     # them, each ``[INDICATES, ATTRIBUTED_TO or USES_MALWARE]`` (``campaign_evidence``).
                     "__MEMBERS__",
                     campaign_evidence.member_malware("a"),
+                )
+                .replace(
+                    # 2026-11-06: an indicator of a shared malware joins only through a link of the actor
+                    # that counts for it, as in Step 1 (``campaign_evidence.indicator_joins``).
+                    "__JOINS__",
+                    campaign_evidence.indicator_joins("i", "m", "a"),
                 )
                 .replace(
                     # 2026-11-02: the sample's order, by the sources' own dates (``indicator_seen_dates``).
@@ -874,7 +999,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                     ),
                 )
             )
-            result = session.run(link_indicators_batched, timeout=NEO4J_READ_TIMEOUT)
+            result = session.run(link_indicators_batched, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             if record:
                 # Fail loudly: any per-batch failure counts as a partial
@@ -954,6 +1079,48 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["links_pruned"] = pruned
             query_pause()
 
+            # Step 3c (2026-11-06): a campaign EdgeGuard created whose actor has campaign evidence but no
+            # active indicator that counts (all expired, or all of a shared malware that no record of
+            # the actor's links reported) is not reached by Step 1, which writes the counts and zones
+            # of campaigns with candidates only, so it kept those of the indicators it no longer counts
+            # (on the 730-day graph of 2026-11-03, 19 campaigns that the rule leaves without candidates
+            # kept up to 4,668 indicators and, all but two, all four zones). It gets ``indicator_count`` 0, the
+            # ``malware_count`` of its members and no zone, so Step 6 removes its sector labels; Step 4
+            # marks it inactive. Its dates stay: they only widen (Step 1).
+            settle_without_candidates = f"""
+            MATCH (c:Campaign)
+            WHERE c.edgeguard_managed = true
+            MATCH (a:ThreatActor {{name: c.actor_name}})
+            WHERE {campaign_evidence.has_evidence("a")}
+            WITH DISTINCT c, a, {campaign_evidence.member_malware("a")} AS malware_list
+            WHERE NOT any(_m IN malware_list WHERE EXISTS {{
+                MATCH (_m)<-[:INDICATES]-(_ci:Indicator)
+                WHERE _ci.active = true AND {campaign_evidence.indicator_joins("_ci", "_m", "a")}
+            }})
+            WITH c, size(malware_list) AS members,
+                 NOT coalesce(c.indicator_count = 0 AND c.malware_count = size(malware_list) AND c.zone = [], false)
+                     AS changed
+            // The stamp comes first, so it compares the values before the change (delta exports select
+            // on ``last_updated``).
+            SET c.last_updated = CASE WHEN changed THEN datetime() ELSE c.last_updated END,
+                c.indicator_count = 0,
+                c.malware_count = members,
+                c.zone = []
+            RETURN count(c) AS campaigns, sum(CASE WHEN changed THEN 1 ELSE 0 END) AS changed
+            """
+            settle_record = session.run(
+                settle_without_candidates, shared_malware=shared_malware, timeout=NEO4J_READ_TIMEOUT
+            ).single()
+            settled = int((settle_record["changed"] if settle_record else 0) or 0)
+            if settled:
+                logger.info(
+                    "[CAMPAIGN] %d campaigns with campaign evidence and no active indicator that counts now have "
+                    "indicator_count 0 and no zone",
+                    settled,
+                )
+            results["campaigns_without_candidates"] = int((settle_record["campaigns"] if settle_record else 0) or 0)
+            query_pause()
+
             # Step 4: Deactivate campaigns whose indicators are all retired.
             #
             # PR-M3d: must use OPTIONAL MATCH. The old inner-MATCH
@@ -1009,6 +1176,18 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 results["sector_labels_removed"],
                 int((record["campaigns"] if record else 0) or 0),
             )
+
+            # Step 7 (2026-11-06): the campaigns record the shared-malware rule this run judged with
+            # (``c.shared_malware_actors``, 0 = off, and ``c.shared_malware``, the names), last, so a
+            # run that fails before leaves the previous run's. The acceptance checks judge each campaign
+            # with the list on it, so a list that a later sync's links change (a seventh actor linked to
+            # a malware) cannot fail a campaign built correctly.
+            session.run(
+                _RECORD_SHARED_MALWARE_CYPHER,
+                min_actors=min_actors,
+                shared_malware=shared_malware,
+                timeout=NEO4J_READ_TIMEOUT,
+            ).single()
 
     except Exception as e:
         # PR-N21 BLOCKER (root cause of 2026-04-22 cloud Campaign = 0):

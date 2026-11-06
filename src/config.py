@@ -1552,3 +1552,22 @@ ABUSEIPDB_MAX_PER_RUN = _env_int("EDGEGUARD_ABUSEIPDB_MAX_PER_RUN", 10000)
 # folds "cobalt strike - s0154" into the ATT&CK node "cobalt strike") follows the same rule:
 # ``EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`` (default ON, ``false`` = dry run) is read at call time,
 # with no constant here. The ingest-side fix is ``src/attack_software_names.py``.
+
+# ---------------------------------------------------------------------------
+# Campaign builder: shared malware (2026-11-06)
+# ---------------------------------------------------------------------------
+# ``enrichment_jobs.build_campaign_nodes`` reads it at call time. The setting is parsed in
+# ``campaign_evidence``, which the acceptance script, which does not load this module, uses as well.
+import campaign_evidence as _campaign_evidence  # noqa: E402
+
+
+def campaign_shared_malware_actors() -> int:
+    """``EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`` (default 7; 0 = off, 1 counts as 2): the number of
+    distinct actors with an ``ATTRIBUTED_TO`` or ``USES_MALWARE`` link to a malware (spellings of one name
+    together) from which the malware is shared (2026-11-06, ``campaign_evidence``). An indicator of a
+    shared malware is campaign evidence only through a link that a record reporting it cites; 0 makes
+    every linked malware count for all its indicators. 7 is a trade-off, not a boundary between lineages and shared families
+    (``campaign_evidence``, at ``SHARED_MALWARE_ACTORS_DEFAULT``). Blank or not an integer gives 7; the
+    baseline postcheck reads the variable through the same function, the acceptance script through
+    ``campaign_evidence.shared_malware_actors``."""
+    return _campaign_evidence.shared_malware_actors(os.getenv(_campaign_evidence.SHARED_MALWARE_ACTORS_SETTING))

@@ -182,7 +182,8 @@ class TestPostcheckCampaignInvariant:
     """INV-1 (2026-10-16): the qualifying actors are those ``build_campaign_nodes`` builds a campaign
     for, by the builder's own definition (``campaign_evidence``): an ATTRIBUTED_TO or a USES_MALWARE
     link to a malware an active indicator INDICATES. The inline query read ATTRIBUTED_TO only, so a
-    graph whose campaigns rest on USES_MALWARE alone passed the invariant with no campaign."""
+    graph whose campaigns rest on USES_MALWARE alone passed the invariant with no campaign. Since
+    2026-11-06 the shared malware are read first, by the builder's query, and passed to the count."""
 
     RUN = "manual__2026-10-16T08:00:00+00:00"
 
@@ -198,11 +199,15 @@ class TestPostcheckCampaignInvariant:
         import campaign_evidence
 
         queries = []
+        self.params = {}
 
-        def run(query, **_kw):
+        def run(query, **kw):
             queries.append(query)
+            self.params[query] = kw
             result = MagicMock()
-            if query == campaign_evidence.QUALIFYING_ACTORS_QUERY:
+            if query == campaign_evidence.SHARED_MALWARE_QUERY:
+                result.single.return_value = {"malware": [{"name": "cobalt strike", "actors": 63}]}
+            elif query == campaign_evidence.QUALIFYING_ACTORS_QUERY:
                 result.single.return_value = {"qualifying_actors": qualifying}
             elif "(c:Campaign)" in query:
                 result.single.return_value = {"campaigns": campaigns}
@@ -228,8 +233,9 @@ class TestPostcheckCampaignInvariant:
 
         ep = _import_dag_module()
         queries, exc = self._run(ep, qualifying=3, campaigns=0)
-        assert queries[0] == campaign_evidence.QUALIFYING_ACTORS_QUERY
-        assert "(a)-[:USES_MALWARE]->(:Malware)<-[:INDICATES]-(i:Indicator)" in queries[0]
+        assert queries[:2] == [campaign_evidence.SHARED_MALWARE_QUERY, campaign_evidence.QUALIFYING_ACTORS_QUERY]
+        assert "(a)-[_ql:USES_MALWARE]->(m:Malware)<-[:INDICATES]-(i:Indicator)" in queries[1]
+        assert self.params[queries[1]] == {"shared_malware": ["cobalt strike"]}
         # INV-1 is the one violation (Indicator and Source counts are non-zero).
         assert exc is not None and "(1 violations)" in str(exc)
 

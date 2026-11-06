@@ -36,7 +36,7 @@ for _p in (_DAGS, _SRC):
         sys.path.insert(0, _p)
 
 import graph_shape_checks as gsc  # noqa: E402
-from campaign_evidence import QUALIFYING_ACTORS_QUERY  # noqa: E402
+from campaign_evidence import QUALIFYING_ACTORS_QUERY, SHARED_MALWARE_QUERY  # noqa: E402
 
 RUN = "manual__2026-11-01T08:30:35.559036+00:00"
 CHAIN = ("full_neo4j_sync", "build_relationships", "run_enrichment_jobs")
@@ -61,6 +61,8 @@ def ep():
 
 # The statements' rows on the 730-day graph (iMac, 2026-11-01 baseline, read 2026-11-02).
 ROWS_730D: Dict[str, Any] = {
+    # 2026-11-06: INV-1 reads the shared malware first (the two most shared of the 41 on the graph of 2026-11-03).
+    "shared": {"malware": [{"name": "cobalt strike", "actors": 63}, {"name": "plugx", "actors": 21}]},
     "qualifying": {"qualifying_actors": 533},
     "campaigns": {"campaigns": 533},
     "indicators": {"n": 274865},
@@ -374,8 +376,9 @@ class _Session:
 
     def run(self, query, parameters=None, **_kw):
         self.statements.append(query)
-        self.parameters[query] = parameters
+        self.parameters[query] = parameters if parameters is not None else _kw
         by_statement = {
+            SHARED_MALWARE_QUERY: "shared",
             QUALIFYING_ACTORS_QUERY: "qualifying",
             "MATCH (c:Campaign) RETURN count(c) AS campaigns": "campaigns",
             "MATCH (i:Indicator) RETURN count(i) AS n": "indicators",
@@ -483,8 +486,11 @@ class TestThe730DayRun:
             gsc.SOURCE_SOURCED_FROM_QUERY,
         }
         assert shared <= set(out.session.statements)
-        # INV-1 stays the first statement; the technique statements carry the revoked-id map the writers read.
-        assert out.session.statements[0] == QUALIFYING_ACTORS_QUERY
+        # INV-1 stays first: the shared malware by the builder's setting (2026-11-06; default 7), then the
+        # qualifying actors judged with them. The technique statements carry the revoked-id map the writers read.
+        assert out.session.statements[:2] == [SHARED_MALWARE_QUERY, QUALIFYING_ACTORS_QUERY]
+        assert out.session.parameters[SHARED_MALWARE_QUERY] == {"min_actors": 7}
+        assert out.session.parameters[QUALIFYING_ACTORS_QUERY] == {"shared_malware": ["cobalt strike", "plugx"]}
         from attack_revoked import technique_successors
 
         assert out.session.parameters[gsc.EMPLOYS_TECHNIQUE_COMPLETE_QUERY] == gsc.technique_params(

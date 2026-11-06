@@ -98,6 +98,9 @@ class _Session:
                 "names": [],
                 # 2026-11-02: Step 6, the campaigns' sector labels
                 "added": 0,
+                # 2026-11-06: the shared malware, and Step 3c
+                "malware": [],
+                "changed": 0,
             }
         return result
 

@@ -2058,10 +2058,20 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime(monkeypatch):
         reactivated_result.single.return_value = {"count": 0}
         now_result = MagicMock()
         now_result.single.return_value = {"now": "2026-10-15T12:00:00Z"}
+        shared_result = MagicMock()
+        shared_result.single.return_value = {"malware": []}
+        shared_links_result = MagicMock()
+        shared_links_result.__iter__ = lambda self: iter([])
         sector_labels_result = MagicMock()
         sector_labels_result.single.return_value = {"campaigns": 0, "added": 0, "removed": 0}
+        without_candidates_result = MagicMock()
+        without_candidates_result.single.return_value = {"campaigns": 0, "changed": 0}
+        record_result = MagicMock()
+        record_result.single.return_value = {"campaigns": 0}
         sess.run.side_effect = [
             now_result,  # 0 — the database's clock (2026-10)
+            shared_result,  # 0b — 2026-11-06 the shared malware
+            shared_links_result,  # 0c — 2026-11-06 the evidence links to them, per type
             actors_result,  # 1
             create_result,  # 2
             backfill_result,  # 3
@@ -2072,9 +2082,11 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime(monkeypatch):
             link_i_result,  # 5 — PR-N21 batched shape
             links_count_result,  # 6 — PR-N21 Bugbot round 1 follow-up
             prune_result,  # 7
+            without_candidates_result,  # 7b — 2026-11-06 Step 3c, campaigns without candidates
             cleanup_result,  # 8
             reactivated_result,  # 9
             sector_labels_result,  # 10 — 2026-11-02 Step 6, the campaigns' sector labels
+            record_result,  # 11 — 2026-11-06 Step 7, the shared-malware rule on the campaigns
         ]
         client.driver.session.return_value = sess
 

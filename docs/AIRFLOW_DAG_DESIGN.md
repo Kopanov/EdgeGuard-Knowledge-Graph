@@ -361,9 +361,9 @@ ThreatActor  -[:USES_MALWARE]-> Malware <-[:INDICATES]- Indicator
  [:RUNS]→ Campaign ←── [:PART_OF_CAMPAIGN] ←── [:PART_OF_CAMPAIGN]
 ```
 
-Every campaign link carries `match_type = 'campaign_grouping'`, the confidence of the links it rests on and their relationship types (`evidence_types`). A campaign whose actor has neither link left (or whose actor name no longer exists after the actor alias merge) is deleted with its links in the same run; one with evidence whose indicators all expired stays, `active = false`. Its `uuid` comes from the actor's name, so a campaign built again keeps it.
+A malware that at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (default 7) actors are linked to, the spellings of one name together, is shared (Cobalt Strike, PlugX): an indicator of it counts for a campaign only through a link that a record reporting it cites, so an ATT&CK `uses` or a curated claim of such a malware adds nothing to a campaign. Every campaign link carries `match_type = 'campaign_grouping'`, the confidence of the links it rests on and their relationship types (`evidence_types`). A campaign whose actor has no campaign evidence left (or whose actor name no longer exists after the actor alias merge) is deleted with its links in the same run; one with evidence and no active indicator that counts stays, `active = false`, with `indicator_count` 0 and no zone. Its `uuid` comes from the actor's name, so a campaign built again keeps it.
 
-Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `indicator_count`, `malware_count`, `tlp` (the most restrictive level of the links it rests on; the campaign links carry theirs the same way).
+Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `indicator_count`, `malware_count`, `tlp` (the most restrictive level of the links it rests on; the campaign links carry theirs the same way), `shared_malware_actors` and `shared_malware` (the shared-malware rule the run judged with, which the acceptance checks judge the campaign with).
 
 ## Data Quality Targets
 
@@ -512,10 +512,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — Campaign Node Builder: an indicator of a malware many actors share counts only through a link that a record reporting it cites (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`); a campaign is deleted when its actor has no campaign evidence left; `shared_malware_actors` and `shared_malware`.
 - 2026-11-02 — Incremental Collection Limit: for OTX the limit counts the pulses modified after the cursor, oldest first, and the overlap's re-reads are processed outside it (the text gave every other collector at most 200 items per run).
 - 2026-11-02 — The provenance-property table no longer lists `validation_status`, which no code writes or reads; the timeout row no longer names a full-sync measurement still to be made.
 - 2026-11-02 — Campaign nodes: `build_campaign_nodes` sets the campaigns' sector labels.

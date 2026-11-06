@@ -444,7 +444,7 @@ set -a; . ./.env; set +a
 python3 scripts/verify_fresh_baseline.py
 ```
 
-Exit 0 means every mandatory check passed. Run it while no sync and no `build_relationships` run is in progress: between the two, the checks of the links `build_relationships` builds fail by design ([docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance)). With an opt-in source enabled, add its flag, so that the script fails when that source left no data: `--require-cisa-ics` (CISA ICS), `--require-ics` (ATT&CK for ICS), `--require-malwarebazaar` (MalwareBazaar); after a baseline that collected OTX, add `--require-otx-industries`.
+Exit 0 means every mandatory check passed. Run it while no sync, `build_relationships` or enrichment run is in progress: until the runs after a sync are done, the checks of the links `build_relationships` and the campaign builder write fail by design ([docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance)). With an opt-in source enabled, add its flag, so that the script fails when that source left no data: `--require-cisa-ics` (CISA ICS), `--require-ics` (ATT&CK for ICS), `--require-malwarebazaar` (MalwareBazaar); after a baseline that collected OTX, add `--require-otx-industries`.
 
 ---
 
@@ -617,4 +617,4 @@ EdgeGuard is developed by IICT-BAS and Ratio1 and financed by ResilMesh Open Cal
 
 ---
 
-_Last updated: 2026-11-03_
+_Last updated: 2026-11-06_
