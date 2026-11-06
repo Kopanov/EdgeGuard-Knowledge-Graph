@@ -198,6 +198,53 @@ class TestStateAgenciesInTheAdversaryField:
         assert _actors(items) == ["GRU Unit 26165"]
 
 
+class TestParenthesesAndLegalFormsInTheAdversaryField:
+    """2026-11-06: the comma split cut adversary fields inside a parenthetical and before a company's
+    legal form. A sync on the test instance of 2026-11-06 made the ThreatActor nodes "black owl (bo team"
+    (OTX pulse 6aec5fe933b8cac0f8ed7334, adversary "Black Owl (BO Team", cut off by the source) and "ltd."
+    (OTX pulse 6ae9a05a6c8de6ce3516b3c8, adversary "Videostrong Technology Co., Ltd.")."""
+
+    @pytest.mark.parametrize(
+        "adversary",
+        ["Black Owl (BO Team, Hackers of the Black Owl)", "Black Owl (BO Team; Hackers)", "Black Owl (BO Team"],
+    )
+    def test_a_parenthetical_is_dropped_whole_and_the_pulse_attributes(self, adversary):
+        items = _HARNESS._collect([_pulse("p-bo", ["ReverseSSH"], adversary, ["203.0.113.110"])])
+        assert _actors(items) == ["Black Owl"]
+        ioc = _ioc(items, "203.0.113.110")
+        assert ioc["pulse_malware_actor_pairs"] == ["ReverseSSH::Black Owl::p-bo"], "one actor: the pulse attributes"
+        assert all(i["several_actor_pulses"] == [] and i["several_actor_pulses_by_name"] == [] for i in items)
+
+    def test_a_company_with_its_legal_form_is_one_actor_name(self):
+        items = _HARNESS._collect(
+            [_pulse("p-itg", ["Raptor Train"], "Integrity Technology Group, Inc.", ["203.0.113.111"])]
+        )
+        assert _actors(items) == ["Integrity Technology Group, Inc."]
+        ioc = _ioc(items, "203.0.113.111")
+        assert ioc["pulse_malware_actor_pairs"] == ["Raptor Train::Integrity Technology Group, Inc.::p-itg"]
+        assert ioc["several_actor_pulses"] == []
+
+    def test_a_company_beside_an_actor_is_two_names(self):
+        items = _HARNESS._collect(
+            [_pulse("p-two", ["Raptor Train"], "Flax Typhoon, Integrity Technology Group, Inc.", ["203.0.113.112"])]
+        )
+        assert _actors(items) == ["Flax Typhoon", "Integrity Technology Group, Inc."]
+        assert _ioc(items, "203.0.113.112")["pulse_malware_actor_pairs"] == [], "two actors: no pair"
+
+    def test_the_listed_company_stays_no_actor_under_its_full_name(self, caplog):
+        caplog.set_level(logging.INFO, logger=oc.logger.name)
+        items = _HARNESS._collect(
+            [_pulse("p-vs", ["Honeygain", "Gaganode"], "Videostrong Technology Co., Ltd.", ["203.0.113.113"])]
+        )
+        assert _actors(items) == [], "neither the company nor 'Ltd.'"
+        assert _malware(items) == ["Honeygain", "Gaganode"]
+        assert _ioc(items, "203.0.113.113")["pulse_malware_actor_pairs"] == []
+        listed = [r.getMessage() for r in caplog.records if "lists as no actors" in r.getMessage()]
+        assert len(listed) == 1 and listed[0].endswith(
+            "dropped from the adversary field: videostrong technology co., ltd. (1 pulse: p-vs)"
+        )
+
+
 class TestNamesTheReferenceListsAsNoActors:
     @pytest.mark.parametrize("name, family", [("ClickFix", "Lumma Stealer"), ("Proton66", "SuperBlack")])
     def test_a_listed_name_gives_no_actor_item_and_no_pair(self, reference, name, family):

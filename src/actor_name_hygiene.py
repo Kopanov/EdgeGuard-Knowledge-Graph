@@ -19,7 +19,10 @@ produced three kinds of junk ``ThreatActor`` nodes:
    ``enrichment_jobs.merge_alias_duplicate_actors``, not here.
 
 This module fixes (1) and (2) at the string level so the collectors / the
-MISP→Neo4j parser can call :func:`clean_actor_names` before any MERGE.
+MISP→Neo4j parser can call :func:`clean_actor_names` before any MERGE. It
+never splits inside parentheses or before a company's legal form
+(``"Integrity Technology Group, Inc."``), and no name it returns has
+unbalanced parentheses or is only a legal form (2026-11-06).
 Names reaching the graph are later lower-cased, NFC-normalised and trimmed
 by ``node_identity.canonicalize_merge_key`` — this module therefore keeps
 the caller's case and only trims / NFC-normalises / collapses whitespace.
@@ -61,12 +64,46 @@ from node_identity import is_placeholder_name
 # Splitting rules
 # ---------------------------------------------------------------------------
 
-# Hard list separators — always split. ASCII comma / semicolon plus their
-# full-width and ideographic forms (NFC does not fold those to ASCII, and
-# CJK-language pulses do emit them). A slash splits ONLY when it has
-# whitespace on both sides (``"apt28 / fancy bear"``); a bare ``a/b`` is
+# Hard list separators — split outside parentheses. ASCII comma / semicolon
+# plus their full-width and ideographic forms (NFC does not fold those to
+# ASCII, and CJK-language pulses do emit them). A slash splits ONLY when it
+# has whitespace on both sides (``"apt28 / fancy bear"``); a bare ``a/b`` is
 # left alone because it is more likely a single token than a list.
 _LIST_SEPARATOR_RE = re.compile(r"[,;，；、]|\s+/\s+")
+
+# Parentheses, ASCII and full-width (2026-11-06). A list separator inside a parenthetical never
+# splits: the parenthetical holds aliases of the name before it, and the trailing-parenthetical
+# rule drops it whole (``"Black Owl (BO Team, Hackers of the Black Owl)"`` is ``"Black Owl"``; the
+# comma split had made the names ``"Black Owl (BO Team"`` and ``"Hackers of the Black Owl)"``). No
+# name comes out with unbalanced parentheses: a parenthesis opened and never closed cuts the
+# fragment there, and a closing one without its opening one is removed.
+_OPENING_PARENS = "(（"
+_CLOSING_PARENS = ")）"
+
+# Legal-form words of a company name (2026-11-06), compared lower-cased. A list fragment or an
+# ``and`` side that BEGINS with one is the legal form of the fragment before it and is never split
+# off it (``"Sichuan Silence Information Technology Co., Ltd."``, ``"Integrity Technology Group,
+# Inc."``, ``"Smith & Co."``; the comma split had made the names ``"... Co."`` and ``"Ltd."``), and a
+# name made ONLY of these words is no name (``"Ltd."``, ``"Co., Ltd."``, rule (d) of
+# ``is_generic_actor_name``). The bare ``inc`` is not one of them: the canonical threat-actor
+# reference gives it to INC Ransom, so ``"LockBit, INC"`` stays two names and ``"INC"`` a name; the
+# dotted ``inc.`` is. Undotted two-letter forms (``ag``, ``sa``, ``bv``, ``nv``, ``ab``, ``oy``) are
+# left out for the same reason. Whether a company is a threat actor at all is not decided here.
+# Tunable.
+LEGAL_FORM_WORDS: frozenset = frozenset(
+    "co. ltd ltd. limited inc. incorporated corp. corporation llc l.l.c. llp l.l.p. plc p.l.c. "
+    "gmbh s.a. s.a.s. s.l. s.r.l. s.p.a. b.v. n.v. a.g. pte pte. pty pty. sdn sdn. bhd bhd. "
+    "jsc pjsc ojsc cjsc".split()
+)
+# One legal-form word: it ends after its dot or before a character that is no letter or digit, so
+# ``"co.ltd."`` is two of them and ``"ltda"`` none. Longest first, so ``"ltd."`` wins over ``"ltd"``.
+_LEGAL_FORM_WORD_RE = r"(?:{})(?:(?<=\.)|(?![^\W_]))".format(
+    "|".join(re.escape(w) for w in sorted(LEGAL_FORM_WORDS, key=lambda w: (-len(w), w)))
+)
+_LEGAL_FORM_ONLY_RE = re.compile(
+    rf"[\s,，]*{_LEGAL_FORM_WORD_RE}(?:[\s,，]*{_LEGAL_FORM_WORD_RE})*[\s,，]*", re.IGNORECASE
+)
+_BEGINS_WITH_LEGAL_FORM_RE = re.compile(rf"\s*{_LEGAL_FORM_WORD_RE}", re.IGNORECASE)
 
 # Word separators — ``" and "`` / ``" & "`` / ``" && "`` with whitespace on
 # both sides, case-insensitive. ``"at&t"`` / ``"c&c"`` (no whitespace) never
@@ -76,9 +113,13 @@ _WORD_SEPARATOR_RE = re.compile(r"\s+(?:and|&&?)\s+", re.IGNORECASE)
 # Oxford-comma residue: after a comma split a fragment may start or end with
 # a dangling conjunction (``"lockbit, cl0p, and fancy bear"`` →
 # ``"and fancy bear"``; ``"apt28 and, apt29"`` → ``"apt28 and"``). Strip it;
-# a fragment that IS just the conjunction becomes empty and is dropped.
-_LEADING_CONJUNCTION_RE = re.compile(r"^(?:and|&&?|aka|a\.k\.a\.?|also known as)(?:\s+|$)", re.IGNORECASE)
-_TRAILING_CONJUNCTION_RE = re.compile(r"(?:^|\s+)(?:and|&&?)$", re.IGNORECASE)
+# a fragment that IS just the conjunction becomes empty and is dropped. The
+# words are compared lower-cased, whole words only (``"andromeda"`` stays).
+# At the start an alias marker as well (``"aka fancy bear"``), and since
+# 2026-11-06 at the end too (``"apt28 aka, apt29"`` → ``"apt28 aka"``), so
+# that a legal form never joins it (``"apt28 and aka, ltd."``).
+_CONJUNCTION_WORDS: frozenset = frozenset({"and", "&", "&&", "aka", "a.k.a", "a.k.a."})
+_CONJUNCTION_PHRASE: tuple = ("also", "known", "as")
 
 # Minimum length (characters, after trim) of EACH side of an ``and`` / ``&`` / ``&&``
 # split. Shorter sides (``"a and b"``) are not names and the split is refused.
@@ -423,6 +464,11 @@ def _geo_key(name: str) -> str:
 
 _GEOPOLITICAL_KEYS: frozenset = frozenset(_geo_key(n) for n in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES)
 _STATE_AGENCY_KEYS: frozenset = frozenset(_geo_key(n) for n in STATE_AGENCY_NAMES)
+# The most words a phrase ``_is_state_agency_key`` accepts can have: a country (possessive) and an agency, or an
+# agency, "of", "the" and a country.
+_MAX_STATE_AGENCY_KEY_WORDS: int = (
+    max(len(k.split(" ")) for k in _STATE_AGENCY_KEYS) + max(len(k.split(" ")) for k in _GEOPOLITICAL_KEYS) + 2
+)
 
 
 def _is_country_key(key: str) -> bool:
@@ -438,6 +484,8 @@ def _is_state_agency_key(key: str) -> bool:
     if key in _STATE_AGENCY_KEYS:
         return True
     words = key.split(" ")
+    if len(words) > _MAX_STATE_AGENCY_KEY_WORDS:  # 2026-11-06: no such phrase is longer (keeps it linear)
+        return False
     for i in range(1, len(words)):
         head, tail = " ".join(words[:i]), " ".join(words[i:])
         if tail in _STATE_AGENCY_KEYS and _is_country_key(head):
@@ -474,11 +522,133 @@ def _normalise(name: str) -> str:
     return _WHITESPACE_RE.sub(" ", unicodedata.normalize("NFC", name)).strip()
 
 
+def _begins_with_legal_form(text: str) -> bool:
+    """``text`` begins with a legal-form word (``LEGAL_FORM_WORDS``): ``"Ltd."``, ``"Inc.
+    (Flax Typhoon)"``, ``"Co. KG"``, ``"Co.Ltd."``."""
+    return _BEGINS_WITH_LEGAL_FORM_RE.match(text) is not None
+
+
+def _is_legal_form_only(text: str) -> bool:
+    """``text`` is made only of legal-form words (``"Ltd."``, ``"Co., Ltd."``, ``"Co.Ltd."``, ``"LLC"``),
+    with whitespace and commas between them: no name."""
+    return _LEGAL_FORM_ONLY_RE.fullmatch(text) is not None
+
+
+def _is_balanced(text: str) -> bool:
+    """Every parenthesis of ``text`` (ASCII or full-width) is closed, and none is closed before it opens."""
+    depth = 0
+    for ch in text:
+        if ch in _OPENING_PARENS:
+            depth += 1
+        elif ch in _CLOSING_PARENS:
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _top_level_parts(text: str) -> List[str]:
+    """``text`` cut at its list separators (``_LIST_SEPARATOR_RE``) that stand outside parentheses, with
+    a part that begins with a legal-form word joined back to the part before it, separator and all
+    (``"Foo Co., Ltd., APT41"`` -> ``["Foo Co., Ltd.", " APT41"]``). A parenthesis opened and never
+    closed keeps the rest of ``text`` inside it; a closing one without its opening one is ignored."""
+    depths: List[int] = []
+    depth = 0
+    for ch in text:
+        depths.append(depth)
+        if ch in _OPENING_PARENS:
+            depth += 1
+        elif ch in _CLOSING_PARENS and depth:
+            depth -= 1
+    spans: List[List[int]] = []
+    start = 0
+    for m in _LIST_SEPARATOR_RE.finditer(text):
+        if depths[m.start()]:
+            continue
+        spans.append([start, m.start()])
+        start = m.end()
+    spans.append([start, len(text)])
+    joined: List[List[int]] = []
+    takes = False  # whether the last joined part can be followed by a legal form
+    for span in spans:
+        part = text[span[0] : span[1]]
+        if joined and takes and _begins_with_legal_form(part):
+            joined[-1][1] = span[1]
+        else:
+            joined.append(span)
+        # The joined part already holds a name; how it ends is how this part ends. Judging the part
+        # alone keeps the loop linear in the length of ``text``.
+        takes = _takes_a_legal_form(part)
+    return [text[s:e] for s, e in joined]
+
+
+def _takes_a_legal_form(raw: str) -> bool:
+    """The list part ``raw`` can be followed by a legal form: it holds a name and does not end with a
+    conjunction (``"); Ltd."``, ``"apt28 and; Ltd."`` leave the legal form on its own)."""
+    balanced = _balance_parentheses(raw)
+    return bool(_strip_conjunctions(balanced)) and not _ends_with_conjunction(balanced)
+
+
+def _ends_with_conjunction(text: str) -> bool:
+    """The last word of ``text`` is a conjunction or an alias marker (``_CONJUNCTION_WORDS``, ``"also known
+    as"``)."""
+    words = [w.lower() for w in text.split()[-3:]]
+    return bool(words) and (words[-1] in _CONJUNCTION_WORDS or tuple(words) == _CONJUNCTION_PHRASE)
+
+
+def _strip_conjunctions(text: str) -> str:
+    """``text`` without a dangling conjunction at either end (the Oxford-comma residue, step 3 of
+    :func:`split_composite_actor_name`), stripped until nothing changes (``"apt28 and and"`` ->
+    ``"apt28"``), with whitespace collapsed. Word by word, so a long run of conjunctions costs one
+    pass."""
+    words = text.split()
+    start, end = 0, len(words)
+    while True:
+        before = (start, end)
+        while start < end and words[start].lower() in _CONJUNCTION_WORDS:
+            start += 1
+        while end > start and words[end - 1].lower() in _CONJUNCTION_WORDS:
+            end -= 1
+        if end - start >= 3 and tuple(w.lower() for w in words[start : start + 3]) == _CONJUNCTION_PHRASE:
+            start += 3
+        if end - start >= 3 and tuple(w.lower() for w in words[end - 3 : end]) == _CONJUNCTION_PHRASE:
+            end -= 3
+        if (start, end) == before:
+            return " ".join(words[start:end])
+
+
+def _clean_part(raw: str) -> str:
+    """A list part with balanced parentheses and without a dangling conjunction."""
+    return _strip_conjunctions(_balance_parentheses(raw))
+
+
+def _balance_parentheses(fragment: str) -> str:
+    """``fragment`` with balanced parentheses (2026-11-06): a closing parenthesis without its opening one
+    is removed, and a parenthesis opened and never closed cuts the fragment there, as the start of a
+    parenthetical that was cut off (``"Black Owl (BO Team"`` -> ``"Black Owl"``). A balanced fragment
+    is returned trimmed and otherwise unchanged."""
+    kept: List[str] = []
+    unclosed: List[int] = []  # positions in ``kept`` of the opening parentheses not yet closed
+    for ch in fragment:
+        if ch in _OPENING_PARENS:
+            unclosed.append(len(kept))
+        elif ch in _CLOSING_PARENS:
+            if not unclosed:
+                continue
+            unclosed.pop()
+        kept.append(ch)
+    if unclosed:
+        kept = kept[: unclosed[0]]
+    return _normalise("".join(kept))
+
+
 # 2026-10 audit: "Name (Alias)" is the dominant composite form on the hosted graph (27 of 815
 # non-MITRE actors: "apt28 (fancy bear)", "kimsuky (apt43)", "apt-c-00 (ocean lotus)"). Keep the
 # head; the parenthetical is an alias the MITRE alias merge resolves when it is one.
 # Whitespace before "(" and a letter inside are required: "NoName057(16)" is one group's real name.
-_TRAILING_PAREN_RE = re.compile(r"^(?P<head>.+?)\s+\((?P<inner>[^()]*[A-Za-z][^()]*)\)$")
+# 2026-11-06: full-width parentheses as well, with the same whitespace rule ("mois （ministry of
+# intelligence and security）" is "mois"; the galaxy name "APT37（Reaper）" stays as it is).
+_TRAILING_PAREN_RE = re.compile(r"^(?P<head>.+?)\s+[(（](?P<inner>[^()（）]*[A-Za-z][^()（）]*)[)）]$")
 
 
 def strip_trailing_parenthetical(fragment: str) -> str:
@@ -487,7 +657,9 @@ def strip_trailing_parenthetical(fragment: str) -> str:
     ``"North Korea (APT37)"`` -> ``"APT37"``, and so for a state agency (2026-11-05):
     ``"FSB (Turla)"`` -> ``"Turla"``. A parenthetical that yields no name, a description or a
     placeholder, leaves the country, which rule (c) then drops (2026-10-22):
-    ``"Cuba (Ransomware)"`` -> ``"Cuba"``, ``"North Korea (unknown)"`` -> ``"North Korea"``."""
+    ``"Cuba (Ransomware)"`` -> ``"Cuba"``, ``"North Korea (unknown)"`` -> ``"North Korea"``. A
+    parenthetical kept as the name can be a list (``"North Korea (APT37, Reaper)"`` ->
+    ``"APT37, Reaper"``), which :func:`clean_actor_names` splits (2026-11-06)."""
     m = _TRAILING_PAREN_RE.match(fragment)
     if not m:
         return fragment
@@ -501,8 +673,9 @@ def strip_trailing_parenthetical(fragment: str) -> str:
         len(inner) > 1
         and _is_geopolitical_name(head.strip(_EDGE_PUNCT))
         and not _is_geopolitical_name(inner.strip(_EDGE_PUNCT))
-        # The sides the and-split makes of the parenthetical, as _split_fragments makes them.
-        and any(not is_generic_actor_name(side) for side in _try_and_split(inner))
+        # The fragments of the parenthetical, as _split_fragments makes them (2026-11-06: the list
+        # split as well as the and-split).
+        and any(not is_generic_actor_name(f) for f in _fragments_of(inner) if len(f) > 1)
     ):
         return inner
     return head if len(head) > 1 else fragment
@@ -535,7 +708,10 @@ def _try_and_split(fragment: str) -> List[str]:
       * the name is not a country or state or a state agency (``"trinidad and tobago"``,
         ``"ministry of intelligence and security"``, rule (c));
       * every resulting side is >= ``AND_SPLIT_MIN_SIDE_LEN`` chars;
-      * no side (lower-cased) is in ``AND_SPLIT_PROTECTED_SIDES``.
+      * no side (lower-cased) is in ``AND_SPLIT_PROTECTED_SIDES``;
+      * no side has unbalanced parentheses;
+      * no side after the first begins with a legal-form word (``"Smith & Co."``,
+        ``"Foo GmbH & Co. KG"``, 2026-11-06).
     """
     sides = [s.strip() for s in _WORD_SEPARATOR_RE.split(fragment)]
     if len(sides) < 2:
@@ -554,8 +730,12 @@ def _try_and_split(fragment: str) -> List[str]:
             return [fragment]
         # 2026-10 audit: never split inside a parenthetical —
         # "mois (ministry of intelligence and security)" produced a ThreatActor "security)".
-        if side.count("(") != side.count(")"):
+        # 2026-11-06: full-width parentheses as well ("APT37（Reaper and Group123）").
+        if not _is_balanced(side):
             return [fragment]
+    # 2026-11-06: "& Co." is the legal form of the name before it, not a name.
+    if any(_begins_with_legal_form(side) for side in sides[1:]):
+        return [fragment]
     return sides
 
 
@@ -571,20 +751,45 @@ def _split_fragments(name: str) -> List[str]:
         return []
     # 2026-10-18: the inverted "Korea, North" is one country name, not "Korea" and "North".
     normalised = _KOREA_INVERTED_RE.sub(lambda m: f"{m.group('side')} {m.group('korea')}", normalised)
+    # The last balance is a guard: every fragment is balanced already.
+    return [f for f in (_balance_parentheses(f) for f in _fragments_of(normalised)) if len(f) > 1]
 
+
+def _is_parenthetical_list(fragment: str, stripped: str) -> bool:
+    """``stripped`` (``strip_trailing_parenthetical(fragment)``) is a parenthetical that a country or
+    agency stands before, and it is a list (``"North Korea (APT37, Reaper)"`` -> ``"APT37, Reaper"``,
+    2026-11-06): its fragments are the names. A head is never a list: its separators stand inside
+    parentheses or before a legal form, as they did in ``fragment``."""
+    return stripped != fragment and len(_top_level_parts(stripped)) > 1
+
+
+def _fragments_of(text: str) -> List[str]:
+    """The fragments of normalised ``text`` (steps 2-4 of :func:`split_composite_actor_name`), before
+    short fragments are dropped."""
     fragments: List[str] = []
-    for raw in _LIST_SEPARATOR_RE.split(normalised):
-        frag = _LEADING_CONJUNCTION_RE.sub("", raw.strip())
-        frag = _TRAILING_CONJUNCTION_RE.sub("", frag).strip()
+    # 2026-11-06: only the separators outside parentheses split, and a legal form stays with its name.
+    for raw in _top_level_parts(text):
+        frag = _clean_part(raw)
         if not frag:
             continue
         # Strip BEFORE the and-split (so "mois (ministry of intelligence and security)" is never
         # split inside the parenthesis) and AGAIN on every side after it (PR #144:
         # "apt28 (fancy bear) and apt29 (cozy bear)" kept both parentheticals).
-        frag = strip_trailing_parenthetical(frag)
-        fragments.extend(strip_trailing_parenthetical(side) for side in _try_and_split(frag))
-
-    return [f for f in (f.strip() for f in fragments) if len(f) > 1]
+        stripped = strip_trailing_parenthetical(frag)
+        if _is_parenthetical_list(frag, stripped):
+            fragments.extend(_fragments_of(stripped))
+            continue
+        for side in _try_and_split(stripped):
+            # A doubled conjunction leaves one on a side ("apt28 and and apt29" -> "and apt29").
+            side = _strip_conjunctions(side)
+            if not side:
+                continue
+            side_stripped = strip_trailing_parenthetical(side)
+            if _is_parenthetical_list(side, side_stripped):
+                fragments.extend(_fragments_of(side_stripped))
+            else:
+                fragments.append(side_stripped)
+    return [f.strip() for f in fragments]
 
 
 def _dedupe_casefold(names: List[str]) -> List[str]:
@@ -619,13 +824,23 @@ def split_composite_actor_name(name: str) -> List[str]:
 
     1. NFC-normalise, collapse whitespace, trim. Non-string input → ``[]``.
     2. Split on hard list separators: ``,`` ``;`` (ASCII, full-width,
-       ideographic) and ``/`` **only when surrounded by whitespace**.
+       ideographic) and ``/`` **only when surrounded by whitespace**, and
+       only outside parentheses (2026-11-06: ``"Black Owl (BO Team,
+       Hackers)"`` is one fragment, which the trailing-parenthetical rule
+       makes ``"Black Owl"``). A fragment that begins with a legal-form word
+       stays with the fragment before it (``"Integrity Technology Group,
+       Inc."``, ``"Sichuan Silence Information Technology Co., Ltd."``).
+       Parentheses are balanced: one opened and never closed cuts the
+       fragment there (``"Black Owl (BO Team"`` → ``"Black Owl"``), and a
+       closing one without its opening one is removed.
     3. Strip a dangling conjunction left by an Oxford comma
        (``"and fancy bear"`` → ``"fancy bear"``).
-    4. Split each fragment on ``" and "`` / ``" & "`` (case-insensitive,
+    4. Drop a trailing parenthetical (:func:`strip_trailing_parenthetical`),
+       then split each fragment on ``" and "`` / ``" & "`` (case-insensitive,
        whitespace on both sides) ONLY when every side is at least
        ``AND_SPLIT_MIN_SIDE_LEN`` chars, no side is in
-       ``AND_SPLIT_PROTECTED_SIDES`` and the fragment does not start with an
+       ``AND_SPLIT_PROTECTED_SIDES``, no side after the first begins with a
+       legal-form word (``"Smith & Co."``) and the fragment does not start with an
        ``AND_SPLIT_PROTECTED_PREFIXES`` entry. When unsure, the fragment is
        kept whole — ``"at&t"`` / ``"c&c"`` (no whitespace) are never split.
     5. Drop empty and 1-character fragments.
@@ -675,9 +890,14 @@ def is_generic_actor_name(name: str) -> bool:
            ``"north korean"``) or a state agency (``STATE_AGENCY_NAMES``:
            ``"mois"``, ``"gru"``, ``"russian federal security service"``,
            ``"russian intelligence services"``) — a name that contains one
-           stays a name (``"cyber army of russia reborn"``, ``"gru unit 26165"``).
+           stays a name (``"cyber army of russia reborn"``, ``"gru unit 26165"``);
+      (d)  the name is made only of legal-form words (``LEGAL_FORM_WORDS``:
+           ``"ltd."``, ``"co., ltd."``, ``"llc"``, ``"inc."``; 2026-11-06) — a
+           company name with its legal form stays a name
+           (``"integrity technology group, inc."``), and so does the bare
+           ``"inc"`` (INC Ransom in the canonical threat-actor reference).
 
-    Single-word names are only generic through rules (a) and (c): ``"apt28"``,
+    Single-word names are only generic through rules (a), (c) and (d): ``"apt28"``,
     ``"sandworm"``, ``"play"`` are names (or at least not provably not).
     Non-string input → True (not a name).
     """
@@ -694,6 +914,9 @@ def is_generic_actor_name(name: str) -> bool:
     if not core:
         return True
     if core in GENERIC_ACTOR_PHRASES or is_placeholder_name(core):
+        return True
+    # (d) only a legal form ("Ltd.", "Co., Ltd.", 2026-11-06).
+    if _is_legal_form_only(canonical):
         return True
     # (c) a country or state, a nationality adjective or a state agency, as the whole name.
     if _is_country_or_state_name(canonical):
@@ -763,6 +986,7 @@ __all__ = [
     "GENERIC_LAST_WORDS",
     "GENERIC_LEADING_WORDS",
     "GENERIC_SIGNAL_PATTERNS",
+    "LEGAL_FORM_WORDS",
     "NATIONALITY_ADJECTIVES",
     "STATE_AGENCY_NAMES",
     "clean_actor_names",

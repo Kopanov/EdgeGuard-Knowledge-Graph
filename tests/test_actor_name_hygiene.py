@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -166,6 +167,250 @@ class TestSplitCompositeActorName:
 
     def test_case_is_preserved(self):
         assert split_composite_actor_name("Mustang Panda, RedDelta") == ["Mustang Panda", "RedDelta"]
+
+
+# ===========================================================================
+# Parentheses and legal forms (2026-11-06)
+# ===========================================================================
+
+
+class TestParenthesesAndLegalForms:
+    """A list separator inside parentheses or before a company's legal form never splits. The comma
+    split made the ThreatActor nodes ``black owl (bo team`` and ``ltd.`` on the test instance's sync
+    of 2026-11-06, and ``videostrong technology co.`` on the graph of 2026-11-03."""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # The five adversary strings of the defect report: one name each.
+            ("Black Owl (BO Team, Hackers of the Black Owl)", ["Black Owl"]),
+            ("Black Owl (BO Team; Hackers)", ["Black Owl"]),
+            ("Sichuan Silence Information Technology Co., Ltd.", ["Sichuan Silence Information Technology Co., Ltd."]),
+            ("Integrity Technology Group, Inc.", ["Integrity Technology Group, Inc."]),
+            ("i-Soon (Anxun Information Technology Co., Ltd.)", ["i-Soon"]),
+            # The adversary fields of the two OTX reports, as OTX gives them: one is cut off.
+            ("Black Owl (BO Team", ["Black Owl"]),
+            ("Videostrong Technology Co., Ltd.", ["Videostrong Technology Co., Ltd."]),
+            # Every list separator inside a parenthetical, ASCII and full-width.
+            ("Black Owl (BO Team / Hackers)", ["Black Owl"]),
+            ("Black Owl (BO Team，Hackers；Owls、Birds)", ["Black Owl"]),
+            ("APT37 (Korea, North)", ["APT37"]),
+            # A list of names with parentheticals still splits outside them.
+            ("APT28 (Fancy Bear, Sofacy), APT29 (Cozy Bear; The Dukes)", ["APT28", "APT29"]),
+            ("APT28 (Fancy Bear, Sofacy) and APT29", ["APT28", "APT29"]),
+            ("APT28 and APT29 (Cozy Bear, The Dukes)", ["APT28", "APT29"]),
+            # A company beside an actor: the legal form stays with the company.
+            ("Flax Typhoon, Integrity Technology Group, Inc.", ["Flax Typhoon", "Integrity Technology Group, Inc."]),
+            (
+                "Sichuan Silence Information Technology Co., Ltd., APT41",
+                ["Sichuan Silence Information Technology Co., Ltd.", "APT41"],
+            ),
+            ("Integrity Technology Group, Inc. (Flax Typhoon)", ["Integrity Technology Group, Inc."]),
+            ("Integrity Technology Group, Inc. and APT41", ["Integrity Technology Group, Inc.", "APT41"]),
+            ("Sichuan Silence Information Technology Co.,Ltd.", ["Sichuan Silence Information Technology Co.,Ltd."]),
+            ("Example Holdings, LLC", ["Example Holdings, LLC"]),
+            ("Example Systems, GmbH", ["Example Systems, GmbH"]),
+            ("Example Systems, S.A.", ["Example Systems, S.A."]),
+            ("Example Systems, Corp.", ["Example Systems, Corp."]),
+            ("Example Systems Pte., Ltd.", ["Example Systems Pte., Ltd."]),
+            # The and-split leaves a legal form with its name.
+            ("Example & Co.", ["Example & Co."]),
+            ("Example GmbH & Co. KG", ["Example GmbH & Co. KG"]),
+            # A legal form on its own is no name.
+            ("Ltd.", []),
+            ("Co., Ltd.", []),
+            ("LLC", []),
+            ("Inc.", []),
+            ("Ltd., APT41", ["APT41"]),
+            # The bare "INC" is INC Ransom in the canonical reference: a name, also in a list.
+            ("INC", ["INC"]),
+            ("LockBit, INC", ["LockBit", "INC"]),
+            ("LockBit, INC Ransom", ["LockBit", "INC Ransom"]),
+            # A real name that ends with a legal-form word is untouched.
+            ("Trickbot LLC", ["Trickbot LLC"]),
+            ("Evil Corp", ["Evil Corp"]),
+            # Unbalanced parentheses: an unclosed one cuts the fragment, a stray closing one is removed.
+            ("Black Owl (BO Team, Hackers", ["Black Owl"]),
+            ("APT28 (Fancy Bear) (Sofacy", ["APT28"]),
+            ("Hackers of the Black Owl)", ["Hackers of the Black Owl"]),
+            ("APT28), Fancy Bear", ["APT28", "Fancy Bear"]),
+            ("(BO Team", []),
+            ("NoName057(16", ["NoName057"]),
+            ("NoName057(16)", ["NoName057(16)"]),  # no whitespace before "(": one group's real name
+            # Full-width parentheses: the and-split never cuts inside them either, and with whitespace
+            # before them the parenthetical is dropped like an ASCII one.
+            ("APT37（Reaper and Group123）", ["APT37（Reaper and Group123）"]),
+            ("APT37（Reaper & Group123, ScarCruft）", ["APT37（Reaper & Group123, ScarCruft）"]),
+            ("APT37 （Reaper，Group123）", ["APT37"]),
+            ("North Korea （APT37）", ["APT37"]),
+            # A legal form written without a space after its dot.
+            ("Co.Ltd.", []),
+            ("Example Technology, Co.Ltd.", ["Example Technology, Co.Ltd."]),
+            ("Example Technology Co.Ltd., APT41", ["Example Technology Co.Ltd.", "APT41"]),
+        ],
+    )
+    def test_clean_actor_names(self, raw, expected):
+        assert clean_actor_names(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # A parenthetical a country or agency stands before is the name, and it can be a list.
+            ("North Korea (APT37, Reaper)", ["APT37", "Reaper"]),
+            ("DPRK (Kimsuky; APT43)", ["Kimsuky", "APT43"]),
+            ("APT28, North Korea (APT37, Reaper)", ["APT28", "APT37", "Reaper"]),
+            ("North Korea (Integrity Technology Group, Inc.)", ["Integrity Technology Group, Inc."]),
+        ],
+    )
+    def test_a_parenthetical_list_behind_a_country_gives_its_names(self, raw, expected):
+        assert clean_actor_names(raw) == expected
+        assert dropped_geopolitical_names(raw) == []
+
+    def test_a_parenthetical_list_of_descriptions_behind_a_country_leaves_the_country(self):
+        assert clean_actor_names("North Korea (unknown, various)") == []
+        assert dropped_geopolitical_names("North Korea (unknown, various)") == ["North Korea"]
+
+    def test_a_full_width_parenthetical_without_whitespace_before_it_is_kept_whole(self):
+        # Like "NoName057(16)": the threat-actor galaxy's record "APT37（Reaper）" is a name of the reference as
+        # it is. A separator inside still never splits.
+        assert clean_actor_names("APT37（Reaper）") == ["APT37（Reaper）"]
+        assert clean_actor_names("APT37（Reaper，Group123）") == ["APT37（Reaper，Group123）"]
+
+    def test_an_agency_with_a_full_width_parenthetical_is_dropped(self):
+        # The and-split had made the name "security" of it.
+        raw = "mois （ministry of intelligence and security）"
+        assert clean_actor_names(raw) == []
+        assert dropped_geopolitical_names(raw) == ["mois"]
+
+    @pytest.mark.parametrize(
+        "name", ["Ltd.", "ltd", "Co., Ltd.", "Co.Ltd.", "LLC", "l.l.c.", "Inc.", "GmbH", "S.A.", "PLC", "Pty Ltd"]
+    )
+    def test_a_legal_form_on_its_own_is_generic(self, name):
+        assert is_generic_actor_name(name) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "INC",
+            "inc",
+            "Integrity Technology Group, Inc.",
+            "Sichuan Silence Information Technology Co., Ltd.",
+            "Trickbot LLC",
+            "Evil Corp",
+            "Ltda",  # "ltd" followed by a letter is no legal-form word
+        ],
+    )
+    def test_a_name_with_a_legal_form_word_is_not_generic(self, name):
+        assert is_generic_actor_name(name) is False
+
+    def test_the_legal_form_list_is_lower_case_and_leaves_out_the_bare_inc(self):
+        from actor_name_hygiene import LEGAL_FORM_WORDS
+
+        for word in LEGAL_FORM_WORDS:
+            assert word == word.lower().strip() and " " not in word and "," not in word, word
+        assert {"co.", "ltd.", "inc.", "llc", "gmbh", "s.a.", "corp."} <= LEGAL_FORM_WORDS
+        # "inc" is INC Ransom (canonical reference); two undotted letters are as likely a name.
+        assert not {"inc", "co", "corp", "ag", "sa", "bv", "nv", "ab", "oy", "as"} & LEGAL_FORM_WORDS
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # A legal form joins only a part that holds a name and does not end with a conjunction.
+            ("); Ltd.", []),
+            ("APT28 and; Ltd.", ["APT28"]),
+            ("APT28, and, Ltd.", ["APT28"]),
+            ("APT28 and aka, Ltd.", ["APT28"]),
+            ("Example, Ltd. and, Inc.", ["Example, Ltd."]),
+            # A doubled conjunction leaves none behind (the names were "APT28 and" and "and APT29").
+            ("APT28 and and", ["APT28"]),
+            ("APT28 and and APT29", ["APT28", "APT29"]),
+            ("and and APT29", ["APT29"]),
+            # A dangling alias marker at the end, as at the start.
+            ("APT28 aka, APT29", ["APT28", "APT29"]),
+            ("Fancy Bear a.k.a.", ["Fancy Bear"]),
+        ],
+    )
+    def test_no_fragment_keeps_a_separator_or_a_dangling_conjunction(self, raw, expected):
+        assert clean_actor_names(raw) == expected
+
+    def test_a_long_list_is_cleaned_in_linear_time(self):
+        # 2026-11-06: joining legal forms re-read the growing name, the state-agency rule tried every split
+        # of a long name, and the conjunctions were stripped one pass each; 8,000 parts took seconds. A
+        # loose bound, far above the time it takes.
+        import time
+
+        start = time.perf_counter()
+        assert clean_actor_names("Example" + ", Ltd." * 8000) == ["Example" + ", Ltd." * 8000]
+        assert clean_actor_names("Example" + " Ltd." * 8000) == ["Example" + " Ltd." * 8000]
+        assert clean_actor_names("APT28" + " and" * 8000) == ["APT28"]
+        assert clean_actor_names("and " * 8000 + "APT28") == ["APT28"]
+        assert time.perf_counter() - start < 2.0
+
+
+def _parentheses_balance(name: str) -> bool:
+    depth = 0
+    for ch in name:
+        if ch in "(（":
+            depth += 1
+        elif ch in ")）":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+# Written apart from the module's LEGAL_FORM_WORDS, so the check does not read the rule it checks.
+_LEGAL_FORM_RE_WORD = r"(?:co\.|ltd\.?|inc\.|corp\.|llc|gmbh|plc|s\.a\.|limited)"
+_ONLY_A_LEGAL_FORM_RE = re.compile(rf"{_LEGAL_FORM_RE_WORD}(?:(?:[\s,]+|(?<=\.)){_LEGAL_FORM_RE_WORD})*")
+
+
+def _assert_clean_names(raw: str) -> None:
+    """Every name ``clean_actor_names`` returns for ``raw`` has balanced parentheses, is more than a legal
+    form and a character, and comes out of ``clean_actor_names`` as it is: the MISP→Neo4j sync skips a
+    threat-actor attribute whose name the hygiene would change, so a name the collector writes must be
+    kept by the sync."""
+    for name in clean_actor_names(raw):
+        assert _parentheses_balance(name), (raw, name)
+        assert not _ONLY_A_LEGAL_FORM_RE.fullmatch(name.lower()), (raw, name)
+        assert len(name) > 1, (raw, name)
+        assert clean_actor_names(name) == [name], (raw, name)
+
+
+_FUZZ_TOKENS = (
+    "Kimsuky",
+    "Lazarus Group",
+    "(",
+    ")",
+    "（",
+    "）",
+    ", ",
+    "; ",
+    " / ",
+    " and ",
+    " & ",
+    "Inc.",
+    "INC",
+    "Co., Ltd.",
+    "Co.Ltd.",
+    " （",
+    " aka ",
+    "aka",
+    "North Korea",
+    "unknown",
+)
+
+
+def test_every_combination_of_names_separators_parentheses_and_legal_forms_gives_clean_names():
+    """All 8,420 strings of up to three of the tokens (2026-11-06: on the code before, 4-token strings of a
+    similar set gave 22,445 names with unbalanced parentheses and 374 that the hygiene changed again)."""
+    import itertools
+
+    count = 0
+    for size in (1, 2, 3):
+        for combo in itertools.product(_FUZZ_TOKENS, repeat=size):
+            _assert_clean_names("".join(combo))
+            count += 1
+    assert count == 20 + 20**2 + 20**3
 
 
 # ===========================================================================
@@ -747,6 +992,16 @@ class TestTheCanonicalReferenceIsNeverGeneric:
         for name in COUNTRY_AND_STATE_NAMES | NATIONALITY_ADJECTIVES:
             assert name == " ".join(name.lower().split()), name
 
+    def test_no_name_of_the_reference_begins_with_a_legal_form(self, reference_doc, reference_names):
+        """A list fragment that begins with a legal-form word joins the fragment before it (2026-11-06), so
+        such a reference name behind a comma would be swallowed. None is; ``inc`` (INC Ransom) is a name."""
+        from actor_name_hygiene import LEGAL_FORM_WORDS
+
+        listed = {e["key"] for e in reference_doc["ambiguous"]} | {e["key"] for e in reference_doc["not_actors"]}
+        first_words = {n.replace(",", " ").split()[0] for n in reference_names | listed if n.split()}
+        assert not first_words & LEGAL_FORM_WORDS
+        assert "inc" in reference_names and clean_actor_names("LockBit, INC") == ["LockBit", "INC"]
+
 
 # ===========================================================================
 # dropped_geopolitical_names (2026-10-22)
@@ -869,3 +1124,10 @@ def test_dropped_geopolitical_names_agrees_with_clean_actor_names(raw):
     assert clean_actor_names("; ".join(dropped)) == []
     assert dropped_geopolitical_names("; ".join(dropped)) == dropped
     assert all(dropped_geopolitical_names(name) == [] for name in names), "a kept name is no country name"
+
+
+@pytest.mark.parametrize("raw", FIXTURE_INPUTS)
+def test_every_name_of_every_fixture_is_clean(raw):
+    """2026-11-06: no name has unbalanced parentheses or is only a legal form, and every name is kept as it
+    is when it is cleaned again."""
+    _assert_clean_names(raw)

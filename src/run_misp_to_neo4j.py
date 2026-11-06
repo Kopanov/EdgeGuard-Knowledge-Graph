@@ -4411,11 +4411,15 @@ class MISPToNeo4jSync:
                 == " ".join(unicodedata.normalize("NFC", str(actor_name)).split()).casefold()
             )
             if not _same_name:
-                logger.info(
-                    "Skipping threat-actor attribute %r: %s",
-                    actor_name[:80],
-                    "generic phrase, not a name" if not _cleaned_names else "composite name — split at collection",
-                )
+                if not _cleaned_names:
+                    _reason = "generic phrase, not a name"
+                elif len(_cleaned_names) > 1:
+                    _reason = "composite name — split at collection"
+                else:
+                    # 2026-11-06: one name the hygiene rewrites ("black owl (bo team", written before it
+                    # balanced parentheses) is no composite.
+                    _reason = "not a clean name — cleaned at collection"
+                logger.info("Skipping threat-actor attribute %r: %s", actor_name[:80], _reason)
                 return None, []
             # 2026-11-05: nor must a name the canonical threat-actor reference lists as no actor (its
             # ``not_actors``: a technique, malware, a kit, a hosting network, a forum, a company or a campaign

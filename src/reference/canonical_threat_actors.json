@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
- "version": "2026.11.05",
- "generated_at": "2026-11-05",
+ "version": "2026.11.06",
+ "generated_at": "2026-11-06",
  "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged. Names listed under 'not_actors' were reviewed and are no threat actors (a technique, malware, a kit, a hosting network, a forum, a company or a campaign that a source gave as its adversary); the OTX collector drops them from a pulse's adversary field, and the MISP to Neo4j sync skips threat-actor attributes of these names.",
  "generator": "scripts/build_canonical_threat_actors.py",
  "key_normalisation": "NFC, trimmed, lower-case (node_identity.canonicalize_merge_key for ThreatActor)",
@@ -93,8 +93,8 @@
   {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "ea5daa30df6cb58ec9b02fafa6bd1ff2c9230e3042ab4607c34a6851f7b7896c",
-   "decisions": 139
+   "sha256": "a65346cbf638a35de79a368ccadd357c1fbb5fc9e9dbad09c65a604f15cbb358",
+   "decisions": 140
   }
  ],
  "attribution": [
@@ -123,7 +123,7 @@
   "attack_groups": 191,
   "synonyms": 4528,
   "ambiguous": 82,
-  "not_actors": 38
+  "not_actors": 39
  },
  "actors": [
   {
@@ -33812,6 +33812,12 @@
    "key": "videostrong technology co.",
    "reason": "A company name, not a threat-actor name: it carries the designator 'Technology Co.', and no galaxy names it as an actor. The OTX report that gives it as the adversary lists 19 proxyware and bandwidth-monetisation SDK families, among them Honeygain (the threat-actor galaxy's Larva-25012 record names it among the proxyware that group distributes) and Gaganode (malpedia describes it as a decentralized bandwidth monetization service). On the graph of 2026-11-03 the node (41 relationships, one OTX report) carries all 19 families.",
    "date": "2026-11-05",
+   "status": "proposed"
+  },
+  {
+   "key": "videostrong technology co., ltd.",
+   "reason": "The full name of the company the decision on 'videostrong technology co.' lists as no actor. An OTX report created on 2026-11-03 on a Badbox operation gives 'Videostrong Technology Co., Ltd.' as its adversary and lists eleven proxyware and SDK families, among them Honeygain and Gaganode. The actor-name hygiene split the name at the comma into 'Videostrong Technology Co.' and 'Ltd.' until 2026-11-06; since then it keeps a legal form with its name, so the full name needs an entry of its own to stay no actor.",
+   "date": "2026-11-06",
    "status": "proposed"
   }
  ]

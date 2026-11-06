@@ -923,6 +923,12 @@ class TestParseAttributeActorNameHygiene:
             ("APT28 and APT29", "composite name — split at collection"),
             ("russian hackers", "generic phrase, not a name"),
             ("Chinese state-backed groups", "generic phrase, not a name"),
+            # 2026-11-06: attributes the OTX collector wrote before the hygiene kept parentheticals and
+            # legal forms whole (a sync on the test instance made nodes of both).
+            ("black owl (bo team", "not a clean name — cleaned at collection"),
+            ("hackers of the black owl)", "not a clean name — cleaned at collection"),
+            ("Ltd.", "generic phrase, not a name"),
+            ("Black Owl (BO Team, Hackers of the Black Owl), APT28", "composite name — split at collection"),
         ],
     )
     def test_composite_or_generic_actor_attribute_is_skipped(self, syncer, caplog, value, reason):
@@ -949,6 +955,14 @@ class TestParseAttributeActorNameHygiene:
     def test_whitespace_variants_and_short_ids_still_parse(self, syncer, value):
         item, _ = syncer.parse_attribute(_attr("threat-actor", value), _EVENT)
         assert item is not None and item["type"] == "actor"
+
+    @pytest.mark.parametrize(
+        "value", ["Integrity Technology Group, Inc.", "Sichuan Silence Information Technology Co., Ltd."]
+    )
+    def test_a_company_name_with_its_legal_form_parses_as_one_name(self, syncer, value):
+        # 2026-11-06: before, the comma made it a composite and the attribute was skipped.
+        item, _ = syncer.parse_attribute(_attr("threat-actor", value, comment=_OTX_COMMENT), _EVENT)
+        assert item is not None and item["type"] == "actor" and item["name"] == value
 
     @pytest.mark.parametrize(
         "value,comment",

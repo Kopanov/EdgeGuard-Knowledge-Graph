@@ -219,6 +219,29 @@ class TestAnchoring:
         assert len(stats.synonyms_rewritten_by_name_hygiene) == 2
         assert [d["synonym"] for d in stats.synonyms_dropped_by_name_hygiene] == ["Waterbug, Venomous Bear"]
 
+    def test_a_synonym_with_a_list_in_its_parenthetical_or_a_legal_form_is_one_name(self, gen):
+        # 2026-11-06: the hygiene no longer splits inside a parenthetical or before a legal form, so the
+        # galaxies' synonyms of that shape are names (none of the galaxies of 2026-11-05 has one).
+        ref, stats = build(
+            gen,
+            ta(
+                "Example Panda",
+                [
+                    "Example Lab (Alias One, Alias Two)",
+                    "Example Technology Co., Ltd.",
+                    "Ltd.",
+                    "Waterbug, Venomous Bear",
+                ],
+            ),
+        )
+        synonyms = actors(ref)["example panda"]["synonyms"]
+        assert {"example lab", "example technology co., ltd."} <= set(synonyms)
+        assert not [s for s in synonyms if s.count("(") != s.count(")") or s in ("ltd.", "alias two)")]
+        assert gen.clean_synonym("Example Lab (Alias One, Alias Two)") == ("rewritten", "example lab")
+        assert gen.clean_synonym("Example Technology Co., Ltd.") == ("ok", "example technology co., ltd.")
+        assert gen.clean_synonym("Ltd.") == ("not a name", "")
+        assert [d["synonym"] for d in stats.synonyms_dropped_by_name_hygiene] == ["Ltd.", "Waterbug, Venomous Bear"]
+
     def test_placeholder_synonyms_are_dropped(self, gen):
         ref, stats = build(gen, ta("Some Actor", ["unknown", "N/A", "Real Alias"]))
         assert actors(ref)["some actor"]["synonyms"][0] == "real alias"
@@ -1111,6 +1134,8 @@ NOT_ACTORS_OF_2026_11_05 = frozenset(
         "smartapesg",
     }
 )  # fmt: skip
+# The full name of a company listed on 2026-11-05, which the hygiene keeps whole since 2026-11-06.
+NOT_ACTORS_OF_2026_11_06 = frozenset({"videostrong technology co., ltd."})
 
 
 @pytest.fixture(scope="module")
@@ -1368,14 +1393,17 @@ class TestCommittedReference:
         # The OTX adversary names of the 730-day baseline of 2026-11-03 that a review found to be no actors
         # (a technique, malware, kits and tools, hosting networks, a forum, companies, campaign names).
         listed = {e["key"] for e in committed["not_actors"]}
-        assert listed == NOT_ACTORS_OF_2026_11_05
+        assert listed == NOT_ACTORS_OF_2026_11_05 | NOT_ACTORS_OF_2026_11_06
         index = gen.build_index(committed)
         for name in sorted(listed):
             assert gen.resolve(index, name) == gen.Resolution(None, "not_actor"), name
             assert gen.clean_synonym(name) == ("ok", name), "the OTX collector reads the name as it is listed"
-        decisions = committed_overrides["not_actor"]
-        assert len(decisions) == 18
-        assert {(d["date"], d["status"]) for d in decisions} == {("2026-11-05", "proposed")}
+        decisions = [d for d in committed_overrides["not_actor"] if d["date"] == "2026-11-05"]
+        assert len(decisions) == 18 and {n for d in decisions for n in d["names"]} == NOT_ACTORS_OF_2026_11_05
+        assert {(d["date"], d["status"]) for d in committed_overrides["not_actor"]} == {
+            ("2026-11-05", "proposed"),
+            ("2026-11-06", "proposed"),
+        }
         # Names of the review that the actor-name hygiene drops since 2026-11-05 are not listed: a language
         # qualifier and state agencies. Nor is a disputed name ('leeme', the name of a ransomware the same
         # report lists as its family, which no galaxy lists).
@@ -1391,6 +1419,18 @@ class TestCommittedReference:
         # Actor names of the same review stay actors.
         assert gen.resolve(index, "mustard tempest").actor == "mustard tempest"
         assert gen.resolve(index, "void manticore").actor == "void manticore"
+
+    def test_not_actor_of_2026_11_06(self, gen, committed, committed_overrides):
+        # The actor-name hygiene keeps a legal form with its name since 2026-11-06, so the OTX adversary
+        # "Videostrong Technology Co., Ltd." is that one name, no longer "Videostrong Technology Co." (listed
+        # on 2026-11-05) and "Ltd.". Its full name is listed beside the short one.
+        decisions = [d for d in committed_overrides["not_actor"] if d["date"] == "2026-11-06"]
+        assert [d["names"] for d in decisions] == [sorted(NOT_ACTORS_OF_2026_11_06)]
+        assert gen.clean_synonym("Videostrong Technology Co., Ltd.") == ("ok", "videostrong technology co., ltd.")
+        index = gen.build_index(committed)
+        for name in ("videostrong technology co., ltd.", "videostrong technology co."):
+            assert gen.resolve(index, name) == gen.Resolution(None, "not_actor"), name
+        assert committed["version"] == "2026.11.06" and committed["counts"]["not_actors"] == 39
 
     def test_decisions_of_2026_10_22(self, gen, committed, committed_overrides):
         # Taken before the fresh baseline: the OTX collector decides with the reference, at collection time,
