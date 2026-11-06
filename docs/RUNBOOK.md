@@ -482,7 +482,7 @@ Each entry: symptom → detection signal → remediation.
 
   | Invariant | Fails when | Cause and recovery |
   |---|---|---|
-  | INV-1 | actors qualify for a campaign (`campaign_evidence`) and the graph holds no `Campaign` | `build_campaign_nodes` failed: read the `run_enrichment_jobs` log; clear `run_enrichment_jobs` with its downstream tasks |
+  | INV-1 | actors qualify for a campaign (`campaign_evidence`, with the shared malware of `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`) and the graph holds no `Campaign` | `build_campaign_nodes` failed: read the `run_enrichment_jobs` log; clear `run_enrichment_jobs` with its downstream tasks |
   | INV-2 | no `Indicator` | the sync wrote nothing: MISP allowlist (`EDGEGUARD_TRUSTED_MISP_ORG_UUIDS`) and `[MERGE-INEFFECTIVE]` lines in the `full_neo4j_sync` log; clear `full_neo4j_sync` with its downstream tasks |
   | INV-3 | no `Source` | `ensure_sources()` never ran: the sync creates the Source nodes when it connects; read the `full_neo4j_sync` log, then clear `full_neo4j_sync` with its downstream tasks |
   | INV-4 | on every run: a kill-chain phase whose `Tactic` exists has no `IN_TACTIC`, or a `uses_techniques` claim whose `Technique` exists has no `EMPLOYS_TECHNIQUE` (ThreatActor) or `IMPLEMENTS_TECHNIQUE` (Malware, Tool) with `match_type` `mitre_explicit`. On an unlimited run (`collection_limit` 0) also: a technique's phases reach no `Tactic`, the MITRE nodes of a label carry not one `uses_techniques` claim, or `collect_mitre` delivered and the graph holds no `Technique` | Missing links (`IN_TACTIC`, `EMPLOYS_TECHNIQUE`, `IMPLEMENTS_TECHNIQUE` lines): `build_relationships` did not write them; read its log, then clear `build_relationships` with its downstream tasks. Missing claims or techniques (`tactic claims`, `<label> claims`, `ATT&CK shape` lines): they were lost between `collect_mitre` and the graph; read the `collect_mitre` and `full_neo4j_sync` logs, then clear `tier1_core.collect_mitre` alone and, once it has succeeded, `full_neo4j_sync` with its downstream tasks. A limited run is judged on the links only: a collection limit cuts the ATT&CK actors and software |
@@ -892,6 +892,40 @@ docker logs edgeguard_airflow 2>&1 | grep -F '[ENRICHMENT SUMMARY]'
 `campaigns_built` counts every campaign the run built, new or existing. A job
 whose result counts errors adds `<job>_errors=N` when N is not 0.
 
+Before it builds, the campaign job logs the malware many actors share, whose
+indicators count for a campaign only through a link that a record reporting them
+cites (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`, default 7;
+[KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), `Campaign`):
+
+```bash
+docker logs edgeguard_airflow 2>&1 | grep -F '[CAMPAIGN] shared malware'
+# expected: [CAMPAIGN] shared malware: N with 7 or more actors (EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS; M names
+#           with their spellings); S of L actor links are to one and count only for the indicators of their own
+#           records (...); most shared: cobalt strike/cobaltstrike (64), ...
+# with the setting 0: [CAMPAIGN] shared malware: rule off (EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS=0): ...
+```
+
+A campaign whose actor has evidence but no active indicator that counts gets
+`indicator_count` 0 and no zone (`[CAMPAIGN] N campaigns with campaign evidence and
+no active indicator that counts now have indicator_count 0 and no zone`), and the
+campaigns record the rule the run judged with (`shared_malware_actors`,
+`shared_malware`), which the acceptance checks judge them with.
+
+On a graph whose campaigns were built without the rule (`shared_malware_actors`
+is null on them), the first enrichment run with it settles their links, counts
+and zones, but not their dates: `first_seen` only moves earlier and `last_seen`
+only later, so they keep the dates of the indicators the rule no longer counts,
+and a campaign left without an indicator that counts stays, inactive, where a
+fresh build creates none. A wipe and a fresh baseline (`edgeguard fresh-baseline`)
+gives the graph of a build with the rule. Short of that, delete EdgeGuard's
+campaigns with the statement below, then clear `run_enrichment_jobs` of the latest
+`edgeguard_neo4j_sync` run with its downstream tasks; the build creates them again,
+each with the `uuid` computed from its actor's name:
+
+```cypher
+MATCH (c:Campaign) WHERE c.edgeguard_managed = true DETACH DELETE c;
+```
+
 Every collector run also emits one grep-able push summary:
 
 ```bash
@@ -1284,7 +1318,7 @@ SET r.sources = [s IN r.sources WHERE NOT s IN ['coreideas', 'misp_galaxy', 'cur
 REMOVE r.tlp;
 ```
 
-Only curated claims set `r.tlp` on these five types, so step 2 removes it. Then run the enrichment jobs: `build_campaign_nodes` rebuilds the campaign links from the links that remain (provenance, confidence, evidence types and `tlp`; an indicator's link from its remaining paths to the actor) and each campaign's `tlp`, so a campaign built on a claim loses the package's events and level, and a campaign whose actor has no link left is deleted. A link the package created and another source asserted afterwards (an OTX pulse naming the same technique, say) still carries the curated label and is deleted in step 1; the relationship build and a full sync (`NEO4J_FULL_SYNC=true`) recreate it from that source's data. To remove one package of several, delete its event, remove the layer as above and run a full sync, which writes the remaining packages' claims again. To leave the layer out of a shared dataset without removing it, filter on `r.sources`, not on `r.match_type` (`docs/KNOWLEDGE_GRAPH.md`, "Curated packages").
+Only curated claims set `r.tlp` on these five types, so step 2 removes it. Then run the enrichment jobs: `build_campaign_nodes` rebuilds the campaign links from the links that remain (provenance, confidence, evidence types and `tlp`; an indicator's link from its remaining paths to the actor) and each campaign's `tlp`, so a campaign built on a claim loses the package's events and level, and a campaign whose actor has no campaign evidence left is deleted (a link to a malware many actors share is evidence only while a record it cites reported one of the malware's indicators, so an ATT&CK `uses` or a curated claim of such a malware keeps no campaign). A link the package created and another source asserted afterwards (an OTX pulse naming the same technique, say) still carries the curated label and is deleted in step 1; the relationship build and a full sync (`NEO4J_FULL_SYNC=true`) recreate it from that source's data. To remove one package of several, delete its event, remove the layer as above and run a full sync, which writes the remaining packages' claims again. To leave the layer out of a shared dataset without removing it, filter on `r.sources`, not on `r.match_type` (`docs/KNOWLEDGE_GRAPH.md`, "Curated packages").
 
 A claim may name a technique id ATT&CK revoked (`T1086`): the validation accepts it, lists it under `revoked_technique_ids` with its successor and warns, the claim goes to MISP as written, and the sync links it to the successor (see "Rebuilding the ATT&CK revoked-id map" below).
 
@@ -1576,10 +1610,11 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
-_Last updated: 2026-11-05_
+_Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — INV-1 counts the qualifying actors with the shared malware of `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`; the campaign job's `[CAMPAIGN] shared malware:` line (also with the rule off), the campaigns without an indicator that counts, and how to bring a graph built without the rule to a build with it; removing a curated layer: a campaign is deleted when its actor has no campaign evidence left.
 - 2026-11-05 — Canonical threat-actor reference: version `2026.11.05` and its counts, built from the MISP galaxies of 2026-11-05 (MISP 2.5.50; 12 new threat-actor records, among them BlackLock and TA419) and the graph of the 730-day baseline of 2026-11-03. Thirteen decisions on the names that baseline left unresolved: eleven merges (`Static Tundra` into Dragonfly and `INC` into INC Ransom from ATT&CK, `Tomiris` into Storm-0473, `KongTuke` into TAG-124, `LapDogs` into UAT-7810, `APT-C-01` into GreenSpot, `DONOT` into VICEROY TIGER, `ARMORY CASTLE` into UTA0178 and `CL-STA-0954` into UNC5820 from galaxy synonyms, two from the upstream threat-actor galaxy v359; `Calypso APT` and `UNG002` as spelling variants) and two never_merges (`Fire Ant`, which the galaxies give to two actors, and a string joining the names of Scattered Lapsus Hunters and ShinyHunters). The decision that made `Global Group` an actor of its own was removed: the galaxies give it to BlackLock. The overrides file gains `not_actor` decisions, copied into the reference's `not_actors`: 38 OTX adversary names of that baseline that a review found to be no actors (a technique, malware, kits and tools, hosting networks, a forum, companies, campaign names), which the OTX collector drops from adversary fields with an `[ACTOR-NAMES]` line of its own, the MISP→Neo4j sync skips as threat-actor attributes (also those MISP holds from before), and step 2d and the acceptance check count as no actors; state intelligence and security agencies on their own are dropped by the hygiene and listed on the country line.
 - 2026-11-03 — New section "MISP push stopped (MISP kept failing)" and the alert `EdgeGuardMispPushStopped` (critical): a MISP push stops once MISP has kept failing for `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` (900 s; the baseline's writer `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`, 3600 s, at most until 10 minutes before its task's end), counts the items not sent as failed and lets the run go on; what each collector does with them, where to look, what to do. Nothing stopped a push before: every failed batch cost five attempts (10, 20, 40 and 80 s of back-off) and a 300 s cooldown followed every three, so a push against a failing MISP ran until Airflow's `execution_timeout` killed the task, which saved nothing. Failure mode 1: a batch gives up after four attempts (the first and three retries; it made five). Failure mode 2: a cooldown ends early when MISP answers a light request. OTX retry backlog: the pulses a stopped push did not send record no try. The observability group holds 10 rules.
 - 2026-11-02 — New section "OTX retry backlog and given-up pulses" and the alerts `EdgeGuardOtxRetryPulsesWaiting` and `EdgeGuardOtxRetryPulsesGivenUp` (warning): a scheduled OTX run whose push left items unstored in batches MISP answered moves its cursor on and retries their pulses by id, each in batches of its own, after the window's push and within `EDGEGUARD_OTX_RETRY_MAX_SECONDS`; only a push of a pulse's items is a try for the give-up rule, so a pulse whose fetch by id keeps failing stays and keeps the waiting alert firing; what the alerts mean, the two alerts the same cause fires (`EdgeGuardDAGRunFailures`, `EdgeGuardSourceUnhealthy`), where to look (`[OTX-RETRY]` and `[OTX-RETRY-GAVE-UP]` lines, the MISP push errors of the run, the list in the incremental state) and how to recover (fix the cause; an additive baseline with `baseline_days` reaching the `modified` of the pulses given up collects them). The `[CONVERT]` paragraph of the post-run summary: OTX retries the pulses of a systemic drop instead of holding its cursor below them. A pulse whose batch MISP does not answer on any run fails every run that pushes it but no longer keeps the other pulses of the list from being pushed (the pulse a push that raised began with goes behind the others), and the list stays within `EDGEGUARD_OTX_RETRY_MAX_PULSES` when that push raises.

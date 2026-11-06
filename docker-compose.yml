@@ -191,6 +191,9 @@ x-common-env: &common-env
   EDGEGUARD_CANONICAL_THREAT_ACTORS: ${EDGEGUARD_CANONICAL_THREAT_ACTORS:-}
   # 2026-10: post-sync fold of Malware nodes named "<family> - S####" into the ATT&CK node (or the base-named node).
   EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE: ${EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE:-true}
+  # 2026-11-06: campaign builder (src/campaign_evidence.py): a malware that at least this many actors are
+  # linked to is shared, and an indicator of it counts only through a link a record reporting it cites (0 = off).
+  EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS: ${EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS:-7}
   # 2026-10 configuration forwarding (production-readiness check): variables read by the code
   # that never reached the containers. Set-but-empty keeps the code default in every case below.
   # Environment name — config.is_production_env() is fail-closed: unset or empty is treated as

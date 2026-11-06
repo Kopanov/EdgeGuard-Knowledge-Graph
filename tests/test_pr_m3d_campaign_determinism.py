@@ -321,6 +321,8 @@ class TestPruneQueryReceivesRunStartAt:
                 "deleted": 0,  # 2026-10-16: Step 1b
                 "names": [],
                 "added": 0,  # 2026-11-02: Step 6, the campaigns' sector labels
+                "malware": [],  # 2026-11-06: the shared malware
+                "changed": 0,  # 2026-11-06: Step 3c
             }
             # For queries that return iterable results (qualifying_actors_query)
             result.__iter__ = lambda s: iter([])

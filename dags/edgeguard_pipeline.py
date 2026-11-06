@@ -3469,9 +3469,10 @@ def assert_baseline_postconditions(**context):
       [INV-1] Campaign > 0 IFF there are qualifying actors.
         If the graph carries actors with campaign evidence (a malware attributed
         to them or, since 2026-10-16, used by them, and an active indicator of that
-        malware; ``campaign_evidence.QUALIFYING_ACTORS_QUERY``) but no Campaigns
-        materialized, ``build_campaign_nodes`` raised an exception that was
-        swallowed before PR-N21 (now re-raised).
+        malware; since 2026-11-06 an indicator of a shared malware only through a
+        link a record reporting it cites; ``campaign_evidence.QUALIFYING_ACTORS_QUERY``)
+        but no Campaigns materialized, ``build_campaign_nodes`` raised an exception
+        that was swallowed before PR-N21 (now re-raised).
 
       [INV-2] Indicator > 0.
         Sync produced data. Zero Indicators means the sync silently
@@ -3513,7 +3514,8 @@ def assert_baseline_postconditions(**context):
     sentinel below: postcheck always runs, detects upstream-failed state,
     emits a clean diagnostic, and exits without double-firing.
     """
-    from campaign_evidence import QUALIFYING_ACTORS_QUERY
+    from campaign_evidence import QUALIFYING_ACTORS_QUERY, SHARED_MALWARE_QUERY, shared_malware_names
+    from config import campaign_shared_malware_actors
     from neo4j_client import Neo4jClient
 
     # PR-N27 sentinel: detect upstream-failed state and emit a clean
@@ -3646,7 +3648,11 @@ def assert_baseline_postconditions(**context):
             # reads it from: an actor qualifies with an ATTRIBUTED_TO or a USES_MALWARE link to a
             # malware that an active indicator INDICATES. An actor with only USES_MALWARE has a
             # campaign since then; the inline query, which read ATTRIBUTED_TO only, missed it.
-            row = session.run(QUALIFYING_ACTORS_QUERY).single()
+            # 2026-11-06: the shared malware come from the builder's query and setting
+            # (``EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS``), so the count is the builder's.
+            row = session.run(SHARED_MALWARE_QUERY, min_actors=campaign_shared_malware_actors()).single()
+            shared_malware = shared_malware_names(row["malware"] if row else None)
+            row = session.run(QUALIFYING_ACTORS_QUERY, shared_malware=shared_malware).single()
             qualifying = int((row["qualifying_actors"] if row else 0) or 0)
 
             row = session.run("MATCH (c:Campaign) RETURN count(c) AS campaigns").single()

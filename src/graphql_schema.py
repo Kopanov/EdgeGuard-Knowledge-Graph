@@ -424,7 +424,9 @@ class Tool:
     description=(
         "Inferred campaign node — EdgeGuard's grouping of one ThreatActor's malware (attributed to "
         "it, ATTRIBUTED_TO, or used by it, USES_MALWARE) and those malware's active indicators, built "
-        "by the enrichment job build_campaign_nodes; deleted when the actor has neither link left."
+        "by the enrichment job build_campaign_nodes. A link to a malware many actors share counts only "
+        "for the indicators of its own records, and an indicator of such a malware joins only through "
+        "such a link. Deleted when the actor has no campaign evidence left."
     )
 )
 class Campaign:

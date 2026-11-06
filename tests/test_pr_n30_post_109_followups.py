@@ -250,6 +250,7 @@ class TestPRN30TestCoverageRECB1BehaviouralSentinel:
             # Non-violating counts for INV-1 to INV-3, and empty graph-shape rows (INV-4 to INV-6 judge
             # nothing without input: no Technique, no claim, no collector status in this context).
             mock_session.run.return_value.single.return_value = {
+                "malware": [],  # 2026-11-06: the shared malware INV-1 reads first
                 "qualifying_actors": 0,
                 "campaigns": 0,
                 "n": 10,  # Indicator/Source count

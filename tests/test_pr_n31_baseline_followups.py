@@ -511,7 +511,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
       * Step 1 creates 1 Campaign
       * Steps 2/3a/4/5 link malware/indicators, prune stale, cleanup, reactivate
       * The returned `results` dict reflects the per-step counts
-      * All 14 expected session.run() calls fire in the right order
+      * All 18 expected session.run() calls fire in the right order
       * Campaign uuid is computed deterministically from the actor name
 
     Without this test, a refactor that re-orders / silently swallows
@@ -520,9 +520,9 @@ class TestPRN31BuildCampaignNodesHappyPath:
     flagged this as the gap.
     """
 
-    def _build_fake_session(self, actor_name: str = "APT-N31-Test", deleted=None):
+    def _build_fake_session(self, actor_name: str = "APT-N31-Test", deleted=None, shared=None, shared_links=None):
         """Construct a MagicMock session that returns happy-path values
-        for each of the 14 session.run() calls build_campaign_nodes
+        for each of the 18 session.run() calls build_campaign_nodes
         makes. Returns ``(client, sess, captured_queries)`` so the test
         can inspect what queries were issued + in what order.
 
@@ -540,6 +540,16 @@ class TestPRN31BuildCampaignNodesHappyPath:
         # (0) the database's clock (2026-10), the prunes' reference time
         now_result = MagicMock()
         now_result.single.return_value = {"now": "2026-10-15T12:00:00Z"}
+
+        # (0b) the shared malware (2026-11-06) — none by default
+        shared_result = MagicMock()
+        shared_result.single.return_value = {"malware": list(shared or [])}
+
+        # (0c) the evidence links per type, those to a shared malware and those of them with an indicator
+        # of their own records (2026-11-06)
+        shared_links_rows = list(shared_links or [])
+        shared_links_result = MagicMock()
+        shared_links_result.__iter__ = lambda self: iter(shared_links_rows)
 
         # (1) qualifying_actors_query — one qualifying actor
         actors_iter = iter([{"name": actor_name}])
@@ -592,6 +602,10 @@ class TestPRN31BuildCampaignNodesHappyPath:
         prune_result = MagicMock()
         prune_result.single.return_value = {"pruned": 0}
 
+        # (7b) Step 3c (2026-11-06) — campaigns with evidence and no active indicator that counts
+        without_candidates_result = MagicMock()
+        without_candidates_result.single.return_value = {"campaigns": 0, "changed": 0}
+
         # (8) Step 4 cleanup_query
         cleanup_result = MagicMock()
         cleanup_result.single.return_value = {"count": 0}
@@ -604,9 +618,15 @@ class TestPRN31BuildCampaignNodesHappyPath:
         sector_labels_result = MagicMock()
         sector_labels_result.single.return_value = {"campaigns": 1, "added": 2, "removed": 0}
 
+        # (11) Step 7 the campaigns record the shared-malware rule (2026-11-06)
+        record_result = MagicMock()
+        record_result.single.return_value = {"campaigns": 1}
+
         captured_queries = []
         original_side_effect = [
             now_result,
+            shared_result,
+            shared_links_result,
             actors_result,
             create_result,
             backfill_result,
@@ -617,9 +637,11 @@ class TestPRN31BuildCampaignNodesHappyPath:
             link_i_result,
             links_count_result,
             prune_result,
+            without_candidates_result,
             cleanup_result,
             reactivated_result,
             sector_labels_result,
+            record_result,
         ]
         idx_holder = {"i": 0}
 
@@ -660,10 +682,11 @@ class TestPRN31BuildCampaignNodesHappyPath:
         )
 
     def test_happy_path_issues_all_14_queries(self, monkeypatch):
-        """The function must issue all 14 expected session.run() calls (2026-10: the database's
+        """The function must issue all 18 expected session.run() calls (2026-10: the database's
         clock, Step 2b, the malware membership prune, and Step 2c, which settles RUNS; 2026-10-16:
         Step 1b, which deletes the campaigns without evidence; 2026-11-02: Step 6, the campaigns'
-        sector labels).
+        sector labels; 2026-11-06: the shared malware and their links, read before Step 1, Step 3c,
+        which settles the campaigns without candidates, and Step 7, which records the rule).
         Fewer calls means a step was silently skipped (the swallower
         pattern PR-N21 fixed); more means a step duplicated or a new
         step was added without updating this pin (intentional break-
@@ -678,14 +701,15 @@ class TestPRN31BuildCampaignNodesHappyPath:
         finally:
             ej.time.sleep = original_sleep
 
-        assert sess.run.call_count == 14, (
-            f"build_campaign_nodes must issue exactly 14 session.run() calls "
-            f"(1 clock + 1 pre-fetch + 9 step queries + 3 follow-ups); got {sess.run.call_count}. "
+        assert sess.run.call_count == 18, (
+            f"build_campaign_nodes must issue exactly 18 session.run() calls "
+            f"(1 clock + 2 shared-malware reads + 1 pre-fetch + 11 step queries + 3 follow-ups); "
+            f"got {sess.run.call_count}. "
             f"If you added a step, update this pin AND the fake-session fixture."
         )
 
     def test_happy_path_query_order(self, monkeypatch):
-        """The 14 queries must fire in a specific order (pre-fetch FIRST,
+        """The 18 queries must fire in a specific order (pre-fetch FIRST,
         Campaign create SECOND, etc). A reorder could break the
         backfill-after-create invariant the post-PR-#33 audit caught."""
         ej = self._import_fresh_enrichment_jobs(monkeypatch)
@@ -703,6 +727,9 @@ class TestPRN31BuildCampaignNodesHappyPath:
         expected_substrings_in_order = [
             # (0) the database's clock (2026-10)
             "RETURN toString(datetime()) AS now",
+            # (0b, 0c) the shared malware and their links (2026-11-06), before any step reads them
+            "AS malware",
+            "AS report_scoped_links",
             # (1) qualifying_actors_query — looks for ThreatActor + WHERE EXISTS
             "MATCH (a:ThreatActor)",
             # (2) Step 1 create_cypher — has the Campaign MERGE
@@ -725,19 +752,23 @@ class TestPRN31BuildCampaignNodesHappyPath:
             assert substr in captured[i], (
                 f"query #{i + 1} must contain '{substr}'; got query starting with: {captured[i][:200]}..."
             )
-        # (10) Step 6 (2026-11-02) — the campaigns' sector labels, last: after Step 1 set the zones
-        assert "apoc.create.addLabels(kept, missing)" in captured[-1]
+        # (7b) Step 3c (2026-11-06), after Step 3b and before Step 4: the campaigns without candidates
+        assert "c.indicator_count = 0" in captured[-5] and "SET c.active = false" in captured[-4]
+        # (10) Step 6 (2026-11-02) — the campaigns' sector labels, after Step 1 and Step 3c set the zones;
+        # (11) Step 7 (2026-11-06) — the campaigns record the shared-malware rule, last
+        assert "apoc.create.addLabels(kept, missing)" in captured[-2]
+        assert "SET c.shared_malware_actors = $min_actors" in captured[-1]
 
     def test_step6_sets_the_campaigns_sector_labels(self, monkeypatch):
-        """2026-11-02: the last statement sets the campaigns' sector labels from their zones, with the
-        sector labels as a parameter, and its counts are in the results."""
+        """2026-11-02: the last statement but one (2026-11-06: Step 7 follows it) sets the campaigns' sector
+        labels from their zones, with the sector labels as a parameter, and its counts are in the results."""
         import sector_labels
 
         ej = self._import_fresh_enrichment_jobs(monkeypatch)
         client, sess, _captured = self._build_fake_session()
         monkeypatch.setattr(ej.time, "sleep", lambda *_a: None)
         results = ej.build_campaign_nodes(client)
-        last = sess.run.call_args_list[-1]
+        last = sess.run.call_args_list[-2]
         assert last.args[0] == sector_labels.CAMPAIGN_SECTOR_LABELS_CYPHER
         assert last.kwargs["sector_labels"] == ["Energy", "Finance", "Healthcare"]
         assert (results["sector_labels_added"], results["sector_labels_removed"]) == (2, 0)
@@ -761,8 +792,9 @@ class TestPRN31BuildCampaignNodesHappyPath:
         # The 2nd session.run call (create_cypher) must receive
         # campaign_uuids as a kwarg with the qualifying actor's name.
         call_args_list = sess.run.call_args_list
-        # call 0 = the clock; call 1 = pre-fetch (no kwargs); call 2 = create_cypher (kwargs)
-        create_call = call_args_list[2]
+        # call 0 = the clock; calls 1-2 = the shared malware (2026-11-06); call 3 = pre-fetch;
+        # call 4 = create_cypher (kwargs)
+        create_call = call_args_list[4]
         assert "campaign_uuids" in create_call.kwargs, (
             "create_cypher must be called with campaign_uuids=... so c.uuid is set"
         )
@@ -798,11 +830,9 @@ class TestPRN31BuildCampaignNodesHappyPath:
         with caplog.at_level(logging.INFO, logger="enrichment_jobs"):
             _ej, _sess, captured, results = self._run_capturing(monkeypatch, deleted=deleted)
         assert results["campaigns_deleted"] == 2
-        assert (
-            "[CAMPAIGN] deleted 2 campaigns whose actor has no ATTRIBUTED_TO or USES_MALWARE link left" in caplog.text
-        )
+        assert "[CAMPAIGN] deleted 2 campaigns whose actor has no campaign evidence left" in caplog.text
         assert "with 2 RUNS and 7 PART_OF_CAMPAIGN links" in caplog.text and "snake campaign" in caplog.text
-        statement = captured[4]
+        statement = captured[6]
         # Only campaigns EdgeGuard created; the node goes with every link it has.
         assert "WHERE c.edgeguard_managed = true" in statement and "DETACH DELETE c" in statement
         # Ordered by name before the sample is taken, so the logged names do not depend on row order.
@@ -819,13 +849,14 @@ class TestPRN31BuildCampaignNodesHappyPath:
         of the duration, not its length (a campaign stamped two days earlier has 0 minutes). The
         statement's semantics on Neo4j: ``tests/test_explainability_neo4j.py``."""
         _ej, sess, captured, _results = self._run_capturing(monkeypatch)
-        # Step 5 is the last but one statement (2026-11-02: Step 6, the sector labels, follows it).
-        step5 = sess.run.call_args_list[-2]
-        assert "MATCH (c:Campaign)" in captured[-2] and "count(c)" in captured[-2]
-        assert "duration.between" not in captured[-2], "a duration component is not an elapsed time"
-        assert "c.last_updated >= datetime($run_start_at)" in captured[-2]
+        # Step 5 is the third statement from the end (2026-11-02: Step 6, the sector labels, follows it;
+        # 2026-11-06: then Step 7, the record of the shared-malware rule).
+        step5 = sess.run.call_args_list[-3]
+        assert "MATCH (c:Campaign)" in captured[-3] and "count(c)" in captured[-3]
+        assert "duration.between" not in captured[-3], "a duration component is not an elapsed time"
+        assert "c.last_updated >= datetime($run_start_at)" in captured[-3]
         assert step5.kwargs.get("run_start_at") == "2026-10-15T12:00:00Z", "the database's clock, read at the start"
-        assert captured[-2] is _ej._CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, "the statement the Neo4j case runs"
+        assert captured[-3] is _ej._CAMPAIGNS_STAMPED_THIS_RUN_CYPHER, "the statement the Neo4j case runs"
 
     def test_every_step_reads_the_same_evidence_definition(self, monkeypatch):
         """2026-10-16: an actor qualifies, a campaign survives, a malware is a member and an indicator
@@ -834,7 +865,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
         import campaign_evidence as ce
 
         _ej, _sess, captured, _results = self._run_capturing(monkeypatch)
-        prefetch, create, _backfill, delete, link_malware, prune_malware, settle_runs, link_indicators = captured[1:9]
+        prefetch, create, _backfill, delete, link_malware, prune_malware, settle_runs, link_indicators = captured[3:11]
         assert ce.has_evidence("a") in prefetch
         assert ce.has_evidence("a") in create and ce.member_malware("a") in create
         assert ce.evidence_links("a") in create  # RUNS: the actor's links
@@ -852,6 +883,6 @@ class TestPRN31BuildCampaignNodesHappyPath:
         """2026-10-16: Step 2b removes a malware's membership when the campaign's actor has no link
         to it, the definition Step 2 links by, whatever the time Step 2 last touched the link."""
         _ej, sess, captured, _results = self._run_capturing(monkeypatch)
-        prune_call = sess.run.call_args_list[6]
-        assert "MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign)" in captured[6]
-        assert "run_start_at" not in prune_call.kwargs and "$run_start_at" not in captured[6]
+        prune_call = sess.run.call_args_list[8]
+        assert "MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign)" in captured[8]
+        assert "run_start_at" not in prune_call.kwargs and "$run_start_at" not in captured[8]

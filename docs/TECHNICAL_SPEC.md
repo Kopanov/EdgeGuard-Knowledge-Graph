@@ -582,8 +582,8 @@ Auth:    Configured via environment variables
 | `EXPLOITS` | ThreatActor / Malware | `CVE` | Curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 (both written when the claim creates the link), `tlp` = the package's TLP level |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`match_type='otx_attack_ids'`, `confidence_score` 0.6, written when the link is created) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |
-| `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()`; `match_type='campaign_grouping'`; rests on the actor's `ATTRIBUTED_TO` and `USES_MALWARE` links to malware (`evidence_types`; `tlp` the most restrictive level of those links); a campaign whose actor has neither link left is deleted with its links |
-| `PART_OF_CAMPAIGN` | Malware, Indicator | Campaign | `build_campaign_nodes()`; a malware with either link to the campaign's actor is a member, an indicator joins through `INDICATES` to a member (`evidence_types`; `tlp` the most restrictive level of the links it rests on) |
+| `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()`; `match_type='campaign_grouping'`; rests on the actor's `ATTRIBUTED_TO` and `USES_MALWARE` links to malware (`evidence_types`; `tlp` the most restrictive level of those links); a campaign whose actor has no campaign evidence left is deleted with its links (a link to a malware many actors share is evidence only while a record it cites reported one of the malware's indicators) |
+| `PART_OF_CAMPAIGN` | Malware, Indicator | Campaign | `build_campaign_nodes()`; a malware with a link to the campaign's actor is a member, a shared malware only while one of its links counts for one of its indicators; an indicator joins through `INDICATES` to a member; an indicator of a malware at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (default 7) actors are linked to joins only through a link that a record reporting it cites (`evidence_types`; `tlp` the most restrictive level of the links it rests on) |
 | `USES_MALWARE` | ThreatActor | Malware | `match_type='mitre_explicit'` (0.95, MITRE group → software `uses`, `build_relationships.py` Q2b); curated-package claims: see below the table |
 | `USES_TOOL` | ThreatActor | Tool | As `USES_MALWARE` (Q2c; a curated claim names the tool by its ATT&CK id) |
 | `SUBTECHNIQUE_OF` | Technique | Technique | `match_type='mitre_explicit'`, 1.0 (Q1b, from the dotted ATT&CK id) |
@@ -1024,10 +1024,11 @@ other type is compared as given.
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — `RUNS`, `PART_OF_CAMPAIGN`: an indicator of a malware many actors share joins a campaign only through a link that a record reporting it cites; a campaign is deleted when its actor has no campaign evidence left.
 - 2026-11-02 — Node schema: `Malware` no longer lists `family`, which no writer sets, and `known_malware[].family` of the alert enrichment is null (the schema and the sample showed a family); `deprecated` is listed on `Malware`, `ThreatActor` and `Tool`, and on `Tactic` with its clearing by an ATT&CK record (it was listed set-only on `Tactic`). A campaign's `last_seen` and the enrichment's `last_updated` take per source its own date first, the first-seen claim before the MISP record time (they named the last-seen claim, else the latest report). `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`: the age applies when no run state decides (it was described as a cross-host TTL).
 - 2026-11-02 — Read-side lookup canonicalization: a `url`, and a `scheme://host` value given without a type, is looked up with its scheme and host lower-cased, as the write side now keys a `url`.
 - 2026-11-02 — `ATTRIBUTED_TO`: `match_type='exact'` (Q2) is on no link: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label.

@@ -126,6 +126,8 @@ class TestCampaignBuild:
             "removed": 0,
             "pruned": 0,
             "added": 0,  # 2026-11-02: Step 6, the campaigns' sector labels
+            "malware": [],  # 2026-11-06: the shared malware
+            "changed": 0,  # 2026-11-06: Step 3c
         }
         driver, statements, _ = _recording_session(lambda q: {**counts, "count": 0})
         client = MagicMock()
@@ -172,6 +174,8 @@ class TestCampaignBuild:
             "removed": 0,
             "pruned": 0,
             "added": 0,
+            "malware": [],  # 2026-11-06: the shared malware
+            "changed": 0,  # 2026-11-06: Step 3c
         }
         driver, statements, _ = _recording_session(lambda q: {**counts, "count": 0})
         client = MagicMock()

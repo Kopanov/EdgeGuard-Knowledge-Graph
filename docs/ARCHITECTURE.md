@@ -258,7 +258,7 @@ When data is pushed to MISP, it gets tagged with:
 | `USES_TOOL` | ThreatActor → Tool | MITRE explicit group → tool `uses`; also a curated package's claim (curated label and 0.85 on a link it creates) |
 | `TARGETS` | Indicator / ThreatActor / Malware → Sector | Node `zone` list → the sync (indicators) and `build_relationships.py` (indicators, actors and malware): `otx_industries`, 0.6, where an OTX pulse's own industries state the sector, else `zone_classification`, 0.5; never to `global`; each link names only the feeds whose `SOURCED_FROM.zones` give its sector (`src/sector_evidence.py`) |
 | `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → the sync and `build_relationships.py`: `advisory_sector`, 0.9, where CISA's ICS advisory states the sector (the product is deployed in it), else `zone_classification`, 0.5; each link names only the feeds that gave its sector (`src/sector_evidence.py`) |
-| `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` for an actor with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware with an active indicator (`r.evidence_types`, `src/campaign_evidence.py`); a campaign whose actor has neither link is deleted with its links |
+| `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` for an actor with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware with an active indicator (`r.evidence_types`, `src/campaign_evidence.py`); an indicator of a malware many actors share counts only through a link that a record reporting it cites; a campaign whose actor has no campaign evidence left is deleted with its links |
 | `PART_OF_CAMPAIGN` | Malware / Indicator → Campaign | Built by `enrichment_jobs.build_campaign_nodes()`; a type of its own because `PART_OF` is ResilMesh's asset hierarchy |
 
 All relationship `sources` arrays are accumulated as sets — no duplicates on re-sync.
@@ -403,7 +403,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/cve_feed_enrichment.py` | FIRST EPSS scores on existing `CVE` nodes, written without MISP |
 | `src/build_relationships.py` | Post-sync graph links on exact keys, each with `match_type` and confidence |
 | `src/indicator_aging.py` | The one Indicator aging rule (basis, tiers, retirement, `aging_evaluated_at`) |
-| `src/campaign_evidence.py` | What a campaign rests on (`ATTRIBUTED_TO` / `USES_MALWARE`) |
+| `src/campaign_evidence.py` | What a campaign rests on (`ATTRIBUTED_TO` / `USES_MALWARE`; shared malware, `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`) |
 | `src/sector_evidence.py` | Evidence label and confidence of links to `Sector` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9) and the zones a record states |
 | `src/description_ranking.py` | Fixed source ranking of node descriptions |
 | `src/relationship_provenance.py` | `sources` / `source_refs` / `misp_event_ids` on derived links; curated claims |
@@ -508,10 +508,11 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — An indicator of a malware that at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (7) actors share counts for a campaign only through a link that a record reporting it cites (`src/campaign_evidence.py`).
 - 2026-11-02 — `ATTRIBUTED_TO`: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label (the row described the exact match as a producer).
 - 2026-11-02 — `run_pipeline.py` runs the collectors into MISP only: its STIX import into Neo4j (`load_stix21_to_neo4j`), its actor-technique and malware-actor writes at confidence 0.7, its `EXPLOITS` pass and its VirusTotal writes (`src/enrichment.py`, deleted) are removed, and `--baseline` exits 2 (it built a reduced graph). The Key Files rows and the VirusTotal row follow.
 - 2026-11-01 — Node list: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the list named `merge_cve`.

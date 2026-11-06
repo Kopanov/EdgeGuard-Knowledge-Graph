@@ -258,8 +258,10 @@ stands in for the stored kind: a later record of the same source that dates the 
 than the edge's report moves `r.last_recorded_at` but not the report, so a record time kept as the
 report then reads as a source date (rare).
 
-- **Campaign** (`build_campaign_nodes`): `first_seen` is the earliest first seen of its active
-  indicators, `last_seen` the latest last seen. `first_seen` only moves earlier and `last_seen`
+- **Campaign** (`build_campaign_nodes`): `first_seen` is the earliest first seen of the active
+  indicators it counts, `last_seen` the latest last seen (an indicator of a malware many actors
+  share counts only through a link that a record reporting it cites; [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)
+  node table, `Campaign`). `first_seen` only moves earlier and `last_seen`
   only later, so a campaign keeps the widest span a build computed, also after the indicators that
   gave it expire. A `last_seen` a build stored too late therefore stays until a fresh baseline
   rebuilds the graph, or until a build deletes the campaign because its actor has no evidence left.
@@ -528,10 +530,11 @@ its first import, and a campaign whose last seen is no feed's record time.
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — Campaign seen dates: the indicators a campaign counts exclude those of a shared malware that no record of the actor's links reported (a link to a shared malware, an ATT&CK `uses` or a curated claim, had given a campaign the family's first and last dates). Dates only widen, so a graph built before keeps the wider span until a fresh baseline.
 - 2026-11-02 — Report SDO: the STIX export emits none; the subsection describes the MISP → STIX converter of `run_misp_to_neo4j.py`, which no pipeline step or API calls (the subsection read as part of the export contract).
 - 2026-11-02 — Seen dates of an indicator: the command-line STIX import of `run_pipeline.py`, named as a writer without a MISP report, is removed.
 - 2026-11-02 — The last date of an edge is the source's own date first: its last-seen claim, its latest report when that is earlier than the MISP record time, its first-seen claim, and only then the record time. The campaign build orders its sample of 100 indicators by that date (it ordered by the node's `last_reported_at`), so the sample, the campaign's `last_seen` and the alert enrichment read one definition. On the 730-day baseline of 2026-11-01 the record time, the time of the push, had placed the items of the feeds without a last-seen date above indicators their sources reported later: 4,270 of 40,938 indicator links change (OTX 29,903 → 31,780, ThreatFox 9,960 → 8,553, MalwareBazaar 1,225 → 911, URLhaus 3 → 65, Feodo Tracker 289 → 8, SSL Blacklist 62 → 0), and 177 instead of 216 of 533 campaigns get a last seen of 1 November; a stored `last_seen` stays until a fresh baseline.

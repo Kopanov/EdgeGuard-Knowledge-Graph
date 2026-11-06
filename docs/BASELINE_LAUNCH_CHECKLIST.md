@@ -379,8 +379,9 @@ clearing:
    EdgeGuard wrote to them. The command then runs the backup gate
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
-   finishes, run `python scripts/verify_fresh_baseline.py` with `NEO4J_USER` and
-   `NEO4J_PASSWORD` of the instance under test in the environment. It reads the Compose
+   finishes, run `python scripts/verify_fresh_baseline.py` with `NEO4J_USER`,
+   `NEO4J_PASSWORD` and `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` of the instance under test
+   in the environment (on the Compose host, `set -a; . ./.env; set +a`). It reads the Compose
    Neo4j at `http://127.0.0.1:7474`; when the instance under test is another one, set
    `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) to its HTTP address. Every mandatory check must
    pass before the instance is handed to the partners or the demo.
@@ -434,8 +435,9 @@ clearing:
      at the MISP time) and is retired after 730 days without one; the per-source measurement
      of [RUNBOOK.md](RUNBOOK.md#indicator-aging) follows the baseline.
    - A campaign rests on its actor's `ATTRIBUTED_TO` or `USES_MALWARE` links, so actors MITRE
-     says use a malware have campaigns too; its links name the relationship types they rest
-     on (`evidence_types`), and a campaign without evidence is deleted.
+     says use a malware have campaigns too (an indicator of a malware many actors share counts
+     only through a link that a record reporting it cites); its links name the relationship types
+     they rest on (`evidence_types`), and a campaign without evidence is deleted.
    - A curated package, once imported
      ([RUNBOOK § Importing a curated package](RUNBOOK.md#importing-a-curated-package)),
      adds `EXPLOITS` from actors and malware to CVEs and marks every link it touches with its
@@ -561,18 +563,28 @@ After `build_relationships` and the enrichment jobs have run, execute the
 read-only acceptance script against the new graph and keep its JSON with
 the baseline record. It reads the Compose Neo4j at `http://127.0.0.1:7474`
 with `NEO4J_USER` and `NEO4J_PASSWORD`; for another instance set
-`NEO4J_HTTP_URL` (or `NEO4J_HTTP`) to its HTTP address:
+`NEO4J_HTTP_URL` (or `NEO4J_HTTP`) to its HTTP address. Give it the
+deployment's `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` too: on the Compose host
+source `.env`, as below; for another instance set the variable to that
+instance's value (the campaign checks judge a campaign without a recorded list
+of shared malware with the list of this value):
 
 ```bash
+set -a; . ./.env; set +a
 python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json
 ```
 
-Run it when no sync and no `build_relationships` run is in progress. A sync writes nodes and the claims on them
-whose links the `build_relationships` run after it builds (in the baseline DAG and in `edgeguard_neo4j_sync`), so
-between the two the checks of those links fail by design: `uses_technique_complete`, `sector_links_complete`,
-`pulse_indicates_complete` and `family_indicates_complete` after new indicators or zones, and
-`in_tactic_complete`, `subtechnique_of_complete`, `employs_technique_complete`, `implements_technique_complete`,
-`uses_malware_complete` and `uses_tool_complete` after a sync that wrote ATT&CK records.
+Run it when no sync, no `build_relationships` run and no enrichment run is in progress. A sync writes nodes and the
+claims on them whose links the `build_relationships` run after it builds (in the baseline DAG and in
+`edgeguard_neo4j_sync`), so between the two the checks of those links fail by design: `uses_technique_complete`,
+`sector_links_complete`, `pulse_indicates_complete` and `family_indicates_complete` after new indicators or zones,
+and `in_tactic_complete`, `subtechnique_of_complete`, `employs_technique_complete`, `implements_technique_complete`,
+`uses_malware_complete` and `uses_tool_complete` after a sync that wrote ATT&CK records. The campaign checks
+`campaign_malware_has_evidence`, `campaigns_have_evidence` and `campaign_indicators_have_evidence` can fail by
+design until the enrichment run that follows: `build_relationships` step 2d removes same-pulse attributions a
+campaign rests on, and a sync or `build_relationships` can link an indicator member to a malware many actors share,
+which it then counts for only through a record of the actor's link. A link that makes a malware shared does not
+fail them: each campaign is judged with the list of shared malware its build recorded.
 
 It exits non-zero when a mandatory check of the table below fails. A warning (`[WARN]`; in the JSON `ok: false` with
 `mandatory: false`) is reported and leaves the exit code unchanged.
@@ -623,8 +635,9 @@ and never fails; the others (`claims_with_target`) are the claims judged.
 | One `Source` node per source (`source_nodes_canonical`) | no `Source` node is keyed by a variant (alias) of a registered source (`otx`, `cisa`, `vt`, …): the graph has one per canonical id. The canonical ids and variants are read from `src/source_registry.py` when the check runs and listed in its report (`variants`), so a newly registered source needs no change to the check. A `Source` node whose id the registry does not know is listed, never failed on |
 | Campaign membership (`campaign_membership_is_part_of_campaign`) | no `PART_OF` ends at a `Campaign`; every `PART_OF_CAMPAIGN` runs from a `Malware` or `Indicator` to a `Campaign`. `PART_OF` stays ResilMesh's (IP → Subnet, the OrganizationUnit hierarchy) |
 | Attribution from a source report (`attribution_from_single_actor_reports`) | no same-pulse `ATTRIBUTED_TO` rests only on OTX pulses whose actors are several actors (the aliases of one actor count as one, canonical reference), unless another feed asserts it, and none names such a pulse in its provenance. The pulses are step 2d's: those recorded on two or more actor nodes that are several actors, and those the OTX collector marked on indicators (`Indicator.several_actor_pulses`, judged with the canonical reference, from the IOCs the collector pushed; the MISP writer marks no stored copy; the detail counts them as `pulses_marked_on_indicators`). Informational without the reference. Informational too when the graph holds no same-pulse attribution, and when no actor records a pulse and no indicator a mark |
-| Campaign malware membership (`campaign_malware_has_evidence`) | every `Malware -[:PART_OF_CAMPAIGN]-> Campaign` has the malware attributed to the campaign's actor (`ATTRIBUTED_TO`) or used by it (`USES_MALWARE`) (`build_campaign_nodes` step 2b prunes the rest; the definition is `src/campaign_evidence.py`, which the builder reads too). Informational without malware members |
-| No campaign without evidence (`campaigns_have_evidence`) | every `Campaign` EdgeGuard built has an actor of its `actor_name` with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware (`build_campaign_nodes` step 1b deletes the others with their links) and that actor's `RUNS`; no `RUNS` comes from an actor that is not the campaign's or has neither link (step 2c removes it). The detail counts `without_evidence`, `without_runs` and `runs_without_evidence`. A campaign with evidence whose indicators all expired is legitimate (`active = false`). Informational while there is no campaign EdgeGuard built and no `RUNS` without evidence; a `RUNS` without evidence into any campaign, a partner's included, fails |
+| Campaign malware membership (`campaign_malware_has_evidence`) | every `Malware -[:PART_OF_CAMPAIGN]-> Campaign` has the malware attributed to the campaign's actor (`ATTRIBUTED_TO`) or used by it (`USES_MALWARE`), a shared malware only while a record one of those links cites reported one of its indicators (`build_campaign_nodes` step 2b prunes the rest; the definition is `src/campaign_evidence.py`, which the builder reads too). The shared malware are those the campaign's build recorded on it (`shared_malware`); a campaign without one (a partner's, or one built before the rule) is judged with those at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (default 7; 0 = off) actors are linked to now, the value read from the script's environment. This check, `campaigns_have_evidence` and `campaign_indicators_have_evidence` report that value and the number of names shared now (`shared_malware_actors`, `shared_malware`), the recorded lists with their campaigns (`recorded`), the campaigns without one (`campaigns_without_recorded_list`) and, when the graph now shares other names than the main recorded list at its value, the difference (`shared_since_build`, reported, not judged). Informational without malware members |
+| No campaign without evidence (`campaigns_have_evidence`) | every `Campaign` EdgeGuard built has an actor of its `actor_name` with an `ATTRIBUTED_TO` or `USES_MALWARE` link to a malware that is campaign evidence (to a shared malware only with an indicator of the link's own records) (`build_campaign_nodes` step 1b deletes the others with their links) and that actor's `RUNS`; no `RUNS` comes from an actor that is not the campaign's or has no campaign evidence (step 2c removes it). The detail counts `without_evidence`, `without_runs` and `runs_without_evidence`. A campaign with evidence whose indicators all expired is legitimate (`active = false`). Informational while there is no campaign EdgeGuard built and no `RUNS` without evidence; a `RUNS` without evidence into any campaign, a partner's included, fails |
+| Campaign indicator membership (`campaign_indicators_have_evidence`) | every `Indicator -[:PART_OF_CAMPAIGN]-> Campaign` has a path to the campaign's actor through a malware it `INDICATES` whose link to the actor counts for it: any link when the indicator `INDICATES` no shared malware, else only a link one of whose `source_refs` is on one of the indicator's `SOURCED_FROM` edges (`build_campaign_nodes` step 3a links only such indicators and step 3b removes the rest). The detail counts `indicator_links` and `without_evidence`. Informational without indicator members |
 | Campaign seen dates (`campaign_seen_dates_cover_members`) | no `Campaign` EdgeGuard built is first seen later than one of its indicator members (`PART_OF_CAMPAIGN`) or last seen earlier than one. A member's first date is, per `SOURCED_FROM` edge, the source's first-seen claim, else its latest report (`r.last_reported_at`), and never later than the member's `first_imported_at`; its last date, per edge, the source's own date first: the last-seen claim, else the latest report when it is earlier than the edge's MISP record time (`r.last_recorded_at`), else the first-seen claim, else the latest report ([TIMESTAMPS.md](TIMESTAMPS.md#seen-dates-of-an-indicator-campaigns-alert-enrichment)). Only the edges no write touched since the build that linked the member count, so a sync after the build cannot make the check fail (an edge it writes is left out). The detail counts `first_seen_after_members` and `last_seen_before_members`, with up to five examples; `edge_dated_members`, the members dated by an edge; and `campaigns_without_edge_dated_member`, with up to five names: the campaigns none of whose members an edge dates, which the comparison with the import time does not reach. A build that dates an indicator without a first-seen claim (every OTX indicator) by EdgeGuard's import time fails here, and so does a campaign with members and no comparable stored `first_seen` (a missing date, or a String, which compares with a date as null), or no comparable stored `last_seen` while an edge gives one of its members a last date. A `last_seen` later than its members is not judged: the members are a sample of up to 100 of the campaign's indicators, and the stored value keeps the dates of indicators that expired. Informational without a defect while no member is dated by an edge (a member then dates only by its first import, which a build that stored the import time also covers): no campaign has an indicator member, every member edge was written after the build, or no member edge carries a report date and an update time, which after a baseline points to a writer defect |
 | CVE scores (`cve_score_from_cvss`) | an EdgeGuard `CVE` with a CVSS sub-node whose `base_score` is in [0, 10] has the `cvss_score` / `cvss_version` of the sub-node selected in the order 3.1, 3.0, 2.0, 4.0 and a CVSS rating as `severity`; a `CVE` without one has a null score and version and `severity = 'UNKNOWN'`. Informational while there is no CVE |
 | CVE score coverage (`cve_cvss_coverage`) | at least half of the EdgeGuard `CVE` nodes NVD delivered that are not REJECTED (`status`) have a CVSS sub-node (`HAS_CVSS_*`); `cve_score_from_cvss` alone passes a graph where no CVE has one. Informational under 100 such CVEs. |
@@ -680,10 +693,11 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-06_
 
 ## History
 
+- 2026-11-06 — Acceptance check `campaign_indicators_have_evidence`; `campaign_malware_has_evidence` and `campaigns_have_evidence` judge a link to a shared malware (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`, default 7) as evidence only for the indicators of its own records; the three judge each campaign with the list of shared malware its build recorded, and the script runs with the deployment's value (sourced `.env`); the campaign checks can fail by design until the enrichment run after a sync.
 - 2026-11-02 — Launch decision: only `edgeguard fresh-baseline` adds the blast-radius counts, the backup gate and the typed confirmation (the text gave both wrappers confirmation and backup-gate UX). Launch step 3: the postcheck's log lists every collector that delivered nothing, also one not run or without a returned status. Fresh-baseline acceptance: the checks that fail by design between a sync and `build_relationships` include the ATT&CK link checks after a sync that wrote ATT&CK records; the exit code follows the mandatory checks of the table; every check the script prints is named in the table, the CISA ICS and MalwareBazaar presence checks are judged only with their flags (the rows tied them to the enable variables), and the reported-only entries are listed; the measured figures are removed from the table (NVD CVE properties `cwe` / `ref_tags` / `cpe_type` / `result_impacts` on the 730-day event of 2026-10-10: 93 / 57 / 58 / 91 %; on the September graph 493 sub-techniques with their `SUBTECHNIQUE_OF`, 0 missing, and sector coverage of about 200 / 100 / 100 actors and 750 / 400 / 320 malware for finance / energy / healthcare; on the graph of 2026-10-14, 136 malware twins holding 16,005 `INDICATES` links; on the graph of 2026-10-15, a dry run of step 2d's statements: 475 attribution links to remove and 24 to trim, from 35 pulses, and 515 links from 29 pulses counted from the pulses' own adversary fields; on the hosted graph of 2026-10-15, 137,753 of 141,932 CVEs with EPSS and 2 score dates).
 - 2026-11-02 — Launch step 3: `baseline_postcheck` fails the run on the ATT&CK links of the claims, the CVE scores after an NVD delivery, each collector's delivery and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES`, and lists the collectors that delivered nothing.
 - 2026-11-02 — Acceptance checks `family_indicates_complete` (step 9 resolves the feed family labels once per run, with a fallback without separators) and `attack_tool_named_malware` (informational); the note on the checks that fail by design between a sync and the next `build_relationships` run names `family_indicates_complete` and `pulse_indicates_complete` (it named `uses_technique_complete` and `sector_links_complete` only). On the 730-day graph of 2026-11-01, before step 9 resolved the labels: 13,900 links judged, 695 missing (the labels found without separators), 2,687 indicators with a label that names no node (IClickFix 2,296), 1,202 with a placeholder label; 26 `Malware` nodes named after an ATT&CK tool with 12,807 `INDICATES` (23 with the tool's name but for case, 11,646). The statement takes about 3 s on that graph.
