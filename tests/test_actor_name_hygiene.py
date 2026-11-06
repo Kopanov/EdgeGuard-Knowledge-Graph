@@ -98,7 +98,9 @@ class TestSplitCompositeActorName:
             # 2026-11-05: the threat-actor galaxy's actor "Stealth Mango and Tangelo" is one name.
             "Stealth Mango and Tangelo",
             "Stealth Mango & Tangelo",
+            "Stealth Mango && Tangelo",  # the separator this change added
             "stealth mango and tangelo group",
+            "stealth mango && tangelo team",
             "a and b",  # sides shorter than AND_SPLIT_MIN_SIDE_LEN
             "ab & cd",
             "ab && cd",

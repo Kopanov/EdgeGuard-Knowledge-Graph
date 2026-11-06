@@ -96,6 +96,7 @@ AND_SPLIT_PROTECTED_PREFIXES: tuple = (
     "op ",
     "stealth mango and tangelo",
     "stealth mango & tangelo",
+    "stealth mango && tangelo",
 )
 
 # If EITHER side of an ``and`` / ``&`` split is one of these (lower-cased,
