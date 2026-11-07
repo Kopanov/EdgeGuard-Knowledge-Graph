@@ -67,7 +67,7 @@ Planned work is listed in [ROADMAP.md](ROADMAP.md).
 | Graph keys | UNIQUE constraint per node label |
 | Provenance timestamps | `imported_at` set on create only |
 | Malware → technique edges | Explicit ATT&CK `uses` rows only |
-| Feed values | ThreatFox `ip:port` reduced to the IP |
+| Feed values | ThreatFox `ip:port` reduced to the IP, the port kept in `TF_META.ports` |
 | Sector detection | `SECTOR_KEYWORDS` in `src/config.py` |
 | Airflow task limits | Timeouts per task and per DAG run |
 | Metrics port | 8001 |
@@ -84,7 +84,7 @@ Planned work is listed in [ROADMAP.md](ROADMAP.md).
 - **Graph keys:** `src/neo4j_client.py` creates a UNIQUE constraint per node label, among them `Indicator` (`indicator_type`, `value`) and `Vulnerability` (`cve_id`).
 - **Provenance timestamps:** `SOURCED_FROM.imported_at` is set with `ON CREATE SET` only.
 - **Malware → technique edges:** `(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` is built only from explicit ATT&CK STIX `uses` rows: the collector writes `MITRE_USES_TECHNIQUES:` into MISP, the sync sets `uses_techniques` on the `Malware` node, and `src/build_relationships.py` matches the exact `mitre_id`, as for `ThreatActor`; there is no `CONTAINS` inference and no fuzzy matching ([KNOWLEDGE_GRAPH.md § Technique edges](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-report)).
-- **Feed values:** ThreatFox `ip:port` values are reduced to the IP before the MISP push, because MISP `ip-dst` takes no port (`src/collectors/global_feed_collector.py`).
+- **Feed values:** ThreatFox `ip:port` values are reduced to the IP before the MISP push, because MISP `ip-dst` takes no port; the records of one value are merged into one attribute whose `TF_META.ports` keeps every port (`threatfox_merge_iocs` in `src/collectors/global_feed_collector.py`).
 - **Airflow task limits:** `execution_timeout` on every task; `max_active_runs=1` and `dagrun_timeout` on the baseline and the five scheduled DAGs.
 - **Metrics port:** 8001 (the REST API holds 8000); `EDGEGUARD_ENABLE_METRICS` matters only for the in-process server of a bare-metal single-process install.
 - **Logging:** the collectors use the `logging` module and configure no module-level `logging.basicConfig`.
@@ -192,10 +192,11 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — Feed values: the ThreatFox port is kept in `TF_META.ports`, and the records of one value are merged.
 - 2026-11-02 — Baseline safety names the trigger check of `edgeguard baseline` and `fresh-baseline`. Testing Status describes the CI checks and when they run; the dated table of manual tests and CI runs (March and April 2026, with their file and test counts) is removed.
 - 2026-10-23 — The baseline-safety control names the Neo4j wipe of `scripts/clear_neo4j.py` among those the destructive-operations trail records.
 - 2026-10-23 — The component table takes the README's lists of available and implemented capabilities, de-duplicated, with the details below it: the collectors counted as 10 by default and 3 opt-in, the scheduled DAGs created paused, the circuit breakers limited to the feed fetches and the sync's checks; the deployment steps no longer require `credentials/config.yaml`, which the Docker path does not read, and trigger the baseline in the `airflow` container; the future-phase and enhancement tables and the "what's left" list are replaced by a pointer to ROADMAP.md, the list of planned work, and the conclusion says "ready for a production test" as the status does; `max_active_runs=1` and `dagrun_timeout` are named for the baseline and the five scheduled DAGs (the metrics DAGs have no timeout), automated review is not claimed for every pull request, the alert routing names the alerts that reach Slack, `preflight_ci.sh` and `make deploy-check` are stated to stop at the DAG parse on Airflow 3.3, and the controls and deployment tables keep short cells with the detail in lists below them.
