@@ -186,7 +186,18 @@ class _RecordedPages:
         return response
 
 
-class _Writer:
+class _Reports:
+    """``MISPWriter.push_reports`` of the writer doubles (2026-11-07): every record is settled, as when MISP stores
+    it; ``records`` keeps the records pushed and ``report_calls`` the keyword arguments of each call."""
+
+    def push_reports(self, source: str, records: List[Dict[str, Any]], **kw: Any) -> Dict[str, Any]:
+        self.__dict__.setdefault("records", []).extend(records)
+        self.__dict__.setdefault("report_calls", []).append({"source": source, **kw})
+        refs = [r["record_ref"] for r in records]
+        return {"reports_added": len(refs), "settled": refs, "failed": [], "skipped": []}
+
+
+class _Writer(_Reports):
     """A MISP writer double: stores every item except those of the pulses in *failing*, which it lists in
     ``last_push_unstored_items`` (positions in the pushed list) as ``MISPWriter`` does; with *at_the_event* they
     failed at their MISP event (``last_push_event_failed_items``: MISP unreachable, the day's event failing),
@@ -212,7 +223,7 @@ class _Writer:
         return len(items) - len(self.last_push_unstored_items), len(self.last_push_unstored_items)
 
 
-class _WriterWithoutList:
+class _WriterWithoutList(_Reports):
     """A writer that gives no list of unstored items: one item of the push failed (every item with
     *every_item_fails*), which one is unknown."""
 
@@ -231,7 +242,7 @@ def _value(index: int) -> str:
     return f"198.51.100.{index + 1}"
 
 
-class _HoldingWriter:
+class _HoldingWriter(_Reports):
     """A MISP writer double that counts a push as ``MISPWriter.push_items`` does when MISP already holds items:
     an item MISP holds is neither stored nor failed, so a push of such items only returns (0, 0)
     (``test_otx_partial_cursor.py`` checks that with the writer itself). MISP holds the values in *held* and

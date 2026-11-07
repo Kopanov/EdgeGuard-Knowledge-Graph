@@ -217,6 +217,21 @@ def _tlp_level(raw: Any) -> str:
     return level if level in _VALID_TLP else EDGEGUARD_DEFAULT_TLP
 
 
+# The per-pulse copies an OTX item carries into its attribute's ``OTX_META`` block: the pulse's name, tags,
+# references and targeted countries. They repeat the pulse's own text on every indicator of the pulse.
+PULSE_COPY_KEYS = ("pulse_name", "pulse_tags", "pulse_references", "targeted_countries")
+# The TLP levels whose pulse text may be copied onto indicators.
+_PULSE_COPY_LEVELS = frozenset({"white", "clear", "green"})
+
+
+def pulse_copies_allowed(pulse_tlp: Any) -> bool:
+    """Whether an OTX pulse's text may be copied onto its items (``PULSE_COPY_KEYS``): only when the pulse states
+    a known TLP level that is white, clear or green. Amber, amber+strict and red keep the text in the pulse's
+    report record (``report_records``, MISP distribution 0); a pulse that states no known level counts as amber,
+    as its report record does (``report_records.gating_tlp``)."""
+    return report_records.tlp_level(pulse_tlp) in _PULSE_COPY_LEVELS
+
+
 def tlp_rank(raw: Any) -> int:
     """Rank of the TLP level ``raw`` is written as (2026-10): white / clear 1, green 2, amber 3,
     amber+strict 4, red 5.
@@ -581,7 +596,8 @@ def _cve_pulse_meta(vuln: Dict[str, Any]) -> Dict[str, Any]:
     """The ``OTX_META`` block of a CVE an OTX pulse names (2026-10-18), ``{}`` for a CVE of no pulse.
 
     ``pulse_id`` (the pulse), ``report_ids`` (the other pulses of the collector run that named the CVE)
-    and ``pulse_name``; the keys and bounds of an OTX indicator's block (``create_attribute``). No
+    and ``pulse_name`` (only for a white, clear or green pulse: ``pulse_copies_allowed``); the keys and bounds of
+    an OTX indicator's block (``create_attribute``). No
     ``description``: the pulse's name says where the CVE was seen, not what it is.
     """
     pulse_id = str(vuln.get("pulse_id") or "").strip()[:64]
@@ -589,7 +605,9 @@ def _cve_pulse_meta(vuln: Dict[str, Any]) -> Dict[str, Any]:
     if not pulse_id and not report_ids:
         return {}
     meta: Dict[str, Any] = {"pulse_id": pulse_id, "report_ids": report_ids[:_MAX_REPORT_IDS]}
-    pulse_name = str(vuln.get("pulse_name") or "").strip()
+    # 2026-11-07: the name of an amber or red pulse, or of one without a known TLP, is left out
+    # (``pulse_copies_allowed``).
+    pulse_name = str(vuln.get("pulse_name") or "").strip() if pulse_copies_allowed(vuln.get("pulse_tlp")) else ""
     if pulse_name:
         meta["pulse_name"] = pulse_name
     return meta
@@ -2869,6 +2887,7 @@ class MISPWriter:
         # pulse carried ATT&CK ids or targeted countries — an OTX IOC from any other pulse lost its
         # pulse_id / report_ids (so the sync could not group it) and now its families / adversaries.
         # Any pulse-level field marks an OTX indicator.
+        pulse_copies = pulse_copies_allowed(indicator.get("pulse_tlp"))
         has_otx_meta = any(
             indicator.get(k)
             for k in (
@@ -2955,6 +2974,12 @@ class MISPWriter:
             for _k in ("mf", "pa", "sap", "sapn", "report_stated_zones"):
                 if not otx_meta.get(_k):
                     otx_meta.pop(_k, None)
+            # 2026-11-07: an amber or red pulse, or one that states no known TLP, keeps its text in its report
+            # record (MISP distribution 0): its copies are written empty, and ``pulse_id`` and ``pulse_tlp`` stay
+            # for the sync's linking (``pulse_copies_allowed``).
+            if not pulse_copies:
+                for _k in PULSE_COPY_KEYS:
+                    otx_meta[_k] = "" if _k == "pulse_name" else []
             comment = _fit_meta_comment("OTX_META:", otx_meta)
         elif has_tf_meta:
             tf_meta = {
@@ -3004,7 +3029,8 @@ class MISPWriter:
                 tf_meta["as_of"] = _tf_meta_as_of()
             comment = _fit_meta_comment("TF_META:", tf_meta)
         else:
-            comment = sanitize_value(indicator.get("pulse_name") or indicator.get("description", ""), max_length=255)
+            pulse_name = indicator.get("pulse_name") if pulse_copies else ""
+            comment = sanitize_value(pulse_name or indicator.get("description", ""), max_length=255)
 
         attribute = {
             "type": misp_type,

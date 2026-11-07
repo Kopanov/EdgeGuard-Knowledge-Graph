@@ -1224,12 +1224,18 @@ def run_collector_with_metrics(
 
 
 def run_otx_collection(**context):
-    """Run OTX collector with metrics."""
+    """Run OTX collector with metrics.
+
+    2026-11-07: the writer knows when the task's ``execution_timeout`` ends (``_task_ends_at``), so the pushes of
+    the run's report records (``MISPWriter.push_reports``) start no record later than 10 minutes before it and the
+    collector saves ``report_pending`` before Airflow kills the task; a failing streak of a push is bounded by the
+    same point.
+    """
     from collectors.misp_writer import MISPWriter
     from collectors.otx_collector import OTXCollector
 
     limit = get_effective_limit("otx")
-    return run_collector_with_metrics("otx", OTXCollector, MISPWriter(), limit=limit)
+    return run_collector_with_metrics("otx", OTXCollector, MISPWriter(task_ends_at=_task_ends_at(context)), limit=limit)
 
 
 def run_nvd_collection(**context):

@@ -32,6 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 
+import report_records
+
 # Import MISP writer
 from actor_name_hygiene import clean_actor_names, dropped_geopolitical_names, strip_trailing_parenthetical
 from attack_software_names import split_attack_software_id
@@ -60,7 +62,14 @@ from collectors.collector_utils import (
     retry_with_backoff,
     status_after_misp_push,
 )
-from collectors.misp_writer import _CASE_NORMALISED_TYPES, MISPWriter, tlp_rank
+from collectors.misp_writer import (
+    _CASE_NORMALISED_TYPES,
+    MISPWriter,
+    _resolve_vulnerability_cve_id_for_misp,
+    pulse_copies_allowed,
+    sanitize_value,
+    tlp_rank,
+)
 from config import (
     OTX_API_KEY,
     OTX_BASELINE_MAX_PAGES,
@@ -892,6 +901,80 @@ def _record_otx_retry_metrics(entries: List[Dict[str, Any]], given_up: int) -> N
         logger.debug("OTX retry metrics not recorded: %s", exc)
 
 
+# 2026-11-07: report records. Every pulse a run processes, and every pulse it fetches by id for the retry list or
+# for ``report_pending``, gets one record (``report_records.otx_pulse_record``): one MISP Event Report, which
+# ``MISPWriter.push_reports`` writes after the push that carries the pulse's items, whatever happened to them. The
+# records are built and pushed ``_REPORT_BATCH`` at a time, and ``report_records.note_report_push`` keeps those
+# whose push failed or was not tried on ``report_pending`` in the OTX incremental state after each batch. The pulses
+# are in memory for the whole run anyway (they hold every indicator); built in batches, the records add at most one
+# batch's copy of them, and a run killed during the pushes loses the outcome of one batch at most.
+_REPORT_BATCH = 100
+_REPORT_SOURCE = report_records.SOURCE_OTX
+# The counts of a run's record pushes (``report_counts`` of its status).
+_REPORT_COUNT_KEYS = (
+    "reports_added",
+    "reports_updated",
+    "reports_unchanged",
+    "reports_deleted_in_misp",
+    "reports_failed",
+    "reports_foreign",
+    "reports_skipped",
+    "report_tag_drift",
+)
+
+
+def _misp_attribute_type(edgeguard_type: str, value: str) -> str:
+    """The MISP type ``MISPWriter.create_attribute`` gives an indicator (``MISPWriter.map_indicator_type``, which
+    reads only the class's ``TYPE_MAPPING``)."""
+    return MISPWriter.map_indicator_type(MISPWriter, edgeguard_type, value)  # type: ignore[arg-type]
+
+
+def _record_pairs(pulse: Dict[str, Any], map_type: Any) -> List[List[str]]:
+    """The ``[MISP type, value]`` pairs of *pulse*'s record: its indicators as ``MISPWriter`` writes the items
+    ``_process_pulse`` makes of them (the collector's type mapping *map_type*, then the writer's on the value cut by
+    ``sanitize_value``; the non-file hash types are not collected) and its CVE references as ``vulnerability``. A
+    ``vulnerability`` value is upper-cased, as MISP stores it, so a CVE indicator and a CVE reference of one id give
+    one pair. Built from the pulse alone, so the window's copy and the answer by id give the same pairs."""
+    pairs: List[List[str]] = []
+    indicators = pulse.get("indicators")
+    for ind in indicators if isinstance(indicators, list) else []:
+        if not isinstance(ind, dict) or ind.get("type") in _NON_FILE_HASH_TYPES:
+            continue
+        raw = ind.get("indicator")
+        value = sanitize_value(raw, max_length=1024) if isinstance(raw, str) else ""
+        if not value:
+            continue
+        misp_type = _misp_attribute_type(map_type(ind.get("type"), raw), value)
+        pairs.append([misp_type, value.upper() if misp_type == "vulnerability" else value])
+    references = pulse.get("cve_references")
+    for cve in references if isinstance(references, list) else []:
+        cve_id = _resolve_vulnerability_cve_id_for_misp(
+            {"cve_id": cve if isinstance(cve, str) else (cve.get("cve") if isinstance(cve, dict) else None)}
+        )
+        if cve_id:
+            pairs.append(["vulnerability", cve_id])
+    return pairs
+
+
+def _pulse_record_ref(pulse: Dict[str, Any]) -> Optional[str]:
+    """``alienvault_otx:<pulse id>``, or ``None`` for a pulse without an id (it gets no record)."""
+    pid = pulse.get("id")
+    return report_records.format_record_ref(_REPORT_SOURCE, pid) if isinstance(pid, str) and pid.strip() else None
+
+
+def _record_pulse_id(record_ref: str) -> str:
+    return record_ref.split(":", 1)[1] if ":" in record_ref else record_ref
+
+
+def _new_report_counts() -> Dict[str, Any]:
+    """The ``report_counts`` of a run's status, before its record pushes: ``records`` (the pulses with an id whose
+    record the run built or tried to build, each once), the counts of ``MISPWriter.push_reports``
+    (``_REPORT_COUNT_KEYS``; ``reports_failed`` also counts records that could not be built, ``reports_skipped`` the
+    records a stopped push left), ``pending`` (records on ``report_pending`` after the run), ``given_up`` and
+    ``pending_saved`` (false when a save of the list failed)."""
+    return {"records": 0, **{key: 0 for key in _REPORT_COUNT_KEYS}, "pending": 0, "given_up": 0, "pending_saved": True}
+
+
 class OTXCollector:
     """
     AlienVault OTX Collector.
@@ -1084,6 +1167,222 @@ class OTXCollector:
         logger.info(f"[FETCH] OTX: Fetched {len(pulses)} pulses")
         return pulses
 
+    def _push_report_records(
+        self, pulses: List[Dict[str, Any]], counts: Dict[str, Any], recorded: Set[str]
+    ) -> Set[str]:
+        """Write the report records of *pulses* (2026-11-07) and keep those whose push failed on ``report_pending``.
+
+        A pulse without an id gets no record; a pulse whose record a call of the run already wrote (*recorded*, its
+        ``record_ref``) is not written again, so one pulse read in the window and fetched by id gives one record.
+        The records are built (``report_records.otx_pulse_record`` over ``_record_pairs``) and pushed
+        ``_REPORT_BATCH`` at a time with ``MISPWriter.push_reports``, given the writer's parent-DAG liveness
+        callback (its exception propagates) and bounded by the writer's ``task_ends_at`` (the baseline's writer and
+        the scheduled run's: no record starts later than 10 minutes before the task's end). A record that cannot be
+        built counts as failed. Once a push leaves records untried (its task's end, MISP failing, no day event),
+        the records of the later batches are not pushed either and count as untried with the same reason. After
+        each batch ``report_records.note_report_push`` saves the outcome on ``report_pending`` (failed and untried
+        records added, settled ones taken off, given-up ones named in ``[REPORT-GAVE-UP]`` lines) and feeds its
+        gauges. *counts* (``_new_report_counts``) receives the totals.
+
+        Returns the ids of the pulses whose record MISP does not hold as the pulse says and that are not saved on
+        ``report_pending``: those of the batch whose save failed and of every later batch, which are not pushed
+        (ERROR ``[REPORT-PENDING]``). The cursor passes none of them (``_after_window_push``)."""
+        todo: List[Tuple[str, Dict[str, Any]]] = []
+        for pulse in pulses:
+            ref = _pulse_record_ref(pulse)
+            if ref is not None and ref not in recorded:
+                recorded.add(ref)
+                todo.append((ref, pulse))
+        writer = self.misp_writer
+        liveness = getattr(writer, "liveness_callback", None)
+        stop_reason: Optional[str] = None
+        for start in range(0, len(todo), _REPORT_BATCH):
+            chunk = todo[start : start + _REPORT_BATCH]
+            counts["records"] += len(chunk)
+            stats: Dict[str, Any] = {"settled": [], "failed": [], "skipped": []}
+            if stop_reason is not None:
+                stats["skipped"] = [{"record_ref": ref, "reason": stop_reason} for ref, _pulse in chunk]
+                counts["reports_skipped"] += len(chunk)
+            else:
+                records: List[Dict[str, Any]] = []
+                for ref, pulse in chunk:
+                    try:
+                        records.append(
+                            report_records.otx_pulse_record(pulse, _record_pairs(pulse, self.map_indicator_type))
+                        )
+                    except (TypeError, ValueError, AttributeError) as exc:
+                        reason = f"the record could not be built ({type(exc).__name__})"
+                        logger.warning("[REPORTS] OTX: %s: %s", ref, reason)
+                        stats["failed"].append({"record_ref": ref, "reason": reason, "permanent": False})
+                        counts["reports_failed"] += 1
+                if records:
+                    pushed = writer.push_reports(_REPORT_SOURCE, records, liveness_callback=liveness)
+                    for key in ("settled", "failed", "skipped"):
+                        stats[key] = [*(pushed.get(key) or []), *stats[key]]
+                    for key in _REPORT_COUNT_KEYS:
+                        counts[key] += int(pushed.get(key) or 0)
+                    if stats["skipped"]:
+                        stop_reason = str(stats["skipped"][0].get("reason") or "the push of the records stopped")
+            try:
+                settled = report_records.note_report_push(_REPORT_SOURCE, stats)
+            except Exception as exc:
+                done = set(stats["settled"]) | {f.get("record_ref") for f in stats["failed"] if f.get("permanent")}
+                unsaved = {_record_pulse_id(ref) for ref, _pulse in todo[start:] if ref not in done}
+                left = len(todo) - start - len(chunk)
+                counts["pending_saved"] = False
+                if left:
+                    counts["reports_skipped"] += left
+                logger.error(
+                    "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s): %s",
+                    type(exc).__name__,
+                    exc,
+                    (
+                        f"the records of {len(unsaved)} pulse(s) are neither in MISP nor on the list"
+                        f"{f', {left} of them not pushed' if left else ''}; the cursor passes none of these pulses "
+                        f"(ids: {_pulse_ids_for_log(sorted(unsaved))})"
+                    )
+                    if unsaved
+                    else "every record of the batch is in MISP, or can never be written there",
+                )
+                return unsaved
+            counts["pending"] = len(settled.entries)
+            counts["given_up"] += len(settled.given_up)
+            counts["noted"] = True
+        return set()
+
+    def _settle_report_counts(self, counts: Dict[str, Any]) -> None:
+        """After a run's record pushes: a run that wrote no record still saves ``report_pending`` once (nothing
+        added; a record given up is named), so its gauges follow the list; then the ``[REPORTS]`` line of the run."""
+        if not counts.pop("noted", False) and counts.get("pending_saved", True):
+            try:
+                settled = report_records.note_report_push(_REPORT_SOURCE, {})
+                counts["pending"] = len(settled.entries)
+                counts["given_up"] += len(settled.given_up)
+            except Exception as exc:
+                counts["pending_saved"] = False
+                logger.error(
+                    "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s)", type(exc).__name__, exc
+                )
+        logger.log(
+            logging.WARNING
+            if counts["reports_failed"] or counts["reports_skipped"] or counts["pending"]
+            else logging.INFO,
+            "[REPORTS] OTX: %d pulse record(s) this run: %d added, %d updated, %d unchanged, %d deleted in MISP, "
+            "%d failed, %d not tried; %d record(s) on report_pending after the run, %d given up",
+            counts["records"],
+            counts["reports_added"],
+            counts["reports_updated"],
+            counts["reports_unchanged"],
+            counts["reports_deleted_in_misp"],
+            counts["reports_failed"],
+            counts["reports_skipped"],
+            counts["pending"],
+            counts["given_up"],
+        )
+
+    def _fetch_pulse_by_id(self, pid: str) -> Tuple[Optional[Dict[str, Any]], Optional[str], bool]:
+        """One ``GET {base_url}/api/v1/pulses/{id}``, with the session, timeouts and TLS setting of the page fetch,
+        then 2 s of pause (OTX free tier: 30 requests a minute, as between page requests). Returns the pulse (HTTP
+        200 with that pulse), or ``None`` with the problem (``None`` for HTTP 404: the pulse was deleted or is no
+        longer subscribed) and whether the fetches of the run stop: after HTTP 429 or 5xx (429, 502, 503 and 504
+        after one retry) or an error of the request itself (a timeout, a connection error, a body cut off: any
+        ``requests`` exception), OTX is not answering."""
+        problem: Optional[str] = None
+        stop = False
+        pulse: Optional[Dict[str, Any]] = None
+        try:
+            response = request_with_rate_limit_retries(
+                "GET",
+                f"{self.base_url}/api/v1/pulses/{quote(pid, safe='')}",
+                session=self.session,
+                max_rate_limit_retries=1,
+                fallback_delay_sec=30.0,
+                retry_on_403=False,
+                context="OTX",
+                timeout=(OTX_CONNECT_TIMEOUT, OTX_REQUEST_TIMEOUT),
+                verify=SSL_VERIFY,
+            )
+        except requests.exceptions.RequestException as exc:
+            problem, stop = type(exc).__name__, True
+        else:
+            status = response.status_code
+            if status == 404:
+                pass
+            elif status != 200:
+                problem, stop = f"HTTP {status}", status == 429 or status >= 500
+            else:
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                if isinstance(body, dict) and str(body.get("id")) == pid:
+                    pulse = body
+                else:
+                    problem = "an answer that is not the pulse"
+        time.sleep(2)  # OTX free tier: 30 requests a minute, as between page requests
+        return pulse, problem, stop
+
+    def _fetch_pending_report_pulses(
+        self, exclude: Set[str], per_run: int
+    ) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+        """Fetch by id up to *per_run* pulses whose record is on ``report_pending`` (2026-11-07), tried longest ago
+        first (``report_records.pending_record_refs``), leaving out the pulses in *exclude* (read in the run's window,
+        or fetched for the retry list: their records are built there). The fetch is ``_fetch_pulse_by_id``; HTTP
+        404 takes the record off the list (the pulse was deleted or is no longer subscribed, so no record can be
+        written: WARNING); any other failure leaves its entry as it is, and HTTP 429, 5xx or a request error stops
+        the fetches of this run. Returns the pulses fetched, the ids answered 404 and the ids with another error."""
+        refs = [
+            ref for ref in report_records.pending_record_refs(_REPORT_SOURCE) if _record_pulse_id(ref) not in exclude
+        ]
+        due = refs[: max(0, per_run)]
+        if due:
+            logger.info(
+                "[REPORT-PENDING] OTX: fetching %d of the %d pulse(s) whose report record is on report_pending by id "
+                "(EDGEGUARD_OTX_RETRY_PER_RUN=%d)",
+                len(due),
+                len(refs),
+                per_run,
+            )
+        fetched: List[Dict[str, Any]] = []
+        not_found: List[str] = []
+        errors: List[str] = []
+        for n, ref in enumerate(due):
+            pid = _record_pulse_id(ref)
+            body, problem, stop = self._fetch_pulse_by_id(pid)
+            if body is not None:
+                fetched.append(body)
+            elif problem is None:
+                not_found.append(ref)
+            else:
+                errors.append(pid)
+                left = len(due) - n - 1
+                logger.warning(
+                    "[REPORT-PENDING] OTX: pulse %s could not be fetched by id (%s); its record stays on "
+                    "report_pending%s",
+                    pid,
+                    problem,
+                    f", and the {left} other record(s) due wait for the next run" if stop and left else "",
+                )
+            if stop:
+                break
+        if not_found:
+            logger.warning(
+                "[REPORT-PENDING] OTX: %d pulse(s) answered HTTP 404 (deleted, or no longer subscribed): their "
+                "records leave report_pending and are not written (ids: %s)",
+                len(not_found),
+                _pulse_ids_for_log([_record_pulse_id(ref) for ref in not_found]),
+            )
+            try:
+                report_records.update_report_pending(_REPORT_SOURCE, permanent=not_found)
+            except Exception as exc:
+                logger.error(
+                    "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s): the records of the pulses that "
+                    "answered HTTP 404 stay on it until a later run takes them off",
+                    type(exc).__name__,
+                    exc,
+                )
+        return fetched, not_found, errors
+
     def _fetch_retry_pulses(
         self, entries: List[Dict[str, Any]], window_ids: Set[str], per_run: int, now: datetime
     ) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
@@ -1091,8 +1390,8 @@ class OTXCollector:
         (*window_ids*: a pulse the window read is processed there), in ``_retry_order``: those tried longest ago
         first (2026-11-02).
 
-        One ``GET {base_url}/api/v1/pulses/{id}`` each, with the session, timeouts and TLS setting of the page
-        fetch and 2 s after each request. HTTP 200 with the pulse: the pulse is processed with the window's.
+        One ``GET {base_url}/api/v1/pulses/{id}`` each (``_fetch_pulse_by_id``, 2 s after each request). HTTP 200
+        with the pulse: the pulse is processed with the window's.
         HTTP 404: the pulse was deleted or is no longer subscribed; it leaves the list (WARNING). Any other
         answer keeps it (WARNING, ``last_reason``, ``last_fetch_failed_at``) and is no try: its items were not
         pushed, so neither ``attempts`` nor ``last_tried_at`` changes, and the give-up rule does not count it.
@@ -1119,45 +1418,18 @@ class OTXCollector:
         errors: List[str] = []
         for n, entry in enumerate(due):
             pid = entry["id"]
-            problem: Optional[str] = None
-            stop = False
-            try:
-                response = request_with_rate_limit_retries(
-                    "GET",
-                    f"{self.base_url}/api/v1/pulses/{quote(pid, safe='')}",
-                    session=self.session,
-                    max_rate_limit_retries=1,
-                    fallback_delay_sec=30.0,
-                    retry_on_403=False,
-                    context="OTX",
-                    timeout=(OTX_CONNECT_TIMEOUT, OTX_REQUEST_TIMEOUT),
-                    verify=SSL_VERIFY,
+            body, problem, stop = self._fetch_pulse_by_id(pid)
+            if body is not None:
+                fetched.append(body)
+            elif problem is None:
+                not_found.append(pid)
+                logger.warning(
+                    "[OTX-RETRY] OTX: pulse %s answered HTTP 404 (deleted, or no longer subscribed): it leaves "
+                    "the retry list after %d attempt(s), first failed at %s; its items are not in MISP",
+                    pid,
+                    entry.get("attempts", 0),
+                    entry.get("first_failed_at"),
                 )
-            except requests.exceptions.RequestException as exc:
-                problem, stop = type(exc).__name__, True
-            else:
-                status = response.status_code
-                if status == 404:
-                    not_found.append(pid)
-                    logger.warning(
-                        "[OTX-RETRY] OTX: pulse %s answered HTTP 404 (deleted, or no longer subscribed): it leaves "
-                        "the retry list after %d attempt(s), first failed at %s; its items are not in MISP",
-                        pid,
-                        entry.get("attempts", 0),
-                        entry.get("first_failed_at"),
-                    )
-                elif status != 200:
-                    problem, stop = f"HTTP {status}", status == 429 or status >= 500
-                else:
-                    try:
-                        body = response.json()
-                    except ValueError:
-                        body = None
-                    if isinstance(body, dict) and str(body.get("id")) == pid:
-                        fetched.append(body)
-                    else:
-                        problem = "an answer that is not the pulse"
-            time.sleep(2)  # OTX free tier: 30 requests a minute, as between page requests
             if problem:
                 errors.append(pid)
                 entry["last_fetch_failed_at"] = now_iso
@@ -1445,6 +1717,20 @@ class OTXCollector:
                     otx_retry_per_run(),
                     run_started,
                 )
+            # 2026-11-07: the pulses whose report record is on ``report_pending``, fetched by id for their records
+            # only (their items are not pushed again), on baselines and scheduled runs alike. A pulse the window read
+            # or the retry list fetched gets its record there.
+            pending_pulses: List[Dict[str, Any]] = []
+            pending_not_found: List[str] = []
+            pending_fetch_failed: List[str] = []
+            if push_to_misp:
+                pending_pulses, pending_not_found, pending_fetch_failed = self._fetch_pending_report_pulses(
+                    {str(p.get("id")) for p in pulses if p.get("id")}
+                    | {str(p.get("id")) for p in retried}
+                    | set(retry_not_found)
+                    | set(retry_fetch_failed),
+                    otx_retry_per_run(),
+                )
 
             def _process_pulse(pulse: Dict) -> None:
                 """Append the items of *pulse* to ``processed``."""
@@ -1567,17 +1853,22 @@ class OTXCollector:
                     if pulse_several_actors
                     else _pulse_actor_pairs(pulse_family_names, pulse_actor_names, pulse.get("id"))
                 )
+                # 2026-11-07: the pulse's text goes onto its items only for a white, clear or green pulse
+                # (``pulse_copies_allowed``); an amber or red pulse, or one without a known TLP, keeps it in its
+                # report record. Items of a later pulse fold into the first pulse's item, which keeps the first
+                # pulse's copies, so a pulse whose copies are withheld here never lends them to another pulse's.
+                pulse_copies = pulse_copies_allowed(pulse_tlp)
                 pulse_meta = {
                     "pulse_id": pulse.get("id"),
                     "several_actor_pulses": pulse_mark if actor_reference is not None else [],
                     "several_actor_pulses_by_name": pulse_mark if actor_reference is None else [],
-                    "pulse_name": pulse.get("name", "")[:100],
-                    "pulse_tags": pulse_tags[:20],
-                    "pulse_references": pulse_references,
+                    "pulse_name": pulse.get("name", "")[:100] if pulse_copies else "",
+                    "pulse_tags": pulse_tags[:20] if pulse_copies else [],
+                    "pulse_references": pulse_references if pulse_copies else [],
                     "pulse_author": pulse_author,
                     "pulse_tlp": pulse_tlp,
                     "attack_ids": pulse_attack_ids,
-                    "targeted_countries": pulse_targeted_countries,
+                    "targeted_countries": pulse_targeted_countries if pulse_copies else [],
                     "otx_industries": otx_industries,
                 }
                 # Extract indicators - one entry per indicator (zone holds all matched sectors)
@@ -1667,7 +1958,11 @@ class OTXCollector:
                     cve_item: Dict[str, Any] = {
                         "type": "vulnerability",
                         "cve_id": cve.upper() if isinstance(cve, str) else cve.get("cve", "").upper(),
-                        "description": f"Referenced in OTX pulse: {pulse.get('name', '')}",
+                        "description": (
+                            f"Referenced in OTX pulse: {pulse.get('name', '')}"
+                            if pulse_copies
+                            else "Referenced in an OTX pulse"
+                        ),
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
@@ -1868,7 +2163,7 @@ class OTXCollector:
                 whole = _failed_at_the_event(unstored, getattr(self.misp_writer, "last_push_event_failed_items", None))
                 return failing, whole
 
-            def _after_window_push(success: int, failed: int) -> Optional[_WindowSettled]:
+            def _after_window_push(success: int, failed: int, record_held: Set[str]) -> Optional[_WindowSettled]:
                 """The cursor, and the pulses of the window put on the retry list, after the window's push of a
                 scheduled run; written in one update of the incremental state before the push of the list's
                 pulses (a baseline changes neither).
@@ -1911,6 +2206,12 @@ class OTXCollector:
                 failed or items were already present. The cursor passes only pulses whose items were stored or
                 found in MISP, or that are on the list as written in the same update.
 
+                - 2026-11-07: the cursor passes a pulse whose report record MISP does not hold only once the record
+                  is on ``report_pending`` and that list is saved (``_push_report_records``, which pushed the window's
+                  records before this). *record_held* holds the pulses of the window whose record is neither: the
+                  list could not be saved. The cursor then stops below the oldest of them, as below a pulse with an
+                  item not sent, and stays when that pulse has no readable ``modified``.
+
                 The list written here holds at most EDGEGUARD_OTX_RETRY_MAX_PULSES: beyond it the pulses that first
                 failed longest ago are given up now, with the ERROR and the counter, and their items are not pushed,
                 so a run that raises or is killed later leaves no longer list. When the pulses of the list are to be
@@ -1938,10 +2239,13 @@ class OTXCollector:
                         unsent_held = _named_pulses(window_items, unsent_list)
                     else:
                         unsent_held = set(failing) if failing is not None else set(window_ids)
+                record_held = record_held & window_ids
                 if whole:
                     held = set(failing or {}) & window_ids
                     new_cursor = (
-                        None if failing is None else _cursor_after(self._pulses_before_oldest(to_process, held))
+                        None
+                        if failing is None
+                        else _cursor_after(self._pulses_before_oldest(to_process, held | record_held))
                     )
                     reason = f"MISP failed the push of the run started {now_iso} at the day's event"
                     if new_cursor and not held:
@@ -1980,7 +2284,9 @@ class OTXCollector:
                     # unsent items they are unknown: the cursor stays and no pulse goes on the list.
                     held_window = unsent_held & window_ids
                     new_cursor = (
-                        _cursor_after(self._pulses_before_oldest(to_process, held_window)) if unsent_known else None
+                        _cursor_after(self._pulses_before_oldest(to_process, held_window | record_held))
+                        if unsent_known
+                        else None
                     )
                     failing = {pid: keys for pid, keys in failing.items() if pid not in unsent_held}
                     reason = f"MISP push of the run started {now_iso}: {failed} of {len(window_items)} item(s) failed"
@@ -2001,8 +2307,16 @@ class OTXCollector:
                         _pulse_ids_for_log(sorted(held_window)),
                     )
                 else:
-                    new_cursor = _cursor_after(to_process)
+                    new_cursor = _cursor_after(self._pulses_before_oldest(to_process, record_held))
                     reason = f"MISP push of the run started {now_iso}: {failed} of {len(window_items)} item(s) failed"
+                if record_held:
+                    logger.warning(
+                        "[REPORT-PENDING] OTX: the report records of %d pulse(s) of the window are neither in MISP nor "
+                        "saved on report_pending; the cursor %s, so the next run reads those pulses again (ids: %s)",
+                        len(record_held),
+                        f"moves no further than {new_cursor}" if new_cursor else "stays where it was",
+                        _pulse_ids_for_log(sorted(record_held)),
+                    )
                 settled = _settle_retry_list(
                     retry_entries,
                     [p for p in to_process if str(p.get("id")) not in listed_ids],
@@ -2231,15 +2545,36 @@ class OTXCollector:
                 # when it stored nothing or falls below EDGEGUARD_MISP_MIN_SUCCESS_RATE, whatever happens to the
                 # cursor. Items the time budget left unsent count neither way; 2026-11-03: the items a push that
                 # stopped because MISP kept failing did not send count as failed (``last_push_unsent_items``).
-                window = _after_window_push(success, failed)
+                # 2026-11-07: the report records of the window's pulses, after the window's push and before the
+                # cursor moves (``_push_report_records``; the cursor rule is in ``_after_window_push``). The pulses
+                # of the retry list read in the window have their items pushed with the list's pulses, so their
+                # records follow that push, with the records of the pulses fetched by id.
+                report_counts = _new_report_counts()
+                recorded: Set[str] = set()
+                record_held = self._push_report_records(
+                    [p for p in to_process if str(p.get("id")) not in listed_ids], report_counts, recorded
+                )
+                window = _after_window_push(success, failed, record_held)
                 if window is not None:
                     retry_success, retry_failed = _push_and_settle_the_list(window, failed)
                     success, failed = success + retry_success, failed + retry_failed
+                self._push_report_records(
+                    [*(p for p in to_process if str(p.get("id")) in listed_ids), *retried, *pending_pulses],
+                    report_counts,
+                    recorded,
+                )
+                report_counts.update(
+                    pending_fetched=len(pending_pulses),
+                    pending_not_found=len(pending_not_found),
+                    pending_fetch_failed=len(pending_fetch_failed),
+                )
+                self._settle_report_counts(report_counts)
 
                 self.circuit_breaker.record_success()
                 st = status_after_misp_push("otx", len(unique), success, failed)
                 st["circuit_breaker_state"] = self.circuit_breaker.state.name
                 st["pulse_counts"] = pulse_counts
+                st["report_counts"] = report_counts
                 return st
             else:
                 record_collection_success(self.source_name)
