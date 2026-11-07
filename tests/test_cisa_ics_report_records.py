@@ -529,6 +529,17 @@ class TestPendingRecords:
         assert st["stats"]["fetch_failed"] == 0 and st["stats"]["pending_failed"] == 1
         assert cursor() == CHANGED
 
+    def test_a_baseline_window_applies_to_an_advisory_without_a_cve(self, monkeypatch):
+        # Constructed: the recorded DICOM advisory (2024-02-27, before the 730-day cutoff 2024-11-07) without its
+        # vulnerability; NX (2026-02-10) is inside the window.
+        http = _HTTP({"index.txt": f"{NX}\n{DICOM}\n", NX: advisory(NX), DICOM: without_cves(DICOM)})
+        monkeypatch.setattr(mod, "FILENAME_DATE_MARGIN_DAYS", 400)
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=True, baseline_days=730)
+        assert DICOM in http.advisories()
+        assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-26-043-08"]
+        assert st["stats"]["outside_window"] == 1
+
     def test_a_baseline_writes_a_pending_record_outside_its_window_and_no_other(self, monkeypatch):
         put_on_pending("cisa_ics:ICSMA-24-058-01")
         # The frozen clock puts the 730-day cutoff at 2024-11-07: DICOM (2024-02-27) and SCALANCE (2024-06-11)
