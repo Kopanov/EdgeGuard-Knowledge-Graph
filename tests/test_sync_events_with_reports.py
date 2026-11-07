@@ -13,7 +13,10 @@ it reads any EdgeGuard event and ignore the reports:
   processed, counted and writes nothing; an incremental run in which only a report changed writes nothing.
 
 The answers are MISP 2.5.50's of 2026-11-07 (``tests/fixtures/misp_events_with_reports_2026_11_07.json``), with an
-EdgeGuard event name in place of the throwaway event's. The sync needed no change for these events, so these tests
+EdgeGuard event name in place of the throwaway event's. The companion event and its index row are constructed from
+these answers (``_companion_event`` and the index test): the recorded event and index row with the attributes
+removed, ``attribute_count`` ``"0"`` and the id ``123``; recorded answers of an event without attributes carry
+``"Attribute": []`` the same way. The sync needed no change for these events, so these tests
 pass without the report records too: they guard the sync against a change that would trip on the reports (a fetch
 that dropped such an event, a count of the reports as failures, an index filter on the event name's date).
 """
@@ -74,9 +77,10 @@ def _day_event() -> Dict[str, Any]:
 
 
 def _companion_event() -> Dict[str, Any]:
-    """The companion event: the day event's reports, no attribute."""
+    """The companion event, constructed from the recorded day event: its reports, no attribute
+    (``attribute_count`` ``"0"``) and the id ``123`` of its index row."""
     answer = _named(_FIXTURE["event_with_reports"], COMPANION)
-    answer["Event"].update(Attribute=[], attribute_count="0")
+    answer["Event"].update(id="123", Attribute=[], attribute_count="0")
     return answer
 
 
@@ -93,6 +97,7 @@ def test_the_recorded_answers_carry_the_reports():
 
 def test_the_index_keeps_the_day_event_and_its_reports_companion():
     day = dict(_FIXTURE["index_row"], info=DAY)
+    # constructed from the recorded index row: the companion's id, name and attribute count
     companion = dict(_FIXTURE["index_row"], id="123", info=COMPANION, attribute_count="0")
     session = MagicMock()
     session.get.side_effect = lambda url, params=None, **_kw: Response(
