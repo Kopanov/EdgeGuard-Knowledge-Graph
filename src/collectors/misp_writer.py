@@ -284,7 +284,7 @@ def _deprecated_tags(item: Dict[str, Any]) -> List[str]:
 # ``MITRE_*`` block, or as the whole comment without one. ATT&CK's longest is 4,668 characters (T1553.003,
 # Enterprise ATT&CK 20.1); the bound only guards the comment column (TEXT, 64 KB) against a runaway text.
 ENTITY_DESCRIPTION_MAX_CHARS = 8000
-# 2026-11-07: every platform ATT&CK lists (at most 10 on one object of ATT&CK 20.1, 21 values in all), in
+# 2026-11-07: every platform ATT&CK lists (at most 10 on one object of ATT&CK 20.1, 22 values in all), in
 # ATT&CK's casing. The count bound never binds on ATT&CK; a value longer than the length bound is skipped.
 _MAX_PLATFORM_TAGS = 32
 _MAX_PLATFORM_CHARS = 64
@@ -329,7 +329,8 @@ def _entity_description(item: Dict[str, Any], limit: int = ENTITY_DESCRIPTION_MA
 def _platform_tags(item: Dict[str, Any]) -> List[str]:
     """``platform:<name>`` for every ATT&CK platform of a technique or software item, in ATT&CK's casing
     (``platform:Network Devices``, ``platform:Field Controller/RTU/PLC/IED``), de-duplicated
-    case-insensitively, order kept (2026-11-07; the writer kept the first 3, lower-cased)."""
+    case-insensitively, order kept (2026-11-07; the writer kept the first 3, lower-cased). MISP keeps the casing of
+    a tag it already holds; the sync reads the values back in ATT&CK's spelling (``attack_platforms``)."""
     tags: List[str] = []
     seen: set = set()
     for platform in item.get("platforms") or []:

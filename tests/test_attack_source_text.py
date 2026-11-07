@@ -14,7 +14,8 @@ MISP holds what ATT&CK publishes; the MISP -> Neo4j sync caps what reaches the g
 5. Groups, malware and tools carry ATT&CK's own MISP galaxy cluster tag (``mitre-intrusion-set``,
    ``mitre-malware``, ``mitre-tool``) beside the community cluster tag.
 6. The sync reads the long text after the block and stores it capped, and none of the new tags creates a node,
-   a label or a link.
+   a label or a link. It reads a technique's platform tags in ATT&CK's spelling whatever casing MISP holds them in
+   (MISP keeps the casing of a tag it already holds, and earlier writer versions created them lower-cased).
 
 Fixture: ``tests/fixtures/attack_source_text_objects_2026_11_07.json``, real STIX objects of the attack-stix-data
 bundles (Enterprise and ICS ATT&CK 20.1, fetched 2026-11-07), among them T1553.003, the technique with the longest
@@ -43,6 +44,7 @@ for _p in (TESTS.parent / "src", TESTS):
 from fake_bolt import FakeBolt  # noqa: E402
 
 import neo4j_client as nc  # noqa: E402
+from attack_platforms import ATTACK_PLATFORMS, canonical_attack_platform  # noqa: E402
 from collectors import misp_writer as mw  # noqa: E402
 from collectors import mitre_collector as mc  # noqa: E402
 from run_misp_to_neo4j import _METADATA_COMMENT_RE, MISPToNeo4jSync  # noqa: E402
@@ -235,16 +237,75 @@ class TestPlatforms:
         attribute = _attribute("technique", _item("technique", "T1136"))
         assert [t for t in _tags(attribute) if t.startswith("platform:")] == [f"platform:{p}" for p in T1136_PLATFORMS]
 
-    def test_software_carries_its_platform_tags(self):
-        attribute = _attribute("malware", _item("malware", "S1072"))
-        assert [t for t in _tags(attribute) if t.startswith("platform:")] == [
-            "platform:Field Controller/RTU/PLC/IED",
-            "platform:Engineering Workstation",
-        ]
+    @pytest.mark.parametrize(
+        ("kind", "attack_id", "platforms"),
+        [
+            ("malware", "S1072", ["Field Controller/RTU/PLC/IED", "Engineering Workstation"]),
+            ("tool", "S0363", ["Linux", "macOS", "Windows"]),
+        ],
+    )
+    def test_software_carries_its_platform_tags(self, kind, attack_id, platforms):
+        attribute = _attribute(kind, _item(kind, attack_id))
+        assert [t for t in _tags(attribute) if t.startswith("platform:")] == [f"platform:{p}" for p in platforms]
 
     def test_the_sync_reads_every_platform(self):
         item, _ = _synced(_attribute("technique", _item("technique", "T1136")))
         assert item["platforms"] == T1136_PLATFORMS
+
+    def test_the_sync_reads_attacks_casing_from_the_lower_case_tags_misp_holds(self):
+        """MISP resolves a tag name without regard to case and keeps the casing of a tag it already holds, so an
+        attribute pushed with ``platform:Windows`` comes back with an existing ``platform:windows``. Constructed: the
+        writer's attribute with its platform tags as such a MISP returns them, a repeat and a value ATT&CK 20.1
+        does not use."""
+        attribute = _attribute("technique", _item("technique", "T1136"))
+        for tag in attribute["Tag"]:
+            if tag["name"].startswith("platform:"):
+                tag["name"] = tag["name"].lower()
+        attribute["Tag"] += [{"name": "platform:WINDOWS"}, {"name": "platform:Quantum  Device"}]
+        item, _ = _synced(attribute)
+        assert item["platforms"] == T1136_PLATFORMS + ["Quantum Device"]
+
+    @pytest.mark.parametrize(
+        ("stored", "attack"),
+        [
+            # The lower-case ``platform:`` tags earlier writer versions created, as the project's hosted MISP
+            # listed them (structure audit of 2026-10-09).
+            ("windows", "Windows"),
+            ("linux", "Linux"),
+            ("macos", "macOS"),
+            ("esxi", "ESXi"),
+            ("iaas", "IaaS"),
+            ("pre", "PRE"),
+            ("containers", "Containers"),
+            ("network devices", "Network Devices"),
+            ("office suite", "Office Suite"),
+            ("identity provider", "Identity Provider"),
+            ("saas", "SaaS"),
+            ("office 365", "Office 365"),
+            ("field controller/rtu/plc/ied", "Field Controller/RTU/PLC/IED"),
+        ],
+    )
+    def test_each_lower_case_platform_tag_maps_to_attacks_name(self, stored, attack):
+        assert canonical_attack_platform(stored) == attack
+
+    def test_the_table_holds_every_platform_of_the_recorded_objects(self):
+        recorded = {
+            p for domain in ("enterprise", "ics") for o in FIXTURE[domain] for p in o.get("x_mitre_platforms") or []
+        }
+        assert recorded and recorded <= set(ATTACK_PLATFORMS)
+        assert all(canonical_attack_platform(p) == p for p in ATTACK_PLATFORMS)
+
+    def test_the_collector_skips_blank_and_non_string_platforms(self):
+        obj = copy.deepcopy(_object("enterprise", "S0039"))
+        obj["x_mitre_platforms"] = ["Windows", "", "  ", None, 5]  # constructed
+        assert _item("tool", "S0039", _parsed(objects=[obj]))["platforms"] == ["Windows"]
+
+    def test_control_characters_are_removed_from_a_platform(self):
+        item = dict(_item("technique", "T1136"), platforms=["Win\x00dows", "Net\x1fwork Devices"])  # constructed
+        assert [t for t in _tags(_attribute("technique", item)) if t.startswith("platform:")] == [
+            "platform:Windows",
+            "platform:Network Devices",
+        ]
 
     def test_platform_values_are_cleaned_and_bounded(self):
         """Constructed values: a duplicate in another case, a blank, a non-string and an over-long name are skipped."""
@@ -272,6 +333,11 @@ class TestToolAliases:
         assert item["aliases"] == aliases
         assert [t for t in _tags(_attribute("tool", item)) if t.startswith("alias:")] == [f"alias:{a}" for a in aliases]
 
+    def test_a_tools_alias_is_bounded_at_100_characters(self):
+        item = dict(_item("tool", "S0039"), aliases=["a" * 150])  # constructed
+        (alias,) = [t for t in _tags(_attribute("tool", item)) if t.startswith("alias:")]
+        assert alias == "alias:" + "a" * 97 + "..."
+
     def test_actor_and_malware_alias_tags_are_unchanged(self):
         actor = _item("actor", "G0034")
         assert [t for t in _tags(_attribute("actor", actor)) if t.startswith("alias:")] == [
@@ -295,13 +361,24 @@ class TestAttackDomains:
         assert _item(kind, attack_id)["attack_domains"] == domains
         assert _item(kind, attack_id, _merged())["attack_domains"] == domains
 
-    def test_each_domain_is_a_tag(self):
-        tags = _tags(_attribute("actor", _item("actor", "G0034")))
-        assert [t for t in tags if t.startswith("attack-domain:")] == [
-            "attack-domain:enterprise",
-            "attack-domain:ics",
-            "attack-domain:mobile",
-        ]
+    @pytest.mark.parametrize(
+        ("kind", "attack_id", "domains"),
+        [
+            ("actor", "G0034", ["enterprise", "ics", "mobile"]),
+            ("malware", "S1072", ["ics", "enterprise"]),
+            ("tool", "S0039", ["enterprise"]),
+        ],
+    )
+    def test_each_domain_is_a_tag(self, kind, attack_id, domains):
+        tags = _tags(_attribute(kind, _item(kind, attack_id)))
+        assert [t for t in tags if t.startswith("attack-domain:")] == [f"attack-domain:{d}" for d in domains]
+
+    def test_the_collector_reads_a_domain_in_any_case(self):
+        """Constructed: ATT&CK writes its domains in lower case. Read from the Enterprise bundle, so the bundle's own
+        domain (the fallback) is not the answer."""
+        obj = copy.deepcopy(_object("enterprise", "S1072"))
+        obj["x_mitre_domains"] = [" ICS-Attack "]
+        assert _item("malware", "S1072", _parsed("enterprise", [obj]))["attack_domains"] == ["ics"]
 
     def test_an_object_without_domains_takes_its_bundles(self):
         obj = copy.deepcopy(_object("ics", "S1072"))
@@ -317,6 +394,18 @@ class TestAttackDomains:
         ics["x_mitre_domains"] = ["ics-attack"]
         merged = mc.MITRECollector._merge_domain_bundles(_parsed("enterprise", [ent]), _parsed("ics", [ics]))
         assert _item("actor", "G0034", merged)["attack_domains"] == ["enterprise", "ics"]
+
+    def test_the_items_of_one_object_unite_their_platforms(self):
+        """Constructed: in ATT&CK 20.1 both copies of Industroyer2 list the same platforms; here the Enterprise copy
+        lists one and the ICS copy two. The kept item (Enterprise first) carries both, once each."""
+        ent = copy.deepcopy(_object("enterprise", "S1072"))
+        ent["x_mitre_platforms"] = ["Engineering Workstation"]
+        ics = copy.deepcopy(_object("ics", "S1072"))
+        ics["x_mitre_platforms"] = ["Field Controller/RTU/PLC/IED", "Engineering Workstation"]
+        merged = mc.MITRECollector._merge_domain_bundles(_parsed("enterprise", [ent]), _parsed("ics", [ics]))
+        item = _item("malware", "S1072", merged)
+        assert item["platforms"] == ["Engineering Workstation", "Field Controller/RTU/PLC/IED"]
+        assert "platform:Field Controller/RTU/PLC/IED" in _tags(_attribute("malware", item))
 
     def test_techniques_and_tactics_keep_their_one_domain_tag(self):
         for kind, attack_id in (("technique", "T1136"), ("tactic", "TA0004")):
@@ -355,6 +444,29 @@ class TestAttackGalaxyTags:
         item = _item("technique", attack_id)
         (cluster,) = FIXTURE["galaxy_clusters"][f"{item['name']} - {attack_id}"]
         assert cluster["tag_name"] in _tags(_attribute("technique", item))
+
+    def test_the_attack_id_is_read_stripped_and_upper_cased(self):
+        item = dict(_item("tool", "S0039"), mitre_id=" s0039 ")  # constructed
+        assert [t for t in _tags(_attribute("tool", item)) if t.startswith("misp-galaxy:mitre-")] == [
+            'misp-galaxy:mitre-tool="Net - S0039"'
+        ]
+
+    @pytest.mark.parametrize(
+        ("kind", "attack_id", "mitre_id"),
+        [("tool", "S0039", "G0001"), ("actor", "G0034", "S0001"), ("malware", "S1072", "T1136")],
+    )
+    def test_an_id_of_another_kind_gives_no_attack_cluster(self, kind, attack_id, mitre_id):
+        item = dict(_item(kind, attack_id), mitre_id=mitre_id)  # constructed
+        assert not [t for t in _tags(_attribute(kind, item)) if t.startswith("misp-galaxy:mitre-")]
+
+    def test_a_tool_without_an_id_gets_no_attack_cluster(self):
+        """``create_tool_attribute`` writes no attribute for a tool without an id; the helper itself gives none."""
+        assert mw._attack_galaxy_tags({"type": "tool", "name": "Net"}, "Net") == []
+
+    @pytest.mark.parametrize(("kind", "attack_id"), [("actor", "G0034"), ("malware", "S1072"), ("tool", "S0039")])
+    def test_a_name_with_a_double_quote_gets_no_attack_cluster(self, kind, attack_id):
+        item = dict(_item(kind, attack_id), name='Net "x"')  # constructed: a quote would end the tag's value
+        assert not [t for t in _tags(_attribute(kind, item)) if t.startswith("misp-galaxy:mitre-")]
 
     def test_an_item_without_an_attack_id_gets_none(self):
         """Constructed items as another source gives them (an OTX family or adversary): no ATT&CK id, domains or
@@ -415,6 +527,16 @@ class TestMispHoldsTheWholeText:
         assert len(comment) > 7990 and long_text.startswith(comment) and comment.endswith("word")
         (line,) = [r.getMessage() for r in caplog.records if "[ENTITY-TEXT]" in r.getMessage()]
         assert "tactic TA0004: description of 9999 characters" in line and "word" not in line.split(":", 1)[1]
+
+    def test_a_cut_at_a_run_of_whitespace_leaves_no_trailing_space(self):
+        """Constructed: the last whitespace within the bound follows another one."""
+        item = dict(_item("tactic", "TA0004"), description="a" * 7998 + "  " + "b" * 100)
+        assert _attribute("tactic", item)["comment"] == "a" * 7998
+
+    @pytest.mark.parametrize("description", [5, 12.5, ["a list"], {"a": "map"}])
+    def test_a_description_that_is_not_text_gives_the_placeholder(self, description):
+        item = dict(_item("tactic", "TA0004"), description=description)  # constructed
+        assert _attribute("tactic", item)["comment"] == "MITRE ATT&CK tactic"
 
     def test_a_text_without_whitespace_over_the_bound_keeps_its_first_8000(self):
         item = dict(_item("tactic", "TA0004"), description="x" * 9000)
