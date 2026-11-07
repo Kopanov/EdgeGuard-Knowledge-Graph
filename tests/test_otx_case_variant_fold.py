@@ -47,7 +47,7 @@ def _pulses(*groups, tlp: str = "white"):
     out = []
     for pulse in (p for group in groups for p in group):
         p = copy.deepcopy(pulse)
-        p.setdefault("TLP", tlp)
+        p.setdefault("tlp", tlp)
         p.setdefault("attack_ids", [])
         p.setdefault("industries", [])
         p.setdefault("cve_references", [])
@@ -268,7 +268,7 @@ class TestRealPulses:
 
     def test_a_variant_s_techniques_zones_and_tlp_join_the_kept_item(self):
         first, later = _pulses(FIXTURE["dcrat_pulses"][:2])
-        later["TLP"] = "amber"
+        later["tlp"] = "amber"
         later["attack_ids"] = [{"id": "T1059.001"}]
         later["industries"] = ["Healthcare"]
         items = _collect(first, later)

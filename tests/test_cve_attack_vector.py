@@ -139,7 +139,7 @@ def _otx_cve_item() -> dict:
         "name": "BIND TKEY exploitation",
         "created": "2026-10-01T08:00:00",
         "modified": "2026-10-02T08:00:00",
-        "TLP": "white",
+        "tlp": "white",
         "cve_references": ["CVE-2015-5477"],
         "indicators": [],
     }

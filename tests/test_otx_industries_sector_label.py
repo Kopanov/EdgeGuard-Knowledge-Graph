@@ -65,7 +65,7 @@ PULSE: Dict[str, Any] = {
     "description": "The operators encrypted patient records at two hospitals and a clinic network.",
     "created": "2026-10-08T09:00:00",
     "modified": "2026-10-09T10:00:00",
-    "TLP": "white",
+    "tlp": "white",
     "adversary": "Dragonfly",
     "author_name": "AlienVault",
     "attack_ids": [{"id": "T1486"}],

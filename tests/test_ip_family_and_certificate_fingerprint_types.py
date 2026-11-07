@@ -79,7 +79,7 @@ _PULSE = {
     "modified": "2026-10-13T23:37:29.579000",
     "revision": 1,
     "public": 1,
-    "TLP": "white",
+    "tlp": "white",
     "adversary": "",
     "tags": [],
     "references": [],

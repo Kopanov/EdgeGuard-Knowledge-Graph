@@ -179,6 +179,22 @@ _PULSE_NAME_PLACEHOLDERS = frozenset({"", "unknown", "n/a", "none", "null", "-"}
 _NON_FILE_HASH_TYPES = frozenset({"FileHash-IMPHASH", "FileHash-PEHASH", "JA3", "SSLCertFingerprint"})
 
 
+def _pulse_tlp(pulse: Dict[str, Any]) -> str:
+    """The TLP level the pulse states, or ``""`` when it states none.
+
+    OTX names the field by endpoint: the subscribed list (``/api/v1/pulses/subscribed``, every
+    scheduled and baseline run) answers ``tlp``, a pulse read by id (``/api/v1/pulses/{id}``, the
+    retry list) answers ``TLP`` (``tests/fixtures/otx_pulse_keys_2026_11_07.json``). Both are read,
+    so an item carries its pulse's level on either path; without one it is written at the deployment
+    default (``EDGEGUARD_DEFAULT_TLP``).
+    """
+    for key in ("tlp", "TLP"):
+        value = pulse.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _pulse_actor_pairs(families: List[str], adversaries: List[str], pulse_id: Any = None) -> List[str]:
     """``"family::adversary::pulse"`` for every family × adversary named by ONE pulse. Encoding the pair
     (Bugbot on PR #145) keeps the same-pulse guarantee when the lists of several pulses are unioned on a
@@ -1466,7 +1482,7 @@ class OTXCollector:
                 pulse_references = pulse.get("references", [])[:10]
                 pulse_author = pulse.get("author_name", "")
                 pulse_adversary = pulse.get("adversary", "")
-                pulse_tlp = pulse.get("TLP", "")
+                pulse_tlp = _pulse_tlp(pulse)
                 # 2026-10: the pulse's description is stored on no item. It describes the report, and it was
                 # given only to the malware family and adversary items below, as their description: every
                 # family and adversary a pulse named showed that pulse's text, in place of ATT&CK's where

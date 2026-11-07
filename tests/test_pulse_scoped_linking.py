@@ -66,7 +66,7 @@ class TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators:
             "created": now,
             "modified": now,
             "adversary": adversary,
-            "TLP": "green",
+            "tlp": "green",
             "attack_ids": ["T1059"],
             "malware_families": families,
             "indicators": [{"type": "IPv4", "indicator": v, "description": "ioc"} for v in iocs],

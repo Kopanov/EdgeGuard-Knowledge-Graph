@@ -218,7 +218,7 @@ REPORT_PULSE = {
     "description": REPORT_TEXT,
     "created": "2026-09-12T08:10:00",
     "modified": "2026-09-12T08:10:00",
-    "TLP": "white",
+    "tlp": "white",
     "adversary": "Dragonfly",
     "author_name": "AlienVault",
     "attack_ids": [{"id": "T1566.001"}, {"id": "T1059.001"}],

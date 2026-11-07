@@ -210,7 +210,7 @@ _OLD_PULSE = {
     "modified": "2026-10-13T23:37:29.579000",
     "revision": 1,
     "public": 1,
-    "TLP": "green",
+    "tlp": "green",
     "adversary": "",
     "tags": ["urls", "phishing", "scam", "microsoft"],
     "references": [],

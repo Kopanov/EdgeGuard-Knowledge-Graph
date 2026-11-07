@@ -65,7 +65,7 @@ def _pulse_naming(family: str, ioc: str) -> Dict[str, Any]:
         "name": f"{family} infrastructure",
         "created": now,
         "modified": now,
-        "TLP": "green",
+        "tlp": "green",
         "malware_families": [family],
         "indicators": [{"type": "IPv4", "indicator": ioc, "description": "C2"}],
     }

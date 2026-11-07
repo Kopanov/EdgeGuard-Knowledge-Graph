@@ -1030,7 +1030,7 @@ class TestOtxCollectorReportedTechniquesAndActorHygiene:
             "created": now,
             "modified": now,
             "adversary": adversary,
-            "TLP": "amber",
+            "tlp": "amber",
             "attack_ids": [{"id": "T1059"}, "T1105"],
             "malware_families": ["Emotet"],
             "indicators": [{"type": "IPv4", "indicator": "203.0.113.5", "description": "ioc"}],

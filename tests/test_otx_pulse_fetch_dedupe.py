@@ -72,7 +72,7 @@ def _pulse(pid: str, name: str, modified: str, indicators: List[Dict[str, Any]])
         "modified": modified,
         "revision": 1,
         "public": 1,
-        "TLP": "white",
+        "tlp": "white",
         "adversary": "",
         "tags": [],
         "references": [],

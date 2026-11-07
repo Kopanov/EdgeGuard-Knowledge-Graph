@@ -76,7 +76,7 @@ def _pulse(pid: str, modified: Any, created: str, n: int) -> Dict[str, Any]:
         "author_name": "example",
         "created": created,
         "modified": modified,
-        "TLP": "white",
+        "tlp": "white",
         "adversary": "",
         "tags": [],
         "references": [],
