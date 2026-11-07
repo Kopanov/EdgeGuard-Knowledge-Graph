@@ -47,6 +47,26 @@ _CACHE_HOURS_DEFAULT = 20.0
 _CACHE_FILENAME = "abuseipdb_blacklist_cache.json"
 
 
+def abuse_int(value: Any, maximum: Optional[int] = None) -> Optional[int]:
+    """A count or score of an AbuseIPDB answer as an int (2026-11-07); ``None`` when absent or not a
+    non-negative whole number (at most *maximum*). Never 0 for a field the answer does not carry."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int) or value < 0 or (maximum is not None and value > maximum):
+        return None
+    return value
+
+
+def country_code(value: Any) -> str:
+    """An ISO 3166-1 alpha-2 code as AbuseIPDB gives it (``countryCode``), upper-cased; ``""`` otherwise."""
+    text = str(value or "").strip().upper()
+    return text if len(text) == 2 and text.isalpha() and text.isascii() else ""
+
+
 def _blacklist_cache_hours() -> float:
     """Max age (hours) of a reusable blacklist response; 0 disables the cache."""
     raw = os.getenv(_CACHE_HOURS_ENV)
@@ -489,7 +509,7 @@ class AbuseIPDBCollector:
         if not ip:
             return None
 
-        abuse_score = data.get("abuseConfidenceScore", 0)
+        abuse_score = abuse_int(data.get("abuseConfidenceScore"), maximum=100)
 
         # Build metadata text for zone detection
         zone_parts = [
@@ -510,7 +530,7 @@ class AbuseIPDBCollector:
             for cat_id in report.get("categories", []):
                 all_categories.add(cat_id)
 
-        return {
+        result: Dict[str, Any] = {
             "indicator_type": "ipv4" if "." in ip else "ipv6",
             "value": ip,
             "zone": zones,
@@ -518,12 +538,13 @@ class AbuseIPDBCollector:
             "source": ["abuseipdb"],
             "first_seen": data.get("firstSeen", ""),
             "last_updated": datetime.now(timezone.utc).isoformat(),
-            "confidence_score": abuse_score / 100.0,
-            "abuse_score": abuse_score,
-            "total_reports": data.get("totalReports", 0),
-            "num_distinct_users": data.get("numDistinctUsers", 0),
+            # 2026-11-07: a field the answer lacks stays None (it was 0, a score or count never reported);
+            # without a score the item has no ``confidence_score`` and the writer's default applies.
+            "abuse_confidence_score": abuse_score,
+            "total_reports": abuse_int(data.get("totalReports")),
+            "num_distinct_users": abuse_int(data.get("numDistinctUsers")),
             "last_reported": data.get("lastReportedAt", ""),
-            "country": data.get("countryCode", ""),
+            "ip_country_code": country_code(data.get("countryCode")),
             "isp": data.get("isp", ""),
             "domain": data.get("domain", ""),
             "hostnames": data.get("hostnames", []),
@@ -533,6 +554,9 @@ class AbuseIPDBCollector:
             "reports": data.get("reports", [])[:5],  # Keep top 5 reports
             "abuse_categories": sorted(all_categories),
         }
+        if abuse_score is not None:
+            result["confidence_score"] = abuse_score / 100.0
+        return result
 
     def _format_blacklist_result(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -548,11 +572,16 @@ class AbuseIPDBCollector:
         if not ip:
             return None
 
-        abuse_score = data.get("abuseConfidenceScore", 0)
+        # 2026-11-07: the score and the country as the answer gives them, or nothing. A missing score was
+        # read as 0 (confidence 0.0, ``confidence:low``, "AbuseIPDB confidence: 0%"); the blacklist answer
+        # carries no ``totalReports`` / ``numDistinctUsers``, so the zeros the item held for them are gone.
+        abuse_score = abuse_int(data.get("abuseConfidenceScore"), maximum=100)
+        country = country_code(data.get("countryCode"))
 
-        # Build description from available data
-        description = f"AbuseIPDB confidence: {abuse_score}%"
-        country = data.get("countryCode", "")
+        # Readable summary; the MISP attribute carries the two facts as TF_META keys.
+        description = "AbuseIPDB blacklist"
+        if abuse_score is not None:
+            description += f", confidence: {abuse_score}%"
         if country:
             description += f", Country: {country}"
 
@@ -586,7 +615,7 @@ class AbuseIPDBCollector:
         # date masquerading as world-truth on every blacklist IP.
         # Fix: omit first_seen entirely. Honest NULL > misleading wall-clock.
         last_reported = data.get("lastReportedAt", "")
-        return {
+        item: Dict[str, Any] = {
             "indicator_type": "ipv4" if "." in ip else "ipv6",
             "value": ip,
             "zone": zones,
@@ -595,14 +624,19 @@ class AbuseIPDBCollector:
             # first_seen INTENTIONALLY OMITTED — see comment above.
             "last_seen": last_reported,
             "last_updated": datetime.now(timezone.utc).isoformat(),
-            "confidence_score": abuse_score / 100.0,
-            "abuse_score": abuse_score,
-            "total_reports": data.get("totalReports", 0),
-            "num_distinct_users": data.get("numDistinctUsers", 0),
-            "country": country,
             "last_reported": data.get("lastReportedAt", ""),
             "description": description,
         }
+        if abuse_score is not None:
+            # Without a score the writer's default confidence applies (``confidence:medium``).
+            item["confidence_score"] = abuse_score / 100.0
+            # TF_META ``abuse_confidence_score``: AbuseIPDB's own 0-100 score, an int.
+            item["abuse_confidence_score"] = abuse_score
+        if country:
+            # TF_META ``ip_country_code``: the country AbuseIPDB gives for the address. It is where the
+            # address is, never a country the activity targets (never ``targeted_countries``).
+            item["ip_country_code"] = country
+        return item
 
     def collect(
         self,

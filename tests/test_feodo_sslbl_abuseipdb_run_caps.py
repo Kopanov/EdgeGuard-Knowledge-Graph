@@ -302,7 +302,7 @@ def test_sslbl_header_row_is_recognised_by_name_in_either_form():
     commented = _sslbl(_SSLBL_BANNER + body).collect(push_to_misp=False)
     plain = _sslbl("# comment\r\nListingdate,SHA1,Listingreason\r\n" + body).collect(push_to_misp=False)
     assert [i["value"] for i in commented] == [i["value"] for i in plain] == [_sha1(n) for n in range(3)]
-    assert commented[0]["first_seen"] == "2026-10-12 06:41:13" and commented[0]["listing_reason"] == "vidar c&c"
+    assert commented[0]["first_seen"] == "2026-10-12 06:41:13" and commented[0]["listing_reason"] == "Vidar C&C"
 
 
 def test_sslbl_capped_run_keeps_the_newest_listings(caplog, monkeypatch):

@@ -147,6 +147,164 @@ class MalwareBazaarTransientError(TransientServerError):
     """
 
 
+def _threatfox_port(ioc_type: str, ioc_value: str) -> Optional[int]:
+    """The port of an ``ip:port`` IOC (``"198.51.100.7:8080"`` -> 8080), else ``None``."""
+    if ioc_type != "ip:port" or ":" not in ioc_value:
+        return None
+    port = ioc_value.rsplit(":", 1)[1].strip()
+    if not port.isdigit():
+        return None
+    number = int(port)
+    return number if 0 < number < 65536 else None
+
+
+def _threatfox_confidence_level(value: Any) -> Optional[int]:
+    """ThreatFox ``confidence_level`` (0-100) as an int; ``None`` when absent or not a number in range."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, (int, float)) and 0 <= value <= 100:
+        return int(value)
+    return None
+
+
+def _threatfox_record_order(ioc: Dict[str, Any]) -> tuple:
+    """Sort key of a ThreatFox record by recency: ``first_seen``, then the numeric id."""
+    seen = feed_time(ioc.get("first_seen"))
+    ioc_id = str(ioc.get("id") or "").strip()
+    return (seen.timestamp() if seen else float("-inf"), int(ioc_id) if ioc_id.isdigit() else -1)
+
+
+def _first_non_empty(records: List[Dict[str, Any]], field: str) -> Any:
+    """The first non-empty *field* of *records* (in their order), else ``""``."""
+    for record in records:
+        if record.get(field):
+            return record[field]
+    return ""
+
+
+def _append_distinct(target: List[Any], value: Any) -> None:
+    if value not in (None, "") and value not in target:
+        target.append(value)
+
+
+def threatfox_merge_iocs(iocs: List[Dict[str, Any]], map_ioc_type) -> List[Dict[str, Any]]:
+    """One item per ``(indicator_type, value)`` from ThreatFox ``get_iocs`` records (2026-11-07).
+
+    ThreatFox lists one record per IOC report, and an ``ip:port`` IOC carries its port in the value.
+    MISP holds one attribute per value (the port is stripped: ``ip-dst`` takes no port), so two records
+    ``IP:443`` and ``IP:8080``, or a value reported twice for two families, become one attribute; without
+    merging, the writer's dedup kept the first record and dropped the other record's port, id, family and
+    threat type before MISP. Merged as Feodo Tracker merges its rows per address
+    (``finance_feed_collector.feodo_merge_rows``):
+
+    - the scalar keys (``malware_family``, ``threat_type``, ``threat_type_desc``, ``ioc_id``,
+      ``malware_alias``, ``malware_malpedia``, ``reporter``, ``reference``) are those of the primary
+      record, the most recent one (``first_seen``, then the higher id); ``reference``, ``reporter`` and
+      ``malware_malpedia`` fall back to the first other record that has one;
+    - ``first_seen`` is the earliest and ``last_seen`` the latest of the records;
+    - the lists hold every record's value once: ``ports`` (ints, ascending), ``ioc_ids`` (ascending by
+      number), ``families`` (``malware_printable``) and ``threat_types`` with the primary record's value
+      first, ``tags`` in the order the records give them;
+    - ``confidence_level`` is the highest ThreatFox ``confidence_level`` (0-100) of the records and
+      ``confidence_score`` that value / 100 (0.5 when no record states one; no level is invented).
+
+    Items keep the order in which their value first appears in *iocs*. Records of an unknown type or
+    without a value are skipped.
+    """
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    order: List[tuple] = []
+    for ioc in iocs:
+        ioc_type = str(ioc.get("ioc_type") or "")
+        ioc_value = str(ioc.get("ioc") or "")
+        # Strip the port of ip:port values: MISP ip-dst takes no port suffix
+        # ("185.220.101.5:8080" -> "185.220.101.5"); the port is kept in ``ports``.
+        if ioc_type == "ip:port" and ":" in ioc_value:
+            ioc_value = ioc_value.rsplit(":", 1)[0]
+        indicator_type = map_ioc_type(ioc_type)
+        if indicator_type == "unknown" or not ioc_value:
+            continue
+        key = (indicator_type, ioc_value)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(ioc)
+
+    items: List[Dict[str, Any]] = []
+    for key in order:
+        records = groups[key]
+        by_recency = sorted(records, key=_threatfox_record_order, reverse=True)
+        primary = by_recency[0]
+        indicator_type, value = key
+
+        ports: List[int] = []
+        ioc_ids: List[str] = []
+        families: List[str] = []
+        threat_types: List[str] = []
+        tags: List[str] = []
+        levels: List[int] = []
+        for record in by_recency:
+            _append_distinct(families, str(record.get("malware_printable") or "").strip())
+            _append_distinct(threat_types, str(record.get("threat_type") or "").strip())
+        for record in records:
+            _append_distinct(ports, _threatfox_port(str(record.get("ioc_type") or ""), str(record.get("ioc") or "")))
+            _append_distinct(ioc_ids, str(record.get("id") or "").strip())
+            for tag in record.get("tags") or []:
+                _append_distinct(tags, tag)
+            level = _threatfox_confidence_level(record.get("confidence_level"))
+            if level is not None:
+                levels.append(level)
+        ports.sort()
+        ioc_ids.sort(key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else 0, x))
+
+        first_seen_records = [r for r in records if feed_time(r.get("first_seen"))]
+        first_seen = (
+            min(first_seen_records, key=lambda r: feed_time(r.get("first_seen"))).get("first_seen")
+            if first_seen_records
+            else primary.get("first_seen", "")
+        )
+        last_seen_records = [r for r in records if feed_time(r.get("last_seen"))]
+        last_seen = (
+            max(last_seen_records, key=lambda r: feed_time(r.get("last_seen"))).get("last_seen")
+            if last_seen_records
+            else primary.get("last_seen", "")
+        )
+
+        malware = primary.get("malware_printable", "") or ""
+        level = max(levels) if levels else None
+        item: Dict[str, Any] = {
+            "indicator_type": indicator_type,
+            "value": value,
+            # Sector detection from every family the value's records name.
+            "zone": get_zones_from_malware(" ".join(families) if families else malware),
+            "tag": "threatfox",
+            "source": ["threatfox"],
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "confidence_score": level / 100.0 if level is not None else 0.5,
+            "malware_family": malware,
+            "threat_type": primary.get("threat_type", ""),
+            "threat_type_desc": primary.get("threat_type_desc", ""),
+            "ioc_id": primary.get("id", ""),
+            "malware_alias": primary.get("malware_alias", ""),
+            "malware_malpedia": _first_non_empty(by_recency, "malware_malpedia"),
+            "reporter": _first_non_empty(by_recency, "reporter"),
+            "reference": _first_non_empty(by_recency, "reference"),
+            "tags": tags,
+            "ioc_ids": ioc_ids,
+            "families": families,
+            "threat_types": threat_types,
+        }
+        if ports:
+            item["ports"] = ports
+        if level is not None:
+            item["confidence_level"] = level
+        items.append(item)
+    return items
+
+
 class ThreatFoxCollector:
     """
     Collects IOCs from ThreatFox API - Global threat intelligence feed.
@@ -315,47 +473,11 @@ class ThreatFoxCollector:
                     cap,
                     len(iocs) - cap,
                 )
-            for ioc in iocs_to_process:
-                malware = ioc.get("malware_printable", "")
-                # Use detect_zones_from_text for sector detection from malware family
-                zones = get_zones_from_malware(malware)
+            # 2026-11-07: one item per value; the records of a value (ip:port ports, other families)
+            # are merged into it (``threatfox_merge_iocs``).
+            results = threatfox_merge_iocs(iocs_to_process, self._map_ioc_type)
 
-                ioc_type = ioc.get("ioc_type", "")
-                ioc_value = ioc.get("ioc", "")
-
-                # Strip port from ip:port values — MISP ip-dst does not accept
-                # a port suffix (e.g. "185.220.101.5:8080" → "185.220.101.5").
-                if ioc_type == "ip:port" and ":" in ioc_value:
-                    ioc_value = ioc_value.rsplit(":", 1)[0]
-
-                # Map ThreatFox IOC types to EdgeGuard types
-                indicator_type = self._map_ioc_type(ioc_type)
-
-                if indicator_type != "unknown" and ioc_value:
-                    results.append(
-                        {
-                            "indicator_type": indicator_type,
-                            "value": ioc_value,
-                            "zone": zones,  # zone is now an array
-                            "tag": "threatfox",
-                            "source": ["threatfox"],
-                            "first_seen": ioc.get("first_seen", ""),
-                            "last_seen": ioc.get("last_seen", ""),
-                            "last_updated": datetime.now(timezone.utc).isoformat(),
-                            "confidence_score": ioc.get("confidence_level", 50) / 100.0,
-                            "malware_family": malware,
-                            "threat_type": ioc.get("threat_type", ""),
-                            "threat_type_desc": ioc.get("threat_type_desc", ""),
-                            "ioc_id": ioc.get("id", ""),
-                            "malware_alias": ioc.get("malware_alias", ""),
-                            "malware_malpedia": ioc.get("malware_malpedia", ""),
-                            "reporter": ioc.get("reporter", ""),
-                            "reference": ioc.get("reference", ""),
-                            "tags": ioc.get("tags") or [],
-                        }
-                    )
-
-            logger.info(f"[OK] ThreatFox: Processed {len(results)} indicators")
+            logger.info(f"[OK] ThreatFox: Processed {len(results)} indicators from {len(iocs_to_process)} IOC records")
             if not results and optional_api_key_effective(self.api_key, THREATFOX_API_KEY_PLACEHOLDERS):
                 logger.warning("ThreatFox returned 0 IOCs despite valid API key — check feed status")
 
@@ -707,6 +829,12 @@ def _malwarebazaar_field(value: Optional[str]) -> str:
     return "" if text.lower() == _MALWAREBAZAAR_NA else text
 
 
+def _hex_digest(value: Optional[str], length: int) -> str:
+    """A lower-case hex digest of *length* characters from an export field; empty for ``n/a`` or a malformed value."""
+    text = _malwarebazaar_field(value).lower()
+    return text if len(text) == length and all(c in "0123456789abcdef" for c in text) else ""
+
+
 def _malwarebazaar_first_seen_iso(value: Optional[str]) -> Optional[str]:
     """``first_seen_utc`` (``YYYY-MM-DD HH:MM:SS``, UTC) → tz-aware ISO-8601; ``None`` when unparseable.
 
@@ -904,8 +1032,10 @@ class MalwareBazaarCollector:
             "confidence_score": 0.7 if signature else 0.6,
             # Family label ("n/a" → empty). Reaches Neo4j via TF_META like the ThreatFox family.
             "malware_family": signature,
-            "md5": _malwarebazaar_field(row.get("md5_hash")).lower(),
-            "sha1": _malwarebazaar_field(row.get("sha1_hash")).lower(),
+            # 2026-11-07: facts of the sample's file, carried in TF_META (``file_md5``, ``file_sha1``,
+            # ``file_name`` as the export gives it, ``file_type``); empty when the export says ``n/a``.
+            "file_md5": _hex_digest(row.get("md5_hash"), 32),
+            "file_sha1": _hex_digest(row.get("sha1_hash"), 40),
             "file_name": _malwarebazaar_field(row.get("file_name")),
             "file_type": file_type,
             "mime_type": _malwarebazaar_field(row.get("mime_type")),

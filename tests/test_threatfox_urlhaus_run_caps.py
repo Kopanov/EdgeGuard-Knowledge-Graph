@@ -36,7 +36,8 @@ def _threatfox_ioc(n: int, first_seen: str) -> Dict[str, Any]:
     """One ``get_iocs`` record (abuse.ch ThreatFox API v1)."""
     return {
         "id": str(1600000 + n),
-        "ioc": f"198.51.100.{n % 250}:{4000 + n}",
+        # One address per record (2026-11-07: records of one address are merged into one item).
+        "ioc": f"{('198.51.100', '203.0.113')[n // 250]}.{n % 250}:{4000 + n}",
         "threat_type": "botnet_cc",
         "threat_type_desc": "Indicator that identifies a botnet command&control server (C&C)",
         "ioc_type": "ip:port",

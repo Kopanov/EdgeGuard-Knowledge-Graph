@@ -399,7 +399,13 @@ class FeodoCollector:
                     "threat_type": FEODO_THREAT_TYPE,
                     "threat_type_desc": FEODO_THREAT_TYPE_DESC,
                     "tags": labels,
+                    # 2026-11-07: the same facts as structured TF_META keys, named as ThreatFox's: every
+                    # port (ints), every family (the primary first) and the status of the most recent row.
+                    "ports": [int(port) for port in rec["ports"] if port.isdigit() and 0 < int(port) < 65536],
+                    "families": list(rec["families"]),
                 }
+                if status:
+                    item["c2_status"] = status
                 # Source-reported last-seen → SOURCED_FROM.source_reported_last_at (activity window).
                 last_seen = feodo_last_seen(first_seen, last_online)
                 if last_seen:
@@ -427,6 +433,44 @@ class FeodoCollector:
             if not push_to_misp:
                 raise
             return status
+
+
+# SSL Blacklist page of a listed certificate (the link form the site's own certificate list uses;
+# checked 2026-11-07: the page of a listed fingerprint shows its listing reason and date).
+SSLBL_CERTIFICATE_URL = "https://sslbl.abuse.ch/ssl-certificates/sha1/{sha1}/"
+# ``Listingreason`` is "<family> <role>": the role suffixes the list uses, mapped to the ThreatFox
+# ``threat_type`` vocabulary where one exists. "MITM" (a banking trojan's man-in-the-middle server)
+# has no ThreatFox equivalent: its family is kept, no threat type is set.
+_SSLBL_ROLE_SUFFIXES = (
+    (" C&C", "botnet_cc"),
+    (" malware distribution", "payload_delivery"),
+    (" MITM", ""),
+)
+# A "family" part that names no family ("Malware C&C", "Malware distribution").
+_SSLBL_GENERIC_FAMILIES = frozenset({"malware"})
+
+
+def sslbl_listing(reason: str) -> Tuple[str, str]:
+    """``(threat_type, family)`` of an SSL Blacklist ``Listingreason`` (2026-11-07).
+
+    The role is kept apart from the family: ``"Vidar C&C"`` -> ``("botnet_cc", "Vidar")``,
+    ``"ACRStealer malware distribution"`` -> ``("payload_delivery", "ACRStealer")``,
+    ``"Vawtrak MITM"`` -> ``("", "Vawtrak")``. The generic reasons give a role and no family
+    (``"Malware C&C"`` -> ``("botnet_cc", "")``, ``"Malware distribution"`` -> ``("payload_delivery", "")``).
+    A reason without one of the role suffixes (``"QuasarRAT"``, ``"Sinkhole"``, ``"doxbin.cy"``) gives
+    neither: it is kept only verbatim as ``listing_reason``. The family is the list's own spelling; it
+    is a label for the family resolver, never a Malware node by itself.
+    """
+    text = (reason or "").strip()
+    for suffix, threat_type in _SSLBL_ROLE_SUFFIXES:
+        if text.lower().endswith(suffix.lower()):
+            family = text[: -len(suffix)].strip()
+            if family.lower() in _SSLBL_GENERIC_FAMILIES:
+                family = ""
+            return threat_type, family
+    if text.lower() == "malware distribution":
+        return "payload_delivery", ""
+    return "", ""
 
 
 class SSLBlacklistCollector:
@@ -495,7 +539,8 @@ class SSLBlacklistCollector:
             lines = [ln for ln in raw_text.strip().split("\n") if ln and not ln.startswith("#")]
             rows: List[List[str]] = []
             for line in lines:
-                parts = [part.strip().strip('"') for part in line.split(",")]
+                # Two splits: the reason (the last column) is kept whole, a comma inside it included.
+                parts = [part.strip().strip('"') for part in line.split(",", 2)]
                 if len(parts) < 3 or parts[0].lower() == "listingdate" or not parts[1]:
                     continue
                 rows.append(parts)
@@ -521,26 +566,33 @@ class SSLBlacklistCollector:
             for parts in rows:
                 date = parts[0]
                 sha1 = parts[1]
-                reason = parts[2].lower()
+                # 2026-11-07: the reason as the list gives it (it was lower-cased and never reached MISP).
+                reason = parts[2]
+                threat_type, family = sslbl_listing(reason)
 
                 # Determine ALL zones from reason using common detection
-                zones = detect_zones_from_text(reason)
+                zones = detect_zones_from_text(reason.lower())
 
-                results.append(
-                    {
-                        # The SHA-1 fingerprint of a TLS certificate, not of a file (2026-10: was ``sha1``,
-                        # which made it a file-hash Indicator with a ``file:hashes`` STIX pattern).
-                        "indicator_type": "x509-fingerprint-sha1",
-                        "value": sha1,
-                        "zone": zones,  # zone is now an array
-                        "tag": self.tag,
-                        "source": [self.tag],
-                        "first_seen": date,
-                        "last_updated": datetime.now(timezone.utc).isoformat(),
-                        "confidence_score": 0.6,
-                        "listing_reason": reason,
-                    }
-                )
+                item: Dict[str, Any] = {
+                    # The SHA-1 fingerprint of a TLS certificate, not of a file (2026-10: was ``sha1``,
+                    # which made it a file-hash Indicator with a ``file:hashes`` STIX pattern).
+                    "indicator_type": "x509-fingerprint-sha1",
+                    "value": sha1,
+                    "zone": zones,  # zone is now an array
+                    "tag": self.tag,
+                    "source": [self.tag],
+                    "first_seen": date,
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                    "confidence_score": 0.6,
+                    "listing_reason": reason,
+                    # The certificate's page on SSL Blacklist; also what makes MISPWriter write TF_META.
+                    "reference": SSLBL_CERTIFICATE_URL.format(sha1=sha1.lower()),
+                }
+                if threat_type:
+                    item["threat_type"] = threat_type
+                if family:
+                    item["listing_family"] = family
+                results.append(item)
 
             logger.info(f"[OK] SSL Blacklist: Collected {len(results)} SSL certs")
             if not results:
