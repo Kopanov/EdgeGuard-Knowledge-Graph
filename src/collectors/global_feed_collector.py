@@ -201,8 +201,9 @@ def threatfox_merge_iocs(iocs: List[Dict[str, Any]], map_ioc_type) -> List[Dict[
 
     - the scalar keys (``malware_family``, ``threat_type``, ``threat_type_desc``, ``ioc_id``,
       ``malware_alias``, ``malware_malpedia``, ``reporter``, ``reference``) are those of the primary
-      record, the most recent one (``first_seen``, then the higher id); ``reference``, ``reporter`` and
-      ``malware_malpedia`` fall back to the first other record that has one;
+      record, the most recent one (``first_seen``, then the higher id); ``reference`` and ``reporter``
+      fall back to the most recent other record that has one, ``malware_malpedia`` only to a record of
+      the primary record's family (the Malpedia page names the family, so it never names another one);
     - ``first_seen`` is the earliest and ``last_seen`` the latest of the records;
     - the lists hold every record's value once: ``ports`` (ints, ascending), ``ioc_ids`` (ascending by
       number), ``families`` (``malware_printable``) and ``threat_types`` with the primary record's value
@@ -211,7 +212,9 @@ def threatfox_merge_iocs(iocs: List[Dict[str, Any]], map_ioc_type) -> List[Dict[
       ``confidence_score`` that value / 100 (0.5 when no record states one; no level is invented).
 
     Items keep the order in which their value first appears in *iocs*. Records of an unknown type or
-    without a value are skipped.
+    without a value are skipped. The merge covers the records of one run: a value MISP already holds is
+    not pushed again (the writer's cross-event duplicate check), so a later run's records of that value
+    (another port, id, family or threat type) do not reach its stored ``TF_META``.
     """
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     order: List[tuple] = []
@@ -289,7 +292,9 @@ def threatfox_merge_iocs(iocs: List[Dict[str, Any]], map_ioc_type) -> List[Dict[
             "threat_type_desc": primary.get("threat_type_desc", ""),
             "ioc_id": primary.get("id", ""),
             "malware_alias": primary.get("malware_alias", ""),
-            "malware_malpedia": _first_non_empty(by_recency, "malware_malpedia"),
+            "malware_malpedia": _first_non_empty(
+                [r for r in by_recency if (r.get("malware_printable") or "") == malware], "malware_malpedia"
+            ),
             "reporter": _first_non_empty(by_recency, "reporter"),
             "reference": _first_non_empty(by_recency, "reference"),
             "tags": tags,

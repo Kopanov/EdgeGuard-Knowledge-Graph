@@ -322,7 +322,7 @@ _TF_META_MAX_ITEM_CHARS = 200
 # 2026-11-07: list-source fields of ``TF_META``, optional like the keys above (written only when the item
 # carries a value) and written as the source gives them, never cut by the writer; only the comment budget
 # shortens them (``_fit_meta_comment``). ``c2_status`` (Feodo Tracker); ``listing_reason`` (verbatim),
-# ``listing_family`` (the family part of the reason, never a generic word) (SSL Blacklist);
+# ``listing_family`` (the family part of the reason, the list's own label, never a category word) (SSL Blacklist);
 # ``ip_country_code`` (where the address is, never a targeted country) (AbuseIPDB); ``file_name``,
 # ``file_md5``, ``file_sha1``, ``file_type`` (MalwareBazaar, VirusTotal); ``meaningful_name``,
 # ``threat_category`` (VirusTotal).

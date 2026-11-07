@@ -37,6 +37,7 @@ from collectors.collector_utils import (
 # Import MISP writer
 from collectors.misp_writer import MISPWriter
 from config import SSL_VERIFY, detect_zones_from_text, resolve_collection_limit
+from node_identity import is_placeholder_name
 from resilience import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -435,8 +436,10 @@ class FeodoCollector:
             return status
 
 
-# SSL Blacklist page of a listed certificate (the link form the site's own certificate list uses;
-# checked 2026-11-07: the page of a listed fingerprint shows its listing reason and date).
+# SSL Blacklist page of a listed certificate, in the link form the site's own certificate list uses.
+# Checked 2026-11-07: the page answers HTTP 200 for any fingerprint, an unlisted one included; it showed
+# the database entry (listing reason and date) for a listing of 2026-10-21 09:43 and "No records found"
+# for the newest listing (2026-11-07 07:52), so the page is a link, not proof of a listing.
 SSLBL_CERTIFICATE_URL = "https://sslbl.abuse.ch/ssl-certificates/sha1/{sha1}/"
 # ``Listingreason`` is "<family> <role>": the role suffixes the list uses, mapped to the ThreatFox
 # ``threat_type`` vocabulary where one exists. "MITM" (a banking trojan's man-in-the-middle server)
@@ -446,8 +449,6 @@ _SSLBL_ROLE_SUFFIXES = (
     (" malware distribution", "payload_delivery"),
     (" MITM", ""),
 )
-# A "family" part that names no family ("Malware C&C", "Malware distribution").
-_SSLBL_GENERIC_FAMILIES = frozenset({"malware"})
 
 
 def sslbl_listing(reason: str) -> Tuple[str, str]:
@@ -455,17 +456,20 @@ def sslbl_listing(reason: str) -> Tuple[str, str]:
 
     The role is kept apart from the family: ``"Vidar C&C"`` -> ``("botnet_cc", "Vidar")``,
     ``"ACRStealer malware distribution"`` -> ``("payload_delivery", "ACRStealer")``,
-    ``"Vawtrak MITM"`` -> ``("", "Vawtrak")``. The generic reasons give a role and no family
-    (``"Malware C&C"`` -> ``("botnet_cc", "")``, ``"Malware distribution"`` -> ``("payload_delivery", "")``).
-    A reason without one of the role suffixes (``"QuasarRAT"``, ``"Sinkhole"``, ``"doxbin.cy"``) gives
-    neither: it is kept only verbatim as ``listing_reason``. The family is the list's own spelling; it
-    is a label for the family resolver, never a Malware node by itself.
+    ``"Vawtrak MITM"`` -> ``("", "Vawtrak")``. A family part that is a category word
+    (``node_identity.is_placeholder_name``: "Malware", "Ransomware", ...) gives a role and no family
+    (``"Malware C&C"`` -> ``("botnet_cc", "")``, ``"Ransomware C&C"`` -> ``("botnet_cc", "")``,
+    ``"Malware distribution"`` -> ``("payload_delivery", "")``), by the rule that keeps such words out of
+    Malware node names. A reason without one of the role suffixes (``"QuasarRAT"``, ``"Sinkhole"``,
+    ``"doxbin.cy"``) gives neither: it is kept only verbatim as ``listing_reason``. The family is the
+    list's own label in its spelling and may name a malware family, an actor (``"TA505 C&C"``), a product
+    or a traffic-distribution cluster; it is kept in MISP only, never a Malware node by itself.
     """
     text = (reason or "").strip()
     for suffix, threat_type in _SSLBL_ROLE_SUFFIXES:
         if text.lower().endswith(suffix.lower()):
             family = text[: -len(suffix)].strip()
-            if family.lower() in _SSLBL_GENERIC_FAMILIES:
+            if is_placeholder_name(family):
                 family = ""
             return threat_type, family
     if text.lower() == "malware distribution":

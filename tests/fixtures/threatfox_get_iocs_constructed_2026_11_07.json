@@ -1,5 +1,5 @@
 {
- "_provenance": "CONSTRUCTED, not recorded. On 2026-11-07 the keyless ThreatFox exports (https://threatfox.abuse.ch/export/json/recent/, /export/csv/recent/, /export/json/ip-port/recent/, /export/json/full/) answered HTTP 410 Gone, and the get_iocs API needs the abuse.ch Auth-Key, which tests do not use. The records follow the get_iocs field list of https://threatfox.abuse.ch/api/ (id, ioc, threat_type, threat_type_desc, ioc_type, ioc_type_desc, malware, malware_printable, malware_alias, malware_malpedia, confidence_level, first_seen, last_seen, reporter, reference, tags). The family names, Malpedia URLs, aliases and threat-type texts are those of real ThreatFox records stored on the test graph (tests/fixtures/feed_family_labels_2026_11_01.json, records 'Cobalt Strike', 'Nanocore RAT', 'IClickFix'). Addresses are RFC 5737 documentation addresses, domains are under example.test, ids, ioc_type_desc texts, dates, ports, reporters, references and tags are made up for the test. The case it builds: one address reported twice (ports 443 and 8080, two families, two confidence levels), one address with a null confidence_level, and one domain with a single record.",
+ "_provenance": "CONSTRUCTED, not recorded. On 2026-11-07 the keyless ThreatFox exports (https://threatfox.abuse.ch/export/json/recent/, /export/csv/recent/, /export/json/ip-port/recent/, /export/json/full/) answered HTTP 410 Gone, and the get_iocs API needs the abuse.ch Auth-Key, which tests do not use. The records follow the get_iocs field list of https://threatfox.abuse.ch/api/ (id, ioc, threat_type, threat_type_desc, ioc_type, ioc_type_desc, malware, malware_printable, malware_alias, malware_malpedia, confidence_level, first_seen, last_seen, reporter, reference, tags). The family names, Malpedia URLs, aliases and threat-type texts are those of real ThreatFox records stored on the test graph (tests/fixtures/feed_family_labels_2026_11_01.json, records 'Cobalt Strike', 'Nanocore RAT', 'IClickFix'). Addresses are RFC 5737 documentation addresses, domains are under example.test, ids, ioc_type_desc texts, dates, ports, reporters, references and tags are made up for the test. The case it builds: one address reported twice (ports 443 and 8080, two families, two confidence levels, two last_seen dates, the latest on the older record), one address with a null confidence_level, and one domain with a single record.",
  "data": [
   {
    "id": "3100002",
@@ -14,7 +14,7 @@
    "malware_malpedia": "https://malpedia.caad.fkie.fraunhofer.de/details/win.nanocore",
    "confidence_level": 75,
    "first_seen": "2026-11-06 09:12:40 UTC",
-   "last_seen": null,
+   "last_seen": "2026-11-06 14:00:00 UTC",
    "reporter": "reporter-b",
    "reference": "",
    "tags": ["NanoCore", "c2"]

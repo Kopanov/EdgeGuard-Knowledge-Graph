@@ -97,7 +97,8 @@ def _is_hex(value: object, length: int) -> bool:
 
 
 # Verdict categories of ``last_analysis_stats`` that count as an engine's answer (the denominator of
-# ``_calculate_confidence``); ``type-unsupported``, ``timeout`` and ``failure`` are no answer.
+# ``_calculate_confidence``); ``type-unsupported``, ``timeout``, ``confirmed-timeout`` and ``failure`` are
+# no answer.
 _VERDICT_KEYS = ("malicious", "suspicious", "harmless", "undetected")
 
 
