@@ -330,8 +330,8 @@ clearing:
    start: after the recreate, `docker exec edgeguard_airflow airflow pools list` must
    list it with the slots of `EDGEGUARD_COLLECTOR_POOL_SLOTS` (default 4); see
    [AIRFLOW_DAGS.md § Collector pool: setup and resizing](AIRFLOW_DAGS.md#collector-pool-setup-and-resizing).
-   The CalVer printed by `edgeguard version` (`2026.10.10`) does not identify these
-   commits, so check the commit, not the version:
+   The CalVer printed by `edgeguard version` does not identify these commits, so check
+   the commit, not the version:
    `git merge-base --is-ancestor eef87be HEAD && echo ok` must print `ok`, and so must
    `test -f tests/test_cve_nvd_precedence.py && echo ok` (the CVE NVD-precedence change). `edgeguard version` also prints the git
    short SHA of the checkout.
@@ -693,10 +693,11 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — Item [7]: the version check no longer quotes a CalVer number (the release 2026.11.6 bumped it); the commit check is unchanged.
 - 2026-11-06 — Acceptance check `campaign_indicators_have_evidence`; `campaign_malware_has_evidence` and `campaigns_have_evidence` judge a link to a shared malware (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`, default 7) as evidence only for the indicators of its own records; the three judge each campaign with the list of shared malware its build recorded, and the script runs with the deployment's value (sourced `.env`); the campaign checks can fail by design until the enrichment run after a sync.
 - 2026-11-02 — Launch decision: only `edgeguard fresh-baseline` adds the blast-radius counts, the backup gate and the typed confirmation (the text gave both wrappers confirmation and backup-gate UX). Launch step 3: the postcheck's log lists every collector that delivered nothing, also one not run or without a returned status. Fresh-baseline acceptance: the checks that fail by design between a sync and `build_relationships` include the ATT&CK link checks after a sync that wrote ATT&CK records; the exit code follows the mandatory checks of the table; every check the script prints is named in the table, the CISA ICS and MalwareBazaar presence checks are judged only with their flags (the rows tied them to the enable variables), and the reported-only entries are listed; the measured figures are removed from the table (NVD CVE properties `cwe` / `ref_tags` / `cpe_type` / `result_impacts` on the 730-day event of 2026-10-10: 93 / 57 / 58 / 91 %; on the September graph 493 sub-techniques with their `SUBTECHNIQUE_OF`, 0 missing, and sector coverage of about 200 / 100 / 100 actors and 750 / 400 / 320 malware for finance / energy / healthcare; on the graph of 2026-10-14, 136 malware twins holding 16,005 `INDICATES` links; on the graph of 2026-10-15, a dry run of step 2d's statements: 475 attribution links to remove and 24 to trim, from 35 pulses, and 515 links from 29 pulses counted from the pulses' own adversary fields; on the hosted graph of 2026-10-15, 137,753 of 141,932 CVEs with EPSS and 2 score dates).
 - 2026-11-02 — Launch step 3: `baseline_postcheck` fails the run on the ATT&CK links of the claims, the CVE scores after an NVD delivery, each collector's delivery and the sources named in `EDGEGUARD_BASELINE_REQUIRED_SOURCES`, and lists the collectors that delivered nothing.
