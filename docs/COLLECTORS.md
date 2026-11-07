@@ -316,7 +316,7 @@ The zones are one list on the item; which of them its pulses stated is decided b
 
 ### What It Does
 Collects CVE records from the National Vulnerability Database, including:
-- CVE IDs and descriptions (up to 1000 chars)
+- CVE IDs and descriptions (up to 1000 chars; the MISP → Neo4j sync writes at most 1,000 characters of a CVE's description to the graph, markup stripped and cut at a sentence or word end, whatever MISP holds: [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#descriptions-and-their-source))
 - Every CVSS version NVD supplies (v4.0, v3.1, v3.0, v2), each with full component data
 - `cvss_score` / `severity`: the record's first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`src/cvss_selection.py`); `None` / `UNKNOWN` when the record has none — rejected CVEs, CVEs awaiting NVD analysis without a CNA score. The CVSS 2 rating is read from the metric object, where NVD API 2.0 puts it.
 - Affected products (CPE matching)
@@ -509,7 +509,7 @@ Collects threat intelligence from MITRE ATT&CK framework, including:
 - Threat actors (intrusion sets)
 - Malware families
 - Relationships (uses, attributed-to, subtechnique-of) — STIX **`uses`** populates **`uses_techniques`** on **actors** and **malware** for **`build_relationships.py`** (malware round-trips via MISP **`MITRE_USES_TECHNIQUES:`**)
-- **Descriptions:** ATT&CK's description of each group, malware, tool, technique and tactic (up to 500 characters). MISPWriter writes it on the line after the comment's `MITRE_USES_TECHNIQUES` / `MITRE_TACTIC_PHASES` block where there is one, else as the whole comment (a tactic, a technique without tactic phases, a tool without techniques, a group or malware with nothing for the block); groups, techniques and tactics up to 255 characters, malware and tools up to 400. MITRE's record ranks first for a `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` node's description (MITRE ATT&CK > a curated source > any other source, with `description_source`), so ATT&CK's text stays whatever the order of the merges.
+- **Descriptions:** ATT&CK's description of each group, malware, tool, technique and tactic (up to 500 characters). The MISP → Neo4j sync writes at most 500 characters of it to the node, without ATT&CK's markdown links (the name stays), `(Citation: …)` markers and `<code>` tags, cut at a sentence or word end ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#descriptions-and-their-source)); MISP keeps what MISPWriter wrote. MISPWriter writes it on the line after the comment's `MITRE_USES_TECHNIQUES` / `MITRE_TACTIC_PHASES` block where there is one, else as the whole comment (a tactic, a technique without tactic phases, a tool without techniques, a group or malware with nothing for the block); groups, techniques and tactics up to 255 characters, malware and tools up to 400. MITRE's record ranks first for a `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` node's description (MITRE ATT&CK > a curated source > any other source, with `description_source`), so ATT&CK's text stays whatever the order of the merges.
 
 ### Source
 - **URL:** `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json`
@@ -1377,6 +1377,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — NVD and ATT&CK descriptions: the MISP → Neo4j sync writes at most 1,000 characters of a CVE's description and 500 of an ATT&CK description to the graph, markup stripped and cut at a sentence or word end; MISP keeps what the collectors send.
 - 2026-11-07 — OTX: the pulse TLP is read from `tlp`, the field the subscribed list answers (only `TLP`, the field of an answer by id, was read, so every pulse of a window reached MISP without its level and was written at the default; on the 730-day test graph of 2026-11-03 every OTX indicator was `white` and `pulse_tlp` was empty on every OTX `SOURCED_FROM` edge).
 - 2026-11-06 — OTX adversaries: a list is not split inside parentheses or before a company's legal form, a name that is only a legal form is dropped, and no name keeps unbalanced parentheses (the split had made the actors `black owl (bo team` and `ltd.`).
 - 2026-11-05 — OTX adversaries: `"&&"` joins two names like `"&"`, a `"<language>-speaking"` qualifier marks a description, and state intelligence and security agencies on their own (`MOIS`, `GRU`, `Russian Federal Security Service`, `Russian intelligence services`) are dropped like country names and logged on the same `[ACTOR-NAMES]` line; a name the canonical threat-actor reference lists as no actor (`ClickFix`, `Proton66`) is dropped before the malware-family rule, with an `[ACTOR-NAMES]` line of its own. On the 730-day baseline of 2026-11-03 these rules would have kept out 43 `ThreatActor` nodes with 791 relationships. A pulse of the retry list whose answer by id cannot be processed is named or counted on none of the run's `[ACTOR-NAMES]` and `[SKIP]` lines (its names and non-file hashes were counted as they were read, although its items were dropped).

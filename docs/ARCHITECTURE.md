@@ -406,6 +406,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/campaign_evidence.py` | What a campaign rests on (`ATTRIBUTED_TO` / `USES_MALWARE`; shared malware, `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`) |
 | `src/sector_evidence.py` | Evidence label and confidence of links to `Sector` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9) and the zones a record states |
 | `src/description_ranking.py` | Fixed source ranking of node descriptions |
+| `src/text_caps.py` | Caps on the texts the sync writes to Neo4j (`cap_text`: markup stripped, cut at a sentence or word end) |
 | `src/relationship_provenance.py` | `sources` / `source_refs` / `misp_event_ids` on derived links; curated claims |
 | `src/baseline_lock.py` | Baseline lock sentinel (collectors and sync tasks skip while a baseline holds it) |
 | `src/collectors/vulnerability_update.py` | CISA KEV whole-catalogue compare; in-place edits of the stored MISP copies |
@@ -508,10 +509,11 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — `src/text_caps.py` in the module table.
 - 2026-11-06 — An indicator of a malware that at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (7) actors share counts for a campaign only through a link that a record reporting it cites (`src/campaign_evidence.py`).
 - 2026-11-02 — `ATTRIBUTED_TO`: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label (the row described the exact match as a producer).
 - 2026-11-02 — `run_pipeline.py` runs the collectors into MISP only: its STIX import into Neo4j (`load_stix21_to_neo4j`), its actor-technique and malware-actor writes at confidence 0.7, its `EXPLOITS` pass and its VirusTotal writes (`src/enrichment.py`, deleted) are removed, and `--baseline` exits 2 (it built a reduced graph). The Key Files rows and the VirusTotal row follow.

@@ -38,8 +38,9 @@ Auth:    Configured via environment variables
   // description: the text of the highest-ranked source, NVD > CISA KEV > CISA ICS > any
   // other source, named in description_source (src/description_ranking.py). A MISP metadata block
   // (OTX_META:{...}, NVD_META:{...}) and an OTX pulse reference ("Referenced in OTX pulse: <name>")
-  // are never a description.
-  description: STRING,      // Vulnerability description (up to 1000 chars)
+  // are never a description. At most 1,000 characters, markup stripped, cut at a sentence or word
+  // end (src/text_caps.py); MISP keeps the source's text.
+  description: STRING,      // Vulnerability description (at most 1,000 characters)
   description_source: STRING, // The source of description ("nvd", "cisa_kev", ...)
   zone: LIST,               // Zone(s): ['finance'], ['energy', 'global'] — always a list
   tag: STRING,              // Source tag (provenance — NOT part of UNIQUE constraint)
@@ -149,7 +150,7 @@ Auth:    Configured via environment variables
   aliases: LIST,            // Other names, including a source's suffixed name ("Cobalt Strike - S0154")
   merged_from: LIST,        // ATT&CK-id twins the enrichment job merge_malware_attack_twins folded in (steps 9b / 2d resolve these names to this node)
   malware_types: LIST,      // Types (trojan, ransomware, etc.)
-  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source
+  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source; at most 500 characters, markup stripped (src/text_caps.py)
   description_source: STRING, // The source of description ("mitre_attck", ...)
   tag: STRING,              // Source tag (provenance — NOT part of UNIQUE constraint)
   source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
@@ -168,7 +169,7 @@ Auth:    Configured via environment variables
   name: STRING,             // Actor name
   mitre_id: STRING,         // ATT&CK group id (G####) of a MITRE record; not part of the key
   aliases: LIST,            // Known aliases
-  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source
+  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source; at most 500 characters, markup stripped (src/text_caps.py)
   description_source: STRING, // The source of description ("mitre_attck", ...)
   source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   uses_techniques: LIST,    // MITRE IDs from STIX actor **uses** technique; drives (Actor)-[:EMPLOYS_TECHNIQUE]->(Technique) edges in build_relationships.py. Property name retained as-is (STIX-side contract).
@@ -184,7 +185,7 @@ Auth:    Configured via environment variables
 (:Technique {
   mitre_id: STRING,         // T#### or T####.###
   name: STRING,             // Technique name
-  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source
+  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source; at most 500 characters, markup stripped (src/text_caps.py)
   description_source: STRING, // The source of description
   platforms: LIST,          // Target platforms
   is_subtechnique: BOOLEAN, // true when mitre_id is dotted (T####.###), whatever the record says
@@ -206,7 +207,7 @@ Auth:    Configured via environment variables
   name: STRING,             // Tactic name
   shortname: STRING,        // Kill-chain phase name (e.g. "initial-access"), matched by Technique.tactic_phases
   attack_domain: STRING,    // enterprise / ics / mobile (default enterprise)
-  description: STRING,      // Ranked text, as on Technique
+  description: STRING,      // Ranked text, as on Technique (at most 500 characters)
   description_source: STRING,
   deprecated: BOOLEAN       // ATT&CK's status: set and cleared by an ATT&CK record; another source only sets it
 })
@@ -240,7 +241,7 @@ Auth:    Configured via environment variables
 (:Tool {
   mitre_id: STRING,         // Tool ID (S0001)
   name: STRING,             // Tool name
-  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source
+  description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source; at most 500 characters, markup stripped (src/text_caps.py)
   description_source: STRING, // The source of description ("mitre_attck", ...)
   tag: STRING,              // Source tag
   tool_types: LIST,         // Classification labels
@@ -437,7 +438,7 @@ Auth:    Configured via environment variables
 ```cypher
 (:CVE {
   cve_id: STRING,           // CVE identifier
-  description: STRING,      // Description; the ranked text, NVD > CISA KEV > CISA ICS > any other source
+  description: STRING,      // Description; the ranked text, NVD > CISA KEV > CISA ICS > any other source; at most 1,000 characters (src/text_caps.py)
   description_source: STRING, // EdgeGuard extension: the source of description
   published: STRING,        // Publication date; NVD's record sets it, any other record only fills it
   last_modified: STRING,    // Last modified date; same rule
@@ -557,7 +558,7 @@ Auth:    Configured via environment variables
 ```cypher
 (:Vulnerability {
   vuln_id: STRING,          // Vulnerability ID
-  description: STRING,      // Description
+  description: STRING,      // Description; ranked as on CVE, at most 1,000 characters (src/text_caps.py)
   status: LIST,             // Status flags
   tag: STRING,              // Data provenance tag
   first_seen: DATETIME,     // First observed
@@ -1032,6 +1033,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — Descriptions: at most 1,000 characters on `CVE` and `Vulnerability` and 500 on `Malware`, `ThreatActor`, `Tool`, `Technique` and `Tactic`, markup stripped and cut at a sentence or word end by the sync (`src/text_caps.py`).
 - 2026-11-07 — Constraints `threatreport_key` and `vulnerabilityadvisory_key` (`record_ref`) for the report labels, created before any sync writes their nodes.
 - 2026-11-06 — `RUNS`, `PART_OF_CAMPAIGN`: an indicator of a malware many actors share joins a campaign only through a link that a record reporting it cites; a campaign is deleted when its actor has no campaign evidence left.
 - 2026-11-02 — Node schema: `Malware` no longer lists `family`, which no writer sets, and `known_malware[].family` of the alert enrichment is null (the schema and the sample showed a family); `deprecated` is listed on `Malware`, `ThreatActor` and `Tool`, and on `Tactic` with its clearing by an ATT&CK record (it was listed set-only on `Tactic`). A campaign's `last_seen` and the enrichment's `last_updated` take per source its own date first, the first-seen claim before the MISP record time (they named the last-seen claim, else the latest report). `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`: the age applies when no run state decides (it was described as a cross-host TTL).

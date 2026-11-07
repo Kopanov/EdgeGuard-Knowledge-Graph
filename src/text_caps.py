@@ -6,8 +6,8 @@ text bound for Neo4j is made here, on the sync's write path (``Neo4jClient``), n
 - ``CVE.description`` and ``Vulnerability.description``: ``CVE_DESCRIPTION_CAP`` (1,000 characters);
 - the description of a ``Technique`` (sub-techniques included), ``Tactic``, ``ThreatActor``, ``Malware`` and
   ``Tool``: ``ENTITY_DESCRIPTION_CAP`` (500);
-- ``CVE.cisa_short_description`` (CISA KEV's ``shortDescription`` as a node property of its own; no writer sets
-  it yet): ``CISA_SHORT_DESCRIPTION_CAP`` (500).
+- CISA KEV's ``shortDescription`` as a node property of its own (``CVE.cisa_short_description``, which no writer
+  sets): ``CISA_SHORT_DESCRIPTION_CAP`` (500).
 
 ``cap_text(text, cap)`` returns ``(text, truncated, full_length)``:
 

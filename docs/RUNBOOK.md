@@ -1538,7 +1538,10 @@ attribute (its properties minus the node's key, as a JSON string) in
 (`src/neo4j_client.py:_upsert_sourced_relationship`). Useful when you
 need the source's record without a round-trip to MISP. On a `CVE` the
 edge holds the source's latest record, replaced on every write from a MISP
-attribute; on other labels, the record that created the edge.
+attribute; on other labels, the record that created the edge. The
+`description` of a CVE, Vulnerability, Malware, ThreatActor, Tool, Technique
+or Tactic record is capped as the node's (1,000 or 500 characters,
+`src/text_caps.py`); the source's whole text is in the MISP attribute.
 
 ```cypher
 MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'})
@@ -1624,6 +1627,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — `r.raw_data`: the description of a CVE or ATT&CK record is capped as the node's; the whole text is in MISP.
 - 2026-11-07 — New section "Report text in MISP's logs": MISP logs the full content of every Event Report add and edit, amber and red records included; MISP's site administrators can read it.
 - 2026-11-06 — 7c: `requirements.txt` pins `apache-airflow~=3.3.2` (`~=3.3` admitted 3.4).
 - 2026-11-06 — Canonical threat-actor reference: version `2026.11.06` lists `Videostrong Technology Co., Ltd.` as no actor beside `Videostrong Technology Co.` (39 names in 19 decisions). The actor-name hygiene no longer splits inside parentheses or before a legal form, so that OTX adversary field is one name, which the 2026-11-05 decision did not cover; built from the same galaxies and graph export, the reference is otherwise unchanged.
