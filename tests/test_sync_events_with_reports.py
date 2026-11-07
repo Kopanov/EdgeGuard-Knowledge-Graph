@@ -10,14 +10,16 @@ it reads any EdgeGuard event and ignore the reports:
   list and its attributes; PyMISP's ``MISPEvent`` loads such an event;
 * the paged fetch reads the event's metadata, which carries no reports;
 * processing writes the same items with and without the reports, and an event with reports and no attributes is
-  processed, counted and writes nothing; an incremental run in which only a report changed writes nothing.
+  processed, counted and writes nothing; an incremental run in which only a report changed writes nothing;
+* an indicator of an amber, red or unknown-TLP pulse, whose ``OTX_META`` block the writer leaves without the pulse
+  name, gets an empty ``pulse_name``, not the block.
 
 The answers are MISP 2.5.50's of 2026-11-07 (``tests/fixtures/misp_events_with_reports_2026_11_07.json``), with an
 EdgeGuard event name in place of the throwaway event's. The companion event and its index row are constructed from
 these answers (``_companion_event`` and the index test): the recorded event and index row with the attributes
 removed, ``attribute_count`` ``"0"`` and the id ``123``; recorded answers of an event without attributes carry
-``"Attribute": []`` the same way. The sync needed no change for these events, so these tests
-pass without the report records too: they guard the sync against a change that would trip on the reports (a fetch
+``"Attribute": []`` the same way. Reading these events needed no change in the sync, so the
+tests of the events pass without the report records too: they guard the sync against a change that would trip on the reports (a fetch
 that dropped such an event, a count of the reports as failures, an index filter on the event name's date).
 """
 
@@ -217,6 +219,47 @@ def test_an_incremental_run_after_a_change_of_a_report_only_writes_nothing():
     assert syncer._process_single_event("122", DAY, 6) == (0, 0, 0)
     syncer.sync_to_neo4j.assert_not_called()
     assert syncer.stats["events_processed"] == 1
+
+
+def _otx_indicator(level: str) -> Dict[str, Any]:
+    """An OTX indicator item as the collector hands it to the writer (constructed; the values are the writer's
+    inputs, not a recorded pulse)."""
+    return {
+        "indicator_type": "ipv4",
+        "value": "198.51.100.9",
+        "tag": "alienvault_otx",
+        "pulse_id": "6abf0b86fb14812f2dc84fb2",
+        "pulse_tlp": level,
+        "pulse_name": "Some pulse",
+        "pulse_tags": ["t"],
+        "pulse_references": ["https://r.example/x"],
+        "targeted_countries": ["Germany"],
+        "attack_ids": ["T1190"],
+        "description": "ind desc",
+    }
+
+
+@pytest.mark.parametrize(("level", "expected"), [("white", "Some pulse"), ("amber", ""), ("red", ""), ("", "")])
+def test_an_indicator_of_a_pulse_without_copies_gets_an_empty_pulse_name(level, expected):
+    """The writer leaves ``OTX_META.pulse_name`` empty for an amber, red or unknown-TLP pulse; the sync then takes no
+    fallback from the comment, which is the whole ``OTX_META`` block, so the indicator's ``pulse_name`` (and the
+    edge's ``raw_data``) holds an empty name, not the block."""
+    from collectors import misp_writer
+
+    writer = misp_writer.MISPWriter(url="http://127.0.0.1:9", api_key="dummy", verify_ssl=False)
+    attr = writer.create_attribute(_otx_indicator(level))
+    assert attr["comment"].startswith("OTX_META:")
+    event = _day_event()
+    stored = copy.deepcopy(event["Event"]["Attribute"][0])
+    stored.update(type=attr["type"], value=attr["value"], comment=attr["comment"])
+    stored["Tag"] = attr.get("Tag", stored.get("Tag", []))
+    event["Event"]["Attribute"] = [stored]
+    syncer = _processing_syncer(event)
+    syncer._process_single_event("122", DAY, 1)
+    items = [item for item in syncer.written if item.get("value") == "198.51.100.9"]
+    assert len(items) == 1
+    assert items[0]["pulse_name"] == expected
+    assert "OTX_META" not in json.dumps(items[0], default=str)
 
 
 @pytest.mark.parametrize("info", [DAY, COMPANION])
