@@ -332,9 +332,10 @@ def test_malwarebazaar_file_facts_reach_misp(writer):
     assert meta["file_sha1"] == "d382bede96d914347228a5392812851da046858f"
     assert "as_of" not in meta, "facts of the file do not change"
 
-    bad = gfc.MalwareBazaarCollector(misp_writer=MagicMock()).build_item({**row, "md5_hash": "n/a", "sha1_hash": "xyz"})
-    meta = _meta(writer.create_attribute(bad))
-    assert "file_md5" not in meta and "file_sha1" not in meta
+    collector = gfc.MalwareBazaarCollector(misp_writer=MagicMock())
+    for md5, sha1 in (("n/a", "n/a"), ("not-a-hash", "xyz"), ("2cbdeeb34862d4f0a40aabcc3236b89", "d382bede" * 6)):
+        meta = _meta(writer.create_attribute(collector.build_item({**row, "md5_hash": md5, "sha1_hash": sha1})))
+        assert "file_md5" not in meta and "file_sha1" not in meta, (md5, sha1)
 
 
 def _vt_object(**extra: Any) -> Dict[str, Any]:
@@ -385,9 +386,10 @@ def test_virustotal_zero_detections_are_kept(writer):
 def test_virustotal_absent_fields_are_not_invented():
     from collectors.vt_collector import VTCollector
 
-    obj = _vt_object(type_description=None, size=None, last_analysis_stats={"malicious": 3})
+    obj = _vt_object(type_description=None, size=None, last_analysis_stats={"malicious": 3}, md5="n/a", sha1="")
     item = VTCollector(misp_writer=MagicMock())._process_file(obj)
     assert item["file_type"] == "" and item["file_size"] is None, "were 'unknown' and 0"
+    assert item["file_md5"] == "" and item["file_sha1"] == "", "only a digest of the right length is kept"
     assert "detection_malicious" not in item and "detection_total" not in item, "partial stats give no counts"
     assert "Type: unknown" not in item["description"]
 
