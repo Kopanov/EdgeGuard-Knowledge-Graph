@@ -1168,7 +1168,12 @@ class OTXCollector:
         return pulses
 
     def _push_report_records(
-        self, pulses: List[Dict[str, Any]], counts: Dict[str, Any], recorded: Set[str]
+        self,
+        pulses: List[Dict[str, Any]],
+        counts: Dict[str, Any],
+        recorded: Set[str],
+        *,
+        unsaved_outcome: str = "the cursor passes none of these pulses",
     ) -> Set[str]:
         """Write the report records of *pulses* (2026-11-07) and keep those whose push failed on ``report_pending``.
 
@@ -1185,8 +1190,10 @@ class OTXCollector:
         gauges. *counts* (``_new_report_counts``) receives the totals.
 
         Returns the ids of the pulses whose record MISP does not hold as the pulse says and that are not saved on
-        ``report_pending``: those of the batch whose save failed and of every later batch, which are not pushed
-        (ERROR ``[REPORT-PENDING]``). The cursor passes none of them (``_after_window_push``)."""
+        ``report_pending``: those of the batch whose save failed and of every later batch of this call, which are
+        not pushed (ERROR ``[REPORT-PENDING]``, ending with *unsaved_outcome*: what the caller does with them). For
+        the window's pulses the cursor passes none of them (``_after_window_push``); the pulses of the retry list
+        keep their entries (``_push_and_settle_the_list``)."""
         todo: List[Tuple[str, Dict[str, Any]]] = []
         for pulse in pulses:
             ref = _pulse_record_ref(pulse)
@@ -1238,7 +1245,7 @@ class OTXCollector:
                     exc,
                     (
                         f"the records of {len(unsaved)} pulse(s) are neither in MISP nor on the list"
-                        f"{f', {left} of them not pushed' if left else ''}; the cursor passes none of these pulses "
+                        f"{f', {left} of them not pushed' if left else ''}; {unsaved_outcome} "
                         f"(ids: {_pulse_ids_for_log(sorted(unsaved))})"
                     )
                     if unsaved
@@ -1324,13 +1331,19 @@ class OTXCollector:
 
     def _fetch_pending_report_pulses(
         self, exclude: Set[str], per_run: int
-    ) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
-        """Fetch by id up to *per_run* pulses whose record is on ``report_pending`` (2026-11-07), tried longest ago
-        first (``report_records.pending_record_refs``), leaving out the pulses in *exclude* (read in the run's window,
-        or fetched for the retry list: their records are built there). The fetch is ``_fetch_pulse_by_id``; HTTP
-        404 takes the record off the list (the pulse was deleted or is no longer subscribed, so no record can be
-        written: WARNING); any other failure leaves its entry as it is, and HTTP 429, 5xx or a request error stops
-        the fetches of this run. Returns the pulses fetched, the ids answered 404 and the ids with another error."""
+    ) -> Tuple[List[Dict[str, Any]], List[str], List[str], int]:
+        """Fetch by id up to *per_run* pulses whose record is on ``report_pending`` (2026-11-07), those tried or
+        fetched in vain longest ago first (``report_records.pending_record_refs``), leaving out the pulses in
+        *exclude* (read in the run's window, or fetched or tried for the retry list: their records are built there,
+        or wait for that list). The fetch is ``_fetch_pulse_by_id``; HTTP 404 takes the record off the list (the
+        pulse was deleted or is no longer subscribed, so no record can be written: WARNING). Any other failure is
+        no try: the entry keeps ``attempts`` and ``last_tried_at`` and gets ``last_fetch_failed_at`` (with
+        ``first_fetch_failed_at`` on its first failure since the pulse was last read) and ``last_reason``, so it
+        goes behind the others at the next run and holds none of them back; a pulse whose fetch keeps failing for
+        ``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` after its record's deadline is given up (``[REPORT-GAVE-UP]``). A
+        pulse fetched ends its fetch failures. HTTP 429, 5xx or a request error also stops the fetches of this
+        run. The outcome of the fetches is saved once, when it changes the list. Returns the pulses fetched, the
+        record refs answered 404, the ids with another error and the number of records that save gave up."""
         refs = [
             ref for ref in report_records.pending_record_refs(_REPORT_SOURCE) if _record_pulse_id(ref) not in exclude
         ]
@@ -1346,6 +1359,7 @@ class OTXCollector:
         fetched: List[Dict[str, Any]] = []
         not_found: List[str] = []
         errors: List[str] = []
+        fetch_failed: List[Tuple[str, str]] = []
         for n, ref in enumerate(due):
             pid = _record_pulse_id(ref)
             body, problem, stop = self._fetch_pulse_by_id(pid)
@@ -1355,6 +1369,7 @@ class OTXCollector:
                 not_found.append(ref)
             else:
                 errors.append(pid)
+                fetch_failed.append((ref, f"fetch by id failed: {problem}"))
                 left = len(due) - n - 1
                 logger.warning(
                     "[REPORT-PENDING] OTX: pulse %s could not be fetched by id (%s); its record stays on "
@@ -1372,20 +1387,33 @@ class OTXCollector:
                 len(not_found),
                 _pulse_ids_for_log([_record_pulse_id(ref) for ref in not_found]),
             )
+        fetched_refs = {_pulse_record_ref(body) for body in fetched}
+        cleared = [
+            e["record_ref"]
+            for e in report_records.load_report_pending(_REPORT_SOURCE)
+            if e["record_ref"] in fetched_refs and "first_fetch_failed_at" in e
+        ]
+        given_up = 0
+        if not_found or fetch_failed or cleared:
             try:
-                report_records.update_report_pending(_REPORT_SOURCE, permanent=not_found)
+                given_up = len(
+                    report_records.update_report_pending(
+                        _REPORT_SOURCE, permanent=not_found, fetch_failed=fetch_failed, fetched=cleared
+                    ).given_up
+                )
             except Exception as exc:
                 logger.error(
-                    "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s): the records of the pulses that "
-                    "answered HTTP 404 stay on it until a later run takes them off",
+                    "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s): the outcome of the fetches by "
+                    "id is not on it; the records of the pulses that answered HTTP 404 stay on it until a later run "
+                    "takes them off, and those whose fetch failed keep their place",
                     type(exc).__name__,
                     exc,
                 )
-        return fetched, not_found, errors
+        return fetched, not_found, errors, given_up
 
     def _fetch_retry_pulses(
         self, entries: List[Dict[str, Any]], window_ids: Set[str], per_run: int, now: datetime
-    ) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+    ) -> Tuple[List[Dict[str, Any]], List[str], List[str], bool]:
         """Fetch by id up to *per_run* pulses of the retry list *entries* that are not in the run's window
         (*window_ids*: a pulse the window read is processed there), in ``_retry_order``: those tried longest ago
         first (2026-11-02).
@@ -1399,8 +1427,8 @@ class OTXCollector:
         connection error, a body cut off: any ``requests`` exception) also stops the fetches of this run (OTX is
         not answering), and the pulses not fetched wait for the next run. A fetch does not change the entry of a
         pulse it answered: the push of the pulse's items is its try. The entries of *entries* are updated in
-        place and the 404s removed. Returns the pulses fetched, the ids answered 404 and the ids with another
-        error."""
+        place and the 404s removed. Returns the pulses fetched, the ids answered 404, the ids with another
+        error and whether the fetches stopped (the run then fetches no pulse of ``report_pending`` either)."""
         now_iso = _utc_iso(now)
         due = sorted((e for e in entries if e["id"] not in window_ids), key=_retry_order)[: max(0, per_run)]
         if due:
@@ -1416,6 +1444,7 @@ class OTXCollector:
         fetched: List[Dict[str, Any]] = []
         not_found: List[str] = []
         errors: List[str] = []
+        stop = False
         for n, entry in enumerate(due):
             pid = entry["id"]
             body, problem, stop = self._fetch_pulse_by_id(pid)
@@ -1446,7 +1475,7 @@ class OTXCollector:
         if not_found:
             gone = set(not_found)
             entries[:] = [e for e in entries if e["id"] not in gone]
-        return fetched, not_found, errors
+        return fetched, not_found, errors, stop
 
     def collect(
         self, limit: int = None, push_to_misp: bool = True, baseline: bool = False, baseline_days: int = 365
@@ -1710,8 +1739,9 @@ class OTXCollector:
             retried: List[Dict[str, Any]] = []
             retry_not_found: List[str] = []
             retry_fetch_failed: List[str] = []
+            retry_fetch_stopped = False
             if not baseline and push_to_misp and retry_entries:
-                retried, retry_not_found, retry_fetch_failed = self._fetch_retry_pulses(
+                retried, retry_not_found, retry_fetch_failed, retry_fetch_stopped = self._fetch_retry_pulses(
                     retry_entries,
                     {str(p.get("id")) for p in pulses if p.get("id")},
                     otx_retry_per_run(),
@@ -1719,17 +1749,26 @@ class OTXCollector:
                 )
             # 2026-11-07: the pulses whose report record is on ``report_pending``, fetched by id for their records
             # only (their items are not pushed again), on baselines and scheduled runs alike. A pulse the window read
-            # or the retry list fetched gets its record there.
+            # or the retry list fetched gets its record there. When the retry list's fetches stopped (OTX is not
+            # answering), the run fetches none of them.
             pending_pulses: List[Dict[str, Any]] = []
             pending_not_found: List[str] = []
             pending_fetch_failed: List[str] = []
-            if push_to_misp:
-                pending_pulses, pending_not_found, pending_fetch_failed = self._fetch_pending_report_pulses(
-                    {str(p.get("id")) for p in pulses if p.get("id")}
-                    | {str(p.get("id")) for p in retried}
-                    | set(retry_not_found)
-                    | set(retry_fetch_failed),
-                    otx_retry_per_run(),
+            pending_given_up = 0
+            if push_to_misp and retry_fetch_stopped:
+                logger.info(
+                    "[REPORT-PENDING] OTX: the fetches by id of the retry list stopped (OTX is not answering): the "
+                    "records on report_pending wait for the next run"
+                )
+            elif push_to_misp:
+                pending_pulses, pending_not_found, pending_fetch_failed, pending_given_up = (
+                    self._fetch_pending_report_pulses(
+                        {str(p.get("id")) for p in pulses if p.get("id")}
+                        | {str(p.get("id")) for p in retried}
+                        | set(retry_not_found)
+                        | set(retry_fetch_failed),
+                        otx_retry_per_run(),
+                    )
                 )
 
             def _process_pulse(pulse: Dict) -> None:
@@ -2207,10 +2246,13 @@ class OTXCollector:
                 found in MISP, or that are on the list as written in the same update.
 
                 - 2026-11-07: the cursor passes a pulse whose report record MISP does not hold only once the record
-                  is on ``report_pending`` and that list is saved (``_push_report_records``, which pushed the window's
-                  records before this). *record_held* holds the pulses of the window whose record is neither: the
-                  list could not be saved. The cursor then stops below the oldest of them, as below a pulse with an
-                  item not sent, and stays when that pulse has no readable ``modified``.
+                  is on ``report_pending`` and that list is saved (``_push_report_records``, which pushed the records
+                  of the window's pulses not on the retry list before this). *record_held* holds the pulses of the
+                  window whose record is neither: the list could not be saved. The cursor then stops below the oldest
+                  of them, as below a pulse with an item not sent, and stays when that pulse has no readable
+                  ``modified``. A pulse of the retry list read in the window is held by its entry instead: its record
+                  follows the push of the list's pulses, and the entry stays until that record is in MISP or saved
+                  (``_push_and_settle_the_list``).
 
                 The list written here holds at most EDGEGUARD_OTX_RETRY_MAX_PULSES: beyond it the pulses that first
                 failed longest ago are given up now, with the ERROR and the counter, and their items are not pushed,
@@ -2377,6 +2419,13 @@ class OTXCollector:
                 ``last_tried_at``, first at the next run. 2026-11-03: so do the pulses whose items a push that stopped
                 because MISP kept failing did not send (``last_push_unsent_items``, this push's or the window's).
 
+                2026-11-07: the report records of the list's pulses (read in the window or fetched by id) are pushed
+                after the push of their items and before the settlement, whatever happened to the items. A pulse whose
+                record is neither in MISP nor saved on ``report_pending`` (that list could not be saved) keeps its
+                entry unchanged, as a pulse not pushed: the next run fetches it by id and writes its record. A pulse
+                given up beyond EDGEGUARD_OTX_RETRY_MAX_PULSES after the window's push is no longer on the list, so
+                its record, when it is neither in MISP nor saved, waits until OTX modifies the pulse again.
+
                 A pulse of the list the run pushed (fetched by id, or read again in the window) leaves the list when
                 none of its items is listed and the items recorded as failed were pushed (recovered), and stays
                 otherwise (``attempts`` + 1, ``last_tried_at`` the run's start); after an unknown failure it stays.
@@ -2423,6 +2472,20 @@ class OTXCollector:
                 # 2026-11-03: a pulse of the list that an item the window's stopped push did not send names keeps
                 # its entry too.
                 not_pushed |= window.held & listed_ids
+                # 2026-11-07: the report records of the list's pulses (read in the window or fetched by id), after
+                # the push of their items and before the list's settlement: a pulse whose record is neither in MISP
+                # nor saved on ``report_pending`` keeps its entry, so the next run fetches it by id and writes its
+                # record. If this push raises, the list written after the window's push still holds every entry.
+                record_unsaved = self._push_report_records(
+                    [*(p for p in to_process if str(p.get("id")) in listed_ids), *retried],
+                    report_counts,
+                    recorded,
+                    unsaved_outcome=(
+                        "those of them still on the retry list keep their entries, so the next run fetches them by "
+                        "id and writes their records"
+                    ),
+                )
+                not_pushed |= record_unsaved & listed_ids
                 if pushes and out_of_time:
                     logger.warning(
                         "[OTX-RETRY] OTX: the push of the retry list's pulses reached its time budget "
@@ -2516,7 +2579,8 @@ class OTXCollector:
                         logging.WARNING if settled.entries else logging.INFO,
                         "[OTX-RETRY] OTX: %d pulse(s) on the retry list after the run%s; this run fetched %d by "
                         "id, recovered %d, added %d and gave up %d; %d answered HTTP 404, %d could not be fetched "
-                        "or read, %d were not pushed (time budget, a stopped push, or a failure at the MISP event)",
+                        "or read, %d were not pushed (time budget, a stopped push, a failure at the MISP event, or a "
+                        "report record neither in MISP nor saved on report_pending)",
                         len(settled.entries),
                         f" (the first failure of the longest waiting: {oldest})" if settled.entries else "",
                         len(retried),
@@ -2548,8 +2612,11 @@ class OTXCollector:
                 # 2026-11-07: the report records of the window's pulses, after the window's push and before the
                 # cursor moves (``_push_report_records``; the cursor rule is in ``_after_window_push``). The pulses
                 # of the retry list read in the window have their items pushed with the list's pulses, so their
-                # records follow that push, with the records of the pulses fetched by id.
+                # records follow that push, with the records of the pulses fetched for the list, before the list is
+                # settled (``_push_and_settle_the_list``). The records of the pulses fetched for ``report_pending``
+                # come last; a pulse whose record is on that list keeps its entry there whatever happens.
                 report_counts = _new_report_counts()
+                report_counts["given_up"] += pending_given_up
                 recorded: Set[str] = set()
                 record_held = self._push_report_records(
                     [p for p in to_process if str(p.get("id")) not in listed_ids], report_counts, recorded
@@ -2559,9 +2626,10 @@ class OTXCollector:
                     retry_success, retry_failed = _push_and_settle_the_list(window, failed)
                     success, failed = success + retry_success, failed + retry_failed
                 self._push_report_records(
-                    [*(p for p in to_process if str(p.get("id")) in listed_ids), *retried, *pending_pulses],
+                    pending_pulses,
                     report_counts,
                     recorded,
+                    unsaved_outcome="their entries stay on report_pending as last saved",
                 )
                 report_counts.update(
                     pending_fetched=len(pending_pulses),

@@ -5,12 +5,15 @@ one report record (``report_records.otx_pulse_record``), which ``MISPWriter.push
 that carries the pulse's items, whatever happened to them. The records are built and pushed 100 at a time; after
 each batch ``report_records.note_report_push`` keeps the records whose push failed, or that a push did not try, on
 ``report_pending`` in the OTX incremental state, on baselines and scheduled runs alike. Each run fetches the
-pulses of that list by id (the retry list's fetch path) and pushes their records again; a record still failing
-``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` after its first failure is given up with ``[REPORT-GAVE-UP]``.
+pulses of that list by id (the retry list's fetch path), up to ``EDGEGUARD_OTX_RETRY_PER_RUN``, and pushes their
+records again; a failed fetch is no try and puts the entry behind the others. A record still failing
+``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` after its first failure, or whose pulse has failed to be fetched for that long,
+is given up with ``[REPORT-GAVE-UP]``.
 
 The window's records are pushed before the cursor moves. The cursor passes a pulse whose record MISP does not
 hold only once that record is on ``report_pending`` and the list is saved; when the list cannot be saved, the
-cursor stops below the oldest such pulse.
+cursor stops below the oldest such pulse. The records of the retry list's pulses are pushed after the push of the
+list's items and before the list is settled: a pulse whose record is neither in MISP nor saved keeps its entry.
 
 The runs use the OTX double and the writer doubles of ``test_otx_incremental_order.py`` (pulses with the ids and
 dates OTX answered on 2026-11-02), ``MISPWriter`` itself against the report double of
@@ -378,13 +381,186 @@ def test_a_pending_record_whose_pulse_answers_404_leaves_the_list(caplog):
     assert any("answered HTTP 404" in m and "leave report_pending" in m for m in run.warnings)
 
 
-def test_a_pending_record_whose_fetch_fails_stays_untouched(caplog):
+def test_a_pending_record_whose_fetch_fails_counts_no_try(caplog):
+    """HTTP 503 by id: the entry keeps its attempts and its last try, and notes the failed fetch."""
     rr.update_report_pending(SOURCE, failed=[(_ref("6ab0000000000000000000ee"), "earlier")])
-    before = _pending()
+    (before,) = _pending()
     otx = _Otx(_recorded(range(2)))
     otx.fetch_errors["6ab0000000000000000000ee"] = 503
-    _collect(otx, {"otx_last_pulse_modified": ROWS[1]["modified"]}, caplog, limit=None, writer=_RecordWriter())
+    run = _collect(otx, {"otx_last_pulse_modified": ROWS[1]["modified"]}, caplog, limit=None, writer=_RecordWriter())
+    (after,) = _pending()
+    assert after["attempts"] == before["attempts"] and after["last_tried_at"] == before["last_tried_at"]
+    assert after["first_failed_at"] == before["first_failed_at"]
+    assert after["last_reason"] == "fetch by id failed: HTTP 503"
+    assert after["first_fetch_failed_at"] == after["last_fetch_failed_at"]
+    assert run.status["report_counts"]["pending_fetch_failed"] == 1
+
+
+_STUCK = "6ab0000000000000000000aa"
+
+
+@pytest.mark.parametrize(("status", "per_run"), [(504, None), (403, "1")])
+def test_a_pulse_whose_fetch_keeps_failing_holds_no_other_back(caplog, monkeypatch, status, per_run):
+    """Two records wait: one never tried, put on the list 30 days ago, whose pulse keeps answering an error by id
+    (HTTP 504 stops the run's fetches; HTTP 403 with one fetch a run), and the record of pulse 6, tried an hour ago.
+    The first run fetches the stuck pulse only; the next one fetches pulse 6 first and settles its record."""
+    if per_run:
+        monkeypatch.setenv("EDGEGUARD_OTX_RETRY_PER_RUN", per_run)
+    pulses = _recorded(range(8))
+    now = datetime.now(timezone.utc)
+    rr.update_report_pending(SOURCE, skipped=[(_ref(_STUCK), "the task's end is near")], now=now - timedelta(days=30))
+    rr.update_report_pending(SOURCE, failed=[(_ref(pulses[6]["id"]), "earlier")], now=now - timedelta(hours=1))
+    requests: List[List[str]] = []
+    for _run in range(2):
+        otx = _Otx(pulses[:3])
+        otx.by_id_only[pulses[6]["id"]] = pulses[6]
+        otx.fetch_errors[_STUCK] = status
+        _collect(otx, {"otx_last_pulse_modified": ROWS[2]["modified"]}, caplog, limit=None, writer=_RecordWriter())
+        requests.append(otx.by_id_requests)
+    assert requests[0] == [_STUCK]
+    assert requests[1][0] == pulses[6]["id"]
+    (entry,) = _pending()
+    assert entry["record_ref"] == _ref(_STUCK) and "last_tried_at" not in entry, "a failed fetch is no try"
+
+
+def test_a_pulse_fetched_again_ends_its_fetch_failures(caplog):
+    """Pulse 6's fetch failed earlier; this run fetches it, and its push tries no record (the task's end is near):
+    the entry keeps its place as untried but no longer counts the failed fetches."""
+    pulses = _recorded(range(8))
+    ref = _ref(pulses[6]["id"])
+    rr.update_report_pending(SOURCE, skipped=[(ref, "the task's end is near")])
+    rr.update_report_pending(SOURCE, fetch_failed=[(ref, "fetch by id failed: HTTP 504")])
+    otx = _Otx(pulses[:3])
+    otx.by_id_only[pulses[6]["id"]] = pulses[6]
+    _collect(
+        otx, {"otx_last_pulse_modified": ROWS[2]["modified"]}, caplog, limit=None, writer=_RecordWriter(skip_all=True)
+    )
+    entry = {e["record_ref"]: e for e in _pending()}[ref]
+    assert otx.by_id_requests == [pulses[6]["id"]]
+    assert "first_fetch_failed_at" not in entry and "last_fetch_failed_at" not in entry
+
+
+def test_a_pending_record_whose_pulse_keeps_failing_to_be_fetched_is_given_up(caplog):
+    """Its record first failed and was tried 30 days ago, and its pulse has failed to answer by id for 8 days
+    (``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` 7): the run's failed fetch gives it up with ``[REPORT-GAVE-UP]``."""
+    now = datetime.now(timezone.utc)
+    ref = _ref(_STUCK)
+    rr.update_report_pending(SOURCE, failed=[(ref, "the add answered HTTP 500")], now=now - timedelta(days=30))
+    rr.update_report_pending(SOURCE, fetch_failed=[(ref, "fetch by id failed: HTTP 504")], now=now - timedelta(days=8))
+    otx = _Otx(_recorded(range(2)))
+    otx.fetch_errors[_STUCK] = 504
+    run = _collect(otx, {"otx_last_pulse_modified": ROWS[1]["modified"]}, caplog, limit=None, writer=_RecordWriter())
+    assert _pending() == []
+    gave_up = [r.getMessage() for r in caplog.records if r.name == REPORTS_LOGGER and r.levelname == "ERROR"]
+    assert len(gave_up) == 1 and gave_up[0].startswith("[REPORT-GAVE-UP] alienvault_otx: 1 report record(s)")
+    assert ref in gave_up[0] and "its source record not fetched since" in gave_up[0]
+    assert run.status["report_counts"]["given_up"] == 1
+
+
+# --------------------------------------------------------------------------- the limits of the pending fetch
+
+
+def _waiting(*indexes: int) -> List[Dict[str, Any]]:
+    """The pulses at *indexes*, answered by id only, their records on ``report_pending`` tried in that order an hour
+    apart (the first longest ago)."""
+    pulses = _recorded(range(8))
+    start = datetime.now(timezone.utc) - timedelta(days=1)
+    for k, n in enumerate(indexes):
+        rr.update_report_pending(SOURCE, failed=[(_ref(pulses[n]["id"]), "earlier")], now=start + timedelta(hours=k))
+    return [pulses[n] for n in indexes]
+
+
+def _pending_run(caplog, waiting, **kw):
+    otx = _Otx(_recorded(range(3)))
+    for pulse in waiting:
+        otx.by_id_only[pulse["id"]] = pulse
+    for pid, error in kw.pop("errors", {}).items():
+        otx.fetch_errors[pid] = error
+    state = kw.pop("state", {"otx_last_pulse_modified": ROWS[2]["modified"]})
+    run = _collect(otx, state, caplog, limit=None, writer=kw.pop("writer", _RecordWriter()), **kw)
+    return otx, run
+
+
+def test_a_run_fetches_at_most_the_retry_limit_of_pending_pulses(caplog, monkeypatch):
+    monkeypatch.setenv("EDGEGUARD_OTX_RETRY_PER_RUN", "2")
+    p7, p5, p6 = _waiting(7, 5, 6)
+    otx, run = _pending_run(caplog, [p7, p5, p6])
+    assert otx.by_id_requests == [p7["id"], p5["id"]], "the two tried longest ago"
+    assert _pending_refs() == [_ref(p6["id"])]
+    assert run.status["report_counts"]["pending_fetched"] == 2
+
+
+def test_with_a_retry_limit_of_0_no_pending_pulse_is_fetched(caplog, monkeypatch):
+    monkeypatch.setenv("EDGEGUARD_OTX_RETRY_PER_RUN", "0")
+    waiting = _waiting(7)
+    before = _pending()
+    otx, _run = _pending_run(caplog, waiting)
+    assert otx.by_id_requests == [] and _pending() == before
+
+
+@pytest.mark.parametrize("status", [503, 429])
+def test_a_429_or_5xx_stops_the_pending_fetches(caplog, status):
+    p7, p5, p6 = _waiting(7, 5, 6)
+    before = {e["record_ref"]: e for e in _pending()}
+    otx, run = _pending_run(caplog, [p7, p5, p6], errors={p7["id"]: status})
+    assert otx.by_id_requests == [p7["id"]]
+    after = {e["record_ref"]: e for e in _pending()}
+    assert after[_ref(p5["id"])] == before[_ref(p5["id"])] and after[_ref(p6["id"])] == before[_ref(p6["id"])]
+    assert run.status["report_counts"]["pending_fetch_failed"] == 1
+
+
+def test_a_404_or_another_error_lets_the_pending_fetches_go_on(caplog):
+    p7, p5, p6 = _waiting(7, 5, 6)
+    otx, run = _pending_run(caplog, [p5, p6], errors={p5["id"]: 403})
+    assert otx.by_id_requests == [p7["id"], p5["id"], p6["id"]]
+    assert _pending_refs() == [_ref(p5["id"])]
+    counts = run.status["report_counts"]
+    assert (counts["pending_not_found"], counts["pending_fetch_failed"], counts["pending_fetched"]) == (1, 1, 1)
+
+
+def test_a_baseline_fetches_the_pending_pulses_too(caplog):
+    (p6,) = _waiting(6)
+    writer = _RecordWriter()
+    otx, _run = _pending_run(caplog, [p6], baseline=True, state={}, writer=writer)
+    assert otx.by_id_requests == [p6["id"]]
+    assert p6["id"] in [r["record_id"] for r in writer.pushed_records()]
+    assert _pending() == []
+
+
+def test_a_run_that_does_not_push_fetches_no_pending_pulse(caplog):
+    _waiting(7)
+    before = _pending()
+    otx, _run = _pending_run(caplog, [], push_to_misp=False)
+    assert otx.by_id_requests == [] and _pending() == before
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_a_pulse_on_both_lists_whose_retry_fetch_failed_is_fetched_once(caplog, status):
+    """Pulse 7 is on the retry list and its record on ``report_pending``, outside the window; its fetch for the
+    retry list answers an error that does not stop the fetches: the pending fetch does not ask again."""
+    (p7,) = _waiting(7)
+    state = {
+        "otx_last_pulse_modified": ROWS[2]["modified"],
+        "otx_retry_pulses": [{"id": p7["id"], "modified": ROWS[7]["modified"], "first_failed_at": ROWS[7]["modified"]}],
+    }
+    otx, _run = _pending_run(caplog, [p7], errors={p7["id"]: status}, state=state)
+    assert otx.by_id_requests == [p7["id"]]
+
+
+def test_after_the_retry_list_s_fetches_stopped_no_pending_pulse_is_fetched(caplog):
+    """The retry list's pulse 5 answers HTTP 503 (OTX is not answering): the run fetches no pulse of
+    ``report_pending``, whose entries stay as they were."""
+    p7, p5 = _recorded(range(8))[7], _recorded(range(8))[5]
+    _waiting(7)
+    before = _pending()
+    state = {
+        "otx_last_pulse_modified": ROWS[2]["modified"],
+        "otx_retry_pulses": [{"id": p5["id"], "modified": ROWS[5]["modified"], "first_failed_at": ROWS[5]["modified"]}],
+    }
+    otx, run = _pending_run(caplog, [p7, p5], errors={p5["id"]: 503}, state=state)
+    assert otx.by_id_requests == [p5["id"]]
     assert _pending() == before
+    assert any("the records on report_pending wait for the next run" in m for m in run.messages)
 
 
 def test_a_record_failing_past_the_limit_is_given_up(caplog):
@@ -523,6 +699,225 @@ def test_the_guards_of_the_two_branches_hold_below_the_items_alone_when_the_reco
         state: Dict[str, Any] = {"otx_last_pulse_modified": CURSOR}
         assert _window(caplog, writer, state).cursor == ROWS[13]["modified"]
         assert _ref(ROWS[14]["id"]) in _pending_refs()
+
+
+def _retry_entry(pid: str, modified: str) -> Dict[str, Any]:
+    """An entry of the retry list tried once, a day ago."""
+    day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    return {
+        "id": pid,
+        "modified": modified,
+        "first_failed_at": day_ago,
+        "last_tried_at": day_ago,
+        "attempts": 1,
+        "last_reason": "an earlier push failed",
+    }
+
+
+class _OrderWriter(_RecordWriter):
+    """Keeps one log of the pushes in call order: ``("items", pulse ids)`` and ``("reports", record ids)``."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.log: List[tuple] = []
+
+    def push_items(self, items, batch_key=None, **kw):
+        self.log.append(("items", sorted({item.get("pulse_id") for item in items})))
+        return super().push_items(items, batch_key=batch_key, **kw)
+
+    def push_reports(self, source, records, **kw):
+        self.log.append(("reports", [r["record_id"] for r in records]))
+        return super().push_reports(source, records, **kw)
+
+
+def test_the_record_of_a_listed_pulse_read_in_the_window_follows_the_push_of_the_list(caplog):
+    """Pulse 2 is on the retry list and read in the window: its items go in the retry list's push, and its one
+    record after that push; the window's other records come before it."""
+    pulses = _recorded(range(5))
+    listed = pulses[2]["id"]
+    state = {
+        "otx_last_pulse_modified": ROWS[4]["modified"],
+        "otx_retry_pulses": [_retry_entry(listed, ROWS[2]["modified"])],
+    }
+    otx = _Otx(pulses)
+    writer = _OrderWriter()
+    _collect(otx, state, caplog, limit=None, writer=writer)
+    assert otx.by_id_requests == []
+    ids = [r["record_id"] for r in writer.pushed_records()]
+    assert ids.count(listed) == 1 and sorted(ids) == sorted(p["id"] for p in pulses)
+    (list_push,) = [n for n, (kind, ids) in enumerate(writer.log) if kind == "items" and listed in ids]
+    assert writer.log[list_push] == ("items", [listed]), "the list's own push"
+    (record_push,) = [n for n, (kind, ids) in enumerate(writer.log) if kind == "reports" and listed in ids]
+    assert record_push > list_push
+    first_records = next(n for n, (kind, _ids) in enumerate(writer.log) if kind == "reports")
+    assert first_records < list_push and set(writer.log[first_records][1]) == {p["id"] for p in pulses} - {listed}
+    assert _pending() == []
+
+
+def test_a_listed_pulse_whose_record_is_neither_written_nor_saved_keeps_its_retry_entry(caplog, monkeypatch):
+    """Pulse 14 is on the retry list and read in the window; its items are stored (it recovers), its record fails
+    and ``report_pending`` cannot be saved: it keeps its entry on the retry list, so the next run fetches it by id
+    and writes its record, and the ERROR line says so."""
+    _failing_save(monkeypatch)
+    pid = ROWS[14]["id"]
+    entry = _retry_entry(pid, ROWS[14]["modified"])
+    state: Dict[str, Any] = {"otx_last_pulse_modified": CURSOR, "otx_retry_pulses": [entry]}
+    run = _window(caplog, _RecordWriter(failing_records=[pid]), state)
+    assert state["otx_retry_pulses"] == [entry], "kept unchanged"
+    assert run.status["pulse_counts"]["retry_not_pushed"] == 1 and run.status["pulse_counts"]["retry_recovered"] == 0
+    (error,) = [
+        m for m in run.errors if m.startswith("[REPORT-PENDING] OTX: report_pending could not be saved") and pid in m
+    ]
+    assert "those of them still on the retry list keep their entries" in error
+    assert "the cursor passes" not in error
+
+
+def test_a_listed_pulse_whose_record_is_saved_on_report_pending_leaves_the_retry_list(caplog):
+    """The guard of the test above: with the list saved, pulse 14 recovers and its record waits on
+    ``report_pending``."""
+    pid = ROWS[14]["id"]
+    state: Dict[str, Any] = {
+        "otx_last_pulse_modified": CURSOR,
+        "otx_retry_pulses": [_retry_entry(pid, ROWS[14]["modified"])],
+    }
+    _window(caplog, _RecordWriter(failing_records=[pid]), state)
+    assert state["otx_retry_pulses"] == [] and _pending_refs() == [_ref(pid)]
+
+
+def test_a_pulse_fetched_for_the_retry_list_whose_record_is_neither_written_nor_saved_keeps_its_entry(
+    caplog, monkeypatch
+):
+    _failing_save(monkeypatch)
+    pulses = _recorded(range(10))
+    otx = _Otx(pulses[:5])
+    otx.by_id_only[pulses[7]["id"]] = pulses[7]
+    pid = pulses[7]["id"]
+    entry = _retry_entry(pid, ROWS[7]["modified"])
+    state = {"otx_last_pulse_modified": ROWS[4]["modified"], "otx_retry_pulses": [entry]}
+    _collect(otx, state, caplog, limit=None, writer=_RecordWriter(failing_records=[pid]))
+    assert otx.by_id_requests == [pid] and state["otx_retry_pulses"] == [entry]
+
+
+class _RaisingWriter(_RecordWriter):
+    """``push_reports`` raises on a batch that holds a record of *raise_for* (the parent DAG run ended)."""
+
+    def __init__(self, raise_for=(), **kw):
+        super().__init__(**kw)
+        self.raise_for = set(raise_for)
+
+    def push_reports(self, source, records, **kw):
+        if any(r["record_id"] in self.raise_for for r in records):
+            raise RuntimeError("the parent DAG run is no longer running")
+        return super().push_reports(source, records, **kw)
+
+
+def test_a_push_of_the_list_s_records_that_raises_leaves_the_retry_entry(caplog):
+    pid = ROWS[14]["id"]
+    entry = _retry_entry(pid, ROWS[14]["modified"])
+    state: Dict[str, Any] = {"otx_last_pulse_modified": CURSOR, "otx_retry_pulses": [entry]}
+    run = _window(caplog, _RaisingWriter(raise_for=[pid]), state)
+    assert run.status["success"] is False
+    assert [e["id"] for e in state["otx_retry_pulses"]] == [pid]
+
+
+def test_after_a_failed_save_the_records_of_the_retry_list_and_report_pending_are_still_pushed(caplog, monkeypatch):
+    """The save after the window's records fails (the record of pulse 1 failed): the cursor holds, and the run
+    still pushes the record of pulse 7, fetched for the retry list, and of pulse 6, fetched for ``report_pending``,
+    whose entry stays as it was saved."""
+    pulses = _recorded(range(8))
+    rr.update_report_pending(SOURCE, failed=[(_ref(pulses[6]["id"]), "earlier")])
+    before = _pending()
+    _failing_save(monkeypatch)
+    otx = _Otx(pulses[:3])
+    otx.by_id_only[pulses[6]["id"]] = pulses[6]
+    otx.by_id_only[pulses[7]["id"]] = pulses[7]
+    state = {
+        "otx_last_pulse_modified": ROWS[2]["modified"],
+        "otx_retry_pulses": [_retry_entry(pulses[7]["id"], ROWS[7]["modified"])],
+    }
+    writer = _RecordWriter(failing_records=[pulses[1]["id"]])
+    run = _collect(otx, state, caplog, limit=None, writer=writer)
+    batches = [[r["record_id"] for r in batch] for batch in writer.report_batches]
+    assert batches[1:] == [[pulses[7]["id"]], [pulses[6]["id"]]]
+    assert _pending() == before
+    assert run.cursor == ROWS[2]["modified"], "held below pulse 1"
+
+
+# --------------------------------------------------------------------------- the cursor over several record batches
+
+
+_BEFORE_ALL = "2026-09-30T00:00:00+00:00"
+
+
+def _saves_failing_from(monkeypatch, n: int) -> None:
+    """The ``report_pending`` saves fail from the *n*-th one on."""
+    real = baseline_checkpoint.update_source_incremental
+    calls = {"n": 0}
+
+    def failing(source, **kw):
+        if rr.PENDING_STATE_KEY in kw:
+            calls["n"] += 1
+            if calls["n"] >= n:
+                raise OSError(28, "No space left on device")
+        return real(source, **kw)
+
+    monkeypatch.setattr(baseline_checkpoint, "update_source_incremental", failing)
+
+
+def _passed_unsaved(pulses, writer, cursor: Optional[str]) -> List[str]:
+    """The pulses the cursor passed whose record is neither pushed nor on ``report_pending``."""
+    from test_otx_incremental_order import _utc
+
+    pushed = {r["record_id"] for r in writer.pushed_records()}
+    pending = {e["record_ref"] for e in _pending()}
+    at = _utc(cursor)
+    return [
+        p["id"]
+        for p in pulses
+        if at is not None and _utc(p["modified"]) < at and p["id"] not in pushed and _ref(p["id"]) not in pending
+    ]
+
+
+@pytest.mark.parametrize(
+    ("count", "limit", "failing_from", "batches"), [(150, None, 1, [100]), (250, 300, 2, [100, 100])]
+)
+def test_a_failed_save_holds_the_cursor_below_the_batches_not_pushed(
+    caplog, monkeypatch, count, limit, failing_from, batches
+):
+    """Every record settles, but a save of ``report_pending`` fails before the window's last batch: the later
+    batches are not pushed, and the cursor passes none of their pulses (here it stays, as they hold the window's
+    oldest pulse)."""
+    _saves_failing_from(monkeypatch, failing_from)
+    pulses = _many(count)
+    writer = _RecordWriter()
+    run = _collect(_Otx(pulses), {"otx_last_pulse_modified": _BEFORE_ALL}, caplog, limit=limit, writer=writer)
+    assert [len(b) for b in writer.report_batches] == batches
+    assert run.cursor == _BEFORE_ALL
+    assert _passed_unsaved(pulses, writer, run.cursor) == []
+
+
+class _PermanentWriter(_RecordWriter):
+    """The record of the pulses in *permanent* can never be written (its uuid is in a foreign event)."""
+
+    def __init__(self, permanent=(), **kw):
+        super().__init__(**kw)
+        self.permanent = set(permanent)
+
+    def push_reports(self, source, records, **kw):
+        stats = super().push_reports(source, records, **kw)
+        for record in records:
+            if record["record_id"] in self.permanent:
+                ref = record["record_ref"]
+                stats["settled"].remove(ref)
+                stats["failed"].append({"record_ref": ref, "reason": "a foreign event", "permanent": True})
+        return stats
+
+
+def test_a_record_that_can_never_be_written_holds_nothing_when_the_save_fails(caplog, monkeypatch):
+    _failing_save(monkeypatch)
+    state: Dict[str, Any] = {"otx_last_pulse_modified": CURSOR}
+    run = _window(caplog, _PermanentWriter(permanent=[ROWS[14]["id"]]), state)
+    assert run.cursor == ROWS[12]["modified"]
 
 
 # --------------------------------------------------------------------------- batches, deadline and liveness
