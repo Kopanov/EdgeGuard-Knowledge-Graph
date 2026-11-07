@@ -335,6 +335,7 @@ Constraints (from `Neo4jClient.create_constraints` in `src/neo4j_client.py`):
 | `Host` | `hostname` |
 | `Subnet` | `range` |
 | `Alert` | `alert_id` |
+| `ThreatReport` / `VulnerabilityAdvisory` | `record_ref` (created ahead of the sync that writes these nodes) |
 
 Device, NetworkService, SoftwareVersion, Application, Role and User carry **no** UNIQUE constraint, because their keys recur in ResilMesh's own data.
 
@@ -739,10 +740,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — Deduplication: the constraint table names `ThreatReport` and `VulnerabilityAdvisory`, unique on `record_ref`, which `create_constraints` creates ahead of the sync that writes report records.
 - 2026-11-06 — Python packages: `apache-airflow[postgres]~=3.3.2`. The two-part `~=3.3` admits every 3.x release, and CI installed Airflow 3.4.0 on its release; the image runs 3.3.2.
 - 2026-11-03 — Baseline troubleshooting: the baseline's writer stops a push on a failing MISP after `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE` (3600 s), a failing streak at most until 10 minutes before its task's end (at least 60 s), so a push it stops lets the collector return its status (slow lookups and listings can still take the task to its `execution_timeout`); the scheduled writers stop after `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` (900 s).
 - 2026-11-02 — Source schedules: an OTX run counts up to 200 pulses modified after the cursor, oldest first (`EDGEGUARD_INCREMENTAL_LIMIT`), the overlap's re-reads on top; the table gave 50 pulses; MISP push accounting: OTX puts the pulses with unstored items on its retry list and moves its cursor on, unless every unstored item failed at its MISP event (the text had the cursor held below them until the collector was fixed).

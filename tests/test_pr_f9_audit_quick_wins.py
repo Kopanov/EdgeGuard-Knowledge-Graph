@@ -163,6 +163,29 @@ class TestAirflowDagsUniqueConstraintTable:
             "Deduplication section must explain that source/provenance lives on the SOURCED_FROM edge"
         )
 
+    def test_table_names_every_constraint_create_constraints_creates(self):
+        """Each ``CREATE CONSTRAINT`` of ``Neo4jClient.create_constraints`` has its label and key in the table,
+        which the doc presents as taken from that method."""
+        import re
+
+        with open("src/neo4j_client.py", encoding="utf-8") as fh:
+            code = fh.read()
+        created = re.findall(
+            r"CREATE CONSTRAINT \w+ IF NOT EXISTS FOR \(\w+:(\w+)\) REQUIRE \(([^)]*)\) IS UNIQUE", code
+        )
+        assert len(created) >= 21, created
+        with open("docs/AIRFLOW_DAGS.md", encoding="utf-8") as fh:
+            content = fh.read()
+        dedup_idx = content.find("### Deduplication")
+        section = content[dedup_idx : content.find("\n## ", dedup_idx + 1)]
+        rows = [line.split("|")[1:3] for line in section.splitlines() if line.startswith("| `")]
+        for label, key in created:
+            props = ", ".join(p.strip().split(".", 1)[1] for p in key.split(","))
+            shown = (f"`{props}`", f"`({props})`")
+            assert any(f"`{label}`" in labels and any(s in keys for s in shown) for labels, keys in rows), (
+                f"{label} ({props}) is created by create_constraints but missing from the AIRFLOW_DAGS.md table"
+            )
+
 
 # ===========================================================================
 # Fix 4: Dead placeholder DAG functions

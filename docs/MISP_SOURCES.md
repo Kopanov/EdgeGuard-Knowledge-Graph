@@ -278,7 +278,6 @@ _Last updated: 2026-11-07_
 ## History
 
 - 2026-11-07 — Report records: one MISP Event Report per OTX pulse and CISA ICS advisory (schema `edgeguard.report.v1`, content, digest, uuid, tags, distribution, the writer's flow and its failure answers, its limits (deadline, task end, failing-time cap), the `report_pending` list, the read-only preflight, MISP's own logs of report text, what was measured and what comes from the MISP source). No collector writes records yet.
-
 - 2026-11-02 — `MISPCollector`: no DAG or `run_pipeline.py` runs it (the text named the collector step of the retired in-process baseline). How the sync reads an ATT&CK value: the node parse only (the text also named a STIX conversion that no pipeline step calls).
 - 2026-11-02 — Event names and lookups: the readers of an event part's source no longer list the STIX flow of `run_pipeline.py`, which is removed (`run_pipeline.py` runs the collectors into MISP only).
 - 2026-11-01 — `MITRE_USES_TECHNIQUES.aid`: the ATT&CK id of a MITRE group or malware.
