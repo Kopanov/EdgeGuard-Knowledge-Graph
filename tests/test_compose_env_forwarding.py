@@ -77,6 +77,10 @@ FORWARDED = [
     ("EDGEGUARD_CANONICAL_THREAT_ACTORS", None),  # empty = the reference shipped in src/reference/
     ("EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE", "true"),  # 2026-10 Malware ATT&CK-id twin merge
     ("EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS", "7"),  # 2026-11-06 campaign builder: shared malware
+    # 2026-11-07 report records (src/report_records.py, MISPWriter.push_reports); compose carries the code defaults
+    ("EDGEGUARD_REPORT_MAX_INDICATORS", "2000"),
+    ("EDGEGUARD_MISP_REPORT_THROTTLE_SEC", "0.1"),
+    ("EDGEGUARD_REPORT_PENDING_MAX_DAYS", "7"),
 ]
 
 

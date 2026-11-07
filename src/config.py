@@ -722,7 +722,8 @@ MISP_PUSH_MAX_FAILING_SEC_HI = 86400.0
 def misp_push_max_failing_seconds(baseline: bool = False) -> float:
     """``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`` (default 900; ``0`` = no cap), or for the baseline's writer
     ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`` (default 3600; ``0`` = no cap): the longest one
-    ``MISPWriter.push_items`` call goes on while MISP keeps failing (2026-11-03); it never cuts a request short, and
+    ``MISPWriter.push_items`` call (2026-11-03) or ``push_reports`` call (2026-11-07, checked before each record)
+    goes on while MISP keeps failing; it never cuts a request short, and
     slow event and part lookups, a new part's creation, the listings and the refresh are not cut at it
     (docs/MISP_TUNING.md). The time is the wall time from the start of the first request that fails
     (a batch answered HTTP 429 or 5xx, a timeout or a connection error, a failed event lookup) and includes the
@@ -789,6 +790,37 @@ def otx_retry_max_pulses() -> int:
     about 490 bytes of it and at most 2,000 (``otx_collector._RETRY_ENTRY_MAX_BYTES``), so the list at most 2 MB
     at the default."""
     return max(1, _env_int("EDGEGUARD_OTX_RETRY_MAX_PULSES", 1000))
+
+
+# Report records (2026-11-07, ``src/report_records.py``): one MISP Event Report per OTX pulse and per CISA ICS
+# advisory, written by ``MISPWriter.push_reports``. Read per call so Airflow tasks and tests pick up the
+# environment at run time.
+REPORT_MAX_INDICATORS_HI = 20000
+
+
+def report_max_indicators() -> int:
+    """``EDGEGUARD_REPORT_MAX_INDICATORS`` (default 2000, 0 to 20,000): the indicators an OTX report record lists,
+    the first in (MISP type, value) order; ``indicator_count`` keeps the pulse's exact total. A record lists at most
+    this many (7 pulses of the 730-day test graph list more, the largest 29,932), so a report stays small in every
+    answer that carries its event's reports. A value outside the range is clamped to it; a value that is not a
+    whole number uses the default."""
+    return max(0, min(REPORT_MAX_INDICATORS_HI, _env_int("EDGEGUARD_REPORT_MAX_INDICATORS", 2000)))
+
+
+def misp_report_throttle_seconds() -> float:
+    """``EDGEGUARD_MISP_REPORT_THROTTLE_SEC`` (default 0.1, 0 to 60): the pause between two records of one
+    ``MISPWriter.push_reports`` call. Each record costs one request (the add), and more when MISP holds the report
+    already (a view, an edit, tag changes); on MISP 2.5.50 an add took 0.23 to 0.54 s. A value that is not a
+    number, not finite or outside [0, 60] uses the default with a WARNING."""
+    return _bounded_env_float("EDGEGUARD_MISP_REPORT_THROTTLE_SEC", 0.1, lo=0.0, hi=60.0)
+
+
+def report_pending_max_days() -> int:
+    """``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` (default 7, at least 1): a record still on a source's
+    ``report_pending`` list this many days after its first failed push is given up once a push has tried it past
+    that deadline: it leaves the list with an ERROR (``[REPORT-GAVE-UP]``) and counts in
+    ``edgeguard_report_pending_given_up_total``. A run that collects the record again pushes it again."""
+    return max(1, _env_int("EDGEGUARD_REPORT_PENDING_MAX_DAYS", 7))
 
 
 # MITRE: use If-None-Match on the STIX bundle URL when not in baseline mode (304 → skip re-push).

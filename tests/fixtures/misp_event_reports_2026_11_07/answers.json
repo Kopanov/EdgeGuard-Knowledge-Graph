@@ -1,0 +1,485 @@
+{
+ "_provenance": "Answers of MISP 2.5.50 (a test instance, site-admin key of organisation ADMIN, id 1) recorded on 2026-11-07 by the live checks L1-L12 of the report-records design, on throwaway events named livecheck-eventreports-<UTC time> that were deleted after the run. Each entry names the recording it comes from (check file and step label), the request's method and path, the HTTP status and the answer as recorded. Sanitised: no API key or header was recorded; the MISP default admin e-mail address is replaced by admin@example.invalid; the recording shortened report contents to 300 characters ('...[shortened; N chars]'), and the Taxonomy texts of the tag search are left out. The report double of tests/test_misp_push_reports.py answers with these shapes and statuses (keys, value types, the Event of the report, the error bodies) and puts the uuid, name, content, distribution and deleted state of the report it holds in place of the recorded ones. events_restsearch_metadata_row is the event's row of an /events/restSearch metadata answer (the recording kept that row). The livecheck event of view_ok and edit_ok is not an EdgeGuard event, so the same answer is the foreign-event case.",
+ "add_ok": {
+  "recorded_in": "L1.json: eventReports/add with uuid + Tag[tlp:white, livecheck]",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/add/122"
+  },
+  "status": 200,
+  "answer": {
+   "EventReport": {
+    "id": "1",
+    "uuid": "660ebb20-a65e-5d9f-a25a-c35efb8d4fd7",
+    "event_id": "122",
+    "name": "Livecheck pulse one: example energy campaign",
+    "content": "Example description of a pulse for the live check. It names only documentation addresses such as 203.0.113.10 and example.net.\n\n## EdgeGuard record\n\n<!-- edgeguard:report-meta v1 -->\n```json\n{\"digest\": \"90a10de6cb5fd86ec61159613e9b20848ac6253b8a67ca072fde87075bdc665a\", \"indicator_count\": 2, \"indicat...[shortened; 696 chars]",
+    "distribution": "5",
+    "sharing_group_id": "0",
+    "timestamp": "1794073605",
+    "deleted": false
+   },
+   "Event": {
+    "id": "122",
+    "orgc_id": "1",
+    "org_id": "1",
+    "info": "livecheck-eventreports-20261107T174641Z",
+    "user_id": "1",
+    "date": "2026-11-07",
+    "Org": {
+     "id": "1",
+     "name": "ADMIN"
+    },
+    "Orgc": {
+     "id": "1",
+     "name": "ADMIN"
+    }
+   },
+   "SharingGroup": {
+    "id": null,
+    "name": null,
+    "uuid": null
+   }
+  },
+  "note": "content as recorded (shortened by the recording to 300 characters); the double puts the content it was sent in its place"
+ },
+ "view_ok": {
+  "recorded_in": "L2.json: eventReports/view/{uuid}",
+  "request": {
+   "method": "GET",
+   "path": "/eventReports/view/660ebb20-a65e-5d9f-a25a-c35efb8d4fd7"
+  },
+  "status": 200,
+  "answer": {
+   "EventReport": {
+    "id": "1",
+    "uuid": "660ebb20-a65e-5d9f-a25a-c35efb8d4fd7",
+    "event_id": "122",
+    "name": "Livecheck pulse one: example energy campaign",
+    "content": "Example description of a pulse for the live check. It names only documentation addresses such as 203.0.113.10 and example.net.\n\n## EdgeGuard record\n\n<!-- edgeguard:report-meta v1 -->\n```json\n{\"digest\": \"90a10de6cb5fd86ec61159613e9b20848ac6253b8a67ca072fde87075bdc665a\", \"indicator_count\": 2, \"indicat...[shortened; 696 chars]",
+    "distribution": "5",
+    "sharing_group_id": "0",
+    "timestamp": "1794073605",
+    "deleted": false
+   },
+   "Event": {
+    "id": "122",
+    "orgc_id": "1",
+    "org_id": "1",
+    "info": "livecheck-eventreports-20261107T174641Z",
+    "user_id": "1",
+    "date": "2026-11-07",
+    "Org": {
+     "id": "1",
+     "name": "ADMIN"
+    },
+    "Orgc": {
+     "id": "1",
+     "name": "ADMIN"
+    }
+   },
+   "SharingGroup": {
+    "id": null,
+    "name": null,
+    "uuid": null
+   },
+   "RelationshipInbound": []
+  }
+ },
+ "view_upper_case_uuid": {
+  "recorded_in": "L2.json: eventReports/view/{UUID upper}",
+  "request": {
+   "method": "GET",
+   "path": "/eventReports/view/660EBB20-A65E-5D9F-A25A-C35EFB8D4FD7"
+  },
+  "status": 404,
+  "answer": {
+   "name": "Invalid report",
+   "message": "Invalid report",
+   "url": "/eventReports/view/660EBB20-A65E-5D9F-A25A-C35EFB8D4FD7"
+  }
+ },
+ "edit_ok": {
+  "recorded_in": "L2.json: eventReports/edit/{uuid} content + foreign uuid + Tag[tlp:green] in body",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/edit/660ebb20-a65e-5d9f-a25a-c35efb8d4fd7"
+  },
+  "status": 200,
+  "answer": {
+   "EventReport": {
+    "id": "1",
+    "uuid": "660ebb20-a65e-5d9f-a25a-c35efb8d4fd7",
+    "event_id": "122",
+    "name": "Livecheck pulse one: example energy campaign (renamed)",
+    "content": "Example description (edit 2, by uuid) of a pulse for the live check. It names only documentation addresses such as 203.0.113.10 and example.net.\n\n## EdgeGuard record\n\n<!-- edgeguard:report-meta v1 -->\n```json\n{\"digest\": \"90a10de6cb5fd86ec61159613e9b20848ac6253b8a67ca072fde87075bdc665a\", \"indicator_c...[shortened; 714 chars]",
+    "distribution": "5",
+    "sharing_group_id": "0",
+    "timestamp": "1794073614",
+    "deleted": false
+   },
+   "Event": {
+    "id": "122",
+    "orgc_id": "1",
+    "org_id": "1",
+    "info": "livecheck-eventreports-20261107T174641Z",
+    "user_id": "1",
+    "date": "2026-11-07",
+    "Org": {
+     "id": "1",
+     "name": "ADMIN"
+    },
+    "Orgc": {
+     "id": "1",
+     "name": "ADMIN"
+    }
+   },
+   "SharingGroup": {
+    "id": null,
+    "name": null,
+    "uuid": null
+   }
+  }
+ },
+ "add_duplicate_uuid": {
+  "recorded_in": "L3.json: eventReports/add same uuid, same event",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/add/122"
+  },
+  "status": 403,
+  "answer": {
+   "saved": false,
+   "name": "Could not add EventReport",
+   "message": "Could not add EventReport",
+   "url": "/event_reports/add",
+   "errors": "The UUID provided is not unique"
+  }
+ },
+ "add_duplicate_uuid_other_event": {
+  "recorded_in": "L3.json: eventReports/add same uuid, second event",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/add/123"
+  },
+  "status": 403,
+  "answer": {
+   "saved": false,
+   "name": "Could not add EventReport",
+   "message": "Could not add EventReport",
+   "url": "/event_reports/add",
+   "errors": "The UUID provided is not unique"
+  }
+ },
+ "view_soft_deleted": {
+  "recorded_in": "L7.json: eventReports/view/{id} after soft delete",
+  "request": {
+   "method": "GET",
+   "path": "/eventReports/view/1"
+  },
+  "status": 200,
+  "answer": {
+   "EventReport": {
+    "id": "1",
+    "uuid": "660ebb20-a65e-5d9f-a25a-c35efb8d4fd7",
+    "deleted": true,
+    "timestamp": "1794073614"
+   }
+  },
+  "note": "the recording kept only id, uuid, deleted and timestamp of the view answer; MISP answers the full view shape (L7: 'View: deleted true')"
+ },
+ "add_after_soft_delete": {
+  "recorded_in": "L7.json: eventReports/add same uuid after soft delete",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/add/122"
+  },
+  "status": 403,
+  "answer": {
+   "saved": false,
+   "name": "Could not add EventReport",
+   "message": "Could not add EventReport",
+   "url": "/event_reports/add",
+   "errors": "The UUID provided is not unique"
+  }
+ },
+ "edit_invalid_distribution": {
+  "recorded_in": "L2b_failed_edit_answers.json: edit with invalid distribution 9",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/edit/14"
+  },
+  "status": 200,
+  "answer": []
+ },
+ "edit_blank_name": {
+  "recorded_in": "L2b_failed_edit_answers.json: edit with blank name",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/edit/19752dfa-302f-55b8-a51c-49ca1a337161"
+  },
+  "status": 200,
+  "answer": []
+ },
+ "edit_name_256_chars": {
+  "recorded_in": "L2b_failed_edit_answers.json: edit with name of 256 chars",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/edit/19752dfa-302f-55b8-a51c-49ca1a337161"
+  },
+  "status": 500,
+  "answer": {
+   "name": "An Internal Error Has Occurred.",
+   "message": "An Internal Error Has Occurred.",
+   "url": "/eventReports/edit/19752dfa-302f-55b8-a51c-49ca1a337161"
+  }
+ },
+ "edit_unknown_uuid": {
+  "recorded_in": "L2b_failed_edit_answers.json: edit of unknown uuid",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/edit/9dda10c5-8ade-537b-b484-2e00a23770f9"
+  },
+  "status": 404,
+  "answer": {
+   "name": "Invalid report",
+   "message": "Invalid report",
+   "url": "/eventReports/edit/9dda10c5-8ade-537b-b484-2e00a23770f9"
+  }
+ },
+ "add_invalid_distribution": {
+  "recorded_in": "L2b_failed_edit_answers.json: add with invalid distribution 9",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/add/126"
+  },
+  "status": 403,
+  "answer": {
+   "saved": false,
+   "name": "Could not add EventReport",
+   "message": "Could not add EventReport",
+   "url": "/event_reports/add",
+   "errors": "Options: Your organisation only, This community only, Connected communities, All communities, Sharing group, Inherit event"
+  }
+ },
+ "add_name_300_chars": {
+  "recorded_in": "L8.json: eventReports/add name of 300 chars",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/add/122"
+  },
+  "status": 500,
+  "answer": {
+   "name": "An Internal Error Has Occurred.",
+   "message": "An Internal Error Has Occurred.",
+   "url": "/eventReports/add/122"
+  }
+ },
+ "add_tag_by_id": {
+  "recorded_in": "L1b_report_tag_changes.json: addTag/{A}/{livecheck id}",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/addTag/9/8214"
+  },
+  "status": 200,
+  "answer": {
+   "saved": true,
+   "success": "Tag added.",
+   "check_publish": true
+  }
+ },
+ "add_tag_already_attached": {
+  "recorded_in": "L1b_report_tag_changes.json: addTag/{A}/{livecheck id} again (already attached)",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/addTag/9/8214"
+  },
+  "status": 200,
+  "answer": {
+   "saved": true,
+   "success": "0 tags added",
+   "check_publish": true
+  }
+ },
+ "add_tag_unknown_name": {
+  "recorded_in": "L1b_report_tag_changes.json: addTag/{A}/livecheck (name of a tag that does not exist)",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/addTag/9/livecheck"
+  },
+  "status": 200,
+  "answer": {
+   "saved": false,
+   "errors": "Invalid Tag."
+  }
+ },
+ "remove_tag_by_id": {
+  "recorded_in": "L1b_report_tag_changes.json: removeTag/{A}/{livecheck id}",
+  "request": {
+   "method": "POST",
+   "path": "/eventReports/removeTag/9/8214"
+  },
+  "status": 200,
+  "answer": {
+   "saved": true,
+   "success": "Tag removed.",
+   "check_publish": true
+  }
+ },
+ "tags_search_tlp": {
+  "recorded_in": "setup.json: tags/search strict (pre)",
+  "request": {
+   "method": "POST",
+   "path": "/tags/search/x/1"
+  },
+  "status": 200,
+  "answer": [
+   {
+    "Tag": {
+     "id": "78",
+     "name": "tlp:white",
+     "colour": "#d78943",
+     "exportable": true,
+     "org_id": "0",
+     "user_id": "0",
+     "hide_tag": false,
+     "numerical_value": null,
+     "is_galaxy": false,
+     "is_custom_galaxy": false,
+     "local_only": false
+    },
+    "Taxonomy": {
+     "id": "171",
+     "namespace": "tlp",
+     "version": "10",
+     "enabled": false,
+     "exclusive": true,
+     "required": false
+    },
+    "TaxonomyPredicate": {
+     "id": "1185",
+     "taxonomy_id": "171",
+     "value": "white",
+     "colour": "#ffffff",
+     "exclusive": false,
+     "numerical_value": null
+    }
+   }
+  ],
+  "note": "the request asked for livecheck, tlp:white and tlp:green; only tlp:white existed on this MISP. The Taxonomy and TaxonomyPredicate description texts are left out"
+ },
+ "tags_search_none": {
+  "recorded_in": "setup_run2.json: tags/search strict livecheck",
+  "request": {
+   "method": "POST",
+   "path": "/tags/search/x/1"
+  },
+  "status": 200,
+  "answer": []
+ },
+ "events_add": {
+  "recorded_in": "L8b_name_length_boundary.json: events/add",
+  "request": {
+   "method": "POST",
+   "path": "/events/add"
+  },
+  "status": 200,
+  "answer": {
+   "Event": {
+    "id": "125",
+    "orgc_id": "1",
+    "org_id": "1",
+    "date": "2026-11-07",
+    "threat_level_id": "4",
+    "info": "livecheck-eventreports-20261107T175123Z-namelen",
+    "published": false,
+    "uuid": "7b7d8c58-41a9-4b1b-95ff-c953dcb04f1c",
+    "attribute_count": "0",
+    "analysis": "0",
+    "timestamp": "1794073883",
+    "distribution": "0",
+    "proposal_email_lock": false,
+    "locked": false,
+    "publish_timestamp": "0",
+    "first_publication": "0",
+    "sharing_group_id": "0",
+    "disable_correlation": false,
+    "extends_uuid": "",
+    "protected": null,
+    "event_creator_email": "admin@example.invalid",
+    "Org": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7",
+     "local": true
+    },
+    "Orgc": {
+     "id": "1",
+     "name": "ADMIN",
+     "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7",
+     "local": true
+    },
+    "Attribute": [],
+    "ShadowAttribute": [],
+    "RelatedEvent": [],
+    "Galaxy": [],
+    "Object": [],
+    "EventReport": [],
+    "CryptographicKey": []
+   }
+  },
+  "note": "event_creator_email replaced by a placeholder"
+ },
+ "events_restsearch_metadata_row": {
+  "recorded_in": "L5.json: events/restSearch metadata timestamp=thr eventinfo (answer.our_row: the event's row of the answer)",
+  "request": {
+   "method": "POST",
+   "path": "/events/restSearch"
+  },
+  "status": 200,
+  "answer": {
+   "response": [
+    {
+     "Event": {
+      "id": "122",
+      "orgc_id": "1",
+      "org_id": "1",
+      "date": "2026-11-07",
+      "threat_level_id": "4",
+      "info": "livecheck-eventreports-20261107T174641Z",
+      "published": false,
+      "uuid": "1e3fff02-dbf8-449e-9826-7dd45abfaab3",
+      "attribute_count": "3",
+      "analysis": "0",
+      "timestamp": "1794073605",
+      "distribution": "0",
+      "proposal_email_lock": false,
+      "locked": false,
+      "publish_timestamp": "0",
+      "first_publication": "0",
+      "sharing_group_id": "0",
+      "disable_correlation": false,
+      "extends_uuid": "",
+      "protected": null,
+      "event_creator_email": "<redacted>",
+      "Org": {
+       "id": "1",
+       "name": "ADMIN",
+       "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7",
+       "local": true
+      },
+      "Orgc": {
+       "id": "1",
+       "name": "ADMIN",
+       "uuid": "fcdb77ee-81ac-4884-864d-c97a6f1a07b7",
+       "local": true
+      },
+      "RelatedEvent": [],
+      "Galaxy": [],
+      "CryptographicKey": []
+     }
+    }
+   ]
+  }
+ }
+}

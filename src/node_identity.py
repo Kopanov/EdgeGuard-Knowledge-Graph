@@ -144,6 +144,11 @@ _NATURAL_KEYS: Dict[str, Tuple[str, ...]] = {
     # constraints already (see Neo4jClient.create_constraints).
     "User": ("username", "domain"),
     "Alert": ("alert_id",),
+    # 2026-11-07, report records (``src/report_records.py``): one node per source record, keyed by the exact
+    # ``source_refs`` string of the record (``alienvault_otx:<pulse id>``, ``cisa_ics:<tracking id>``). The
+    # MISP Event Report of the record carries this uuid, so MISP, the graph and STIX share one id.
+    "ThreatReport": ("record_ref",),
+    "VulnerabilityAdvisory": ("record_ref",),
 }
 
 
@@ -216,6 +221,12 @@ NEO4J_TO_STIX_TYPE: Dict[str, str] = {
     # prefix without auditing the Sector overlap).
     "User": "x-edgeguard-user",
     "Alert": "x-edgeguard-alert",
+    # 2026-11-07: both report labels map to the STIX ``report`` SDO (``report_types`` threat-report and
+    # vulnerability), so a report's uuid depends on its ``record_ref`` only and a later rename of either
+    # label leaves every uuid, and with it every MISP Event Report, as it is. The ``record_ref`` starts
+    # with the source id, so an OTX and a CISA ICS record never share a canonical string.
+    "ThreatReport": "report",
+    "VulnerabilityAdvisory": "report",
 }
 
 # Lowercase-keyed mirror — derived from NEO4J_TO_STIX_TYPE so the two cannot

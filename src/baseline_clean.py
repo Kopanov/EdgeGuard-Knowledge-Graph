@@ -589,6 +589,10 @@ def _wipe_checkpoints() -> None:
     are set to an empty list here; otherwise they kept the list until the first scheduled OTX run after the
     baseline, and ``EdgeGuardOtxRetryPulsesWaiting`` could fire for a list that no longer exists. A
     metrics failure is logged at DEBUG and never fails the wipe.
+
+    2026-11-07: so do the ``report_pending`` lists of the report sources (``report_records``), on purpose:
+    the wipe deletes MISP's events and with them every Event Report, and the baseline that follows pushes
+    the records it collects again. Their gauges are set to empty lists here too.
     """
     from baseline_checkpoint import clear_checkpoint
 
@@ -599,6 +603,14 @@ def _wipe_checkpoints() -> None:
         record_otx_retry_list(0, 0.0, 0)
     except Exception as exc:
         logger.debug("OTX retry gauges not reset: %s", exc)
+    try:
+        from metrics_server import record_report_pending
+        from report_records import REPORT_SOURCES
+
+        for source in REPORT_SOURCES:
+            record_report_pending(source, 0, 0.0, 0)
+    except Exception as exc:
+        logger.debug("report_pending gauges not reset: %s", exc)
 
 
 # Neo4j wipe scope of the destructive step (2026-10, shared-database contract). On a database
