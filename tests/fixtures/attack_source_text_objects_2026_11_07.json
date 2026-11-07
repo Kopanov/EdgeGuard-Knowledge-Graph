@@ -1,0 +1,1021 @@
+{
+ "_provenance": {
+  "attack": {
+   "source": {
+    "enterprise": "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json",
+    "ics": "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/ics-attack/ics-attack.json"
+   },
+   "fetched": "2026-11-07",
+   "bundles": {
+    "enterprise": {
+     "sha256": "539a843a7b53ed9749740b2123dddae3726b1a4831841c32aca740b011b910b5",
+     "collection": "Enterprise ATT&CK",
+     "version": "20.1",
+     "modified": "2026-11-05T15:11:27.678Z"
+    },
+    "ics": {
+     "sha256": "3f6448369f9135ade84ff6437479441530d0b262f910dca991879a7146b524ff",
+     "collection": "ICS ATT&CK",
+     "version": "20.1",
+     "modified": "2026-11-05T05:00:37.128Z"
+    }
+   },
+   "reduction": "Verbatim STIX 2.1 objects, all fields kept. enterprise: T1553.003 SIP and Trust Provider Hijacking (the longest technique description of the bundle, 4,668 characters; the MISP galaxy copy of 2026-11-05 has 4,680, 12 whitespace characters more), T1136 Create Account (10 platforms), T1136.001 Local Account (6 platforms), T1195 Supply Chain Compromise (a sector keyword after its 500th character), TA0004 Privilege Escalation (769 characters), the tools S0039 Net (alias net.exe) and S0363 Empire (aliases EmPyre, PowerShell Empire), the group G0034 Sandworm Team (x_mitre_domains enterprise, ics, mobile), the malware S1072 Industroyer2 (ICS platforms), and the relationship Net uses T1136.001. ics: the same G0034 and S1072 objects as the ICS bundle carries them, and TA0105 Impact. Every other object of the bundles is left out.",
+   "licence": "MITRE ATT&CK, (c) 2026 The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation (ATT&CK terms of use, LICENSE.txt of the attack-stix-data repository)."
+  },
+  "galaxy": {
+   "source": "MISP /galaxy_clusters/restSearch answers of the project's test MISP (2.5.50), captured 2026-11-05 as open data (CC0 1.0 / BSD 2-Clause, https://github.com/MISP/misp-galaxy); only the clusters of the objects above, and of each its tag_name, uuid and the length of its description",
+   "galaxies": {
+    "mitre-attack-pattern": {
+     "file": "misp_galaxy_mitre-attack-pattern_20261105.json",
+     "captured_at": "2026-11-05T23:57:55+01:00",
+     "misp_version": "2.5.50",
+     "galaxy_name": "MITRE ATT&CK Techniques",
+     "galaxy_version": "20",
+     "namespace": "mitre",
+     "sha256": "f96c8931f280e325d7bc110e77972a51b0775f7f82a5a6d7773c5b66adab917a"
+    },
+    "mitre-intrusion-set": {
+     "file": "misp_galaxy_mitre-intrusion-set_20261105.json",
+     "captured_at": "2026-11-05T23:57:21+01:00",
+     "misp_version": "2.5.50",
+     "galaxy_name": "MITRE ATT&CK Groups",
+     "galaxy_version": "9",
+     "namespace": "mitre",
+     "sha256": "f34a12a74843431d5b77eb08ed434fca5e8d3aa5a8b8fc444a94d38ce97d9a4b"
+    },
+    "mitre-malware": {
+     "file": "misp_galaxy_mitre-malware_20261105.json",
+     "captured_at": "2026-11-05T23:57:30+01:00",
+     "misp_version": "2.5.50",
+     "galaxy_name": "MITRE ATT&CK Malware",
+     "galaxy_version": "8",
+     "namespace": "deprecated",
+     "sha256": "64f47f19fe98e9a2e9d666e69cb86eda56a15e0acd8e985d862afcae16fc787f"
+    },
+    "mitre-tool": {
+     "file": "misp_galaxy_mitre-tool_20261105.json",
+     "captured_at": "2026-11-05T23:57:37+01:00",
+     "misp_version": "2.5.50",
+     "galaxy_name": "MITRE ATT&CK Tools",
+     "galaxy_version": "9",
+     "namespace": "deprecated",
+     "sha256": "c11feac83b74a32b44d4744669c9db78960401b120c7ee4d736521ffc5946921"
+    }
+   }
+  }
+ },
+ "enterprise": [
+  {
+   "type": "attack-pattern",
+   "spec_version": "2.1",
+   "id": "attack-pattern--543fceb5-cb92-40cb-aacf-6913d4db58bc",
+   "created": "2020-02-05T19:34:04.910Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T1553/003",
+     "external_id": "T1553.003"
+    },
+    {
+     "source_name": "GitHub SIP POC Sept 2017",
+     "description": "Graeber, M. (2017, September 14). PoCSubjectInterfacePackage. Retrieved January 31, 2018.",
+     "url": "https://github.com/mattifestation/PoCSubjectInterfacePackage"
+    },
+    {
+     "source_name": "SpectorOps Subverting Trust Sept 2017",
+     "description": "Graeber, M. (2017, September). Subverting Trust in Windows. Retrieved January 31, 2018.",
+     "url": "https://specterops.io/assets/resources/SpecterOps_Subverting_Trust_in_Windows.pdf"
+    },
+    {
+     "source_name": "Microsoft Catalog Files and Signatures April 2017",
+     "description": "Hudek, T. (2017, April 20). Catalog Files and Digital Signatures. Retrieved January 31, 2018.",
+     "url": "https://docs.microsoft.com/windows-hardware/drivers/install/catalog-files"
+    },
+    {
+     "source_name": "Microsoft Authenticode",
+     "description": "Microsoft. (n.d.). Authenticode. Retrieved January 31, 2018.",
+     "url": "https://msdn.microsoft.com/library/ms537359.aspx"
+    },
+    {
+     "source_name": "Microsoft WinVerifyTrust",
+     "description": "Microsoft. (n.d.). WinVerifyTrust function. Retrieved January 31, 2018.",
+     "url": "https://msdn.microsoft.com/library/windows/desktop/aa388208.aspx"
+    },
+    {
+     "source_name": "EduardosBlog SIPs July 2008",
+     "description": "Navarro, E. (2008, July 11). SIP’s (Subject Interface Package) and Authenticode. Retrieved January 31, 2018.",
+     "url": "https://blogs.technet.microsoft.com/eduardonavarro/2008/07/11/sips-subject-interface-package-and-authenticode/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-11-04T00:57:27.686Z",
+   "name": "SIP and Trust Provider Hijacking",
+   "description": "Adversaries may tamper with SIP and trust provider components to mislead the operating system and application control tools when conducting signature validation checks. In user mode, Windows Authenticode(Citation: Microsoft Authenticode) digital signatures are used to verify a file's origin and integrity, variables that may be used to establish trust in signed code (ex: a driver with a valid Microsoft signature may be handled as safe). The signature validation process is handled via the WinVerifyTrust application programming interface (API) function,(Citation: Microsoft WinVerifyTrust) which accepts an inquiry and coordinates with the appropriate trust provider, which is responsible for validating parameters of a signature.(Citation: SpectorOps Subverting Trust Sept 2017)\n\nBecause of the varying executable file types and corresponding signature formats, Microsoft created software components called Subject Interface Packages (SIPs)(Citation: EduardosBlog SIPs July 2008) to provide a layer of abstraction between API functions and files. SIPs are responsible for enabling API functions to create, retrieve, calculate, and verify signatures. Unique SIPs exist for most file formats (Executable, PowerShell, Installer, etc., with catalog signing providing a catch-all)(Citation: Microsoft Catalog Files and Signatures April 2017) and are identified by globally unique identifiers (GUIDs).(Citation: SpectorOps Subverting Trust Sept 2017)\n\nSimilar to [Code Signing](https://attack.mitre.org/techniques/T1553/002), adversaries may abuse this architecture to subvert trust controls and bypass security policies that allow only legitimately signed code to execute on a system. Adversaries may hijack SIP and trust provider components to mislead operating system and application control tools to classify malicious (or any) code as signed by:(Citation: SpectorOps Subverting Trust Sept 2017)\n\n* Modifying the <code>Dll</code> and <code>FuncName</code> Registry values in <code>HKLM\\SOFTWARE[\\WOW6432Node\\]Microsoft\\Cryptography\\OID\\EncodingType 0\\CryptSIPDllGetSignedDataMsg\\{SIP_GUID}</code> that point to the dynamic link library (DLL) providing a SIP’s CryptSIPDllGetSignedDataMsg function, which retrieves an encoded digital certificate from a signed file. By pointing to a maliciously-crafted DLL with an exported function that always returns a known good signature value (ex: a Microsoft signature for Portable Executables) rather than the file’s real signature, an adversary can apply an acceptable signature value to all files using that SIP(Citation: GitHub SIP POC Sept 2017) (although a hash mismatch will likely occur, invalidating the signature, since the hash returned by the function will not match the value computed from the file).\n* Modifying the <code>Dll</code> and <code>FuncName</code> Registry values in <code>HKLM\\SOFTWARE\\[WOW6432Node\\]Microsoft\\Cryptography\\OID\\EncodingType 0\\CryptSIPDllVerifyIndirectData\\{SIP_GUID}</code> that point to the DLL providing a SIP’s CryptSIPDllVerifyIndirectData function, which validates a file’s computed hash against the signed hash value. By pointing to a maliciously-crafted DLL with an exported function that always returns TRUE (indicating that the validation was successful), an adversary can successfully validate any file (with a legitimate signature) using that SIP(Citation: GitHub SIP POC Sept 2017) (with or without hijacking the previously mentioned CryptSIPDllGetSignedDataMsg function). This Registry value could also be redirected to a suitable exported function from an already present DLL, avoiding the requirement to drop and execute a new file on disk.\n* Modifying the <code>DLL</code> and <code>Function</code> Registry values in <code>HKLM\\SOFTWARE\\[WOW6432Node\\]Microsoft\\Cryptography\\Providers\\Trust\\FinalPolicy\\{trust provider GUID}</code> that point to the DLL providing a trust provider’s FinalPolicy function, which is where the decoded and parsed signature is checked and the majority of trust decisions are made. Similar to hijacking SIP’s CryptSIPDllVerifyIndirectData function, this value can be redirected to a suitable exported function from an already present DLL or a maliciously-crafted DLL (though the implementation of a trust provider is complex).\n* **Note:** The above hijacks are also possible without modifying the Registry via [DLL](https://attack.mitre.org/techniques/T1574/001) search order hijacking.\n\nHijacking SIP or trust provider components can also enable persistent code execution, since these malicious components may be invoked by any application that performs code signing or signature validation.(Citation: SpectorOps Subverting Trust Sept 2017)",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-attack",
+     "phase_name": "defense-impairment"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Matt Graeber, @mattifestation, SpecterOps"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_is_subtechnique": true,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows"
+   ],
+   "x_mitre_version": "2.0"
+  },
+  {
+   "type": "attack-pattern",
+   "spec_version": "2.1",
+   "id": "attack-pattern--e01be9c5-e763-4caf-aeb7-000b416aef67",
+   "created": "2017-12-14T16:46:06.044Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T1136",
+     "external_id": "T1136"
+    },
+    {
+     "source_name": "Symantec WastedLocker June 2020",
+     "description": "Symantec Threat Intelligence. (2020, June 25). WastedLocker: Symantec Identifies Wave of Attacks Against U.S. Organizations. Retrieved May 20, 2021.",
+     "url": "https://symantec-enterprise-blogs.security.com/blogs/threat-intelligence/wastedlocker-ransomware-us"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-11-04T03:15:58.720Z",
+   "name": "Create Account",
+   "description": "Adversaries may create an account to maintain access to victim systems.(Citation: Symantec WastedLocker June 2020) With a sufficient level of access, creating such accounts may be used to establish secondary credentialed access that does not require persistent remote access tools to be deployed on the system.\n\nAccounts may be created on the local system or within a domain or cloud tenant. In cloud environments, adversaries may create accounts that only have access to specific services, which can reduce the chance of detection.",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-attack",
+     "phase_name": "persistence"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Microsoft Threat Intelligence Center (MSTIC)",
+    "Praetorian",
+    "Austin Clark, @c2defense"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows",
+    "IaaS",
+    "Linux",
+    "macOS",
+    "Network Devices",
+    "Containers",
+    "SaaS",
+    "Office Suite",
+    "Identity Provider",
+    "ESXi"
+   ],
+   "x_mitre_version": "2.6"
+  },
+  {
+   "type": "attack-pattern",
+   "spec_version": "2.1",
+   "id": "attack-pattern--635cbe30-392d-4e27-978e-66774357c762",
+   "created": "2020-01-28T13:50:22.506Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T1136/001",
+     "external_id": "T1136.001"
+    },
+    {
+     "source_name": "cisco_username_cmd",
+     "description": "Cisco. (2023, March 6). username - Cisco IOS Security Command Reference: Commands S to Z. Retrieved July 13, 2022.",
+     "url": "https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/security/s1/sec-s1-cr-book/sec-cr-t2.html#wp1047035630"
+    },
+    {
+     "source_name": "Cyber Security News",
+     "description": "Kaaviya. (n.d.). SuperBlack Actors Exploiting Two Fortinet Vulnerabilities to Deploy Ransomware. Retrieved September 22, 2025.",
+     "url": "https://cybersecuritynews.com/superblack-actors-exploiting-two-fortinet-vulnerabilities/"
+    },
+    {
+     "source_name": "Kubernetes Service Accounts Security",
+     "description": "Kubernetes. (n.d.). Service Accounts. Retrieved July 14, 2023.",
+     "url": "https://kubernetes.io/docs/concepts/security/service-accounts/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-11-04T03:16:37.829Z",
+   "name": "Local Account",
+   "description": "Adversaries may create a local account to maintain access to victim systems. Local accounts are those configured by an organization for use by users, remote support, services, or for administration on a single system or service. \n\nFor example, with a sufficient level of access, the Windows <code>net user /add</code> command can be used to create a local account.  In Linux, the `useradd` command can be used, while on macOS systems, the <code>dscl -create</code> command can be used. Local accounts may also be added to network devices, often via common [Network Device CLI](https://attack.mitre.org/techniques/T1059/008) commands such as <code>username</code>, to ESXi servers via `esxcli system account add`, or to Kubernetes clusters using the `kubectl` utility.(Citation: cisco_username_cmd)(Citation: Kubernetes Service Accounts Security)\n\nAdversaries may also create new local accounts on network firewall management consoles – for example, by exploiting a vulnerable firewall management system, threat actors may be able to establish super-admin accounts that could be used to modify firewall rules and gain further access to the network.(Citation: Cyber Security News)\n\nSuch accounts may be used to establish secondary credentialed access that does not require persistent remote access tools to be deployed on the system.",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-attack",
+     "phase_name": "persistence"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Austin Clark, @c2defense"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_is_subtechnique": true,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Containers",
+    "ESXi",
+    "Linux",
+    "macOS",
+    "Network Devices",
+    "Windows"
+   ],
+   "x_mitre_version": "1.5"
+  },
+  {
+   "type": "attack-pattern",
+   "spec_version": "2.1",
+   "id": "attack-pattern--3f18edba-28f4-4bb9-82c3-8aa60dcac5f7",
+   "created": "2018-04-18T17:59:24.739Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T1195",
+     "external_id": "T1195"
+    },
+    {
+     "source_name": "Avast CCleaner3 2018",
+     "description": "Avast Threat Intelligence Team. (2018, March 8). New investigations into the CCleaner incident point to a possible third stage that had keylogger capacities. Retrieved March 15, 2018.",
+     "url": "https://blog.avast.com/new-investigations-in-ccleaner-incident-point-to-a-possible-third-stage-that-had-keylogger-capacities"
+    },
+    {
+     "source_name": "Krebs 3cx overview 2023",
+     "description": "Brian Krebs. (2023, April 20). 3CX Breach Was a Double Supply Chain Compromise. Retrieved May 22, 2025.",
+     "url": "https://krebsonsecurity.com/2023/04/3cx-breach-was-a-double-supply-chain-compromise/"
+    },
+    {
+     "source_name": "Command Five SK 2011",
+     "description": "Command Five Pty Ltd. (2011, September). SK Hack by an Advanced Persistent Threat. Retrieved November 17, 2024.",
+     "url": "https://web.archive.org/web/20160309235002/https://www.commandfive.com/papers/C5_APT_SKHack.pdf"
+    },
+    {
+     "source_name": "IBM Storwize",
+     "description": "IBM Support. (2017, April 26). Storwize USB Initialization Tool may contain malicious code. Retrieved May 28, 2019.",
+     "url": "https://www-01.ibm.com/support/docview.wss?uid=ssg1S1010146&myns=s028&mynp=OCSTHGUJ&mynp=OCSTLM5A&mynp=OCSTLM6B&mynp=OCHW206&mync=E&cm_sp=s028-_-OCSTHGUJ-OCSTLM5A-OCSTLM6B-OCHW206-_-E"
+    },
+    {
+     "source_name": "Symantec Elderwood Sept 2012",
+     "description": "O'Gorman, G., and McDonald, G.. (2012, September 6). The Elderwood Project. Retrieved November 17, 2024.",
+     "url": "https://web.archive.org/web/20190717233006/http:/www.symantec.com/content/en/us/enterprise/media/security_response/whitepapers/the-elderwood-project.pdf"
+    },
+    {
+     "source_name": "Schneider Electric USB Malware",
+     "description": "Schneider Electric. (2018, August 24). Security Notification – USB Removable Media Provided With Conext Combox and Conext Battery Monitor. Retrieved May 28, 2019.",
+     "url": "https://www.se.com/us/en/download/document/SESN-2018-236-01/"
+    },
+    {
+     "source_name": "Trendmicro NPM Compromise",
+     "description": "Trendmicro. (2018, November 29). Hacker Infects Node.js Package to Steal from Bitcoin Wallets. Retrieved April 10, 2019.",
+     "url": "https://www.trendmicro.com/vinfo/dk/security/news/cybercrime-and-digital-threats/hacker-infects-node-js-package-to-steal-from-bitcoin-wallets"
+    },
+    {
+     "source_name": "Microsoft Dofoil 2018",
+     "description": "Windows Defender Research. (2018, March 7). Behavior monitoring combined with machine learning spoils a massive Dofoil coin mining campaign. Retrieved March 20, 2018.",
+     "url": "https://cloudblogs.microsoft.com/microsoftsecure/2018/03/07/behavior-monitoring-combined-with-machine-learning-spoils-a-massive-dofoil-coin-mining-campaign/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-10-24T17:48:41.675Z",
+   "name": "Supply Chain Compromise",
+   "description": "Adversaries may manipulate products or product delivery mechanisms prior to receipt by a final consumer for the purpose of data or system compromise.\n\nSupply chain compromise can take place at any stage of the supply chain including:\n\n* Manipulation of development tools\n* Manipulation of a development environment\n* Manipulation of source code repositories (public or private)\n* Manipulation of source code in open-source dependencies\n* Manipulation of software update/distribution mechanisms\n* Compromised/infected system images (removable media infected at the factory)(Citation: IBM Storwize)(Citation: Schneider Electric USB Malware) \n* Replacement of legitimate software with modified versions\n* Sales of modified/counterfeit products to legitimate distributors\n* Shipment interdiction\n\nWhile supply chain compromise can impact any component of hardware or software, adversaries looking to gain execution have often focused on malicious additions to legitimate software in software distribution or update channels.(Citation: Avast CCleaner3 2018)(Citation: Microsoft Dofoil 2018)(Citation: Command Five SK 2011) Adversaries may limit targeting to a desired victim set or distribute malicious software to a broad set of consumers but only follow up with specific victims.(Citation: Symantec Elderwood Sept 2012)(Citation: Avast CCleaner3 2018)(Citation: Command Five SK 2011) Popular open-source projects that are used as dependencies in many applications may also be targeted as a means to add malicious code to users of the dependency.(Citation: Trendmicro NPM Compromise)\n\nIn some cases, adversaries may conduct “second-order” supply chain compromises by leveraging the access gained from an initial supply chain compromise to further compromise a software component.(Citation: Krebs 3cx overview 2023) This may allow the threat actor to spread to even more victims.  ",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-attack",
+     "phase_name": "initial-access"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Veeral Patel",
+    "Menachem Goldstein",
+    "Damien Miller-McAndrews"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Linux",
+    "Windows",
+    "macOS",
+    "SaaS"
+   ],
+   "x_mitre_version": "1.7"
+  },
+  {
+   "type": "x-mitre-tactic",
+   "spec_version": "2.1",
+   "id": "x-mitre-tactic--5e29b093-294e-49e9-a803-dab3d73b77dd",
+   "created": "2018-10-17T00:14:20.652Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/tactics/TA0004",
+     "external_id": "TA0004"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-04-25T14:45:33.853Z",
+   "name": "Privilege Escalation",
+   "description": "The adversary is trying to gain higher-level permissions.\n\nPrivilege Escalation consists of techniques that adversaries use to gain higher-level permissions on a system or network. Adversaries can often enter and explore a network with unprivileged access but require elevated permissions to follow through on their objectives. Common approaches are to take advantage of system weaknesses, misconfigurations, and vulnerabilities. Examples of elevated access include: \n\n* SYSTEM/root level\n* local administrator\n* user account with admin-like access \n* user accounts with access to specific system or perform specific function\n\nThese techniques often overlap with Persistence techniques, as OS features that let an adversary persist can execute in an elevated context.  ",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_version": "1.0",
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_shortname": "privilege-escalation"
+  },
+  {
+   "type": "tool",
+   "spec_version": "2.1",
+   "id": "tool--03342581-f790-4f03-ba41-e82e67392e23",
+   "created": "2017-05-31T21:32:31.601Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S0039",
+     "external_id": "S0039"
+    },
+    {
+     "source_name": "Microsoft Net Utility",
+     "description": "Microsoft. (2006, October 18). Net.exe Utility. Retrieved September 22, 2015.",
+     "url": "https://msdn.microsoft.com/en-us/library/aa939914"
+    },
+    {
+     "source_name": "Savill 1999",
+     "description": "Savill, J. (1999, March 4). Net.exe reference. Retrieved September 22, 2015.",
+     "url": "https://web.archive.org/web/20150511162820/http://windowsitpro.com/windows/netexe-reference"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-05-12T15:12:00.740Z",
+   "name": "Net",
+   "description": "The [Net](https://attack.mitre.org/software/S0039) utility is a component of the Windows operating system. It is used in command-line operations for control of users, groups, services, and network connections. (Citation: Microsoft Net Utility)\n\n[Net](https://attack.mitre.org/software/S0039) has a great deal of functionality, (Citation: Savill 1999) much of which is useful for an adversary, such as gathering system and network information for Discovery, moving laterally through [SMB/Windows Admin Shares](https://attack.mitre.org/techniques/T1021/002) using <code>net use</code> commands, and interacting with services. The net1.exe utility is executed for certain functionality when net.exe is run and can be used directly in commands such as <code>net1 user</code>.",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_version": "2.8",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "David Ferguson, CyberSponse"
+   ],
+   "x_mitre_aliases": [
+    "Net",
+    "net.exe"
+   ]
+  },
+  {
+   "type": "tool",
+   "spec_version": "2.1",
+   "id": "tool--3433a9e8-1c47-4320-b9bf-ed449061d1c3",
+   "created": "2019-03-11T14:13:40.648Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S0363",
+     "external_id": "S0363"
+    },
+    {
+     "source_name": "EmPyre",
+     "description": "(Citation: Github PowerShell Empire)"
+    },
+    {
+     "source_name": "PowerShell Empire",
+     "description": "(Citation: Github PowerShell Empire)"
+    },
+    {
+     "source_name": "Github PowerShell Empire",
+     "description": "Schroeder, W., Warner, J., Nelson, M. (n.d.). Github PowerShellEmpire. Retrieved April 28, 2016.",
+     "url": "https://github.com/PowerShellEmpire/Empire"
+    },
+    {
+     "source_name": "GitHub ATTACK Empire",
+     "description": "Stepanic, D. (2018, September 2). attck_empire: Generate ATT&CK Navigator layer file from PowerShell Empire agent logs. Retrieved March 11, 2019.",
+     "url": "https://github.com/dstepanic/attck_empire"
+    },
+    {
+     "source_name": "NCSC Joint Report Public Tools",
+     "description": "The Australian Cyber Security Centre (ACSC), the Canadian Centre for Cyber Security (CCCS), the New Zealand National Cyber Security Centre (NZ NCSC), CERT New Zealand, the UK National Cyber Security Centre (UK NCSC) and the US National Cybersecurity and Communications Integration Center (NCCIC). (2018, October 11). Joint report on publicly available hacking tools. Retrieved March 11, 2019.",
+     "url": "https://www.ncsc.gov.uk/report/joint-report-on-publicly-available-hacking-tools"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-10-24T03:33:19.777Z",
+   "name": "Empire",
+   "description": "[Empire](https://attack.mitre.org/software/S0363) is an open-source, cross-platform remote administration and post-exploitation framework that is publicly available on GitHub. While the tool itself is primarily written in Python, the post-exploitation agents are written in pure [PowerShell](https://attack.mitre.org/techniques/T1059/001) for Windows and Python for Linux/macOS. [Empire](https://attack.mitre.org/software/S0363) was one of five tools singled out by a joint report on public hacking tools being widely used by adversaries.(Citation: NCSC Joint Report Public Tools)(Citation: Github PowerShell Empire)(Citation: GitHub ATTACK Empire)",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Linux",
+    "macOS",
+    "Windows"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_version": "1.8",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_aliases": [
+    "Empire",
+    "EmPyre",
+    "PowerShell Empire"
+   ]
+  },
+  {
+   "type": "intrusion-set",
+   "spec_version": "2.1",
+   "id": "intrusion-set--381fcf73-60f6-4ab2-9991-6af3cbc35192",
+   "created": "2017-05-31T21:32:04.588Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/groups/G0034",
+     "external_id": "G0034"
+    },
+    {
+     "source_name": "Voodoo Bear",
+     "description": "(Citation: CrowdStrike VOODOO BEAR)(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "ELECTRUM",
+     "description": "(Citation: Dragos ELECTRUM)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Sandworm Team",
+     "description": "(Citation: iSIGHT Sandworm 2014) (Citation: F-Secure BlackEnergy 2014) (Citation: InfoSecurity Sandworm Oct 2014)(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Quedagh",
+     "description": "(Citation: iSIGHT Sandworm 2014) (Citation: F-Secure BlackEnergy 2014)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "FROZENBARENTS",
+     "description": "(Citation: Leonard TAG 2023)"
+    },
+    {
+     "source_name": "APT44",
+     "description": "(Citation: mandiant_apt44_unearthing_sandworm)"
+    },
+    {
+     "source_name": "IRIDIUM",
+     "description": "(Citation: Microsoft Prestige ransomware October 2022)"
+    },
+    {
+     "source_name": "Seashell Blizzard",
+     "description": "(Citation: Microsoft Threat Actor Naming July 2023)"
+    },
+    {
+     "source_name": "BlackEnergy (Group)",
+     "description": "(Citation: NCSC Sandworm Feb 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Telebots",
+     "description": "(Citation: NCSC Sandworm Feb 2020)(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "IRON VIKING",
+     "description": "(Citation: Secureworks IRON VIKING )(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Leonard TAG 2023",
+     "description": "Billy Leonard. (2023, April 19). Ukraine remains Russia’s biggest cyber focus in 2023. Retrieved March 1, 2024.",
+     "url": "https://blog.google/threat-analysis-group/ukraine-remains-russias-biggest-cyber-focus-in-2023/"
+    },
+    {
+     "source_name": "US District Court Indictment GRU Oct 2018",
+     "description": "Brady, S . (2018, October 3). Indictment - United States vs Aleksei Sergeyevich Morenets, et al.. Retrieved October 1, 2020.",
+     "url": "https://www.justice.gov/opa/page/file/1098481/download"
+    },
+    {
+     "source_name": "Dragos ELECTRUM",
+     "description": "Dragos. (2017, January 1). ELECTRUM Threat Profile. Retrieved June 10, 2020.",
+     "url": "https://www.dragos.com/resource/electrum/"
+    },
+    {
+     "source_name": "F-Secure BlackEnergy 2014",
+     "description": "F-Secure Labs. (2014). BlackEnergy & Quedagh: The convergence of crimeware and APT attacks. Retrieved March 24, 2016.",
+     "url": "https://blog-assets.f-secure.com/wp-content/uploads/2019/10/15163408/BlackEnergy_Quedagh.pdf"
+    },
+    {
+     "source_name": "iSIGHT Sandworm 2014",
+     "description": "Hultquist, J.. (2016, January 7). Sandworm Team and the Ukrainian Power Authority Attacks. Retrieved October 6, 2017.",
+     "url": "https://www.fireeye.com/blog/threat-research/2016/01/ukraine-and-sandworm-team.html"
+    },
+    {
+     "source_name": "CrowdStrike VOODOO BEAR",
+     "description": "Meyers, A. (2018, January 19). Meet CrowdStrike’s Adversary of the Month for January: VOODOO BEAR. Retrieved May 22, 2018.",
+     "url": "https://www.crowdstrike.com/blog/meet-crowdstrikes-adversary-of-the-month-for-january-voodoo-bear/"
+    },
+    {
+     "source_name": "Microsoft Threat Actor Naming July 2023",
+     "description": "Microsoft . (2023, July 12). How Microsoft names threat actors. Retrieved November 17, 2023.",
+     "url": "https://learn.microsoft.com/en-us/microsoft-365/security/intelligence/microsoft-threat-actor-naming?view=o365-worldwide"
+    },
+    {
+     "source_name": "Microsoft Prestige ransomware October 2022",
+     "description": "MSTIC. (2022, October 14). New “Prestige” ransomware impacts organizations in Ukraine and Poland. Retrieved January 19, 2023.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2022/10/14/new-prestige-ransomware-impacts-organizations-in-ukraine-and-poland/"
+    },
+    {
+     "source_name": "InfoSecurity Sandworm Oct 2014",
+     "description": "Muncaster, P.. (2014, October 14). Microsoft Zero Day Traced to Russian ‘Sandworm’ Hackers. Retrieved October 6, 2017.",
+     "url": "https://www.infosecurity-magazine.com/news/microsoft-zero-day-traced-russian/"
+    },
+    {
+     "source_name": "NCSC Sandworm Feb 2020",
+     "description": "NCSC. (2020, February 20). NCSC supports US advisory regarding GRU intrusion set Sandworm. Retrieved June 10, 2020.",
+     "url": "https://www.ncsc.gov.uk/news/ncsc-supports-sandworm-advisory"
+    },
+    {
+     "source_name": "USDOJ Sandworm Feb 2020",
+     "description": "Pompeo, M. (2020, February 20). The United States Condemns Russian Cyber Attack Against the Country of Georgia. Retrieved September 12, 2024.",
+     "url": "https://2017-2021.state.gov/the-united-states-condemns-russian-cyber-attack-against-the-country-of-georgia/index.html"
+    },
+    {
+     "source_name": "mandiant_apt44_unearthing_sandworm",
+     "description": "Roncone, G. et al. (n.d.). APT44: Unearthing Sandworm. Retrieved July 11, 2024.",
+     "url": "https://services.google.com/fh/files/misc/apt44-unearthing-sandworm.pdf"
+    },
+    {
+     "source_name": "US District Court Indictment GRU Unit 74455 October 2020",
+     "description": "Scott W. Brady. (2020, October 15). United States vs. Yuriy Sergeyevich Andrienko et al.. Retrieved November 25, 2020.",
+     "url": "https://www.justice.gov/opa/press-release/file/1328521/download"
+    },
+    {
+     "source_name": "Secureworks IRON VIKING ",
+     "description": "Secureworks. (2020, May 1). IRON VIKING Threat Profile. Retrieved June 10, 2020.",
+     "url": "https://www.secureworks.com/research/threat-profiles/iron-viking"
+    },
+    {
+     "source_name": "UK NCSC Olympic Attacks October 2020",
+     "description": "UK NCSC. (2020, October 19). UK exposes series of Russian cyber attacks against Olympic and Paralympic Games . Retrieved November 30, 2020.",
+     "url": "https://www.gov.uk/government/news/uk-exposes-series-of-russian-cyber-attacks-against-olympic-and-paralympic-games"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:32.342Z",
+   "name": "Sandworm Team",
+   "description": "[Sandworm Team](https://attack.mitre.org/groups/G0034) is a destructive threat group that has been attributed to Russia's General Staff Main Intelligence Directorate (GRU) Main Center for Special Technologies (GTsST) military unit 74455.(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020) This group has been active since at least 2009.(Citation: iSIGHT Sandworm 2014)(Citation: CrowdStrike VOODOO BEAR)(Citation: USDOJ Sandworm Feb 2020)(Citation: NCSC Sandworm Feb 2020)\n\nIn October 2020, the US indicted six GRU Unit 74455 officers associated with [Sandworm Team](https://attack.mitre.org/groups/G0034) for the following cyber operations: the 2015 and 2016 attacks against Ukrainian electrical companies and government organizations, the 2017 worldwide [NotPetya](https://attack.mitre.org/software/S0368) attack, targeting of the 2017 French presidential campaign, the 2018 [Olympic Destroyer](https://attack.mitre.org/software/S0365) attack against the Winter Olympic Games, the 2018 operation against the Organisation for the Prohibition of Chemical Weapons, and attacks against the country of Georgia in 2018 and 2019.(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020) Some of these were conducted with the assistance of GRU Unit 26165, which is also referred to as [APT28](https://attack.mitre.org/groups/G0007).(Citation: US District Court Indictment GRU Oct 2018)",
+   "aliases": [
+    "Sandworm Team",
+    "ELECTRUM",
+    "Telebots",
+    "IRON VIKING",
+    "BlackEnergy (Group)",
+    "Quedagh",
+    "Voodoo Bear",
+    "IRIDIUM",
+    "Seashell Blizzard",
+    "FROZENBARENTS",
+    "APT44"
+   ],
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack",
+    "mobile-attack"
+   ],
+   "x_mitre_version": "4.2",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Dragos Threat Intelligence",
+    "Hakan KARABACAK"
+   ]
+  },
+  {
+   "type": "malware",
+   "spec_version": "2.1",
+   "id": "malware--6a0d0ea9-b2c4-43fe-a552-ac41a3009dc5",
+   "created": "2023-03-30T19:20:45.556Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S1072",
+     "external_id": "S1072"
+    },
+    {
+     "source_name": "Industroyer2 Blackhat ESET",
+     "description": "Anton Cherepanov, Robert Lipovsky. (2022, August). Industroyer2: Sandworm's Cyberwarfare Targets Ukraine's Power Grid. Retrieved April 6, 2023.",
+     "url": "https://www.youtube.com/watch?v=xC9iM5wVedQ"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-04-16T20:38:14.728Z",
+   "name": "Industroyer2",
+   "description": "[Industroyer2](https://attack.mitre.org/software/S1072) is a compiled and static piece of malware that has the ability to communicate over the IEC-104 protocol. It is similar to the IEC-104 module found in [Industroyer](https://attack.mitre.org/software/S0604). Security researchers assess that [Industroyer2](https://attack.mitre.org/software/S1072) was designed to cause impact to high-voltage electrical substations. The initial [Industroyer2](https://attack.mitre.org/software/S1072) sample was compiled on 03/23/2022 and scheduled to execute on 04/08/2022, however it was discovered before deploying, resulting in no impact.(Citation: Industroyer2 Blackhat ESET)",
+   "is_family": true,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Field Controller/RTU/PLC/IED",
+    "Engineering Workstation"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack",
+    "enterprise-attack"
+   ],
+   "x_mitre_version": "1.0",
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_aliases": [
+    "Industroyer2"
+   ]
+  },
+  {
+   "type": "relationship",
+   "spec_version": "2.1",
+   "id": "relationship--7185fe1c-1565-4175-bc7e-539ff704f4cb",
+   "created": "2017-12-14T16:46:06.044Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "Savill 1999",
+     "description": "Savill, J. (1999, March 4). Net.exe reference. Retrieved September 22, 2015.",
+     "url": "https://web.archive.org/web/20150511162820/http://windowsitpro.com/windows/netexe-reference"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-04-29T14:23:06.080Z",
+   "description": "The <code>net user username \\password</code> commands in [Net](https://attack.mitre.org/software/S0039) can be used to create a local account.(Citation: Savill 1999)",
+   "relationship_type": "uses",
+   "source_ref": "tool--03342581-f790-4f03-ba41-e82e67392e23",
+   "target_ref": "attack-pattern--635cbe30-392d-4e27-978e-66774357c762",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_attack_spec_version": "3.3.0"
+  }
+ ],
+ "ics": [
+  {
+   "type": "intrusion-set",
+   "spec_version": "2.1",
+   "id": "intrusion-set--381fcf73-60f6-4ab2-9991-6af3cbc35192",
+   "created": "2017-05-31T21:32:04.588Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/groups/G0034",
+     "external_id": "G0034"
+    },
+    {
+     "source_name": "Voodoo Bear",
+     "description": "(Citation: CrowdStrike VOODOO BEAR)(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "ELECTRUM",
+     "description": "(Citation: Dragos ELECTRUM)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Sandworm Team",
+     "description": "(Citation: iSIGHT Sandworm 2014) (Citation: F-Secure BlackEnergy 2014) (Citation: InfoSecurity Sandworm Oct 2014)(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Quedagh",
+     "description": "(Citation: iSIGHT Sandworm 2014) (Citation: F-Secure BlackEnergy 2014)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "FROZENBARENTS",
+     "description": "(Citation: Leonard TAG 2023)"
+    },
+    {
+     "source_name": "APT44",
+     "description": "(Citation: mandiant_apt44_unearthing_sandworm)"
+    },
+    {
+     "source_name": "IRIDIUM",
+     "description": "(Citation: Microsoft Prestige ransomware October 2022)"
+    },
+    {
+     "source_name": "Seashell Blizzard",
+     "description": "(Citation: Microsoft Threat Actor Naming July 2023)"
+    },
+    {
+     "source_name": "BlackEnergy (Group)",
+     "description": "(Citation: NCSC Sandworm Feb 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Telebots",
+     "description": "(Citation: NCSC Sandworm Feb 2020)(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "IRON VIKING",
+     "description": "(Citation: Secureworks IRON VIKING )(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020)"
+    },
+    {
+     "source_name": "Leonard TAG 2023",
+     "description": "Billy Leonard. (2023, April 19). Ukraine remains Russia’s biggest cyber focus in 2023. Retrieved March 1, 2024.",
+     "url": "https://blog.google/threat-analysis-group/ukraine-remains-russias-biggest-cyber-focus-in-2023/"
+    },
+    {
+     "source_name": "US District Court Indictment GRU Oct 2018",
+     "description": "Brady, S . (2018, October 3). Indictment - United States vs Aleksei Sergeyevich Morenets, et al.. Retrieved October 1, 2020.",
+     "url": "https://www.justice.gov/opa/page/file/1098481/download"
+    },
+    {
+     "source_name": "Dragos ELECTRUM",
+     "description": "Dragos. (2017, January 1). ELECTRUM Threat Profile. Retrieved June 10, 2020.",
+     "url": "https://www.dragos.com/resource/electrum/"
+    },
+    {
+     "source_name": "F-Secure BlackEnergy 2014",
+     "description": "F-Secure Labs. (2014). BlackEnergy & Quedagh: The convergence of crimeware and APT attacks. Retrieved March 24, 2016.",
+     "url": "https://blog-assets.f-secure.com/wp-content/uploads/2019/10/15163408/BlackEnergy_Quedagh.pdf"
+    },
+    {
+     "source_name": "iSIGHT Sandworm 2014",
+     "description": "Hultquist, J.. (2016, January 7). Sandworm Team and the Ukrainian Power Authority Attacks. Retrieved October 6, 2017.",
+     "url": "https://www.fireeye.com/blog/threat-research/2016/01/ukraine-and-sandworm-team.html"
+    },
+    {
+     "source_name": "CrowdStrike VOODOO BEAR",
+     "description": "Meyers, A. (2018, January 19). Meet CrowdStrike’s Adversary of the Month for January: VOODOO BEAR. Retrieved May 22, 2018.",
+     "url": "https://www.crowdstrike.com/blog/meet-crowdstrikes-adversary-of-the-month-for-january-voodoo-bear/"
+    },
+    {
+     "source_name": "Microsoft Threat Actor Naming July 2023",
+     "description": "Microsoft . (2023, July 12). How Microsoft names threat actors. Retrieved November 17, 2023.",
+     "url": "https://learn.microsoft.com/en-us/microsoft-365/security/intelligence/microsoft-threat-actor-naming?view=o365-worldwide"
+    },
+    {
+     "source_name": "Microsoft Prestige ransomware October 2022",
+     "description": "MSTIC. (2022, October 14). New “Prestige” ransomware impacts organizations in Ukraine and Poland. Retrieved January 19, 2023.",
+     "url": "https://www.microsoft.com/en-us/security/blog/2022/10/14/new-prestige-ransomware-impacts-organizations-in-ukraine-and-poland/"
+    },
+    {
+     "source_name": "InfoSecurity Sandworm Oct 2014",
+     "description": "Muncaster, P.. (2014, October 14). Microsoft Zero Day Traced to Russian ‘Sandworm’ Hackers. Retrieved October 6, 2017.",
+     "url": "https://www.infosecurity-magazine.com/news/microsoft-zero-day-traced-russian/"
+    },
+    {
+     "source_name": "NCSC Sandworm Feb 2020",
+     "description": "NCSC. (2020, February 20). NCSC supports US advisory regarding GRU intrusion set Sandworm. Retrieved June 10, 2020.",
+     "url": "https://www.ncsc.gov.uk/news/ncsc-supports-sandworm-advisory"
+    },
+    {
+     "source_name": "USDOJ Sandworm Feb 2020",
+     "description": "Pompeo, M. (2020, February 20). The United States Condemns Russian Cyber Attack Against the Country of Georgia. Retrieved September 12, 2024.",
+     "url": "https://2017-2021.state.gov/the-united-states-condemns-russian-cyber-attack-against-the-country-of-georgia/index.html"
+    },
+    {
+     "source_name": "mandiant_apt44_unearthing_sandworm",
+     "description": "Roncone, G. et al. (n.d.). APT44: Unearthing Sandworm. Retrieved July 11, 2024.",
+     "url": "https://services.google.com/fh/files/misc/apt44-unearthing-sandworm.pdf"
+    },
+    {
+     "source_name": "US District Court Indictment GRU Unit 74455 October 2020",
+     "description": "Scott W. Brady. (2020, October 15). United States vs. Yuriy Sergeyevich Andrienko et al.. Retrieved November 25, 2020.",
+     "url": "https://www.justice.gov/opa/press-release/file/1328521/download"
+    },
+    {
+     "source_name": "Secureworks IRON VIKING ",
+     "description": "Secureworks. (2020, May 1). IRON VIKING Threat Profile. Retrieved June 10, 2020.",
+     "url": "https://www.secureworks.com/research/threat-profiles/iron-viking"
+    },
+    {
+     "source_name": "UK NCSC Olympic Attacks October 2020",
+     "description": "UK NCSC. (2020, October 19). UK exposes series of Russian cyber attacks against Olympic and Paralympic Games . Retrieved November 30, 2020.",
+     "url": "https://www.gov.uk/government/news/uk-exposes-series-of-russian-cyber-attacks-against-olympic-and-paralympic-games"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-07-31T20:48:32.342Z",
+   "name": "Sandworm Team",
+   "description": "[Sandworm Team](https://attack.mitre.org/groups/G0034) is a destructive threat group that has been attributed to Russia's General Staff Main Intelligence Directorate (GRU) Main Center for Special Technologies (GTsST) military unit 74455.(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020) This group has been active since at least 2009.(Citation: iSIGHT Sandworm 2014)(Citation: CrowdStrike VOODOO BEAR)(Citation: USDOJ Sandworm Feb 2020)(Citation: NCSC Sandworm Feb 2020)\n\nIn October 2020, the US indicted six GRU Unit 74455 officers associated with [Sandworm Team](https://attack.mitre.org/groups/G0034) for the following cyber operations: the 2015 and 2016 attacks against Ukrainian electrical companies and government organizations, the 2017 worldwide [NotPetya](https://attack.mitre.org/software/S0368) attack, targeting of the 2017 French presidential campaign, the 2018 [Olympic Destroyer](https://attack.mitre.org/software/S0365) attack against the Winter Olympic Games, the 2018 operation against the Organisation for the Prohibition of Chemical Weapons, and attacks against the country of Georgia in 2018 and 2019.(Citation: US District Court Indictment GRU Unit 74455 October 2020)(Citation: UK NCSC Olympic Attacks October 2020) Some of these were conducted with the assistance of GRU Unit 26165, which is also referred to as [APT28](https://attack.mitre.org/groups/G0007).(Citation: US District Court Indictment GRU Oct 2018)",
+   "aliases": [
+    "Sandworm Team",
+    "ELECTRUM",
+    "Telebots",
+    "IRON VIKING",
+    "BlackEnergy (Group)",
+    "Quedagh",
+    "Voodoo Bear",
+    "IRIDIUM",
+    "Seashell Blizzard",
+    "FROZENBARENTS",
+    "APT44"
+   ],
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "enterprise-attack",
+    "ics-attack",
+    "mobile-attack"
+   ],
+   "x_mitre_version": "4.2",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_contributors": [
+    "Dragos Threat Intelligence",
+    "Hakan KARABACAK"
+   ]
+  },
+  {
+   "type": "malware",
+   "spec_version": "2.1",
+   "id": "malware--6a0d0ea9-b2c4-43fe-a552-ac41a3009dc5",
+   "created": "2023-03-30T19:20:45.556Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S1072",
+     "external_id": "S1072"
+    },
+    {
+     "source_name": "Industroyer2 Blackhat ESET",
+     "description": "Anton Cherepanov, Robert Lipovsky. (2022, August). Industroyer2: Sandworm's Cyberwarfare Targets Ukraine's Power Grid. Retrieved April 6, 2023.",
+     "url": "https://www.youtube.com/watch?v=xC9iM5wVedQ"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-04-16T20:38:14.728Z",
+   "name": "Industroyer2",
+   "description": "[Industroyer2](https://attack.mitre.org/software/S1072) is a compiled and static piece of malware that has the ability to communicate over the IEC-104 protocol. It is similar to the IEC-104 module found in [Industroyer](https://attack.mitre.org/software/S0604). Security researchers assess that [Industroyer2](https://attack.mitre.org/software/S1072) was designed to cause impact to high-voltage electrical substations. The initial [Industroyer2](https://attack.mitre.org/software/S1072) sample was compiled on 03/23/2022 and scheduled to execute on 04/08/2022, however it was discovered before deploying, resulting in no impact.(Citation: Industroyer2 Blackhat ESET)",
+   "is_family": true,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Field Controller/RTU/PLC/IED",
+    "Engineering Workstation"
+   ],
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack",
+    "enterprise-attack"
+   ],
+   "x_mitre_version": "1.0",
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_aliases": [
+    "Industroyer2"
+   ]
+  },
+  {
+   "type": "x-mitre-tactic",
+   "spec_version": "2.1",
+   "id": "x-mitre-tactic--77542f83-70d0-40c2-8a9d-ad2eb8b00279",
+   "created": "2019-03-14T18:44:44.639Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/tactics/TA0105",
+     "external_id": "TA0105"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-04-16T21:26:21.936Z",
+   "name": "Impact",
+   "description": "The adversary is trying to manipulate, interrupt, or destroy your ICS systems, data, and their surrounding environment.\n\nImpact consists of techniques that adversaries use to disrupt, compromise, destroy, and manipulate the integrity and availability of control system operations, processes, devices, and data. These techniques encompass the influence and effects resulting from adversarial efforts to attack the ICS environment or that tangentially impact it. Impact techniques can result in more instantaneous disruption to control processes and the operator, or may result in more long term damage or loss to the ICS environment and related operations. The adversary may leverage [Impair Process Control](https://attack.mitre.org/tactics/TA0106) techniques, which often manifest in more self-revealing impacts on operations, or [Impair Process Control](https://attack.mitre.org/tactics/TA0106) techniques to hinder safeguards and alarms in order to follow through with and provide cover for Impact. In some scenarios, control system processes can appear to function as expected, but may have been altered to benefit the adversary’s goal over the course of a longer duration. These techniques might be used by adversaries to follow through on their end goal or to provide cover for a confidentiality breach.\n\n[Loss of Productivity and Revenue](https://attack.mitre.org/techniques/T0828), [Theft of Operational Information](https://attack.mitre.org/techniques/T0882), and [Damage to Property](https://attack.mitre.org/techniques/T0879) are meant to encompass some of the more granular goals of adversaries in targeted and untargeted attacks. These techniques in and of themselves are not necessarily detectable, but the associated adversary behavior can potentially be mitigated and/or detected.",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.0",
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_shortname": "impact"
+  }
+ ],
+ "galaxy_clusters": {
+  "Create Account - T1136": [
+   {
+    "galaxy": "mitre-attack-pattern",
+    "tag_name": "misp-galaxy:mitre-attack-pattern=\"Create Account - T1136\"",
+    "uuid": "e01be9c5-e763-4caf-aeb7-000b416aef67",
+    "description_length": 530
+   }
+  ],
+  "Empire - S0363": [
+   {
+    "galaxy": "mitre-tool",
+    "tag_name": "misp-galaxy:mitre-tool=\"Empire - S0363\"",
+    "uuid": "3433a9e8-1c47-4320-b9bf-ed449061d1c3",
+    "description_length": 648
+   }
+  ],
+  "Industroyer2 - S1072": [
+   {
+    "galaxy": "mitre-malware",
+    "tag_name": "misp-galaxy:mitre-malware=\"Industroyer2 - S1072\"",
+    "uuid": "6a0d0ea9-b2c4-43fe-a552-ac41a3009dc5",
+    "description_length": 667
+   }
+  ],
+  "Local Account - T1136.001": [
+   {
+    "galaxy": "mitre-attack-pattern",
+    "tag_name": "misp-galaxy:mitre-attack-pattern=\"Local Account - T1136.001\"",
+    "uuid": "635cbe30-392d-4e27-978e-66774357c762",
+    "description_length": 1329
+   }
+  ],
+  "Net - S0039": [
+   {
+    "galaxy": "mitre-tool",
+    "tag_name": "misp-galaxy:mitre-tool=\"Net - S0039\"",
+    "uuid": "03342581-f790-4f03-ba41-e82e67392e23",
+    "description_length": 771
+   }
+  ],
+  "SIP and Trust Provider Hijacking - T1553.003": [
+   {
+    "galaxy": "mitre-attack-pattern",
+    "tag_name": "misp-galaxy:mitre-attack-pattern=\"SIP and Trust Provider Hijacking - T1553.003\"",
+    "uuid": "543fceb5-cb92-40cb-aacf-6913d4db58bc",
+    "description_length": 4680
+   }
+  ],
+  "Sandworm Team - G0034": [
+   {
+    "galaxy": "mitre-intrusion-set",
+    "tag_name": "misp-galaxy:mitre-intrusion-set=\"Sandworm Team - G0034\"",
+    "uuid": "381fcf73-60f6-4ab2-9991-6af3cbc35192",
+    "description_length": 1503
+   }
+  ],
+  "Supply Chain Compromise - T1195": [
+   {
+    "galaxy": "mitre-attack-pattern",
+    "tag_name": "misp-galaxy:mitre-attack-pattern=\"Supply Chain Compromise - T1195\"",
+    "uuid": "3f18edba-28f4-4bb9-82c3-8aa60dcac5f7",
+    "description_length": 1876
+   }
+  ]
+ }
+}
