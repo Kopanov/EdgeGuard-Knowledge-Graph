@@ -156,11 +156,17 @@ class TestRevisions:
         assert status["success"] and status["failed"] == 0
         update = status["kev_update"]
         assert (update["updated"], update["added"], update["unchanged"], update["deferred"]) == (2, 0, 0, 0)
-        assert update["changed_keys"] == {OLD_FLIP: ["known_ransomware_use"], TEXT: ["description"]}
+        # The 2026-05-22 catalogue has no ``forensicTriage``; CISA added it to every entry before 2026-09-16
+        # ("No" for both), and NVD_META holds it since 2026-11-07, so it is one of the changed keys.
+        assert update["changed_keys"] == {
+            OLD_FLIP: ["cisa_forensic_triage", "known_ransomware_use"],
+            TEXT: ["cisa_forensic_triage", "description"],
+        }
+        assert meta(misp.by_value(OLD_FLIP))["cisa_forensic_triage"] == "No"
         old = misp.by_value(OLD_FLIP)
         assert (
-            f"[KEV-UPDATE] {OLD_FLIP} attribute {old['uuid']} event {old['event_id']}: known_ransomware_use; tags +ransomware:known"
-            in caplog.text
+            f"[KEV-UPDATE] {OLD_FLIP} attribute {old['uuid']} event {old['event_id']}: "
+            "cisa_forensic_triage, known_ransomware_use; tags +ransomware:known" in caplog.text
         )
 
     def test_the_month_to_2026_10_16_two_revisions_and_two_new_entries(self, env):
@@ -176,7 +182,12 @@ class TestRevisions:
         update = status["kev_update"]
         assert (update["catalogue"], update["scope"]) == (7, 7)
         assert (update["added"], update["updated"], update["unchanged"], update["failed"]) == (2, 2, 3, 0)
-        assert update["changed_keys"] == {DUE: ["cisa_action_due"], FLIP: ["known_ransomware_use"]}
+        # CISA also set the forensic-triage flag of CVE-2022-0995 from "No" to "Yes" on 2026-10-16 (BOD 26-04).
+        assert update["changed_keys"] == {
+            DUE: ["cisa_action_due", "cisa_forensic_triage"],
+            FLIP: ["known_ransomware_use"],
+        }
+        assert meta(misp.by_value(DUE))["cisa_forensic_triage"] == "Yes"
         assert update["catalogue_version"] is None, "set by the real download only"
         assert status["count"] == 4 and status["success"]
 
@@ -234,8 +245,17 @@ class TestRevisions:
             ("severity:high", True),
             ("severity:unknown", False),
         ]
+        # The copy also predates the KEV keys of 2026-11-07 (notes, CWE ids and names, forensic triage).
         assert status["kev_update"]["changed_keys"] == {
-            "CVE-2025-21042": ["cisa_known_ransomware_use", "known_ransomware_use"]
+            "CVE-2025-21042": [
+                "cisa_cwes",
+                "cisa_forensic_triage",
+                "cisa_known_ransomware_use",
+                "cisa_notes",
+                "cwe_names",
+                "cwe_names_version",
+                "known_ransomware_use",
+            ]
         }
         misp.posts.clear()
         run(misp, catalogue("2026-10-16", "CVE-2025-21042"))

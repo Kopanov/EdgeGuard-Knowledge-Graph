@@ -84,6 +84,7 @@ from config import (
     resolve_collection_limit,
 )
 from cvss_selection import cvss_attack_vector, select_cvss, select_cvss_payload
+from cwe_names import item_fields as cwe_name_fields
 
 # Import resilience utilities
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
@@ -258,6 +259,144 @@ def cisa_ssvc(metrics: Any) -> Optional[Dict[str, str]]:
         if best is None or out.get("timestamp", "") > best.get("timestamp", ""):
             best = out
     return best
+
+
+# 2026-11-07: the source facts of an NVD record that MISP holds in ``NVD_META`` for the sync to lift later.
+# A reference URL longer than this is left out, never cut (a cut URL is a broken link): the CVE record format
+# allows 2,048 characters.
+MAX_REFERENCE_URL_CHARS = 2048
+# NVD's reference tags are short labels ("Exploit", "Vendor Advisory", "Issue Tracking").
+MAX_REFERENCE_TAG_CHARS = 64
+# The CNA's vendor / product pairs (``affected[].affectedData[]``): at most 20 pairs; a name longer than this is
+# left out, never cut.
+MAX_AFFECTED_PAIRS = 20
+MAX_AFFECTED_NAME_CHARS = 256
+# Values a CNA writes where it names no vendor or product ("n/a" on 554 of 1,000 KEV-page records).
+AFFECTED_PLACEHOLDERS = frozenset({"n/a", "unknown", "*", "-"})
+# NVD's analysis states ("Analyzed", "Awaiting Analysis", "Deferred", ...) are short.
+MAX_VULN_STATUS_CHARS = 32
+# Who scored a CVSS metric (an e-mail or a UUID) and its type ("Primary" for NVD, "Secondary" otherwise).
+MAX_SCORED_BY_CHARS = 128
+MAX_SCORE_TYPE_CHARS = 32
+# The CVSS payload keys of the item (``NVD_META``) and the NVD metric lists they are read from.
+CVSS_METRIC_KEYS = (
+    ("cvss_v40_data", "cvssMetricV40"),
+    ("cvss_v31_data", "cvssMetricV31"),
+    ("cvss_v30_data", "cvssMetricV30"),
+    ("cvss_v2_data", "cvssMetricV2"),
+)
+
+
+def nvd_references(cve_data: Any) -> List[Dict[str, Any]]:
+    """The record's references with their NVD tags, each URL once (2026-11-07).
+
+    ``[{"url": ..., "tags": [...]}]`` in NVD's order. NVD lists a URL once per source that contributed it
+    (CVE-2024-3400: 9 references, 5 URLs), so a URL listed again adds only the tags it did not have yet; ``tags``
+    is left out when no source tagged the URL. A URL longer than ``MAX_REFERENCE_URL_CHARS`` is left out, never
+    cut; a tag that is not a short string is left out. Malformed shapes are ignored; never raises.
+    """
+    out: Dict[str, List[str]] = {}
+    refs = cve_data.get("references") if isinstance(cve_data, dict) else None
+    for ref in refs if isinstance(refs, list) else []:
+        if not isinstance(ref, dict):
+            continue
+        url = ref.get("url")
+        if not isinstance(url, str) or not url.strip() or len(url.strip()) > MAX_REFERENCE_URL_CHARS:
+            continue
+        tags = out.setdefault(url.strip(), [])
+        for tag in ref.get("tags") if isinstance(ref.get("tags"), list) else []:
+            if isinstance(tag, str) and tag.strip() and len(tag.strip()) <= MAX_REFERENCE_TAG_CHARS:
+                if tag.strip() not in tags:
+                    tags.append(tag.strip())
+    return [{"url": url, "tags": tags} if tags else {"url": url} for url, tags in out.items()]
+
+
+def _affected_name(value: Any) -> str:
+    """A CNA's vendor or product name as ``nvd_affected`` keeps it: as the CNA wrote it, trimmed; ``""`` for a
+    placeholder (``AFFECTED_PLACEHOLDERS``), a name longer than ``MAX_AFFECTED_NAME_CHARS`` or a value that is no
+    string."""
+    if not isinstance(value, str):
+        return ""
+    name = value.strip()
+    if name.lower() in AFFECTED_PLACEHOLDERS or len(name) > MAX_AFFECTED_NAME_CHARS:
+        return ""
+    return name
+
+
+def nvd_affected(cve_data: Any) -> List[Dict[str, str]]:
+    """The CNA's vendor / product pairs of an NVD record (``affected[].affectedData[]``, 2026-11-07).
+
+    Only the entries the CNA itself wrote, those whose ``source`` is the record's ``sourceIdentifier``: an ADP
+    container (CISA-ADP) lists the same products again in CPE words. A placeholder (``n/a``, ``Unknown``, ``*``,
+    ``-``, any case) or an overlong name counts as no name: a pair keeps the name it has (``{"product": ...}``)
+    and is left out when it has none. Each pair once, in the CNA's order, at most ``MAX_AFFECTED_PAIRS``.
+    The version ranges stay out (MISP holds NVD's CPE ranges in ``version_constraints``). Never raises.
+    """
+    if not isinstance(cve_data, dict):
+        return []
+    cna = cve_data.get("sourceIdentifier")
+    out: List[Dict[str, str]] = []
+    entries = cve_data.get("affected")
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or not cna or entry.get("source") != cna:
+            continue
+        data = entry.get("affectedData")
+        for product in data if isinstance(data, list) else []:
+            if not isinstance(product, dict):
+                continue
+            pair = {
+                key: name
+                for key, name in (
+                    ("vendor", _affected_name(product.get("vendor"))),
+                    ("product", _affected_name(product.get("product"))),
+                )
+                if name
+            }
+            if pair and pair not in out:
+                out.append(pair)
+            if len(out) >= MAX_AFFECTED_PAIRS:
+                return out
+    return out
+
+
+def nvd_cvss_scorers(metrics: Any) -> Dict[str, Dict[str, str]]:
+    """Who scored each CVSS payload of the item and how (2026-11-07).
+
+    The collector reads the first metric NVD lists for each CVSS version; this names its ``source`` (an e-mail
+    or a UUID: ``nvd@nist.gov``, a CNA's PSIRT, CISA-ADP) as ``scored_by`` and its ``type`` (``Primary``: NVD's
+    own score; ``Secondary``: another scorer's) as ``score_type``, keyed by the payload key
+    (``{"cvss_v31_data": {"scored_by": ..., "score_type": ...}}``). A version without a metric, or whose first
+    metric names neither, has no entry. The first-listed v3.1 metric is the CNA's on 88% of recent records; the
+    score keeps that choice, and these keys say whose it is. Never raises.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    if not isinstance(metrics, dict):
+        return out
+    for payload_key, metric_key in CVSS_METRIC_KEYS:
+        entries = metrics.get(metric_key)
+        first = entries[0] if isinstance(entries, list) and entries else None
+        if not isinstance(first, dict):
+            continue
+        scorer = {
+            key: value.strip()
+            for key, value, limit in (
+                ("scored_by", first.get("source"), MAX_SCORED_BY_CHARS),
+                ("score_type", first.get("type"), MAX_SCORE_TYPE_CHARS),
+            )
+            if isinstance(value, str) and value.strip() and len(value.strip()) <= limit
+        }
+        if scorer:
+            out[payload_key] = scorer
+    return out
+
+
+def nvd_vuln_status(cve_data: Any) -> str:
+    """NVD's analysis state of the record (``vulnStatus``: ``Analyzed``, ``Deferred``, ...), ``""`` when it
+    has none or an overlong one (2026-11-07). The item's ``status`` keeps ResilMesh's ``active`` / ``rejected``."""
+    value = cve_data.get("vulnStatus") if isinstance(cve_data, dict) else None
+    if not isinstance(value, str) or len(value.strip()) > MAX_VULN_STATUS_CHARS:
+        return ""
+    return value.strip()
 
 
 def configurations_to_zone_text(configurations: Optional[List[Any]]) -> str:
@@ -1305,7 +1444,9 @@ class NVDCollector:
         return {
             "type": "vulnerability",
             "cve_id": cve_id,
-            "description": description[:1000],
+            # 2026-11-07: the whole text (it was cut at 1,000 characters here, mid-word, so MISP never held the
+            # rest). MISP holds what the source gives; the sync caps what the graph holds (``text_caps``).
+            "description": description,
             "status": vuln_status,
             "zone": sectors,
             "tag": self.tag,
@@ -1360,6 +1501,14 @@ class NVDCollector:
             "version_constraints": version_constraints,
             # 2026-10: CISA's SSVC decision points (``cisa_ssvc``), None when the record has none
             "ssvc": cisa_ssvc(metrics),
+            # 2026-11-07: source facts MISP holds in NVD_META (the sync does not read them yet): NVD's analysis
+            # state, every reference with its tags, the CNA's vendor / product pairs, who scored each CVSS
+            # payload, and the names of the CWE ids (``cwe_names``, from the pinned MITRE list).
+            "nvd_vuln_status": nvd_vuln_status(cve_data),
+            "references": nvd_references(cve_data),
+            "affected": nvd_affected(cve_data),
+            "cvss_scorers": nvd_cvss_scorers(metrics),
+            **cwe_name_fields(cwe_list),
         }
 
     def collect(

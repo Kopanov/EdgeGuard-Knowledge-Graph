@@ -1076,7 +1076,7 @@ class KnownAttribute(NamedTuple):
 _NVD_META_PREFIX = "NVD_META:"
 # ``NVD_META`` lists whose order carries no meaning. They are compared sorted: before 2026-10 the
 # NVD collector built them from sets, so a stored copy can list the same values in another order.
-_NVD_META_UNORDERED_KEYS = ("cwe", "ref_tags", "cpe_type", "affected_products")
+_NVD_META_UNORDERED_KEYS = ("cwe", "ref_tags", "cpe_type", "affected_products", "cwe_names", "cisa_cwes")
 # Tag families that describe NVD's current score: an update replaces them.
 _REPLACED_VULNERABILITY_TAG_PREFIXES = ("severity:", "cvss:")
 # 2026-10: a KEV edit also replaces the tag ``ransomware:known``, the only ransomware tag EdgeGuard writes.
@@ -1176,6 +1176,262 @@ def _nvd_meta_digest_of_comment(comment: Any) -> Optional[str]:
     """``nvd_meta_digest`` of an attribute comment, or None when it carries no readable ``NVD_META``."""
     meta = nvd_meta_of_comment(comment)
     return nvd_meta_digest(meta) if meta is not None else None
+
+
+# 2026-11-07: the source facts of a CVE record that ``NVD_META`` holds for the sync to lift later (the NVD and KEV
+# collectors' items; ``create_vulnerability_attribute`` writes each key only when the item carries a value). The
+# writer re-checks every value: a value of the wrong shape is left out, and a string over its bound is left out
+# whole, never cut (a cut URL is a broken link, a cut name names something else).
+_MAX_META_REFERENCES = 1000  # every reference of the largest real record (341, 171 URLs) and far more
+_MAX_META_REFERENCE_URL_CHARS = 2048  # the CVE record format's bound
+_MAX_META_REFERENCE_TAGS = 20
+_MAX_META_REFERENCE_TAG_CHARS = 64
+_MAX_META_AFFECTED_PAIRS = 20
+_MAX_META_AFFECTED_NAME_CHARS = 256
+_MAX_META_CWE_NAMES = 50
+_MAX_META_CWE_NAME_CHARS = 300  # "CWE-1234: " and MITRE's longest name (121 characters in CWE 5.0)
+_MAX_META_CWE_IDS = 50
+_MAX_META_CWE_ID_CHARS = 16
+_META_CVSS_PAYLOAD_KEYS = ("cvss_v40_data", "cvss_v31_data", "cvss_v30_data", "cvss_v2_data")
+_META_SHORT_STRINGS = {
+    # key -> the most characters a value holds (NVD's analysis state; KEV's "Yes" / "No"; the CWE version).
+    "nvd_vuln_status": 32,
+    "cisa_forensic_triage": 16,
+    "cwe_names_version": 32,
+}
+_META_SCORER_BOUNDS = (("scored_by", 128), ("score_type", 32))
+# The ``NVD_META`` keys added on 2026-11-07. A copy written before has none of them, so its digest differs from
+# the item's wherever the record carries one: the NVD and KEV update paths edit it once to add them.
+NVD_META_SOURCE_TEXT_KEYS = (
+    "nvd_vuln_status",
+    "references",
+    "affected",
+    "cvss_scorers",
+    "cwe_names",
+    "cwe_names_version",
+    "cisa_notes",
+    "cisa_cwes",
+    "cisa_forensic_triage",
+)
+
+# 2026-11-07: the byte budget of an ``NVD_META`` comment (C8). MISP keeps an attribute comment in a MySQL ``TEXT``
+# column, at most ``MISP_COMMENT_COLUMN_BYTES``: a longer comment is refused under strict SQL and cut otherwise,
+# which breaks the JSON, so the sync would read the CVE without its NVD_META. The column type is taken as MySQL's
+# ``TEXT`` (MISP's schema file was not at hand); the budget is half of it. Every record of NVD's KEV page fits
+# whole (1,769 records on 2026-11-07: median 4,800 bytes, 95th percentile 7,200): the largest, CVE-2023-44487 (292
+# references, 173 URLs), needs 26,598 bytes, CVE-2014-6271 (341 references, 171 URLs) 24,053. The comment is JSON
+# with ``ensure_ascii``, so its bytes are its characters.
+MISP_COMMENT_COLUMN_BYTES = 65_535
+NVD_META_BUDGET_BYTES = 32_768
+# The shrink order of an ``NVD_META`` over its budget (``_fit_nvd_meta``): whole entries of these lists go, never a
+# part of one; ``references`` first, a reference without a tag before one with a tag and one with a key tag
+# (``_KEY_REFERENCE_TAGS``) last, each kind from the end.
+_NVD_META_SHRINK_LISTS = ("references", "affected", "version_constraints", "cwe_names")
+_KEY_REFERENCE_TAGS = frozenset({"Exploit", "Patch", "Vendor Advisory", "Mitigation"})
+# Only when the lists are gone and the comment is still over its budget (no real record comes near: a CVE
+# description holds at most 4,096 characters): the source texts are cut at a word end, logged as an error.
+_NVD_META_SHRINK_TEXTS = ("description", "cisa_notes")
+# What a last-resort shrink keeps whatever their size: the record's identity, dates, scores and status.
+_NVD_META_CORE_KEYS = frozenset(
+    {"published", "last_modified", "description", "status", "cisa_exploit_add", *_META_CVSS_PAYLOAD_KEYS}
+)
+
+
+def _whole_strings(values: Any, max_items: int, max_chars: int) -> List[str]:
+    """The non-empty strings of a list, trimmed, each at most ``max_chars`` (a longer one is left out, never cut),
+    de-duplicated in order, at most ``max_items``; ``[]`` for anything that is not a list."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    out: List[str] = []
+    for value in values:
+        if isinstance(value, str) and value.strip() and len(value.strip()) <= max_chars and value.strip() not in out:
+            out.append(value.strip())
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _meta_short_string(value: Any, max_chars: int) -> str:
+    """``value`` trimmed when it is a string of at most ``max_chars`` characters, else ``""``."""
+    return value.strip() if isinstance(value, str) and len(value.strip()) <= max_chars else ""
+
+
+def _meta_references(values: Any) -> List[Dict[str, Any]]:
+    """``NVD_META.references`` (2026-11-07): ``[{"url", "tags"}]``, each URL once (a URL listed again adds the
+    tags it lacked), ``tags`` left out when there are none, at most ``_MAX_META_REFERENCES``. A URL over
+    ``_MAX_META_REFERENCE_URL_CHARS`` is left out, never cut."""
+    out: Dict[str, List[str]] = {}
+    for value in values if isinstance(values, (list, tuple)) else []:
+        if not isinstance(value, dict):
+            continue
+        url = value.get("url")
+        if not isinstance(url, str) or not url.strip() or len(url.strip()) > _MAX_META_REFERENCE_URL_CHARS:
+            continue
+        if url.strip() not in out and len(out) >= _MAX_META_REFERENCES:
+            continue
+        tags = out.setdefault(url.strip(), [])
+        for tag in _whole_strings(value.get("tags"), _MAX_META_REFERENCE_TAGS, _MAX_META_REFERENCE_TAG_CHARS):
+            if tag not in tags and len(tags) < _MAX_META_REFERENCE_TAGS:
+                tags.append(tag)
+    return [{"url": url, "tags": tags} if tags else {"url": url} for url, tags in out.items()]
+
+
+def _meta_affected(values: Any) -> List[Dict[str, str]]:
+    """``NVD_META.affected`` (2026-11-07): the CNA's ``{"vendor", "product"}`` pairs (a pair may hold one of the
+    two), each once, at most ``_MAX_META_AFFECTED_PAIRS``; a name over ``_MAX_META_AFFECTED_NAME_CHARS`` is left
+    out, never cut."""
+    out: List[Dict[str, str]] = []
+    for value in values if isinstance(values, (list, tuple)) else []:
+        if not isinstance(value, dict):
+            continue
+        pair = {
+            key: value[key].strip()
+            for key in ("vendor", "product")
+            if isinstance(value.get(key), str)
+            and value[key].strip()
+            and len(value[key].strip()) <= _MAX_META_AFFECTED_NAME_CHARS
+        }
+        if pair and pair not in out:
+            out.append(pair)
+        if len(out) >= _MAX_META_AFFECTED_PAIRS:
+            break
+    return out
+
+
+def _meta_cvss_scorers(value: Any) -> Dict[str, Dict[str, str]]:
+    """``NVD_META.cvss_scorers`` (2026-11-07): for each CVSS payload key, ``scored_by`` and ``score_type`` of the
+    metric it was read from, each a string within its bound; a payload key without either has no entry."""
+    out: Dict[str, Dict[str, str]] = {}
+    if not isinstance(value, dict):
+        return out
+    for key in _META_CVSS_PAYLOAD_KEYS:
+        entry = value.get(key)
+        if not isinstance(entry, dict):
+            continue
+        scorer = {
+            name: _meta_short_string(entry.get(name), limit)
+            for name, limit in _META_SCORER_BOUNDS
+            if _meta_short_string(entry.get(name), limit)
+        }
+        if scorer:
+            out[key] = scorer
+    return out
+
+
+def _render_nvd_meta(meta: Dict[str, Any]) -> str:
+    return _NVD_META_PREFIX + json.dumps(meta, default=str)
+
+
+def _comment_bytes(comment: str) -> int:
+    return len(comment.encode("utf-8"))
+
+
+def _reference_drop_order(references: List[Any]) -> List[int]:
+    """The indices of ``references`` in the order ``_fit_nvd_meta`` drops them: those without a tag first, then
+    those whose tags hold no key tag, then those with a key tag (``_KEY_REFERENCE_TAGS``), each kind from the end."""
+
+    def kind(index: int) -> int:
+        entry = references[index]
+        tags = entry.get("tags") if isinstance(entry, dict) else None
+        tags = tags if isinstance(tags, list) else []
+        if not tags:
+            return 0
+        return 2 if _KEY_REFERENCE_TAGS.intersection(t for t in tags if isinstance(t, str)) else 1
+
+    return sorted(range(len(references)), key=lambda i: (kind(i), -i))
+
+
+def _cut_at_word(text: str, max_chars: int) -> str:
+    """``text`` cut to at most ``max_chars`` characters at its last whitespace (the last resort of
+    ``_fit_nvd_meta`` only)."""
+    if len(text) <= max_chars:
+        return text
+    head = text[: max_chars + 1]
+    space = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
+    return (head[:space] if space > 0 else text[:max_chars]).rstrip()
+
+
+def _fit_nvd_meta(meta: Dict[str, Any], budget: int = NVD_META_BUDGET_BYTES, ref: str = "") -> str:
+    """``"NVD_META:" + json.dumps(meta)`` within ``budget`` bytes, the JSON always intact (C8, 2026-11-07).
+
+    Over the budget, whole entries of the lists in ``_NVD_META_SHRINK_LISTS`` go, list by list, as few as make the
+    comment fit (``references`` in ``_reference_drop_order``, the others from the end); a URL or a name is dropped
+    whole, never cut, and ``cwe_names_version`` goes with the last CWE name. Only when every such list is gone and
+    the comment is still over the budget (no real record comes near) are the source texts cut at a word end, the
+    longest first, and then the keys outside ``_NVD_META_CORE_KEYS`` dropped, the largest first; that is logged as
+    an error. The log names ``ref`` (the CVE id), the sizes and the counts, never the content (C10).
+    """
+    comment = _render_nvd_meta(meta)
+    if _comment_bytes(comment) <= budget:
+        return comment
+    original_bytes = _comment_bytes(comment)
+    meta = dict(meta)
+    dropped: List[str] = []
+
+    def without(key: str, values: List[Any], order: List[int], count: int) -> Dict[str, Any]:
+        gone = set(order[:count])
+        kept = [v for i, v in enumerate(values) if i not in gone]
+        candidate = dict(meta)
+        if kept:
+            candidate[key] = kept
+        else:
+            candidate.pop(key, None)
+            if key == "cwe_names":
+                candidate.pop("cwe_names_version", None)
+        return candidate
+
+    for key in _NVD_META_SHRINK_LISTS:
+        values = meta.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        order = _reference_drop_order(values) if key == "references" else list(reversed(range(len(values))))
+        if _comment_bytes(_render_nvd_meta(without(key, values, order, len(values)))) > budget:
+            meta = without(key, values, order, len(values))
+            dropped.append(f"{key} {len(values)} of {len(values)}")
+            continue
+        fits, too_few = len(values), 0  # dropping ``fits`` entries fits; dropping ``too_few`` does not
+        while fits - too_few > 1:
+            mid = (fits + too_few) // 2
+            if _comment_bytes(_render_nvd_meta(without(key, values, order, mid))) <= budget:
+                fits = mid
+            else:
+                too_few = mid
+        meta = without(key, values, order, fits)
+        dropped.append(f"{key} {fits} of {len(values)}")
+        break
+    comment = _render_nvd_meta(meta)
+    if _comment_bytes(comment) > budget:
+        for key in sorted(
+            (k for k in _NVD_META_SHRINK_TEXTS if isinstance(meta.get(k), str)), key=lambda k: -len(meta[k])
+        ):
+            while _comment_bytes(comment) > budget and len(meta[key]) > 32:
+                meta[key] = _cut_at_word(meta[key], max(32, len(meta[key]) // 2))
+                comment = _render_nvd_meta(meta)
+        for key in sorted(
+            (k for k in meta if k not in _NVD_META_CORE_KEYS), key=lambda k: -len(json.dumps(meta[k], default=str))
+        ):
+            if _comment_bytes(comment) <= budget:
+                break
+            meta.pop(key)
+            comment = _render_nvd_meta(meta)
+        logger.error(
+            "[NVD_META] %s: comment over its budget once the lists were dropped: source texts cut and keys dropped "
+            "to fit MISP (%d -> %d bytes, budget %d)",
+            ref,
+            original_bytes,
+            _comment_bytes(comment),
+            budget,
+        )
+        return comment
+    logger.warning(
+        "[NVD_META] %s: comment shrunk to fit MISP: %d -> %d bytes, budget %d (dropped: %s)",
+        ref,
+        original_bytes,
+        _comment_bytes(comment),
+        budget,
+        ", ".join(dropped),
+    )
+    return comment
 
 
 def _vulnerability_tag_changes(
@@ -3220,6 +3476,7 @@ class MISPWriter:
         # For NVD-sourced CVEs, embed the rich metadata as JSON so the MISP→Neo4j
         # pipeline can reconstruct the full CVE/CVSS graph without calling NVD again.
         # The prefix "NVD_META:" acts as a sentinel for the reader.
+        source_text = vuln.get("description", "")
         nvd_fields = {
             "published": vuln.get("published", ""),
             "last_modified": vuln.get("last_modified", ""),
@@ -3237,7 +3494,9 @@ class MISPWriter:
             "cvss_v31_data": vuln.get("cvss_v31_data"),
             "cvss_v30_data": vuln.get("cvss_v30_data"),
             "cvss_v2_data": vuln.get("cvss_v2_data"),
-            "description": vuln.get("description", ""),
+            # 2026-11-07: the source's whole text (the collectors no longer cut it), characters outside the Basic
+            # Multilingual Plane stripped as in every MISP text (C1); the sync caps what the graph holds.
+            "description": _strip_non_bmp(source_text) if isinstance(source_text, str) else source_text,
             "vendor": vendor,
             "product": product,
             # CISA KEV exploitability intelligence
@@ -3282,6 +3541,28 @@ class MISPWriter:
         ics_sectors = _bounded_strings(vuln.get("ics_sectors"), _MAX_ICS_SECTORS, _MAX_ICS_SECTOR_CHARS)
         if ics_sectors:
             nvd_fields["ics_sectors"] = ics_sectors
+        # 2026-11-07: source facts MISP holds for the sync to lift later, each only when the item carries a value,
+        # so a record without them keeps its NVD_META (and its digest) unchanged. NVD: its analysis state, every
+        # reference with its tags, the CNA's vendor / product pairs, who scored each CVSS payload. KEV: CISA's
+        # notes (whole), CWE ids and forensic-triage flag. Both: the names of the CWE ids and the CWE version that
+        # named them (the pinned MITRE list, ``cwe_names``).
+        new_fields: Dict[str, Any] = {
+            "nvd_vuln_status": _meta_short_string(vuln.get("nvd_vuln_status"), _META_SHORT_STRINGS["nvd_vuln_status"]),
+            "references": _meta_references(vuln.get("references")),
+            "affected": _meta_affected(vuln.get("affected")),
+            "cvss_scorers": _meta_cvss_scorers(vuln.get("cvss_scorers")),
+            "cwe_names": _whole_strings(vuln.get("cwe_names"), _MAX_META_CWE_NAMES, _MAX_META_CWE_NAME_CHARS),
+            "cisa_notes": _strip_non_bmp(vuln["cisa_notes"]).strip() if isinstance(vuln.get("cisa_notes"), str) else "",
+            "cisa_cwes": _whole_strings(vuln.get("cisa_cwes"), _MAX_META_CWE_IDS, _MAX_META_CWE_ID_CHARS),
+            "cisa_forensic_triage": _meta_short_string(
+                vuln.get("cisa_forensic_triage"), _META_SHORT_STRINGS["cisa_forensic_triage"]
+            ),
+        }
+        if new_fields["cwe_names"]:
+            new_fields["cwe_names_version"] = _meta_short_string(
+                vuln.get("cwe_names_version"), _META_SHORT_STRINGS["cwe_names_version"]
+            )
+        nvd_fields.update({key: value for key, value in new_fields.items() if value})
         has_nvd_meta = any(
             [
                 nvd_fields["published"],
@@ -3311,9 +3592,8 @@ class MISPWriter:
         otx_pulse_meta = _cve_pulse_meta(vuln)
 
         if has_nvd_meta:
-            import json as _json
-
-            comment = "NVD_META:" + _json.dumps(nvd_fields, default=str)
+            # 2026-11-07: within the comment's byte budget, the JSON always intact (``_fit_nvd_meta``).
+            comment = _fit_nvd_meta(nvd_fields, ref=cve_id.upper())
         elif otx_pulse_meta:
             comment = _fit_meta_comment("OTX_META:", otx_pulse_meta)
         else:
