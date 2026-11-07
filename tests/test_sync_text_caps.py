@@ -471,3 +471,48 @@ class TestAttackIdsAfterTheCap:
             is None
         )
         assert builder.export_rows([dict(row, attack_mitre_id="APT28")])[0]["attack_id"] == "G0007"
+
+
+DOCS = TESTS.parent / "docs"
+# The docs that describe the capped texts or the ATT&CK id reading of the twin merge.
+CHANGED_DOCS = (
+    "ARCHITECTURE.md",
+    "BASELINE_LAUNCH_CHECKLIST.md",
+    "COLLECTORS.md",
+    "KNOWLEDGE_GRAPH.md",
+    "RESILMESH_INTEROPERABILITY.md",
+    "RUNBOOK.md",
+    "TECHNICAL_SPEC.md",
+)
+
+
+class TestDocs:
+    def test_the_checklist_reads_a_mitre_nodes_id_as_the_twin_merge_does(self):
+        """The acceptance row names the order ``attack_software_id`` reads: the node's ``mitre_id``, the delivered
+        record's ``mitre_id``, then the link an older record's description opens with."""
+        main, history = (DOCS / "BASELINE_LAUNCH_CHECKLIST.md").read_text().split("\n## History", 1)
+        assert any(
+            line.startswith("- 2026-11-07 — Malware twins:") and "`mitre_id`" in line for line in history.splitlines()
+        )
+        rows = [
+            line for line in main.splitlines() if line.startswith("| Malware twins (`malware_attack_twins_folded`)")
+        ]
+        assert len(rows) == 1
+        row = rows[0]
+        assert "(read from the record MITRE delivered)" not in row
+        order = [
+            row.find("its `mitre_id`"),
+            row.find("else the `mitre_id` of the record MITRE delivered"),
+            row.find("else the link an older record's description opens with"),
+        ]
+        assert -1 not in order and order == sorted(order)
+
+    @pytest.mark.parametrize("name", CHANGED_DOCS)
+    def test_history_bullets_follow_each_other_without_blank_lines(self, name):
+        text = (DOCS / name).read_text()
+        assert "_Last updated: 2026-11-07_" in text
+        lines = text.split("\n## History", 1)[1].splitlines()
+        bullets = [i for i, line in enumerate(lines) if line.startswith("- ")]
+        assert len(bullets) > 1 and lines[bullets[0]].startswith("- 2026-11-07 — ")
+        blank = [lines[i - 1] for i in range(bullets[0], bullets[-1] + 1) if not lines[i].strip()]
+        assert blank == [], f"{name}: blank line after {blank[0][:60]!r}"
