@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -509,10 +510,15 @@ class TestDocs:
 
     @pytest.mark.parametrize("name", CHANGED_DOCS)
     def test_history_bullets_follow_each_other_without_blank_lines(self, name):
+        """The History section holds this change's bullet, newest first, with no blank line between bullets.
+
+        No date is pinned to the top: a later change adds a newer bullet above it."""
         text = (DOCS / name).read_text()
-        assert "_Last updated: 2026-11-07_" in text
         lines = text.split("\n## History", 1)[1].splitlines()
         bullets = [i for i, line in enumerate(lines) if line.startswith("- ")]
-        assert len(bullets) > 1 and lines[bullets[0]].startswith("- 2026-11-07 — ")
+        assert len(bullets) > 1
+        assert any(lines[i].startswith("- 2026-11-07 — ") for i in bullets)
+        dates = [m.group(1) for i in bullets if (m := re.match(r"- (\d{4}-\d{2}-\d{2}) ", lines[i]))]
+        assert dates == sorted(dates, reverse=True), f"{name}: History is not newest first"
         blank = [lines[i - 1] for i in range(bullets[0], bullets[-1] + 1) if not lines[i].strip()]
         assert blank == [], f"{name}: blank line after {blank[0][:60]!r}"
