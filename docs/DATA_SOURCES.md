@@ -117,9 +117,10 @@
 **What we get:**
 - CVE IDs
 - Vendor/product names
-- Description
+- Description (CISA's short description, whole in MISP)
 - Date added to KEV
 - Known ransomware campaign use (`known_ransomware_use` on the `CVE` node; no CVSS score is derived from it — the catalogue carries none, and the node's score comes from its CVSS sub-nodes)
+- CISA's notes (vendor advisory and patch URLs), CWE ids and the forensic-triage flag of BOD 26-04 (`Yes` on 97 of 1,769 entries on 2026-11-06), in MISP (`NVD_META`: `cisa_notes`, `cisa_cwes`, `cisa_forensic_triage`); the sync does not set them on the node yet
 
 **How classified:**
 - Vendor, product and short description searched for sector keywords
@@ -220,7 +221,8 @@
 
 **What we get:**
 - CVE IDs
-- Descriptions
+- Descriptions (whole in MISP; the graph holds at most 1,000 characters)
+- NVD's analysis state, every reference with its tags, the CNA's vendor / product pairs, and who scored each CVSS metric (Primary: NVD; Secondary: another scorer), in MISP (`NVD_META`, [MISP_SOURCES.md](MISP_SOURCES.md#nvd_meta-cve-records)); the sync does not read them yet
 - CVSS scores (including v4 when present); a CVE's `cvss_score` / `severity` come from its first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`cvss_version` names it), and a CVE without any CVSS has no score and severity `UNKNOWN`
 - Attack vectors
 - NVD's record status (`status`, `["active"]` or `["rejected"]`)
@@ -296,6 +298,19 @@ MISP is the staging hub every collector pushes into (361,546 attributes after th
 
 ---
 
+### 9b. MITRE CWE list (reference data)
+Not a collected source: a pinned copy of MITRE's CWE list gives the names of the CWE ids that NVD and CISA KEV name (`src/reference/cwe_names.json`, read by `src/cwe_names.py`; [COLLECTORS.md](COLLECTORS.md#cwe-names)).
+
+| Attribute | Value |
+|-----------|-------|
+| URL | `https://cwe.mitre.org/data/xml/cwec_latest.xml.zip` (downloaded once per list version by `scripts/build_cwe_names.py`, never by a run) |
+| Version | CWE 5.0 of 2026-10-28: 1,415 names (984 weaknesses, 431 groupings) |
+| Update | Only before a fresh baseline ([RUNBOOK.md](RUNBOOK.md#rebuilding-the-cwe-name-list)) |
+
+**Terms:** CWE is free to use for research, development and commercial purposes under the CWE Terms of Use (<https://cwe.mitre.org/about/termsofuse.html>): a copy must reproduce MITRE's copyright designation and the licence. The reference file carries both (`notices.cwe`): "Copyright © 2006–2026, The MITRE Corporation. CWE, CWSS, CWRAF, and the CWE logo are trademarks of The MITRE Corporation." CWE is a trademark of The MITRE Corporation.
+
+---
+
 ## Classification Methods
 
 ### Method 1: Keyword Matching
@@ -319,6 +334,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — NVD and CISA KEV: the whole description in MISP; NVD's analysis state, tagged references, CNA vendor / product pairs and CVSS scorers, KEV's notes, CWE ids and forensic-triage flag in `NVD_META`; § 9b, the pinned MITRE CWE list and its terms of use.
 - 2026-11-07 — CISA ICS: one report record per advisory in MISP.
 - 2026-11-07 — MITRE ATT&CK (§ 5): the terms of use and MITRE's notice for the ATT&CK text EdgeGuard copies.
 - 2026-11-07 — SSL Blacklist: the listing reason reaches MISP (verbatim, with its role and family part apart, and the certificate page); AbuseIPDB's score and the address's country, and Feodo Tracker's ports, families and status, are structured keys in MISP.

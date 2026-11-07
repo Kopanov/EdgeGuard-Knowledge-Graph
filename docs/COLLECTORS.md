@@ -331,7 +331,7 @@ The zones are one list on the item; which of them its pulses stated is decided b
 
 ### What It Does
 Collects CVE records from the National Vulnerability Database, including:
-- CVE IDs and descriptions (up to 1000 chars; the MISP → Neo4j sync writes at most 1,000 characters of a CVE's description to the graph, markup stripped and cut at a sentence or word end, whatever MISP holds: [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#descriptions-and-their-source))
+- CVE IDs and descriptions (NVD's whole text, up to the 4,096 characters the CVE record format allows; the MISP → Neo4j sync writes at most 1,000 characters of a CVE's description to the graph, markup stripped and cut at a sentence or word end, while MISP keeps the whole text: [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#descriptions-and-their-source))
 - Every CVSS version NVD supplies (v4.0, v3.1, v3.0, v2), each with full component data
 - `cvss_score` / `severity`: the record's first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`src/cvss_selection.py`); `None` / `UNKNOWN` when the record has none — rejected CVEs, CVEs awaiting NVD analysis without a CNA score. The CVSS 2 rating is read from the metric object, where NVD API 2.0 puts it.
 - Affected products (CPE matching)
@@ -339,6 +339,12 @@ Collects CVE records from the National Vulnerability Database, including:
 - CWE identifiers
 - Reference URLs and tags (advisory/patch links)
 - **CISA KEV fields** — `cisa_exploit_add`, `cisa_action_due`, `cisa_required_action`, `cisa_vulnerability_name` (strongest signal of active exploitation; auto-boosts confidence to 0.9)
+- Source facts MISP holds in `NVD_META` and the sync does not read yet ([MISP_SOURCES.md](MISP_SOURCES.md#nvd_meta-cve-records)):
+  - `nvd_vuln_status`: NVD's analysis state as NVD writes it (`Analyzed`, `Awaiting Analysis`, `Deferred`, `Modified`, `Rejected` ...); `status` keeps ResilMesh's `["active"]` / `["rejected"]`;
+  - `references`: every reference, each URL once with the tags of every source that listed it (`Exploit`, `Patch`, `Vendor Advisory` ...); a URL longer than 2,048 characters is left out, never cut. `reference_urls` keeps the first 10 URLs in NVD's order;
+  - `affected`: the vendor / product pairs of the CNA's own `affected` container (the entry whose `source` is the record's `sourceIdentifier`; an ADP container such as CISA-ADP's is left out), at most 20, each once; `n/a`, `Unknown`, `*` and `-` count as no name, a pair keeps the name it has and is left out with none;
+  - `cvss_scorers`: for each CVSS payload, who scored the metric it was read from (`scored_by`: `nvd@nist.gov`, a CNA's address or UUID) and its `score_type` (`Primary`, NVD's own; `Secondary`, another scorer's). The payload is still the first metric NVD lists for its version, which is the CNA's on most recent records;
+  - `cwe_names` (`"CWE-89: <name>"`) and `cwe_names_version`: the names of the record's CWE ids from the pinned MITRE CWE list ([§ CWE names](#cwe-names)); an id the list does not hold (`NVD-CWE-noinfo`, `NVD-CWE-Other`) has none.
 
 **NIST notice:** This product uses data from the NVD API but is not endorsed or certified by the NVD ([Start Here](https://nvd.nist.gov/developers/start-here)).
 
@@ -422,8 +428,18 @@ NVD 2.0 requires **`pubStartDate` and `pubEndDate` together**; each window **≤
     'cisa_action_due': '2024-02-02',        # federal remediation deadline
     'cisa_required_action': 'Apply update per vendor instructions.',
     'cisa_vulnerability_name': 'Hospital Mgmt SQL Injection',
+    'nvd_vuln_status': 'Analyzed',
+    'references': [{'url': 'https://vendor.example.com/advisory/2024-001', 'tags': ['Vendor Advisory', 'Patch']}],
+    'affected': [{'vendor': 'Hospital Mgmt', 'product': 'System'}],
+    'cvss_scorers': {'cvss_v31_data': {'scored_by': 'nvd@nist.gov', 'score_type': 'Primary'}},
+    'cwe_names': ['CWE-89: Improper Neutralization of Special Elements used in an SQL Command'],
+    'cwe_names_version': '5.0',
 }
 ```
+
+### CWE names
+
+NVD and CISA KEV name a CVE's weaknesses by id only. The NVD and KEV collectors add the names of a record's CWE ids from `src/reference/cwe_names.json` (`src/cwe_names.py`), so MISP holds them with the record and no request is made at collection time. The list holds every weakness and grouping of MITRE's CWE list (version 5.0 of 2026-10-28, 1,415 names, deprecated and obsolete entries included; views are left out), with MITRE's copyright designation and the CWE licence ([DATA_SOURCES.md](DATA_SOURCES.md#9b-mitre-cwe-list-reference-data)). `scripts/build_cwe_names.py` builds it from `cwec_latest.xml.zip`; it changes only before a fresh baseline, since names written at collection time would otherwise come from two CWE versions ([RUNBOOK.md](RUNBOOK.md#rebuilding-the-cwe-name-list)). A list that cannot be read gives no names, with a warning; the run goes on.
 
 ---
 
@@ -437,6 +453,7 @@ Collects Known Exploited Vulnerabilities (KEV) from CISA, including:
 - Vendor and product information
 - Required actions and due dates
 - Known ransomware campaign use (`known_ransomware_use`; no score is derived from it)
+- CISA's short description whole (up to 821 characters on 2026-11-06), its `notes` whole (`cisa_notes`: vendor advisory and patch URLs separated by `;`, some labelled, such as `BOD 26-04: <url>`), its CWE ids (`cisa_cwes`), whether BOD 26-04 requires forensic triage (`cisa_forensic_triage`, `Yes` / `No`) and the names of the CWE ids (`cwe_names`, [§ CWE names](#cwe-names)), in `NVD_META`; the sync does not read the last four yet
 
 **Scope:** every run, the baseline and the run of `edgeguard_medium_freq` every 4 hours, takes the whole catalogue, whatever an entry's `dateAdded` (`EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE`, default `true`; `false` takes only the entries whose `dateAdded` lies within a window of the baseline length), and compares it with EdgeGuard's MISP copies ([below](#revisions-every-run-compares-the-catalogue-with-misp)). `EDGEGUARD_CISA_INCREMENTAL_DAYS` is not read. With `false`, an entry outside the window is neither added nor edited, so its revisions reach neither MISP nor the graph; where NVD's record (the NVD KEV sweep) is the only one that gives it KEV fields, that record only fills them on the `CVE` node, so they keep its first values (a later NVD record shows only in the `raw_data` of NVD's edge).
 
@@ -472,7 +489,12 @@ def detect_sectors(self, text: str) -> list:
     'product': 'Grid Manager Pro',
     'required_action': 'Apply patch by due date',
     'due_date': '2024-02-01',
-    'known_ransomware_use': 'Known'
+    'known_ransomware_use': 'Known',
+    'cisa_cwes': ['CWE-78'],
+    'cisa_notes': 'https://vendor.example.com/advisory ; https://nvd.nist.gov/vuln/detail/CVE-2023-1234',
+    'cisa_forensic_triage': 'No',
+    'cwe_names': ['CWE-78: Improper Neutralization of Special Elements used in an OS Command'],
+    'cwe_names_version': '5.0',
 }
 # Note: the KEV catalogue carries no CVSS, so a KEV record has no score; the CVE's CVSS
 # comes from the NVD collector, and the CVE node takes it from its CVSS sub-nodes whatever record
@@ -493,7 +515,7 @@ Every run follows one path (`CISACollector._update_misp`, `src/collectors/vulner
 - **Scope and order.** The whole catalogue (above), newest `dateAdded` first, then by CVE id. The generic incremental limit (`EDGEGUARD_INCREMENTAL_LIMIT`, 200) does not apply: `cisa` and `cisa_kev` are in `config.OWN_RUN_CAP_SOURCES`.
 - **Listing.** EdgeGuard's copies are listed once (`MISPWriter.index_source_attributes("source:CISA-KEV", "vulnerability", keep_meta=True)`, every page, non-exportable tags included; one page of about 1,750 attributes). A listing that fails writes nothing and fails the run, since a partial one would make stored CVEs look new. Only copies in events EdgeGuard created (`Event.info` starting with `EdgeGuard-`, the rule of the indicator refresh) are compared and edited: a copy in another event (an analyst's, a federated organisation's) is never edited, and a CVE MISP holds only in such events is neither added nor edited and is counted (`foreign_only`) with a WARNING naming the first 20. The sync reads more events than these: every event whose `Event.info` contains `EDGEGUARD_MISP_EVENT_SEARCH` (default `EdgeGuard`, in any case) or whose organisation is named `EdgeGuard`; a copy in such an event that does not start with `EdgeGuard-` is synced but not kept in step (Limits). A MISP answer whose rows lacked their event would show up there, as every CVE.
 - **Comparison.** Each entry is rebuilt as the attribute a new push would write and compared with each stored copy (`MISPWriter.plan_vulnerability_update`):
-  - `NVD_META` by digest: `shortDescription` (its first 500 characters), `vendorProject`, `product`, `dateAdded`, `dueDate`, `requiredAction`, `vulnerabilityName` and `knownRansomwareCampaignUse`; empty values count as absent;
+  - `NVD_META` by digest: `shortDescription`, `vendorProject`, `product`, `dateAdded`, `dueDate`, `requiredAction`, `vulnerabilityName`, `knownRansomwareCampaignUse`, `notes`, `cwes` (with their names) and `forensicTriage`; empty values count as absent;
   - tags by family: `severity:` and `cvss:` are replaced and, for KEV, the tag `ransomware:known`, the only ransomware tag EdgeGuard writes (`KEV_REPLACED_TAGS`), so an entry CISA reverts to Unknown loses it; any other `ransomware:` tag (a machine tag of MISP's `ransomware` taxonomy an analyst attached) is left alone and plans no edit; zone, `CISA-KEV` and source tags are only added; `tlp:` only when the copy has none.
 - **Additions.** A CVE MISP lacks is added through `push_items`, given the listing (`known_source_keys`), so MISP is not listed twice. Additions MISP's answers do not confirm are looked up by value (`MISPWriter.existing_values`), as in the NVD incremental run.
 - **Edits.** A copy that differs is edited in place (`MISPWriter.update_attribute`, `POST /attributes/edit/{uuid}`): the new `NVD_META` comment, `first_seen` and the tag changes. An edit counts only when MISP's answer shows it and an attribute timestamp later than the stored copy's, because the incremental sync re-reads an attribute only when that timestamp moves. The edits follow the stop rules of the indicator refresh: a pause of `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` (default 5 s) and the parent-DAG liveness check after every 50 edits; no edit starts once `EDGEGUARD_MISP_REFRESH_MAX_SECONDS` (default 600) is spent, nor after 5 failed edits in a row.
@@ -506,7 +528,7 @@ Every run follows one path (`CISACollector._update_misp`, `src/collectors/vulner
 
 **Limits.**
 - Removals never propagate: an entry dropped from the catalogue keeps its MISP copy and its node fields (counted and logged only).
-- KEV `notes`, `cwes` and `forensicTriage` (BOD 26-04) are not stored in `NVD_META`, so a change to them is not seen, and the GraphQL fields `cisaNotes` and `cisaCwes` stay empty. `shortDescription` is compared up to its 500th character (9 entries are longer on 2026-10-16).
+- KEV `notes`, `cwes` and `forensicTriage` (BOD 26-04) reach MISP, but the sync does not set them on the `CVE` node yet, so the GraphQL fields `cisaNotes` and `cisaCwes` stay empty.
 - A change to EdgeGuard's own rules for KEV items (the zone keywords, the TLP, the `NVD_META` keys) looks like a revision of every affected entry and edits each copy once, within the cap.
 - That `POST /attributes/edit` moves the event's timestamp, which the sync selects events by, rests on MISP 2.5's code (`AttributesController::edit` → `unpublishEvent`), not on a test against MISP; the first live edit is the check ([RUNBOOK.md](RUNBOOK.md)).
 - A KEV copy in an event the sync reads but EdgeGuard did not create (`Event.info` containing `EdgeGuard` without starting with `EdgeGuard-`, or an event of the `EdgeGuard` organisation with another title) is synced but never edited: when the sync merges it after EdgeGuard's copy (a full sync reads events by ascending attribute count), its older record sets the node's four KEV fields and the edge's `raw_data` back. Such copies are not counted apart from EdgeGuard's.
@@ -1485,6 +1507,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — NVD, CISA KEV and CISA ICS: no collector cuts a CVE text before MISP (NVD's description was cut at 1,000 characters, KEV's short description at 500, an ICS advisory text at 1,000). New `NVD_META` source facts: NVD's `nvd_vuln_status`, `references` with their tags, the CNA's `affected` pairs and `cvss_scorers`; KEV's `cisa_notes`, `cisa_cwes` and `cisa_forensic_triage`, so the KEV comparison sees a change to them; `cwe_names` from a pinned MITRE CWE list (§ CWE names).
 - 2026-11-07 — CISA ICS: one report record per advisory (summary, sectors, countries, vendor headquarters, TLP, dates, `revision` as the number of revision-history entries and `version` as `tracking.version`, vendors, products, and per CVE the whole note, remediations, affected products and CWE), also for an advisory without a CVE, pushed after the CVE items and, on a run without items, before its return. Records whose push failed or was not tried wait on `report_pending` instead of holding the cursor, and so do the record that cannot be built and the record of an advisory in the window that could not be fetched (on a baseline, by its file-name date); each run reads the advisories of up to 100 listed records for their records only, with a fetch-failure streak of their own that stops these reads, not the run, and so does an open circuit breaker; any error of such a read is a failed try; a record whose advisory the listing does not name is a failed try, and a listing without a row leaves the list untouched. The record's list caps are 500 remediations and 5,000 affected products per CVE and 2,000 products per advisory (the record library's 50, 500 and 500: 50 remediations had cut ICSA-26-113-03 and 500 affected products ICSA-24-235-03), and a cut is logged. The vulnerability summary falls back to a `details` note that holds no score; the countries note is split at `and` and loses its closing full stop. The sector note's last list item loses its `and` (`"…, and Energy"` gave the sector `and Energy`, which mapped to no zone), and a sector named with a trailing `Sector` maps to its zone. The vulnerability note reaches MISP whole (it was cut at 1,000 characters). The scheduled run's writer knows its task's end: no record starts, and no failing streak of the item push goes on, later than 10 minutes before it. The window applies to an advisory by its `initial_release_date`, also to one without a CVE.
 - 2026-11-07 — ATT&CK in MISP: the collector passes every description whole and MISPWriter writes it whole (up to 8,000 characters; it cut groups, techniques and tactics at 255 characters and malware and tools at 400 with "..." added mid-word, and a comment without a block at 500); every platform is a tag sent in ATT&CK's casing, on malware and tools too (the first 3 of a technique, lower-cased), and the sync reads the platform tags in ATT&CK's spelling whatever casing MISP holds them in; tools carry alias tags; groups, malware and tools carry their ATT&CK domains as `attack-domain:` tags and ATT&CK's own galaxy cluster tag beside the community one; a technique's zones are still read from its first 500 characters; MITRE's terms and notice for the copied text.
 - 2026-11-07 — OTX: an indicator of an amber, red or unknown-TLP pulse gets an empty `pulse_name` in the graph; the sync took the comment as the fallback name, which for such an item is the whole `OTX_META` block, and now takes no metadata block as a name.
