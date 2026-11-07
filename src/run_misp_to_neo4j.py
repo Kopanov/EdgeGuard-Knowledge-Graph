@@ -5003,7 +5003,13 @@ class MISPToNeo4jSync:
                 # PR (S5): legacy first_seen removed (see
                 # vulnerability site for the rationale).
                 "confidence_score": confidence,
-                "pulse_name": otx_meta.get("pulse_name") or tf_meta.get("malware_family") or raw_comment,
+                # 2026-11-07: a metadata block is never the fallback. The sync item reaches the SOURCED_FROM
+                # edge's ``raw_data``, so the whole block of an item without a pulse name or a family (SSL
+                # Blacklist, AbuseIPDB, VirusTotal, an unlabelled MalwareBazaar sample) would carry the
+                # fields that stay in MISP into the graph; a plain comment is still taken.
+                "pulse_name": otx_meta.get("pulse_name")
+                or tf_meta.get("malware_family")
+                or ("" if _METADATA_COMMENT_RE.match(raw_comment) else raw_comment),
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
                 "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp

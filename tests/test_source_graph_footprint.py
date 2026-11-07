@@ -58,6 +58,18 @@ def path(monkeypatch: pytest.MonkeyPatch):
     return run
 
 
+def _assert_block_stays_in_misp(row: Dict[str, Any], *absent: str) -> None:
+    """2026-11-07: the edge's ``raw_data`` takes no metadata block. ``pulse_name`` falls back to a plain
+    comment only, so the TF_META of an item without a pulse name or a family (SSL Blacklist, AbuseIPDB,
+    VirusTotal, an unlabelled MalwareBazaar sample) stays in MISP with the list-source fields it holds."""
+    raw = row["raw_data"]
+    assert raw["pulse_name"] == "", "no pulse name, no family, no plain comment: nothing to name"
+    text = json.dumps(raw)
+    assert "TF_META" not in text
+    for word in absent:
+        assert word not in text, f"{word!r} is a MISP-only field or value"
+
+
 def _vt_item(**extra: Any) -> Dict[str, Any]:
     from collectors.vt_collector import VTCollector
 
@@ -125,6 +137,7 @@ def test_virustotal_item_without_a_classification_carries_its_file_facts(path) -
     assert meta["file_type"] == "ELF" and meta["meaningful_name"] == "bot.arm7" and meta["file_size"] == 82344
     assert (meta["detection_malicious"], meta["detection_total"]) == (48, 63)
     assert "threat_label" not in row and "yara_rules" not in row
+    _assert_block_stays_in_misp(row, "meaningful_name", "file_size", "bot.arm7")
 
 
 def test_virustotal_item_with_nothing_structured_keeps_a_plain_comment(path) -> None:
@@ -143,6 +156,7 @@ def test_virustotal_item_with_nothing_structured_keeps_a_plain_comment(path) -> 
     attr, _sync_item, row = path(item)
     assert attr["comment"] == "Malicious file detected by VirusTotal", "nothing to carry: a readable comment"
     assert "threat_label" not in row and "yara_rules" not in row
+    assert row["raw_data"]["pulse_name"] == attr["comment"], "a plain comment is still the edge's pulse_name"
 
 
 def test_one_hash_from_three_sources_is_one_node(path) -> None:
@@ -192,9 +206,18 @@ def test_malwarebazaar_family_reference_and_first_seen_reach_the_node(path) -> N
     assert row["first_seen_at_source"] == "2026-10-12T21:16:06+00:00" and row["last_seen_at_source"] is None
     assert row["raw_data"]["tf_tags"] == ["elf"], "the file type stays with the source record"
 
-    unlabelled = mb.build_item({"first_seen_utc": "2026-10-12 21:16:06", "sha256_hash": SHA, "signature": "n/a"})
-    _attr, _sync_item, row = path(unlabelled)
+    unlabelled = mb.build_item(
+        {
+            "first_seen_utc": "2026-10-12 21:16:06",
+            "sha256_hash": SHA,
+            "file_name": "invoice_2026.exe",
+            "signature": "n/a",
+        }
+    )
+    attr, _sync_item, row = path(unlabelled)
     assert "malware_family" not in row, "an unlabelled sample makes no family claim"
+    assert json.loads(attr["comment"][len("TF_META:") :])["file_name"] == "invoice_2026.exe"
+    _assert_block_stays_in_misp(row, "file_name", "invoice_2026")
 
 
 def test_threatfox_first_seen_with_utc_suffix_reaches_the_edge(path) -> None:
@@ -240,6 +263,7 @@ def test_urlhaus_status_and_last_online_reach_the_node(path) -> None:
     _attr, _sync_item, row = path(item)
     assert row["url_status"] == "online" and row["last_online"] == "2026-09-01 23:10:00"
     assert row["last_seen_at_source"] == "2026-09-01T23:10:00+00:00"
+    _assert_block_stays_in_misp(row, "as_of")
 
 
 def test_feodo_node_carries_family_last_online_and_the_activity_window(path, monkeypatch) -> None:
@@ -339,6 +363,7 @@ def test_sslbl_and_abuseipdb_blocks_pass_the_sync(path) -> None:
     _attr, _sync_item, row = path(sslbl)
     assert row["reference"] == sslbl["reference"]
     assert "malware_family" not in row, "the family of a listing reason is kept in MISP only, never linked"
+    _assert_block_stays_in_misp(row, "listing_reason", "listing_family", "Vidar")
 
     abuse = {
         "indicator_type": "ipv4",
@@ -357,6 +382,7 @@ def test_sslbl_and_abuseipdb_blocks_pass_the_sync(path) -> None:
     assert json.loads(attr["comment"][len("TF_META:") :])["ip_country_code"] == "NL"
     assert row["source_id"] == "abuseipdb" and row["confidence"] == 0.8
     assert "targeted_countries" not in row, "the address's own country is never a targeted country"
+    _assert_block_stays_in_misp(row, "abuse_confidence_score", "ip_country_code", "NL")
 
 
 # ---------------------------------------------------------------------------
