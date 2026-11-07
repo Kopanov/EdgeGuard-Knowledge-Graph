@@ -1595,6 +1595,16 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
+## Report text in MISP's logs
+
+MISP logs every Event Report that `MISPWriter.push_reports` adds or edits with its full content: an add with the whole content, an edit with the old and the new content ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)). Amber and red records are included: distribution 0 keeps a report to the writer's organisation, not out of MISP's logs, and MISP's site administrators can read those entries. EdgeGuard's own logs carry no report text.
+
+- **Treat the MISP log tables as holding report text.** Do not share MISP log exports outside the operating organisation.
+- **Size.** Each fresh baseline adds about the size of its reports to the log tables.
+- **Removal.** Removing the entries is a MISP administration task (log retention or clean-up on the MISP host); EdgeGuard does not do it.
+
+---
+
 ## See also
 
 - `docs/MISP_TUNING.md` — backend tuning for failure modes 1-2
@@ -1610,10 +1620,11 @@ For a CVE the comment is the record's `NVD_META:{...}` block, whose `description
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — New section "Report text in MISP's logs": MISP logs the full content of every Event Report add and edit, amber and red records included; MISP's site administrators can read it.
 - 2026-11-06 — 7c: `requirements.txt` pins `apache-airflow~=3.3.2` (`~=3.3` admitted 3.4).
 - 2026-11-06 — Canonical threat-actor reference: version `2026.11.06` lists `Videostrong Technology Co., Ltd.` as no actor beside `Videostrong Technology Co.` (39 names in 19 decisions). The actor-name hygiene no longer splits inside parentheses or before a legal form, so that OTX adversary field is one name, which the 2026-11-05 decision did not cover; built from the same galaxies and graph export, the reference is otherwise unchanged.
 - 2026-11-06 — INV-1 counts the qualifying actors with the shared malware of `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`; the campaign job's `[CAMPAIGN] shared malware:` line (also with the rule off), the campaigns without an indicator that counts, and how to bring a graph built without the rule to a build with it; removing a curated layer: a campaign is deleted when its actor has no campaign evidence left.

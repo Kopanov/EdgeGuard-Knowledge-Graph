@@ -5258,16 +5258,21 @@ class MISPWriter:
            the same digest, or with a later ``last_modified``, is left as it is (``reports_unchanged``);
            otherwise ``POST /eventReports/edit/<uuid>`` with name, content and distribution, checked as the add.
         3. After an edit that changes the record's TLP, ``removeTag`` of the old ``tlp:`` tag and ``addTag`` of
-           the new one, by tag id, each checked for ``saved``; a failure counts in ``report_tag_drift`` and
-           does not fail the record (the reader never relies on report tags).
+           the new one, by tag id, each checked for ``saved`` (``_swap_report_tlp``: the ``addTag`` is sent
+           whatever the ``removeTag`` answered, and an old tag that is not on the report counts as gone); a
+           failure counts in ``report_tag_drift`` and does not fail the record (the reader never relies on
+           report tags).
 
         Reports never travel in ``POST /events/<id>``. These requests are not wrapped in the writer's retry
         decorator: an HTTP 4xx is never tried again, an HTTP 5xx, a timeout or a connection error once more.
-        After ``REPORT_MAX_CONSECUTIVE_FAILURES`` records in a row failed that way, the rest are skipped.
-        ``EDGEGUARD_MISP_REPORT_THROTTLE_SEC`` is the pause between records. *liveness_callback* (default the
-        writer's) is called before each record, and its exception propagates. *deadline*: a ``time.monotonic()``
-        value; no record starts when its pause would end at or after it. The logs carry uuid, ``record_ref``,
-        lengths and SHA-256 only, never content or MISP's answers. ``last_push_*`` is not written.
+        After ``REPORT_MAX_CONSECUTIVE_FAILURES`` records in a row failed that way, the rest are skipped, and
+        so they are once the push's failing streak reaches its cap (``_failing_streak``,
+        ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC``). ``EDGEGUARD_MISP_REPORT_THROTTLE_SEC`` is the pause between
+        records. *liveness_callback* (default the writer's) is called before each record, and its exception
+        propagates. *deadline*: a ``time.monotonic()`` value; for a writer given ``task_ends_at``, the task's end
+        less ``PUSH_TASK_END_MARGIN_SEC`` too, whichever comes first: no record starts when its pause would end at
+        or after it, and no report request starts after it. The logs carry uuid, ``record_ref``, lengths and
+        SHA-256 only, never content or MISP's answers. ``last_push_*`` is not written.
 
         Returns the stats: ``reports_added``, ``reports_updated``, ``reports_unchanged``, ``reports_failed``
         (``reports_foreign`` among them), ``reports_deleted_in_misp``, ``report_tag_drift``,
@@ -5310,22 +5315,73 @@ class MISPWriter:
         if not todo:
             return self._log_report_stats(stats) if stats["reports_failed"] else stats
         self._arm_push_cap()
-        if deadline is not None and time.monotonic() >= deadline:
-            self._skip_reports(stats, todo, "the push's deadline came before the first record")
-            return self._log_report_stats(stats)
-        event_id, problem = self._report_event_id(source)
-        if not event_id:
-            self._skip_reports(stats, todo, problem)
-            return self._log_report_stats(stats)
-        stats["event_id"] = event_id
+        # The push's stop point: its deadline, or its task's end less PUSH_TASK_END_MARGIN_SEC (a writer given
+        # ``task_ends_at``), whichever comes first. No record and no report request starts at or after it, so the
+        # collector can save ``report_pending`` before Airflow kills the task (a killed task saves nothing).
+        ends_at = getattr(self, "task_ends_at", None)
+        stops = [(deadline, "the push's deadline came")] if deadline is not None else []
+        if _is_seconds(ends_at):
+            stops.append(
+                (
+                    time.monotonic() + (ends_at - time.time()) - PUSH_TASK_END_MARGIN_SEC,
+                    f"the task's end is near: no record starts later than {PUSH_TASK_END_MARGIN_SEC:.0f} s before "
+                    "task_ends_at",
+                )
+            )
+        stop_at, stop_reason = min(stops, key=lambda stop: stop[0]) if stops else (None, "")
+        self._report_stop_at = stop_at
+        try:
+            if stop_at is not None and time.monotonic() >= stop_at:
+                self._skip_reports(stats, todo, f"{stop_reason} before the first record")
+                return self._log_report_stats(stats)
+            event_id, problem = self._report_event_id(source)
+            if not event_id:
+                self._skip_reports(stats, todo, problem)
+                return self._log_report_stats(stats)
+            # MISP answered the lookup, so a failing streak its retries began ends (``_failing_streak``).
+            self._misp_push_failing_since = None
+            stats["event_id"] = event_id
+            self._push_report_records(stats, todo, event_id, source, label, stop_at, stop_reason, liveness_callback)
+        finally:
+            # The stop point and the cap belong to this call; a request made outside a push has none.
+            self._report_stop_at = None
+            self._misp_push_failing_cap = None
+            self._misp_push_failing_since = None
+        return self._log_report_stats(stats)
+
+    def _push_report_records(
+        self,
+        stats: Dict[str, Any],
+        todo: Sequence[Dict[str, Any]],
+        event_id: str,
+        source: str,
+        label: str,
+        stop_at: Optional[float],
+        stop_reason: str,
+        liveness_callback: Optional[Callable[[], None]],
+    ) -> None:
+        """The record loop of ``push_reports``. Before each record the rest is skipped when the record's pause
+        would end at or after *stop_at*, when the push's failing streak has reached its cap (``_failing_streak``:
+        ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC``, or the baseline's setting, at most until
+        ``PUSH_TASK_END_MARGIN_SEC`` before the task's end), or after ``REPORT_MAX_CONSECUTIVE_FAILURES`` records
+        in a row failed on HTTP 5xx or no answer. Such a failure starts the streak at the record's start; any other
+        outcome ends it."""
         source_tag = self.SOURCE_TAGS.get(source, source)
         callback = liveness_callback if liveness_callback is not None else getattr(self, "liveness_callback", None)
         pause = misp_report_throttle_seconds()
         in_a_row = 0
         for position, record in enumerate(todo):
             wait = pause if position > 0 else 0.0
-            if deadline is not None and time.monotonic() + wait >= deadline:
-                self._skip_reports(stats, todo[position:], "the push's deadline came")
+            if stop_at is not None and time.monotonic() + wait >= stop_at:
+                self._skip_reports(stats, todo[position:], stop_reason)
+                break
+            streak = _failing_streak(self)
+            if streak is not None and streak[1] + wait >= streak[0]:
+                self._skip_reports(
+                    stats,
+                    todo[position:],
+                    f"MISP kept failing for {streak[1]:.0f} s ({_push_cap_text(self, streak[0])})",
+                )
                 break
             if in_a_row >= REPORT_MAX_CONSECUTIVE_FAILURES:
                 self._skip_reports(
@@ -5338,20 +5394,23 @@ class MISPWriter:
                 time.sleep(wait)
             if callback is not None:
                 callback()
+            started = time.monotonic()
             kind, reason, transient = self._push_report(event_id, source, label, source_tag, record, stats)
             ref = record["record_ref"]
             if kind in ("added", "updated", "unchanged", "deleted"):
                 stats["reports_deleted_in_misp" if kind == "deleted" else f"reports_{kind}"] += 1
                 stats["settled"].append(ref)
-                in_a_row = 0
             elif kind == "foreign":
                 stats["reports_foreign"] += 1
                 self._report_failed(stats, ref, reason, True)
-                in_a_row = 0
             else:
                 self._report_failed(stats, ref, reason, False)
-                in_a_row = in_a_row + 1 if transient else 0
-        return self._log_report_stats(stats)
+            if kind == "failed" and transient:
+                in_a_row += 1
+                _failing_streak(self, started)
+            else:
+                in_a_row = 0
+                self._misp_push_failing_since = None
 
     @staticmethod
     def _report_failed(stats: Dict[str, Any], ref: str, reason: str, permanent: bool) -> None:
@@ -5421,11 +5480,20 @@ class MISPWriter:
 
     def _report_request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> _ReportAnswer:
         """One report request, outside the writer's retry decorator: HTTP 5xx, a timeout or a connection error is
-        tried once more, HTTP 4xx never. The answer's body is returned, never logged."""
+        tried once more, HTTP 4xx never. The answer's body is returned, never logged. Inside ``push_reports`` no
+        attempt starts at or after the push's stop point (``_report_stop_at``: its deadline, or its task's end
+        less ``PUSH_TASK_END_MARGIN_SEC``); a request not sent then counts as no answer, and an attempt not
+        repeated keeps the first attempt's answer. An attempt in flight keeps its timeouts, which fit in that
+        margin."""
         url = f"{self.url}{path}"
         timeout = (self.CONNECT_TIMEOUT, self.READ_TIMEOUT)
-        problem = ""
+        stop_at = getattr(self, "_report_stop_at", None)
+        first: Optional[_ReportAnswer] = None
         for attempt in (1, 2):
+            if stop_at is not None and time.monotonic() >= stop_at:
+                if first is None:
+                    return _ReportAnswer(None, None, "no answer (not sent: the push's time was up)")
+                return first._replace(problem=f"{first.problem}, not tried again: the push's time was up")
             tries = " (tried twice)" if attempt == 2 else ""
             try:
                 if method == "GET":
@@ -5433,19 +5501,17 @@ class MISPWriter:
                 else:
                     response = self.session.post(url, json=payload, verify=self.verify_ssl, timeout=timeout)
             except requests.exceptions.RequestException as e:
-                problem = f"no answer ({type(e).__name__}){tries}"
-                if attempt == 1:
-                    continue
-                return _ReportAnswer(None, None, problem)
-            status = response.status_code
-            if status >= 500 and attempt == 1:
-                continue
-            try:
-                body = response.json()
-            except ValueError:
-                body = None
-            return _ReportAnswer(status, body, f"HTTP {status}{tries}")
-        return _ReportAnswer(None, None, problem)  # pragma: no cover - the loop always returns
+                answer = _ReportAnswer(None, None, f"no answer ({type(e).__name__}){tries}")
+            else:
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                answer = _ReportAnswer(response.status_code, body, f"HTTP {response.status_code}{tries}")
+            if attempt == 2 or not answer.transient:
+                return answer
+            first = answer
+        return first  # pragma: no cover - the loop always returns
 
     def _report_writer_org(self) -> Tuple[Optional[str], _ReportAnswer]:
         """The organisation id of the writer key (``GET /users/view/me``), read once per writer."""
@@ -5473,19 +5539,29 @@ class MISPWriter:
         return {n: cache[n.lower()] for n in names if n.lower() in cache}
 
     def _swap_report_tlp(self, report_id: str, old: Optional[str], new: str) -> bool:
-        """``removeTag`` of ``tlp:<old>`` (when known), then ``addTag`` of ``tlp:<new>``, by tag id; True when MISP
-        answered ``saved`` true to each (a tag already attached answers ``saved`` true, "0 tags added")."""
+        """``removeTag`` of ``tlp:<old>`` (when known), then ``addTag`` of ``tlp:<new>``, by tag id. The ``addTag``
+        is sent whatever the ``removeTag`` answered. True when the old tag is gone and MISP answered ``saved`` true
+        to the ``addTag`` (a tag already attached answers ``saved`` true, "0 tags added"). The old tag counts as
+        gone when this MISP does not hold it, or when ``removeTag`` answers HTTP 200 ``{"saved": false,
+        "errors": "Invalid event-report - tag combination."}``: the tag is not on the report
+        (``EventReportsController::removeTag``, MISP 2.5.45 and 2.5.50). That happens after an earlier swap
+        whose ``addTag`` failed, after an add that dropped a missing tag, or after an edit with a
+        ``perm_sync_authoritative`` key, which strips the report's tags."""
         names = [f"tlp:{level}" for level in (old, new) if level]
         ids = self._report_tag_ids(names)
-        steps = ([("removeTag", f"tlp:{old}")] if old else []) + [("addTag", f"tlp:{new}")]
-        for action, name in steps:
-            tag_id = ids.get(name)
-            if tag_id is None:
-                return False
-            answer = self._report_request("POST", f"/eventReports/{action}/{report_id}/{tag_id}", {})
-            if answer.status != 200 or not isinstance(answer.body, dict) or answer.body.get("saved") is not True:
-                return False
-        return True
+        ok = True
+        old_id = ids.get(f"tlp:{old}") if old else None
+        if old_id is not None:
+            answer = self._report_request("POST", f"/eventReports/removeTag/{report_id}/{old_id}", {})
+            body = answer.body if isinstance(answer.body, dict) else {}
+            not_attached = answer.status == 200 and "tag combination" in str(body.get("errors") or "")
+            if not not_attached and not (answer.status == 200 and body.get("saved") is True):
+                ok = False
+        new_id = ids.get(f"tlp:{new}")
+        if new_id is None:
+            return False
+        answer = self._report_request("POST", f"/eventReports/addTag/{report_id}/{new_id}", {})
+        return ok and answer.status == 200 and isinstance(answer.body, dict) and answer.body.get("saved") is True
 
     def _push_report(
         self, event_id: str, source: str, label: str, source_tag: str, record: Dict[str, Any], stats: Dict[str, Any]

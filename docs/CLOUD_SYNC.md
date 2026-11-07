@@ -611,7 +611,7 @@ snapshot. Steps:
    500K-node / 1M-edge graph.
 
 3. **Initialize the cloud schema** by running the standard EdgeGuard startup
-   sequence — this creates the 19 UNIQUE constraints + 25 `<label>_uuid` indexes
+   sequence — this creates the 21 UNIQUE constraints + 25 `<label>_uuid` indexes
    declared in `Neo4jClient.create_constraints` / `create_indexes`:
 
    ```bash
@@ -803,7 +803,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
-- 2026-11-07 — The report labels `ThreatReport` and `VulnerabilityAdvisory`, keyed by `record_ref` and mapped to the STIX type `report`; the uuid of a report node is the uuid of its MISP Event Report.
+- 2026-11-07 — The report labels `ThreatReport` and `VulnerabilityAdvisory`, keyed by `record_ref` and mapped to the STIX type `report`; the uuid of a report node is the uuid of its MISP Event Report; the cloud schema setup creates 21 UNIQUE constraints (`threatreport_key` and `vulnerabilityadvisory_key` added).
 - 2026-11-02 — Mechanism B lists the three remaining standalone relationship helpers, which no pipeline path calls (it counted six; three were removed with the retired in-process load); Mechanism A names the sync's batch writer, `create_misp_relationships_batch`, as the path that creates Sector nodes (it named the uncalled helpers).
 - 2026-11-02 — Sector labels: campaigns get theirs from `build_campaign_nodes`.
 - 2026-11-01 — `(:CVE)`: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the text named `merge_cve`.

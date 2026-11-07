@@ -146,6 +146,30 @@ class TestOtxRecord:
         monkeypatch.setenv("EDGEGUARD_REPORT_MAX_INDICATORS", "999999")
         assert len(rr.otx_pulse_record(_BY_ID, pairs)["indicators"]) == 2501  # clamped to the hard bound 20,000
 
+    def test_dates_are_written_in_utc(self):
+        record = _otx_record(
+            {**_BY_ID, "created": "2026-10-02T03:40:22+02:00", "modified": "2026-11-01T01:03:15-05:00"}
+        )
+        assert record["published"] == "2026-10-02T01:40:22+00:00"
+        assert record["last_modified"] == "2026-11-01T06:03:15+00:00"
+
+    def test_a_url_over_its_cap_is_left_out_never_cut(self):
+        over = "https://example.com/long/" + "a" * (rr.URL_MAX_CHARS + 1 - len("https://example.com/long/"))
+        at_cap = "https://example.com/" + "b" * (rr.URL_MAX_CHARS - len("https://example.com/"))
+        assert (len(over), len(at_cap)) == (2049, 2048)
+        assert _otx_record({**_BY_ID, "references": [over, at_cap]})["references"] == [at_cap]
+        assert _ics_record(csaf_url=over)["csaf_url"] is None and _ics_record(url=at_cap)["url"] == at_cap
+
+    def test_a_record_given_again_keeps_its_identity_and_another_one_is_refused(self):
+        record = _ics_record()
+        assert rr.build_record("cisa_ics", record) == record
+        with pytest.raises(ValueError, match="given as"):
+            rr.build_record("cisa_ics", {**record, "source": "alienvault_otx"})
+        with pytest.raises(ValueError, match="does not belong"):
+            rr.build_record("cisa_ics", {**record, "record_ref": "cisa_ics:ICSA-26-281-02"})
+        with pytest.raises(ValueError, match="schema"):
+            rr.build_record("cisa_ics", {**record, "schema": "edgeguard.report.v2"})
+
     def test_a_missing_id_or_an_unknown_field_is_refused(self):
         with pytest.raises(ValueError, match="without a record id"):
             rr.build_record("alienvault_otx", {"title": "x"})
@@ -185,6 +209,17 @@ class TestUnstorableCharacters:
         assert record["indicator_count"] == 1
         content = rr.render_content(record)
         assert all(ord(ch) <= 0xFFFF for ch in content)
+        assert rr.record_from_content(content) == record
+
+    def test_lone_surrogates_and_nul_are_removed_and_a_value_needing_them_is_left_out(self):
+        pulse = {**_BY_ID, "name": "Cam\x00paign energy", "description": "Text\ud800 with\x00 a lone surrogate"}
+        pairs = [("domain", "bad\ud800.example"), ("domain", "nul\x00.example"), ("domain", "ok.example")]
+        record = rr.otx_pulse_record(pulse, pairs)
+        assert record["title"] == "Campaign energy"
+        assert record["description"] == "Text with a lone surrogate"
+        assert record["indicators"] == [["domain", "ok.example"]]
+        content = rr.render_content(record)
+        assert len(rr.content_sha256(content)) == 64  # UTF-8: a lone surrogate would raise UnicodeEncodeError
         assert rr.record_from_content(content) == record
 
     def test_the_report_name_is_cut_at_a_word_end_within_255_characters(self):
@@ -324,6 +359,12 @@ class TestContent:
     def test_render_takes_only_a_built_record(self):
         with pytest.raises(ValueError):
             rr.render_content({"source": "alienvault_otx", "description": "x"})
+
+    def test_a_block_nested_too_deep_for_json_is_no_record(self):
+        """``json.loads`` raises RecursionError some 10,000 levels deep; the reader returns None."""
+        head, fence, _block = rr.render_content(_otx_record()).rpartition("```json\n")
+        content = f"{head}{fence}{'[' * 20000}{']' * 20000}\n```\n"
+        assert rr.parse_content(content) is None and rr.record_from_content(content) is None
 
 
 # --------------------------------------------------------------------------- #

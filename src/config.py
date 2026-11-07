@@ -722,7 +722,8 @@ MISP_PUSH_MAX_FAILING_SEC_HI = 86400.0
 def misp_push_max_failing_seconds(baseline: bool = False) -> float:
     """``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`` (default 900; ``0`` = no cap), or for the baseline's writer
     ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`` (default 3600; ``0`` = no cap): the longest one
-    ``MISPWriter.push_items`` call goes on while MISP keeps failing (2026-11-03); it never cuts a request short, and
+    ``MISPWriter.push_items`` call (2026-11-03) or ``push_reports`` call (2026-11-07, checked before each record)
+    goes on while MISP keeps failing; it never cuts a request short, and
     slow event and part lookups, a new part's creation, the listings and the refresh are not cut at it
     (docs/MISP_TUNING.md). The time is the wall time from the start of the first request that fails
     (a batch answered HTTP 429 or 5xx, a timeout or a connection error, a failed event lookup) and includes the

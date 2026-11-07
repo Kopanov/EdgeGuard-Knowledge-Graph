@@ -195,21 +195,23 @@ The block holds every field but the description, the `digest`, and a `self_diges
    - **Deleted in MISP.** The report is soft-deleted (a soft-deleted uuid still blocks an add). The deletion is respected: no restore, no edit (`reports_deleted_in_misp`).
    - **Unchanged.** The stored block's `digest` equals the record's, or its `last_modified` is later than the record's. The report is left as it is (`reports_unchanged`).
    - **Otherwise: edit.** `POST /eventReports/edit/<uuid>` with name, content and distribution, checked as the add. MISP applies only these fields, in the report's own event, and keeps uuid and id. A failed edit answers HTTP 200 `[]`.
-3. **TLP change.** After an edit that changes the record's TLP: `removeTag` of the old `tlp:` tag, then `addTag` of the new one. Both go by tag id (MISP reads `tlp:white` in a path as a named parameter), and each answer must say `saved` true (a failure answers HTTP 200 `{"saved": false}`). A failure counts in `report_tag_drift` and does not fail the record: the reader takes the TLP from the block and the distribution follows the edit.
+3. **TLP change.** After an edit that changes the record's TLP: `removeTag` of the old `tlp:` tag, then `addTag` of the new one. Both go by tag id (MISP reads `tlp:white` in a path as a named parameter), and each answer must say `saved` true (a failure answers HTTP 200 `{"saved": false}`). The `addTag` is sent whatever the `removeTag` answered. An old tag that is not on the report counts as removed: MISP answers its `removeTag` HTTP 200 `{"saved": false, "errors": "Invalid event-report - tag combination."}` (MISP source), as after an earlier change whose `addTag` failed, an add that dropped a missing tag, or an edit with a `perm_sync_authoritative` key. So does an old tag this MISP does not hold. A failure counts in `report_tag_drift` and does not fail the record: the reader takes the TLP from the block and the distribution follows the edit.
 
 Reports never travel inside `POST /events/<id>`: there MISP 2.5.50 silently ignores the uuid of another event's report, and 2.5.45 moves the report into the edited event. The report requests are not wrapped in the writer's retry decorator:
 
 - an HTTP 4xx is never tried again;
 - an HTTP 5xx, a timeout or a connection error is tried once more;
-- after 5 records in a row failed that way, the rest of the push is skipped.
+- after 5 records in a row failed that way, the rest of the push is skipped; a record with any other outcome starts the count again.
 
 Pacing and limits:
 
 - `EDGEGUARD_MISP_REPORT_THROTTLE_SEC` (default 0.1) is the pause between records.
 - The parent-DAG liveness callback runs before each record.
-- No record starts after the push's deadline.
+- No record starts after the push's deadline. For a writer given its task's end (`task_ends_at`, the baseline's), no record and no report request starts later than 10 minutes before that end, so the collector can save `report_pending` before Airflow kills the task. A request in flight keeps its timeouts (30 s to connect, 300 s to read), which fit in those 10 minutes. A request not sent then counts as no answer, and one not tried again keeps its first answer.
+- The push stops before the next record once MISP has kept failing for `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` (the baseline's writer: `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE`, at most until 10 minutes before its task's end): the time from the start of the first record that failed on HTTP 5xx or no answer, until a record ends otherwise.
+- The records not tried are listed as skipped.
 
-The logs carry uuid, `record_ref`, lengths and SHA-256 only, never content or MISP's answers. The writer's item bookkeeping (`last_push_*`) is not touched.
+The logs carry uuid, `record_ref`, lengths and SHA-256 only, never content or MISP's answers. MISP's own logs are not covered by this rule: MISP logs every Event Report change in full, an add with the whole content and an edit with the old and the new content, amber and red text included, whatever the report's distribution. MISP's site administrators can read these entries ([RUNBOOK.md](RUNBOOK.md#report-text-in-misps-logs)). The writer's item bookkeeping (`last_push_*`) is not touched.
 
 **Outcome of a push.** The writer returns counts: `reports_added`, `reports_updated`, `reports_unchanged`, `reports_deleted_in_misp`, `reports_failed` (with `reports_foreign`), `reports_skipped` and `report_tag_drift`. It also returns the lists `settled`, `failed` (with the reason, and whether the failure is permanent) and `skipped`.
 
@@ -229,7 +231,7 @@ The logs carry uuid, `record_ref`, lengths and SHA-256 only, never content or MI
 
 It returns the problems found; no task runs it yet.
 
-**MISP versions.** The behaviour above was measured on MISP 2.5.50 on 2026-11-07. The source of 2.5.45 behaves the same on the requests the writer sends; it differs on the event-edit path, which the writer does not use.
+**MISP versions.** The report and tag requests and their answers above were measured on MISP 2.5.50 on 2026-11-07 with a site-admin key. The effects of the writer key's role (`perm_tagger`, `perm_tag_editor`, `perm_sync_authoritative`), the creator-organisation check, the shape of the `GET /users/view/me` answer and the answer to a `removeTag` of a tag that is not on the report come from the MISP and PyMISP source, not from a measurement. A read-only check with the writer key settles them, and its recording then replaces the constructed fixture. The source of 2.5.45 behaves the same on the report and tag requests the writer sends; it differs on the event-edit path, which the writer does not use.
 
 ---
 
@@ -275,7 +277,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
-- 2026-11-07 — Report records: one MISP Event Report per OTX pulse and CISA ICS advisory (schema `edgeguard.report.v1`, content, digest, uuid, tags, distribution, the writer's flow and its failure answers, the `report_pending` list, the read-only preflight). No collector writes records yet.
+- 2026-11-07 — Report records: one MISP Event Report per OTX pulse and CISA ICS advisory (schema `edgeguard.report.v1`, content, digest, uuid, tags, distribution, the writer's flow and its failure answers, its limits (deadline, task end, failing-time cap), the `report_pending` list, the read-only preflight, MISP's own logs of report text, what was measured and what comes from the MISP source). No collector writes records yet.
 
 - 2026-11-02 — `MISPCollector`: no DAG or `run_pipeline.py` runs it (the text named the collector step of the retired in-process baseline). How the sync reads an ATT&CK value: the node parse only (the text also named a STIX conversion that no pipeline step calls).
 - 2026-11-02 — Event names and lookups: the readers of an event part's source no longer list the STIX flow of `run_pipeline.py`, which is removed (`run_pipeline.py` runs the collectors into MISP only).

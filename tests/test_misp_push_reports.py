@@ -4,9 +4,11 @@ The writer's flow per record follows the live checks on MISP 2.5.50 of 2026-11-0
 ``/eventReports/add/<event>`` counts only when the answer shows the uuid, the content's SHA-256, the name and
 ``deleted`` false; any HTTP 403 leads to a view of the uuid, which decides between a foreign report (permanent),
 a deletion in MISP (respected), an unchanged or newer stored record (left as it is) and an edit by
-``/eventReports/edit/<uuid>`` (checked the same way); a TLP change swaps the ``tlp:`` tags by id. HTTP 4xx is never
-tried again, HTTP 5xx once. The MISP double (``tests/report_misp_double.py``) answers with the recorded answers of
-``tests/fixtures/misp_event_reports_2026_11_07/``.
+``/eventReports/edit/<uuid>`` (checked the same way); a TLP change swaps the ``tlp:`` tags by id, the new one added
+whatever the old one's removal answered. HTTP 4xx is never tried again; HTTP 5xx, a timeout or a connection error
+once. The push stops at its deadline, 10 minutes before its task's end, at the cap on failing time and after five
+records in a row without an answer or with HTTP 5xx. The MISP double (``tests/report_misp_double.py``) answers with
+the recorded answers of ``tests/fixtures/misp_event_reports_2026_11_07/``.
 """
 
 from __future__ import annotations
@@ -14,9 +16,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from typing import Any, Dict, List
 
 import pytest
+import requests
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
@@ -86,6 +90,48 @@ def _counts(stats: Dict[str, Any]) -> Dict[str, int]:
     return {k: v for k, v in stats.items() if k.startswith("report")}
 
 
+def _answer(key: str, record: Dict[str, Any], **changes: Any):
+    """The recorded answer *key* holding the report as sent for *record*, then *changes* to its EventReport."""
+    status, answer = recorded(key)
+    answer["EventReport"].update(
+        uuid=rr.record_uuid(record), name=rr.report_name(record), content=rr.render_content(record), deleted=False
+    )
+    answer["EventReport"].update(changes)
+    return status, answer
+
+
+def _clock(monkeypatch, start: float = 1000.0) -> Dict[str, float]:
+    """A fake ``time.monotonic`` the test moves on."""
+    clock = {"now": start}
+    monkeypatch.setattr(mw.time, "monotonic", lambda: clock["now"])
+    return clock
+
+
+def _slow_reports(misp: ReportMisp, clock: Dict[str, float], seconds: float) -> None:
+    """Each report request takes *seconds* of the fake clock, answered or not."""
+    post, get = misp.post, misp.get
+
+    def timed_post(url, json=None, **kw):
+        if "/eventReports/" in url:
+            clock["now"] += seconds
+        return post(url, json=json, **kw)
+
+    def timed_get(url, **kw):
+        if "/eventReports/" in url:
+            clock["now"] += seconds
+        return get(url, **kw)
+
+    misp.post, misp.get = timed_post, timed_get
+
+
+# A report MISP answers HTTP 200 for, but not as sent: the answer must show the uuid, the name and deleted false.
+_NOT_AS_SENT = [
+    ("uuid", lambda r: rr.record_uuid(_record(2)), "the answer names another report"),
+    ("name", lambda r: rr.report_name(r)[:8], "MISP holds another name"),  # the non-strict-SQL cut (L8)
+    ("deleted", lambda r: True, "MISP holds the report as deleted"),  # L7: an edit of a deleted report
+]
+
+
 ZERO = {
     "reports_added": 0,
     "reports_updated": 0,
@@ -153,6 +199,46 @@ class TestAdd:
                 "permanent": False,
             }
         ]
+
+    @pytest.mark.parametrize("field,value,problem", _NOT_AS_SENT, ids=[c[0] for c in _NOT_AS_SENT])
+    def test_an_add_answered_200_that_differs_from_what_was_sent_fails(self, field, value, problem):
+        misp = ReportMisp()
+        _day_event(misp)
+        record = _record()
+        misp.script("POST", "/eventReports/add/", _answer("add_ok", record, **{field: value(record)}))
+        stats = _writer(misp).push_reports("alienvault_otx", [record])
+        assert _counts(stats) == {**ZERO, "reports_failed": 1}
+        assert stats["failed"] == [
+            {
+                "record_ref": record["record_ref"],
+                "reason": f"the add answered HTTP 200 but {problem}",
+                "permanent": False,
+            }
+        ]
+        assert stats["settled"] == []
+
+    def test_a_title_over_255_characters_is_sent_cut_at_a_word_end_on_add_and_edit(self):
+        record = _record(title="\U0001f600 " + ("word " * 80).strip())
+        assert len(record["title"]) > 255  # the full title stays in the record (meta block)
+        misp = ReportMisp()
+        _day_event(misp)
+        assert _writer(misp).push_reports("alienvault_otx", [record])["reports_added"] == 1
+        (body,) = misp.bodies("/eventReports/add/")
+        name = body["EventReport"]["name"]
+        assert len(name) <= 255 and name.endswith("word") and not name.endswith(" ")
+        misp = ReportMisp()
+        _day_event(misp)
+        _stored(misp, _record(revision=1, last_modified="2026-10-01T00:00:00"))
+        assert _writer(misp).push_reports("alienvault_otx", [record])["reports_updated"] == 1
+        (edit,) = misp.bodies("/eventReports/edit/")
+        assert edit["EventReport"]["name"] == name
+
+    def test_a_record_without_a_title_is_named_by_its_reference(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        record = _record(title=None)
+        assert _writer(misp).push_reports("alienvault_otx", [record])["reports_added"] == 1
+        assert misp.bodies("/eventReports/add/")[0]["EventReport"]["name"] == record["record_ref"]
 
     def test_a_record_given_twice_is_written_once_newest_first(self):
         misp = ReportMisp()
@@ -289,6 +375,37 @@ class TestStoredReport:
             "permanent": False,
         }
 
+    @pytest.mark.parametrize("field,value,problem", _NOT_AS_SENT, ids=[c[0] for c in _NOT_AS_SENT])
+    def test_an_edit_answered_200_that_differs_from_what_was_sent_fails(self, field, value, problem):
+        """deleted: the report was deleted in MISP between the view and the edit; L7 recorded that such an edit
+        answers HTTP 200 with the new content and deleted true."""
+        misp = ReportMisp()
+        _day_event(misp)
+        _stored(misp, _record(revision=1, last_modified="2026-10-01T00:00:00"))
+        record = _record()
+        misp.script("POST", "/eventReports/edit/", _answer("edit_ok", record, **{field: value(record)}))
+        stats = _writer(misp).push_reports("alienvault_otx", [record])
+        assert _counts(stats) == {**ZERO, "reports_failed": 1}
+        assert stats["failed"] == [
+            {
+                "record_ref": record["record_ref"],
+                "reason": f"the edit answered HTTP 200 but {problem}",
+                "permanent": False,
+            }
+        ]
+        assert stats["settled"] == []
+
+    def test_a_view_answering_another_uuid_fails_and_edits_nothing(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        _stored(misp, _record(revision=1, last_modified="2026-10-01T00:00:00"))
+        record = _record()
+        misp.script("GET", "/eventReports/view/", _answer("view_ok", record, uuid=rr.record_uuid(_record(2))))
+        stats = _writer(misp).push_reports("alienvault_otx", [record])
+        assert _counts(stats) == {**ZERO, "reports_failed": 1}
+        assert stats["failed"][0]["reason"] == "the add answered HTTP 403 and the view of the uuid answered HTTP 200"
+        assert misp.writes() == ["/eventReports/add/150"]
+
     def test_a_stored_content_without_a_valid_block_is_overwritten(self):
         misp = ReportMisp()
         _day_event(misp)
@@ -296,6 +413,17 @@ class TestStoredReport:
         misp.store(rr.record_uuid(record), "150", name="x", content="edited by hand")
         stats = _writer(misp).push_reports("alienvault_otx", [record])
         assert stats["reports_updated"] == 1
+
+    def test_a_stored_block_nested_too_deep_to_parse_is_overwritten_and_the_push_goes_on(self):
+        """A block some 10,000 levels deep makes ``json.loads`` raise RecursionError: no record, so the edit."""
+        misp = ReportMisp()
+        _day_event(misp)
+        first, second = _record(1), _record(2)
+        head, fence, _block = rr.render_content(first).rpartition("```json\n")
+        misp.store(rr.record_uuid(first), "150", name="x", content=f"{head}{fence}{'[' * 20000}{']' * 20000}\n```\n")
+        stats = _writer(misp).push_reports("alienvault_otx", [first, second])
+        assert (stats["reports_updated"], stats["reports_added"], stats["reports_failed"]) == (1, 1, 0)
+        assert f"/eventReports/edit/{rr.record_uuid(first)}" in misp.writes()
 
 
 # --------------------------------------------------------------------------- #
@@ -339,6 +467,47 @@ class TestTlpChange:
         assert stats["report_tag_drift"] == 1 and stats["reports_updated"] == 1
         assert [p for p in misp.writes() if "Tag/" in p] == [f"/eventReports/removeTag/{stored['id']}/78"]
         assert misp.reports[stored["uuid"]]["tags"] == set() and misp.reports[stored["uuid"]]["distribution"] == "0"
+
+    def test_an_old_tag_not_on_the_report_still_lets_the_new_tag_be_added(self):
+        """The old tlp tag is gone (an earlier swap whose addTag failed, a perm_sync_authoritative edit): MISP
+        answers its removeTag saved false, "tag combination" (MISP source); the new tag is added all the same."""
+        misp = ReportMisp()
+        misp.add_tag("tlp:amber", "80")
+        _day_event(misp)
+        stored = _stored(misp, _record(revision=1, last_modified="2026-10-01T00:00:00"), tags=("EdgeGuard",))
+        stats = _writer(misp).push_reports("alienvault_otx", [_record(tlp="amber")])
+        assert _counts(stats) == {**ZERO, "reports_updated": 1}
+        report_id = stored["id"]
+        assert misp.writes()[-2:] == [f"/eventReports/removeTag/{report_id}/78", f"/eventReports/addTag/{report_id}/80"]
+        assert misp.reports[stored["uuid"]]["tags"] == {"EdgeGuard", "tlp:amber"}
+
+    def test_an_old_level_this_misp_lacks_sends_only_the_add_of_the_new_tag(self):
+        """tlp:green does not exist (as on the recording MISP), so the add dropped it; the revision to amber adds
+        tlp:amber. The same holds after the white-to-red swap of the test above, whose tlp:red was missing."""
+        misp = ReportMisp()
+        misp.add_tag("tlp:amber", "80")
+        _day_event(misp)
+        record = _record(tlp="green")
+        assert _writer(misp).push_reports("alienvault_otx", [record])["reports_added"] == 1
+        uuid = rr.record_uuid(record)
+        assert "tlp:green" not in misp.reports[uuid]["tags"]
+        revised = _record(tlp="amber", revision=3, last_modified="2026-11-05T00:00:00")
+        stats = _writer(misp).push_reports("alienvault_otx", [revised])
+        assert _counts(stats) == {**ZERO, "reports_updated": 1}
+        report_id = misp.reports[uuid]["id"]
+        assert [p for p in misp.writes() if "Tag/" in p] == [f"/eventReports/addTag/{report_id}/80"]
+        assert "tlp:amber" in misp.reports[uuid]["tags"]
+
+    def test_a_failed_remove_is_drift_and_the_new_tag_is_still_added(self):
+        misp = ReportMisp()
+        misp.add_tag("tlp:amber", "80")
+        _day_event(misp)
+        stored = _stored(misp, _record(revision=1, last_modified="2026-10-01T00:00:00"), tags=("tlp:white",))
+        misp.script("POST", "/eventReports/removeTag/", "add_name_300_chars", times=2)  # HTTP 500, tried twice
+        stats = _writer(misp).push_reports("alienvault_otx", [_record(tlp="amber")])
+        assert _counts(stats) == {**ZERO, "reports_updated": 1, "report_tag_drift": 1}
+        assert misp.writes()[-1] == f"/eventReports/addTag/{stored['id']}/80"
+        assert misp.reports[stored["uuid"]]["tags"] == {"tlp:white", "tlp:amber"}
 
     def test_an_unchanged_tlp_sends_no_tag_change(self):
         misp = ReportMisp()
@@ -402,6 +571,50 @@ class TestRetriesAndLimits:
         assert stats["skipped"][0]["reason"].startswith("MISP kept failing: 5 records in a row")
         assert misp.paths().count("/eventReports/add/150") == 10
 
+    def test_a_timeout_is_tried_once_more(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        misp.script("POST", "/eventReports/add/", requests.exceptions.ConnectTimeout("no answer"))
+        stats = _writer(misp).push_reports("alienvault_otx", [_record()])
+        assert _counts(stats) == {**ZERO, "reports_added": 1}
+        assert misp.paths().count("/eventReports/add/150") == 2
+
+    def test_no_answer_twice_fails_the_record(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        misp.script("POST", "/eventReports/add/", requests.exceptions.ConnectionError("no answer"), times=2)
+        stats = _writer(misp).push_reports("alienvault_otx", [_record()])
+        assert _counts(stats) == {**ZERO, "reports_failed": 1}
+        assert stats["failed"][0]["reason"] == "the add answered no answer (ConnectionError) (tried twice)"
+        assert stats["failed"][0]["permanent"] is False
+        assert misp.paths().count("/eventReports/add/150") == 2
+
+    def test_after_five_records_without_an_answer_the_rest_is_skipped(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        misp.script("POST", "/eventReports/add/", requests.exceptions.ReadTimeout("no answer"), times=100)
+        stats = _writer(misp).push_reports("alienvault_otx", [_record(n) for n in range(8)])
+        assert (stats["reports_failed"], stats["reports_skipped"]) == (5, 3)
+        assert stats["skipped"][0]["reason"].startswith("MISP kept failing: 5 records in a row")
+        assert misp.paths().count("/eventReports/add/150") == 10
+
+    def test_records_refused_with_4xx_do_not_count_toward_the_stop(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        misp.script("POST", "/eventReports/add/", "add_invalid_distribution", times=100)  # 403 (L2b), view 404 (L2)
+        stats = _writer(misp).push_reports("alienvault_otx", [_record(n) for n in range(8)])
+        assert (stats["reports_failed"], stats["reports_skipped"]) == (8, 0)
+        assert misp.paths().count("/eventReports/add/150") == 8
+
+    def test_a_4xx_failure_breaks_a_row_of_5xx_failures(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        misp.script("POST", "/eventReports/add/", "add_name_300_chars", times=8)  # 4 records x 2 attempts, HTTP 500
+        misp.script("POST", "/eventReports/add/", "add_invalid_distribution", times=1)  # 403, view 404
+        misp.script("POST", "/eventReports/add/", "add_name_300_chars", times=8)
+        stats = _writer(misp).push_reports("alienvault_otx", [_record(n) for n in range(9)])
+        assert (stats["reports_failed"], stats["reports_skipped"]) == (9, 0)
+
     def test_a_deadline_in_the_past_sends_nothing(self):
         import time
 
@@ -425,6 +638,93 @@ class TestRetriesAndLimits:
         stats = _writer(misp).push_reports("alienvault_otx", [_record(n) for n in range(4)], deadline=1050.0)
         assert (stats["reports_added"], stats["reports_skipped"]) == (2, 2)
         assert stats["skipped"][0]["reason"] == "the push's deadline came"
+
+    def test_a_task_end_already_within_the_margin_sends_nothing(self):
+        misp = ReportMisp()
+        _day_event(misp)
+        misp.script("POST", "/eventReports/add/", requests.exceptions.ReadTimeout("no answer"), times=100)
+        writer = _writer(misp, task_ends_at=time.time() - 3600)
+        stats = writer.push_reports("alienvault_otx", [_record(1), _record(2)])
+        assert stats["reports_skipped"] == 2 and misp.requests == []
+        assert stats["skipped"][0]["reason"].startswith("the task's end is near")
+        # the stop point and the cap belong to the push: a request made after it is sent
+        assert writer._misp_push_failing_cap is None
+        writer.report_preflight()
+        assert misp.paths() == ["/users/view/me", "/tags/search/x/1"]
+
+    def test_no_record_starts_within_the_margin_before_the_tasks_end(self, monkeypatch):
+        clock = _clock(monkeypatch)
+        misp = ReportMisp()
+        _day_event(misp)
+        _slow_reports(misp, clock, 250.0)
+        # 1,000 s to the task's end: records start until 400 s from now (the margin is 600 s)
+        writer = _writer(misp, task_ends_at=time.time() + 1000)
+        stats = writer.push_reports("alienvault_otx", [_record(n) for n in range(4)])
+        assert (stats["reports_added"], stats["reports_skipped"]) == (2, 2)
+        assert stats["skipped"][0]["reason"] == (
+            "the task's end is near: no record starts later than 600 s before task_ends_at"
+        )
+
+    def test_no_report_request_starts_after_the_tasks_stop_point(self, monkeypatch):
+        """Each add times out after 350 s; the stop point is 300 s away, so the add is not tried again."""
+        clock = _clock(monkeypatch)
+        misp = ReportMisp()
+        _day_event(misp)
+        _slow_reports(misp, clock, 350.0)
+        misp.script("POST", "/eventReports/add/", requests.exceptions.ReadTimeout("no answer"), times=100)
+        stats = _writer(misp, task_ends_at=time.time() + 900).push_reports(
+            "alienvault_otx", [_record(n) for n in range(3)]
+        )
+        assert (stats["reports_failed"], stats["reports_skipped"]) == (1, 2)
+        assert stats["failed"][0]["reason"] == (
+            "the add answered no answer (ReadTimeout), not tried again: the push's time was up"
+        )
+        assert misp.paths().count("/eventReports/add/150") == 1
+
+    def test_the_push_stops_once_misp_kept_failing_for_the_cap(self, monkeypatch):
+        monkeypatch.setenv("EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC", "100")
+        clock = _clock(monkeypatch)
+        misp = ReportMisp()
+        _day_event(misp)
+        _slow_reports(misp, clock, 30.0)
+        misp.script("POST", "/eventReports/add/", requests.exceptions.ReadTimeout("no answer"), times=100)
+        stats = _writer(misp).push_reports("alienvault_otx", [_record(n) for n in range(8)])
+        # records 0 and 1 fail (60 s each); before record 2 MISP has kept failing for 120 s
+        assert (stats["reports_failed"], stats["reports_skipped"]) == (2, 6)
+        assert stats["skipped"][0]["reason"] == "MISP kept failing for 120 s (EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC=100)"
+
+    def test_a_record_misp_answers_ends_the_failing_streak(self, monkeypatch):
+        monkeypatch.setenv("EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC", "100")
+        clock = _clock(monkeypatch)
+        misp = ReportMisp()
+        _day_event(misp)
+        records = [_record(n) for n in range(8)]
+        answered = rr.record_uuid(records[1])
+        post = misp.post
+
+        def timed_post(url, json=None, **kw):
+            if "/eventReports/add/" in url:
+                clock["now"] += 30.0
+                if json["EventReport"]["uuid"] != answered:
+                    raise requests.exceptions.ReadTimeout("no answer")
+            return post(url, json=json, **kw)
+
+        misp.post = timed_post
+        stats = _writer(misp).push_reports("alienvault_otx", records)
+        # record 1 is added at 90 s and ends the streak record 0 began; records 2 and 3 begin a new one
+        assert (stats["reports_added"], stats["reports_failed"], stats["reports_skipped"]) == (1, 3, 4)
+
+    def test_an_event_lookup_that_returns_ends_the_streak_its_retries_began(self, monkeypatch):
+        misp = ReportMisp()
+        _day_event(misp)
+        writer = _writer(misp)
+
+        def lookup_after_failures(source):
+            writer._misp_push_failing_since = time.monotonic() - 10_000  # its retries failed for a long time
+            return "150", ""
+
+        monkeypatch.setattr(writer, "_report_event_id", lookup_after_failures)
+        assert writer.push_reports("alienvault_otx", [_record()])["reports_added"] == 1
 
     def test_the_liveness_callback_runs_before_each_record_and_its_exception_propagates(self):
         misp = ReportMisp()
@@ -607,3 +907,29 @@ class TestPreflight:
         misp.script("GET", "/users/view/me", (403, {"name": "Forbidden"}))
         result = _writer(misp).report_preflight()
         assert not result.ok and result.perm_tagger is None and "HTTP 403" in result.problems[0]
+
+    @pytest.mark.parametrize("answer", [(403, {"name": "Forbidden"}), "add_name_300_chars"], ids=["403", "500"])
+    def test_an_unreadable_tag_list_is_a_problem(self, answer):
+        misp = ReportMisp()
+        misp.script("POST", "/tags/search/x/1", answer, times=2)  # a 5xx is tried once more
+        result = _writer(misp).report_preflight()
+        assert not result.ok and result.missing_tags == ()
+        assert any("/tags/search/x/1" in p for p in result.problems)
+        assert misp.writes() == []
+
+    def test_role_flags_answered_as_strings_are_read(self):
+        """MISP may answer a role's flags as "0" / "1" (the answer is constructed, see the double)."""
+        misp = ReportMisp()
+        misp.me["Role"].update(perm_tagger="0", perm_tag_editor="0", perm_sync_authoritative="1")
+        result = _writer(misp).report_preflight()
+        assert (result.perm_tagger, result.perm_tag_editor, result.perm_sync_authoritative) == (False, False, True)
+        assert any("perm_tagger" in p for p in result.problems)
+        assert any("perm_sync_authoritative" in p for p in result.problems)
+        misp = ReportMisp()
+        misp.add_tag("source:AlienVault-OTX", "2")
+        misp.add_tag("source:CISA-ICS", "3")
+        for n, level in enumerate(rr.TLP_LEVELS):
+            misp.add_tag(f"tlp:{level}", "78" if level == "white" else str(90 + n))
+        misp.me["Role"].update(perm_tagger="1", perm_tag_editor="0", perm_sync_authoritative="0")
+        result = _writer(misp).report_preflight()
+        assert result.ok and (result.perm_tagger, result.perm_sync_authoritative) == (True, False)

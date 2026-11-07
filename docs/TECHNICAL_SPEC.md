@@ -642,7 +642,7 @@ These three bridges are planned; no pipeline path writes them today. The Vulnera
 
 ## Constraints
 
-### UNIQUE Constraints (19 — see `Neo4jClient.create_constraints` in `src/neo4j_client.py` for the canonical list)
+### UNIQUE Constraints (21 — see `Neo4jClient.create_constraints` in `src/neo4j_client.py` for the canonical list)
 
 > **Note:** no constraint includes `tag`: provenance lives on `SOURCED_FROM`
 > edges, so an entity merges across sources on its natural key alone. The

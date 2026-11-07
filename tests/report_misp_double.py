@@ -11,8 +11,14 @@ a failed edit answers HTTP 200 ``[]`` (L2b); a name over 255 characters answers 
 unknown tag answers HTTP 200 ``{"saved": false}`` (L1b). ``GET /users/view/me`` answers the constructed shape of
 ``users_view_me_constructed.json`` (no recording exists).
 
+Two answers come from the MISP source, not from a recording (``EventReportsController``, MISP 2.5.45 and 2.5.50):
+``removeTag`` of a tag that is not on the report answers HTTP 200 ``{"saved": false, "errors": "Invalid
+event-report - tag combination."}``, and ``addTag`` or ``removeTag`` of an unknown report answers HTTP 404
+"Invalid report" (``fetchIfAuthorized``; the shape of the recorded ``edit_unknown_uuid``).
+
 ``script(method, path_prefix, key_or_answer, times)`` makes the next matching requests answer as recorded under
-*key* (or a given ``(status, body)``), before the double's own logic: a recorded failure for one request.
+*key* (or a given ``(status, body)``), before the double's own logic: a recorded failure for one request. Given an
+exception instead, the matching requests raise it (MISP did not answer: a timeout or a connection error).
 """
 
 from __future__ import annotations
@@ -88,8 +94,13 @@ class ReportMisp:
         self.reports[uuid] = report
         return report
 
-    def script(self, method: str, path_prefix: str, answer: Union[str, Tuple[int, Any]], times: int = 1) -> None:
-        status, body = recorded(answer) if isinstance(answer, str) else answer
+    def script(
+        self, method: str, path_prefix: str, answer: Union[str, Tuple[int, Any], BaseException], times: int = 1
+    ) -> None:
+        if isinstance(answer, BaseException):
+            status, body = None, answer
+        else:
+            status, body = recorded(answer) if isinstance(answer, str) else answer
         self._script.append([method, path_prefix, status, body, times])
 
     # ------------------------------------------------------------------ what the writer asked
@@ -116,6 +127,8 @@ class ReportMisp:
         for entry in self._script:
             if entry[0] == method and path.startswith(entry[1]) and entry[4] > 0:
                 entry[4] -= 1
+                if isinstance(entry[3], BaseException):
+                    raise entry[3]
                 return Response(entry[2], copy.deepcopy(entry[3]))
         if method == "GET" and path == "/users/view/me":
             return Response(200, copy.deepcopy(self.me))
@@ -230,8 +243,10 @@ class ReportMisp:
 
     def _tag(self, action: str, report_id: str, tag_id: str):
         report = next((r for r in self.reports.values() if r["id"] == report_id or r["uuid"] == report_id), None)
+        if report is None:  # fetchIfAuthorized: 404 "Invalid report" (MISP source)
+            return self._not_found("edit_unknown_uuid", f"/eventReports/{action}/{report_id}/{tag_id}")
         names = {v: k for k, v in self.tags.items()}
-        if report is None or tag_id not in names:
+        if tag_id not in names:
             return Response(*recorded("add_tag_unknown_name"))
         name = names[tag_id]
         if action == "addTag":
@@ -239,6 +254,8 @@ class ReportMisp:
                 return Response(*recorded("add_tag_already_attached"))
             report["tags"].add(name)
             return Response(*recorded("add_tag_by_id"))
+        if name not in report["tags"]:  # EventReportsController::removeTag (MISP source, not recorded)
+            return Response(200, {"saved": False, "errors": "Invalid event-report - tag combination."})
         report["tags"].discard(name)
         return Response(*recorded("remove_tag_by_id"))
 

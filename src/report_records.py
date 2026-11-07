@@ -677,7 +677,7 @@ def parse_content(content: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
         return None
     try:
         meta = json.loads(tail.group(1))
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: a block nested some 10,000 levels deep
         return None
     head = content[:at]
     heading = f"\n\n{META_HEADING}\n"
