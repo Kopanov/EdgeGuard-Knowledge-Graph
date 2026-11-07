@@ -7,7 +7,9 @@ holds the Cypher of ``description_ranking`` to its Python mirror, which the path
 (``tests/test_description_ranking.py``), on every stored state against every incoming source, and runs the
 write paths with the real records of ``tests/test_cve_description_source.py`` and
 ``tests/test_entity_description_source.py`` in every order: ``merge_cve``, ``merge_vulnerabilities_batch``,
-``merge_resilmesh_cve``, ``merge_malware`` and ``merge_technique``.
+``merge_resilmesh_cve``, ``merge_malware`` and ``merge_technique``. A node holds the ranked text as the write
+paths cap it (``text_caps``: ATT&CK's markup stripped, at most 500 characters on these labels; the CVE texts are
+shorter than 1,000 characters and have no markup), which ``as_stored`` gives.
 
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``, writes
 only nodes labelled ``EdgeGuardIT``, refuses any other node.
@@ -226,7 +228,7 @@ def test_the_batch_path_keeps_nvds_text_in_both_orders(client, raw_driver, first
 
 
 def test_merge_malware_keeps_the_highest_ranked_text_in_every_order(client, raw_driver):
-    from test_entity_description_source import mitre_items, synced, written
+    from test_entity_description_source import as_stored, mitre_items, synced, written
 
     records = {
         "mitre_attck": synced(written("malware", mitre_items()["malware"])),
@@ -234,6 +236,10 @@ def test_merge_malware_keeps_the_highest_ranked_text_in_every_order(client, raw_
         "misp": dict(mitre_items()["malware"], description="A MISP-native attribute's text"),
         "stix_import": dict(mitre_items()["malware"], description="An external bundle's text"),
     }
+    # Not vacuous: the node holds ATT&CK's text without its markup; the other texts have none.
+    assert records["mitre_attck"]["description"].startswith("[Cobalt Strike](")
+    assert as_stored(records["mitre_attck"]["description"]).startswith("Cobalt Strike ")
+    assert all(as_stored(r["description"]) == r["description"] for s, r in records.items() if s != "mitre_attck")
     for subset_size in (2, 3, 4):
         for order in itertools.permutations(records, subset_size):
             _reset(raw_driver, "Malware", "name", "cobalt strike")
@@ -241,19 +247,20 @@ def test_merge_malware_keeps_the_highest_ranked_text_in_every_order(client, raw_
                 assert client.merge_malware(records[source], source_id=source)
             best = max(order, key=ENTITY.rank)
             node = _described(raw_driver, "Malware", "name", "cobalt strike")
-            assert node == {"description": records[best]["description"], "description_source": best}, order
+            assert node == {"description": as_stored(records[best]["description"]), "description_source": best}, order
 
 
 @pytest.mark.parametrize("first", ["mitre_attck", "misp"])
 def test_a_technique_keeps_attacks_text_in_both_orders(client, raw_driver, first):
     # Until 2026-10-16 any record set a Technique's description: the one merged last won.
-    from test_entity_description_source import mitre_items, synced, written
+    from test_entity_description_source import as_stored, mitre_items, synced, written
 
     mitre = synced(written("technique", mitre_items()["technique"]))
+    assert as_stored(mitre["description"]) != mitre["description"]  # the node holds the capped text
     native = dict(mitre_items()["technique"], description="A MISP-native attribute's text")
     _reset(raw_driver, "Technique", "mitre_id", mitre["mitre_id"].upper())
     records = [(mitre, "mitre_attck"), (native, "misp")]
     for item, source in records if first == "mitre_attck" else records[::-1]:
         assert client.merge_technique(item, source_id=source)
     node = _described(raw_driver, "Technique", "mitre_id", mitre["mitre_id"].upper())
-    assert node == {"description": mitre["description"], "description_source": "mitre_attck"}
+    assert node == {"description": as_stored(mitre["description"]), "description_source": "mitre_attck"}
