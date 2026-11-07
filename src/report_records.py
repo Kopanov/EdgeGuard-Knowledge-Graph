@@ -591,7 +591,12 @@ def otx_pulse_record(
     author = pulse.get("author_name")
     if not (isinstance(author, str) and author.strip()) and isinstance(pulse.get("author"), Mapping):
         author = pulse["author"].get("username")
-    tlp = next((pulse.get(k) for k in ("tlp", "TLP") if isinstance(pulse.get(k), str) and pulse.get(k).strip()), None)
+    tlp: Optional[str] = None
+    for key in ("tlp", "TLP"):
+        stated = pulse.get(key)
+        if isinstance(stated, str) and stated.strip():
+            tlp = stated
+            break
     fields = {
         "record_id": pulse_id if isinstance(pulse_id, str) else "",
         "url": OTX_PULSE_URL.format(pulse_id) if isinstance(pulse_id, str) and pulse_id.strip() else None,
@@ -787,7 +792,7 @@ def _pending_entries(raw: Any, source: str, now: datetime) -> List[Dict[str, Any
         if not isinstance(ref, str) or not ref.startswith(prefix) or len(ref) <= len(prefix) or ref in seen:
             continue
         seen.add(ref)
-        kept = {"record_ref": ref}
+        kept: Dict[str, Any] = {"record_ref": ref}
         first = iso_datetime(entry.get("first_failed_at"))
         kept["first_failed_at"] = _utc_iso(first or now)
         attempts = entry.get("attempts")
