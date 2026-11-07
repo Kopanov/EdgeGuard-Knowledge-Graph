@@ -54,6 +54,7 @@ its lowercase view). The table lists the threat-intelligence labels:
 | Campaign | `name` | `campaign` |
 | Source | `source_id` | `x-edgeguard-source` |
 | CVSSv2 / v30 / v31 / v40 | `cve_id` | `x-edgeguard-cvssv*` |
+| ThreatReport / VulnerabilityAdvisory | `record_ref` | `report` |
 
 ¹ Tool is the documented STIX-parity exception — see "Caveats" below.
 
@@ -61,7 +62,13 @@ its lowercase view). The table lists the threat-intelligence labels:
 Host `hostname`, Device `device_id`, Subnet `range`, NetworkService `port` +
 `protocol`, SoftwareVersion `version`, Application `name`, Role
 `permission`), User (`username`, `domain`; type `x-edgeguard-user`) and Alert
-(`alert_id`; type `x-edgeguard-alert`). A label without an entry in
+(`alert_id`; type `x-edgeguard-alert`). The two report labels, `ThreatReport`
+(an OTX pulse) and `VulnerabilityAdvisory` (a CISA ICS advisory), are keyed by
+`record_ref`, the record's exact `source_refs` string; both map to the STIX
+type `report`, so a report's uuid depends on `record_ref` only, and the same
+uuid is the uuid of the record's MISP Event Report
+([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)).
+No sync writes these nodes yet. A label without an entry in
 `NEO4J_TO_STIX_TYPE` uses its lowercased label name as the type in the
 canonical string.
 
@@ -86,6 +93,7 @@ documented order, after each field value is NFC-normalized, trimmed and has
 | CVE(cve_id="CVE-2024-1234") | `"vulnerability:cve-2024-1234"` |
 | Vulnerability(cve_id="CVE-2024-1234") | `"vulnerability:cve-2024-1234"` (same as CVE) |
 | Sector(name="healthcare") | `"identity:healthcare"` |
+| VulnerabilityAdvisory(record_ref="cisa_ics:ICSA-26-281-01") | `"report:cisa_ics:icsa-26-281-01"` |
 
 The trailing `.lower()` is what gives STIX parity — `_deterministic_id` in
 the STIX exporter does exactly the same thing.
@@ -791,10 +799,11 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — The report labels `ThreatReport` and `VulnerabilityAdvisory`, keyed by `record_ref` and mapped to the STIX type `report`; the uuid of a report node is the uuid of its MISP Event Report.
 - 2026-11-02 — Mechanism B lists the three remaining standalone relationship helpers, which no pipeline path calls (it counted six; three were removed with the retired in-process load); Mechanism A names the sync's batch writer, `create_misp_relationships_batch`, as the path that creates Sector nodes (it named the uncalled helpers).
 - 2026-11-02 — Sector labels: campaigns get theirs from `build_campaign_nodes`.
 - 2026-11-01 — `(:CVE)`: the sync writes CVEs in batches (`merge_cves_batch`, each CVE as `merge_cve` writes it); the text named `merge_cve`.

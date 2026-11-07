@@ -127,6 +127,14 @@ def test_canonical_node_key_format_is_lowercased_and_typed():
         ("CVE", {"cve_id": "CVE-2024-1234"}, "vulnerability", "CVE-2024-1234"),
         ("Sector", {"name": "healthcare"}, "identity", "healthcare"),
         ("Campaign", {"name": "OperationPawnStorm"}, "campaign", "OperationPawnStorm"),
+        # 2026-11-07: both report labels map to STIX ``report``; the key is the record's source_refs string.
+        (
+            "ThreatReport",
+            {"record_ref": "alienvault_otx:6abf0b86fb14812f2dc84fb2"},
+            "report",
+            "alienvault_otx:6abf0b86fb14812f2dc84fb2",
+        ),
+        ("VulnerabilityAdvisory", {"record_ref": "cisa_ics:ICSA-26-281-01"}, "report", "cisa_ics:ICSA-26-281-01"),
         # NOTE: Tool is intentionally absent. stix_exporter._deterministic_id
         # uses Tool.name for the STIX SDO id, but Neo4j keys Tool by mitre_id
         # (UNIQUE constraint). UUID parity for Tool requires a follow-up to
@@ -222,6 +230,7 @@ def test_natural_key_props_returns_documented_tuple():
     assert natural_key_props("Indicator") == ("indicator_type", "value")
     assert natural_key_props("Malware") == ("name",)
     assert natural_key_props("CVE") == ("cve_id",)
+    assert natural_key_props("ThreatReport") == natural_key_props("VulnerabilityAdvisory") == ("record_ref",)
     with pytest.raises(KeyError):
         natural_key_props("UnknownLabel")
 
@@ -263,6 +272,23 @@ def test_namespace_is_frozen():
     Neo4j and every STIX bundle ever shipped to ResilMesh — fail loudly if
     someone tries."""
     assert str(EDGEGUARD_NODE_UUID_NAMESPACE) == "5f2e1f9a-6a1b-5e0f-9b25-ed9ea2d574cb"
+
+
+def test_report_uuids_are_pinned():
+    """2026-11-07: the uuid of a report record is its MISP Event Report's uuid, its graph node's uuid and the uuid of
+    its STIX ``report--<uuid>``. MISP keeps the uuid of every report written, so a change of these values would
+    orphan every stored report (each would be written again under a new uuid). Frozen: one OTX and one CISA ICS
+    reference."""
+    assert NEO4J_TO_STIX_TYPE["ThreatReport"] == NEO4J_TO_STIX_TYPE["VulnerabilityAdvisory"] == "report"
+    otx = compute_node_uuid("ThreatReport", {"record_ref": "alienvault_otx:6abf0b86fb14812f2dc84fb2"})
+    ics = compute_node_uuid("VulnerabilityAdvisory", {"record_ref": "cisa_ics:ICSA-26-281-01"})
+    assert otx == "41646198-5449-5283-bf27-6f3813e5f708"
+    assert ics == "17ff328c-07c3-5786-9cac-e09357433faa"
+    assert canonical_node_key("VulnerabilityAdvisory", {"record_ref": "cisa_ics:ICSA-26-281-01"}) == (
+        "report:cisa_ics:icsa-26-281-01"
+    )
+    # the label does not enter the uuid: a rename of either label leaves MISP untouched
+    assert compute_node_uuid("VulnerabilityAdvisory", {"record_ref": "alienvault_otx:6abf0b86fb14812f2dc84fb2"}) == otx
 
 
 def test_neo4j_to_stix_type_map_is_frozen_for_threat_intel_core():

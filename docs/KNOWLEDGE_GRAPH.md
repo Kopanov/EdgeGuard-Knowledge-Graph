@@ -366,7 +366,9 @@ FOR (i:Indicator) REQUIRE (i.indicator_type, i.value) IS UNIQUE;
 // Also created by Neo4jClient.create_constraints: cve_key, source_key,
 // malware_key / actor_key (name), technique_key / tactic_key / tool_key (mitre_id),
 // sector_key, cvssv2/30/31/40_key (cve_id), campaign_key, ip_key (IP.address),
-// host_key (Host.hostname), subnet_key (Subnet.range), alert_key.
+// host_key (Host.hostname), subnet_key (Subnet.range), alert_key, and
+// threatreport_key / vulnerabilityadvisory_key (record_ref) for the report labels,
+// whose nodes no sync writes yet.
 // Device, NetworkService, SoftwareVersion, Application, Role and User get no
 // constraint (SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT).
 ```
@@ -622,10 +624,11 @@ ORDER BY coalesce(i.last_reported_at, i.first_imported_at) DESC
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — The constraints `threatreport_key` and `vulnerabilityadvisory_key` (`record_ref`) of the report labels `ThreatReport` and `VulnerabilityAdvisory`, created before any sync writes their nodes.
 - 2026-11-06 — Threat-actor names: the hygiene's list split no longer cuts inside parentheses or before a company's legal form, a name that is only a legal form is dropped, no name has unbalanced parentheses, and a doubled conjunction or an alias marker at the end leaves none on a name (`"apt28 and and apt29"` gave `apt28` and `and apt29`); a parenthetical in full-width parentheses with a space before it is dropped like an ASCII one (`"mois （ministry of intelligence and security）"` had given `security`). A sync on a test instance on 2026-11-06 had made the nodes `black owl (bo team` (an OTX adversary field that reads `"Black Owl (BO Team"`) and `ltd.` (from `"Videostrong Technology Co., Ltd."`), and the graph of 2026-11-03 holds `videostrong technology co.`. Reference 2026.11.06 lists the company's full name as no actor beside its short name; no other name of the reference changes, and the galaxy names of 2026-11-05 and the actor names of the graph of 2026-11-03 come out of the hygiene as before. The sync logs a single name the hygiene rewrites as `not a clean name — cleaned at collection` (it said `composite name`).
 - 2026-11-06 — Campaigns and shared malware: a malware that at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (default 7) actors are linked to, the spellings of one name together, is shared, and an indicator of it counts for an actor's campaign only through a link that a record reporting it cites, whichever member it reaches (`src/campaign_evidence.py`); a campaign with evidence and no indicator that counts has `indicator_count` 0 and no zone; `shared_malware_actors` and `shared_malware` on the campaign. A link of an actor to such a malware had made every indicator of the family evidence of the actor's campaign: on the 730-day graph of 2026-11-03, 30 ATT&CK groups that use Cobalt Strike had its 2,238 active indicators as candidates, the samples of APT32, APT37, menuPass, Chimera and others were all Cobalt Strike indicators, and a curated claim that an actor uses such a malware did the same to that actor's campaign.
 - 2026-11-05 — Threat-actor names: since reference 2026.11.05 `global group` counts as BlackLock (a galaxy synonym) and `kongtuke` as TAG-124; the 94 adversary names the 2026-11-03 baseline kept as malware were reviewed. The hygiene splits on `"&&"`, reads a `"<language>-speaking"` qualifier as a description and drops state intelligence and security agencies on their own like country names (`mois`, `gru`, `russian federal security service`, `russian intelligence services`); the reference lists 38 reviewed names as no actors (`not_actors`), which the OTX collector drops from adversary fields, the sync skips as threat-actor attributes and `actor_identities` does not count; on the graph of 2026-11-03 these rules would have kept out 43 `ThreatActor` nodes with 791 relationships. The and-split leaves the galaxy actor `stealth mango and tangelo` whole (it made two names), and `"&&"` inside a country or agency name reads as `and`. The test of the reference checks every name of it against the whole hygiene.

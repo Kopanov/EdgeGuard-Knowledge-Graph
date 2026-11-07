@@ -2805,6 +2805,10 @@ class Neo4jClient:
             "CREATE CONSTRAINT subnet_key IF NOT EXISTS FOR (n:Subnet) REQUIRE (n.range) IS UNIQUE",
             # Alert: alert_id is the upstream-provided idempotency key.
             "CREATE CONSTRAINT alert_key IF NOT EXISTS FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE",
+            # 2026-11-07, report records: one node per source record, keyed by the record's exact source_refs
+            # string (``node_identity._NATURAL_KEYS``); created ahead of the sync that writes the nodes.
+            "CREATE CONSTRAINT threatreport_key IF NOT EXISTS FOR (r:ThreatReport) REQUIRE (r.record_ref) IS UNIQUE",
+            "CREATE CONSTRAINT vulnerabilityadvisory_key IF NOT EXISTS FOR (r:VulnerabilityAdvisory) REQUIRE (r.record_ref) IS UNIQUE",
         ]
 
         success_count = 0

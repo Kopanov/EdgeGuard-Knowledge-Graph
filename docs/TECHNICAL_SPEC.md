@@ -678,6 +678,10 @@ CREATE CONSTRAINT host_key FOR (n:Host) REQUIRE (n.hostname) IS UNIQUE;
 CREATE CONSTRAINT subnet_key FOR (n:Subnet) REQUIRE (n.range) IS UNIQUE;
 // Alert: alert_id is the idempotency key of the alerts EdgeGuard's own processor writes
 CREATE CONSTRAINT alert_key FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE;
+// Report records: one node per OTX pulse / CISA ICS advisory, keyed by the record's source_refs string
+// (created ahead of the sync that writes the nodes)
+CREATE CONSTRAINT threatreport_key FOR (r:ThreatReport) REQUIRE (r.record_ref) IS UNIQUE;
+CREATE CONSTRAINT vulnerabilityadvisory_key FOR (r:VulnerabilityAdvisory) REQUIRE (r.record_ref) IS UNIQUE;
 ```
 
 ---
@@ -1024,10 +1028,11 @@ other type is compared as given.
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — Constraints `threatreport_key` and `vulnerabilityadvisory_key` (`record_ref`) for the report labels, created before any sync writes their nodes.
 - 2026-11-06 — `RUNS`, `PART_OF_CAMPAIGN`: an indicator of a malware many actors share joins a campaign only through a link that a record reporting it cites; a campaign is deleted when its actor has no campaign evidence left.
 - 2026-11-02 — Node schema: `Malware` no longer lists `family`, which no writer sets, and `known_malware[].family` of the alert enrichment is null (the schema and the sample showed a family); `deprecated` is listed on `Malware`, `ThreatActor` and `Tool`, and on `Tactic` with its clearing by an ATT&CK record (it was listed set-only on `Tactic`). A campaign's `last_seen` and the enrichment's `last_updated` take per source its own date first, the first-seen claim before the MISP record time (they named the last-seen claim, else the latest report). `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`: the age applies when no run state decides (it was described as a cross-host TTL).
 - 2026-11-02 — Read-side lookup canonicalization: a `url`, and a `scheme://host` value given without a type, is looked up with its scheme and host lower-cased, as the write side now keys a `url`.
