@@ -354,6 +354,17 @@ class TestSectorNotes:
         assert mod.split_note_list("Energy, & Dams") == ["Energy", "Dams"]
         assert mod.split_note_list(" , Energy,, Energy ") == ["Energy"]
 
+    def test_a_part_holding_a_name_with_commas_and_other_words_keeps_them(self):
+        # Constructed: no sector note of 2024-2026 adds words to this name (only the exact name occurs).
+        assert mod.split_note_list("Energy, Nuclear Reactors, Materials, and Waste Sector") == [
+            "Energy",
+            "Nuclear Reactors, Materials, and Waste Sector",
+        ]
+        assert mod.split_note_list("Energy, and the Nuclear Reactors, Materials, and Waste") == [
+            "Energy",
+            "the Nuclear Reactors, Materials, and Waste",
+        ]
+
 
 # --------------------------------------------------------------------------- #
 # The whole vulnerability note in MISP
@@ -689,6 +700,74 @@ class TestPendingRecords:
         assert http.advisories() == [NX, COMOS] and st["stats"]["pending_fetched"] == 1
         assert "cisa_ics:ICSA-25-317-15" in {r["record_ref"] for r in pushed_records(c)}
         assert pending() == {}
+
+    def test_failing_pending_reads_stop_after_their_own_streak_and_the_run_goes_on(self, monkeypatch, caplog):
+        # Constructed: five pending records whose advisories the listing names (outside the look-back) and that
+        # answer HTTP 404; the run's own advisory is read first and fetched.
+        monkeypatch.setattr(mod, "MAX_CONSECUTIVE_FETCH_FAILURES", 3)
+        old = "2026-09-01T00:00:00.000000Z"
+        missing = [f"2025/icsa-25-001-0{n}.json" for n in range(1, 6)]
+        put_on_pending(*(f"cisa_ics:ICSA-25-001-0{n}" for n in range(1, 6)))
+        http = _HTTP({"changes.csv": changes((NX, CHANGED), *((p, old) for p in missing)), NX: advisory(NX)})
+        c = collector(monkeypatch, http)
+        with caplog.at_level("WARNING"):
+            st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True and st["stats"]["fetch_failed"] == 0
+        assert st["stats"]["pending_fetched"] == 3 and st["stats"]["pending_failed"] == 3
+        assert http.advisories()[0] == NX and len(http.advisories()) == 4
+        assert sorted(e["attempts"] for e in pending().values()) == [1, 1, 2, 2, 2]
+        assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}
+        assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-26-043-08"]
+        assert any(
+            r.levelname == "WARNING" and "[REPORT-PENDING]" in r.getMessage() and "2 record(s) left" in r.getMessage()
+            for r in caplog.records
+        )
+        assert cursor() == CHANGED
+
+    def test_a_pending_read_that_succeeds_ends_the_pending_streak(self, monkeypatch):
+        # Constructed: pending records read in record-reference order, two whose advisories answer HTTP 404, then
+        # COMOS (fetched), then two more answering HTTP 404; no three failures in a row, so every record is tried.
+        monkeypatch.setattr(mod, "MAX_CONSECUTIVE_FETCH_FAILURES", 3)
+        old = "2026-09-01T00:00:00.000000Z"
+        missing = ["2025/icsa-25-001-01.json", "2025/icsa-25-001-02.json"]
+        later = ["2025/icsa-25-318-01.json", "2025/icsa-25-318-02.json"]
+        refs = [f"cisa_ics:{mod._listed_record_key(p).upper()}" for p in [*missing, COMOS, *later]]
+        put_on_pending(*refs)
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), *((p, old) for p in [*missing, COMOS, *later])),
+                NX: advisory(NX),
+                COMOS: advisory(COMOS),
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert http.advisories() == [NX, *missing, COMOS, *later]
+        assert st["stats"]["pending_fetched"] == 5 and st["stats"]["pending_failed"] == 4
+        assert {ref: e["attempts"] for ref, e in pending().items()} == {
+            ref: 2 for ref in refs if ref != "cisa_ics:ICSA-25-317-15"
+        }
+
+    def test_a_pending_read_after_failing_window_reads_does_not_abort_the_run(self, monkeypatch):
+        # Constructed: two advisories of the window that answer HTTP 404, then a pending record whose advisory
+        # answers HTTP 404 too; three failures in a row, but only two of the run's own reads.
+        monkeypatch.setattr(mod, "MAX_CONSECUTIVE_FETCH_FAILURES", 3)
+        gone = ["2026/icsa-26-300-91.json", "2026/icsa-26-300-92.json"]
+        put_on_pending("cisa_ics:ICSA-25-001-01")
+        http = _HTTP(
+            {
+                "changes.csv": changes(
+                    (NX, CHANGED), *((p, CHANGED) for p in gone), ("2025/icsa-25-001-01.json", "2026-09-01T00:00:00Z")
+                ),
+                NX: advisory(NX),
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert st["stats"]["fetch_failed"] == 2 and st["stats"]["pending_failed"] == 1
+        assert pending()["cisa_ics:ICSA-25-001-01"]["attempts"] == 2
+        assert {"cisa_ics:ICSA-26-300-91", "cisa_ics:ICSA-26-300-92"} <= set(pending())
+        assert cursor() is None
 
     def test_a_list_that_cannot_be_read_does_not_stop_the_run(self, monkeypatch):
         monkeypatch.setattr(rr, "pending_record_refs", MagicMock(side_effect=OSError("unreadable")))

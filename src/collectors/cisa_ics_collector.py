@@ -256,7 +256,8 @@ def split_note_list(text: str) -> List[str]:
     """The names a note lists, in order, each once: the text split at commas, each part trimmed, a leading
     ``and`` / ``&`` of the last part of a list (``"Critical Manufacturing, Energy, and Water"``) removed. A name
     that holds commas itself (``LISTED_NAMES_WITH_COMMAS``) is kept whole. A name that holds ``and`` without a
-    comma before it (``"Food and Agriculture"``) is one name."""
+    comma before it (``"Food and Agriculture"``) is one name. A part that holds such a name with other words
+    (``"Nuclear Reactors, Materials, and Waste Sector"``) keeps them."""
     protected = str(text or "")
     kept: Dict[str, str] = {}
     for index, name in enumerate(LISTED_NAMES_WITH_COMMAS):
@@ -266,8 +267,9 @@ def split_note_list(text: str) -> List[str]:
     out: List[str] = []
     for part in protected.split(","):
         name = _LEADING_CONJUNCTION_RE.sub("", part.strip()).strip()
-        name = kept.get(name, name)
-        if name and "\x00" not in name and name not in out:
+        for token, original in kept.items():
+            name = name.replace(token, original)
+        if name and name not in out:
             out.append(name)
     return out
 
@@ -1172,10 +1174,22 @@ class CISAICSCollector:
                 )
 
             consecutive_failures = 0
+            # The reads for report_pending records keep a fetch-failure streak of their own: they come after the
+            # run's own reads, and a burst of failures among them stops them, not the run (advisories the listing
+            # names that cannot be fetched would otherwise abort every run before its push, never given up).
+            pending_failures = 0
             for path in [*paths, *pending_paths]:
                 pending_ref = pending_paths.get(path)
                 if pending_ref is None and limit is not None and len(processed) >= limit:
                     continue
+                if pending_ref and pending_failures >= MAX_CONSECUTIVE_FETCH_FAILURES:
+                    logger.warning(
+                        "[REPORT-PENDING] CISA ICS: %d consecutive advisory reads for report_pending records failed: "
+                        "the %d record(s) left are not tried this run",
+                        pending_failures,
+                        len(pending_paths) - stats["pending_fetched"],
+                    )
+                    break
                 if not CISA_ICS_CIRCUIT_BREAKER.can_execute():
                     raise CISAICSTransientError("CISA ICS circuit breaker opened mid-run — aborting before push")
                 stats["pending_fetched" if pending_ref else "attempted"] += 1
@@ -1187,9 +1201,9 @@ class CISAICSCollector:
                     requests.exceptions.HTTPError,  # includes CISAICSTransientError after retries
                     ValueError,  # JSON decode error
                 ) as e:
-                    consecutive_failures += 1
                     logger.warning(f"CISA ICS: fetch failed for {path}: {type(e).__name__}: {e}")
                     if pending_ref:
+                        pending_failures += 1
                         stats["pending_failed"] += 1
                         record_failures.append(
                             {
@@ -1199,6 +1213,7 @@ class CISAICSCollector:
                             }
                         )
                     else:
+                        consecutive_failures += 1
                         stats["fetch_failed"] += 1
                         # The record waits on report_pending: a baseline sets no cursor, and the look-back of the
                         # run after it may not reach this advisory again. On a baseline only an advisory whose file
@@ -1219,7 +1234,10 @@ class CISAICSCollector:
                             f"CISA ICS: {consecutive_failures} consecutive advisory fetch failures — upstream broken"
                         ) from e
                     continue
-                consecutive_failures = 0
+                if pending_ref:
+                    pending_failures = 0
+                else:
+                    consecutive_failures = 0
                 if path in change_ts and (processed_max_ts is None or change_ts[path] > processed_max_ts):
                     processed_max_ts = change_ts[path]
                 try:
