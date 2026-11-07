@@ -144,6 +144,7 @@
 **What we get:**
 - CVE IDs with CWE, CVSS v3.x score/vector (→ `CVSSv31`/`CVSSv30` sub-nodes), vulnerability summary. A CSAF score block has no impact or exploitability sub-score, so the sub-node gets none. On a CVE NVD also describes, NVD's values hold: a sub-node NVD has asserted and NVD's lists (CWE, references, products) are only filled by CISA's record where they lack a value, whatever the order of the sync. When NVD's record drops a CVSS version CISA also gives, CISA's next record sets that sub-node's values again
 - Advisory id, title, cisa.gov URL, vendor and affected products
+- One report record per advisory, an advisory without a CVE included, as one MISP Event Report: the advisory summary, sectors, countries deployed, vendor headquarters, TLP, dates, revision, vendors and products, and per CVE the whole note, the remediations (`vendor_fix`, `mitigation`, `no_fix_planned`, ...), the affected products and the CWE ([COLLECTORS.md § 12](COLLECTORS.md#advisory-report-records))
 - `initial_release_date` / `current_release_date` as source-truthful `first_seen` / `last_seen`
 - The ids of every advisory that names the CVE (`advisory_ids`), CISA's own sector names (`ics_sectors`, all of CISA's sectors, not only the three mapped to zones, e.g. `Water and Wastewater Systems`) and the zones of each advisory (`advisory_zones`). MISPWriter carries the three in the attribute's `NVD_META` comment (CISA ICS records only), and the sync keeps them in the `raw_data` of the CVE's `SOURCED_FROM` edge to `cisa_ics`; each advisory becomes a record reference `cisa_ics:<advisory id>` (`r.source_refs`), which the STIX export links to its cisa.gov page. A sector link cites only the advisories whose sector note names that sector (the edge's `stated_refs`), not every advisory that names the CVE
 
@@ -318,6 +319,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — CISA ICS: one report record per advisory in MISP.
 - 2026-11-07 — MITRE ATT&CK (§ 5): the terms of use and MITRE's notice for the ATT&CK text EdgeGuard copies.
 - 2026-11-07 — SSL Blacklist: the listing reason reaches MISP (verbatim, with its role and family part apart, and the certificate page); AbuseIPDB's score and the address's country, and Feodo Tracker's ports, families and status, are structured keys in MISP.
 - 2026-11-02 — OTX: the per-run limit counts the pulses modified after the cursor, oldest first, and the overlap's re-reads are processed without counting; OTX returns the pulses newest-modified first, and the limit took the newest, so the cursor passed the older pulses of a window larger than the limit.

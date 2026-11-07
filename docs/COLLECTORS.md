@@ -1100,14 +1100,14 @@ SOURCE_TAG_MAPPING = {
 **File:** `src/collectors/cisa_ics_collector.py` — **flag-guarded, OFF by default** (`EDGEGUARD_ENABLE_CISA_ICS=true` to enable).
 
 ### What It Does
-Collects CISA ICS-CERT advisories (`ICSA-*`) and ICS medical advisories (`ICSMA-*`) published as **CSAF 2.0** JSON files in the public `cisagov/CSAF` GitHub repository and emits **one `vulnerability` item per CVE** (the advisories that name one CVE are merged, see *One item per CVE* below). The point of this collector is the **source-asserted critical-infrastructure sector**: every advisory carries a `"Critical infrastructure sectors"` note written by CISA (e.g. `"Critical Manufacturing, Energy, Information Technology"`). The keyword sector detector (`detect_zones_from_text`) is **deliberately not applied** to these items.
+Collects CISA ICS-CERT advisories (`ICSA-*`) and ICS medical advisories (`ICSMA-*`) published as **CSAF 2.0** JSON files in the public `cisagov/CSAF` GitHub repository and emits **one `vulnerability` item per CVE** (the advisories that name one CVE are merged, see *One item per CVE* below) and **one report record per advisory** (see *Advisory report records* below). The point of this collector is the **source-asserted critical-infrastructure sector**: every advisory carries a `"Critical infrastructure sectors"` note written by CISA (e.g. `"Critical Manufacturing, Energy, Information Technology"`). The keyword sector detector (`detect_zones_from_text`) is **deliberately not applied** to these items.
 
 ### Source
 - **Base URL:** `https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/` (`EDGEGUARD_CISA_ICS_BASE_URL`)
 - **Listing files:** `index.txt` (all advisories as `YYYY/<file>.json`, ~3,960 entries 2010–2026, newest first) and `changes.csv` (`"YYYY/<file>.json","<ISO timestamp>"`, no header, newest first)
-- **Per advisory:** `document.tracking.{id,initial_release_date,current_release_date}`, `document.title`, `document.notes[]`, `document.references[]` (`category: self` → cisa.gov URL), `product_tree.branches[]` (vendor → product_name), `vulnerabilities[]` (`cve`, `cwe`, `notes`, `scores[].cvss_v3`)
+- **Per advisory:** `document.tracking.{id,initial_release_date,current_release_date,version,revision_history}`, `document.title`, `document.publisher`, `document.distribution.tlp`, `document.notes[]`, `document.references[]` (`category: self` → cisa.gov URL and the CSAF file), `product_tree` (vendor → product_name → product, with its `product_id`; `full_product_names`, `relationships`), `vulnerabilities[]` (`cve`, `cwe`, `notes`, `product_status`, `remediations`, `scores[].cvss_v3`)
 - **API Key:** Not required · **Licence:** TLP:WHITE ("Disclosure is not limited")
-- **Mode selection:** baseline → `index.txt` filtered to the years inside `baseline_days` and pre-filtered on the day-of-year encoded in the file name (`icsa-26-281-01` → 2026-10-08, with a 45-day margin), fetched newest-first, then filtered by `initial_release_date >= cutoff`; incremental → `changes.csv` rows newer than the stored cursor (`checkpoints/baseline_checkpoint.json` → `cisa_ics.incremental.cisa_ics_last_change_ts`, minus a 24 h overlap; first run uses `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS`, default 30). The cursor advances only when every selected advisory was fetched (`fetch_failed == 0`) and the MISP push had no failure (`failed == 0`), or, on a run without items, when no fetch failed. A baseline does not set it.
+- **Mode selection:** baseline → `index.txt` filtered to the years inside `baseline_days` and pre-filtered on the day-of-year encoded in the file name (`icsa-26-281-01` → 2026-10-08, with a 45-day margin), fetched newest-first, then filtered by `initial_release_date >= cutoff`; incremental → `changes.csv` rows newer than the stored cursor (`checkpoints/baseline_checkpoint.json` → `cisa_ics.incremental.cisa_ics_last_change_ts`, minus a 24 h overlap; first run uses `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS`, default 30). The cursor advances only when every selected advisory was fetched (`fetch_failed == 0`) and the MISP push had no failure (`failed == 0`), or, on a run without items, when no fetch failed. A report record whose push failed does not hold it: `report_pending` keeps the record. It stays only while a record is neither in MISP nor saved on that list. A baseline does not set it.
 - **Per-run limit:** `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200 advisory files) bounds every run, daily and baseline. The generic incremental limit (`EDGEGUARD_INCREMENTAL_LIMIT`, 200) does not apply: `cisa_ics` is in `config.OWN_RUN_CAP_SOURCES`, so the daily DAG passes no item limit (`EDGEGUARD_MAX_ENTRIES` still applies when set). An item limit would count (advisory, CVE) items: an advisory naming more CVEs than the limit (350–378 on three advisories of the 2026-10-16 baseline) would stop every run inside the same advisory.
 
 ### Zone Mapping (source-asserted, fixed table)
@@ -1120,7 +1120,7 @@ Collects CISA ICS-CERT advisories (`ICSA-*`) and ICS medical advisories (`ICSMA-
 | any other sector (Critical Manufacturing, Water, Communications, …) | contributes nothing |
 | nothing mapped | `['global']` |
 
-The raw sector list is kept on the item as `ics_sectors`; every emitted zone is validated against `config.VALID_ZONES`.
+The raw sector list is kept on the item as `ics_sectors`; every emitted zone is validated against `config.VALID_ZONES`. The note is a list: `parse_sectors` splits it at commas and drops a leading `and` or `&` of a part, so `"Commercial Facilities, Critical Manufacturing, and Energy"` (ICSA-24-354-07) gives `Energy`. A name with `and` and no comma before it (`Food and Agriculture`, `Water and Wastewater Systems`) stays one name, and CISA's sector "Nuclear Reactors, Materials, and Waste" is kept whole (`LISTED_NAMES_WITH_COMMAS`, ICSA-24-165-12). The table ignores case and a trailing word `Sector` (`Healthcare and Public Health Sector`, ICSMA-24-254-01).
 
 **What the sector means.** CISA's note names the sectors where the affected product is **deployed**, not the sectors an adversary targets. In the graph a mapped sector is CISA's statement: the CVE's `AFFECTS` link to the Sector carries the evidence label `advisory_sector` at confidence 0.9 (`src/sector_evidence.py`), never `TARGETS`, and the link names `cisa_ics` only when CISA's record gave that sector (the `SOURCED_FROM` edge of `cisa_ics` keeps the record's `zones` and `stated_zones`). A sector NVD, KEV or OTX infers for the same CVE stays `zone_classification` at 0.5 unless CISA also states it, in which case the one link carries `advisory_sector` and names both feeds. The field is often broad (Siemens advisories list nearly every sector), so read a finance or energy figure from CISA as "deployed in", not as a targeting signal.
 
@@ -1128,13 +1128,40 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
 
 **Advisory provenance.** MISPWriter writes `advisory_ids` (at most 50), `ics_sectors` (at most 20) and `advisory_zones` (the advisories kept in `advisory_ids` only) into the attribute's `NVD_META` comment, for a CISA ICS item only (NVD and KEV records carry none of these keys, so their `NVD_META` digest does not depend on them). The sync puts the three on the item: they reach the `raw_data` of the CVE's `SOURCED_FROM` edge to `cisa_ics` (CISA's own words, including sectors EdgeGuard has no zone for, such as Water), and each advisory becomes a record reference `cisa_ics:<advisory id>` on that edge (`r.source_refs`). On an AFFECTS link a sector cites only the advisories that name it: the edge records them per sector (`stated_refs`, e.g. `healthcare|cisa_ics:ICSMA-26-283-01`), and both the sync and `build_relationships` step 7b read them from there; a record without `advisory_zones` cites all of its advisories on every sector. The STIX export turns it into an `external_reference` with the cisa.gov page (`ics-advisories`, or `ics-medical-advisories` for `ICSMA-*`). No node property holds the raw sector names.
 
+### Advisory report records
+
+Every advisory the run reads in its window gets one report record (`parse_advisory_record`, schema `edgeguard.report.v1`, [MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)), an advisory that names no CVE included. MISP keeps it as one Event Report in the `cisa_ics` day event (`MISPWriter.push_reports`); its uuid is that of the graph node `VulnerabilityAdvisory` (`record_ref` `cisa_ics:<tracking id>`).
+
+| Record field | CSAF source |
+|---|---|
+| `record_id` | `tracking.id` |
+| `url` | the advisory's `self` reference on cisa.gov, else the page its id gives |
+| `csaf_url` | the `self` reference that ends with the file's name (CISA's copy on GitHub), else the URL read |
+| `kind` | `ICSA` or `ICSMA`, from the id |
+| `title`, `publisher` | `document.title`, `document.publisher.name` |
+| `description` | the note "Advisory Summary", else the first note of category `summary` ("Summary", "Overview" in advisories converted from a vendor's), whole |
+| `tlp` | `distribution.tlp.label` (`WHITE` → `white`, `CLEAR` → `clear`) |
+| `published`, `last_modified` | `tracking.initial_release_date`, `tracking.current_release_date` |
+| `revision`, `version` | the number of `tracking.revision_history` entries; `tracking.version` as given (a whole number, or a version such as `1.0.1` on 72 of the 1,389 advisories of 2024-2026) |
+| `deployment_sectors`, `deployment_countries` | the names the notes "Critical infrastructure sectors" and "Countries/areas deployed" list |
+| `vendor_headquarters` | the note "Company headquarters location" (several such notes joined with `, `) |
+| `vendors`, `products` | every vendor name and every `<vendor> <product>` label of the product tree (a tree without `product_name` branches, 14 of the 1,389 advisories of 2024-2026: its `<vendor> <family>` labels) |
+| `cve_ids`, `vulnerabilities` | per vulnerability with a valid CVE id: `cve_id`; `summary`, its first note of category `summary`, else of category `description`, whole; `remediations` (`category`: `vendor_fix`, `mitigation`, `workaround`, `none_available`, `no_fix_planned`, and `details`); `affected_products`, the full names of the products `product_status` lists as `first_affected`, `known_affected` or `last_affected`, resolved through the product tree; `cwes` (`id`, `name`) |
+
+- **Push.** The records are written before the CVE items and before the return of a run without items, 100 per `push_reports` call. The scheduled run's writer and the baseline's know their task's end, so no record starts later than 10 minutes before it.
+- **`report_pending`.** After each call, the records whose push failed or was not tried go on the `report_pending` list of the `cisa_ics` incremental state, on baselines and scheduled runs alike; a record that cannot be built goes there too. The list's gauges are set on every run, also a run without records, and a record still failing `EDGEGUARD_REPORT_PENDING_MAX_DAYS` after its first failure is given up with an ERROR `[REPORT-GAVE-UP]`.
+- **Records on the list.** Each run that pushes reads the advisories of up to 100 records on the list, those tried longest ago first, for their records only: their items are not pushed again, the window does not apply to them, and their fetch is not counted in `fetch_failed`. The file comes from the run's listing (`index.txt` or `changes.csv`, by the advisory id). A record whose advisory cannot be fetched or parsed counts as a failed try. A record whose advisory the listing no longer names leaves the list.
+- **Cursor.** A record failure does not hold the cursor. When the list cannot be saved, the records neither in MISP nor on the list hold it (ERROR `[REPORT-PENDING]`), and the later batches of the run are not pushed.
+- **Status.** The run's status carries `report_counts` (`records`, the counts `push_reports` gives, `pending`, `given_up`, `pending_saved`); `stats` carries `records`, `pending_fetched`, `pending_failed` and `pending_not_listed`. One `[REPORTS] CISA ICS` line per run sums them up.
+- **Size.** The largest advisory of 2024-2026 (ICSA-26-295-11, 428 CVEs) gives a record of about 940 KB.
+
 ### Example Output
 
 ```python
 {
     'type': 'vulnerability',
     'cve_id': 'CVE-2026-32645',
-    'description': 'ICSA-26-281-01: Red Lion Controls N-Tron 700 Series — Default factory credentials ...',
+    'description': 'ICSA-26-281-01: Red Lion Controls N-Tron 700 Series — Default factory credentials ...',  # whole note
     'zone': ['energy'],                      # from "Critical Manufacturing, Energy, Information Technology"
     'ics_sectors': ['Commercial Facilities', 'Communications', 'Critical Manufacturing', 'Energy', 'Information Technology'],
     'advisory_id': 'ICSA-26-281-01',         # the newest advisory naming the CVE
@@ -1162,7 +1189,9 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
 # MISP: tagged source:CISA-ICS + zone:<Zone>; NOT tagged CISA-KEV. Same CVE in two advisories → one item with the
 # union of their sectors and ids.
 # A CVE MISP already holds is not pushed again: an incremental run's new advisory naming it does not add its
-# sectors (no update path for revised advisories yet).
+# sectors (no update path for revised advisories yet); the advisory's report record is revised in place.
+# The description is the advisory id and title and the vulnerability's whole note: MISP holds it uncut, and the
+# sync caps the graph's copy at 1,000 characters.
 # published / last_modified only fill a CVE node without them: NVD's record sets them. The
 # description ranks below NVD's and the KEV's and above any other source's (description_source
 # "cisa_ics"), so a CVE NVD also holds shows NVD's description and dates, not the advisory's.
@@ -1185,7 +1214,7 @@ The settings are defined in the CISA ICS advisories section of `src/config.py`; 
 
 ### Safety behaviour
 - **Isolated:** own circuit breaker (`cisa_ics`, 3 failures → open 30 min), own `RateLimiter` (≤ 4 req/s, sequential fetches), `retry_with_backoff` (3 retries) + `request_with_rate_limit_retries` (429/5xx backoff). Shares only the generic helpers with the KEV collector.
-- **Per-file failures never abort the run:** a file that is not a JSON object with `document` + `vulnerabilities`, a JSON decode error, or a per-file 404 is counted in the status `stats` (`malformed`, `fetch_failed`, `skipped_vulns`, …) and skipped. Ten **consecutive** fetch failures (or the breaker opening mid-run) abort as a transient error **before** anything is pushed.
+- **Per-file failures never abort the run:** a file that is not a JSON object with `document` + `vulnerabilities`, a JSON decode error, or a per-file 404 is counted in the status `stats` (`malformed`, `fetch_failed`, `skipped_vulns`, …) and skipped; one outside the window (its `initial_release_date`) is counted in `outside_window`, with its record. Ten **consecutive** fetch failures (or the breaker opening mid-run) abort as a transient error **before** anything is pushed.
 - **Baseline sanity floor:** when at least `CISA_ICS_MIN_EXPECTED_ADVISORIES` advisories were attempted but fewer parsed, or the index lists nothing in the window, the collector logs an error, increments `pipeline_errors_total{task="collect_cisa_ics"}` and raises `CISAICSBaselineFloorError` (a `TransientServerError` subclass) → `run_collector_with_metrics` marks the task **skipped + Slack alert** instead of writing a thin dataset. Not evaluated when fewer than the floor were attempted (small `collection_limit` smoke runs).
 - **Upstream outage** (timeout / connection error / 5xx on the index) propagates as transient → skip + alert. A 4xx on `index.txt`/`changes.csv` (layout change) returns `success=False` so the task goes red for an operator. Code defects re-raise (DAG catastrophic branch).
 - `health_check()` GETs `index.txt` and returns the same `{healthy, response_time_ms, ...}` shape as the other collectors.
@@ -1455,6 +1484,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — CISA ICS: one report record per advisory (summary, sectors, countries, vendor headquarters, TLP, dates, revision, vendors, products, and per CVE the whole note, remediations, affected products and CWE), pushed before the CVE items, also for an advisory without a CVE; records whose push failed stay on `report_pending` and no longer hold the cursor; the scheduled run's writer knows its task's end. The sector note's last list item loses its `and` (`"…, and Energy"` gave the sector `and Energy`, which mapped to no zone), and a sector named with a trailing `Sector` maps to its zone. The vulnerability note reaches MISP whole (it was cut at 1,000 characters). The window applies to an advisory by its `initial_release_date`, also to one without a CVE.
 - 2026-11-07 — ATT&CK in MISP: the collector passes every description whole and MISPWriter writes it whole (up to 8,000 characters; it cut groups, techniques and tactics at 255 characters and malware and tools at 400 with "..." added mid-word, and a comment without a block at 500); every platform is a tag sent in ATT&CK's casing, on malware and tools too (the first 3 of a technique, lower-cased), and the sync reads the platform tags in ATT&CK's spelling whatever casing MISP holds them in; tools carry alias tags; groups, malware and tools carry their ATT&CK domains as `attack-domain:` tags and ATT&CK's own galaxy cluster tag beside the community one; a technique's zones are still read from its first 500 characters; MITRE's terms and notice for the copied text.
 - 2026-11-07 — OTX: an indicator of an amber, red or unknown-TLP pulse gets an empty `pulse_name` in the graph; the sync took the comment as the fallback name, which for such an item is the whole `OTX_META` block, and now takes no metadata block as a name.
 - 2026-11-07 — OTX report records: one MISP Event Report per pulse, pushed after the pulse's items in batches of 100; `report_pending` on baselines and scheduled runs, its pulses fetched by id on every run (a failed fetch is no try and puts the entry behind the others; none after the retry list's fetches stopped), given up after `EDGEGUARD_REPORT_PENDING_MAX_DAYS`, also when the pulse's fetch keeps failing that long; the cursor passes a pulse whose record failed only once it is saved on the list, and a pulse of the retry list keeps its entry until its record is; the scheduled writer knows its task's end; `report_counts` in the status, whose `pending` gives the list as last saved after a failed save of it. The text of an amber or red pulse, or of one without a known TLP, is no longer copied onto its items.
