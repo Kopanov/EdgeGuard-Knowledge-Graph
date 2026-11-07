@@ -40,10 +40,16 @@ holds two attributes of one source for one node (the cross-event check switched 
 failed, both logged; a MITRE technique, tactic or tool ATT&CK renamed, whose attribute value carries the
 name), the one merged last is kept.
 
+The text is capped before it is ranked (``text_caps``, 2026-11-07): markup stripped, then at most
+``CVE_DESCRIPTION_CAP`` (1,000) characters for ``CVE`` and ``Vulnerability`` and ``ENTITY_DESCRIPTION_CAP`` (500)
+for the other labels, cut at a sentence or word end (``DescriptionRanking.cap``, applied by ``record``). Every
+writer of these descriptions takes the text from ``record``, so the graph holds no longer text whatever the
+importer; MISP keeps the text the collector sent.
+
 Neo4j evaluates the rule (``DescriptionRanking.set_cypher``; ``best_of_cypher`` for the nodes an alias or
 twin merge folds together); ``replaces`` and ``best_of`` mirror them in Python for the tests, and
 ``tests/test_description_ranking_neo4j.py`` checks that each pair agrees on a real database. Standard library
-and ``source_registry`` only.
+``source_registry`` and ``text_caps`` only.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from source_registry import all_sources, canonical_source_id, curated_source_ids
+from text_caps import CVE_DESCRIPTION_CAP, ENTITY_DESCRIPTION_CAP, cap_text, capped
 
 # Source ids are inlined into Cypher as string literals; the registry only holds lowercase ASCII ids. ``\Z``,
 # not ``$``, which also matches before a final newline (2026-11).
@@ -78,13 +85,15 @@ class DescriptionRanking:
     ``groups`` are the named groups of sources, highest first; every other ranked registered source
     follows them. ``ranks`` gives every registered source with ``ranked_for_descriptions`` a distinct
     rank, highest first from the number of such sources down to 1; an unregistered source, or one
-    registered with ``ranked_for_descriptions=False``, ranks 0.
+    registered with ``ranked_for_descriptions=False``, ranks 0. ``cap`` is the most characters a description
+    of these labels holds in the graph (``text_caps.cap_text``; None: no cap).
     """
 
     name: str
     labels: Tuple[str, ...]
     groups: Tuple[Tuple[str, ...], ...]
     ranks: Dict[str, int] = field(init=False, repr=False, compare=False)
+    cap: Optional[int] = None
 
     def __post_init__(self) -> None:
         group_of = {sid: i for i, group in enumerate(self.groups) for sid in group}
@@ -116,10 +125,21 @@ class DescriptionRanking:
         """The rank of ``source`` (an id or an alias); 0 for a source the registry does not know."""
         return self.ranks.get(canonical_source_id(source) or "", 0)
 
+    def capped(self, text: object) -> object:
+        """``text`` as the graph holds it: capped (``text_caps.cap_text``) when it is a string and the ranking has
+        a cap; any other value as it is. For the copy of a record a writer stores beside the description
+        (``SOURCED_FROM.raw_data``)."""
+        return capped(text, self.cap) if self.cap is not None else text
+
     def record(self, text: object, source: Optional[str]) -> Optional[RankedDescription]:
-        """The description a record of ``source`` gives, or None when it gives no text."""
+        """The description a record of ``source`` gives, capped (``cap``), or None when it gives no text (none
+        left after the cap either: a text that is only markup, or one whose first word is longer than the cap)."""
         sid = canonical_source_id(source)
-        if not isinstance(text, str) or not text.strip() or not sid:
+        if not isinstance(text, str) or not sid:
+            return None
+        if self.cap is not None:
+            text = cap_text(text, self.cap)[0]
+        if not text.strip():
             return None
         return RankedDescription(text=text, source=sid, rank=self.ranks.get(sid, 0))
 
@@ -211,6 +231,7 @@ CVE_DESCRIPTIONS = DescriptionRanking(
     name="cve",
     labels=("CVE", "Vulnerability"),
     groups=(("nvd",), ("cisa_kev",), ("cisa_ics",)),
+    cap=CVE_DESCRIPTION_CAP,
 )
 
 # Malware, ThreatActor, Tool, Technique, Tactic: MITRE ATT&CK, the curated sources, then every other source.
@@ -218,6 +239,7 @@ ENTITY_DESCRIPTIONS = DescriptionRanking(
     name="entity",
     labels=("Malware", "ThreatActor", "Tool", "Technique", "Tactic"),
     groups=(("mitre_attck",), curated_source_ids()),
+    cap=ENTITY_DESCRIPTION_CAP,
 )
 
 # The source a ResilMesh-native write (``Neo4jClient.merge_resilmesh_cve`` / ``merge_resilmesh_vulnerability``)
