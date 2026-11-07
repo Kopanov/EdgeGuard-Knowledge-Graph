@@ -215,11 +215,11 @@ The logs carry uuid, `record_ref`, lengths and SHA-256 only, never content or MI
 
 **Outcome of a push.** The writer returns counts: `reports_added`, `reports_updated`, `reports_unchanged`, `reports_deleted_in_misp`, `reports_failed` (with `reports_foreign`), `reports_skipped` and `report_tag_drift`. It also returns the lists `settled`, `failed` (with the reason, and whether the failure is permanent) and `skipped`.
 
-**`report_pending`.** Per source, `report_records.note_report_push` keeps the records whose push failed, or that a push did not try, in the incremental state of the source's collector: `report_pending` beside the `otx` or `cisa_ics` cursor. Each entry holds `record_ref`, `first_failed_at`, `attempts`, `last_tried_at` and `last_reason`.
+**`report_pending`.** Per source, `report_records.note_report_push` keeps the records whose push failed, or that a push did not try, in the incremental state of the source's collector: `report_pending` beside the `otx` or `cisa_ics` cursor. Each entry holds `record_ref`, `first_failed_at`, `attempts`, `last_tried_at` and `last_reason`, and, while the collector cannot fetch the source record, `first_fetch_failed_at` and `last_fetch_failed_at` (`fetch_failed`; no try: `attempts` and `last_tried_at` stay). `pending_record_refs` orders the list by the later of `last_tried_at` and `last_fetch_failed_at`, neither first; a read of the source record (`fetched`) or a try ends the fetch failures.
 
 - The list is apart from the OTX item retry list, and kept on baselines and scheduled runs alike.
 - A push that settles a record takes it off; a permanent failure is never added.
-- A record still failing `EDGEGUARD_REPORT_PENDING_MAX_DAYS` (default 7) after its first failure is given up by the next push that tries it, with an ERROR `[REPORT-GAVE-UP]`.
+- A record still failing `EDGEGUARD_REPORT_PENDING_MAX_DAYS` (default 7) after its first failure is given up by the next push that tries it, with an ERROR `[REPORT-GAVE-UP]`. So is a record whose source record has failed to be fetched for more than that many days, the last of those fetches past the record's deadline.
 - Gauges: `edgeguard_report_pending_records` and `edgeguard_report_pending_oldest_failure_timestamp_seconds`; counter: `edgeguard_report_pending_given_up_total`.
 - The fresh baseline's wipe clears the list with MISP, which frees every report uuid.
 
@@ -277,7 +277,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
-- 2026-11-07 — The OTX collector writes a report record per pulse. `OTX_META` carries the pulse's text (name, tags, references, targeted countries) only for a white, clear or green pulse; for an amber or red pulse, or one without a known TLP, the keys are written empty and the text stays in the pulse's report record.
+- 2026-11-07 — The OTX collector writes a report record per pulse. `report_pending` notes the failed fetches of a source record (`first_fetch_failed_at`, `last_fetch_failed_at`): no try, but they order the list and give up a record whose source keeps failing. `OTX_META` carries the pulse's text (name, tags, references, targeted countries) only for a white, clear or green pulse; for an amber or red pulse, or one without a known TLP, the keys are written empty and the text stays in the pulse's report record.
 - 2026-11-07 — `TF_META`: SSL Blacklist and AbuseIPDB write it (SSL Blacklist wrote "From ssl_blacklist", AbuseIPDB a prose comment); the list-source fields, `as_of` for values that change at the source, their place in the shrink order, the records that fit unshortened and the comment size per source.
 - 2026-11-07 — Report records: one MISP Event Report per OTX pulse and CISA ICS advisory (schema `edgeguard.report.v1`, content, digest, uuid, tags, distribution, the writer's flow and its failure answers, its limits (deadline, task end, failing-time cap), the `report_pending` list, the read-only preflight, MISP's own logs of report text, what was measured and what comes from the MISP source). No collector writes records yet.
 - 2026-11-02 — `MISPCollector`: no DAG or `run_pipeline.py` runs it (the text named the collector step of the retired in-process baseline). How the sync reads an ATT&CK value: the node parse only (the text also named a STIX conversion that no pipeline step calls).
