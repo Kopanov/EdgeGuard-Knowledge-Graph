@@ -71,7 +71,7 @@ from text_caps import ENTITY_DESCRIPTION_CAP, cap_text  # noqa: E402
 
 def as_stored(text: str) -> str:
     """A description as the node holds it (2026-11-07): markup stripped, capped (``text_caps``)."""
-    return cap_text(text, ENTITY_DESCRIPTION_CAP)[0]
+    return cap_text(text, ENTITY_DESCRIPTION_CAP, older_cut=True)[0]
 
 
 WRITER = misp_writer.MISPWriter.__new__(misp_writer.MISPWriter)

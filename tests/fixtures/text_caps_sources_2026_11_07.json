@@ -13,6 +13,18 @@
    "answer_timestamp": "2026-11-07T20:30:50.330",
    "reduction": "two entries of 'vulnerabilities' (CVE-2026-2411, CVE-2026-69245), verbatim; both English descriptions are longer than 1,000 characters",
    "notice": "This product uses data from the NVD API but is not endorsed or certified by the NVD."
+  },
+  "nvd_kernel": {
+   "source": "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<id>, one request per id",
+   "answer_timestamps": {
+    "CVE-2026-89494": "2026-11-07T21:15:10.406",
+    "CVE-2026-89541": "2026-11-07T21:15:25.550",
+    "CVE-2026-89616": "2026-11-07T21:15:40.469",
+    "CVE-2026-81014": "2026-11-07T21:15:17.933",
+    "CVE-2026-80981": "2026-11-07T21:15:32.930"
+   },
+   "reduction": "the single entry of 'vulnerabilities' of each answer, verbatim. The English descriptions come from the kernel.org CNA (sourceIdentifier 416baaa9-dc9f-4396-8d5f-8c081fb06d67) and hold '[' that is no markup: half-open intervals ('ml[0..num_locks)', '[0, GSS_KRB5_TOK_HDR_LEN)', '[unc_size, frame_size)', a memory region) and an indented kernel log of '[    2.523161]' lines that NVD ends in '[    2\\n---truncated---' (CVE-2026-80981)",
+   "notice": "This product uses data from the NVD API but is not endorsed or certified by the NVD."
   }
  },
  "attack": [
@@ -457,6 +469,908 @@
      {
       "url": "https://github.com/guzzle/guzzle/security/advisories/GHSA-f7vp-7xgx-4w4r",
       "source": "security-advisories@github.com"
+     }
+    ]
+   }
+  }
+ ],
+ "nvd_kernel": [
+  {
+   "cve": {
+    "id": "CVE-2026-89494",
+    "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+    "published": "2026-09-11T20:19:31.370",
+    "lastModified": "2026-10-19T09:17:43.363",
+    "vulnStatus": "Received",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nocfs2: validate lengths in dlm_mig_lockres_handler\n\nA node receiving a DLM_MIG_LOCKRES message trusts several fields of the\npeer-supplied dlm_migratable_lockres without validation.  num_locks and\nlockname_len are bounded only on the sending side, and the message is\nnever checked to actually carry num_locks migratable_lock entries.  As a\nresult dlm_process_recovery_data() walks mres->ml[0..num_locks) past the\nkmalloc(data_len) copy of the message (an out-of-bounds read that ends in\na BUG_ON panic), and dlm_init_lockres() copies lockname_len bytes into the\nfixed 32-byte o2dlm_lockname slab object (a heap out-of-bounds write). \nBoth are reachable by any node in the domain.\n\nValidate these fields right after dlm_grab(), before anything uses them --\nincluding the not-joined error path, which already prints mres->lockname\nwith the unbounded lockname_len as a %.*s precision.  Reject the message\nunless lockname_len <= DLM_LOCKID_NAME_MAX, num_locks <=\nDLM_MAX_MIGRATABLE_LOCKS (the bound the sender already asserts), and the\npayload is large enough to hold the claimed locks.  Conforming recovery\nand migration messages are unaffected."
+     }
+    ],
+    "affected": [
+     {
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+      "affectedData": [
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "unaffected",
+        "programFiles": [
+         "fs/ocfs2/dlm/dlmrecovery.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "4a5798253212093b9ff7d90c6cfbe348bcda1594",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "dce05b17db862f47ff60614017abe639b2e71cad",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "0e999d56917f861f97adb961617b1828c9eb4733",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "77686fa5bba135252d348e2dacf481fc19f60c41",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "f33041906885f96e190cde54e61ddc69de39e3ee",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "50c4cc9183e11f83427efbf770f54851f4471c02",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "a8facb1670b4a0612183198e758d9539ef628ed9",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "6714d8e86bf443f6f7af50f9d432025649f091f5",
+          "lessThan": "b54e03d9b3697d25f4a0063cf717d459c5e3ad94",
+          "versionType": "git",
+          "status": "affected"
+         }
+        ]
+       },
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "affected",
+        "programFiles": [
+         "fs/ocfs2/dlm/dlmrecovery.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "2.6.16",
+          "status": "affected"
+         },
+         {
+          "version": "0",
+          "lessThan": "2.6.16",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "5.10.270",
+          "lessThanOrEqual": "5.10.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "5.15.221",
+          "lessThanOrEqual": "5.15.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.1.188",
+          "lessThanOrEqual": "6.1.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.6.157",
+          "lessThanOrEqual": "6.6.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.12.109",
+          "lessThanOrEqual": "6.12.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.18.50",
+          "lessThanOrEqual": "6.18.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.2.4",
+          "lessThanOrEqual": "7.2.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.3",
+          "lessThanOrEqual": "*",
+          "versionType": "original_commit_for_fix",
+          "status": "unaffected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 9.8,
+        "baseSeverity": "CRITICAL",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     ]
+    },
+    "references": [
+     {
+      "url": "https://git.kernel.org/stable/c/0e999d56917f861f97adb961617b1828c9eb4733",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/4a5798253212093b9ff7d90c6cfbe348bcda1594",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/50c4cc9183e11f83427efbf770f54851f4471c02",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/77686fa5bba135252d348e2dacf481fc19f60c41",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/a8facb1670b4a0612183198e758d9539ef628ed9",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/b54e03d9b3697d25f4a0063cf717d459c5e3ad94",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/dce05b17db862f47ff60614017abe639b2e71cad",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/f33041906885f96e190cde54e61ddc69de39e3ee",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2026-89541",
+    "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+    "published": "2026-09-11T20:19:37.247",
+    "lastModified": "2026-10-19T09:17:48.983",
+    "vulnStatus": "Received",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nSUNRPC: harden gss_unwrap_resp_priv length checks\n\ngss_unwrap_resp_priv() validates the RPCSEC_GSS opaque length with\n\n    offset = (u8 *)(p) - (u8 *)head->iov_base;\n    if (offset + opaque_len > rcv_buf->len)\n            goto unwrap_failed;\n    maj_stat = gss_unwrap(ctx->gc_gss_ctx, offset,\n                          offset + opaque_len, rcv_buf);\n\nBoth operands are u32 and the sum is computed in u32. A reply with\nopaque_len near 0xffffffff makes offset + opaque_len wrap to a small\nvalue that is below rcv_buf->len, so the bound check passes and\ngss_unwrap() is called with end < begin. The check also lacks a\nlower bound, so any opaque_len in [0, GSS_KRB5_TOK_HDR_LEN) is\naccepted and forwarded to gss_krb5_unwrap_v2(), whose pre-decrypt\nheader reads at ptr+4 and ptr+6 then run past the token.\n\nA krb5p NFS server returning a crafted RPCSEC_GSS reply can drive\nthe client into out-of-bounds reads in gss_krb5_unwrap_v2() and the\nrotate_left() loop that follows.\n\nFix by replacing the single combined check with three guards that\nare safe in u32 arithmetic and that enforce the RFC 4121 minimum\nouter token length:\n\n    if (offset > rcv_buf->len)\n            goto unwrap_failed;\n    if (opaque_len > rcv_buf->len - offset)\n            goto unwrap_failed;\n    if (opaque_len < GSS_KRB5_TOK_HDR_LEN)\n            goto unwrap_failed;\n\nThe first guard makes the subtraction in the second guard\nunconditionally safe; offset is derived from a successful\nxdr_inline_decode() in the head kvec, so in practice it already\nsatisfies the bound. The floor mirrors the server-side check added\nin commit 5b757c2e57a5 (\"SUNRPC: svcauth_gss: enforce krb5 token\nminimum length\")."
+     }
+    ],
+    "affected": [
+     {
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+      "affectedData": [
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "unaffected",
+        "programFiles": [
+         "net/sunrpc/auth_gss/auth_gss.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "3691c4b3488d8ca046b9941e5be30c626dbbbb50",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "85fa6b12e8f439739ac36ef2aad925f37c8b976a",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "401f6a5b338d05bb1069ad814d9f77e3c367854f",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "81fd7654a8429718adfcb2a7e03496077f547ed0",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "89a15a50f84d32d4b99db86f957427fcbe20a99a",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "ebcbd2523a8524c3d24e111cdbed8e271d910269",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "d395c30d570ca6168f0297b191709927d1258273",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "2d2da60c63b67174add32f06e8d54c3a0c5cd9cf",
+          "lessThan": "87831b92112c81db251d46756d65daa4f91af6a2",
+          "versionType": "git",
+          "status": "affected"
+         }
+        ]
+       },
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "affected",
+        "programFiles": [
+         "net/sunrpc/auth_gss/auth_gss.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "2.6.15",
+          "status": "affected"
+         },
+         {
+          "version": "0",
+          "lessThan": "2.6.15",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "5.10.270",
+          "lessThanOrEqual": "5.10.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "5.15.221",
+          "lessThanOrEqual": "5.15.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.1.188",
+          "lessThanOrEqual": "6.1.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.6.157",
+          "lessThanOrEqual": "6.6.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.12.109",
+          "lessThanOrEqual": "6.12.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.18.50",
+          "lessThanOrEqual": "6.18.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.2.4",
+          "lessThanOrEqual": "7.2.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.3",
+          "lessThanOrEqual": "*",
+          "versionType": "original_commit_for_fix",
+          "status": "unaffected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 9.8,
+        "baseSeverity": "CRITICAL",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     ],
+     "ssvcV203": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "ssvcData": {
+        "timestamp": "2026-10-16T19:23:27.526748Z",
+        "id": "CVE-2026-89541",
+        "options": [
+         {
+          "exploitation": "none"
+         },
+         {
+          "automatable": "yes"
+         },
+         {
+          "technicalImpact": "total"
+         }
+        ],
+        "role": "CISA Coordinator",
+        "version": "2.0.3"
+       }
+      }
+     ]
+    },
+    "references": [
+     {
+      "url": "https://git.kernel.org/stable/c/3691c4b3488d8ca046b9941e5be30c626dbbbb50",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/401f6a5b338d05bb1069ad814d9f77e3c367854f",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/81fd7654a8429718adfcb2a7e03496077f547ed0",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/85fa6b12e8f439739ac36ef2aad925f37c8b976a",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/87831b92112c81db251d46756d65daa4f91af6a2",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/89a15a50f84d32d4b99db86f957427fcbe20a99a",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/d395c30d570ca6168f0297b191709927d1258273",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/ebcbd2523a8524c3d24e111cdbed8e271d910269",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2026-89616",
+    "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+    "published": "2026-09-11T20:19:46.783",
+    "lastModified": "2026-10-19T09:17:58.270",
+    "vulnStatus": "Received",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nfs/ntfs3: fix info-leak on partial LZNT decompress in ni_read_frame()\n\nni_read_frame() decompresses an LZNT $DATA frame into the vmapped target\npages and then trusts decompress_lznt()'s return value:\n\n  unc_size = decompress_lznt(frame_ondisk, ondisk_size, frame_mem,\n                             frame_size);\n  if ((ssize_t)unc_size < 0)        err = unc_size;\n  else if (!unc_size || unc_size > frame_size)  err = -EINVAL;\n\ndecompress_lznt() stops as soon as the compressed stream is exhausted\n(e.g. a zero chunk header) and returns the number of bytes it actually\nwrote, which may be far less than frame_size. The bytes between unc_size\nand frame_size are never written. The only memset() that follows zeroes\nthe region beyond i_valid; when the frame lies entirely within the file's\nvalid size that memset() does not run, so the gap retains whatever was in\nthe just-vmapped pages. All pages are then marked uptodate and returned\nto userspace, disclosing uninitialized (recently-freed) kernel page\nmemory. A crafted compressed file whose stream decompresses to only a few\nbytes leaks the remainder of every frame on a plain read(2), which is\nenough to recover kernel pointers and defeat KASLR.\n\nZero the [unc_size, frame_size) tail immediately after a successful LZNT\ndecompress so the remainder reads back as zero."
+     }
+    ],
+    "affected": [
+     {
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+      "affectedData": [
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "unaffected",
+        "programFiles": [
+         "fs/ntfs3/frecord.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "4342306f0f0d5ff4315a204d315c1b51b914fca5",
+          "lessThan": "7d60a4c49af4d5cb88aa7cbf998d0408bd415055",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "4342306f0f0d5ff4315a204d315c1b51b914fca5",
+          "lessThan": "cd40eee4923d104ebec9ac7513b971bc441e431d",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "4342306f0f0d5ff4315a204d315c1b51b914fca5",
+          "lessThan": "77d8efd04745cda23858546afdbd9d07b591758e",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "4342306f0f0d5ff4315a204d315c1b51b914fca5",
+          "lessThan": "0f699ddb290a24b37e1bc9bf1e3c9dbccf564bea",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "4342306f0f0d5ff4315a204d315c1b51b914fca5",
+          "lessThan": "376ee45659a4b943df672ad275c63da00655f929",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "4342306f0f0d5ff4315a204d315c1b51b914fca5",
+          "lessThan": "4a1b39b2e10eb8de86265e80cf2be4396bc1dce4",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "4342306f0f0d5ff4315a204d315c1b51b914fca5",
+          "lessThan": "35d1ea92c7d946e2ebdbe36cdb2c969c8704bebd",
+          "versionType": "git",
+          "status": "affected"
+         }
+        ]
+       },
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "affected",
+        "programFiles": [
+         "fs/ntfs3/frecord.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "5.15",
+          "status": "affected"
+         },
+         {
+          "version": "0",
+          "lessThan": "5.15",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "5.15.221",
+          "lessThanOrEqual": "5.15.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.1.188",
+          "lessThanOrEqual": "6.1.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.6.157",
+          "lessThanOrEqual": "6.6.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.12.109",
+          "lessThanOrEqual": "6.12.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.18.50",
+          "lessThanOrEqual": "6.18.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.2.4",
+          "lessThanOrEqual": "7.2.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.3",
+          "lessThanOrEqual": "*",
+          "versionType": "original_commit_for_fix",
+          "status": "unaffected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        "baseScore": 7.5,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "NONE",
+        "availabilityImpact": "NONE"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 3.6
+      }
+     ]
+    },
+    "references": [
+     {
+      "url": "https://git.kernel.org/stable/c/0f699ddb290a24b37e1bc9bf1e3c9dbccf564bea",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/35d1ea92c7d946e2ebdbe36cdb2c969c8704bebd",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/376ee45659a4b943df672ad275c63da00655f929",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/4a1b39b2e10eb8de86265e80cf2be4396bc1dce4",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/77d8efd04745cda23858546afdbd9d07b591758e",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/7d60a4c49af4d5cb88aa7cbf998d0408bd415055",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/cd40eee4923d104ebec9ac7513b971bc441e431d",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2026-81014",
+    "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+    "published": "2026-09-11T20:19:10.297",
+    "lastModified": "2026-10-19T09:17:34.820",
+    "vulnStatus": "Received",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nplatform/x86: hp-bioscfg: fix heap OOB read in sk_store() and kek_store()\n\nsk_store() and kek_store() strip a trailing newline from the sysfs\nwrite before allocating the key buffer:\n\n\tlength = count;\n\tif (buf[length - 1] == '\\n')\n\t\tlength--;\n\tbioscfg_drv.spm_data.signing_key = kmemdup(buf, length, GFP_KERNEL);\n\nbut then pass the original \"count\" (not \"length\") as the copy size to\nhp_wmi_perform_query(), which memcpy()s that many bytes out of the\n\"length\"-sized allocation, reading one byte past it whenever the write\nends in a newline, the normal case for a shell \"echo\" into sysfs.\n\nKASAN confirms this directly:\n\n  BUG: KASAN: slab-out-of-bounds in hp_wmi_perform_query+0x1e9/0x460 [hp_bioscfg]\n  Read of size 28 at addr ffff88813c8e2b80 by task python3/16022\n  ...\n  sk_store+0xa7/0x240 [hp_bioscfg]\n  kernfs_fop_write_iter+0x3e1/0x5d0\n  ...\n  The buggy address is located 0 bytes inside of\n  allocated 27-byte region [ffff88813c8e2b80, ffff88813c8e2b9b)\n\nReproduced identically for kek_store, and at multiple write sizes\n(28, 57, 201 bytes), each time reading exactly one byte past a\nkmemdup() allocation one byte smaller than the write.\n\nFix by passing \"length\" instead of \"count\" to hp_wmi_perform_query()\nin both functions."
+     }
+    ],
+    "affected": [
+     {
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+      "affectedData": [
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "unaffected",
+        "programFiles": [
+         "drivers/platform/x86/hp/hp-bioscfg/spmobj-attributes.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "b2715aa2e1352c0060b9dcba57a2e465bbfbcd68",
+          "lessThan": "81db79fed115640736188e56595b1e9aec317d5b",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "b2715aa2e1352c0060b9dcba57a2e465bbfbcd68",
+          "lessThan": "4c6374dcb270d12907b880cf82a5a5ef21785fc3",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "b2715aa2e1352c0060b9dcba57a2e465bbfbcd68",
+          "lessThan": "7cd8fe01aba303a2382db0966eb6c8ab41d5f3c2",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "b2715aa2e1352c0060b9dcba57a2e465bbfbcd68",
+          "lessThan": "67b60703d7d8af1ca0e49f72e1bdb1ccecd41b5b",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "b2715aa2e1352c0060b9dcba57a2e465bbfbcd68",
+          "lessThan": "a7508c7959ff8d037327d377ed21a9c0eabe4674",
+          "versionType": "git",
+          "status": "affected"
+         }
+        ]
+       },
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "affected",
+        "programFiles": [
+         "drivers/platform/x86/hp/hp-bioscfg/spmobj-attributes.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "6.6",
+          "status": "affected"
+         },
+         {
+          "version": "0",
+          "lessThan": "6.6",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.6.157",
+          "lessThanOrEqual": "6.6.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.12.109",
+          "lessThanOrEqual": "6.12.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.18.50",
+          "lessThanOrEqual": "6.18.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.2.4",
+          "lessThanOrEqual": "7.2.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.3",
+          "lessThanOrEqual": "*",
+          "versionType": "original_commit_for_fix",
+          "status": "unaffected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {},
+    "references": [
+     {
+      "url": "https://git.kernel.org/stable/c/4c6374dcb270d12907b880cf82a5a5ef21785fc3",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/67b60703d7d8af1ca0e49f72e1bdb1ccecd41b5b",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/7cd8fe01aba303a2382db0966eb6c8ab41d5f3c2",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/81db79fed115640736188e56595b1e9aec317d5b",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/a7508c7959ff8d037327d377ed21a9c0eabe4674",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2026-80981",
+    "sourceIdentifier": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+    "published": "2026-09-11T20:19:04.520",
+    "lastModified": "2026-10-19T09:17:30.483",
+    "vulnStatus": "Received",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "In the Linux kernel, the following vulnerability has been resolved:\n\nnet/smc: fix use-after-free of the LLC qentry in smc_llc_srv_add_link()\n\nsmc_llc_srv_add_link() keeps add_llc pointing into the queue entry:\n\n  add_llc = &qentry->msg.add_link;\t\t\tsmc_llc.c:1482\n  ...\n  smc_llc_save_add_link_info(link_new, add_llc);\tsmc_llc.c:1494\n  smc_llc_flow_qentry_del(&lgr->llc_flow_lcl);\t\tsmc_llc.c:1495\n  ...\n  u8 *llc_msg = smc_link_shared_v2_rxbuf(link) ?\n\t(u8 *)lgr->wr_rx_buf_v2 : (u8 *)add_llc;\tsmc_llc.c:1504\n  smc_llc_save_add_link_rkeys(link, link_new, llc_msg);\tsmc_llc.c:1506\n\nsmc_llc_flow_qentry_del() kfree()s the entry, so on a link without a shared\nv2 receive buffer the pointer handed to smc_llc_save_add_link_rkeys() is\nalready freed. Before the Fixes: commit that branch always used\nlgr->wr_rx_buf_v2 and add_llc was not used after the free.\n\nReproduced on an unpatched tree over rxe, with KASAN, kasan_multi_shot\nand a link forced to max_recv_sge == 1: the entry is freed and read by\nthe same call, and the freeing frame is smc_llc_srv_add_link() itself.\n\n  [    2.523161] BUG: KASAN: slab-use-after-free in smc_llc_save_add_link_rkeys+0x333/0x350\n  [    2.523499] Read of size 2 at addr ffff8880052194de by task kworker/0:1/11\n  [    2.523789]\n  [    2.523862] CPU: 0 UID: 0 PID: 11 Comm: kworker/0:1 Not tainted 7.2.0-rc5-p0-g2c9dd296545d #35 PREEMPT(lazy)\n  [    2.523865] Hardware name: QEMU Ubuntu 24.04 PC v2 (i440FX + PIIX, arch_caps fix, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014\n  [    2.523866] Workqueue: smc_hs_wq smc_listen_work\n  [    2.523869] Call Trace:\n  [    2.523870]  <TASK>\n  [    2.523871]  dump_stack_lvl+0x53/0x70\n  [    2.523872]  print_report+0xd0/0x630\n  [    2.523874]  ? __pfx__raw_spin_lock_irqsave+0x10/0x10\n  [    2.523876]  ? smc_llc_save_add_link_rkeys+0x333/0x350\n  [    2.523878]  kasan_report+0xce/0x100\n  [    2.523879]  ? smc_llc_save_add_link_rkeys+0x333/0x350\n  [    2.523881]  smc_llc_save_add_link_rkeys+0x333/0x350\n  [    2.523883]  ? smcr_buf_reg_lgr+0x2a4/0x660\n  [    2.523885]  smc_llc_srv_add_link+0xaa2/0x1e50\n  [    2.523888]  ? _printk+0xba/0xf0\n  [    2.523897]  ? __pfx_smc_llc_srv_add_link+0x10/0x10\n  [    2.523899]  ? down_write+0xb0/0x130\n  [    2.523903]  ? __pfx_down_write+0x10/0x10\n  [    2.523905]  smc_listen_work+0x489e/0x4d00\n  [    2.523907]  ? kmem_cache_free+0x1c6/0x3a0\n  [    2.523911]  ? __pfx_smc_listen_work+0x10/0x10\n  [    2.523913]  ? release_sock+0x148/0x1d0\n  [    2.523915]  ? smc_tcp_listen_work+0xb4f/0xfc0\n  [    2.523917]  ? _raw_spin_lock_irq+0x80/0xe0\n  [    2.523918]  ? __pfx__raw_spin_lock_irq+0x10/0x10\n  [    2.523920]  process_one_work+0x633/0x1030\n  [    2.523922]  ? assign_work+0x11d/0x370\n  [    2.523924]  worker_thread+0x45b/0xd10\n  [    2.523926]  ? __pfx_worker_thread+0x10/0x10\n  [    2.523928]  ? __pfx_worker_thread+0x10/0x10\n  [    2.523929]  kthread+0x2c6/0x3b0\n  [    2.523931]  ? recalc_sigpending+0x15c/0x1e0\n  [    2.523934]  ? __pfx_kthread+0x10/0x10\n  [    2.523935]  ret_from_fork+0x36e/0x5a0\n  [    2.523937]  ? __pfx_ret_from_fork+0x10/0x10\n  [    2.523938]  ? __switch_to+0x572/0xdd0\n  [    2.523943]  ? __pfx_kthread+0x10/0x10\n  [    2.523944]  ret_from_fork_asm+0x1a/0x30\n  [    2.523947]  </TASK>\n  [    2.523948]\n  [    2.531253] Allocated by task 48:\n  [    2.531399]  kasan_save_stack+0x33/0x60\n  [    2.531570]  kasan_save_track+0x14/0x30\n  [    2.531737]  __kasan_kmalloc+0x8f/0xa0\n  [    2.531905]  __kmalloc_cache_noprof+0x158/0x370\n  [    2.532100]  smc_llc_enqueue+0x72/0x560\n  [    2.532268]  smc_wr_rx_tasklet_fn+0x474/0xa80\n  [    2.532491]  tasklet_action_common+0x20f/0x8a0\n  [    2.532714]  handle_softirqs+0x18e/0x590\n  [    2.532886]  do_softirq+0x3b/0x60\n  [    2.533036]  __local_bh_enable_ip+0x61/0x70\n  [    2.533221]  __alloc_skb+0x732/0x890\n  [    2.533384]  rxe_init_packet+0x16b/0x4f0\n  [    2.533567]  prepare_ack_packet+0xb8/0x830\n  [    2.533760]  rxe_receiver+0x495/0x96e0\n  [    2.533933]  do_work+0x144/0x470\n  [    2\n---truncated---"
+     }
+    ],
+    "affected": [
+     {
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+      "affectedData": [
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "unaffected",
+        "programFiles": [
+         "net/smc/smc_llc.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "27ef6a9981fe74191849966a6d5e0400a4008ab8",
+          "lessThan": "c52a998a223e7e84333306996edec096178d1e95",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "27ef6a9981fe74191849966a6d5e0400a4008ab8",
+          "lessThan": "adef84cc85d449ac28d2b4b4c49cf19619c56e27",
+          "versionType": "git",
+          "status": "affected"
+         },
+         {
+          "version": "27ef6a9981fe74191849966a6d5e0400a4008ab8",
+          "lessThan": "a42a459ef0e54cb0c4b3e43e21cb0e658e664f64",
+          "versionType": "git",
+          "status": "affected"
+         }
+        ]
+       },
+       {
+        "vendor": "Linux",
+        "product": "Linux",
+        "defaultStatus": "affected",
+        "programFiles": [
+         "net/smc/smc_llc.c"
+        ],
+        "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+        "versions": [
+         {
+          "version": "6.14",
+          "status": "affected"
+         },
+         {
+          "version": "0",
+          "lessThan": "6.14",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "6.18.50",
+          "lessThanOrEqual": "6.18.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.2.4",
+          "lessThanOrEqual": "7.2.*",
+          "versionType": "semver",
+          "status": "unaffected"
+         },
+         {
+          "version": "7.3",
+          "lessThanOrEqual": "*",
+          "versionType": "original_commit_for_fix",
+          "status": "unaffected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 9.8,
+        "baseSeverity": "CRITICAL",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     ]
+    },
+    "references": [
+     {
+      "url": "https://git.kernel.org/stable/c/a42a459ef0e54cb0c4b3e43e21cb0e658e664f64",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/adef84cc85d449ac28d2b4b4c49cf19619c56e27",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
+     },
+     {
+      "url": "https://git.kernel.org/stable/c/c52a998a223e7e84333306996edec096178d1e95",
+      "source": "416baaa9-dc9f-4396-8d5f-8c081fb06d67"
      }
     ]
    }

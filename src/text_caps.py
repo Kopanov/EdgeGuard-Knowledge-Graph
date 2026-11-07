@@ -9,16 +9,26 @@ text bound for Neo4j is made here, on the sync's write path (``Neo4jClient``), n
 - CISA KEV's ``shortDescription`` as a node property of its own (``CVE.cisa_short_description``, which no writer
   sets): ``CISA_SHORT_DESCRIPTION_CAP`` (500).
 
-``cap_text(text, cap)`` returns ``(text, truncated, full_length)``:
+``cap_text(text, cap, older_cut=False)`` returns ``(text, truncated, full_length)``:
 
 1. **Markup is stripped first.** A markdown link ``[Name](url)`` becomes ``Name``; every ``(Citation: X)`` is
    removed, also a run of several; the tags ``<code>`` and ``</code>`` are removed and the text between them is
-   kept. A copy that an older writer cut inside markup ends in an unclosed citation, which is removed, or an
-   unclosed link, which keeps its name. Stripping, with the normalising of spaces below, repeats until nothing
-   changes, so a link inside a link's name is stripped too. When something was stripped, the spaces it leaves are normalised: no run of spaces or tabs,
-   no space or tab before a ``.``, ``,``, ``;``, ``:``, ``!`` or ``?`` that ends a word group (one followed by
+   kept. Stripping repeats, with the normalising of spaces below, until nothing changes (at most
+   ``_MAX_STRIP_PASSES`` passes, so a link inside a link's name is stripped too and a text of any length takes
+   linear time). When something was stripped, the spaces it leaves are normalised: no run of spaces or tabs, no
+   space or tab before a ``.``, ``,``, ``;``, ``:``, ``!`` or ``?`` that ends a word group (one followed by
    whitespace or the end, so ``.exe`` keeps its space) or before ``)``, none at the start or end of a line, and
-   none at either end of the text. A text without markup keeps its spacing.
+   none at either end of the text. A text without markup keeps its spacing, and a ``[`` that opens no link
+   (``ml[0..num_locks)``, ``[0, len)``, a kernel log's ``[    2.523161]``) is kept.
+1a. **An older writer's cut** (``older_cut=True``, for the entity descriptions only): an older MISPWriter cut an
+   ATT&CK description inside its markup and appended ``...`` (``misp_writer.sanitize_value``). At the end of such
+   a text, an unclosed citation (also one cut inside the word "Citation": ``(Cita...``) or ``<code>`` tag is
+   removed with the ``...``, and an unclosed link keeps its name without the ``...`` (``[PowerSp...`` becomes
+   ``PowerSp``; ``[Empire](https://attack.mi...`` and ``[APT39]...`` become ``Empire`` and ``APT39``); the
+   whitespace this leaves at the end goes. A link name holds no line break or parenthesis. Only the end of the
+   text is read (its last ``_OLDER_CUT_TAIL`` characters), and only a text that ends in ``...``. A
+   ``CVE`` or ``Vulnerability`` description never held ATT&CK markup, so its ``...`` copies (``rb_threads[c...``)
+   keep their ``[``.
 2. **A text longer than the cap is cut**, at the last sentence end within the cap that keeps at least half of
    it, otherwise at the last whitespace within the cap. A sentence end is ``.``, ``!`` or ``?`` (with any
    closing quotes or brackets after it) followed by whitespace and then by no lowercase letter. A ``.`` does not
@@ -26,7 +36,8 @@ text bound for Neo4j is made here, on the sync's write path (``Neo4jClient``), n
    letter (``J.``), dotted letters (``U.S.``, ``a.k.a.``) or an ellipsis; a ``.`` inside a token (``v1.2``,
    ``1.2.3``, ``example.com``) is followed by no whitespace and so ends nothing. The cut never splits a word
    and never appends an ellipsis; separators the cut leaves at the end (whitespace, ``,``, ``;``, ``:``, an
-   opening bracket, a dash) are dropped.
+   opening bracket, a dash) are dropped. The kept text is a prefix of the stripped text (with ``older_cut``, of
+   the stripped text before step 1a reads the cut's own end).
 3. **``full_length``** is the length of the whole stripped text; ``truncated`` is whether the text was cut.
 
 Edge cases, decided:
@@ -37,7 +48,8 @@ Edge cases, decided:
   the cut never splits a word, so the graph gets no text and MISP keeps the whole.
 - A text that is only markup gives ``("", False, 0)``.
 - A text within the cap that ends in ``...`` (a MISP copy an older writer cut, such as an ATT&CK description cut
-  at 255 characters) is kept as it is; over the cap, it is cut like any other text.
+  at 255 characters) keeps its ``...`` unless step 1a removes markup there; over the cap, it is cut like any
+  other text.
 
 The function is idempotent: capping a capped text changes nothing. Standard library only.
 """
@@ -61,11 +73,21 @@ _CITATION_RE = re.compile(r"\(Citation:[^()]*(?:\([^()]*\)[^()]*)*\)")
 # ("https://en.wikipedia.org/wiki/Foo_(bar)").
 _LINK_RE = re.compile(r"\[([^\[\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)")
 _CODE_TAG_RE = re.compile(r"</?code>", re.IGNORECASE)
-# The markup an older writer's cut left unclosed at the end of a text: a citation, also one cut inside the word
-# "Citation" ("(Cita..."); a link cut inside its URL ("[Name](https://attack.mi...") or its name ("[Na...").
-_UNCLOSED_CITATION_RE = re.compile(r"\((?:Citation:[^)]*|C(?:i(?:t(?:a(?:t(?:i(?:on?)?)?)?)?)?)?\.+)\Z")
-_UNCLOSED_LINK_RE = re.compile(r"\[([^\[\]]*)\]\([^)\s]*\Z")
-_UNCLOSED_LINK_NAME_RE = re.compile(r"\[([^\[\]]*)\Z")
+# The markup an older writer's cut left unclosed before the "..." it appended (step 1a): a citation, also one cut
+# inside the word "Citation" ("(Cita...") or inside a name with a year ("(Citation: Microsoft (20..."); a
+# ``<code>`` tag; a link cut after its name ("[APT39]...") or inside its URL ("[Name](https://attack.mi...");
+# a link name ("[Na..."), which holds no line break or parenthesis.
+_OLDER_CUT_END = r"\.\.\.\Z"
+_UNCLOSED_CITATION_RE = re.compile(
+    r"\((?:Citation:[^()]*(?:\([^()]*\)[^()]*)*(?:\([^()]*)?|C(?:i(?:t(?:a(?:t(?:i(?:on?)?)?)?)?)?)?)" + _OLDER_CUT_END
+)
+_UNCLOSED_CODE_TAG_RE = re.compile(r"</?(?:c(?:o(?:d(?:e)?)?)?)?" + _OLDER_CUT_END, re.IGNORECASE)
+_UNCLOSED_LINK_RE = re.compile(r"\[([^\[\]\n]*)\](?:\([^()\s]*)?" + _OLDER_CUT_END)
+_UNCLOSED_LINK_NAME_RE = re.compile(r"\[([^\[\]\n()]*)" + _OLDER_CUT_END)
+# Step 1a reads this many characters at the end of a text: a citation or a link name is far shorter.
+_OLDER_CUT_TAIL = 300
+# Step 1 repeats at most this often: each pass strips one level of nested links, and no source nests deeper.
+_MAX_STRIP_PASSES = 16
 
 _SPACE_RUN_RE = re.compile(r"[ \t]{2,}")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \t]+(?:([.,;:!?])(?=\s|\Z)|(\)))")
@@ -130,10 +152,7 @@ _CUT_TAIL_CHARS = " \t\r\n,;:([{-–—"
 def _strip_once(text: str) -> str:
     text = _CITATION_RE.sub("", text)
     text = _LINK_RE.sub(r"\1", text)
-    text = _CODE_TAG_RE.sub("", text)
-    text = _UNCLOSED_CITATION_RE.sub("", text)
-    text = _UNCLOSED_LINK_RE.sub(r"\1", text)
-    return _UNCLOSED_LINK_NAME_RE.sub(r"\1", text)
+    return _CODE_TAG_RE.sub("", text)
 
 
 def _normalise_spaces(text: str) -> str:
@@ -144,18 +163,37 @@ def _normalise_spaces(text: str) -> str:
     return text.strip()
 
 
-def strip_markup(text: str) -> str:
+def _strip_older_cut(text: str) -> str:
+    """``text`` without the markup an older writer's cut left unclosed before its ``...`` (step 1a)."""
+    # Each round that changes the text shortens it and reads only its end, so the loop ends in linear time; it
+    # repeats because a removal can bring an earlier cut construct to the end ("[a b...(Cit..."), which makes
+    # the result idempotent.
+    while text.endswith("..."):
+        head, tail = text[:-_OLDER_CUT_TAIL], text[-_OLDER_CUT_TAIL:]
+        new = _UNCLOSED_CITATION_RE.sub("", tail)
+        new = _UNCLOSED_CODE_TAG_RE.sub("", new)
+        new = _UNCLOSED_LINK_RE.sub(r"\1", new)
+        new = _UNCLOSED_LINK_NAME_RE.sub(r"\1", new)
+        if new == tail:
+            break
+        # The removals are at the end: the only space they leave is there.
+        text = (head + new).rstrip()
+    return text
+
+
+def strip_markup(text: str, older_cut: bool = False) -> str:
     """``text`` without markdown links, ``(Citation: X)`` and ``<code>`` tags, spaces normalised where something
-    was stripped (step 1 of the module docstring). A text without markup is returned as it is."""
+    was stripped (step 1 of the module docstring); with ``older_cut``, also without the markup an older writer's
+    cut left unclosed at the end (step 1a). A text without markup is returned as it is."""
     stripped = text
-    # Each pass that changes the text shortens it, so the loop ends. The spaces are normalised in each pass, since
-    # normalising can close markup ("[N](http://x . )" becomes the link "[N](http://x.)") or bring an unclosed one
-    # to the end of the text.
-    while True:
+    # The spaces are normalised in each pass that changed the text, since normalising can close markup
+    # ("[N](http://x . )" becomes the link "[N](http://x.)").
+    for _ in range(_MAX_STRIP_PASSES):
         again = _strip_once(stripped)
         if again == stripped:
-            return stripped
+            break
         stripped = _normalise_spaces(again)
+    return _strip_older_cut(stripped) if older_cut else stripped
 
 
 def _ends_sentence(text: str, end: int) -> bool:
@@ -195,24 +233,26 @@ def _cut(text: str, cap: int) -> str:
     return text[:space].rstrip(_CUT_TAIL_CHARS)
 
 
-def cap_text(text: Any, cap: int) -> Tuple[str, bool, int]:
+def cap_text(text: Any, cap: int, older_cut: bool = False) -> Tuple[str, bool, int]:
     """``(text, truncated, full_length)``: ``text`` without markup and cut to at most ``cap`` characters at a
-    sentence or word end; whether it was cut; the length of the whole stripped text (module docstring)."""
+    sentence or word end; whether it was cut; the length of the whole stripped text (module docstring).
+    ``older_cut``: the text may be a copy an older writer cut inside markup (step 1a; the entity descriptions)."""
     if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
         raise ValueError(f"cap_text: the cap must be a positive int, not {cap!r}")
     if not isinstance(text, str):
         return "", False, 0
-    stripped = strip_markup(text)
+    stripped = strip_markup(text, older_cut)
     full_length = len(stripped)
     if full_length <= cap:
         return stripped, False, full_length
-    # A cut inside brackets can leave an unclosed "[" at the end, which a second strip would remove; stripping
-    # the cut text keeps the function idempotent.
-    return strip_markup(_cut(stripped, cap)), True, full_length
+    out = _cut(stripped, cap)
+    # A cut can end just after a "..." of the text itself ("word [alpha beta... gamma"); step 1a reads that end
+    # as it would when the capped text is capped again, which keeps the function idempotent.
+    return (_strip_older_cut(out) if older_cut else out), True, full_length
 
 
-def capped(text: Any, cap: int) -> Any:
+def capped(text: Any, cap: int, older_cut: bool = False) -> Any:
     """The capped form of ``text`` (``cap_text``'s first value) when it is a string; any other value as it is."""
     if not isinstance(text, str):
         return text
-    return cap_text(text, cap)[0]
+    return cap_text(text, cap, older_cut)[0]

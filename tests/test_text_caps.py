@@ -3,9 +3,11 @@
 Real texts: ``tests/fixtures/text_caps_sources_2026_11_07.json`` holds six ATT&CK objects of the Enterprise bundle of
 attack-stix-data (collection 20.1) with their descriptions verbatim (two techniques with markdown links, runs of
 citations and ``<code>`` tags; a group; a malware; a tool; a tactic) and two NVD API 2.0 records whose descriptions
-are longer than 1,000 characters (CVE-2026-2411 with "e.g.", CVE-2026-69245 with version numbers and IP addresses).
-Older MISP copies are made by the writer's own cut (``misp_writer.sanitize_value``: 255 characters with "...").
-The other texts are constructed, each to isolate one rule, and say so.
+are longer than 1,000 characters (CVE-2026-2411 with "e.g.", CVE-2026-69245 with version numbers and IP addresses),
+and five NVD API 2.0 records of the kernel.org CNA whose descriptions hold a ``[`` that opens no link (half-open
+intervals, a memory region, an indented kernel log that NVD ends in ``[    2\n---truncated---``). Older MISP copies
+are made by the writer's own cut (``misp_writer.sanitize_value``: a length with "..."). The other texts are
+constructed, each to isolate one rule, and say so.
 """
 
 from __future__ import annotations
@@ -38,8 +40,20 @@ from text_caps import (  # noqa: E402
 FIXTURE = json.loads((TESTS / "fixtures" / "text_caps_sources_2026_11_07.json").read_text())
 ATTACK = {o["external_references"][0]["external_id"]: o["description"] for o in FIXTURE["attack"]}
 NVD = {v["cve"]["id"]: next(d["value"] for d in v["cve"]["descriptions"] if d["lang"] == "en") for v in FIXTURE["nvd"]}
-REAL_TEXTS = [*ATTACK.values(), *NVD.values()]
+KERNEL = {
+    v["cve"]["id"]: next(d["value"] for d in v["cve"]["descriptions"] if d["lang"] == "en")
+    for v in FIXTURE["nvd_kernel"]
+}
+REAL_TEXTS = [*ATTACK.values(), *NVD.values(), *KERNEL.values()]
 MARKUP = ("(Citation:", "](", "<code>", "</code>")
+
+
+# The list the module documents, written out so that a test fails when an entry goes.
+KNOWN_ABBREVIATIONS = (
+    "approx.", "al.", "cf.", "co.", "corp.", "dept.", "dr.", "e.g.", "est.", "fig.", "i.e.", "inc.", "jr.", "ltd.",
+    "mr.", "mrs.", "ms.", "no.", "nos.", "op.", "pp.", "prof.", "rev.", "sr.", "st.", "ver.", "viz.", "vol.", "vs.",
+    "jan.", "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "sept.", "oct.", "nov.", "dec.",
+)  # fmt: skip
 
 
 def _is_sentence_end(text: str) -> bool:
@@ -127,45 +141,107 @@ class TestMarkup:
 
 
 class TestOlderMispCopies:
-    """MISP copies an older writer cut at 255 characters with "..." (``sanitize_value``), as MISP holds ATT&CK's
-    descriptions written before the collector cut moved to the sync."""
+    """MISP copies an older writer cut with "..." (``sanitize_value``: 255 or 400 characters), as MISP holds
+    ATT&CK's descriptions written before the collector cut moved to the sync. Read with ``older_cut`` (step 1a),
+    as the entity descriptions are."""
 
     @pytest.mark.parametrize("ext_id", sorted(ATTACK))
     def test_no_markup_is_left_whatever_the_cut(self, ext_id):
         full = ATTACK[ext_id]
-        for length in range(60, min(len(full), 600), 7):
+        cut_in_markup = 0
+        for length in range(10, min(len(full), 1200) + 1):
             copy = sanitize_value(full, max_length=length)
-            out = cap_text(copy, ENTITY_DESCRIPTION_CAP)[0]
+            out = cap_text(copy, ENTITY_DESCRIPTION_CAP, older_cut=True)[0]
             assert not any(m in out for m in MARKUP), (ext_id, length, out[-80:])
-            assert "[" not in out and "(Cit" not in out, (ext_id, length, out[-80:])
+            assert "[" not in out and "(Cit" not in out and "<co" not in out, (ext_id, length, out[-80:])
+            cut_in_markup += strip_markup(copy) != copy and copy != full
+        assert cut_in_markup or ext_id == "TA0001"
+
+    def test_the_writers_own_lengths(self):
+        """The copies MISPWriter makes (255 for a technique, an actor and a tactic, 400 for malware and a tool)."""
+        for ext_id, length in (("T1059.001", 255), ("T1036.007", 255), ("G0007", 255), ("S0154", 400)):
+            copy = sanitize_value(ATTACK[ext_id], max_length=length)
+            assert copy.endswith("...")
+            out = cap_text(copy, ENTITY_DESCRIPTION_CAP, older_cut=True)[0]
+            assert not any(m in out for m in MARKUP) and "[" not in out, (ext_id, out[-80:])
+
+    def test_without_older_cut_a_copy_keeps_its_end(self):
+        """A CVE description is read without step 1a: its "..." copies hold real brackets."""
+        copy = "The handler walks rb_threads[c..."
+        assert cap_text(copy, CVE_DESCRIPTION_CAP) == (copy, False, len(copy))
+        assert cap_text(copy, CVE_DESCRIPTION_CAP, older_cut=True)[0] == "The handler walks rb_threadsc"
+
+    def test_a_name_holds_no_parenthesis_or_line_break(self):
+        # Constructed after T1564.004's "Data [known as Alternate Data Streams (ADSs) when more than one ...]".
+        copy = "Data [known as Alternate Data Streams (ADSs) when more than one..."
+        assert cap_text(copy, 500, older_cut=True)[0] == copy
+        copy = "A list [of\nitems..."
+        assert cap_text(copy, 500, older_cut=True)[0] == copy
+
+    def test_a_copy_cut_just_after_a_link_name(self):
+        full = ATTACK["G0007"]
+        at = full.index("[APT28]") + len("[APT28]")
+        assert cap_text(full[:at] + "...", 500, older_cut=True)[0] == "APT28"
+        at = full.index("[APT28](") + len("[APT28](")
+        assert cap_text(full[:at] + "...", 500, older_cut=True)[0] == "APT28"
+
+    def test_a_removal_at_the_end_keeps_the_spacing_before_it(self):
+        # Constructed: a text without closed markup keeps its spacing; only the end the removal leaves is trimmed.
+        text = "Two  spaces stay .\n  Indented line uses [PowerSp..."
+        assert cap_text(text, 500, older_cut=True)[0] == "Two  spaces stay .\n  Indented line uses PowerSp"
+        assert cap_text("Two  spaces stay . (Cit...", 500, older_cut=True)[0] == "Two  spaces stay ."
+
+    def test_a_copy_cut_inside_a_code_tag(self):
+        text = "Run <code>cmd.exe</code> or <co..."
+        assert cap_text(text, 500, older_cut=True)[0] == "Run cmd.exe or"
+        assert cap_text("Run </cod...", 500, older_cut=True)[0] == "Run"
+
+    def test_a_copy_cut_inside_a_citation_name_with_parentheses(self):
+        assert cap_text("A tool.(Citation: Microsoft (20...", 500, older_cut=True)[0] == "A tool."
+        assert cap_text("A tool.(Citation: Microsoft (2021) Blog...", 500, older_cut=True)[0] == "A tool."
+
+    def test_an_earlier_cut_construct_brought_to_the_end_goes_too(self):
+        # Constructed: removing the citation brings the cut link name to the end.
+        assert cap_text("Uses [a b...(Cit...", 500, older_cut=True)[0] == "Uses a b"
+
+    def test_a_cut_at_an_ellipsis_of_the_text_is_idempotent(self):
+        # Constructed: the word cut ends just after the text's own "..." behind an unclosed "[".
+        text = "word [alpha beta... gamma delta epsilon zeta"
+        out = cap_text(text, 20, older_cut=True)
+        assert out == ("word alpha beta", True, len(text))
+        assert cap_text(out[0], 20, older_cut=True) == (out[0], False, len(out[0]))
+        assert cap_text(text, 20) == ("word [alpha beta...", True, len(text))
 
     def test_a_copy_cut_inside_a_citation_ends_before_it(self):
         full = ATTACK["T1059.001"]
         at = full.index("(Citation: TechNet PowerShell)") + len("(Citation: Tech")
         copy = full[:at] + "..."
-        assert cap_text(copy, 500)[0] == "Adversaries may abuse PowerShell commands and scripts for execution. " + (
+        expected = "Adversaries may abuse PowerShell commands and scripts for execution. " + (
             "PowerShell is a powerful interactive command-line interface and scripting environment included in the "
             "Windows operating system."
         )
+        assert cap_text(copy, 500, older_cut=True)[0] == expected
 
-    @pytest.mark.parametrize("inside", ["(C...", "(Cit...", "(Citation..."])
+    @pytest.mark.parametrize("inside", ["(C...", "(Cit...", "(Citation...", " (Citation: Vendor 20..."])
     def test_a_copy_cut_inside_the_word_citation(self, inside):
-        assert cap_text("It ends here." + inside, 500)[0] == "It ends here."
+        assert cap_text("It ends here." + inside, 500, older_cut=True)[0] == "It ends here."
 
     def test_a_copy_cut_inside_a_link_url_keeps_the_name(self):
         full = ATTACK["T1059.001"]
         at = full.index("[Empire](https://attack.mitre.org/software/S0363)") + len("[Empire](https://attack.mi")
-        assert cap_text(full[:at] + "...", 1000)[0].endswith("tools are available, including Empire")
+        assert cap_text(full[:at] + "...", 1000, older_cut=True)[0].endswith("tools are available, including Empire")
 
     def test_a_copy_cut_inside_a_link_name_keeps_the_text(self):
+        """The name keeps the text the cut left, without the writer's "..." (decided: the graph's text carries no
+        ellipsis it did not get from its source)."""
         full = ATTACK["T1059.001"]
         at = full.index("[PowerSploit]") + len("[PowerSp")
-        assert cap_text(full[:at] + "...", 1000)[0].endswith("including Empire, PowerSp...")
+        assert cap_text(full[:at] + "...", 1000, older_cut=True)[0].endswith("including Empire, PowerSp")
 
     def test_a_copy_within_the_cap_keeps_its_trailing_dots(self):
         copy = sanitize_value(ATTACK["TA0001"], max_length=255)
         assert copy.endswith("...")
-        assert cap_text(copy, 500) == (copy, False, len(copy))
+        assert cap_text(copy, 500, older_cut=True) == (copy, False, len(copy))
 
 
 # ---------------------------------------------------------------------------------------------- the cut
@@ -178,8 +254,8 @@ class TestCut:
             out, truncated, full_length = cap_text(text, cap)
             assert full_length == len(stripped)
             assert truncated == (len(stripped) > cap)
+            # A prefix: the cut appends nothing (CVE-2026-80981's code holds a "..." of its own, which may end it).
             assert len(out) <= cap and stripped.startswith(out)
-            assert "..." not in out[-3:] or not truncated
             if truncated:
                 cut_somewhere = True
                 following = stripped[len(out)]
@@ -223,6 +299,22 @@ class TestCut:
         out = cap_text(text, cap)[0]
         assert out.endswith(abbreviation + " Then"), out
 
+    def test_the_known_abbreviations(self):
+        assert text_caps._ABBREVIATIONS == frozenset(KNOWN_ABBREVIATIONS)
+
+    @pytest.mark.parametrize("abbreviation", sorted(set(KNOWN_ABBREVIATIONS) - {"e.g.", "i.e."}))
+    def test_every_known_abbreviation_ends_no_sentence(self, abbreviation):
+        # Constructed, as above, for each entry in lowercase and capitalised.
+        for form in (abbreviation, abbreviation.capitalize()):
+            text = "x" * 10 + " word word word word " + form + " Then more text follows here."
+            cap = text.index(form) + len(form) + 6
+            assert cap_text(text, cap)[0].endswith(form + " Then"), form
+
+    def test_eg_and_ie_are_dotted_letters_too(self):
+        """The list holds "e.g." and "i.e.", which are dotted letters too, so the loop above leaves them out."""
+        assert {"e.g.", "i.e."} <= text_caps._ABBREVIATIONS
+        assert all(text_caps._DOTTED_LETTERS_RE.match(t) for t in ("e.g.", "i.e.", "E.g."))
+
     def test_an_ellipsis_ends_no_sentence(self):
         text = "aaaa bbbb cccc dddd... Then more text follows here."
         assert cap_text(text, text.index("Then") + 6)[0] == "aaaa bbbb cccc dddd... Then"
@@ -258,6 +350,17 @@ class TestCut:
         assert cap_text("aaaa bbbb, (cccc dddd eeee", 12)[0] == "aaaa bbbb"
         assert cap_text("aaaa bbbb - cccc dddd eeee", 12)[0] == "aaaa bbbb"
 
+    @pytest.mark.parametrize("separator", [",", ";", ":", "(", "[", "{", "-", "–", "—"])
+    def test_every_separator_the_cut_leaves_is_dropped(self, separator):
+        # Constructed: the cut falls inside "cccc", just after the separator and its space.
+        text = f"aaaa bbbb {separator} cccc dddd"
+        assert cap_text(text, text.index("cccc") + 2)[0] == "aaaa bbbb"
+
+    @pytest.mark.parametrize("space", ["\t", "\r", "\n", " "])
+    def test_every_whitespace_is_a_word_end(self, space):
+        text = f"aaaa{space}bbbb{space}cccc"
+        assert cap_text(text, 11)[0] == f"aaaa{space}bbbb"
+
     def test_no_ellipsis_is_appended(self):
         out, truncated, _ = cap_text("word " * 300, 500)
         assert truncated and not out.endswith("...") and out.endswith("word")
@@ -271,9 +374,17 @@ class TestCut:
         # Constructed: removing the spaces before "." and ")" turns "[N](http://y . )" into a link.
         assert strip_markup("(Citation: A) See [N](http://y . ) now.") == "See N now."
 
-    def test_a_cut_inside_brackets_leaves_no_unclosed_bracket(self):
-        # Constructed: the cut falls inside "[a b]"; the "[" it would leave at the end goes.
-        assert cap_text("Some words here [alpha beta gamma] end", 24) == ("Some words here alpha", True, 38)
+    def test_a_cut_inside_brackets_keeps_the_sources_bracket(self):
+        # Constructed: the cut falls inside "[alpha beta gamma]", which opens no link: the kept text is a prefix.
+        assert cap_text("Some words here [alpha beta gamma] end", 24) == ("Some words here [alpha", True, 38)
+        # A "[" the cut would leave at the very end is a separator and goes.
+        assert cap_text("Some words here [ alpha beta", 18) == ("Some words here", True, 28)
+
+    def test_a_cut_that_drops_a_later_bracket_keeps_an_earlier_one(self):
+        # Constructed: an interval early, a closed "[a]" (no link) that the cut drops.
+        text = "Region [0, len) is checked first. Then the rest of it [a] is read."
+        out = cap_text(text, 50)[0]
+        assert out == "Region [0, len) is checked first." and text.startswith(out)
 
     def test_idempotent_on_mixed_texts(self):
         """Constructed texts from tokens of every rule (markup, unclosed markup, abbreviations, punctuation,
@@ -287,13 +398,86 @@ class TestCut:
         for _ in range(20000):
             text = "".join(rnd.choice(tokens) + rnd.choice(["", " ", " ", "  "]) for _ in range(rnd.randint(1, 60)))
             cap = rnd.randint(1, 120)
-            out, _truncated, _full = cap_text(text, cap)
-            assert len(out) <= cap, (text, cap)
-            assert cap_text(out, cap) == (out, False, len(out)), (text, cap)
+            for older_cut in (False, True):
+                out, _truncated, _full = cap_text(text, cap, older_cut)
+                assert len(out) <= cap, (text, cap, older_cut)
+                assert cap_text(out, cap, older_cut) == (out, False, len(out)), (text, cap, older_cut)
+            # Without step 1a the capped text is a prefix of the stripped text.
+            assert strip_markup(text).startswith(cap_text(text, cap)[0]), (text, cap)
 
     def test_newlines_are_word_ends(self):
         text = "aaaa\nbbbb\ncccc"
         assert cap_text(text, 11)[0] == "aaaa\nbbbb"
+
+
+# ---------------------------------------------------------------------------------------------- "[" without a link
+class TestBracketsThatOpenNoLink:
+    """Kernel CVE descriptions (NVD API 2.0, kernel.org CNA) hold a "[" that opens no link: it and the text's
+    spacing are kept, within the cap and over it."""
+
+    def test_the_fixture_texts_are_what_the_tests_need(self):
+        assert "mres->ml[0..num_locks) past the" in KERNEL["CVE-2026-89494"]
+        assert "opaque_len in [0, GSS_KRB5_TOK_HDR_LEN) is" in KERNEL["CVE-2026-89541"]
+        assert "Zero the [unc_size, frame_size) tail" in KERNEL["CVE-2026-89616"]
+        assert (
+            "region [ffff88813c8e2b80, " in KERNEL["CVE-2026-81014"] and "\tlength = count;" in KERNEL["CVE-2026-81014"]
+        )
+        assert KERNEL["CVE-2026-80981"].endswith("[    2\n---truncated---")
+        assert "\n  [    2.523161] BUG" in KERNEL["CVE-2026-80981"]
+        assert all(len(t) > CVE_DESCRIPTION_CAP for t in KERNEL.values())
+
+    @pytest.mark.parametrize("cve_id", sorted(KERNEL))
+    def test_within_the_cap_the_text_is_unchanged(self, cve_id):
+        text = KERNEL[cve_id]
+        assert strip_markup(text) == text
+        assert cap_text(text, len(text)) == (text, False, len(text))
+
+    @pytest.mark.parametrize("cve_id", sorted(KERNEL))
+    def test_over_the_cap_the_text_is_a_prefix(self, cve_id):
+        text = KERNEL[cve_id]
+        out, truncated, full_length = cap_text(text, CVE_DESCRIPTION_CAP)
+        assert truncated and full_length == len(text) and len(out) <= CVE_DESCRIPTION_CAP
+        assert text.startswith(out) and len(out) > CVE_DESCRIPTION_CAP // 2
+
+    def test_the_sync_ranking_keeps_the_interval(self):
+        from description_ranking import CVE_DESCRIPTIONS
+
+        ranked = CVE_DESCRIPTIONS.record(KERNEL["CVE-2026-89494"], "nvd")
+        assert ranked is not None and "mres->ml[0..num_locks) past the" in ranked.text
+        assert KERNEL["CVE-2026-89494"].startswith(ranked.text)
+
+    def test_a_text_without_markup_keeps_its_interval_and_spacing(self):
+        # Constructed.
+        text = "The fix bounds offset to [0, len) before the copy.  See   the  patch."
+        assert cap_text(text, 1000) == (text, False, len(text))
+
+
+# ---------------------------------------------------------------------------------------------- time
+class TestTime:
+    """Each text is read a bounded number of times: a 64 KB text full of brackets is capped at once."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[a " * 22000,
+            "x[" * 32000,
+            "[... " * 13000,
+            "(C..." * 13000,
+            "[" * 16000 + "a" + "](u)" * 12000,
+            "[x" * 12000 + "](u)" * 12000,
+            "(Citation: x " * 5000,
+        ],
+        ids=["unclosed", "x[", "older-cut-names", "older-cut-citations", "nested-links", "nested-names", "citations"],
+    )
+    def test_a_64_kb_text(self, text):
+        import time
+
+        assert len(text) > 60000
+        start = time.perf_counter()
+        for older_cut in (False, True):
+            for cap in (CVE_DESCRIPTION_CAP, ENTITY_DESCRIPTION_CAP):
+                cap_text(text, cap, older_cut)
+        assert time.perf_counter() - start < 2.0
 
 
 # ---------------------------------------------------------------------------------------------- inputs
@@ -310,6 +494,8 @@ class TestInputs:
 
     def test_capped_is_the_first_value(self):
         assert capped(ATTACK["G0007"], 500) == cap_text(ATTACK["G0007"], 500)[0]
+        copy = "Uses [PowerSp..."
+        assert capped(copy, 500) == copy and capped(copy, 500, older_cut=True) == "Uses PowerSp"
 
     def test_the_module_imports_the_standard_library_only(self):
         source = Path(text_caps.__file__).read_text()

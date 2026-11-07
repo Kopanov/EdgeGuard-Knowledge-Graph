@@ -42,7 +42,9 @@ name), the one merged last is kept.
 
 The text is capped before it is ranked (``text_caps``, 2026-11-07): markup stripped, then at most
 ``CVE_DESCRIPTION_CAP`` (1,000) characters for ``CVE`` and ``Vulnerability`` and ``ENTITY_DESCRIPTION_CAP`` (500)
-for the other labels, cut at a sentence or word end (``DescriptionRanking.cap``, applied by ``record``). Every
+for the other labels, cut at a sentence or word end (``DescriptionRanking.cap``, applied by ``record``); the
+entity texts are also read as copies an older writer may have cut inside ATT&CK's markup
+(``DescriptionRanking.older_cut``, ``text_caps`` step 1a), the CVE texts are not. Every
 writer of these descriptions takes the text from ``record``, so the graph holds no longer text whatever the
 importer; MISP keeps the text the collector sent.
 
@@ -86,7 +88,8 @@ class DescriptionRanking:
     follows them. ``ranks`` gives every registered source with ``ranked_for_descriptions`` a distinct
     rank, highest first from the number of such sources down to 1; an unregistered source, or one
     registered with ``ranked_for_descriptions=False``, ranks 0. ``cap`` is the most characters a description
-    of these labels holds in the graph (``text_caps.cap_text``; None: no cap).
+    of these labels holds in the graph (``text_caps.cap_text``; None: no cap); ``older_cut``: a text may be a
+    copy an older writer cut inside markup (``text_caps`` step 1a).
     """
 
     name: str
@@ -94,6 +97,7 @@ class DescriptionRanking:
     groups: Tuple[Tuple[str, ...], ...]
     ranks: Dict[str, int] = field(init=False, repr=False, compare=False)
     cap: Optional[int] = None
+    older_cut: bool = False
 
     def __post_init__(self) -> None:
         group_of = {sid: i for i, group in enumerate(self.groups) for sid in group}
@@ -129,7 +133,7 @@ class DescriptionRanking:
         """``text`` as the graph holds it: capped (``text_caps.cap_text``) when it is a string and the ranking has
         a cap; any other value as it is. For the copy of a record a writer stores beside the description
         (``SOURCED_FROM.raw_data``)."""
-        return capped(text, self.cap) if self.cap is not None else text
+        return capped(text, self.cap, self.older_cut) if self.cap is not None else text
 
     def record(self, text: object, source: Optional[str]) -> Optional[RankedDescription]:
         """The description a record of ``source`` gives, capped (``cap``), or None when it gives no text (none
@@ -138,7 +142,7 @@ class DescriptionRanking:
         if not isinstance(text, str) or not sid:
             return None
         if self.cap is not None:
-            text = cap_text(text, self.cap)[0]
+            text = cap_text(text, self.cap, self.older_cut)[0]
         if not text.strip():
             return None
         return RankedDescription(text=text, source=sid, rank=self.ranks.get(sid, 0))
@@ -240,6 +244,7 @@ ENTITY_DESCRIPTIONS = DescriptionRanking(
     labels=("Malware", "ThreatActor", "Tool", "Technique", "Tactic"),
     groups=(("mitre_attck",), curated_source_ids()),
     cap=ENTITY_DESCRIPTION_CAP,
+    older_cut=True,
 )
 
 # The source a ResilMesh-native write (``Neo4jClient.merge_resilmesh_cve`` / ``merge_resilmesh_vulnerability``)

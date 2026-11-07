@@ -84,15 +84,18 @@ def _statements(server: FakeBolt, marker: str) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------------------------- CVE records
+NVD_RECORDS = FIXTURE["nvd"] + FIXTURE["nvd_kernel"]
+
+
 def _nvd_description(cve_id: str) -> str:
-    (record,) = [v for v in FIXTURE["nvd"] if v["cve"]["id"] == cve_id]
+    (record,) = [v for v in NVD_RECORDS if v["cve"]["id"] == cve_id]
     return next(d["value"] for d in record["cve"]["descriptions"] if d["lang"] == "en")
 
 
 def _nvd_attribute(cve_id: str) -> Dict[str, Any]:
     """The MISP attribute of the recorded NVD record: the NVD collector's item, written by MISPWriter, with the
     full description in ``NVD_META`` (constructed: MISP holds it so once no collector cuts it)."""
-    records = [v for v in FIXTURE["nvd"] if v["cve"]["id"] == cve_id]
+    records = [v for v in NVD_RECORDS if v["cve"]["id"] == cve_id]
     collector = NVDCollector.__new__(NVDCollector)
     collector.base_url, collector.api_key, collector._api_key_rejected = "http://fake", "k", False
     collector.tag = collector.source_name = "nvd"
@@ -180,6 +183,20 @@ class TestCveDescription:
         assert client.merge_resilmesh_vulnerability({"cve_id": "CVE-2026-69245", "description": text}) is True
         found = [p["description"] for p in server.parameters if "description_source" in p]
         assert found == [_capped_cve("CVE-2026-69245")] * 2
+
+    def test_a_bracket_that_opens_no_link_reaches_the_graph(self, bolt):
+        """A kernel CVE description (NVD API 2.0, kernel.org CNA) with a half-open interval: the batch path stores
+        a prefix of the source text that keeps the interval's "[" and the line breaks."""
+        source = _nvd_description("CVE-2026-89494")
+        server, client = bolt()
+        sync = MISPToNeo4jSync(neo4j_client=client)
+        assert sync._sync_to_neo4j_chunk([_synced_cve("CVE-2026-89494")]) == (1, 0)
+        (node,) = _statements(server, BATCH_CVE)
+        (row,) = node["rows"]
+        assert source.startswith(row["description"]) and len(row["description"]) <= CVE_DESCRIPTION_CAP
+        assert "mres->ml[0..num_locks) past the\n" in row["description"]
+        (edge,) = [p for p in _statements(server, SINGLE_EDGE) if "rows" in p]
+        assert json.loads(edge["rows"][0]["raw_data"])["description"] == row["description"]
 
     def test_a_cve_description_of_900_characters_is_not_cut(self):
         # Constructed: the CVE cap is 1,000, not the 500 of the entities.
@@ -323,4 +340,10 @@ class TestTodaysTexts:
 
     def test_the_rankings_caps(self):
         assert (CVE_DESCRIPTIONS.cap, ENTITY_DESCRIPTIONS.cap) == (1000, 500)
+        # Only an entity text is read as a copy an older writer cut inside ATT&CK's markup (``text_caps`` 1a).
+        assert (CVE_DESCRIPTIONS.older_cut, ENTITY_DESCRIPTIONS.older_cut) == (False, True)
+        assert ENTITY_DESCRIPTIONS.record("Uses [PowerSp...", "mitre_attck").text == "Uses PowerSp"
+        assert ENTITY_DESCRIPTIONS.capped("Uses [PowerSp...") == "Uses PowerSp"
+        assert CVE_DESCRIPTIONS.record("walks rb_threads[c...", "nvd").text == "walks rb_threads[c..."
+        assert CVE_DESCRIPTIONS.capped("walks rb_threads[c...") == "walks rb_threads[c..."
         assert CVE_DESCRIPTIONS.capped(None) is None and ENTITY_DESCRIPTIONS.capped(5) == 5
