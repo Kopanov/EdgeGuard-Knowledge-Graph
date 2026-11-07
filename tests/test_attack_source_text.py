@@ -15,7 +15,7 @@ MISP holds what ATT&CK publishes; the MISP -> Neo4j sync caps what reaches the g
    ``mitre-malware``, ``mitre-tool``) beside the community cluster tag.
 6. The sync reads the long text after the block and stores it capped, and none of the new tags creates a node,
    a label or a link. It reads a technique's platform tags in ATT&CK's spelling whatever casing MISP holds them in
-   (MISP keeps the casing of a tag it already holds, and earlier writer versions created them lower-cased).
+   (MISP keeps the casing of a tag it already holds, such as ``platform:windows``).
 
 Fixture: ``tests/fixtures/attack_source_text_objects_2026_11_07.json``, real STIX objects of the attack-stix-data
 bundles (Enterprise and ICS ATT&CK 20.1, fetched 2026-11-07), among them T1553.003, the technique with the longest
@@ -268,7 +268,7 @@ class TestPlatforms:
     @pytest.mark.parametrize(
         ("stored", "attack"),
         [
-            # The lower-case ``platform:`` tags earlier writer versions created, as the project's hosted MISP
+            # Lower-case ``platform:`` tags, as the project's hosted MISP
             # listed them (structure audit of 2026-10-09).
             ("windows", "Windows"),
             ("linux", "Linux"),
@@ -650,3 +650,12 @@ class TestDocs:
             "MITRE Corporation." in text
         )
         assert FIXTURE["_provenance"]["attack"]["licence"].startswith("MITRE ATT&CK, (c) 2026 The MITRE Corporation")
+
+    @pytest.mark.parametrize("name", ["COLLECTORS.md", "MISP_SOURCES.md"])
+    def test_the_platform_tag_casing_is_stated_as_the_current_state(self, name):
+        """The main text says what MISP returns for a ``platform:`` tag it already holds in another casing; earlier
+        writer behaviour belongs only in the History section."""
+        main = (REPO / "docs" / name).read_text(encoding="utf-8").split("\n## History", 1)[0]
+        assert "already holds a `platform:` tag in another casing (`platform:windows`" in main
+        assert "earlier writer versions" not in main
+        assert "lower-case `platform:` tags of" not in main

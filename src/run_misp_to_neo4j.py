@@ -1810,8 +1810,9 @@ def _pulse_family_lists(otx_meta: Dict[str, Any]) -> Tuple[List[str], List[str]]
 def _extract_alias_tags(tags: List[Dict[str, Any]]) -> List[str]:
     """Rehydrate ``alias:<name>`` MISP tags into an aliases list.
 
-    The MISP-side carrier is written by MISPWriter for ThreatActor and
-    Malware attributes (capped at 20 tags / 100 chars each at write time).
+    The MISP-side carrier is written by MISPWriter for ThreatActor,
+    Malware and Tool (not read yet) attributes (capped at 20 tags / 100
+    chars each at write time).
     This is the read half of the alias round-trip (2026-06) — before it
     existed, parse_attribute hardcoded ``aliases: []`` and every
     MISP-sourced actor/malware lost its aliases, disabling the

@@ -3,13 +3,13 @@
 MISPWriter writes every ATT&CK platform of a technique, malware or tool as a ``platform:<name>`` tag in
 ATT&CK's casing (``platform:Network Devices``). MISP resolves a tag name without regard to case and keeps the
 casing of a tag it already holds (``Tag::captureTag`` matches ``LOWER(name)``; the ``tags.name`` column is
-case-insensitive), so on a MISP that holds the lower-case ``platform:`` tags of earlier writer versions
-(``platform:windows``, ``platform:network devices``) an attribute comes back with those. The MISP -> Neo4j sync
+case-insensitive), so on a MISP that already holds a ``platform:`` tag in another casing
+(``platform:windows``, ``platform:network devices``) an attribute comes back with that tag. The MISP -> Neo4j sync
 therefore maps each platform value it reads to ATT&CK's spelling with ``canonical_attack_platforms``.
 
 ``ATTACK_PLATFORMS`` lists every value of ``x_mitre_platforms`` on the technique (``attack-pattern``), malware
 and tool objects of the Enterprise and ICS ATT&CK 20.1 bundles of ``mitre-attack/attack-stix-data`` (measured
-2026-11-07; ``Office 365`` is on revoked objects only and is kept for the tags earlier versions wrote). A value
+2026-11-07; ``Office 365`` is on revoked objects only and is kept for a MISP that holds its tag). A value
 the table does not hold (a platform a later ATT&CK release adds) passes unchanged. Standard library only.
 """
 

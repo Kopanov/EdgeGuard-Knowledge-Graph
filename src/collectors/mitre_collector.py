@@ -229,7 +229,7 @@ def _one_item_per_node_key(items: list, label: str) -> list:
     ``Killdisk`` marked the active ``KillDisk`` node deprecated and replaced its description.
 
     In each group of items of one node key (``_node_key``), the first active item is kept (Enterprise
-    comes first) and takes the ``_UNION_LIST_KEYS`` entries of the other active items; deprecated items
+    comes first) and takes the ``_UNION_LIST_KEYS`` and ``_UNION_FACT_KEYS`` entries of the other active items; deprecated items
     are left out when the group holds an active one. The deprecated copies ATT&CK publishes carry no
     relationships; one with a link the kept item lacks is named in a warning, since it is not kept. A group of
     deprecated items only keeps the first, as for active ones. Order is kept. ``Tool`` nodes are keyed
