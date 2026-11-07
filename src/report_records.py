@@ -91,9 +91,12 @@ _CVE_SUMMARY_MAX_CHARS = 20000
 _REMEDIATION_CATEGORY_MAX_CHARS = 64
 _REMEDIATION_DETAILS_MAX_CHARS = 8000
 _PRODUCT_MAX_CHARS = 300
+_CWE_NAME_MAX_CHARS = 300
+_MAX_CWES = 20
 _MAX_REMEDIATIONS = 50
 _MAX_VULNERABILITIES = 1000
 _CVE_ID_RE = re.compile(r"^CVE-\d{4}-\d{4,}$")
+_CWE_ID_RE = re.compile(r"^CWE-\d+$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -134,10 +137,12 @@ _SOURCE_FIELDS: Dict[str, Tuple[Tuple[str, str, Dict[str, int]], ...]] = {
         ("indicators", "pairs", {}),
         ("indicator_count", "count", {}),
     ),
-    # A CISA ICS CSAF advisory. ``kind`` is ICSA or ICSMA; ``revision`` is ``tracking.version`` when it is a
-    # whole number and ``revision_count`` the number of ``tracking.revision_history`` entries;
-    # ``deployment_sectors``, ``deployment_countries`` and ``vendor_headquarters`` are the raw texts of the
-    # document notes; ``vulnerabilities`` holds one entry per CVE.
+    # A CISA ICS CSAF advisory (``cisa_ics_collector.parse_advisory_record``). ``kind`` is ICSA or ICSMA;
+    # ``revision`` is the number of ``tracking.revision_history`` entries and ``version`` is ``tracking.version``
+    # as given (a whole number, or a version such as ``1.0.1``: 72 of the 1,389 advisories of 2024-2026 read on
+    # 2026-11-07, where the whole numbers always equalled the count); ``deployment_sectors`` and
+    # ``deployment_countries`` are the names the document notes list, ``vendor_headquarters`` the text of its
+    # note(s); ``vulnerabilities`` holds one entry per CVE.
     SOURCE_CISA_ICS: (
         ("publisher", "text", {"max_chars": NAME_MAX_CHARS}),
         ("kind", "text", {"max_chars": 16}),
@@ -148,7 +153,7 @@ _SOURCE_FIELDS: Dict[str, Tuple[Tuple[str, str, Dict[str, int]], ...]] = {
         ("deployment_countries", "texts", {"max_items": 300, "max_chars": NAME_MAX_CHARS}),
         ("vendor_headquarters", "text", {"max_chars": NAME_MAX_CHARS}),
         ("cve_ids", "cves", {"max_items": 5000}),
-        ("revision_count", "int", {}),
+        ("version", "text", {"max_chars": 32}),
         ("vulnerabilities", "vulns", {}),
     ),
 }
@@ -352,14 +357,36 @@ def _remediations(values: Any) -> List[Dict[str, str]]:
     return [kept[key] for key in sorted(kept)][:_MAX_REMEDIATIONS]
 
 
-_VULN_KEYS = ("cve_id", "summary", "remediations", "affected_products")
+def _cwes(values: Any) -> List[Dict[str, Optional[str]]]:
+    """CWE entries ``{"id": "CWE-<n>", "name": <the advisory's name or None>}``: an entry without a valid id is
+    left out, a name longer than 300 characters is None; one entry per id (of several names, the first in sort
+    order, so the order given does not matter), sorted by id number, the first 20."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    kept: Dict[str, Optional[str]] = {}
+    for entry in values:
+        if not isinstance(entry, Mapping):
+            continue
+        cwe_id = _line_text(entry.get("id")).upper()
+        if not _CWE_ID_RE.match(cwe_id):
+            continue
+        name = _line_text(entry.get("name"))
+        name_or_none = name if name and len(name) <= _CWE_NAME_MAX_CHARS else None
+        given = kept.get(cwe_id)
+        if cwe_id not in kept or (name_or_none is not None and (given is None or name_or_none < given)):
+            kept[cwe_id] = name_or_none
+    ordered = sorted(kept, key=lambda c: (int(c[4:]), c))
+    return [{"id": cwe_id, "name": kept[cwe_id]} for cwe_id in ordered][:_MAX_CWES]
+
+
+_VULN_KEYS = ("cve_id", "summary", "remediations", "affected_products", "cwes")
 
 
 def _vulns(values: Any) -> List[Dict[str, Any]]:
     """CISA ICS per-CVE entries: ``cve_id``, the vulnerability's ``summary`` note, its ``remediations``
-    (CSAF ``category`` and ``details``) and its ``affected_products``; an entry without a valid CVE id is
-    left out, an entry with another key raises ``ValueError``; sorted by CVE id (then by content), the
-    first 1,000."""
+    (CSAF ``category`` and ``details``), its ``affected_products`` and its ``cwes`` (``id`` and ``name``,
+    ``_cwes``); an entry without a valid CVE id is left out, an entry with another key raises ``ValueError``;
+    sorted by CVE id (then by content), the first 1,000."""
     if not isinstance(values, (list, tuple)):
         return []
     kept: Dict[str, Dict[str, Any]] = {}
@@ -377,6 +404,7 @@ def _vulns(values: Any) -> List[Dict[str, Any]]:
             "summary": cut_at_word_end(_block_text(entry.get("summary")), _CVE_SUMMARY_MAX_CHARS),
             "remediations": _remediations(entry.get("remediations")),
             "affected_products": _texts(entry.get("affected_products"), 500, _PRODUCT_MAX_CHARS),
+            "cwes": _cwes(entry.get("cwes")),
         }
         kept[_canonical_json(clean)] = clean
     return [kept[key] for key in sorted(kept, key=lambda k: (kept[k]["cve_id"], k))][:_MAX_VULNERABILITIES]

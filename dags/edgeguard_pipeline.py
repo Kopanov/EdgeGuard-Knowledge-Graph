@@ -1274,6 +1274,10 @@ def run_cisa_ics_collection(**context):
     off. When enabled it goes through ``run_collector_with_metrics`` exactly
     like the other collectors (transient upstream failure → skip + alert;
     code defects fail loudly).
+
+    2026-11-07: the writer knows when the task's ``execution_timeout`` ends (``_task_ends_at``), so the pushes of
+    the run's report records (``MISPWriter.push_reports``) start no record later than 10 minutes before it and the
+    collector saves ``report_pending`` before Airflow kills the task.
     """
     try:
         from config import ENABLE_CISA_ICS as _cisa_ics_enabled
@@ -1298,7 +1302,8 @@ def run_cisa_ics_collection(**context):
     from collectors.misp_writer import MISPWriter
 
     limit = get_effective_limit("cisa_ics")
-    return run_collector_with_metrics("cisa_ics", CISAICSCollector, MISPWriter(), limit=limit)
+    writer = MISPWriter(task_ends_at=_task_ends_at(context))
+    return run_collector_with_metrics("cisa_ics", CISAICSCollector, writer, limit=limit)
 
 
 def run_vt_collection(**context):

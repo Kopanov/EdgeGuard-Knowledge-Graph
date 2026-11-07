@@ -1,0 +1,5200 @@
+{
+ "_provenance": "Real CISA CSAF 2.0 advisories, fetched on 2026-11-07 from the cisagov/CSAF repository (https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/<path>, the files the CISA ICS collector reads); keys are the paths. Every advisory is copied whole and unchanged, except 2026/icsa-26-134-10.json: its document and product tree are unchanged, its vulnerabilities list is reduced to the one entry of CVE-2025-23143 (of 171), whose summary note is the longest of the 1,389 advisories of 2024-2026 (4,102 characters), and 2026/icsa-26-300-02.json: its document and product tree are unchanged, its vulnerabilities list is reduced to the first entry (of 4). What each advisory shows: ICSA-25-317-15 (two CVEs, a vulnerability note of 1,501 characters), ICSMA-24-058-01 (a medical advisory), ICSA-25-016-07 (tracking.version '1.0.0', a remediation of category no_fix_planned, a product tree without product_name branches), ICSA-26-043-08 (five revisions), ICSA-24-354-07 (sector note ending ', and Energy'), ICSA-24-165-12 (the sector 'Nuclear Reactors, Materials, and Waste' in its list), ICSA-24-291-04 (sector note ending ', and Food and Agriculture'), ICSMA-24-254-01 (the sector note 'Healthcare and Public Health Sector'), ICSA-25-226-26 (two CVEs, each affecting another product of the tree), ICSA-26-148-05 (the countries note 'India, Nepal, United Arab Emirates, Gambia'), ICSA-26-300-02 (two notes 'Company headquarters location').",
+ "advisories": {
+  "2025/icsa-25-317-15.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "organization": "Siemens ProductCERT",
+      "summary": "reporting these vulnerabilities to CISA."
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage"
+     }
+    },
+    "lang": "en",
+    "notes": [
+     {
+      "category": "summary",
+      "text": "COMOS is affected by two vulnerabilities that could allow an attacker to execute arbitrary code or lead to data infiltration. \n\nSiemens has released a new version for COMOS and recommends to update to the latest version.",
+      "title": "Summary"
+     },
+     {
+      "category": "general",
+      "text": "As a general security measure, Siemens strongly recommends to protect network access to devices with appropriate mechanisms. In order to operate the devices in a protected IT environment, Siemens recommends to configure the environment according to Siemens' operational guidelines for Industrial Security (Download: https://www.siemens.com/cert/operational-guidelines-industrial-security), and to follow the recommendations in the product manuals.\nAdditional information on Industrial Security by Siemens can be found at: https://www.siemens.com/industrialsecurity",
+      "title": "General Recommendations"
+     },
+     {
+      "category": "general",
+      "text": "For further inquiries on security vulnerabilities in Siemens products and solutions, please contact the Siemens ProductCERT: https://www.siemens.com/cert/advisories",
+      "title": "Additional Resources"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "The use of Siemens Security Advisories is subject to the terms and conditions listed on: https://www.siemens.com/productcert/terms-of-use.",
+      "title": "Terms of Use"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "This product is provided subject to this Notification (https://www.cisa.gov/notification) and this Privacy & Use policy (https://www.cisa.gov/privacy-policy).",
+      "title": "Legal Notice and Terms of Use"
+     },
+     {
+      "category": "other",
+      "text": "This ICSA is a verbatim republication of Siemens ProductCERT SSA-682326 from a direct conversion of the vendor's Common Security Advisory Framework (CSAF) advisory. This is republished to CISA's website as a means of increasing visibility and is provided \"as-is\" for informational purposes only. CISA is not responsible for the editorial or technical accuracy of republished advisories and provides no warranties of any kind regarding any information contained within this advisory.  Further, CISA does not endorse any commercial product or service.  Please contact Siemens ProductCERT directly for any questions regarding this advisory.",
+      "title": "Advisory Conversion Disclaimer"
+     },
+     {
+      "category": "other",
+      "text": "Critical Manufacturing",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Germany",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the exploitation risk of this vulnerability.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, and ensure they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolate them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most recent version available. Also recognize VPN is only as secure as its connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets. Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "other",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "SSA-682326: Multiple Vulnerabilities in COMOS before V10.4.5 - CSAF Version",
+      "url": "https://cert-portal.siemens.com/productcert/csaf/ssa-682326.json"
+     },
+     {
+      "category": "self",
+      "summary": "SSA-682326: Multiple Vulnerabilities in COMOS before V10.4.5 - HTML Version",
+      "url": "https://cert-portal.siemens.com/productcert/html/ssa-682326.html"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-25-317-15 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2025/icsa-25-317-15.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-25-317-15 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-25-317-15"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/ics-alerts/ics-alert-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/targeted-cyber-intrusion-detection-and-mitigation-strategies-update-b"
+     }
+    ],
+    "title": "Siemens COMOS",
+    "tracking": {
+     "current_release_date": "2025-11-11T00:00:00.000000Z",
+     "generator": {
+      "date": "2025-11-13T15:08:52.829524Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSA-25-317-15",
+     "initial_release_date": "2025-11-11T00:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2025-11-11T00:00:00.000000Z",
+       "legacy_version": "1.0",
+       "number": "1",
+       "summary": "Publication Date"
+      }
+     ],
+     "status": "final",
+     "version": "1"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:intdot/<10.4.5",
+          "product": {
+           "name": "COMOS",
+           "product_id": "CSAFPID-0001"
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:intdot/<10.4.5",
+          "product": {
+           "name": "COMOS",
+           "product_id": "CSAFPID-0002"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "COMOS"
+       }
+      ],
+      "category": "vendor",
+      "name": "Siemens"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2023-45133",
+     "cwe": {
+      "id": "CWE-184",
+      "name": "Incomplete List of Disallowed Inputs"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "Babel is a compiler for writingJavaScript. In `@babel/traverse` prior to versions 7.23.2 and 8.0.0-alpha.4 and all versions of `babel-traverse`, using Babel to compile code that was specifically crafted by an attacker can lead to arbitrary code execution during compilation, when using plugins that rely on the `path.evaluate()`or `path.evaluateTruthy()` internal Babel methods. Known affected plugins are `@babel/plugin-transform-runtime`; `@babel/preset-env` when using its `useBuiltIns` option; and any \"polyfill provider\" plugin that depends on `@babel/helper-define-polyfill-provider`, such as `babel-plugin-polyfill-corejs3`, `babel-plugin-polyfill-corejs2`, `babel-plugin-polyfill-es-shims`, `babel-plugin-polyfill-regenerator`. No other plugins under the `@babel/` namespace are impacted, but third-party plugins might be. Users that only compile trusted code are not impacted. The vulnerability has been fixed in `@babel/traverse@7.23.2` and `@babel/traverse@8.0.0-alpha.4`. Those who cannot upgrade `@babel/traverse` and are using one of the affected packages mentioned above should upgrade them to their latest version to avoid triggering the vulnerable code path in affected `@babel/traverse` versions: `@babel/plugin-transform-runtime` v7.23.2, `@babel/preset-env` v7.23.2, `@babel/helper-define-polyfill-provider` v0.4.3, `babel-plugin-polyfill-corejs2` v0.4.6, `babel-plugin-polyfill-corejs3` v0.8.5, `babel-plugin-polyfill-es-shims` v0.10.0, `babel-plugin-polyfill-regenerator` v0.5.3.",
+       "title": "Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001"
+      ]
+     },
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Update to V10.4.5 or later version",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://support.sw.siemens.com/product/222981661/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 9.3,
+        "baseSeverity": "CRITICAL",
+        "vectorString": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001"
+       ]
+      }
+     ],
+     "title": "CVE-2023-45133"
+    },
+    {
+     "cve": "CVE-2024-0056",
+     "cwe": {
+      "id": "CWE-319",
+      "name": "Cleartext Transmission of Sensitive Information"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "Microsoft.Data.SqlClient and System.Data.SqlClient SQL Data Provider Security Feature Bypass Vulnerability",
+       "title": "Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0002"
+      ]
+     },
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Update to V10.4.5 or later version",
+       "product_ids": [
+        "CSAFPID-0002"
+       ],
+       "url": "https://support.sw.siemens.com/product/222981661/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 8.7,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0002"
+       ]
+      }
+     ],
+     "title": "CVE-2024-0056"
+    }
+   ]
+  },
+  "2024/icsma-24-058-01.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "names": [
+       "Michael Heinzl"
+      ],
+      "summary": "reporting this vulnerability to CISA"
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://us-cert.cisa.gov/tlp/"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "legal_disclaimer",
+      "text": "All information products included in https://us-cert.cisa.gov/ics are provided \"as is\" for informational purposes only. The Department of Homeland Security (DHS) does not provide any warranties of any kind regarding any information contained within. DHS does not endorse any commercial product or service, referenced in this product or otherwise. Further dissemination of this product is governed by the Traffic Light Protocol (TLP) marking in the header. For more information about TLP, see https://us-cert.cisa.gov/tlp/.",
+      "title": "Legal Notice"
+     },
+     {
+      "category": "summary",
+      "text": "Successful exploitation of this vulnerability could allow an attacker to disclose information and execute arbitrary code on affected installations of the product.",
+      "title": "Risk evaluation"
+     },
+     {
+      "category": "other",
+      "text": "Healthcare and Public Health",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Cyprus",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov/ics. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov/ics in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "No known public exploitation specifically targeting this vulnerability has been reported to CISA at this time. This vulnerability are not exploitable remotely.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "coordinator",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSMA-24-058-01 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2024/icsma-24-058-01.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICSA Advisory ICSMA-24-058-01 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-medical-advisories/icsma-24-058-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://us-cert.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/tips/ICS-TIP-12-146-01B"
+     }
+    ],
+    "title": "Santesoft Sante DICOM Viewer Pro",
+    "tracking": {
+     "current_release_date": "2024-02-27T07:00:00.000000Z",
+     "generator": {
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSMA-24-058-01",
+     "initial_release_date": "2024-02-27T07:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2024-02-27T07:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Initial Publication"
+      }
+     ],
+     "status": "final",
+     "version": "1"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=14.0.3",
+          "product": {
+           "name": "Santesoft Sante DICOM Viewer Pro: <=14.0.3",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Sante DICOM Viewer Pro"
+       }
+      ],
+      "category": "vendor",
+      "name": "Santesoft"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2024-1453",
+     "cwe": {
+      "id": "CWE-125",
+      "name": "Out-of-bounds Read"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "In Sante DICOM Viewer Pro versions 14.0.3 and prior, a user must open a malicious DICOM file, which could allow a local attacker to disclose information or execute arbitrary code.",
+       "title": "Vulnerability Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "web.nvd.nist.gov",
+       "url": "http://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2024-1453"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Santesoft released an updated version of their product and recommends updating Sante DICOM Viewer Pro to v14.0.4 or later.",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://santesoft.com/win/sante-dicom-viewer-pro/download.html"
+      },
+      {
+       "category": "mitigation",
+       "details": "CISA recommends users take the following measures to protect themselves from social engineering attacks:",
+       "product_ids": [
+        "CSAFPID-0001"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "Do not click web links or open attachments in unsolicited email messages.",
+       "product_ids": [
+        "CSAFPID-0001"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "Refer to Recognizing and Avoiding Email Scams for more information on avoiding email scams.",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://www.cisa.gov/uscert/sites/default/files/publications/emailscams0905.pdf"
+      },
+      {
+       "category": "mitigation",
+       "details": "Refer to Avoiding Social Engineering and Phishing Attacks for more information on social engineering attacks.",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://www.cisa.gov/uscert/ncas/tips/ST04-014"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 7.8,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "2025/icsa-25-016-07.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "names": [
+       "Darius Pavelescu",
+       "Bernhard Rader"
+      ],
+      "organization": "Limes Security",
+      "summary": "reporting this vulnerability to Hitachi Energy."
+     }
+    ],
+    "aggregate_severity": {
+     "namespace": "https://www.first.org/cvss/specification-document",
+     "text": "MEDIUM"
+    },
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://us-cert.cisa.gov/tlp/"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "summary",
+      "text": "Hitachi Energy is aware of a vulnerability that affects the XMC20 versions listed below. Please refer to the “Recommended Immediate Actions” for information about the remediation. ",
+      "title": "Summary"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "The information in this document is subject to change without notice and should not be construed as a commitment by Hitachi Energy. Hitachi Energy provides no warranty, express or implied, including warran-ties of merchantability and fitness for a particular purpose, for the information contained in this document, and assumes no responsibility for any errors that may appear in this document. In no event shall Hitachi Energy or any of its suppliers be liable for direct, indirect, special, incidental or consequential damages of any nature or kind arising from the use of this document, or from the use of any hardware or software de-scribed in this document, even if Hitachi Energy or its suppliers have been advised of the possibility of such damages. This document and parts hereof must not be reproduced or copied without written permission from Hitachi Energy and the contents hereof must not be imparted to a third party nor used for any unauthorized purpose. All rights to registrations and trademarks reside with their respective owners.",
+      "title": "Notice"
+     },
+     {
+      "category": "general",
+      "text": "Recommended security practices and firewall configurations can help protect a process control network from attacks that originate from outside the network. Such practices include that process control systems are physically protected from direct access by unauthorized personnel, have no direct connections to the Internet, and are separated from other networks by means of a firewall system that has a minimal number of ports exposed, and others that have to be evaluated case by case. Process control systems should not be used for Internet surfing, instant messaging, or receiving e-mails. Portable computers and removable storage media should be carefully scanned for viruses before they are connected to a control system.",
+      "title": "General Mitigation Factors/Workarounds"
+     },
+     {
+      "category": "other",
+      "text": "For additional information and support please contact your product provider or Hitachi Energy service organization. For contact information, see https://www.hitachienergy.com/contact-us/ for Hitachi Energy contact-centers.",
+      "title": "Support"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "All information products included in https://us-cert.cisa.gov/ics are provided \"as is\" for informational purposes only. The Department of Homeland Security (DHS) does not provide any warranties of any kind regarding any information contained within. DHS does not endorse any commercial product or service, referenced in this product or otherwise. Further dissemination of this product is governed by the Traffic Light Protocol (TLP) marking in the header. For more information about TLP, see https://us-cert.cisa.gov/tlp/.",
+      "title": "Legal Notice"
+     },
+     {
+      "category": "other",
+      "text": "This CISA CSAF advisory was converted from Hitachi Energy PSIRT's CSAF advisory.",
+      "title": "Advisory Conversion Disclaimer"
+     },
+     {
+      "category": "other",
+      "text": "Critical Manufacturing",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Switzerland",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the exploitation risk of these vulnerabilities.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, and ensure they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolate them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most recent version available. Also recognize VPN is only as secure as its connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets. Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "other",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-25-016-07 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2025/icsa-25-016-07.json"
+     },
+     {
+      "category": "self",
+      "summary": "CYBERSECURITY ADVISORY - Zip Slip Vulnerability in Hitachi Energy’s XMC20",
+      "url": "https://publisher.hitachienergy.com/preview?DocumentId=8DBD000202&languageCode=en&Preview=true"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-25-016-07 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-25-016-07"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://us-cert.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/tips/ICS-TIP-12-146-01B"
+     }
+    ],
+    "title": "Hitachi Energy FOX61x Products",
+    "tracking": {
+     "current_release_date": "2024-06-11T12:30:00.000000Z",
+     "generator": {
+      "date": "2024-06-11T15:40:33.237000Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSA-25-016-07",
+     "initial_release_date": "2024-06-11T12:30:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2024-06-11T12:30:00.000000Z",
+       "number": "1.0.0",
+       "summary": "Initial version."
+      }
+     ],
+     "status": "final",
+     "version": "1.0.0"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=R15A",
+          "product": {
+           "name": "XMC20 R15A and older including all subversions",
+           "product_id": "CSAFPID-0001"
+          }
+         },
+         {
+          "category": "product_version",
+          "name": "R15B",
+          "product": {
+           "name": "XMC20 R15B",
+           "product_id": "CSAFPID-0002"
+          }
+         },
+         {
+          "category": "product_version",
+          "name": "R16A",
+          "product": {
+           "name": "XMC20 R16A",
+           "product_id": "CSAFPID-0003"
+          }
+         },
+         {
+          "category": "product_version",
+          "name": "R16B_Revision_C",
+          "product": {
+           "name": "XMC20 R16B Revision C (cent2_r16b04_02, co5ne_r16b04_02) and older including all subversions",
+           "product_id": "CSAFPID-0004"
+          }
+         },
+         {
+          "category": "product_version",
+          "name": "R16B_Revision_D",
+          "product": {
+           "name": "XMC20 R16B Revision D, version (cent2_r16b04_07, co5ne_r16b04_07)",
+           "product_id": "CSAFPID-0005"
+          }
+         }
+        ],
+        "category": "product_family",
+        "name": "XMC20"
+       }
+      ],
+      "category": "vendor",
+      "name": "Hitachi Energy"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2024-2461",
+     "cwe": {
+      "id": "CWE-23",
+      "name": "Relative Path Traversal"
+     },
+     "notes": [
+      {
+       "category": "description",
+       "text": "Hitachi Energy is aware of a vulnerability that affects the XMC20. If exploited an attacker could traverse the file system to access files or directories that would otherwise be inaccessible.",
+       "title": "CVE description"
+      }
+     ],
+     "product_status": {
+      "fixed": [
+       "CSAFPID-0005"
+      ],
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0002",
+       "CSAFPID-0003",
+       "CSAFPID-0004"
+      ],
+      "recommended": [
+       "CSAFPID-0005"
+      ]
+     },
+     "references": [
+      {
+       "category": "self",
+       "summary": "NVD - CVE-2024-2461",
+       "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-2461"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Update to XMC20 R16B Revision D, version (cent2_r16b04_07, co5ne_r16b04_07) and apply general mitigation factors.\n(Hitachi Energy recommends that customers apply the update at the earliest convenience)",
+       "product_ids": [
+        "CSAFPID-0004"
+       ]
+      },
+      {
+       "category": "vendor_fix",
+       "details": "Recommended to update to XMC20 R16B Revision D, version (cent2_r16b04_07, co5ne_r16b04_07) and apply general mitigation factors.",
+       "product_ids": [
+        "CSAFPID-0002"
+       ]
+      },
+      {
+       "category": "no_fix_planned",
+       "details": "EOL versions - no remediation will be available. Recommended to update to XMC20 R16B Revision D, version (cent2_r16b04_07, co5ne_r16b04_07) and apply general mitigation factors.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0003"
+       ]
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "attackComplexity": "LOW",
+        "attackVector": "NETWORK",
+        "availabilityImpact": "NONE",
+        "baseScore": 4.9,
+        "baseSeverity": "MEDIUM",
+        "confidentialityImpact": "NONE",
+        "environmentalScore": 4.9,
+        "environmentalSeverity": "MEDIUM",
+        "integrityImpact": "HIGH",
+        "privilegesRequired": "HIGH",
+        "scope": "UNCHANGED",
+        "temporalScore": 4.9,
+        "temporalSeverity": "MEDIUM",
+        "userInteraction": "NONE",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "2026/icsa-26-043-08.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "organization": "Siemens ProductCERT",
+      "summary": "reported this vulnerability to CISA."
+     },
+     {
+      "names": [
+       "Michael Heinzl"
+      ],
+      "summary": "reported this vulnerability to Siemens."
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage"
+     }
+    },
+    "lang": "en",
+    "notes": [
+     {
+      "category": "summary",
+      "text": "Siemens NX is affected by missing data validation vulnerability that could allow an attacker with local access on a compromised system to interfere with internal data during the PDF export process that could potentially lead to arbitrary code execution. \n\nSiemens has released a new version of NX which resolves the data tampering vulnerability.",
+      "title": "Summary"
+     },
+     {
+      "category": "general",
+      "text": "As a general security measure, Siemens strongly recommends to protect network access to devices with appropriate mechanisms. In order to operate the devices in a protected IT environment, Siemens recommends to configure the environment according to Siemens' operational guidelines for Industrial Security (Download: https://www.siemens.com/cert/operational-guidelines-industrial-security), and to follow the recommendations in the product manuals.\nAdditional information on Industrial Security by Siemens can be found at: https://www.siemens.com/industrialsecurity",
+      "title": "General Recommendations"
+     },
+     {
+      "category": "general",
+      "text": "For further inquiries on security vulnerabilities in Siemens products and solutions, please contact the Siemens ProductCERT: https://www.siemens.com/cert/advisories",
+      "title": "Additional Resources"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "The use of Siemens Security Advisories is subject to the terms and conditions listed on: https://www.siemens.com/productcert/terms-of-use.",
+      "title": "Terms of Use"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "This product is provided subject to this Notification (https://www.cisa.gov/notification) and this Privacy & Use policy (https://www.cisa.gov/privacy-policy).",
+      "title": "Legal Notice and Terms of Use"
+     },
+     {
+      "category": "other",
+      "text": "This ICSA is a verbatim republication of Siemens ProductCERT SSA-535115 from a direct conversion of the vendor's Common Security Advisory Framework (CSAF) advisory. This is republished to CISA's website as a means of increasing visibility and is provided \"as-is\" for informational purposes only. CISA is not responsible for the editorial or technical accuracy of republished advisories and provides no warranties of any kind regarding any information contained within this advisory.  Further, CISA does not endorse any commercial product or service.  Please contact Siemens ProductCERT directly for any questions regarding this advisory.",
+      "title": "Advisory Conversion Disclaimer"
+     },
+     {
+      "category": "other",
+      "text": "Critical Manufacturing",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Germany",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the exploitation risk of these vulnerabilities.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, and ensure they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolate them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most recent version available. Also recognize VPN is only as secure as its connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets. Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "other",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "SSA-535115: Data Validation Vulnerability in NX Before V2512 - CSAF Version",
+      "url": "https://cert-portal.siemens.com/productcert/csaf/ssa-535115.json"
+     },
+     {
+      "category": "self",
+      "summary": "SSA-535115: Data Validation Vulnerability in NX Before V2512 - HTML Version",
+      "url": "https://cert-portal.siemens.com/productcert/html/ssa-535115.html"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-26-043-08 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2026/icsa-26-043-08.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-26-043-08 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-26-043-08"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/ics-alerts/ics-alert-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/targeted-cyber-intrusion-detection-and-mitigation-strategies-update-b"
+     }
+    ],
+    "title": "Siemens NX",
+    "tracking": {
+     "current_release_date": "2026-03-12T06:00:00.000000Z",
+     "generator": {
+      "date": "2026-04-02T19:47:33.096507Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.5.0"
+      }
+     },
+     "id": "ICSA-26-043-08",
+     "initial_release_date": "2026-02-10T00:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2026-02-10T00:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Publication Date"
+      },
+      {
+       "date": "2026-02-12T07:00:00.000000Z",
+       "legacy_version": "Additional Release 1",
+       "number": "2",
+       "summary": "CISA Republication - Initial CISA Republication of Siemens ProductCERT SSA-535115 advisory"
+      },
+      {
+       "date": "2026-03-10T00:00:00.000000Z",
+       "legacy_version": "Additional Release 2",
+       "number": "3",
+       "summary": "Added product-specific CVSS for NX with managed mode"
+      },
+      {
+       "date": "2026-03-12T06:00:00.000000Z",
+       "legacy_version": "Additional Release 3",
+       "number": "4",
+       "summary": "CISA Republication update based on Siemens ProductCERT SSA-535115 advisory"
+      },
+      {
+       "date": "2026-03-12T06:00:00.000000Z",
+       "legacy_version": "Latest Updated CISA Republication",
+       "number": "5",
+       "summary": "CISA Republication update based on Siemens ProductCERT SSA-535115 advisory"
+      }
+     ],
+     "status": "final",
+     "version": "5"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:intdot/<2512",
+          "product": {
+           "name": "NX",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "NX"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:intdot/<2512",
+          "product": {
+           "name": "NX (Managed Mode)",
+           "product_id": "CSAFPID-0002"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "NX (Managed Mode)"
+       }
+      ],
+      "category": "vendor",
+      "name": "Siemens"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2026-22923",
+     "cwe": {
+      "id": "CWE-121",
+      "name": "Stack-based Buffer Overflow"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "The affected application contains a data validation vulnerability that could allow an attacker with local access to interfere with internal data during the PDF export process that could potentially lead to arbitrary code execution.",
+       "title": "Summary"
+      },
+      {
+       "category": "summary",
+       "text": "An attacker would need privileged access to the application running in managed mode in order to exploit",
+       "title": "For NX (Managed Mode)"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0002"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2026-22923"
+      },
+      {
+       "category": "external",
+       "summary": "cwe.mitre.org",
+       "url": "https://cwe.mitre.org/data/definitions/121.html"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:H"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "mitigation",
+       "details": "Prioritize strong overall system hygiene to prevent initial system infection which includes maintaining fully patched systems, robust endpoint security, and continuous monitoring for signs of compromise",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002"
+       ]
+      },
+      {
+       "category": "vendor_fix",
+       "details": "Update to V2512 or later version",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002"
+       ],
+       "url": "https://support.sw.siemens.com/product/209349590/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 7.8,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001"
+       ]
+      },
+      {
+       "cvss_v3": {
+        "baseScore": 6.7,
+        "baseSeverity": "MEDIUM",
+        "vectorString": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0002"
+       ]
+      }
+     ],
+     "title": "CVE-2026-22923"
+    }
+   ]
+  },
+  "2024/icsa-24-354-07.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "organization": "Schneider Electric CPCERT",
+      "summary": "reporting this vulnerability to CISA"
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "legal_disclaimer",
+      "text": "This product is provided subject to this Notification (https://www.cisa.gov/notification) and this Privacy & Use policy (https://www.cisa.gov/privacy-policy).",
+      "title": "Legal Notice and Terms of Use"
+     },
+     {
+      "category": "summary",
+      "text": "Successful exploitation of this vulnerability could allow an attacker to cause a victim's browser to run arbitrary JavaScript when visiting a page containing injected payload. ",
+      "title": "Risk evaluation"
+     },
+     {
+      "category": "other",
+      "text": "Commercial Facilities, Critical Manufacturing, and Energy",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "France",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the risk of exploitation of this vulnerability, such as:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, ensuring they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolating them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs). Recognize VPNs may have vulnerabilities, should be updated to the most recent version available, and are only as secure as the connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also recommends users take the following measures to protect themselves from social engineering attacks:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Do not click web links or open attachments in unsolicited email messages.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Recognizing and Avoiding Email Scams for more information on avoiding email scams.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Avoiding Social Engineering and Phishing Attacks for more information on social engineering attacks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "No known public exploitation specifically targeting this vulnerability has been reported to CISA at this time.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "coordinator",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-24-354-07 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2024/icsa-24-354-07.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICSA Advisory ICSA-24-354-07 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-354-07"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/sites/default/files/publications/emailscams0905.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ncas/tips/ST04-014"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/ics-alerts/ics-alert-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/targeted-cyber-intrusion-detection-and-mitigation-strategies-update-b"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/secure-our-world/teach-employees-avoid-phishing"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/avoiding-social-engineering-and-phishing-attacks"
+     }
+    ],
+    "title": "Schneider Electric Modicon Controllers (Update A)",
+    "tracking": {
+     "current_release_date": "2025-10-21T06:00:00.000000Z",
+     "generator": {
+      "date": "2025-10-21T17:56:17.330168Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSA-24-354-07",
+     "initial_release_date": "2024-12-19T07:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2024-12-19T07:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Initial Publication"
+      },
+      {
+       "date": "2025-10-21T06:00:00.000000Z",
+       "legacy_version": "Update A",
+       "number": "2",
+       "summary": "Update A - Modified Affect Product version for M258 / LMC058, Added mitigations for M258 / LMC058"
+      }
+     ],
+     "status": "final",
+     "version": "2"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<5.0.4.19",
+          "product": {
+           "name": "Schneider Electric Schneider Electric Modicon Controllers M258 / LMC058: <5.0.4.19",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Schneider Electric Modicon Controllers M258 / LMC058"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<5.2.8.26",
+          "product": {
+           "name": "Schneider Electric Schneider Electric Modicon Controllers M262: <5.2.8.26",
+           "product_id": "CSAFPID-0002"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Schneider Electric Modicon Controllers M262"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<5.2.11.24",
+          "product": {
+           "name": "Schneider Electric Schneider Electric Modicon Controllers M251: <5.2.11.24",
+           "product_id": "CSAFPID-0003"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Schneider Electric Modicon Controllers M251"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<5.2.11.24",
+          "product": {
+           "name": "Schneider Electric Schneider Electric Modicon Controllers M241: <5.2.11.24",
+           "product_id": "CSAFPID-0004"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Schneider Electric Modicon Controllers M241"
+       }
+      ],
+      "category": "vendor",
+      "name": "Schneider Electric"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2024-6528",
+     "cwe": {
+      "id": "CWE-79",
+      "name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "A Cross-site Scripting  vulnerability exists  where an attacker could cause a victim's browser run arbitrary JavaScript when they visit a page containing the injected payload.",
+       "title": "Vulnerability Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0002",
+       "CSAFPID-0003",
+       "CSAFPID-0004"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2024-6528"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "mitigation",
+       "details": "Schneider Electric has identified the following specific workarounds and mitigations users can apply to reduce risk:",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "Schneider Electric Modicon Controllers Version prior to v5.2.11.24: Modicon Controller M241 Firmware version 5.2.11.24 delivered with EcoStruxure Machine Expert v2.2.2  includes a fix for this vulnerability and can be updated  through the Schneider Electric Software Update (SESU) application.  https://www.se.com/ww/en/product-range/2226-ecostruxure-machine-expert-software/  On the engineering workstation, update to v2.2.2 of  EcoStruxure Machine Expert. Update Modicon Controller M241 to the latest Firmware and  perform reboot",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ],
+       "url": "https://www.se.com/ww/en/product-range/2226-ecostruxure-machine-expert-software/"
+      },
+      {
+       "category": "mitigation",
+       "details": "Schneider Electric Modicon Controllers Version prior to v5.2.11.24: Modicon Controller M251 Firmware version 5.2.11.24  delivered with EcoStruxure Machine Expert v2.2.2  includes a fix for this vulnerability and can be updated  through the Schneider Electric Software Update (SESU) application.  https://www.se.com/ww/en/product-range/2226-ecostruxure-machine-expert-software/  On the engineering workstation, update to v2.2.2 of  EcoStruxure Machine Expert. Update Modicon Controller M251 to the latest Firmware and  perform reboot",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ],
+       "url": "https://www.se.com/ww/en/product-range/2226-ecostruxure-machine-expert-software/"
+      },
+      {
+       "category": "vendor_fix",
+       "details": "Schneider Electric Modicon Controllers M262 Versions prior to v5.2.8.26: Modicon Controller M262 Firmware version 5.2.8.26  delivered with EcoStruxure Machine Expert v2.2.2  includes a fix for this vulnerability and can be updated  through the Schneider Electric Software Update (SESU) application. https://www.se.com/ww/en/product-range/2226-ecostruxure-machine-expert-software/  On the engineering workstation, update to v2.2.2 of  EcoStruxure Machine Expert. Update Modicon Controller M262 to the latest Firmware  and perform reboot",
+       "product_ids": [
+        "CSAFPID-0002"
+       ],
+       "url": "https://www.se.com/ww/en/product-range/2226-ecostruxure-machine-expert-software/"
+      },
+      {
+       "category": "vendor_fix",
+       "details": "Schneider Electric Modicon Controllers Version prior to v5.2.11.24, Schneider Electric Modicon Controllers M258 / LMC058 All versions , Schneider Electric Modicon Controllers M262 Versions prior to v5.2.8.26, Schneider Electric Modicon Controllers Version prior to v5.2.11.24: Modicon Controller M262 Firmware version 5.2.8.26 delivered with EcoStruxure Machine Expert v2.2.2 includes a fix for this vulnerability and can be updated through the Schneider Electric Software Update (SESU) application.  https://www.se.com/ww/en/product-range/2226-ecostruxure-machineexpert-software/  On the engineering workstation, update to v2.2.2 of EcoStruxure Machine Expert.  By using Controller Assistant from EcoStruxureTM Machine Expert update Modicon Controller M258/LMC058 and perform reboot .",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002"
+       ],
+       "url": "https://www.se.com/ww/en/product-range/2226-ecostruxure-machineexpert-software/"
+      },
+      {
+       "category": "vendor_fix",
+       "details": "Schneider Electric Modicon Controllers Version prior to v5.2.11.24, Schneider Electric Modicon Controllers M258 / LMC058 All versions , Schneider Electric Modicon Controllers M262 Versions prior to v5.2.8.26, Schneider Electric Modicon Controllers Version prior to v5.2.11.24: Modicon Controller M262 Firmware version 5.2.8.26 delivered with EcoStruxure Machine Expert v2.2.2 includes a fix for this vulnerability and can be updated through the Schneider Electric Software Update (SESU) application.  https://www.se.com/ww/en/product-range/2226-ecostruxure-machineexpert-software/  On the engineering workstation, update to v2.2.2 of EcoStruxure Machine Expert.  By using Controller Assistant from EcoStruxureTM Machine Expert update Modicon Controller M258/LMC058 and perform reboot .",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002"
+       ],
+       "url": "https://www.se.com/ww/en/product-range/2226-ecostruxure-machine-expert-software/"
+      },
+      {
+       "category": "mitigation",
+       "details": "Users should observe appropriate patching methodologies when applying these patches to their systems. We strongly recommend the use of back-ups and evaluating the impact of these patches in a Test and Development environment or on an offline infrastructure. Contact Schneider Electric's Customer Care Center if you need assistance removing a patch.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "If users choose not to apply the remediation provided above they should immediately apply the following mitigations to reduce the risk of exploit:",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "Users should immediately apply the following mitigations to reduce the risk of exploit:  Use controllers and devices only in a protected environment to minimize network exposure and ensure that they are not accessible from public internet or untrusted networks. Ensure application of user management and password features. User rights are enabled by default and forced to create a strong password at first use. Deactivate the Webserver after use, when not needed. Use encrypted communication links. Setup network segmentation and implement a firewall to block all unauthorized access to port 80/HTTP and 443/HTTPS. Use VPN (Virtual Private Networks) tunnels if remote access is required.  The \"Cybersecurity Guidelines for EcoStruxure Machine Expert, Modicon and PacDrive Controllers and Associated Equipment\" provide product specific chapters to ensure you are informed of all updates, including details on affected products and remediation plans. Subscribe to Schneider Electric's security notification service here.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ],
+       "url": "https://download.schneider-electric.com/files?&p_enDocType=User+guide&p_File_Name=EIO0000004242.00.pdf&p_Doc_Ref=EIO0000004242"
+      },
+      {
+       "category": "mitigation",
+       "details": "For more information, refer to the Schneider Electric Recommended Cybersecurity Best Practices document and the associated Schneider Electric Security Notification SEVD-2024-191-04 in PDF and CSAF.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ],
+       "url": "https://www.se.com/us/en/download/document/7EN52-0390/"
+      },
+      {
+       "category": "mitigation",
+       "details": "For more information, refer to the Schneider Electric Recommended Cybersecurity Best Practices document and the associated Schneider Electric Security Notification SEVD-2024-191-04 in PDF and CSAF.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ],
+       "url": "https://download.schneider-electric.com/doc/SEVD-2024-191-04/SEVD-2024-191-04.pdf"
+      },
+      {
+       "category": "mitigation",
+       "details": "For more information, refer to the Schneider Electric Recommended Cybersecurity Best Practices document and the associated Schneider Electric Security Notification SEVD-2024-191-04 in PDF and CSAF.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ],
+       "url": "https://download.schneider-electric.com/files?p_Doc_Ref=SEVD-2024-191-04&p_enDocType=Security+and+Safety+Notice&p_File_Name=SEVD-2024-191-04.json"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 5.4,
+        "baseSeverity": "MEDIUM",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003",
+        "CSAFPID-0004"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "2024/icsa-24-165-12.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "organization": "Siemens ProductCERT",
+      "summary": "reporting these vulnerabilities to CISA."
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://us-cert.cisa.gov/tlp/"
+     }
+    },
+    "lang": "en",
+    "notes": [
+     {
+      "category": "summary",
+      "text": "SCALANCE W-700 IEEE 802.11ax family devices are affected by multiple vulnerabilities.\n\nSiemens has released a new version for SCALANCE W-700 IEEE 802.11ax family and recommends to update to the latest version. Siemens recommends countermeasures for vulnerabilities where fixes are not, or not yet available.",
+      "title": "Summary"
+     },
+     {
+      "category": "general",
+      "text": "As a general security measure, Siemens strongly recommends to protect network access to devices with appropriate mechanisms. In order to operate the devices in a protected IT environment, Siemens recommends to configure the environment according to Siemens' operational guidelines for Industrial Security (Download: \nhttps://www.siemens.com/cert/operational-guidelines-industrial-security), and to follow the recommendations in the product manuals.\nAdditional information on Industrial Security by Siemens can be found at: https://www.siemens.com/industrialsecurity",
+      "title": "General Recommendations"
+     },
+     {
+      "category": "general",
+      "text": "For further inquiries on security vulnerabilities in Siemens products and solutions, please contact the Siemens ProductCERT: https://www.siemens.com/cert/advisories",
+      "title": "Additional Resources"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "The use of Siemens Security Advisories is subject to the terms and conditions listed on: https://www.siemens.com/productcert/terms-of-use.",
+      "title": "Terms of Use"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "All information products included in https://us-cert.cisa.gov/ics are provided \"as is\" for informational purposes only. The Department of Homeland Security (DHS) does not provide any warranties of any kind regarding any information contained within. DHS does not endorse any commercial product or service, referenced in this product or otherwise. Further dissemination of this product is governed by the Traffic Light Protocol (TLP) marking in the header. For more information about TLP, see https://us-cert.cisa.gov/tlp/.",
+      "title": "Legal Notice"
+     },
+     {
+      "category": "other",
+      "text": "This CISA CSAF advisory was converted from Siemens ProductCERT's CSAF advisory.",
+      "title": "Advisory Conversion Disclaimer"
+     },
+     {
+      "category": "other",
+      "text": "Chemical, Critical Manufacturing, Energy, Nuclear Reactors, Materials, and Waste",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Germany",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the exploitation risk of this vulnerability.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, and ensure they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolate them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most recent version available. Also recognize VPN is only as secure as its connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets. Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "other",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "SSA-690517: Multiple Vulnerabilities in SCALANCE W-700 IEEE 802.11ax Family - CSAF Version",
+      "url": "https://cert-portal.siemens.com/productcert/csaf/ssa-690517.json"
+     },
+     {
+      "category": "self",
+      "summary": "SSA-690517: Multiple Vulnerabilities in SCALANCE W-700 IEEE 802.11ax Family - HTML Version",
+      "url": "https://cert-portal.siemens.com/productcert/html/ssa-690517.html"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-24-165-12 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2024/icsa-24-165-12.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-24-165-12 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-165-12"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://us-cert.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/tips/ICS-TIP-12-146-01B"
+     }
+    ],
+    "title": "Siemens SCALANCE W700",
+    "tracking": {
+     "current_release_date": "2025-01-14T00:00:00.000000Z",
+     "generator": {
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSA-24-165-12",
+     "initial_release_date": "2024-06-11T00:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2024-06-11T00:00:00.000000Z",
+       "legacy_version": "1.0",
+       "number": "1",
+       "summary": "Publication Date"
+      },
+      {
+       "date": "2024-09-10T00:00:00.000000Z",
+       "legacy_version": "1.1",
+       "number": "2",
+       "summary": "Move CVE-2023-44373 to SSA-721642 as fixed in V2.4 and remove CVE-2023-49691 as products are not affected"
+      },
+      {
+       "date": "2025-01-14T00:00:00.000000Z",
+       "legacy_version": "1.2",
+       "number": "3",
+       "summary": "Added fix for CVE-2023-44317, CVE-2023-44319, CVE-2024-44374; added CVSSv4 vectors for all CVE IDs; removed CVE-2022-46144 as this is addressed in SSA-413565 and was fixed in V2.0.0"
+      }
+     ],
+     "status": "final",
+     "version": "3"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAB762-1 (6GK5762-1AJ00-6AA0)",
+           "product_id": "CSAFPID-0001",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5762-1AJ00-6AA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAB762-1 (6GK5762-1AJ00-6AA0)",
+           "product_id": "CSAFPID-0002",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5762-1AJ00-6AA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAB762-1 (6GK5762-1AJ00-6AA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM763-1 (6GK5763-1AL00-7DA0)",
+           "product_id": "CSAFPID-0003",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-7DA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM763-1 (6GK5763-1AL00-7DA0)",
+           "product_id": "CSAFPID-0004",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-7DA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM763-1 (6GK5763-1AL00-7DA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM763-1 (ME) (6GK5763-1AL00-7DC0)",
+           "product_id": "CSAFPID-0005",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-7DC0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM763-1 (ME) (6GK5763-1AL00-7DC0)",
+           "product_id": "CSAFPID-0006",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-7DC0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM763-1 (ME) (6GK5763-1AL00-7DC0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM763-1 (US) (6GK5763-1AL00-7DB0)",
+           "product_id": "CSAFPID-0007",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-7DB0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM763-1 (US) (6GK5763-1AL00-7DB0)",
+           "product_id": "CSAFPID-0008",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-7DB0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM763-1 (US) (6GK5763-1AL00-7DB0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM766-1 (6GK5766-1GE00-7DA0)",
+           "product_id": "CSAFPID-0009",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7DA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM766-1 (6GK5766-1GE00-7DA0)",
+           "product_id": "CSAFPID-0010",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7DA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM766-1 (6GK5766-1GE00-7DA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM766-1 (ME) (6GK5766-1GE00-7DC0)",
+           "product_id": "CSAFPID-0011",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7DC0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM766-1 (ME) (6GK5766-1GE00-7DC0)",
+           "product_id": "CSAFPID-0012",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7DC0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM766-1 (ME) (6GK5766-1GE00-7DC0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM766-1 (US) (6GK5766-1GE00-7DB0)",
+           "product_id": "CSAFPID-0013",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7DB0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM766-1 (US) (6GK5766-1GE00-7DB0)",
+           "product_id": "CSAFPID-0014",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7DB0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM766-1 (US) (6GK5766-1GE00-7DB0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM766-1 EEC (6GK5766-1GE00-7TA0)",
+           "product_id": "CSAFPID-0015",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7TA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM766-1 EEC (6GK5766-1GE00-7TA0)",
+           "product_id": "CSAFPID-0016",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7TA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM766-1 EEC (6GK5766-1GE00-7TA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM766-1 EEC (ME) (6GK5766-1GE00-7TC0)",
+           "product_id": "CSAFPID-0017",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7TC0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM766-1 EEC (ME) (6GK5766-1GE00-7TC0)",
+           "product_id": "CSAFPID-0018",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7TC0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM766-1 EEC (ME) (6GK5766-1GE00-7TC0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WAM766-1 EEC (US) (6GK5766-1GE00-7TB0)",
+           "product_id": "CSAFPID-0019",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7TB0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WAM766-1 EEC (US) (6GK5766-1GE00-7TB0)",
+           "product_id": "CSAFPID-0020",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-7TB0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WAM766-1 EEC (US) (6GK5766-1GE00-7TB0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUB762-1 (6GK5762-1AJ00-1AA0)",
+           "product_id": "CSAFPID-0021",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5762-1AJ00-1AA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUB762-1 (6GK5762-1AJ00-1AA0)",
+           "product_id": "CSAFPID-0022",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5762-1AJ00-1AA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUB762-1 (6GK5762-1AJ00-1AA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUB762-1 iFeatures (6GK5762-1AJ00-2AA0)",
+           "product_id": "CSAFPID-0023",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5762-1AJ00-2AA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUB762-1 iFeatures (6GK5762-1AJ00-2AA0)",
+           "product_id": "CSAFPID-0024",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5762-1AJ00-2AA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUB762-1 iFeatures (6GK5762-1AJ00-2AA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUM763-1 (6GK5763-1AL00-3AA0)",
+           "product_id": "CSAFPID-0025",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3AA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUM763-1 (6GK5763-1AL00-3AA0)",
+           "product_id": "CSAFPID-0026",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3AA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUM763-1 (6GK5763-1AL00-3AA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUM763-1 (6GK5763-1AL00-3DA0)",
+           "product_id": "CSAFPID-0027",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3DA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUM763-1 (6GK5763-1AL00-3DA0)",
+           "product_id": "CSAFPID-0028",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3DA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUM763-1 (6GK5763-1AL00-3DA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUM763-1 (US) (6GK5763-1AL00-3AB0)",
+           "product_id": "CSAFPID-0029",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3AB0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUM763-1 (US) (6GK5763-1AL00-3AB0)",
+           "product_id": "CSAFPID-0030",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3AB0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUM763-1 (US) (6GK5763-1AL00-3AB0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUM763-1 (US) (6GK5763-1AL00-3DB0)",
+           "product_id": "CSAFPID-0031",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3DB0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUM763-1 (US) (6GK5763-1AL00-3DB0)",
+           "product_id": "CSAFPID-0032",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5763-1AL00-3DB0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUM763-1 (US) (6GK5763-1AL00-3DB0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUM766-1 (6GK5766-1GE00-3DA0)",
+           "product_id": "CSAFPID-0033",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-3DA0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUM766-1 (6GK5766-1GE00-3DA0)",
+           "product_id": "CSAFPID-0034",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-3DA0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUM766-1 (6GK5766-1GE00-3DA0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUM766-1 (ME) (6GK5766-1GE00-3DC0)",
+           "product_id": "CSAFPID-0035",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-3DC0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUM766-1 (ME) (6GK5766-1GE00-3DC0)",
+           "product_id": "CSAFPID-0036",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-3DC0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUM766-1 (ME) (6GK5766-1GE00-3DC0)"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/<V3.0.0",
+          "product": {
+           "name": "SCALANCE WUM766-1 (USA) (6GK5766-1GE00-3DB0)",
+           "product_id": "CSAFPID-0037",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-3DB0"
+            ]
+           }
+          }
+         },
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "SCALANCE WUM766-1 (USA) (6GK5766-1GE00-3DB0)",
+           "product_id": "CSAFPID-0038",
+           "product_identification_helper": {
+            "model_numbers": [
+             "6GK5766-1GE00-3DB0"
+            ]
+           }
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SCALANCE WUM766-1 (USA) (6GK5766-1GE00-3DB0)"
+       }
+      ],
+      "category": "vendor",
+      "name": "Siemens"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2023-44317",
+     "cwe": {
+      "id": "CWE-349",
+      "name": "Acceptance of Extraneous Untrusted Data With Trusted Data"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "Affected products do not properly validate the content of uploaded X509 certificates which could allow an attacker with administrative privileges to execute arbitrary code on the device.",
+       "title": "Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0003",
+       "CSAFPID-0005",
+       "CSAFPID-0007",
+       "CSAFPID-0009",
+       "CSAFPID-0011",
+       "CSAFPID-0013",
+       "CSAFPID-0015",
+       "CSAFPID-0017",
+       "CSAFPID-0019",
+       "CSAFPID-0021",
+       "CSAFPID-0023",
+       "CSAFPID-0025",
+       "CSAFPID-0027",
+       "CSAFPID-0029",
+       "CSAFPID-0031",
+       "CSAFPID-0033",
+       "CSAFPID-0035",
+       "CSAFPID-0037"
+      ]
+     },
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Update to V3.0.0 or later version",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0003",
+        "CSAFPID-0005",
+        "CSAFPID-0007",
+        "CSAFPID-0009",
+        "CSAFPID-0011",
+        "CSAFPID-0013",
+        "CSAFPID-0015",
+        "CSAFPID-0017",
+        "CSAFPID-0019",
+        "CSAFPID-0021",
+        "CSAFPID-0023",
+        "CSAFPID-0025",
+        "CSAFPID-0027",
+        "CSAFPID-0029",
+        "CSAFPID-0031",
+        "CSAFPID-0033",
+        "CSAFPID-0035",
+        "CSAFPID-0037"
+       ],
+       "url": "https://support.industry.siemens.com/cs/ww/en/view/109977720/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 7.2,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0003",
+        "CSAFPID-0005",
+        "CSAFPID-0007",
+        "CSAFPID-0009",
+        "CSAFPID-0011",
+        "CSAFPID-0013",
+        "CSAFPID-0015",
+        "CSAFPID-0017",
+        "CSAFPID-0019",
+        "CSAFPID-0021",
+        "CSAFPID-0023",
+        "CSAFPID-0025",
+        "CSAFPID-0027",
+        "CSAFPID-0029",
+        "CSAFPID-0031",
+        "CSAFPID-0033",
+        "CSAFPID-0035",
+        "CSAFPID-0037"
+       ]
+      }
+     ],
+     "title": "CVE-2023-44317"
+    },
+    {
+     "cve": "CVE-2023-44318",
+     "cwe": {
+      "id": "CWE-321",
+      "name": "Use of Hard-coded Cryptographic Key"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "Affected devices use a hardcoded key to obfuscate the configuration backup that an administrator can export from the device. This could allow an authenticated attacker with administrative privileges or an attacker that obtains a configuration backup to extract configuration information from the exported file.",
+       "title": "Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0002",
+       "CSAFPID-0004",
+       "CSAFPID-0006",
+       "CSAFPID-0008",
+       "CSAFPID-0010",
+       "CSAFPID-0012",
+       "CSAFPID-0014",
+       "CSAFPID-0016",
+       "CSAFPID-0018",
+       "CSAFPID-0020",
+       "CSAFPID-0022",
+       "CSAFPID-0024",
+       "CSAFPID-0026",
+       "CSAFPID-0028",
+       "CSAFPID-0030",
+       "CSAFPID-0032",
+       "CSAFPID-0034",
+       "CSAFPID-0036",
+       "CSAFPID-0038"
+      ]
+     },
+     "remediations": [
+      {
+       "category": "no_fix_planned",
+       "details": "Currently no fix is planned",
+       "product_ids": [
+        "CSAFPID-0002",
+        "CSAFPID-0004",
+        "CSAFPID-0006",
+        "CSAFPID-0008",
+        "CSAFPID-0010",
+        "CSAFPID-0012",
+        "CSAFPID-0014",
+        "CSAFPID-0016",
+        "CSAFPID-0018",
+        "CSAFPID-0020",
+        "CSAFPID-0022",
+        "CSAFPID-0024",
+        "CSAFPID-0026",
+        "CSAFPID-0028",
+        "CSAFPID-0030",
+        "CSAFPID-0032",
+        "CSAFPID-0034",
+        "CSAFPID-0036",
+        "CSAFPID-0038"
+       ]
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 4.9,
+        "baseSeverity": "MEDIUM",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0002",
+        "CSAFPID-0004",
+        "CSAFPID-0006",
+        "CSAFPID-0008",
+        "CSAFPID-0010",
+        "CSAFPID-0012",
+        "CSAFPID-0014",
+        "CSAFPID-0016",
+        "CSAFPID-0018",
+        "CSAFPID-0020",
+        "CSAFPID-0022",
+        "CSAFPID-0024",
+        "CSAFPID-0026",
+        "CSAFPID-0028",
+        "CSAFPID-0030",
+        "CSAFPID-0032",
+        "CSAFPID-0034",
+        "CSAFPID-0036",
+        "CSAFPID-0038"
+       ]
+      }
+     ],
+     "title": "CVE-2023-44318"
+    },
+    {
+     "cve": "CVE-2023-44319",
+     "cwe": {
+      "id": "CWE-328",
+      "name": "Use of Weak Hash"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "Affected devices use a weak checksum algorithm to protect the configuration backup that an administrator can export from the device. This could allow an authenticated attacker with administrative privileges or an attacker that tricks a legitimate administrator to upload a modified configuration file to change the configuration of an affected device.",
+       "title": "Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0003",
+       "CSAFPID-0005",
+       "CSAFPID-0007",
+       "CSAFPID-0009",
+       "CSAFPID-0011",
+       "CSAFPID-0013",
+       "CSAFPID-0015",
+       "CSAFPID-0017",
+       "CSAFPID-0019",
+       "CSAFPID-0021",
+       "CSAFPID-0023",
+       "CSAFPID-0025",
+       "CSAFPID-0027",
+       "CSAFPID-0029",
+       "CSAFPID-0031",
+       "CSAFPID-0033",
+       "CSAFPID-0035",
+       "CSAFPID-0037"
+      ]
+     },
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Update to V3.0.0 or later version",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0003",
+        "CSAFPID-0005",
+        "CSAFPID-0007",
+        "CSAFPID-0009",
+        "CSAFPID-0011",
+        "CSAFPID-0013",
+        "CSAFPID-0015",
+        "CSAFPID-0017",
+        "CSAFPID-0019",
+        "CSAFPID-0021",
+        "CSAFPID-0023",
+        "CSAFPID-0025",
+        "CSAFPID-0027",
+        "CSAFPID-0029",
+        "CSAFPID-0031",
+        "CSAFPID-0033",
+        "CSAFPID-0035",
+        "CSAFPID-0037"
+       ],
+       "url": "https://support.industry.siemens.com/cs/ww/en/view/109977720/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 4.9,
+        "baseSeverity": "MEDIUM",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:H/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0003",
+        "CSAFPID-0005",
+        "CSAFPID-0007",
+        "CSAFPID-0009",
+        "CSAFPID-0011",
+        "CSAFPID-0013",
+        "CSAFPID-0015",
+        "CSAFPID-0017",
+        "CSAFPID-0019",
+        "CSAFPID-0021",
+        "CSAFPID-0023",
+        "CSAFPID-0025",
+        "CSAFPID-0027",
+        "CSAFPID-0029",
+        "CSAFPID-0031",
+        "CSAFPID-0033",
+        "CSAFPID-0035",
+        "CSAFPID-0037"
+       ]
+      }
+     ],
+     "title": "CVE-2023-44319"
+    },
+    {
+     "cve": "CVE-2023-44374",
+     "cwe": {
+      "id": "CWE-567",
+      "name": "Unsynchronized Access to Shared Data in a Multithreaded Context"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "Affected devices allow to change the password, but insufficiently check which password is to be changed. With this an authenticated attacker could, under certain conditions, be able to change the password of another, potential admin user, which could allow to escalate privileges.",
+       "title": "Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0003",
+       "CSAFPID-0005",
+       "CSAFPID-0007",
+       "CSAFPID-0009",
+       "CSAFPID-0011",
+       "CSAFPID-0013",
+       "CSAFPID-0015",
+       "CSAFPID-0017",
+       "CSAFPID-0019",
+       "CSAFPID-0021",
+       "CSAFPID-0023",
+       "CSAFPID-0025",
+       "CSAFPID-0027",
+       "CSAFPID-0029",
+       "CSAFPID-0031",
+       "CSAFPID-0033",
+       "CSAFPID-0035",
+       "CSAFPID-0037"
+      ]
+     },
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Update to V3.0.0 or later version",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0003",
+        "CSAFPID-0005",
+        "CSAFPID-0007",
+        "CSAFPID-0009",
+        "CSAFPID-0011",
+        "CSAFPID-0013",
+        "CSAFPID-0015",
+        "CSAFPID-0017",
+        "CSAFPID-0019",
+        "CSAFPID-0021",
+        "CSAFPID-0023",
+        "CSAFPID-0025",
+        "CSAFPID-0027",
+        "CSAFPID-0029",
+        "CSAFPID-0031",
+        "CSAFPID-0033",
+        "CSAFPID-0035",
+        "CSAFPID-0037"
+       ],
+       "url": "https://support.industry.siemens.com/cs/ww/en/view/109977720/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 6.5,
+        "baseSeverity": "MEDIUM",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0003",
+        "CSAFPID-0005",
+        "CSAFPID-0007",
+        "CSAFPID-0009",
+        "CSAFPID-0011",
+        "CSAFPID-0013",
+        "CSAFPID-0015",
+        "CSAFPID-0017",
+        "CSAFPID-0019",
+        "CSAFPID-0021",
+        "CSAFPID-0023",
+        "CSAFPID-0025",
+        "CSAFPID-0027",
+        "CSAFPID-0029",
+        "CSAFPID-0031",
+        "CSAFPID-0033",
+        "CSAFPID-0035",
+        "CSAFPID-0037"
+       ]
+      }
+     ],
+     "title": "CVE-2023-44374"
+    }
+   ]
+  },
+  "2024/icsa-24-291-04.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "names": [
+       "Anurag Chevendra",
+       "Parul Sindhwad",
+       "Dr. Faruk Kazi"
+      ],
+      "organization": "CoE-CNDS Lab, VJTI, Mumbai, India",
+      "summary": "reporting these vulnerabilities to CISA"
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://us-cert.cisa.gov/tlp/"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "legal_disclaimer",
+      "text": "All information products included in https://us-cert.cisa.gov/ics are provided \"as is\" for informational purposes only. The Department of Homeland Security (DHS) does not provide any warranties of any kind regarding any information contained within. DHS does not endorse any commercial product or service, referenced in this product or otherwise. Further dissemination of this product is governed by the Traffic Light Protocol (TLP) marking in the header. For more information about TLP, see https://us-cert.cisa.gov/tlp/.",
+      "title": "Legal Notice"
+     },
+     {
+      "category": "summary",
+      "text": "Successful exploitation of this vulnerability could allow an attacker to sniff and decode credentials that are transmitted using weak encoding techniques.",
+      "title": "Risk evaluation"
+     },
+     {
+      "category": "other",
+      "text": "Water and Wastewater Systems, Energy, and Food and Agriculture",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Sweden",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the risk of exploitation of this vulnerability, such as:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, ensuring they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolating them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most current version available. Also recognize VPN is only as secure as the connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov/ics. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov/ics in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also recommends users take the following measures to protect themselves from social engineering attacks:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Do not click web links or open attachments in unsolicited email messages.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Recognizing and Avoiding Email Scams for more information on avoiding email scams.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Avoiding Social Engineering and Phishing Attacks for more information on social engineering attacks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "No known public exploitation specifically targeting this vulnerability has been reported to CISA at this time.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "coordinator",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-24-291-04 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2024/icsa-24-291-04.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICSA Advisory ICSA-24-291-04 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-291-04"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/sites/default/files/publications/emailscams0905.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ncas/tips/ST04-014"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://us-cert.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/tips/ICS-TIP-12-146-01B"
+     }
+    ],
+    "title": "HMS Networks EWON FLEXY 202",
+    "tracking": {
+     "current_release_date": "2024-10-17T06:00:00.000000Z",
+     "generator": {
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSA-24-291-04",
+     "initial_release_date": "2024-10-17T06:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2024-10-17T06:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Initial Publication"
+      }
+     ],
+     "status": "final",
+     "version": "1"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version",
+          "name": "Firmware__14.2s0",
+          "product": {
+           "name": "HMS Networks EWON FLEXY 202: Firmware__14.2s0",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "EWON FLEXY 202"
+       }
+      ],
+      "category": "vendor",
+      "name": "HMS Networks"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2024-7755",
+     "cwe": {
+      "id": "CWE-522",
+      "name": "Insufficiently Protected Credentials"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "The EWON FLEXY 202 transmits credentials using a weak encoding method base64. An attacker who is present in the network can sniff the traffic and decode the credentials.",
+       "title": "Vulnerability Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2024-7755"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "mitigation",
+       "details": "HMS Networks recommends users update to firmware version 14.9s2",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://www.hms-networks.com/p/flexy20200-00ma-ewon-flexy-202?tab=tab-support"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 8.2,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "2024/icsma-24-254-01.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "names": [
+       "Yash Chandna"
+      ],
+      "summary": "reporting this vulnerability to CISA"
+     },
+     {
+      "names": [
+       "Hanit Thakur"
+      ],
+      "summary": "reporting this vulnerability to CISA"
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://us-cert.cisa.gov/tlp/"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "legal_disclaimer",
+      "text": "All information products included in https://us-cert.cisa.gov/ics are provided \"as is\" for informational purposes only. The Department of Homeland Security (DHS) does not provide any warranties of any kind regarding any information contained within. DHS does not endorse any commercial product or service, referenced in this product or otherwise. Further dissemination of this product is governed by the Traffic Light Protocol (TLP) marking in the header. For more information about TLP, see https://us-cert.cisa.gov/tlp/.",
+      "title": "Legal Notice"
+     },
+     {
+      "category": "summary",
+      "text": "Successful exploitation of this vulnerability could allow an attacker to intercept and modify information as it being processed",
+      "title": "Risk evaluation"
+     },
+     {
+      "category": "other",
+      "text": "Healthcare and Public Health Sector",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "India",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the risk of exploitation of this vulnerability, such as:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, ensuring they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolating them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most current version available. Also recognize VPN is only as secure as the connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov/ics. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov/ics in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also recommends users take the following measures to protect themselves from social engineering attacks:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Do not click web links or open attachments in unsolicited email messages.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Recognizing and Avoiding Email Scams for more information on avoiding email scams.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Avoiding Social Engineering and Phishing Attacks for more information on social engineering attacks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "No known public exploitation specifically targeting this vulnerability has been reported to CISA at this time. This vulnerability is not exploitable remotely.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "coordinator",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSMA-24-254-01 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2024/icsma-24-254-01.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICSA Advisory ICSMA-24-254-01 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-medical-advisories/icsma-24-254-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/sites/default/files/publications/emailscams0905.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ncas/tips/ST04-014"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://us-cert.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/tips/ICS-TIP-12-146-01B"
+     }
+    ],
+    "title": "BPL Medical Technologies PWS-01-BT and BPL Be Well Android Application",
+    "tracking": {
+     "current_release_date": "2024-09-10T06:00:00.000000Z",
+     "generator": {
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSMA-24-254-01",
+     "initial_release_date": "2024-09-10T06:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2024-09-10T06:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Initial Publication"
+      }
+     ],
+     "status": "final",
+     "version": "1"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=3.64",
+          "product": {
+           "name": "BPL Medical Technologies Be Well Android Application: <=3.64",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Be Well Android Application"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "BPL Medical Technologies PWS-01-BT: vers:all/*",
+           "product_id": "CSAFPID-0002"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "PWS-01-BT"
+       }
+      ],
+      "category": "vendor",
+      "name": "BPL Medical Technologies"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2024-34463",
+     "cwe": {
+      "id": "CWE-319",
+      "name": "Cleartext Transmission of Sensitive Information"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "BPL Personal Weighing Scale PWS-01BT IND/09/18/599 devices send sensitive information in unencrypted BLE packets. (The packet data also lacks authentication and integrity protection.)",
+       "title": "Vulnerability Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0002"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2024-34463"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/4.0#CVSS:4.0/AV:A/AC:L/AT:N/PR:N/UI:P/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "mitigation",
+       "details": "BPL Medical Technologies has not responded to requests to work with CISA to mitigate these vulnerabilities. Users of the affected products are encouraged to contact BPL Medical Technologies support for additional information.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002"
+       ],
+       "url": "https://www.bplmedicaltechnologies.com/customer-care/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 4.6,
+        "baseSeverity": "MEDIUM",
+        "vectorString": "CVSS:3.1/AV:A/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0002"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "2025/icsa-25-226-26.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "organization": "Rockwell Automation",
+      "summary": "reporting these vulnerabilities to CISA"
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "legal_disclaimer",
+      "text": "This product is provided subject to this Notification (https://www.cisa.gov/notification) and this Privacy & Use policy (https://www.cisa.gov/privacy-policy).",
+      "title": "Legal Notice and Terms of Use"
+     },
+     {
+      "category": "summary",
+      "text": "Successful exploitation of these vulnerabilities could create a denial-of-service condition.",
+      "title": "Risk evaluation"
+     },
+     {
+      "category": "other",
+      "text": "Chemical, Critical Manufacturing, Energy, Food and Agriculture, Transportation Systems, Water and Wastewater",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "United States",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the risk of exploitation of these vulnerabilities, such as:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, ensuring they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolating them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most current version available. Also recognize VPN is only as secure as the connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov/ics. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov/ics in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "No known public exploitation specifically targeting these vulnerabilities has been reported to CISA at this time.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "coordinator",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-25-226-26 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2025/icsa-25-226-26.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICSA Advisory ICSA-25-226-26 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-25-226-26"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/ics-alerts/ics-alert-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/targeted-cyber-intrusion-detection-and-mitigation-strategies-update-b"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/secure-our-world/teach-employees-avoid-phishing"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/avoiding-social-engineering-and-phishing-attacks"
+     }
+    ],
+    "title": "Rockwell Automation FLEX 5000 I/O (Update A)",
+    "tracking": {
+     "current_release_date": "2025-09-30T06:00:00.000000Z",
+     "generator": {
+      "date": "2025-09-30T17:05:25.877028Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSA-25-226-26",
+     "initial_release_date": "2025-08-14T06:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2025-08-14T06:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Initial Publication"
+      },
+      {
+       "date": "2025-09-30T06:00:00.000000Z",
+       "legacy_version": "Revision",
+       "number": "2",
+       "summary": "Revision - Fixed CVE references"
+      }
+     ],
+     "status": "final",
+     "version": "2"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version",
+          "name": "V2.011",
+          "product": {
+           "name": "Rockwell Automation 5094-IF8: V2.011",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "5094-IF8"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version",
+          "name": "V2.011",
+          "product": {
+           "name": "Rockwell Automation 5094-IY8: V2.011",
+           "product_id": "CSAFPID-0002"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "5094-IY8"
+       }
+      ],
+      "category": "vendor",
+      "name": "Rockwell Automation"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2025-9041",
+     "cwe": {
+      "id": "CWE-20",
+      "name": "Improper Input Validation"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "A security issue exists due to improper handling of CIP Class 32's request when a module is inhibited on the 5094-IF8 device. It causes the module to enter a fault state with the Module LED flashing red. Upon un-inhibiting, the module returns a connection fault (Code 16#0010), and the module cannot recover without a power cycle.",
+       "title": "Vulnerability Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2025-9041"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/4.0#CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "mitigation",
+       "details": "Rockwell Automation recommends users upgrade to V2.012 or later. The update can be downloaded from Rockwell Automation's website.",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://www.rockwellautomation.com/en-ca/support/product/product-downloads.html"
+      },
+      {
+       "category": "mitigation",
+       "details": "Rockwell Automation also recommends users follow their published Security Best Practices.",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://support.rockwellautomation.com/app/answers/answer_view/a_id/1085012/loc/en_US#__highlight"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 7.5,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001"
+       ]
+      }
+     ]
+    },
+    {
+     "cve": "CVE-2025-9042",
+     "cwe": {
+      "id": "CWE-20",
+      "name": "Improper Input Validation"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "A security issue exists due to improper handling of CIP Class 32's request when a module is inhibited on the 5094-IY8 device. It causes the module to enter a fault state with the Module LED flashing red. Upon un-inhibiting, the module returns a connection fault (Code 16#0010), and the module cannot recover without a power cycle.",
+       "title": "Vulnerability Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0002"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2025-9042"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H/E:U/RL:O/RC:C"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/4.0#CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "mitigation",
+       "details": "Rockwell Automation recommends users upgrade to V2.012 or later. The update can be downloaded from Rockwell Automation's website.",
+       "product_ids": [
+        "CSAFPID-0002"
+       ],
+       "url": "https://www.rockwellautomation.com/en-ca/support/product/product-downloads.html"
+      },
+      {
+       "category": "mitigation",
+       "details": "Rockwell Automation also recommends users follow their published Security Best Practices.",
+       "product_ids": [
+        "CSAFPID-0002"
+       ],
+       "url": "https://support.rockwellautomation.com/app/answers/answer_view/a_id/1085012/loc/en_US#__highlight"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 7.5,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H/E:U/RL:O/RC:C",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0002"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "2026/icsa-26-148-05.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "names": [
+       "Jithin Nambiar J"
+      ],
+      "summary": "reported this vulnerability to CISA"
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "legal_disclaimer",
+      "text": "This product is provided subject to this Notification (https://www.cisa.gov/notification) and this Privacy & Use policy (https://www.cisa.gov/privacy-policy).",
+      "title": "Legal Notice and Terms of Use"
+     },
+     {
+      "category": "summary",
+      "text": "Successful exploitation of this vulnerability allows an attacker's malicious script to execute in the browser of any authenticated user or administrator who accesses the affected interface. This could lead to compromise of user sessions, execution of unauthorized actions with the victim's privileges, exposure or manipulation of sensitive data, and degradation of overall system integrity.",
+      "title": "Advisory Summary"
+     },
+     {
+      "category": "other",
+      "text": "Commercial Facilities, Critical Manufacturing, Emergency Services",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "India, Nepal, United Arab Emirates, Gambia",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "India",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the risk of exploitation of this vulnerability.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, ensuring they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolating them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most current version available. Also recognize VPN is only as secure as the connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov/ics. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov/ics in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also recommends users take the following measures to protect themselves from social engineering attacks:",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Do not click web links or open attachments in unsolicited email messages.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Recognizing and Avoiding Email Scams for more information on avoiding email scams.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Refer to Avoiding Social Engineering and Phishing Attacks for more information on social engineering attacks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "No known public exploitation specifically targeting this vulnerability has been reported to CISA at this time.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "coordinator",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-26-148-05 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2026/icsa-26-148-05.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICSA Advisory ICSA-26-148-05 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-26-148-05"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ics/alerts/ICS-ALERT-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/sites/default/files/publications/emailscams0905.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/uscert/ncas/tips/ST04-014"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/ics-alerts/ics-alert-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/targeted-cyber-intrusion-detection-and-mitigation-strategies-update-b"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/secure-our-world/teach-employees-avoid-phishing"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/avoiding-social-engineering-and-phishing-attacks"
+     }
+    ],
+    "title": "CP Plus 8 Ch. Network Video Recorder",
+    "tracking": {
+     "current_release_date": "2026-05-28T06:00:00.000000Z",
+     "generator": {
+      "date": "2026-05-27T19:41:39.866713Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.0.0"
+      }
+     },
+     "id": "ICSA-26-148-05",
+     "initial_release_date": "2026-05-28T06:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2026-05-28T06:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Initial Publication"
+      }
+     ],
+     "status": "final",
+     "version": "1"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version",
+          "name": "V1.0",
+          "product": {
+           "name": "CP Plus CP-UNR-108F1 Hardware: V1.0",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "CP-UNR-108F1 Hardware"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version",
+          "name": "V3.2.7.128806",
+          "product": {
+           "name": "CP Plus CP-UNR-108F1 Web: V3.2.7.128806",
+           "product_id": "CSAFPID-0002"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "CP-UNR-108F1 Web"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version",
+          "name": "V4.001.00AT009.0.R",
+          "product": {
+           "name": "CP Plus CP-UNR-108F1 System: V4.001.00AT009.0.R",
+           "product_id": "CSAFPID-0003"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "CP-UNR-108F1 System"
+       }
+      ],
+      "category": "vendor",
+      "name": "CP Plus"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2026-6824",
+     "cwe": {
+      "id": "CWE-79",
+      "name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "A stored Cross-Site Scripting (XSS) vulnerability exists in certain 1xxx series NVR devices due to insufficient sanitization of user-supplied input in specific functional modules. Attackers can inject malicious scripts, which are then persistently stored on the device backend. When administrators or users access affected pages, the stored scripts are executed in their browsers, leading to potential session hijacking, unauthorized actions, or data theft.",
+       "title": "Vulnerability Summary"
+      },
+      {
+       "category": "details",
+       "text": "SSVCv2/E:N/A:N/2026-05-27T06:00:00.000000Z",
+       "title": "SSVC"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0002",
+       "CSAFPID-0003"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "cwe.mitre.org",
+       "url": "https://cwe.mitre.org/data/definitions/79.html"
+      },
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2026-6824"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:H/I:H/A:H"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/4.0#CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:P/VC:N/VI:L/VA:N/SC:H/SI:H/SA:H"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "mitigation",
+       "details": "CP Plus recommends updating the firmware on the device to the latest firmware version.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "CP-UNR-AxxxMars_PN_15_Q_00_V1.00.14.01.T.260326 which can be downloaded at https://drive.google.com/file/d/1Ctxdp55UtlrQY7CSepkImM9zFgdcuCyL/view",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003"
+       ],
+       "url": "https://drive.google.com/file/d/1Ctxdp55UtlrQY7CSepkImM9zFgdcuCyL/view"
+      },
+      {
+       "category": "mitigation",
+       "details": "For firmware access and upgrade instructions, please contact support at:",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "Phone: +91-8800952952",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "Email: support@cpplusworld.com",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003"
+       ],
+       "url": "mailto:support@cpplusworld.com"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 8.4,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:H/I:H/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0003"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "2026/icsa-26-134-10.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "organization": "Siemens ProductCERT",
+      "summary": "reported these vulnerabilities to CISA."
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage"
+     }
+    },
+    "lang": "en",
+    "notes": [
+     {
+      "category": "summary",
+      "text": "SIMATIC CN 4100 contains multiple vulnerabilities which could potentially lead to a compromise in availability, integrity and confidentiality.\n\nSiemens has released a new version for SIMATIC CN 4100 and recommends to update to the latest version.",
+      "title": "Summary"
+     },
+     {
+      "category": "general",
+      "text": "As a general security measure, Siemens strongly recommends to protect network access to devices with appropriate mechanisms. In order to operate the devices in a protected IT environment, Siemens recommends to configure the environment according to Siemens' operational guidelines for Industrial Security (Download: https://www.siemens.com/cert/operational-guidelines-industrial-security), and to follow the recommendations in the product manuals.\nAdditional information on Industrial Security by Siemens can be found at: https://www.siemens.com/industrialsecurity",
+      "title": "General Recommendations"
+     },
+     {
+      "category": "general",
+      "text": "For further inquiries on security vulnerabilities in Siemens products and solutions, please contact the Siemens ProductCERT: https://www.siemens.com/cert/advisories",
+      "title": "Additional Resources"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "The use of Siemens Security Advisories is subject to the terms and conditions listed on: https://www.siemens.com/productcert/terms-of-use.",
+      "title": "Terms of Use"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "This product is provided subject to this Notification (https://www.cisa.gov/notification) and this Privacy & Use policy (https://www.cisa.gov/privacy-policy).",
+      "title": "Legal Notice and Terms of Use"
+     },
+     {
+      "category": "other",
+      "text": "This ICSA is a verbatim republication of Siemens ProductCERT SSA-032379 from a direct conversion of the vendor's Common Security Advisory Framework (CSAF) advisory. This is republished to CISA's website as a means of increasing visibility and is provided \"as-is\" for informational purposes only. CISA is not responsible for the editorial or technical accuracy of republished advisories and provides no warranties of any kind regarding any information contained within this advisory.  Further, CISA does not endorse any commercial product or service.  Please contact Siemens ProductCERT directly for any questions regarding this advisory.",
+      "title": "Advisory Conversion Disclaimer"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the exploitation risk of this vulnerability.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, and ensure they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolate them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most recent version available. Also recognize VPN is only as secure as its connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets. Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "other",
+      "text": "Critical Manufacturing",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Germany",
+      "title": "Company headquarters location"
+     }
+    ],
+    "publisher": {
+     "category": "other",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "SSA-032379: Multiple Vulnerabilities in SIMATIC CN 4100 Before V5.0 - CSAF Version",
+      "url": "https://cert-portal.siemens.com/productcert/csaf/ssa-032379.json"
+     },
+     {
+      "category": "self",
+      "summary": "SSA-032379: Multiple Vulnerabilities in SIMATIC CN 4100 Before V5.0 - HTML Version",
+      "url": "https://cert-portal.siemens.com/productcert/html/ssa-032379.html"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-26-134-10 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2026/icsa-26-134-10.json"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-26-134-10 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-26-134-10"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/ics-alerts/ics-alert-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/targeted-cyber-intrusion-detection-and-mitigation-strategies-update-b"
+     }
+    ],
+    "title": "Siemens SIMATIC",
+    "tracking": {
+     "current_release_date": "2026-05-14T06:00:00.000000Z",
+     "generator": {
+      "date": "2026-05-12T16:46:53.095499Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.5.0"
+      }
+     },
+     "id": "ICSA-26-134-10",
+     "initial_release_date": "2026-05-12T00:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2026-05-12T00:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Publication Date"
+      },
+      {
+       "date": "2026-05-14T06:00:00.000000Z",
+       "legacy_version": "CISA Republication",
+       "number": "2",
+       "summary": "Initial CISA Republication of Siemens ProductCERT SSA-032379 advisory"
+      }
+     ],
+     "status": "final",
+     "version": "2"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:intdot/<5.0",
+          "product": {
+           "name": "SIMATIC CN 4100",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "SIMATIC CN 4100"
+       }
+      ],
+      "category": "vendor",
+      "name": "Siemens"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2025-23143",
+     "cwe": {
+      "id": "CWE-476",
+      "name": "NULL Pointer Dereference"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "In the Linux kernel, the following vulnerability has been resolved:\r\n\r\nnet: Fix null-ptr-deref by sock_lock_init_class_and_name() and rmmod.\r\n\r\nWhen I ran the repro [0] and waited a few seconds, I observed two\r\nLOCKDEP splats: a warning immediately followed by a null-ptr-deref. [1]\r\n\r\nReproduction Steps:\r\n\r\n  1) Mount CIFS\r\n  2) Add an iptables rule to drop incoming FIN packets for CIFS\r\n  3) Unmount CIFS\r\n  4) Unload the CIFS module\r\n  5) Remove the iptables rule\r\n\r\nAt step 3), the CIFS module calls sock_release() for the underlying\r\nTCP socket, and it returns quickly.  However, the socket remains in\r\nFIN_WAIT_1 because incoming FIN packets are dropped.\r\n\r\nAt this point, the module's refcnt is 0 while the socket is still\r\nalive, so the following rmmod command succeeds.\r\n\r\n  # ss -tan\r\n  State      Recv-Q Send-Q Local Address:Port  Peer Address:Port\r\n  FIN-WAIT-1 0      477        10.0.2.15:51062   10.0.0.137:445\r\n\r\n  # lsmod | grep cifs\r\n  cifs                 1159168  0\r\n\r\nThis highlights a discrepancy between the lifetime of the CIFS module\r\nand the underlying TCP socket.  Even after CIFS calls sock_release()\r\nand it returns, the TCP socket does not die immediately in order to\r\nclose the connection gracefully.\r\n\r\nWhile this is generally fine, it causes an issue with LOCKDEP because\r\nCIFS assigns a different lock class to the TCP socket's sk->sk_lock\r\nusing sock_lock_init_class_and_name().\r\n\r\nOnce an incoming packet is processed for the socket or a timer fires,\r\nsk->sk_lock is acquired.\r\n\r\nThen, LOCKDEP checks the lock context in check_wait_context(), where\r\nhlock_class() is called to retrieve the lock class.  However, since\r\nthe module has already been unloaded, hlock_class() logs a warning\r\nand returns NULL, triggering the null-ptr-deref.\r\n\r\nIf LOCKDEP is enabled, we must ensure that a module calling\r\nsock_lock_init_class_and_name() (CIFS, NFS, etc) cannot be unloaded\r\nwhile such a socket is still alive to prevent this issue.\r\n\r\nLet's hold the module reference in sock_lock_init_class_and_name()\r\nand release it when the socket is freed in sk_prot_free().\r\n\r\nNote that sock_lock_init() clears sk->sk_owner for svc_create_socket()\r\nthat calls sock_lock_init_class_and_name() for a listening socket,\r\nwhich clones a socket by sk_clone_lock() without GFP_ZERO.\r\n\r\n[0]:\r\nCIFS_SERVER=\"10.0.0.137\"\r\nCIFS_PATH=\"//${CIFS_SERVER}/Users/Administrator/Desktop/CIFS_TEST\"\r\nDEV=\"enp0s3\"\r\nCRED=\"/root/WindowsCredential.txt\"\r\n\r\nMNT=$(mktemp -d /tmp/XXXXXX)\r\nmount -t cifs ${CIFS_PATH} ${MNT} -o vers=3.0,credentials=${CRED},cache=none,echo_interval=1\r\n\r\niptables -A INPUT -s ${CIFS_SERVER} -j DROP\r\n\r\nfor i in $(seq 10);\r\ndo\r\n    umount ${MNT}\r\n    rmmod cifs\r\n    sleep 1\r\ndone\r\n\r\nrm -r ${MNT}\r\n\r\niptables -D INPUT -s ${CIFS_SERVER} -j DROP\r\n\r\n[1]:\r\nDEBUG_LOCKS_WARN_ON(1)\r\nWARNING: CPU: 10 PID: 0 at kernel/locking/lockdep.c:234 hlock_class (kernel/locking/lockdep.c:234 kernel/locking/lockdep.c:223)\r\nModules linked in: cifs_arc4 nls_ucs2_utils cifs_md4 [last unloaded: cifs]\r\nCPU: 10 UID: 0 PID: 0 Comm: swapper/10 Not tainted 6.14.0 #36\r\nHardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS rel-1.16.0-0-gd239552ce722-prebuilt.qemu.org 04/01/2014\r\nRIP: 0010:hlock_class (kernel/locking/lockdep.c:234 kernel/locking/lockdep.c:223)\r\n...\r\nCall Trace:\r\n <IRQ>\r\n __lock_acquire (kernel/locking/lockdep.c:4853 kernel/locking/lockdep.c:5178)\r\n lock_acquire (kernel/locking/lockdep.c:469 kernel/locking/lockdep.c:5853 kernel/locking/lockdep.c:5816)\r\n _raw_spin_lock_nested (kernel/locking/spinlock.c:379)\r\n tcp_v4_rcv (./include/linux/skbuff.h:1678 ./include/net/tcp.h:2547 net/ipv4/tcp_ipv4.c:2350)\r\n...\r\n\r\nBUG: kernel NULL pointer dereference, address: 00000000000000c4\r\n PF: supervisor read access in kernel mode\r\n PF: error_code(0x0000) - not-present page\r\nPGD 0\r\nOops: Oops: 0000 [#1] PREEMPT SMP NOPTI\r\nCPU: 10 UID: 0 PID: 0 Comm: swapper/10 Tainted: G        W          6.14.0 #36\r\nTainted: [W]=WARN\r\nHardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS rel-1.16.0-0-gd239552ce722-prebuilt.qemu.org 04/01/2014\r\nRIP: 0010:__lock_acquire (kernel/\r\n---truncated---",
+       "title": "Summary"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2025-23143"
+      },
+      {
+       "category": "external",
+       "summary": "cwe.mitre.org",
+       "url": "https://cwe.mitre.org/data/definitions/476.html"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Update to V5.0 or later version",
+       "product_ids": [
+        "CSAFPID-0001"
+       ],
+       "url": "https://support.industry.siemens.com/cs/ww/en/view/109814144/"
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 5.5,
+        "baseSeverity": "MEDIUM",
+        "vectorString": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001"
+       ]
+      }
+     ],
+     "title": "CVE-2025-23143"
+    }
+   ]
+  },
+  "2026/icsa-26-300-02.json": {
+   "document": {
+    "acknowledgments": [
+     {
+      "organization": "Mitsubishi Electric",
+      "summary": "discovering these vulnerabilities"
+     }
+    ],
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "distribution": {
+     "text": "Disclosure is not limited",
+     "tlp": {
+      "label": "WHITE",
+      "url": "https://www.cisa.gov/news-events/news/traffic-light-protocol-tlp-definitions-and-usage"
+     }
+    },
+    "lang": "en-US",
+    "notes": [
+     {
+      "category": "summary",
+      "text": "Successful exploitation of these vulnerabilities could allow an attacker to execute arbitrary code (CVE-2023-4863), bypass authentication (CVE-2026-16436 and CVE-2026-16437), or perform arbitrary operations (CVE-2026-16438), resulting in information disclosure, tampering with, destruction, or deletion of information, and a denial-of-service (DoS) condition of the system.",
+      "title": "Advisory Summary"
+     },
+     {
+      "category": "other",
+      "text": "Critical Manufacturing",
+      "title": "Critical infrastructure sectors"
+     },
+     {
+      "category": "other",
+      "text": "Worldwide",
+      "title": "Countries/areas deployed"
+     },
+     {
+      "category": "other",
+      "text": "Japan",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "other",
+      "text": "United States",
+      "title": "Company headquarters location"
+     },
+     {
+      "category": "legal_disclaimer",
+      "text": "This product is provided subject to this Notification (https://www.cisa.gov/notification) and this Privacy & Use policy (https://www.cisa.gov/privacy-policy).",
+      "title": "Legal Notice and Terms of Use"
+     },
+     {
+      "category": "other",
+      "text": "This ICSA is a verbatim republication of Mitsubishi Electric 2026-006 from a direct conversion of the vendor's Common Security Advisory Framework (CSAF) advisory. This is republished to CISA's website as a means of increasing visibility and is provided \"as-is\" for informational purposes only. CISA is not responsible for the editorial or technical accuracy of republished advisories and provides no warranties of any kind regarding any information contained within this advisory.  Further, CISA does not endorse any commercial product or service.  Please contact Mitsubishi Electric directly for any questions regarding this advisory.",
+      "title": "Advisory Conversion Disclaimer"
+     },
+     {
+      "category": "general",
+      "text": "CISA recommends users take defensive measures to minimize the exploitation risk of this vulnerability.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Minimize network exposure for all control system devices and/or systems, and ensure they are not accessible from the internet.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Locate control system networks and remote devices behind firewalls and isolate them from business networks.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "When remote access is required, use more secure methods, such as Virtual Private Networks (VPNs), recognizing VPNs may have vulnerabilities and should be updated to the most recent version available. Also recognize VPN is only as secure as its connected devices.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA reminds organizations to perform proper impact analysis and risk assessment prior to deploying defensive measures.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA also provides a section for control systems security recommended practices on the ICS webpage on cisa.gov. Several CISA products detailing cyber defense best practices are available for reading and download, including Improving Industrial Control Systems Cybersecurity with Defense-in-Depth Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "CISA encourages organizations to implement recommended cybersecurity strategies for proactive defense of ICS assets. Additional mitigation guidance and recommended practices are publicly available on the ICS webpage at cisa.gov in the technical information paper, ICS-TIP-12-146-01B--Targeted Cyber Intrusion Detection and Mitigation Strategies.",
+      "title": "Recommended Practices"
+     },
+     {
+      "category": "general",
+      "text": "Organizations observing suspected malicious activity should follow established internal procedures and report findings to CISA for tracking and correlation against other incidents.",
+      "title": "Recommended Practices"
+     }
+    ],
+    "publisher": {
+     "category": "other",
+     "contact_details": "central@cisa.dhs.gov",
+     "name": "CISA",
+     "namespace": "https://www.cisa.gov/"
+    },
+    "references": [
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-26-300-02 JSON",
+      "url": "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2026/icsa-26-300-02.json"
+     },
+     {
+      "category": "self",
+      "summary": "Mitsubishi Electric Advisory 2026-006",
+      "url": "https://www.mitsubishielectric.com/psirt/vulnerability/pdf/2026-006_en.pdf"
+     },
+     {
+      "category": "self",
+      "summary": "ICS Advisory ICSA-26-300-02 - Web Version",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-26-300-02"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/ics-alerts/ics-alert-10-301-01"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/ics-recommended-practices"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/topics/industrial-control-systems"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/recommended_practices/NCCIC_ICS-CERT_Defense_in_Depth_2016_S508C.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/sites/default/files/publications/Cybersecurity_Best_Practices_for_Industrial_Control_Systems.pdf"
+     },
+     {
+      "category": "external",
+      "summary": "Recommended Practices",
+      "url": "https://www.cisa.gov/news-events/news/targeted-cyber-intrusion-detection-and-mitigation-strategies-update-b"
+     }
+    ],
+    "title": "Mitsubishi Electric GENESIS, GENESIS64, ICONICS Suite, Hyper Historian, AnalytiX, MobileHMI, IoTWorX, MC Works64, GENESIS32 and BizViz",
+    "tracking": {
+     "current_release_date": "2026-10-27T06:00:00.000000Z",
+     "generator": {
+      "date": "2026-10-14T20:33:28.172836Z",
+      "engine": {
+       "name": "CISA CSAF Generator",
+       "version": "1.5.0"
+      }
+     },
+     "id": "ICSA-26-300-02",
+     "initial_release_date": "2026-10-15T00:00:00.000000Z",
+     "revision_history": [
+      {
+       "date": "2026-10-15T00:00:00.000000Z",
+       "legacy_version": "Initial",
+       "number": "1",
+       "summary": "Initial Publication"
+      },
+      {
+       "date": "2026-10-27T06:00:00.000000Z",
+       "legacy_version": "CISA Republication",
+       "number": "2",
+       "summary": "Initial CISA Republication of Mitsubishi Electric 2026-006 advisory"
+      }
+     ],
+     "status": "final",
+     "version": "2"
+    }
+   },
+   "product_tree": {
+    "branches": [
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": ">=10.97|<=10.97.2",
+          "product": {
+           "name": "Mitsubishi Electric GENESIS64: >=10.97|<=10.97.2",
+           "product_id": "CSAFPID-0001"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric GENESIS64"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": ">=10.97|<=10.97.2",
+          "product": {
+           "name": "Mitsubishi Electric ICONICS Suite: >=10.97|<=10.97.2",
+           "product_id": "CSAFPID-0002"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric ICONICS Suite"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=11.03",
+          "product": {
+           "name": "Mitsubishi Electric GENESIS: <=11.03",
+           "product_id": "CSAFPID-0003"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric GENESIS"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric GENESIS64: <=10.97.3",
+           "product_id": "CSAFPID-0004"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric GENESIS64"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric ICONICS Suite: <=10.97.3",
+           "product_id": "CSAFPID-0005"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric ICONICS Suite"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric Hyper Historian: <=10.97.3",
+           "product_id": "CSAFPID-0006"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Hyper Historian"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric AnalytiX: <=10.97.3",
+           "product_id": "CSAFPID-0007"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric AnalytiX"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric MobileHMI: <=10.97.3",
+           "product_id": "CSAFPID-0008"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric MobileHMI"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric IoTWorX: <=10.97.3",
+           "product_id": "CSAFPID-0009"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric IoTWorX"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "Mitsubishi Electric MC Works64: vers:all/*",
+           "product_id": "CSAFPID-0010"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric MC Works64"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "Mitsubishi Electric GENESIS32: vers:all/*",
+           "product_id": "CSAFPID-0011"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric GENESIS32"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "Mitsubishi Electric BizViz: vers:all/*",
+           "product_id": "CSAFPID-0012"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric BizViz"
+       }
+      ],
+      "category": "vendor",
+      "name": "Mitsubishi Electric"
+     },
+     {
+      "branches": [
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": ">=10.97|<=10.97.2",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS64: >=10.97|<=10.97.2",
+           "product_id": "CSAFPID-0013"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS64"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": ">=10.97|<=10.97.2",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions ICONICS Suite: >=10.97|<=10.97.2",
+           "product_id": "CSAFPID-0014"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions ICONICS Suite"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=11.03",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS: <=11.03",
+           "product_id": "CSAFPID-0015"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS64: <=10.97.3",
+           "product_id": "CSAFPID-0016"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS64"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions ICONICS Suite: <=10.97.3",
+           "product_id": "CSAFPID-0017"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions ICONICS Suite"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions Hyper Historian: <=10.97.3",
+           "product_id": "CSAFPID-0018"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions Hyper Historian"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions AnalytiX: <=10.97.3",
+           "product_id": "CSAFPID-0019"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions AnalytiX"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions MobileHMI: <=10.97.3",
+           "product_id": "CSAFPID-0020"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions MobileHMI"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "<=10.97.3",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions IoTWorX: <=10.97.3",
+           "product_id": "CSAFPID-0021"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions IoTWorX"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS32: vers:all/*",
+           "product_id": "CSAFPID-0022"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions GENESIS32"
+       },
+       {
+        "branches": [
+         {
+          "category": "product_version_range",
+          "name": "vers:all/*",
+          "product": {
+           "name": "Mitsubishi Electric Iconics Digital Solutions BizViz: vers:all/*",
+           "product_id": "CSAFPID-0023"
+          }
+         }
+        ],
+        "category": "product_name",
+        "name": "Mitsubishi Electric Iconics Digital Solutions BizViz"
+       }
+      ],
+      "category": "vendor",
+      "name": "Mitsubishi Electric Iconics Digital Solutions"
+     }
+    ]
+   },
+   "vulnerabilities": [
+    {
+     "cve": "CVE-2023-4863",
+     "cwe": {
+      "id": "CWE-787",
+      "name": "Out-of-bounds Write"
+     },
+     "notes": [
+      {
+       "category": "summary",
+       "text": "Out-of-bounds Write (CWE-787) vulnerability caused by libwebp, an internal component in GENESIS64 and ICONICS Suite could allow an authenticated local attacker to cause a heap-based buffer overflow and execute arbitrary code by importing a crafted file as an administrator for the affected product. As a result, the attacker may disclose internal information, tamper with, destroy, or delete internal information, or cause the affected system to enter a denial-of-service (DoS) condition.",
+       "title": "Vulnerability Summary"
+      },
+      {
+       "category": "details",
+       "text": "SSVCv2/E:N/A:N/T:T/2026-10-15T00:00:00Z/",
+       "title": "SSVC"
+      }
+     ],
+     "product_status": {
+      "known_affected": [
+       "CSAFPID-0001",
+       "CSAFPID-0002",
+       "CSAFPID-0013",
+       "CSAFPID-0014"
+      ]
+     },
+     "references": [
+      {
+       "category": "external",
+       "summary": "www.cve.org",
+       "url": "https://www.cve.org/CVERecord?id=CVE-2023-4863"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/3.1#CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H"
+      },
+      {
+       "category": "external",
+       "summary": "www.first.org",
+       "url": "https://www.first.org/cvss/calculator/4.0#CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H"
+      },
+      {
+       "category": "external",
+       "summary": "www.mitre.org",
+       "url": "https://cwe.mitre.org/data/definitions/787.html"
+      }
+     ],
+     "remediations": [
+      {
+       "category": "vendor_fix",
+       "details": "Mitsubishi Electric is releasing fixed version 10.97.3 or later for GENESIS64 and ICONICS Suite. Please download the fixed version from the link below and install it: \"https://iconicsinc.my.site.com/community/s/resource-center/product-downloads\". (Note: GENESIS64 is included in the ICONICS Suite installation.) For more information on the fixed version, please refer to the Mitsubishi Electric security advisory at \"https://www.mitsubishielectric.com/psirt/vulnerability/pdf/2026-006_en.pdf\".",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002"
+       ],
+       "url": "https://iconicsinc.my.site.com/community/s/resource-center/product-downloads"
+      },
+      {
+       "category": "vendor_fix",
+       "details": "Mitsubishi Electric Iconics Digital Solutions is releasing fixed version 10.97.3 or later for GENESIS64 and ICONICS Suite. Please download the fixed version from the link below and install it: \"https://iconicsinc.my.site.com/community/s/resource-center/product-downloads\". Note: GENESIS64 is included in the ICONICS Suite installation. For more information on the fixed version, please refer to the Mitsubishi Electric Iconics Digital Solutions whitepaper on security vulnerabilities, which can be found at \"https://iconics.com/about/security/cert\".",
+       "product_ids": [
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ],
+       "url": "https://iconicsinc.my.site.com/community/s/resource-center/product-downloads"
+      },
+      {
+       "category": "mitigation",
+       "details": "For customers using the affected product who cannot immediately update it, Mitsubishi Electric and Mitsubishi Electric Iconics Digital Solutions recommend configuring the PCs with the affected product installed so that only an administrator can log in, to minimize the risk of exploitation of this vulnerability.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "For customers using the affected product who cannot immediately update it, Mitsubishi Electric and Mitsubishi Electric Iconics Digital Solutions recommend using the PCs with the affected product installed in the LAN and blocking remote login from untrusted networks and hosts, and from non-administrator users, to minimize the risk of exploitation of this vulnerability.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "For customers using the affected product who cannot immediately update it, Mitsubishi Electric and Mitsubishi Electric Iconics Digital Solutions recommend blocking unauthorized access by using a firewall, virtual private network (VPN), etc. and allowing remote login only to administrator when internet access is required, to minimize the risk of exploitation of this vulnerability.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "For customers using the affected product who cannot immediately update it, Mitsubishi Electric and Mitsubishi Electric Iconics Digital Solutions recommend restricting physical access to the PC with the affected product installed and the network to which the PC is connected, to minimize the risk of exploitation of this vulnerability.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "For customers using the affected product who cannot immediately update it, Mitsubishi Electric and Mitsubishi Electric Iconics Digital Solutions recommend preventing the user from clicking on web links in emails from untrusted sources, or from opening attachments in untrusted emails, to minimize the risk of exploitation of this vulnerability.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ]
+      },
+      {
+       "category": "mitigation",
+       "details": "For customers using the affected product who cannot immediately update it, Mitsubishi Electric and Mitsubishi Electric Iconics Digital Solutions recommend installing anti-virus software on the PC with the affected product installed, to minimize the risk of exploitation of this vulnerability.",
+       "product_ids": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ]
+      }
+     ],
+     "scores": [
+      {
+       "cvss_v3": {
+        "baseScore": 8.2,
+        "baseSeverity": "HIGH",
+        "vectorString": "CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H",
+        "version": "3.1"
+       },
+       "products": [
+        "CSAFPID-0001",
+        "CSAFPID-0002",
+        "CSAFPID-0013",
+        "CSAFPID-0014"
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

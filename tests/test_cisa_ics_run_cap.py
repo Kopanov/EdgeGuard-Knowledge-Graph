@@ -65,6 +65,11 @@ def test_daily_runs_get_past_an_advisory_with_more_cves_than_the_incremental_lim
             return len(new), 0
 
         writer.push_items.side_effect = push_items
+        writer.push_reports.side_effect = lambda source, records, **_k: {
+            "settled": [r["record_ref"] for r in records],
+            "failed": [],
+            "skipped": [],
+        }
         collector = ics.CISAICSCollector(misp_writer=writer)
 
         def fake_get(url):
