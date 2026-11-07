@@ -2100,10 +2100,12 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
 # folds the twins a graph built before that already holds, so no new baseline is needed.
 #
 # A non-MITRE node whose name, or an alias of its own name, ends with " - S####" folds into the
-# MITRE-sourced Malware node of that ATT&CK id. The MITRE node's id is read from the record MITRE
-# delivered (the ``raw_data`` of its SOURCED_FROM edge to the ATT&CK source, as
-# ``scripts/build_canonical_threat_actors.py`` reads group ids; a node synced since 2026-11 also carries
-# it as ``mitre_id``), and when it cannot be read the node of the same base name is the target. A revoked software id is translated to its
+# MITRE-sourced Malware node of that ATT&CK id. The MITRE node's id is its ``mitre_id``, else the
+# ``mitre_id`` of the record MITRE delivered (the ``raw_data`` of its SOURCED_FROM edge to the ATT&CK
+# source), else the link ATT&CK's description in that record opens with (an older record only; the sync
+# strips the description's markup), as ``scripts/build_canonical_threat_actors.py`` reads group ids
+# (``attack_software_names.attack_software_id``); when none gives it, the node of the same base name is
+# the target. A revoked software id is translated to its
 # successor first (``attack_revoked``). A twin whose id and name lead to two MITRE nodes is skipped
 # (``skipped_ambiguous``). ATT&CK software without a MITRE Malware node (chiefly the ATT&CK tools,
 # such as Mimikatz S0002, which are ``Tool`` nodes) has no merge target; since the collectors name a
@@ -2144,14 +2146,14 @@ _MALWARE_TWIN_CANDIDATES_CYPHER = (
     "ORDER BY name"
 )
 
-# The MITRE-sourced Malware nodes and the record MITRE delivered for each (its ATT&CK id is read
-# from it in Python, ``attack_software_names.attack_software_id``).
+# The MITRE-sourced Malware nodes, their ``mitre_id`` and the record MITRE delivered for each (the
+# ATT&CK id is read from them in Python, ``attack_software_names.attack_software_id``).
 _MALWARE_TWIN_ATTACK_NODES_CYPHER = """
 MATCH (c:Malware)
 WHERE $mitre_source IN coalesce(c.source, [])
 OPTIONAL MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: $mitre_source})
 WITH c, head(collect(sf.raw_data)) AS attack_raw
-RETURN c.name AS name, attack_raw
+RETURN c.name AS name, c.mitre_id AS attack_id, attack_raw
 """
 
 # Re-checked at merge time, like the actor merge's guard: the canonical is MITRE-sourced, or a
@@ -2223,7 +2225,7 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
                 logger.info("[MALWARE-TWIN-MERGE] no Malware node carries an ATT&CK software id in its name")
                 return results
             attack_ids = {
-                row["name"]: attack_software_id(row["attack_raw"], row["name"])
+                row["name"]: attack_software_id(row["attack_raw"], row["name"], row.get("attack_id"))
                 for row in session.run(
                     _MALWARE_TWIN_ATTACK_NODES_CYPHER,
                     mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,

@@ -18,9 +18,10 @@ This module holds what every site needs to treat such a name as the family it na
 * ``cypher_family_name_variants`` / ``folded_family_names`` — how steps 9b / 2d (and the acceptance
   check that mirrors 9b) find the ``Malware`` node of a family name: as given, without the id, and
   through the names the twin merge folded into a node (``merged_from``);
-* ``attack_software_id`` — the ATT&CK id of a MITRE ``Malware`` node, read from the record MITRE
-  delivered (its ``SOURCED_FROM`` edge's ``raw_data``, which every MITRE node has; a node synced since
-  2026-11 also carries the id as ``mitre_id``);
+* ``attack_software_id`` — the ATT&CK id of a MITRE ``Malware`` node: the node's ``mitre_id``, else the
+  ``mitre_id`` of the record MITRE delivered (its ``SOURCED_FROM`` edge's ``raw_data``), else the link to
+  the software that ATT&CK's description in that record opens with (a record written before the sync
+  carried the id and stripped the description's markup);
 * ``plan_twin_folds`` — which non-MITRE node folds into which node: the MITRE node of its id or base
   name, else the non-MITRE node of its base name (the enrichment job ``merge_malware_attack_twins`` and
   ``scripts/verify_fresh_baseline.py``).
@@ -85,10 +86,20 @@ def cypher_family_name_variants(var: str) -> str:
 
 
 # The link every ATT&CK software description opens with: ``[Cobalt Strike](https://attack.mitre.org/
-# software/S0154)``.
+# software/S0154)``. The graph's descriptions lose it (``text_caps``), so only an older record holds it.
 _ATTACK_SOFTWARE_LINK_RE = re.compile(
     r"\[([^\]]+)\]\(https?://attack\.mitre\.org/software/(S[0-9]{4})/?\)", re.IGNORECASE
 )
+# An ATT&CK software id as a value of its own (``mitre_id``).
+_SOFTWARE_ID_RE = re.compile(r"S[0-9]{4}", re.IGNORECASE | re.ASCII)
+
+
+def _software_id(value: Any) -> Optional[str]:
+    """``value`` trimmed and upper-cased when it is an ATT&CK software id, else ``None``."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate.upper() if _SOFTWARE_ID_RE.fullmatch(candidate) else None
 
 
 def split_attack_software_id(name: Any) -> Tuple[str, Optional[str]]:
@@ -128,22 +139,32 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
-def attack_software_id(raw_data: Any, name: Any = None) -> Optional[str]:
-    """The ATT&CK software id of a MITRE ``Malware`` node, from the record MITRE delivered.
+def attack_software_id(raw_data: Any, name: Any = None, node_id: Any = None) -> Optional[str]:
+    """The ATT&CK software id of a MITRE ``Malware`` node.
 
-    ``raw_data`` is the JSON on the node's ``SOURCED_FROM`` edge to the ATT&CK source (written when the
-    edge is created, so another feed cannot change it); its ``description`` is ATT&CK's, which opens with
-    a link to the software itself. The link whose text is the node's ``name`` decides; without a
-    ``name``, or when no link carries it, a link at the very start of the description does. ``None``
-    when there is no readable record or no such link.
+    In this order: ``node_id``, the node's own ``mitre_id`` (set on every write of an ATT&CK attribute that
+    carries the id); the ``mitre_id`` of ``raw_data``, the JSON on the node's ``SOURCED_FROM`` edge to the
+    ATT&CK source (written when the edge is created, so another feed cannot change it); else the link ATT&CK's
+    description in that record opens with, which only a record written before the sync carried the id holds:
+    the sync strips the description's markup (``text_caps``). Of the links, the one whose text is the node's
+    ``name`` decides; without a ``name``, or when no link carries it, a link at the very start of the
+    description does. A value that is no software id counts as none. ``None`` when none of them gives an id.
     """
+    found = _software_id(node_id)
+    if found:
+        return found
     if not isinstance(raw_data, str):
         return None
     try:
         document = json.loads(raw_data)
     except ValueError:
         return None
-    description = document.get("description") if isinstance(document, Mapping) else None
+    if not isinstance(document, Mapping):
+        return None
+    found = _software_id(document.get("mitre_id"))
+    if found:
+        return found
+    description = document.get("description")
     if not isinstance(description, str):
         return None
     wanted = _canonical(name)

@@ -19,6 +19,7 @@ the writer's cut is constructed. Today's texts come from the real fixtures the C
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import sys
 import uuid
@@ -35,7 +36,9 @@ for _p in (TESTS.parent / "src", TESTS):
 
 from fake_bolt import FakeBolt, fail  # noqa: E402
 
+import enrichment_jobs  # noqa: E402
 import neo4j_client as nc  # noqa: E402
+from attack_software_names import attack_software_id  # noqa: E402
 from collectors import mitre_collector as mc  # noqa: E402
 from collectors.misp_writer import MISPWriter  # noqa: E402
 from collectors.nvd_collector import NVDCollector  # noqa: E402
@@ -251,6 +254,30 @@ def _synced_entity(kind: str) -> Dict[str, Any]:
     return item
 
 
+def written_attack_record(kind: str) -> Tuple[Dict[str, Any], str]:
+    """What ``merge_malware`` / ``merge_actor`` write for the recorded ATT&CK object of ``kind`` (``malware``:
+    Cobalt Strike S0154; ``actor``: APT28 G0007), on a FakeBolt server: the node's parameters and the record on
+    its ``SOURCED_FROM`` edge (``raw_data``). The readers of the ATT&CK id take these (``attack_software_names.
+    attack_software_id``, ``scripts/verify_fresh_baseline.py``, ``scripts/build_canonical_threat_actors.py``)."""
+    _ext_id, _key, _builder, merge, label = _KINDS[kind]
+    server = FakeBolt([])
+    client = nc.Neo4jClient(uri=server.uri, user="neo4j", password="pw")
+    try:
+        assert client.connect() is True
+        assert getattr(client, merge)(_synced_entity(kind), source_id="mitre_attck") is True
+        (node,) = _statements(server, f"MERGE (n:{label} {{")
+        (edge,) = [p for p in _statements(server, SINGLE_EDGE) if "raw_data" in p]
+        return node, edge["raw_data"]
+    finally:
+        client.close()
+        server.close()
+
+
+def without_mitre_id(raw_data: str) -> str:
+    """``raw_data`` without its ``mitre_id``, as a record written before the sync carried the id."""
+    return json.dumps({k: v for k, v in json.loads(raw_data).items() if k != "mitre_id"})
+
+
 class TestEntityDescription:
     @pytest.mark.parametrize("kind", ["technique", "subtechnique", "actor", "malware"])
     def test_a_long_description_is_stored_capped(self, bolt, kind):
@@ -347,3 +374,100 @@ class TestTodaysTexts:
         assert CVE_DESCRIPTIONS.record("walks rb_threads[c...", "nvd").text == "walks rb_threads[c..."
         assert CVE_DESCRIPTIONS.capped("walks rb_threads[c...") == "walks rb_threads[c..."
         assert CVE_DESCRIPTIONS.capped(None) is None and ENTITY_DESCRIPTIONS.capped(5) == 5
+
+
+# ---------------------------------------------------------------------------------------------- ATT&CK ids
+class TestAttackIdsAfterTheCap:
+    """The cap strips the link to the object itself that ATT&CK's description opens with, in ``raw_data`` too. The
+    readers of the ATT&CK id take it from the node's ``mitre_id``, else the record's, before that link, so the
+    twin merge and the canonical threat-actor reference keep every id on a graph this sync builds. End to end:
+    from the record the writer stores to each reader's answer."""
+
+    def test_the_written_record_has_the_id_and_no_link(self):
+        assert _attack_text("S0154").startswith("[Cobalt Strike](https://attack.mitre.org/software/S0154)")
+        node, raw = written_attack_record("malware")
+        record = json.loads(raw)
+        assert "](" not in record["description"] and record["description"].startswith("Cobalt Strike is")
+        assert (node["mitre_id"], record["mitre_id"]) == ("S0154", "S0154")
+        node, raw = written_attack_record("actor")
+        record = json.loads(raw)
+        assert "attack.mitre.org" not in record["description"] and "attack.mitre.org" not in node["ranked_description"]
+        assert (node["mitre_id"], record["mitre_id"]) == ("G0007", "G0007")
+
+    def test_attack_software_id_reads_the_ids(self):
+        node, raw = written_attack_record("malware")
+        assert attack_software_id(raw, "cobalt strike") == "S0154"
+        assert attack_software_id(without_mitre_id(raw), "cobalt strike", node["mitre_id"]) == "S0154"
+        # Not vacuous: the stripped description gives no id.
+        assert attack_software_id(without_mitre_id(raw), "cobalt strike") is None
+        assert attack_software_id(None, None, " s0154 ") == "S0154"
+        assert attack_software_id(json.dumps({"mitre_id": "T1059"}), None, "G0007") is None
+
+    @staticmethod
+    def _twin_client(attack_rows):
+        def run(query, **_kwargs):
+            if "d.name =~ $suffixed" in query:
+                # Its base name is no node's: only the id leads to the MITRE node.
+                return iter([{"name": "cobaltstrike", "aliases": ["CobaltStrike - S0154"]}])
+            if "AS attack_raw" in query:
+                assert "c.mitre_id AS attack_id" in query
+                return iter(attack_rows)
+            if "b.name IN $bases" in query:
+                return iter([])
+            raise AssertionError(f"unexpected query: {query[:120]!r}")
+
+        session = MagicMock()
+        session.run = run
+        session.__enter__ = lambda s: s
+        session.__exit__ = lambda *a: False
+        client = MagicMock()
+        client.driver.session.return_value = session
+        return client
+
+    @pytest.mark.parametrize("read", ["node", "record", "neither"])
+    def test_the_twin_merge_finds_the_mitre_node_by_its_id(self, monkeypatch, read):
+        node, raw = written_attack_record("malware")
+        attack_id, record = {
+            "node": (node["mitre_id"], without_mitre_id(raw)),
+            "record": (None, raw),
+            "neither": (None, without_mitre_id(raw)),
+        }[read]
+        monkeypatch.setenv(enrichment_jobs._MALWARE_TWIN_MERGE_ENV_FLAG, "false")  # a dry run: the plan only
+        result = enrichment_jobs.merge_malware_attack_twins(
+            self._twin_client([{"name": node["name"], "attack_id": attack_id, "attack_raw": record}])
+        )
+        assert result["candidates"] == 1
+        # "neither" is a record written before the sync carried the id: the stripped description gives none.
+        assert result["no_target"] == (1 if read == "neither" else 0)
+
+    @staticmethod
+    def _reference_builder():
+        path = TESTS.parent / "scripts" / "build_canonical_threat_actors.py"
+        spec = importlib.util.spec_from_file_location("build_canonical_threat_actors_sync_text_caps", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = module  # dataclasses resolve their annotations through sys.modules
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_actor_reference_export_keeps_the_group_id(self):
+        builder = self._reference_builder()
+        assert "a.mitre_id END AS attack_mitre_id" in builder._EXPORT_CYPHER
+        node, raw = written_attack_record("actor")
+        row = {
+            "name": node["name"],
+            "aliases": None,
+            "source": ["mitre_attck"],
+            "attack_raw": raw,
+            "attack_mitre_id": node["mitre_id"],
+            "attack_description": node["ranked_description"][:300],
+        }
+        assert builder.export_rows([row])[0]["attack_id"] == "G0007"
+        assert builder.export_rows([dict(row, attack_raw=without_mitre_id(raw))])[0]["attack_id"] == "G0007"
+        assert builder.export_rows([dict(row, attack_mitre_id=None)])[0]["attack_id"] == "G0007"
+        # Not vacuous: neither the stripped delivered description nor the node's gives the id.
+        assert (
+            builder.export_rows([dict(row, attack_mitre_id=None, attack_raw=without_mitre_id(raw))])[0]["attack_id"]
+            is None
+        )
+        assert builder.export_rows([dict(row, attack_mitre_id="APT28")])[0]["attack_id"] == "G0007"

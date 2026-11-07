@@ -114,8 +114,9 @@ The build prints the counts, the rule effects and every override decision. With
 ``--export-graph-actors PATH`` reads every ``ThreatActor`` node over the Neo4j HTTP Query API v2
 in read mode: name, aliases, sources, relationship count, pulse count and malware names. For an
 ATT&CK node it also reads the record MITRE delivered (its SOURCED_FROM edge to the ATT&CK source):
-the delivered aliases (``attack_aliases``) and the ATT&CK group id the delivered description links
-to (else the id the node's own description links to). It builds the request with
+the delivered aliases (``attack_aliases``) and the ATT&CK group id: the node's ``mitre_id``, else the
+delivered record's ``mitre_id``, else the id the delivered description links to, else the id the node's
+own description links to (the links only an older record holds: the sync strips the markup). It builds the request with
 ``src/neo4j_http_endpoint.py``, like ``scripts/verify_fresh_baseline.py``: ``NEO4J_HTTP_URL``, then
 ``NEO4J_HTTP`` (neither set: the local Compose Neo4j ``http://127.0.0.1:7474``; there is no remote
 default), ``NEO4J_DATABASE``, ``NEO4J_USER``, ``NEO4J_PASSWORD``. Graph-derived files must be written
@@ -367,7 +368,7 @@ class LoadedAttackGroup:
 
     key: str
     name: str  # display name: the alias spelled like the key, else the key
-    attack_id: Optional[str]  # from the delivered (else the node's) description link, when it has one
+    attack_id: Optional[str]  # the node's or the delivered record's mitre_id, else a description link
     aliases: Tuple[str, ...]  # synonym keys (``clean_synonym``) of the delivered aliases, without the key
 
 
@@ -2017,6 +2018,9 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
 # record ranks first, ``description_ranking``; ``description_source`` names it since 2026-10-16); a
 # graph built before that may still hold
 # the text of the feed merged last there, so the group link is read from the delivered record first.
+# The group id itself is the node's ``mitre_id`` (set on every write of an ATT&CK attribute that carries
+# it), else the delivered record's; the description links hold it only on an older record, since the sync
+# strips a description's markup (``text_caps``).
 _EXPORT_CYPHER = """
 MATCH (a:ThreatActor)
 OPTIONAL MATCH (a)-[sf:SOURCED_FROM]->(:Source {source_id: $mitre_source})
@@ -2026,7 +2030,8 @@ RETURN a.name AS name, a.aliases AS aliases, a.source AS source,
        COUNT { UNWIND coalesce(a.pulse_ids, []) AS p RETURN DISTINCT p } AS pulses,
        [(m:Malware)-[:ATTRIBUTED_TO]->(a) | m.name] + [(a)-[:USES_MALWARE]->(m:Malware) | m.name] AS malware,
        CASE WHEN $mitre_source IN coalesce(a.source, []) THEN left(coalesce(a.description, ''), 300) END AS attack_description,
-       CASE WHEN $mitre_source IN coalesce(a.source, []) THEN attack_raw END AS attack_raw
+       CASE WHEN $mitre_source IN coalesce(a.source, []) THEN attack_raw END AS attack_raw,
+       CASE WHEN $mitre_source IN coalesce(a.source, []) THEN a.mitre_id END AS attack_mitre_id
 ORDER BY name
 """
 
@@ -2046,16 +2051,23 @@ def _http_query(
     return req.full_url, [dict(zip(data["fields"], row, strict=True)) for row in data["values"]]
 
 
-def attack_delivery(raw_data: Any) -> Tuple[Optional[List[str]], str]:
-    """``(aliases, description)`` of the record MITRE delivered for an ATT&CK node (the JSON in its
-    SOURCED_FROM edge's ``raw_data``); ``(None, "")`` when there is none or it is not readable."""
+def _delivered_document(raw_data: Any) -> Optional[Mapping[str, Any]]:
+    """The record MITRE delivered for an ATT&CK node (the JSON in its SOURCED_FROM edge's ``raw_data``), or
+    None when there is none or it is not readable."""
     if not isinstance(raw_data, str):
-        return None, ""
+        return None
     try:
         doc = json.loads(raw_data)
     except ValueError:
-        return None, ""
-    if not isinstance(doc, Mapping):
+        return None
+    return doc if isinstance(doc, Mapping) else None
+
+
+def attack_delivery(raw_data: Any) -> Tuple[Optional[List[str]], str]:
+    """``(aliases, description)`` of the record MITRE delivered for an ATT&CK node (the JSON in its
+    SOURCED_FROM edge's ``raw_data``); ``(None, "")`` when there is none or it is not readable."""
+    doc = _delivered_document(raw_data)
+    if doc is None:
         return None, ""
     aliases = doc.get("aliases")
     description = doc.get("description")
@@ -2065,16 +2077,38 @@ def attack_delivery(raw_data: Any) -> Tuple[Optional[List[str]], str]:
     )
 
 
+def _group_id(value: Any) -> Optional[str]:
+    """``value`` trimmed and upper-cased when it is an ATT&CK group id (``G0007``), else None."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().upper()
+    return candidate if _ATTACK_GROUP_ID_RE.match(candidate) else None
+
+
+def export_attack_id(raw: Mapping[str, Any], delivered_description: str) -> Optional[str]:
+    """The ATT&CK group id of an export row: the node's ``mitre_id`` (``attack_mitre_id``), else the
+    delivered record's ``mitre_id``, else the id the delivered description links to, else the id the node's
+    description links to (the links only an older record holds: the sync strips a description's markup)."""
+    found = _group_id(raw.get("attack_mitre_id"))
+    if found:
+        return found
+    doc = _delivered_document(raw.get("attack_raw"))
+    found = _group_id(doc.get("mitre_id")) if doc is not None else None
+    if found:
+        return found
+    match = _ATTACK_GROUP_URL_RE.search(delivered_description) or _ATTACK_GROUP_URL_RE.search(
+        raw.get("attack_description") or ""
+    )
+    return match.group(1) if match else None
+
+
 def export_rows(raw_rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """Export rows from the query rows: malware names de-duplicated; for an ATT&CK node the aliases
-    MITRE delivered (``attack_aliases``) and the ATT&CK group id its delivered description links to,
-    else the id the node's description links to (no description is kept)."""
+    MITRE delivered (``attack_aliases``) and the ATT&CK group id (``export_attack_id``; no description is
+    kept)."""
     rows = []
     for raw in raw_rows:
         attack_aliases, delivered_description = attack_delivery(raw.get("attack_raw"))
-        match = _ATTACK_GROUP_URL_RE.search(delivered_description) or _ATTACK_GROUP_URL_RE.search(
-            raw.get("attack_description") or ""
-        )
         rows.append(
             {
                 "name": raw.get("name"),
@@ -2084,7 +2118,7 @@ def export_rows(raw_rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
                 "relationships": raw.get("relationships"),
                 "pulses": raw.get("pulses"),
                 "malware": sorted({m for m in (raw.get("malware") or []) if isinstance(m, str)}),
-                "attack_id": match.group(1) if match else None,
+                "attack_id": export_attack_id(raw, delivered_description),
             }
         )
     return rows
