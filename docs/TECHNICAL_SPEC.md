@@ -39,7 +39,7 @@ Auth:    Configured via environment variables
   // other source, named in description_source (src/description_ranking.py). A MISP metadata block
   // (OTX_META:{...}, NVD_META:{...}) and an OTX pulse reference ("Referenced in OTX pulse: <name>")
   // are never a description. At most 1,000 characters, markup stripped, cut at a sentence or word
-  // end (src/text_caps.py); MISP keeps the source's text.
+  // end (src/text_caps.py); MISP keeps the text the collector sent.
   description: STRING,      // Vulnerability description (at most 1,000 characters)
   description_source: STRING, // The source of description ("nvd", "cisa_kev", ...)
   zone: LIST,               // Zone(s): ['finance'], ['energy', 'global'] — always a list
