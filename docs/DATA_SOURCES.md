@@ -71,7 +71,7 @@
 
 **What we get:**
 - SSL certificate SHA1 fingerprints, stored as MISP `x509-fingerprint-sha1` attributes and `x509-fingerprint-sha1` Indicators
-- Listing reason (for example `Dridex C&C`), written to MISP verbatim with its role (`threat_type`: `botnet_cc` for "C&C", `payload_delivery` for "malware distribution") and its family part (`listing_family`, none for the generic "Malware C&C") kept apart, and the certificate's page as `reference`. No `malware_family` is emitted ([COLLECTORS.md § 7](COLLECTORS.md#ssl-blacklist-what-reaches-the-graph))
+- Listing reason (for example `Dridex C&C`), written to MISP verbatim with its role (`threat_type`: `botnet_cc` for "C&C", `payload_delivery` for "malware distribution") and its family part (`listing_family`, the list's own label, which may name an actor or a product; none for a category word such as "Malware C&C" or "Ransomware C&C") kept apart, and the certificate's page as `reference`. No `malware_family` is emitted and no graph link is made from the listing family ([COLLECTORS.md § 7](COLLECTORS.md#ssl-blacklist-what-reaches-the-graph))
 
 **How classified:**
 - Keyword detector on the listing reason; no malware family is mapped to a sector by name (Method 2 below), so the rows are tagged Global
@@ -245,7 +245,7 @@ MISP is the staging hub every collector pushes into (361,546 attributes after th
 **What we get:**
 - C&C server IPs
 - Malware family (QakBot, BumbleBee, TrickBot, Emotet, Dridex, Pikabot) — carried to MISP and Neo4j, where it links the indicator to the `Malware` node (`INDICATES`)
-- Last-online date as `Indicator.last_online` and as the source-reported last-seen time; every port, every family and the status kept with the source record (in MISP as `ports`, `families`, `c2_status`). Servers not seen online in the last 30 days are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
+- Last-online date as `Indicator.last_online` and as the source-reported last-seen time; every port, every family and the status kept with the source record (in MISP as `ports`, `families`, `c2_status`, as the run that first wrote the address read them). Servers not seen online in the last 30 days are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
 
 **Per-run cap:** a run reports every server of the list it reads (the 30-day list daily, the complete history on a baseline), up to `EDGEGUARD_FEODO_MAX_PER_RUN` (default 15,000 servers, about twice the history). A run whose list is longer keeps the servers seen online most recently and logs a warning.
 

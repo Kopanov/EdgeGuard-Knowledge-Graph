@@ -338,7 +338,7 @@ def test_sslbl_and_abuseipdb_blocks_pass_the_sync(path) -> None:
     }
     _attr, _sync_item, row = path(sslbl)
     assert row["reference"] == sslbl["reference"]
-    assert "malware_family" not in row, "the family of a listing reason is linked by the family resolver only"
+    assert "malware_family" not in row, "the family of a listing reason is kept in MISP only, never linked"
 
     abuse = {
         "indicator_type": "ipv4",
