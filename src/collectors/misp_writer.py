@@ -19,11 +19,12 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 import requests
 import urllib3
 
+import report_records  # noqa: E402  — report records (Event Reports), 2026-11-07
 import source_registry  # noqa: E402  — single source of truth for source→MISP-tag mapping (chip 5a)
 from attack_values import attack_object_id, attack_value_key, format_attack_value
 from collectors.collector_utils import TransientServerError, retry_after_sleep_seconds, retry_with_backoff
@@ -39,6 +40,7 @@ from config import (
     misp_refresh_last_seen_days,
     misp_refresh_max_per_run,
     misp_refresh_max_seconds,
+    misp_report_throttle_seconds,
     otx_industry_zones,
 )
 from cvss_selection import cvss_rating_tag, normalize_attack_vector
@@ -1191,7 +1193,8 @@ class StoredCopy(NamedTuple):
     last_seen: Optional[str]
 
 
-# 2026-10: the events ``_get_or_create_event`` creates (``EdgeGuard-{source}-{date}``, ``-part<N>``).
+# 2026-10: the events ``_get_or_create_event`` creates (``EdgeGuard-{source}-{date}``, ``-part<N>``; since 2026-11-07
+# also ``-reports``, which holds report records only).
 # Only copies in them are refreshed: the sync reads EdgeGuard's events, and a copy that keeps the
 # source tag in an analyst's or a federated organisation's event is not EdgeGuard's to edit.
 _OWN_EVENT_PREFIX = "EdgeGuard-"
@@ -1306,6 +1309,12 @@ def _event_name(source: str, date: str, part: int = 1) -> str:
     ``-`` field of the name, so the suffix does not move it."""
     name = f"{_OWN_EVENT_PREFIX}{source}-{date}"
     return name if part <= 1 else f"{name}-part{part}"
+
+
+def _report_event_name(source: str, date: str) -> str:
+    """``EdgeGuard-<source>-<date>-reports`` (2026-11-07): the companion event that takes the new report records of
+    a day whose event holds more attributes than ``_event_split_above`` allows (``MISPWriter.push_reports``)."""
+    return f"{_event_name(source, date)}{report_records.REPORT_EVENT_SUFFIX}"
 
 
 def _note_stored_copy(
@@ -1577,6 +1586,96 @@ def rate_limited(max_per_second: float = 2.0):
         return wrapper
 
     return decorator
+
+
+# --------------------------------------------------------------------------- #
+# Report records (2026-11-07): MISPWriter.push_reports and report_preflight
+# --------------------------------------------------------------------------- #
+
+# A push of report records stops after this many records in a row failed because MISP answered HTTP 5xx or did not
+# answer (each after one more try); the records not tried are listed as skipped, so a MISP that is down costs a few
+# requests and not two per record.
+REPORT_MAX_CONSECUTIVE_FAILURES = 5
+
+
+class _ReportAnswer(NamedTuple):
+    """One report request: the HTTP status (None when MISP did not answer), the JSON body (None when the answer
+    was no JSON) and the problem as the log names it (status and tries; never the body)."""
+
+    status: Optional[int]
+    body: Any
+    problem: str
+
+    @property
+    def transient(self) -> bool:
+        return self.status is None or self.status >= 500
+
+
+class ReportPreflight(NamedTuple):
+    """The read-only check of the writer key for report records (``MISPWriter.report_preflight``)."""
+
+    ok: bool  # no problem found
+    problems: Tuple[str, ...]  # what keeps reports or their tags from being written as intended
+    org_id: Optional[str]  # the organisation of the writer key (``User.org_id``)
+    perm_tagger: Optional[bool]  # None: the role could not be read
+    perm_tag_editor: Optional[bool]
+    perm_sync_authoritative: Optional[bool]
+    tags_checked: Tuple[str, ...]  # the tags the writer sets on reports
+    missing_tags: Tuple[str, ...]  # those of them this MISP does not hold
+
+
+def report_tag_names() -> Tuple[str, ...]:
+    """Every tag ``push_reports`` may set on a report: ``EdgeGuard``, the source tags of the report sources and
+    ``tlp:<level>`` for each TLP level a record can state."""
+    sources = tuple(MISPWriter.SOURCE_TAGS[s] for s in report_records.REPORT_SOURCES)
+    return ("EdgeGuard", *sources, *(f"tlp:{level}" for level in report_records.TLP_LEVELS))
+
+
+def _role_flag(role: Dict[str, Any], key: str) -> Optional[bool]:
+    """A ``Role.perm_*`` flag as MISP answers it (``true`` / ``false``, or ``1`` / ``0``); None when absent."""
+    if key not in role:
+        return None
+    value = role.get(key)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true")
+    return bool(value)
+
+
+def _writer_org_of(body: Any) -> Optional[str]:
+    """The organisation id in an answer of ``GET /users/view/me`` (``User.org_id``, else ``Organisation.id``)."""
+    if not isinstance(body, dict):
+        return None
+    for holder, key in (("User", "org_id"), ("Organisation", "id")):
+        part = body.get(holder)
+        value = part.get(key) if isinstance(part, dict) else None
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _report_deleted(report: Dict[str, Any]) -> bool:
+    """Whether MISP holds the report as soft-deleted (``deleted`` true; MISP 2.5 answers a bool)."""
+    return report.get("deleted") not in (False, 0, "0")
+
+
+def _stored_report_problem(body: Any, uuid: str, content_sha: str, name: str) -> Optional[str]:
+    """Why MISP's answer to an add or an edit does not show the report as sent, or None when it does (live checks
+    L1, L2 and L8 of 2026-11-07): the answer must hold ``EventReport`` with the uuid sent, the content's SHA-256,
+    the name sent and ``deleted`` false. A failed edit answers HTTP 200 ``[]``, a failed tag change HTTP 200
+    ``{"saved": false}``, and a database without strict SQL mode cuts a value without an error."""
+    report = body.get("EventReport") if isinstance(body, dict) else None
+    if not isinstance(report, dict):
+        return "the answer holds no report"
+    if str(report.get("uuid") or "") != uuid:
+        return "the answer names another report"
+    content = report.get("content")
+    if not isinstance(content, str) or report_records.content_sha256(content) != content_sha:
+        return "MISP holds other content"
+    if report.get("name") != name:
+        return "MISP holds another name"
+    if _report_deleted(report):
+        return "MISP holds the report as deleted"
+    return None
 
 
 class MISPWriter:
@@ -2336,11 +2435,14 @@ class MISPWriter:
         raise MispTransientError(f"MISP {context} failed after {made} attempt(s): {last_problem}")
 
     @retry_with_backoff(max_retries=4, base_delay=10.0, give_up=_misp_retry_gives_up)
-    def _get_or_create_event(self, source: str, date: str = None, part: int = 1, **_kwargs) -> Optional[str]:
+    def _get_or_create_event(
+        self, source: str, date: str = None, part: int = 1, *, reports: bool = False, **_kwargs
+    ) -> Optional[str]:
         """Get or create a MISP event for a source/date combination.
 
         Event naming: ``EdgeGuard-{source}-{date}``, ``-part{N}`` appended from part 2 (2026-10,
-        ``_event_split_above``).  Zone classification lives
+        ``_event_split_above``); with *reports* (2026-11-07) the companion event of the day's report records,
+        ``EdgeGuard-{source}-{date}-reports`` (``push_reports``).  Zone classification lives
         on attribute-level tags (``zone:Finance``, ``zone:Healthcare``), not in
         the event name — a single event can contain multi-zone attributes.
 
@@ -2354,7 +2456,7 @@ class MISPWriter:
         source = sanitize_value(source, max_length=50)
 
         date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        event_name = _event_name(source, date, part)
+        event_name = _report_event_name(source, date) if reports else _event_name(source, date, part)
 
         try:
             rows = self._restsearch_events_for_name(event_name)
@@ -5122,6 +5224,446 @@ class MISPWriter:
                 ind["tag"] = source
 
         return self.push_items(indicators, batch_size)
+
+    # ------------------------------------------------------------------ report records (2026-11-07)
+
+    def push_reports(
+        self,
+        source: str,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        liveness_callback: Optional[Callable[[], None]] = None,
+        deadline: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Write each report record of *source* (``alienvault_otx`` or ``cisa_ics``) as one MISP Event Report.
+
+        *records*: records ``report_records.build_record`` (or ``otx_pulse_record``) made; each is normalised
+        again, and one that is not a valid record of *source* fails permanently. Records with the same
+        ``record_ref`` are written once: the newest ``last_modified``, the first among equals. The report's
+        uuid is ``report_records.record_uuid`` (the graph node's uuid), its content ``render_content``.
+
+        The day event is the source's ``EdgeGuard-<source>-<date>`` (``_get_or_create_event``, with its lock);
+        when that event holds more attributes than ``EDGEGUARD_MISP_EVENT_SPLIT_ABOVE`` (``_event_split_above``,
+        0 = never), new records go to ``EdgeGuard-<source>-<date>-reports``. Per record (docs/MISP_SOURCES.md,
+        "Report records (Event Reports)"):
+
+        1. ``POST /eventReports/add/<event id>`` with uuid, name (``report_name``, at most 255 characters),
+           content, distribution (``report_distribution``: 0 for amber and red, else 5) and the tags
+           ``EdgeGuard``, the source tag and ``tlp:<level>``. It is written only when the answer shows
+           ``EventReport`` with that uuid, the content's SHA-256, that name and ``deleted`` false.
+        2. On any HTTP 403, ``GET /eventReports/view/<uuid>``: a report in an event that is not one of the
+           source's EdgeGuard events (``report_records.report_event_info_pattern``) of the writer key's
+           organisation (``GET /users/view/me``) is a permanent failure (``[REPORT-UUID-FOREIGN]``); a deleted
+           report is respected, never restored or edited (``reports_deleted_in_misp``); a stored meta block with
+           the same digest, or with a later ``last_modified``, is left as it is (``reports_unchanged``);
+           otherwise ``POST /eventReports/edit/<uuid>`` with name, content and distribution, checked as the add.
+        3. After an edit that changes the record's TLP, ``removeTag`` of the old ``tlp:`` tag and ``addTag`` of
+           the new one, by tag id, each checked for ``saved``; a failure counts in ``report_tag_drift`` and
+           does not fail the record (the reader never relies on report tags).
+
+        Reports never travel in ``POST /events/<id>``. These requests are not wrapped in the writer's retry
+        decorator: an HTTP 4xx is never tried again, an HTTP 5xx, a timeout or a connection error once more.
+        After ``REPORT_MAX_CONSECUTIVE_FAILURES`` records in a row failed that way, the rest are skipped.
+        ``EDGEGUARD_MISP_REPORT_THROTTLE_SEC`` is the pause between records. *liveness_callback* (default the
+        writer's) is called before each record, and its exception propagates. *deadline*: a ``time.monotonic()``
+        value; no record starts when its pause would end at or after it. The logs carry uuid, ``record_ref``,
+        lengths and SHA-256 only, never content or MISP's answers. ``last_push_*`` is not written.
+
+        Returns the stats: ``reports_added``, ``reports_updated``, ``reports_unchanged``, ``reports_failed``
+        (``reports_foreign`` among them), ``reports_deleted_in_misp``, ``report_tag_drift``,
+        ``reports_skipped``; ``settled`` (the ``record_ref`` of every record MISP now holds as the record says,
+        or deleted and respected), ``failed`` (``{"record_ref", "reason", "permanent"}``), ``skipped``
+        (``{"record_ref", "reason"}``, not tried) and ``event_id``. ``report_records.note_report_push`` keeps
+        the failed and skipped records on the source's ``report_pending`` list.
+        """
+        label = report_records.report_label(source)
+        stats: Dict[str, Any] = {
+            "source": source,
+            "event_id": None,
+            "reports_added": 0,
+            "reports_updated": 0,
+            "reports_unchanged": 0,
+            "reports_failed": 0,
+            "reports_deleted_in_misp": 0,
+            "reports_foreign": 0,
+            "report_tag_drift": 0,
+            "reports_skipped": 0,
+            "settled": [],
+            "failed": [],
+            "skipped": [],
+        }
+        chosen: Dict[str, Dict[str, Any]] = {}
+        for given in records or []:
+            try:
+                record = report_records.build_record(source, given)
+            except (ValueError, TypeError) as e:
+                ref = given.get("record_ref") if isinstance(given, Mapping) else None
+                self._report_failed(stats, ref if isinstance(ref, str) else "<invalid>", f"invalid record: {e}", True)
+                continue
+            ref = record["record_ref"]
+            kept = chosen.get(ref)
+            if kept is None or (
+                report_records.iso_datetime(record["last_modified"]) or datetime.min.replace(tzinfo=timezone.utc)
+            ) > (report_records.iso_datetime(kept["last_modified"]) or datetime.min.replace(tzinfo=timezone.utc)):
+                chosen[ref] = record
+        todo = list(chosen.values())
+        if not todo:
+            return self._log_report_stats(stats) if stats["reports_failed"] else stats
+        self._arm_push_cap()
+        if deadline is not None and time.monotonic() >= deadline:
+            self._skip_reports(stats, todo, "the push's deadline came before the first record")
+            return self._log_report_stats(stats)
+        event_id, problem = self._report_event_id(source)
+        if not event_id:
+            self._skip_reports(stats, todo, problem)
+            return self._log_report_stats(stats)
+        stats["event_id"] = event_id
+        source_tag = self.SOURCE_TAGS.get(source, source)
+        callback = liveness_callback if liveness_callback is not None else getattr(self, "liveness_callback", None)
+        pause = misp_report_throttle_seconds()
+        in_a_row = 0
+        for position, record in enumerate(todo):
+            wait = pause if position > 0 else 0.0
+            if deadline is not None and time.monotonic() + wait >= deadline:
+                self._skip_reports(stats, todo[position:], "the push's deadline came")
+                break
+            if in_a_row >= REPORT_MAX_CONSECUTIVE_FAILURES:
+                self._skip_reports(
+                    stats,
+                    todo[position:],
+                    f"MISP kept failing: {in_a_row} records in a row answered HTTP 5xx or nothing",
+                )
+                break
+            if wait:
+                time.sleep(wait)
+            if callback is not None:
+                callback()
+            kind, reason, transient = self._push_report(event_id, source, label, source_tag, record, stats)
+            ref = record["record_ref"]
+            if kind in ("added", "updated", "unchanged", "deleted"):
+                stats["reports_deleted_in_misp" if kind == "deleted" else f"reports_{kind}"] += 1
+                stats["settled"].append(ref)
+                in_a_row = 0
+            elif kind == "foreign":
+                stats["reports_foreign"] += 1
+                self._report_failed(stats, ref, reason, True)
+                in_a_row = 0
+            else:
+                self._report_failed(stats, ref, reason, False)
+                in_a_row = in_a_row + 1 if transient else 0
+        return self._log_report_stats(stats)
+
+    @staticmethod
+    def _report_failed(stats: Dict[str, Any], ref: str, reason: str, permanent: bool) -> None:
+        stats["reports_failed"] += 1
+        stats["failed"].append({"record_ref": ref, "reason": reason, "permanent": permanent})
+
+    @staticmethod
+    def _skip_reports(stats: Dict[str, Any], records: Sequence[Mapping[str, Any]], reason: str) -> None:
+        stats["reports_skipped"] += len(records)
+        stats["skipped"].extend({"record_ref": r["record_ref"], "reason": reason} for r in records)
+        logger.warning("[REPORTS] %s: %d record(s) not pushed: %s", stats["source"], len(records), reason)
+
+    @staticmethod
+    def _log_report_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
+        log = (
+            logger.warning
+            if stats["reports_failed"] or stats["reports_skipped"] or stats["report_tag_drift"]
+            else logger.info
+        )
+        log(
+            "[REPORTS] %s: %d added, %d updated, %d unchanged, %d deleted in MISP (left as they are), %d failed "
+            "(%d in a foreign event), %d skipped, %d tag change(s) failed; event %s",
+            stats["source"],
+            stats["reports_added"],
+            stats["reports_updated"],
+            stats["reports_unchanged"],
+            stats["reports_deleted_in_misp"],
+            stats["reports_failed"],
+            stats["reports_foreign"],
+            stats["reports_skipped"],
+            stats["report_tag_drift"],
+            stats["event_id"],
+        )
+        return stats
+
+    def _report_event_id(self, source: str) -> Tuple[Optional[str], str]:
+        """The event new records of *source* go to, and the problem when there is none: the day event, or its
+        ``-reports`` companion when the day event holds more than ``_event_split_above`` attributes (0 = never)."""
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            day_event = self._get_or_create_event(source, date)
+        except Exception as e:
+            return None, f"the lookup of the day event failed ({type(e).__name__})"
+        if not day_event:
+            return None, "the day event could not be looked up or created"
+        split = _event_split_above()
+        size = self.__dict__.get("_event_sizes", {}).get(str(day_event))
+        if split <= 0 or not isinstance(size, int) or size <= split:
+            return str(day_event), ""
+        try:
+            companion = self._get_or_create_event(source, date, reports=True)
+        except Exception as e:
+            return None, f"the lookup of the reports event failed ({type(e).__name__})"
+        if not companion:
+            return None, "the reports event could not be looked up or created"
+        logger.info(
+            "[REPORTS] %s: the day event %s holds %d attributes (EDGEGUARD_MISP_EVENT_SPLIT_ABOVE=%d); new records "
+            "go to %s (event %s)",
+            source,
+            day_event,
+            size,
+            split,
+            _report_event_name(source, date),
+            companion,
+        )
+        return str(companion), ""
+
+    def _report_request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> _ReportAnswer:
+        """One report request, outside the writer's retry decorator: HTTP 5xx, a timeout or a connection error is
+        tried once more, HTTP 4xx never. The answer's body is returned, never logged."""
+        url = f"{self.url}{path}"
+        timeout = (self.CONNECT_TIMEOUT, self.READ_TIMEOUT)
+        problem = ""
+        for attempt in (1, 2):
+            tries = " (tried twice)" if attempt == 2 else ""
+            try:
+                if method == "GET":
+                    response = self.session.get(url, verify=self.verify_ssl, timeout=timeout)
+                else:
+                    response = self.session.post(url, json=payload, verify=self.verify_ssl, timeout=timeout)
+            except requests.exceptions.RequestException as e:
+                problem = f"no answer ({type(e).__name__}){tries}"
+                if attempt == 1:
+                    continue
+                return _ReportAnswer(None, None, problem)
+            status = response.status_code
+            if status >= 500 and attempt == 1:
+                continue
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            return _ReportAnswer(status, body, f"HTTP {status}{tries}")
+        return _ReportAnswer(None, None, problem)  # pragma: no cover - the loop always returns
+
+    def _report_writer_org(self) -> Tuple[Optional[str], _ReportAnswer]:
+        """The organisation id of the writer key (``GET /users/view/me``), read once per writer."""
+        cached = self.__dict__.get("_report_writer_org_id")
+        if cached:
+            return cached, _ReportAnswer(200, None, "HTTP 200")
+        answer = self._report_request("GET", "/users/view/me")
+        org = _writer_org_of(answer.body) if answer.status == 200 else None
+        if org:
+            self.__dict__["_report_writer_org_id"] = org
+        return org, answer
+
+    def _report_tag_ids(self, names: Sequence[str]) -> Dict[str, str]:
+        """Tag id per tag name, for the names this MISP holds (``POST /tags/search/x/1``, an exact match; ids are
+        kept per writer). A tag is addressed by id: MISP reads ``tlp:white`` in a path as a named parameter."""
+        cache: Dict[str, str] = self.__dict__.setdefault("_report_tag_id_cache", {})
+        wanted = [n for n in names if n.lower() not in cache]
+        if wanted:
+            answer = self._report_request("POST", "/tags/search/x/1", {"tag": wanted})
+            rows = answer.body if answer.status == 200 and isinstance(answer.body, list) else []
+            for row in rows:
+                tag = row.get("Tag") if isinstance(row, dict) else None
+                if isinstance(tag, dict) and isinstance(tag.get("name"), str) and tag.get("id") is not None:
+                    cache[tag["name"].lower()] = str(tag["id"])
+        return {n: cache[n.lower()] for n in names if n.lower() in cache}
+
+    def _swap_report_tlp(self, report_id: str, old: Optional[str], new: str) -> bool:
+        """``removeTag`` of ``tlp:<old>`` (when known), then ``addTag`` of ``tlp:<new>``, by tag id; True when MISP
+        answered ``saved`` true to each (a tag already attached answers ``saved`` true, "0 tags added")."""
+        names = [f"tlp:{level}" for level in (old, new) if level]
+        ids = self._report_tag_ids(names)
+        steps = ([("removeTag", f"tlp:{old}")] if old else []) + [("addTag", f"tlp:{new}")]
+        for action, name in steps:
+            tag_id = ids.get(name)
+            if tag_id is None:
+                return False
+            answer = self._report_request("POST", f"/eventReports/{action}/{report_id}/{tag_id}", {})
+            if answer.status != 200 or not isinstance(answer.body, dict) or answer.body.get("saved") is not True:
+                return False
+        return True
+
+    def _push_report(
+        self, event_id: str, source: str, label: str, source_tag: str, record: Dict[str, Any], stats: Dict[str, Any]
+    ) -> Tuple[str, str, bool]:
+        """Write one record (``push_reports``, steps 1 to 3). Returns ``(outcome, reason, transient)``: the outcome
+        ``added``, ``updated``, ``unchanged``, ``deleted``, ``foreign`` or ``failed``; the reason of a failure;
+        whether it was MISP answering HTTP 5xx or nothing."""
+        ref = record["record_ref"]
+        uuid = report_records.report_uuid(ref, label)
+        content = report_records.render_content(record)
+        sha = report_records.content_sha256(content)
+        name = report_records.report_name(record)
+        distribution = report_records.report_distribution(record)
+        sent = f"uuid={uuid} record_ref={ref} content_chars={len(content)} sha256={sha[:16]}"
+        add = self._report_request(
+            "POST",
+            f"/eventReports/add/{event_id}",
+            {
+                "EventReport": {
+                    "uuid": uuid,
+                    "name": name,
+                    "content": content,
+                    "distribution": distribution,
+                    "Tag": report_records.report_tags(record, source_tag),
+                }
+            },
+        )
+        if add.status == 200:
+            problem = _stored_report_problem(add.body, uuid, sha, name)
+            if problem is None:
+                logger.debug("[REPORT-ADDED] %s event=%s", sent, event_id)
+                return "added", "", False
+            logger.warning("[REPORT-FAILED] %s: the add answered HTTP 200 but %s", sent, problem)
+            return "failed", f"the add answered HTTP 200 but {problem}", False
+        if add.status != 403:
+            logger.warning("[REPORT-FAILED] %s: the add answered %s", sent, add.problem)
+            return "failed", f"the add answered {add.problem}", add.transient
+        # Any 403: the uuid may be taken (this record, revised or not, deleted, or a foreign report), or the add
+        # was refused for another reason; the report as MISP holds it decides.
+        view = self._report_request("GET", f"/eventReports/view/{uuid}")
+        stored = view.body.get("EventReport") if view.status == 200 and isinstance(view.body, dict) else None
+        if not isinstance(stored, dict) or str(stored.get("uuid") or "") != uuid:
+            logger.warning(
+                "[REPORT-FAILED] %s: the add answered HTTP 403 and the view of the uuid %s", sent, view.problem
+            )
+            return (
+                "failed",
+                f"the add answered HTTP 403 and the view of the uuid answered {view.problem}",
+                view.transient,
+            )
+        event = view.body.get("Event") if isinstance(view.body.get("Event"), dict) else {}
+        org, me = self._report_writer_org()
+        if org is None:
+            logger.warning(
+                "[REPORT-FAILED] %s: the writer key's organisation is unknown (GET /users/view/me %s)", sent, me.problem
+            )
+            return (
+                "failed",
+                f"the writer key's organisation is unknown (GET /users/view/me answered {me.problem})",
+                me.transient,
+            )
+        info = str(event.get("info") or "")
+        if not report_records.report_event_info_pattern(source).match(info) or str(event.get("orgc_id") or "") != org:
+            logger.error(
+                "[REPORT-UUID-FOREIGN] %s: MISP holds the uuid in event %s, which is not an EdgeGuard event of %s "
+                "created by the writer key's organisation; the record is not written (permanent)",
+                sent,
+                event.get("id"),
+                source,
+            )
+            return (
+                "foreign",
+                f"the uuid belongs to a report in event {event.get('id')}, not an EdgeGuard event of {source} of this organisation",
+                False,
+            )
+        if _report_deleted(stored):
+            logger.info(
+                "[REPORT-DELETED-IN-MISP] %s: the report is deleted in MISP (event %s); the deletion is respected",
+                sent,
+                event.get("id"),
+            )
+            return "deleted", "", False
+        parsed = report_records.parse_content(stored.get("content"))
+        stored_meta = parsed[1] if parsed is not None else None
+        if stored_meta is not None:
+            if stored_meta.get("digest") == record["digest"]:
+                logger.debug("[REPORT-UNCHANGED] %s", sent)
+                return "unchanged", "", False
+            stored_at = report_records.iso_datetime(stored_meta.get("last_modified"))
+            new_at = report_records.iso_datetime(record.get("last_modified"))
+            if stored_at is not None and new_at is not None and stored_at > new_at:
+                logger.info("[REPORT-UNCHANGED] %s: MISP holds a later version of the record (last_modified)", sent)
+                return "unchanged", "", False
+        edit = self._report_request(
+            "POST",
+            f"/eventReports/edit/{uuid}",
+            {"EventReport": {"name": name, "content": content, "distribution": distribution}},
+        )
+        if edit.status != 200:
+            logger.warning("[REPORT-FAILED] %s: the edit answered %s", sent, edit.problem)
+            return "failed", f"the edit answered {edit.problem}", edit.transient
+        problem = _stored_report_problem(edit.body, uuid, sha, name)
+        if problem is not None:
+            logger.warning("[REPORT-FAILED] %s: the edit answered HTTP 200 but %s", sent, problem)
+            return "failed", f"the edit answered HTTP 200 but {problem}", False
+        old_tlp = report_records.gating_tlp(stored_meta) if stored_meta is not None else None
+        new_tlp = report_records.gating_tlp(record)
+        if old_tlp != new_tlp and not self._swap_report_tlp(str(stored.get("id") or uuid), old_tlp, new_tlp):
+            stats["report_tag_drift"] += 1
+            logger.warning(
+                "[REPORT-TAG-DRIFT] %s: the report's tlp tag could not be changed from %s to %s; the meta block and "
+                "the distribution carry tlp:%s",
+                sent,
+                old_tlp or "unknown",
+                new_tlp,
+                new_tlp,
+            )
+        logger.info("[REPORT-UPDATED] %s", sent)
+        return "updated", "", False
+
+    def report_preflight(self, tag_names: Optional[Sequence[str]] = None) -> ReportPreflight:
+        """Read-only check of the writer key for report records: its role (``GET /users/view/me``) must have
+        ``perm_tagger`` (without it MISP drops every report tag) and lack ``perm_sync_authoritative`` (with it
+        every report edit strips the report's tags), and every tag the writer sets (*tag_names*, default
+        ``report_tag_names()``) must exist (``POST /tags/search/x/1``) unless the role has ``perm_tag_editor``
+        (without it MISP drops a missing tag instead of creating it). Writes nothing; logs the outcome without
+        any answer body."""
+        names = tuple(tag_names) if tag_names is not None else report_tag_names()
+        problems: List[str] = []
+        me = self._report_request("GET", "/users/view/me")
+        role = me.body.get("Role") if me.status == 200 and isinstance(me.body, dict) else None
+        org = _writer_org_of(me.body) if me.status == 200 else None
+        if isinstance(role, dict):
+            tagger = _role_flag(role, "perm_tagger")
+            editor = _role_flag(role, "perm_tag_editor")
+            authoritative = _role_flag(role, "perm_sync_authoritative")
+            if not tagger:
+                problems.append("the writer key's role lacks perm_tagger: MISP drops the tags of every report")
+            if authoritative:
+                problems.append(
+                    "the writer key's role has perm_sync_authoritative: every report edit strips the report's tags"
+                )
+        else:
+            tagger = editor = authoritative = None
+            problems.append(f"the writer key's role could not be read (GET /users/view/me answered {me.problem})")
+        missing: Tuple[str, ...] = ()
+        search = self._report_request("POST", "/tags/search/x/1", {"tag": list(names)})
+        if search.status == 200 and isinstance(search.body, list):
+            held = {
+                row["Tag"]["name"].lower()
+                for row in search.body
+                if isinstance(row, dict)
+                and isinstance(row.get("Tag"), dict)
+                and isinstance(row["Tag"].get("name"), str)
+            }
+            missing = tuple(n for n in names if n.lower() not in held)
+            if missing and not editor:
+                problems.append(
+                    "tags the writer sets are missing on this MISP and the role lacks perm_tag_editor, so MISP drops "
+                    f"them from the reports: {', '.join(missing)}"
+                )
+        else:
+            problems.append(f"the tags could not be read (POST /tags/search/x/1 answered {search.problem})")
+        result = ReportPreflight(
+            ok=not problems,
+            problems=tuple(problems),
+            org_id=org,
+            perm_tagger=tagger,
+            perm_tag_editor=editor,
+            perm_sync_authoritative=authoritative,
+            tags_checked=names,
+            missing_tags=missing,
+        )
+        if result.ok:
+            logger.info("[REPORT-PREFLIGHT] the writer key can write report records and their tags")
+        else:
+            logger.error("[REPORT-PREFLIGHT] %s", "; ".join(problems))
+        return result
 
     def get_stats(self) -> Dict[str, int]:
         """Get writer statistics."""

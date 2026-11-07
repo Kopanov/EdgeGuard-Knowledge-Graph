@@ -11,6 +11,9 @@ Metrics exposed:
 - edgeguard_collection_duration_seconds - Collection duration histogram
 - edgeguard_otx_retry_pulses / edgeguard_otx_retry_oldest_failure_timestamp_seconds - OTX retry list after a run
 - edgeguard_otx_retry_given_up_total - OTX pulses given up from the retry list
+- edgeguard_report_pending_records / edgeguard_report_pending_oldest_failure_timestamp_seconds - report records
+  waiting on a source's report_pending list
+- edgeguard_report_pending_given_up_total - report records given up from a report_pending list
 - edgeguard_misp_events_total - MISP events by source
 - edgeguard_misp_attributes_total - MISP attributes by type
 - edgeguard_misp_push_stopped_total - MISP pushes stopped because MISP kept failing past the push's cap
@@ -136,6 +139,34 @@ OTX_RETRY_GIVEN_UP = Counter(
     "OTX pulses given up from the retry list ([OTX-RETRY-GAVE-UP]): still failing EDGEGUARD_OTX_RETRY_MAX_DAYS "
     "after their first failure, or beyond EDGEGUARD_OTX_RETRY_MAX_PULSES; a baseline whose window reaches their "
     "modified collects them again",
+)
+
+# 2026-11-07: the report_pending lists (``report_records``): per report source (``alienvault_otx``, ``cisa_ics``), the
+# records whose MISP Event Report push failed or was not tried, kept in the incremental state until a push settles
+# them. The gauges are set whenever a list is written and by the fresh baseline's wipe
+# (``baseline_clean._wipe_checkpoints``); the counter counts the records given up (failing longer than
+# EDGEGUARD_REPORT_PENDING_MAX_DAYS and tried since).
+REPORT_PENDING_RECORDS = Gauge(
+    "edgeguard_report_pending_records",
+    "Report records on a source's report_pending list: records whose MISP Event Report push failed or was not "
+    "tried, which later pushes write again",
+    ["source"],
+    multiprocess_mode="mostrecent",
+)
+
+REPORT_PENDING_OLDEST_FAILURE = Gauge(
+    "edgeguard_report_pending_oldest_failure_timestamp_seconds",
+    "First failure (Unix time) of the record that has waited longest on a source's report_pending list; 0 when "
+    "the list is empty",
+    ["source"],
+    multiprocess_mode="mostrecent",
+)
+
+REPORT_PENDING_GIVEN_UP = Counter(
+    "edgeguard_report_pending_given_up_total",
+    "Report records given up from a source's report_pending list ([REPORT-GAVE-UP]): still failing "
+    "EDGEGUARD_REPORT_PENDING_MAX_DAYS after their first failure and tried since",
+    ["source"],
 )
 
 COLLECTION_DURATION = Histogram(
@@ -873,6 +904,15 @@ def record_otx_retry_list(pending: int, oldest_first_failure: float, given_up: i
     OTX_RETRY_OLDEST_FAILURE.set(oldest_first_failure if pending > 0 else 0)
     if given_up > 0:
         OTX_RETRY_GIVEN_UP.inc(given_up)
+
+
+def record_report_pending(source: str, pending: int, oldest_first_failure: float, given_up: int) -> None:
+    """Record a source's report_pending list after it was written (2026-11-07): the records on it, the first
+    failure (Unix time, 0 for an empty list) of the one that has waited longest, and the records given up."""
+    REPORT_PENDING_RECORDS.labels(source=source).set(max(0, pending))
+    REPORT_PENDING_OLDEST_FAILURE.labels(source=source).set(oldest_first_failure if pending > 0 else 0)
+    if given_up > 0:
+        REPORT_PENDING_GIVEN_UP.labels(source=source).inc(given_up)
 
 
 def record_collection_duration(source: str, zone: str, duration: float):

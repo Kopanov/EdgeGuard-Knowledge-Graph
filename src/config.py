@@ -791,6 +791,37 @@ def otx_retry_max_pulses() -> int:
     return max(1, _env_int("EDGEGUARD_OTX_RETRY_MAX_PULSES", 1000))
 
 
+# Report records (2026-11-07, ``src/report_records.py``): one MISP Event Report per OTX pulse and per CISA ICS
+# advisory, written by ``MISPWriter.push_reports``. Read per call so Airflow tasks and tests pick up the
+# environment at run time.
+REPORT_MAX_INDICATORS_HI = 20000
+
+
+def report_max_indicators() -> int:
+    """``EDGEGUARD_REPORT_MAX_INDICATORS`` (default 2000, 0 to 20,000): the indicators an OTX report record lists,
+    the first in (MISP type, value) order; ``indicator_count`` keeps the pulse's exact total. A record lists at most
+    this many (7 pulses of the 730-day test graph list more, the largest 29,932), so a report stays small in every
+    answer that carries its event's reports. A value outside the range is clamped to it; a value that is not a
+    whole number uses the default."""
+    return max(0, min(REPORT_MAX_INDICATORS_HI, _env_int("EDGEGUARD_REPORT_MAX_INDICATORS", 2000)))
+
+
+def misp_report_throttle_seconds() -> float:
+    """``EDGEGUARD_MISP_REPORT_THROTTLE_SEC`` (default 0.1, 0 to 60): the pause between two records of one
+    ``MISPWriter.push_reports`` call. Each record costs one request (the add), and more when MISP holds the report
+    already (a view, an edit, tag changes); on MISP 2.5.50 an add took 0.23 to 0.54 s. A value that is not a
+    number, not finite or outside [0, 60] uses the default with a WARNING."""
+    return _bounded_env_float("EDGEGUARD_MISP_REPORT_THROTTLE_SEC", 0.1, lo=0.0, hi=60.0)
+
+
+def report_pending_max_days() -> int:
+    """``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` (default 7, at least 1): a record still on a source's
+    ``report_pending`` list this many days after its first failed push is given up once a push has tried it past
+    that deadline: it leaves the list with an ERROR (``[REPORT-GAVE-UP]``) and counts in
+    ``edgeguard_report_pending_given_up_total``. A run that collects the record again pushes it again."""
+    return max(1, _env_int("EDGEGUARD_REPORT_PENDING_MAX_DAYS", 7))
+
+
 # MITRE: use If-None-Match on the STIX bundle URL when not in baseline mode (304 → skip re-push).
 MITRE_USE_CONDITIONAL_GET = _env_bool("EDGEGUARD_MITRE_CONDITIONAL_GET", "true")
 

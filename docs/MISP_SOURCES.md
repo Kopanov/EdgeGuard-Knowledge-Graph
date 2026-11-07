@@ -142,6 +142,97 @@ These are parsed by `run_misp_to_neo4j.py` during the MISP→Neo4j sync to popul
 
 ---
 
+## Report records (Event Reports)
+
+A report record holds what one source record says, as the source says it: an AlienVault OTX pulse (graph label `ThreatReport`) or a CISA ICS CSAF advisory (graph label `VulnerabilityAdvisory`). MISP keeps one Event Report per record. `src/report_records.py` defines the record; `MISPWriter.push_reports` (`src/collectors/misp_writer.py`) writes it. No collector writes records yet, and the sync does not read them yet.
+
+**Record (schema `edgeguard.report.v1`).** Common fields: `source` (`alienvault_otx`, `cisa_ics`), `record_id`, `record_ref` (the exact `source_refs` string, `alienvault_otx:<pulse id>` or `cisa_ics:<tracking id>`), `url`, `title`, `description`, `published`, `last_modified` (ISO 8601 in UTC), `revision`, `tlp`.
+
+| Source | Fields |
+|---|---|
+| OTX pulse | `author`, `industries`, `targeted_countries`, `tags`, `references`, `adversary`, `malware_families`, `attack_ids`, `cve_ids` (the values of the pulse's CVE indicators), `indicators` (`[MISP type, value]` pairs as the writer stores them: at most `EDGEGUARD_REPORT_MAX_INDICATORS`, default 2000, the first in (type, value) order), `indicator_count` (the pulse's exact total) |
+| CISA ICS advisory | `publisher`, `kind` (ICSA, ICSMA), `csaf_url`, `vendors`, `products`, `deployment_sectors`, `deployment_countries`, `vendor_headquarters` (the raw texts of the document notes), `cve_ids`, `revision_count` (entries of `tracking.revision_history`; `revision` is `tracking.version` when it is a whole number), `vulnerabilities` (per CVE: `cve_id`, `summary`, `remediations` with CSAF `category` and `details`, `affected_products`) |
+
+- **Source facts only.** Zones, canonical actors and country codes are not in the record; the sync derives them from the raw fields, so a change of the derivation rules never rewrites MISP.
+- **Normalisation.** Characters MISP cannot store are removed: those outside the Basic Multilingual Plane, lone surrogates and NUL. An indicator whose value needs such a character is left out, because the writer never stores it. Lists are de-duplicated and sorted. A missing scalar is `null` and a missing list is empty.
+- **Caps.** The meta block has safety caps far above real records: a list item over its cap is left out, never cut, and a text over its cap is cut at a word end. The caps of the graph are applied by the sync.
+- **Digest.** `digest` is the SHA-256 of the canonical JSON (sorted keys, ASCII, no spaces) of the record's source facts, the description included. The same pulse read from the subscribed list (`tlp`) and by id (`TLP`) gives the same record and digest.
+
+**Content.** The Event Report's content is, in this order:
+
+1. the description, in a code fence longer than any run of backticks it holds;
+2. the heading `## EdgeGuard record`;
+3. the sentinel line `<!-- edgeguard:report-meta v1 -->`;
+4. exactly one fenced `json` block, to the end of the content.
+
+The block holds every field but the description, the `digest`, and a `self_digest`: the SHA-256 of the canonical JSON of the block without it. A reader (`parse_content`):
+
+- takes the **last** sentinel, which must be followed by that one block and nothing else, so a sentinel or a block inside the description cannot stand for the record;
+- accepts the block only in its normal form, with schema v1 and a matching self-digest;
+- returns the description as stored. A description edited in MISP still reads; `digest_matches` tells whether the block's digest covers it;
+- ignores text MISP puts before the description's fence.
+
+**uuid, name, tags, distribution.**
+
+- **uuid**: `node_identity.compute_node_uuid(<label>, {"record_ref": ...})`. Both labels map to the STIX type `report`, so the uuid depends on `record_ref` alone. It is the report's uuid in MISP, the node's `uuid` and the uuid of the STIX `report--<uuid>`. Pinned: `alienvault_otx:6abf0b86fb14812f2dc84fb2` is `41646198-5449-5283-bf27-6f3813e5f708`, and `cisa_ics:ICSA-26-281-01` is `17ff328c-07c3-5786-9cac-e09357433faa`.
+- **Name**: the title, cut at a word end to at most 255 characters (`EventReport.name` is varchar(255); 256 characters answer HTTP 500).
+- **Tags on the add**: `EdgeGuard`, the source tag and `tlp:<level>`. A record without a known level counts as amber.
+- **Distribution**: 0 ("Your organisation only") for amber, amber+strict and red; 5 ("Inherit event") otherwise. The events themselves have distribution 1.
+
+**Event.** A record goes to the source's day event, `EdgeGuard-<source>-<date>`, which is looked up or created through the same locked path as for attributes. When that event holds more attributes than `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (default 20000; `0` = never), new records go to `EdgeGuard-<source>-<date>-reports` instead: the OTX baseline's day event holds about 150,000 attributes, and every attribute push to an event and every view of it carries all of its reports in full. A revised record is edited where MISP holds it.
+
+**The writer's flow per record.**
+
+1. **Add.** `POST /eventReports/add/<event id>` with uuid, name, content, distribution and tags. The add counts only when MISP's answer shows `EventReport` with:
+   - the uuid sent;
+   - the SHA-256 of the content sent;
+   - the name sent;
+   - `deleted` false.
+
+   A database without strict SQL mode cuts a value silently, so the content is compared after every add.
+2. **Any HTTP 403: view the uuid.** `GET /eventReports/view/<lower-case uuid>` (an upper-case uuid answers 404). Then:
+   - **Foreign report.** The report sits in an event whose `info` does not match `^EdgeGuard-<source>-\d{4}-\d{2}-\d{2}(-part\d+|-reports)?$`, or whose creator organisation is not the writer key's (`GET /users/view/me`). This is a permanent failure, logged as `[REPORT-UUID-FOREIGN]`; the record is not written and not retried.
+   - **Deleted in MISP.** The report is soft-deleted (a soft-deleted uuid still blocks an add). The deletion is respected: no restore, no edit (`reports_deleted_in_misp`).
+   - **Unchanged.** The stored block's `digest` equals the record's, or its `last_modified` is later than the record's. The report is left as it is (`reports_unchanged`).
+   - **Otherwise: edit.** `POST /eventReports/edit/<uuid>` with name, content and distribution, checked as the add. MISP applies only these fields, in the report's own event, and keeps uuid and id. A failed edit answers HTTP 200 `[]`.
+3. **TLP change.** After an edit that changes the record's TLP: `removeTag` of the old `tlp:` tag, then `addTag` of the new one. Both go by tag id (MISP reads `tlp:white` in a path as a named parameter), and each answer must say `saved` true (a failure answers HTTP 200 `{"saved": false}`). A failure counts in `report_tag_drift` and does not fail the record: the reader takes the TLP from the block and the distribution follows the edit.
+
+Reports never travel inside `POST /events/<id>`: there MISP 2.5.50 silently ignores the uuid of another event's report, and 2.5.45 moves the report into the edited event. The report requests are not wrapped in the writer's retry decorator:
+
+- an HTTP 4xx is never tried again;
+- an HTTP 5xx, a timeout or a connection error is tried once more;
+- after 5 records in a row failed that way, the rest of the push is skipped.
+
+Pacing and limits:
+
+- `EDGEGUARD_MISP_REPORT_THROTTLE_SEC` (default 0.1) is the pause between records.
+- The parent-DAG liveness callback runs before each record.
+- No record starts after the push's deadline.
+
+The logs carry uuid, `record_ref`, lengths and SHA-256 only, never content or MISP's answers. The writer's item bookkeeping (`last_push_*`) is not touched.
+
+**Outcome of a push.** The writer returns counts: `reports_added`, `reports_updated`, `reports_unchanged`, `reports_deleted_in_misp`, `reports_failed` (with `reports_foreign`), `reports_skipped` and `report_tag_drift`. It also returns the lists `settled`, `failed` (with the reason, and whether the failure is permanent) and `skipped`.
+
+**`report_pending`.** Per source, `report_records.note_report_push` keeps the records whose push failed, or that a push did not try, in the incremental state of the source's collector: `report_pending` beside the `otx` or `cisa_ics` cursor. Each entry holds `record_ref`, `first_failed_at`, `attempts`, `last_tried_at` and `last_reason`.
+
+- The list is apart from the OTX item retry list, and kept on baselines and scheduled runs alike.
+- A push that settles a record takes it off; a permanent failure is never added.
+- A record still failing `EDGEGUARD_REPORT_PENDING_MAX_DAYS` (default 7) after its first failure is given up by the next push that tries it, with an ERROR `[REPORT-GAVE-UP]`.
+- Gauges: `edgeguard_report_pending_records` and `edgeguard_report_pending_oldest_failure_timestamp_seconds`; counter: `edgeguard_report_pending_given_up_total`.
+- The fresh baseline's wipe clears the list with MISP, which frees every report uuid.
+
+**Read-only preflight.** `MISPWriter.report_preflight()` checks the writer key and writes nothing:
+
+- its role has `perm_tagger`, without which MISP drops every report tag;
+- its role lacks `perm_sync_authoritative`, with which every report edit strips the report's tags;
+- every tag the writer sets exists (`POST /tags/search/x/1`), or the role has `perm_tag_editor`, without which MISP drops a missing tag instead of creating it.
+
+It returns the problems found; no task runs it yet.
+
+**MISP versions.** The behaviour above was measured on MISP 2.5.50 on 2026-11-07. The source of 2.5.45 behaves the same on the requests the writer sends; it differs on the event-edit path, which the writer does not use.
+
+---
+
 ## Classification (sector)
 
 | Approach | Status |
@@ -180,9 +271,11 @@ Usually **MITRE-specific** types/tags vs MISP policy. Read the full MISP error b
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-07_
 
 ## History
+
+- 2026-11-07 — Report records: one MISP Event Report per OTX pulse and CISA ICS advisory (schema `edgeguard.report.v1`, content, digest, uuid, tags, distribution, the writer's flow and its failure answers, the `report_pending` list, the read-only preflight). No collector writes records yet.
 
 - 2026-11-02 — `MISPCollector`: no DAG or `run_pipeline.py` runs it (the text named the collector step of the retired in-process baseline). How the sync reads an ATT&CK value: the node parse only (the text also named a STIX conversion that no pipeline step calls).
 - 2026-11-02 — Event names and lookups: the readers of an event part's source no longer list the STIX flow of `run_pipeline.py`, which is removed (`run_pipeline.py` runs the collectors into MISP only).

@@ -160,6 +160,12 @@ x-common-env: &common-env
   EDGEGUARD_OTX_RETRY_MAX_DAYS: ${EDGEGUARD_OTX_RETRY_MAX_DAYS:-7}
   EDGEGUARD_OTX_RETRY_MAX_PULSES: ${EDGEGUARD_OTX_RETRY_MAX_PULSES:-1000}
   EDGEGUARD_OTX_RETRY_MAX_SECONDS: ${EDGEGUARD_OTX_RETRY_MAX_SECONDS:-600}
+  # Report records (2026-11-07, src/report_records.py, MISPWriter.push_reports): indicators an OTX report record
+  # lists (its exact total is kept), the pause between two records of a push, and the days a record whose push
+  # keeps failing stays on its source's report_pending list. Defaults mirror src/config.py.
+  EDGEGUARD_REPORT_MAX_INDICATORS: ${EDGEGUARD_REPORT_MAX_INDICATORS:-2000}
+  EDGEGUARD_MISP_REPORT_THROTTLE_SEC: ${EDGEGUARD_MISP_REPORT_THROTTLE_SEC:-0.1}
+  EDGEGUARD_REPORT_PENDING_MAX_DAYS: ${EDGEGUARD_REPORT_PENDING_MAX_DAYS:-7}
   EDGEGUARD_ZONE_DETECT_THRESHOLD: ${EDGEGUARD_ZONE_DETECT_THRESHOLD:-1.5}
   EDGEGUARD_ZONE_ITEM_THRESHOLD: ${EDGEGUARD_ZONE_ITEM_THRESHOLD:-1.5}
   # Re-reported indicators (2026-10, src/collectors/misp_writer.py): the stored copy of an

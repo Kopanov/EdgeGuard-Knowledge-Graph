@@ -1,0 +1,30 @@
+{
+ "_provenance": "Not a recording: no answer of GET /users/view/me was recorded on 2026-11-07. The shape follows MISP 2.5's UsersController::view('me') answer as PyMISP 2.5.34 reads it (PyMISP.get_user: 'User', 'Role', 'UserSetting'; the organisation under 'Organisation'), reduced to the fields the report preflight reads; the organisation (ADMIN, id 1) is the one of the recorded events, the role flags are those of a site-admin role. Replace it with a recording made with the writer key once the owner allows the read-only check on the hosted MISP.",
+ "answer": {
+  "User": {
+   "id": "1",
+   "org_id": "1",
+   "role_id": "1",
+   "disabled": false
+  },
+  "Role": {
+   "id": "1",
+   "name": "admin",
+   "perm_add": true,
+   "perm_modify": true,
+   "perm_modify_org": true,
+   "perm_publish": true,
+   "perm_sync": true,
+   "perm_admin": true,
+   "perm_site_admin": true,
+   "perm_tagger": true,
+   "perm_tag_editor": true,
+   "perm_sync_authoritative": false
+  },
+  "UserSetting": [],
+  "Organisation": {
+   "id": "1",
+   "name": "ADMIN"
+  }
+ }
+}
