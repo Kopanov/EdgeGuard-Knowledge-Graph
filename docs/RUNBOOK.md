@@ -787,6 +787,28 @@ Every `collect_cisa` run (`edgeguard_medium_freq`, every 4 hours, and the baseli
      RETURN c.known_ransomware_use, c.cisa_action_due, c.last_updated, r.updated_at, r.raw_data;
      ```
 
+## CISA ICS report records waiting on report_pending
+
+Every `collect_cisa_ics` run (`edgeguard_daily`, 02:00, and the baseline) writes one MISP Event Report per advisory it reads in its window, an advisory without a CVE included, after its CVE items ([COLLECTORS.md § Advisory report records](COLLECTORS.md#advisory-report-records)). Records whose push failed or was not tried, records that could not be built, and the record of an advisory in the window that could not be fetched go on the `report_pending` list of the `cisa_ics` incremental state, on baselines too. Each later run that pushes reads the advisories of up to 100 records on the list, those tried longest ago first, for their records only. A record still failing `EDGEGUARD_REPORT_PENDING_MAX_DAYS` (7) days after its first failure is given up once a run has tried it past that deadline. A record failure never fails the task and does not hold the cursor.
+
+- **Signals.** `edgeguard_report_pending_records{source="cisa_ics"}`, `edgeguard_report_pending_oldest_failure_timestamp_seconds{source="cisa_ics"}` and `edgeguard_report_pending_given_up_total{source="cisa_ics"}` ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md)); no alert reads them. The run's WARNING `[REPORTS] CISA ICS: …` line (failed, not tried, on the list, given up), and `report_counts` in the task's return value (`pending_saved` among them).
+- **Where to look.** The `collect_cisa_ics` task log:
+  ```bash
+  docker logs edgeguard_airflow 2>&1 | grep -E '\[REPORTS\] CISA ICS|\[REPORT-PENDING\] CISA ICS|\[REPORT-GAVE-UP\] cisa_ics' | tail -20
+  ```
+  - `[REPORT-PENDING] CISA ICS: N of M record(s) on report_pending: …` (INFO): what the run read for the list.
+  - `[REPORT-PENDING] CISA ICS: the listing does not name the advisory of N record(s) …` (WARNING): the advisories named are not in `changes.csv` or `index.txt` (withdrawn or renamed by CISA); each run counts a failed try until the record is given up.
+  - `[REPORT-PENDING] CISA ICS: the listing gave no advisory …` (WARNING): `changes.csv` gave no row the collector reads (empty, or a changed layout); the list is left untouched. When it repeats, check the file on GitHub against the `"YYYY/<file>.json","<timestamp>"` form.
+  - `[REPORT-GAVE-UP] cisa_ics: …` (ERROR): the records named are not in MISP as their advisory says; a run that reads the advisory again (it changes, or a baseline whose window reaches it) writes them.
+  - `[REPORTS] CISA ICS <record_ref>: the record keeps K of the N <list> (its cap)` (WARNING): an advisory gave more entries than the record holds; the record keeps the first in sort order.
+
+  The list, with each record's `first_failed_at`, `attempts` and `last_reason`:
+  ```bash
+  docker compose exec airflow python -c "import json; print(json.dumps(json.load(open('/opt/airflow/checkpoints/baseline_checkpoint.json'))['cisa_ics']['incremental'].get('report_pending', []), indent=1))"
+  ```
+- **A list that cannot be saved.** ERROR `[REPORT-PENDING] CISA ICS: report_pending could not be saved (…)` means the checkpoint file could not be written. The run pushes no later batch of records, `pending_saved` is `false`, and the cursor does not pass the advisories whose records are neither in MISP nor on the list, so the next run reads them again. Check that `checkpoints/baseline_checkpoint.json` is writable and the disk has room; nothing else needs to be done.
+- **How to recover.** Fix the cause the push lines give (MISP's capacity or a refused report, failure modes 1 and 2); the records then leave the list at the next runs. Records given up come back with a baseline whose window reaches their advisories; a fresh baseline's wipe removes the list with the rest of the incremental state.
+
 ## Bravo-ops: memory posture for the next baseline
 
 The memory settings and alerts below guard a 32-hour baseline run (the
@@ -1641,6 +1663,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — New section "CISA ICS report records waiting on report_pending": the list, its signals and log lines, a list that cannot be saved, and how to recover.
 - 2026-11-07 — CVE descriptions: a revised CISA ICS advisory revises its report record in MISP; the CVE's attribute keeps the first advisory's text.
 - 2026-11-07 — New section "OTX report records waiting on report_pending": the OTX collector writes a record per pulse and keeps the records whose push failed on `report_pending`, on every run; a pulse whose fetch by id fails goes behind the others and is given up once it has failed for `EDGEGUARD_REPORT_PENDING_MAX_DAYS`; signals, where to look, a list that cannot be saved (the cursor holds, and a pulse of the retry list keeps its entry) and how to recover.
 - 2026-11-07 — MISP push stopped: the writer of the scheduled `collect_otx` also stops a failing streak 10 minutes before its task's end.
