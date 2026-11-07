@@ -52,7 +52,7 @@ from collectors.misp_writer import (  # noqa: E402
     nvd_meta_digest,
     nvd_meta_of_comment,
 )
-from collectors.nvd_collector import NVDCollector  # noqa: E402
+from collectors.nvd_collector import NVDCollector, nvd_affected, nvd_references  # noqa: E402
 from collectors.vulnerability_update import meta_changed_keys  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
 from text_caps import CVE_DESCRIPTION_CAP, cap_text  # noqa: E402
@@ -275,6 +275,13 @@ class TestNvdKeys:
         assert "Exploit" in unit42["tags"]
         assert meta["reference_urls"] == [r["url"] for r in refs][:10], "the key the sync reads is unchanged"
 
+    def test_the_collector_gives_each_url_once(self):
+        refs = nvd_references(NVD["CVE-2024-3400"]["cve"])
+        assert [r["url"] for r in refs] == list(
+            dict.fromkeys(r["url"] for r in NVD["CVE-2024-3400"]["cve"]["references"])
+        )
+        assert len(refs) == 5
+
     def test_a_reference_url_too_long_is_left_out_whole(self):
         # Constructed: a URL longer than the CVE format allows is left out, never cut.
         record = json.loads(json.dumps(NVD["CVE-2023-29492"]))
@@ -319,8 +326,12 @@ class TestNvdKeys:
             )
         )
         assert len(pairs) == 22
+        assert [(p["vendor"], p["product"]) for p in nvd_affected(cve)] == pairs[:20], "the collector keeps 20"
         meta = _meta(_attribute(_nvd_item("CVE-2023-28229"), "601"))
         assert [(p["vendor"], p["product"]) for p in meta["affected"]] == pairs[:20]
+        # The writer bounds an item's pairs as well (constructed: an item with all 22).
+        item = dict(_nvd_item("CVE-2023-28229"), affected=[{"vendor": v, "product": p} for v, p in pairs])
+        assert len(_meta(_attribute(item, "601"))["affected"]) == 20
 
     def test_cwe_names_from_the_pinned_list(self):
         meta = _meta(_attribute(_nvd_item("CVE-2024-3400"), "601"))
@@ -333,6 +344,23 @@ class TestNvdKeys:
 
     def test_the_new_keys_are_the_ones_the_update_paths_know(self):
         assert NVD_META_SOURCE_TEXT_KEYS == NEW_KEYS
+
+    def test_the_order_of_the_cwe_lists_is_no_change(self):
+        """``cwe`` is compared without its order (NVD built it from a set before 2026-10), so are the names made from
+        it and KEV's own ids: a stored copy that lists them in another order needs no edit."""
+        meta = _meta(_attribute(_nvd_item("CVE-2022-46169"), "601"))
+        assert len(meta["cwe_names"]) == 3
+        reordered = dict(meta, cwe=meta["cwe"][::-1], cwe_names=meta["cwe_names"][::-1])
+        assert nvd_meta_digest(reordered) == nvd_meta_digest(meta)
+        kev = _meta(_attribute(dict(_kev_item("CVE-2024-3400")), "602"))
+        assert nvd_meta_digest(dict(kev, cisa_cwes=kev["cisa_cwes"][::-1])) == nvd_meta_digest(kev)
+        assert nvd_meta_digest(dict(meta, cwe_names=meta["cwe_names"][:2])) != nvd_meta_digest(meta)
+
+    def test_a_cwe_version_without_names_is_not_written(self):
+        # Constructed: an item that carries the version but no name.
+        item = dict(_nvd_item("CVE-2023-29492"), cwe_names=[], cwe_names_version="5.0")
+        meta = _meta(_attribute(item, "601"))
+        assert "cwe_names" not in meta and "cwe_names_version" not in meta
 
     def test_a_record_without_the_new_facts_gets_no_new_key(self):
         """Constructed item without the new keys (an older item shape): its NVD_META, and so its digest, is the

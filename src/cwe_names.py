@@ -64,8 +64,8 @@ def list_version() -> str:
 def cwe_names(cwe_ids: Iterable[Any]) -> List[str]:
     """``"CWE-89: <name>"`` for each id of ``cwe_ids`` the list names, in their order, each id once.
 
-    An id is matched as written (``CWE-89``; surrounding whitespace and case are ignored, leading zeros are
-    not: ``CWE-089`` names nothing). Anything that is not such an id gets no name."""
+    An id is looked up as written (``CWE-89``), surrounding whitespace and case ignored; ``CWE-089`` is not an id
+    the list holds and names nothing. Anything that is not such an id gets no name."""
     names = _load()["names"]
     out: List[str] = []
     seen = set()
@@ -73,7 +73,7 @@ def cwe_names(cwe_ids: Iterable[Any]) -> List[str]:
         if not isinstance(value, str):
             continue
         match = _ID_RE.match(value.strip().upper())
-        if not match or match.group(1).startswith("0"):
+        if not match:
             continue
         cwe_id = f"CWE-{match.group(1)}"
         name = names.get(cwe_id)
