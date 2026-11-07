@@ -701,6 +701,108 @@ def test_the_guards_of_the_two_branches_hold_below_the_items_alone_when_the_reco
         assert _ref(ROWS[14]["id"]) in _pending_refs()
 
 
+# --------------------------------------------------------------------------- the counts after a failed save
+
+
+def _reports_line(run) -> str:
+    (line,) = [m for m in run.messages if m.startswith("[REPORTS] OTX: ")]
+    return line
+
+
+def test_a_failed_save_of_the_fetch_outcome_alone_marks_the_list_unsaved(caplog, monkeypatch):
+    """The pulse of the one entry on ``report_pending`` answers HTTP 503 by id, and only the save of that outcome
+    fails; the window's records are written and their save works. ``pending_saved`` is false, and the run's line
+    gives the list as last saved: the one entry, without its failed fetch."""
+    real = rr.update_report_pending
+
+    def failing_fetch_save(source, **kw):
+        if kw.get("fetch_failed") or kw.get("fetched"):
+            raise OSError(28, "No space left on device")
+        return real(source, **kw)
+
+    monkeypatch.setattr(rr, "update_report_pending", failing_fetch_save)
+    real(SOURCE, failed=[(_ref(_STUCK), "earlier")])
+    otx = _Otx(_recorded(range(3)))
+    otx.fetch_errors[_STUCK] = 503
+    writer = _RecordWriter()
+    run = _collect(otx, {"otx_last_pulse_modified": ROWS[2]["modified"]}, caplog, limit=None, writer=writer)
+    assert otx.by_id_requests == [_STUCK]
+    assert len(writer.pushed_records()) == 3, "the window's records are written"
+    (entry,) = _pending()
+    assert entry["record_ref"] == _ref(_STUCK) and "last_fetch_failed_at" not in entry
+    counts = run.status["report_counts"]
+    assert counts["pending_saved"] is False and counts["pending"] == 1
+    assert "; 1 record(s) on report_pending as last saved (the list could not be saved)," in _reports_line(run)
+
+
+def test_after_failed_saves_the_count_is_the_stored_list(caplog, monkeypatch):
+    """Two records wait on ``report_pending`` (not fetched: ``EDGEGUARD_OTX_RETRY_PER_RUN`` 0), the record of
+    pulse 1 fails and every save of the list fails: ``pending`` is the 2 records the stored list holds, not the
+    count of a save of this run (none worked)."""
+    monkeypatch.setenv("EDGEGUARD_OTX_RETRY_PER_RUN", "0")
+    rr.update_report_pending(SOURCE, failed=[(_ref(_STUCK), "earlier"), (_ref("6ab0000000000000000000ee"), "earlier")])
+    _failing_save(monkeypatch)
+    pulses = _recorded(range(3))
+    run = _collect(
+        _Otx(pulses),
+        {"otx_last_pulse_modified": ROWS[2]["modified"]},
+        caplog,
+        limit=None,
+        writer=_RecordWriter(failing_records=[pulses[1]["id"]]),
+    )
+    counts = run.status["report_counts"]
+    assert counts["pending_saved"] is False and counts["pending"] == 2 and len(_pending()) == 2
+    line = _reports_line(run)
+    assert "; 2 record(s) on report_pending as last saved (the list could not be saved)," in line
+    assert "after the run" not in line
+
+
+def test_when_the_stored_list_cannot_be_read_back_its_count_is_unknown(caplog, monkeypatch):
+    """Every save of the list fails, and so does reading it back for the run's line: ``pending`` is ``None``."""
+    _failing_save(monkeypatch)
+    real_load = rr.load_report_pending
+    settling = {"on": False}
+
+    def load(source, now=None):
+        if settling["on"]:
+            raise OSError(5, "Input/output error")
+        return real_load(source, now)
+
+    real_settle = OTXCollector._settle_report_counts
+
+    def settle(self, counts):
+        settling["on"] = True
+        return real_settle(self, counts)
+
+    monkeypatch.setattr(rr, "load_report_pending", load)
+    monkeypatch.setattr(OTXCollector, "_settle_report_counts", settle)
+    pulses = _recorded(range(3))
+    run = _collect(
+        _Otx(pulses),
+        {"otx_last_pulse_modified": ROWS[2]["modified"]},
+        caplog,
+        limit=None,
+        writer=_RecordWriter(failing_records=[pulses[1]["id"]]),
+    )
+    assert run.status["report_counts"]["pending"] is None
+    assert "; unknown record(s) on report_pending as last saved (the list could not be saved)," in _reports_line(run)
+    assert any(m.startswith("[REPORT-PENDING] OTX: report_pending could not be read back") for m in run.errors)
+
+
+def test_after_saves_that_worked_the_count_is_the_list_after_the_run(caplog):
+    """Every save works: the line gives the list after the run."""
+    pulses = _recorded(range(3))
+    run = _collect(
+        _Otx(pulses),
+        {"otx_last_pulse_modified": ROWS[2]["modified"]},
+        caplog,
+        limit=None,
+        writer=_RecordWriter(failing_records=[pulses[1]["id"]]),
+    )
+    assert run.status["report_counts"]["pending_saved"] is True and run.status["report_counts"]["pending"] == 1
+    assert "; 1 record(s) on report_pending after the run," in _reports_line(run)
+
+
 def _retry_entry(pid: str, modified: str) -> Dict[str, Any]:
     """An entry of the retry list tried once, a day ago."""
     day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()

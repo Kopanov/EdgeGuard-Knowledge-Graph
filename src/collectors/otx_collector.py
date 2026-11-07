@@ -971,7 +971,8 @@ def _new_report_counts() -> Dict[str, Any]:
     record the run built or tried to build, each once), the counts of ``MISPWriter.push_reports``
     (``_REPORT_COUNT_KEYS``; ``reports_failed`` also counts records that could not be built, ``reports_skipped`` the
     records a stopped push left), ``pending`` (records on ``report_pending`` after the run), ``given_up`` and
-    ``pending_saved`` (false when a save of the list failed)."""
+    ``pending_saved`` (false when a save of the list failed: ``pending`` is then the count of the list as last
+    saved, read back from the state, or ``None`` when that cannot be read)."""
     return {"records": 0, **{key: 0 for key in _REPORT_COUNT_KEYS}, "pending": 0, "given_up": 0, "pending_saved": True}
 
 
@@ -1259,7 +1260,10 @@ class OTXCollector:
 
     def _settle_report_counts(self, counts: Dict[str, Any]) -> None:
         """After a run's record pushes: a run that wrote no record still saves ``report_pending`` once (nothing
-        added; a record given up is named), so its gauges follow the list; then the ``[REPORTS]`` line of the run."""
+        added; a record given up is named), so its gauges follow the list; then the ``[REPORTS]`` line of the run.
+        When a save of the list failed in the run (``pending_saved`` false), ``pending`` is the count of the list as
+        last saved, read back from the state (``report_records.load_report_pending``), and the line says so;
+        ``None`` ("unknown" in the line) when the state cannot be read either."""
         if not counts.pop("noted", False) and counts.get("pending_saved", True):
             try:
                 settled = report_records.note_report_push(_REPORT_SOURCE, {})
@@ -1270,12 +1274,27 @@ class OTXCollector:
                 logger.error(
                     "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s)", type(exc).__name__, exc
                 )
+        if counts.get("pending_saved", True):
+            pending_text = f"{counts['pending']} record(s) on report_pending after the run"
+        else:
+            try:
+                counts["pending"] = len(report_records.load_report_pending(_REPORT_SOURCE))
+            except Exception as exc:
+                counts["pending"] = None
+                logger.error(
+                    "[REPORT-PENDING] OTX: report_pending could not be read back (%s: %s)", type(exc).__name__, exc
+                )
+            stored = "unknown" if counts["pending"] is None else str(counts["pending"])
+            pending_text = f"{stored} record(s) on report_pending as last saved (the list could not be saved)"
         logger.log(
             logging.WARNING
-            if counts["reports_failed"] or counts["reports_skipped"] or counts["pending"]
+            if counts["reports_failed"]
+            or counts["reports_skipped"]
+            or counts["pending"]
+            or not counts.get("pending_saved", True)
             else logging.INFO,
             "[REPORTS] OTX: %d pulse record(s) this run: %d added, %d updated, %d unchanged, %d deleted in MISP, "
-            "%d failed, %d not tried; %d record(s) on report_pending after the run, %d given up",
+            "%d failed, %d not tried; %s, %d given up",
             counts["records"],
             counts["reports_added"],
             counts["reports_updated"],
@@ -1283,7 +1302,7 @@ class OTXCollector:
             counts["reports_deleted_in_misp"],
             counts["reports_failed"],
             counts["reports_skipped"],
-            counts["pending"],
+            pending_text,
             counts["given_up"],
         )
 
@@ -1331,7 +1350,7 @@ class OTXCollector:
 
     def _fetch_pending_report_pulses(
         self, exclude: Set[str], per_run: int
-    ) -> Tuple[List[Dict[str, Any]], List[str], List[str], int]:
+    ) -> Tuple[List[Dict[str, Any]], List[str], List[str], int, bool]:
         """Fetch by id up to *per_run* pulses whose record is on ``report_pending`` (2026-11-07), those tried or
         fetched in vain longest ago first (``report_records.pending_record_refs``), leaving out the pulses in
         *exclude* (read in the run's window, or fetched or tried for the retry list: their records are built there,
@@ -1343,7 +1362,8 @@ class OTXCollector:
         ``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` after its record's deadline is given up (``[REPORT-GAVE-UP]``). A
         pulse fetched ends its fetch failures. HTTP 429, 5xx or a request error also stops the fetches of this
         run. The outcome of the fetches is saved once, when it changes the list. Returns the pulses fetched, the
-        record refs answered 404, the ids with another error and the number of records that save gave up."""
+        record refs answered 404, the ids with another error, the number of records that save gave up and whether
+        the save worked (true when there was nothing to save)."""
         refs = [
             ref for ref in report_records.pending_record_refs(_REPORT_SOURCE) if _record_pulse_id(ref) not in exclude
         ]
@@ -1394,6 +1414,7 @@ class OTXCollector:
             if e["record_ref"] in fetched_refs and "first_fetch_failed_at" in e
         ]
         given_up = 0
+        saved = True
         if not_found or fetch_failed or cleared:
             try:
                 given_up = len(
@@ -1402,6 +1423,7 @@ class OTXCollector:
                     ).given_up
                 )
             except Exception as exc:
+                saved = False
                 logger.error(
                     "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s): the outcome of the fetches by "
                     "id is not on it; the records of the pulses that answered HTTP 404 stay on it until a later run "
@@ -1409,7 +1431,7 @@ class OTXCollector:
                     type(exc).__name__,
                     exc,
                 )
-        return fetched, not_found, errors, given_up
+        return fetched, not_found, errors, given_up, saved
 
     def _fetch_retry_pulses(
         self, entries: List[Dict[str, Any]], window_ids: Set[str], per_run: int, now: datetime
@@ -1755,13 +1777,14 @@ class OTXCollector:
             pending_not_found: List[str] = []
             pending_fetch_failed: List[str] = []
             pending_given_up = 0
+            pending_fetch_saved = True
             if push_to_misp and retry_fetch_stopped:
                 logger.info(
                     "[REPORT-PENDING] OTX: the fetches by id of the retry list stopped (OTX is not answering): the "
                     "records on report_pending wait for the next run"
                 )
             elif push_to_misp:
-                pending_pulses, pending_not_found, pending_fetch_failed, pending_given_up = (
+                pending_pulses, pending_not_found, pending_fetch_failed, pending_given_up, pending_fetch_saved = (
                     self._fetch_pending_report_pulses(
                         {str(p.get("id")) for p in pulses if p.get("id")}
                         | {str(p.get("id")) for p in retried}
@@ -2617,6 +2640,8 @@ class OTXCollector:
                 # come last; a pulse whose record is on that list keeps its entry there whatever happens.
                 report_counts = _new_report_counts()
                 report_counts["given_up"] += pending_given_up
+                if not pending_fetch_saved:
+                    report_counts["pending_saved"] = False
                 recorded: Set[str] = set()
                 record_held = self._push_report_records(
                     [p for p in to_process if str(p.get("id")) not in listed_ids], report_counts, recorded
