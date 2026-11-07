@@ -264,16 +264,19 @@ def test_threatfox_reporter_and_malpedia_fall_back_and_malpedia_keeps_to_the_pri
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_threatfox_same_first_seen_makes_the_higher_id_primary(quiet_feeds, reverse):
-    """Records of one submission share the second of ``first_seen``: the higher id is the primary record."""
+@pytest.mark.parametrize("higher, lower", [("21", "20"), ("1000", "999")])
+def test_threatfox_same_first_seen_makes_the_higher_id_primary(quiet_feeds, reverse, higher, lower):
+    """Records of one submission share the second of ``first_seen``: the higher id is the primary record.
+    The ids compare as numbers: ``1000`` is above ``999``, which a text order would put first."""
     _ffc, gfc = quiet_feeds
     records = [
-        _tf_record("21", "198.51.100.70:443", "Remcos", "2026-11-06 08:00:00 UTC"),
-        _tf_record("20", "198.51.100.70:8080", "AsyncRAT", "2026-11-06 08:00:00 UTC"),
+        _tf_record(higher, "198.51.100.70:443", "Remcos", "2026-11-06 08:00:00 UTC"),
+        _tf_record(lower, "198.51.100.70:8080", "AsyncRAT", "2026-11-06 08:00:00 UTC"),
     ]
     (item,) = _merge(gfc, list(reversed(records)) if reverse else records)
-    assert (item["ioc_id"], item["malware_family"]) == ("21", "Remcos")
+    assert (item["ioc_id"], item["malware_family"]) == (higher, "Remcos")
     assert item["families"] == ["Remcos", "AsyncRAT"]
+    assert item["ioc_ids"] == [lower, higher]
 
 
 def test_threatfox_zones_come_from_every_family_of_the_value(quiet_feeds):
@@ -327,6 +330,12 @@ def test_threatfox_domain_has_no_ports(quiet_feeds, writer):
         ("Malware C&C", "botnet_cc", ""),
         ("Ransomware C&C", "botnet_cc", ""),
         ("TA505 C&C", "botnet_cc", "TA505"),
+        ("Spambot C&C", "botnet_cc", ""),
+        ("Steal C&C", "botnet_cc", ""),
+        ("Downloder-Bot C&C", "botnet_cc", ""),
+        ("hVNC C&C", "botnet_cc", ""),
+        ("HVNC C&C", "botnet_cc", ""),
+        ("Stealc C&C", "botnet_cc", "Stealc"),
         ("Malware distribution", "payload_delivery", ""),
         ("ACRStealer malware distribution", "payload_delivery", "ACRStealer"),
         ("NetSupport RAT malware distribution", "payload_delivery", "NetSupport RAT"),
@@ -893,6 +902,33 @@ def test_moderately_oversized_block_shrinks_only_the_tags(writer):
     meta = json.loads(comment[len("TF_META:") :])
     assert len(comment) <= _META_COMMENT_BUDGET and 1 <= len(meta["tags"]) < 80
     assert meta["ports"] == [443, 8080] and meta["ioc_ids"] == ["1", "2"] and meta["families"] == ["Cobalt Strike"]
+
+
+def test_list_source_lists_have_no_entry_cap_only_the_budget(writer, caplog):
+    """The writer keeps every entry of a list-source list (constructed: 600 ports, about 2,900 characters,
+    fit the budget whole); a list over the budget is shortened by ``_fit_meta_comment`` with its warning,
+    keeping the longest first part that fits."""
+    from collectors.misp_writer import _META_COMMENT_BUDGET
+
+    item = _oversized_threatfox_item()
+    item.update(reference="https://example.test/r", tags=["c2"], ioc_ids=["1"], families=["Cobalt Strike"])
+    item["ports"] = list(range(1, 601))
+    with caplog.at_level(logging.WARNING):
+        comment = writer.create_attribute(item)["comment"]
+    assert len(comment) <= _META_COMMENT_BUDGET
+    assert _meta({"comment": comment})["ports"] == item["ports"], "more than 500 entries are written whole"
+    assert not [r for r in caplog.records if "shrunk" in r.getMessage()]
+
+    caplog.clear()
+    item["ports"] = list(range(1, 3001))
+    with caplog.at_level(logging.WARNING):
+        comment = writer.create_attribute(item)["comment"]
+    meta = _meta({"comment": comment})
+    assert len(comment) <= _META_COMMENT_BUDGET
+    assert 600 < len(meta["ports"]) < 3000 and meta["ports"] == item["ports"][: len(meta["ports"])]
+    longer = dict(meta, ports=item["ports"][: len(meta["ports"]) + 1])
+    assert len("TF_META:" + json.dumps(longer)) > _META_COMMENT_BUDGET, "the longest part that fits"
+    assert [r for r in caplog.records if "shrunk" in r.getMessage()], "a shortened list is logged"
 
 
 def test_long_file_names_shrink_after_the_lists(writer):

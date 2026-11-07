@@ -351,7 +351,6 @@ _TF_META_SOURCE_INTS = (
 # Lists of every record of a value: ``ports`` (ints; ThreatFox ip:port, Feodo Tracker), ``ioc_ids``,
 # ``threat_types`` (ThreatFox), ``families`` (ThreatFox, Feodo Tracker; the primary record's family first).
 _TF_META_SOURCE_LISTS = ("ports", "ioc_ids", "threat_types", "families")
-_TF_META_SOURCE_MAX_LIST_ITEMS = 500
 # Facts that change at the source after the first report. The writer never re-comments a stored attribute (a
 # re-reported value only gets ``last_seen``, ``_refresh_stored_copies``), so MISP keeps the values of the
 # first report for the life of the attribute; ``as_of`` records when they were read.
@@ -370,8 +369,9 @@ def _tf_meta_source_fields(indicator: Dict[str, Any]) -> Dict[str, Any]:
     """The list-source keys of ``TF_META`` an item carries (2026-11-07), in the order of the key tuples.
 
     Strings are stripped and kept whole; ints are kept when they are non-negative ints (not bools); a list
-    keeps its distinct non-empty entries in order, ints for ``ports`` (1-65535) and strings otherwise, at most
-    ``_TF_META_SOURCE_MAX_LIST_ITEMS``. A key without a usable value is left out, so no value is invented.
+    keeps its distinct non-empty entries in order, ints for ``ports`` (1-65535) and strings otherwise, all of
+    them: only the comment budget shortens a list (``_fit_meta_comment``, with its warning). A key without a
+    usable value is left out, so no value is invented.
     """
     fields: Dict[str, Any] = {}
     for key in _TF_META_SOURCE_STRINGS:
@@ -387,6 +387,7 @@ def _tf_meta_source_fields(indicator: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(raw, (list, tuple)):
             continue
         kept: List[Any] = []
+        seen: set = set()
         for entry in raw:
             if key == "ports":
                 if isinstance(entry, bool) or not isinstance(entry, int) or not 0 < entry < 65536:
@@ -397,10 +398,11 @@ def _tf_meta_source_fields(indicator: Dict[str, Any]) -> Dict[str, Any]:
                 entry = str(entry)
             else:
                 continue
-            if entry not in kept:
+            if entry not in seen:
+                seen.add(entry)
                 kept.append(entry)
         if kept:
-            fields[key] = kept[:_TF_META_SOURCE_MAX_LIST_ITEMS]
+            fields[key] = kept
     return fields
 
 

@@ -449,6 +449,10 @@ _SSLBL_ROLE_SUFFIXES = (
     (" malware distribution", "payload_delivery"),
     (" MITM", ""),
 )
+# Family parts the list uses for a kind of server, not a family (one listing each on 2026-11-07:
+# "Spambot C&C", "Steal C&C", "Downloder-Bot C&C", "hVNC C&C"), compared case-insensitively. They give a
+# role and no family, as a category word does; the reason itself is kept verbatim.
+_SSLBL_SERVER_KIND_WORDS = frozenset({"spambot", "steal", "downloder-bot", "hvnc"})
 
 
 def sslbl_listing(reason: str) -> Tuple[str, str]:
@@ -460,7 +464,8 @@ def sslbl_listing(reason: str) -> Tuple[str, str]:
     (``node_identity.is_placeholder_name``: "Malware", "Ransomware", ...) gives a role and no family
     (``"Malware C&C"`` -> ``("botnet_cc", "")``, ``"Ransomware C&C"`` -> ``("botnet_cc", "")``,
     ``"Malware distribution"`` -> ``("payload_delivery", "")``), by the rule that keeps such words out of
-    Malware node names. A reason without one of the role suffixes (``"QuasarRAT"``, ``"Sinkhole"``,
+    Malware node names; so does a word the list uses for a kind of server (``_SSLBL_SERVER_KIND_WORDS``:
+    ``"Spambot C&C"`` -> ``("botnet_cc", "")``). A reason without one of the role suffixes (``"QuasarRAT"``, ``"Sinkhole"``,
     ``"doxbin.cy"``) gives neither: it is kept only verbatim as ``listing_reason``. The family is the
     list's own label in its spelling and may name a malware family, an actor (``"TA505 C&C"``), a product
     or a traffic-distribution cluster; it is kept in MISP only, never a Malware node by itself.
@@ -469,7 +474,7 @@ def sslbl_listing(reason: str) -> Tuple[str, str]:
     for suffix, threat_type in _SSLBL_ROLE_SUFFIXES:
         if text.lower().endswith(suffix.lower()):
             family = text[: -len(suffix)].strip()
-            if is_placeholder_name(family):
+            if is_placeholder_name(family) or family.lower() in _SSLBL_SERVER_KIND_WORDS:
                 family = ""
             return threat_type, family
     if text.lower() == "malware distribution":
