@@ -98,6 +98,10 @@ class TestMarkup:
         assert strip_markup(text) == text
         assert cap_text(text, 500) == (text, False, len(text))
 
+    def test_no_space_is_left_at_a_line_start_or_end(self):
+        # Constructed: a citation at the start and at the end of a line.
+        assert strip_markup("First.\n(Citation: A) Second. (Citation: B)\nThird.") == "First.\nSecond.\nThird."
+
     def test_a_space_before_a_closing_parenthesis_goes(self):
         # Constructed.
         assert strip_markup("used by APT28 (and others (Citation: Vendor 2020) ).") == "used by APT28 (and others)."
