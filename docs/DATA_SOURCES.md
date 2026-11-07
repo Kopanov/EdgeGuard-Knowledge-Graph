@@ -71,7 +71,7 @@
 
 **What we get:**
 - SSL certificate SHA1 fingerprints, stored as MISP `x509-fingerprint-sha1` attributes and `x509-fingerprint-sha1` Indicators
-- Listing reason (for example `Dridex C&C`), written to MISP verbatim with its role (`threat_type`: `botnet_cc` for "C&C", `payload_delivery` for "malware distribution") and its family part (`listing_family`, the list's own label, which may name an actor or a product; none for a category word such as "Malware C&C" or "Ransomware C&C") kept apart, and the certificate's page as `reference`. No `malware_family` is emitted and no graph link is made from the listing family ([COLLECTORS.md § 7](COLLECTORS.md#ssl-blacklist-what-reaches-the-graph))
+- Listing reason (for example `Dridex C&C`), written to MISP verbatim with its role (`threat_type`: `botnet_cc` for "C&C", `payload_delivery` for "malware distribution") and its family part (`listing_family`, the list's own label, which may name an actor or a product; none for a category word such as "Malware C&C" or "Ransomware C&C" and for a word the list uses for a kind of server such as "Spambot C&C") kept apart, and the certificate's page as `reference`. No `malware_family` is emitted and no graph link is made from the listing family ([COLLECTORS.md § 7](COLLECTORS.md#ssl-blacklist-what-reaches-the-graph))
 
 **How classified:**
 - Keyword detector on the listing reason; no malware family is mapped to a sector by name (Method 2 below), so the rows are tagged Global
