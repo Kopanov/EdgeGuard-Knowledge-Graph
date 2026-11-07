@@ -31,12 +31,16 @@ FROM python:3.12-slim AS runtime
 # has the patched library. The same upgrade is applied in Dockerfile.airflow.
 #
 # This ``apt-get upgrade`` is narrowly scoped (-y --only-upgrade openssl
-# libssl3t64 openssl-provider-legacy) — it does NOT do a full image upgrade,
+# libssl3t64 openssl-provider-legacy, and zlib1g below) — it does NOT do a full image upgrade,
 # which could destabilize other packages. When the python:3.12-slim base
 # itself is refreshed upstream with patched openssl, this RUN can be removed.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends --only-upgrade \
         openssl libssl3t64 openssl-provider-legacy \
+ # 2026-11: Trivy HIGH CVE-2026-76844 and CVE-2026-85091 (heap buffer overflow in gz_vacate()) in zlib1g
+ # 1:1.3.dfsg+really1.3.1-1+b1 (image), fixed in 1:1.3.dfsg+really1.3.1-1+deb13u1 (trixie-security).
+ # Same upgrade-in-place pattern as openssl above.
+ && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
  && rm -rf /var/lib/apt/lists/*
 
 # Security: run as a non-root user.
