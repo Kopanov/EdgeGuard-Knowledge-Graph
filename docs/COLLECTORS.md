@@ -524,21 +524,23 @@ Collects threat intelligence from MITRE ATT&CK framework, including:
 - Threat actors (intrusion sets)
 - Malware families
 - Relationships (uses, attributed-to, subtechnique-of) — STIX **`uses`** populates **`uses_techniques`** on **actors** and **malware** for **`build_relationships.py`** (malware round-trips via MISP **`MITRE_USES_TECHNIQUES:`**)
-- **Descriptions:** ATT&CK's description of each group, malware, tool, technique and tactic (up to 500 characters). The MISP → Neo4j sync writes at most 500 characters of it to the node, without ATT&CK's markdown links (the name stays), `(Citation: …)` markers and `<code>` tags, cut at a sentence or word end ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#descriptions-and-their-source)); MISP keeps what MISPWriter wrote. MISPWriter writes it on the line after the comment's `MITRE_USES_TECHNIQUES` / `MITRE_TACTIC_PHASES` block where there is one, else as the whole comment (a tactic, a technique without tactic phases, a tool without techniques, a group or malware with nothing for the block); groups, techniques and tactics up to 255 characters, malware and tools up to 400. MITRE's record ranks first for a `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` node's description (MITRE ATT&CK > a curated source > any other source, with `description_source`), so ATT&CK's text stays whatever the order of the merges.
+- **Descriptions:** ATT&CK's whole description of each group, malware, tool, technique and tactic, with its markup. MISPWriter writes it whole on the line after the comment's `MITRE_USES_TECHNIQUES` / `MITRE_TACTIC_PHASES` block where there is one, else as the whole comment (a tactic, a technique without tactic phases, a tool without techniques, a group or malware with nothing for the block): control characters removed and the surrounding whitespace stripped, up to `ENTITY_DESCRIPTION_MAX_CHARS` (8,000 characters; ATT&CK's longest, T1553.003 in Enterprise ATT&CK 20.1, has 4,668). A longer text would be cut at its last whitespace within the bound, with an `[ENTITY-TEXT]` warning giving the lengths. MISP therefore holds ATT&CK's text; the MISP → Neo4j sync writes at most 500 characters of it to the node, without ATT&CK's markdown links (the name stays), `(Citation: …)` markers and `<code>` tags, cut at a sentence or word end ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#descriptions-and-their-source)). A technique's zones are detected in the first 500 characters of its description; read whole, 3 Enterprise and 20 ICS techniques of ATT&CK 20.1 would gain a sector from a keyword further on. `x_mitre_detection` (deprecated in ATT&CK) is read as its first 1,000 characters and not written to MISP. MITRE's record ranks first for a `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` node's description (MITRE ATT&CK > a curated source > any other source, with `description_source`), so ATT&CK's text stays whatever the order of the merges.
 
 ### Source
 - **URL:** `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json`
 - **ATT&CK for ICS (`EDGEGUARD_ENABLE_MITRE_ICS=true`, default off):** `ics-attack/ics-attack.json` from the same repository (`MITRE_ICS_ATTACK_URL` to override) is fetched after the Enterprise bundle and parsed with the same code (`_parse_bundle`, kill-chain name `mitre-ics-attack`). 97 techniques (T08xx), 12 tactics (TA0100–TA0111, 9 short names identical to Enterprise), 14 groups, 23 malware. Every item carries `attack_domain` (`enterprise` | `ics`); groups/malware present in both bundles are emitted once with `uses_techniques` unioned. An ICS fetch/parse failure is logged, counted (`pipeline_errors_total{task=collect_mitre_ics}`) and never affects the Enterprise items; the MITRE circuit breaker is not tripped. No ETag for ICS: on an Enterprise HTTP 304 the ICS bundle is skipped (baseline runs ignore ETag). ICS items are zoned by keyword detection on their descriptions only, so they are **not** zoned `energy` automatically: `x_mitre_sectors` and `x-mitre-asset` are not read (planned: [ROADMAP.md § Collection depth and scale](ROADMAP.md#collection-depth-and-scale)).
 - **API Key:** Not required
 - **Format:** STIX 2.1 bundle
+- **Licence:** ATT&CK's terms of use; text copied from ATT&CK (MISP comments, node descriptions, the APIs and the STIX export) carries MITRE's notice, given in [DATA_SOURCES.md § 5](DATA_SOURCES.md#5-mitre-attck).
 
 ### Revoked and deprecated objects
 
 The ATT&CK bundles keep replaced and retired objects. `_parse_bundle` (Enterprise and ICS alike):
 
-- **Revoked** (`revoked: true`, with a `revoked-by` relationship to the successor): skipped, whatever the type. No item, no relationship to or from it (`uses`, `subtechnique-of`, `attributed-to`), so no `uses_techniques` / `uses_malware` / `uses_tools` entry names it. A revoked group's or software's name and aliases are appended to its successor's `aliases` (the successor's own aliases first; a chain A → B → C ends on C): `UNC2452` → `APT29`, `Dragonfly 2.0` → `Dragonfly`, `Stolen Pencil` → `Kimsuky`, `Darkmoon` → `PoisonIvy`. Tool items carry `aliases` too (`x_mitre_aliases`), but the MISP writer tags aliases of actors and malware only, so a tool's aliases do not reach the graph.
+- **Revoked** (`revoked: true`, with a `revoked-by` relationship to the successor): skipped, whatever the type. No item, no relationship to or from it (`uses`, `subtechnique-of`, `attributed-to`), so no `uses_techniques` / `uses_malware` / `uses_tools` entry names it. A revoked group's or software's name and aliases are appended to its successor's `aliases` (the successor's own aliases first; a chain A → B → C ends on C): `UNC2452` → `APT29`, `Dragonfly 2.0` → `Dragonfly`, `Stolen Pencil` → `Kimsuky`, `Darkmoon` → `PoisonIvy`. Tool items carry `aliases` too (`x_mitre_aliases`), and the MISP writer tags them as it tags those of actors and malware (see "MISP tags" below); the sync does not read a tool's alias tags yet, so they do not reach the graph.
 - **Deprecated** (`x_mitre_deprecated: true`, no successor): kept, with `deprecated: True`; every other item carries `deprecated: False`. The MISP writer tags a deprecated item `attack-status:deprecated`; the sync turns the tag into `n.deprecated = true`, and an ATT&CK record without the tag sets `n.deprecated = false`.
 - **One item per node** (`_one_item_per_node_key`, per bundle and again when the ICS bundle is merged): groups and malware whose names are equal once lower-cased (the `ThreatActor` / `Malware` node key) become one item, and tools of one ATT&CK id (the `Tool` node key). An active object wins over a deprecated one: the active ICS `Triton` (S1009) replaces the deprecated Enterprise `TRITON` (S0609), and the deprecated ICS copies without an ATT&CK id (`Killdisk`, `Stuxnet`, `EKANS`, `Industroyer`, `Bad Rabbit`, `Conficker`) are left out beside the active objects of their names; these copies carry no relationships. Of several active items (the same STIX object in both bundles) the first is kept, Enterprise first, with their `uses_techniques`, `uses_malware` and `uses_tools` united. `[ATTACK-SAME-NAME] <label>: N deprecated object(s) left out, an active one has the same name: …` names each object left out, and a warning names one left out with a technique or software link the kept item lacks, which is not kept. MISP does not store a value that differs only in case from one an earlier request stored in the event (within one request it stores both), and the deprecated object would mark the node of its name deprecated. When ATT&CK for ICS is on and its bundle fails, the run pushes no deprecated group or malware (an active object of the same name may be in the ICS bundle) and does not store the Enterprise ETag, so the next run reads both bundles again (`[MITRE] ATT&CK for ICS failed: N deprecated group(s) / malware held back …`).
+- **Domains and platforms:** group, malware and tool items carry `attack_domains`, the ATT&CK domains of `x_mitre_domains` (`enterprise`, `ics`, `mobile`, in ATT&CK's order; the bundle's domain when the object lists none), and malware and tool items carry `platforms` (`x_mitre_platforms`) as techniques do. Of several active items of one object, the kept one unites their `attack_domains` and `platforms` too.
 - **ATT&CK ids:** group and malware items carry their ATT&CK id (`mitre_id`, `G####` / `S####`) like techniques, tactics and tools; the MISP writer carries it in the `aid` key of the `MITRE_USES_TECHNIQUES` block, since their MISP value is the name ([MISP_SOURCES.md](MISP_SOURCES.md)).
 - The log line `skipped N revoked ATT&CK objects {...} and M relationships that reach them` gives the counts per bundle.
 
@@ -547,6 +549,21 @@ Feeds that still name a revoked technique id (OTX pulses citing `T1086`) are tra
 ### MISP values
 
 MISPWriter writes each technique, tactic (Enterprise and ICS) and tool as a MISP `text` attribute whose value is the ATT&CK id, ` - ` and the name (`attack_values.format_attack_value`): `T1059.003 - Windows Command Shell`, `TA0002 - Execution`, `T0807 - Command-Line Interface`, `S0005 - Windows Credential Editor`. A group is a `threat-actor` attribute and a malware a `malware-type` attribute, each valued by its name. The ATT&CK values carry no colon, so MISP's default Import Regexp rules, which rewrite a value where any character, a colon and any character precede "Windows" (`/.:.Windows./i` → `%WINDIR%\`), leave them unchanged ([MISP_SOURCES.md](MISP_SOURCES.md#attribute-types-and-values)). The MISP → Neo4j sync reads the id and the name back with `attack_values.parse_attack_value`, which also reads `<id>: <name>`, and skips a value without a valid ATT&CK id with an `[ATTACK-VALUE]` warning. MISPWriter's dedup (per event and across events) reads a `text` value in either form as the same ATT&CK entry (`attack_values.attack_value_key`), so an entry stored as `<id>: <name>` is not written again as `<id> - <name>`; a value MISP rewrote holds no valid id and counts as a different value. The check that confirms a push compares the exact value.
+
+### MISP tags
+
+Besides the zone, source, TLP and `attack-status:deprecated` tags every ATT&CK attribute carries:
+
+| Tag | On | Value |
+|---|---|---|
+| `platform:<platform>` | techniques, malware, tools | every platform ATT&CK lists, in ATT&CK's casing (`platform:Network Devices`, `platform:Field Controller/RTU/PLC/IED`), de-duplicated case-insensitively; a value over 64 characters is skipped, and at most 32 are written (ATT&CK 20.1 lists at most 10 on one object) |
+| `attack-domain:<domain>` | every item | techniques and tactics: the domain of their bundle; groups, malware and tools: one tag per domain of `attack_domains` |
+| `alias:<name>` | groups, malware, tools | the item's aliases, at most 20, each up to 100 characters |
+| `misp-galaxy:mitre-attack-pattern="<name> - <id>"` | techniques | ATT&CK's own MISP galaxy cluster, plus `mitre-attack:technique="<id>"` |
+| `misp-galaxy:mitre-intrusion-set="<name> - G####"`, `misp-galaxy:mitre-malware="<name> - S####"`, `misp-galaxy:mitre-tool="<name> - S####"` | groups, malware, tools with an ATT&CK id | ATT&CK's own MISP galaxy cluster, beside the community cluster tag (`misp-galaxy:threat-actor`, `misp-galaxy:malware`, `misp-galaxy:tool`); MISP attaches the cluster (ATT&CK's card, with its references) to the attribute. ATT&CK publishes no galaxy of tactics |
+| `mitre-tactic:<shortname>`, `tool-type:<type>`, `malware-type:<type>`, `malware-family:<family>` | tactics, tools, malware | the tactic's short name; the types ATT&CK gives (`tool`, `malware`); a family other than the name |
+
+On the project's test MISP (2.5.50, galaxies captured 2026-11-05) the galaxy tags of ATT&CK 20.1 match a cluster for 185 of 187 Enterprise groups and all 14 ICS groups, 731 of 748 Enterprise and 17 of 25 ICS malware, all 95 tools and 806 of 824 techniques (Enterprise and ICS); the clusters of the newest objects come with a later galaxy release, and a tag without a cluster stays a plain tag. The MISP → Neo4j sync reads the platform tags of a technique (`platforms` on the record) and the domain tag of a technique or tactic; it takes no node, label or link from the domain, alias, platform or ATT&CK galaxy tags of a group, malware or tool.
 
 ### Zone Detection
 ```python
@@ -567,7 +584,7 @@ def detect_sectors(self, text):
     'zone': ['global'],  # Array of all matching zones
     'tag': 'mitre_attck',
     'source': ['mitre_attck'],
-    'platforms': ['Windows', 'macOS', 'Linux'],
+    'platforms': ['Windows', 'macOS', 'Linux'],  # every platform, in ATT&CK's casing
     'data_sources': ['Application Log', 'File', 'Network Traffic'],
     'deprecated': False,  # True for an object ATT&CK deprecated; revoked objects are skipped
     'confidence_score': 0.8
@@ -579,6 +596,7 @@ def detect_sectors(self, text):
     'name': 'APT29',
     'aliases': ['Cozy Bear', 'The Dukes', 'PowerDuke', 'UNC2452', 'StellarParticle'],  # + revoked groups' names
     'description': 'APT29 is a threat group that has been attributed to the Russian government...',
+    'attack_domains': ['enterprise', 'mobile'],  # x_mitre_domains
     'zone': ['healthcare', 'finance'],  # Array of all matching zones
     'tag': 'mitre_attck',
     'source': ['mitre_attck'],
@@ -610,6 +628,9 @@ def detect_sectors(self, text):
     'tag': 'mitre_attck',
     'source': ['mitre_attck'],
     'tool_types': ['credential-theft'],
+    'aliases': ['Mimikatz'],
+    'attack_domains': ['enterprise'],
+    'platforms': ['Windows'],
     'confidence_score': 0.7,
     'uses_techniques': ['T1003.001', 'T1078'],
 }
@@ -1434,6 +1455,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — ATT&CK in MISP: the collector passes every description whole and MISPWriter writes it whole (up to 8,000 characters; it cut groups, techniques and tactics at 255 characters and malware and tools at 400 with "..." added mid-word, and a comment without a block at 500); every platform is a tag in ATT&CK's casing, on malware and tools too (the first 3 of a technique, lower-cased); tools carry alias tags; groups, malware and tools carry their ATT&CK domains as `attack-domain:` tags and ATT&CK's own galaxy cluster tag beside the community one; a technique's zones are still read from its first 500 characters; the licence notice.
 - 2026-11-07 — OTX: an indicator of an amber, red or unknown-TLP pulse gets an empty `pulse_name` in the graph; the sync took the comment as the fallback name, which for such an item is the whole `OTX_META` block, and now takes no metadata block as a name.
 - 2026-11-07 — OTX report records: one MISP Event Report per pulse, pushed after the pulse's items in batches of 100; `report_pending` on baselines and scheduled runs, its pulses fetched by id on every run (a failed fetch is no try and puts the entry behind the others; none after the retry list's fetches stopped), given up after `EDGEGUARD_REPORT_PENDING_MAX_DAYS`, also when the pulse's fetch keeps failing that long; the cursor passes a pulse whose record failed only once it is saved on the list, and a pulse of the retry list keeps its entry until its record is; the scheduled writer knows its task's end; `report_counts` in the status, whose `pending` gives the list as last saved after a failed save of it. The text of an amber or red pulse, or of one without a known TLP, is no longer copied onto its items.
 - 2026-11-07 — Sync: the `raw_data.pulse_name` of a `SOURCED_FROM` edge takes a plain comment only, never a metadata block (the whole `TF_META` of an item without a family, every URLhaus item among them, was copied into it, and the list-source fields with it).
