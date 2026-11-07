@@ -13,9 +13,9 @@
 - The sync reads an ``NVD_META`` with the new keys as before and lifts none of them yet: the item, and so the graph
   write, is the one the same record without them gives.
 
-Records: ``tests/fixtures/cve_source_text_2026_11_07.json``, real answers of the NVD CVE API 2.0 and the CISA KEV
-catalogue recorded on 2026-11-07 (its ``_provenance`` names each record and why it is there). Values built for a
-test that no source gives are marked "constructed".
+Records: ``tests/fixtures/cve_source_text_2026_11_07.json`` and ``tests/fixtures/nvd_cve_2023_44487_2026_11_07.json``,
+real answers of the NVD CVE API 2.0 and the CISA KEV catalogue recorded on 2026-11-07 (their ``_provenance`` names
+each record and why it is there). Values built for a test that no source gives are marked "constructed".
 """
 
 from __future__ import annotations
@@ -52,28 +52,25 @@ from collectors.misp_writer import (  # noqa: E402
     nvd_meta_digest,
     nvd_meta_of_comment,
 )
-from collectors.nvd_collector import NVDCollector, nvd_affected, nvd_references  # noqa: E402
+from collectors.nvd_collector import (  # noqa: E402
+    NVDCollector,
+    nvd_affected,
+    nvd_cvss_scorers,
+    nvd_references,
+    nvd_vuln_status,
+)
 from collectors.vulnerability_update import meta_changed_keys  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
 from text_caps import CVE_DESCRIPTION_CAP, cap_text  # noqa: E402
 
 FIXTURE = json.loads((TESTS / "fixtures" / "cve_source_text_2026_11_07.json").read_text(encoding="utf-8"))
-NVD = {record["cve"]["id"]: record for record in FIXTURE["nvd"]}
+LARGEST = json.loads((TESTS / "fixtures" / "nvd_cve_2023_44487_2026_11_07.json").read_text(encoding="utf-8"))
+NVD = {record["cve"]["id"]: record for record in FIXTURE["nvd"] + LARGEST["nvd"]}
 KEV = {entry["cveID"]: entry for entry in FIXTURE["kev"]}
 WRITER = MISPWriter.__new__(MISPWriter)
 NVD_EVENT = {"id": "601", "info": "EdgeGuard-nvd-2026-11-07", "Tag": []}
 KEV_EVENT = {"id": "602", "info": "EdgeGuard-CISA-2026-11-07", "Tag": []}
-NEW_KEYS = (
-    "nvd_vuln_status",
-    "references",
-    "affected",
-    "cvss_scorers",
-    "cwe_names",
-    "cwe_names_version",
-    "cisa_notes",
-    "cisa_cwes",
-    "cisa_forensic_triage",
-)
+NEW_KEYS = NVD_META_SOURCE_TEXT_KEYS
 BATCH_CVE = "MERGE (n:CVE {cve_id: row.cve_id})"
 SINGLE_EDGE = "MERGE (n)-[r:SOURCED_FROM]->(s)"
 
@@ -108,6 +105,52 @@ def _meta(attribute: Dict[str, Any]) -> Dict[str, Any]:
 
 def _comment_bytes(attribute: Dict[str, Any]) -> int:
     return len(attribute["comment"].encode("utf-8"))
+
+
+def _size(meta: Dict[str, Any]) -> int:
+    return len(mw._render_nvd_meta(meta).encode("utf-8"))
+
+
+def _words(prefix: str, count: int) -> str:
+    """Constructed text of words of different lengths (``note0 note1 ... note10 ...``), so a cut at a fixed number
+    of characters lands inside a word."""
+    return " ".join(f"{prefix}{i}" for i in range(count))
+
+
+def _cut_at_a_word_end(kept: str, source: str) -> bool:
+    return (
+        0 < len(kept) < len(source)
+        and source.startswith(kept)
+        and source[len(kept)].isspace()
+        and not kept[-1].isspace()
+    )
+
+
+# The keys the last resort of the byte budget keeps whatever their size (docs/MISP_SOURCES.md, "Byte budget").
+CORE_KEYS = {
+    "published",
+    "last_modified",
+    "description",
+    "status",
+    "cisa_exploit_add",
+    "cvss_v40_data",
+    "cvss_v31_data",
+    "cvss_v30_data",
+    "cvss_v2_data",
+}
+# Constructed: one reference of each kind, every key tag (Exploit, Patch, Vendor Advisory, Mitigation) on its own.
+KINDS_OF_REFERENCES = [
+    {"url": "https://example.org/0"},
+    {"url": "https://example.org/1", "tags": ["Third Party Advisory"]},
+    {"url": "https://example.org/2", "tags": ["Mitigation"]},
+    {"url": "https://example.org/3"},
+    {"url": "https://example.org/4", "tags": ["Vendor Advisory"]},
+    {"url": "https://example.org/5", "tags": ["Mailing List"]},
+    {"url": "https://example.org/6", "tags": ["Exploit", "Third Party Advisory"]},
+    {"url": "https://example.org/7", "tags": ["Patch"]},
+]
+# Untagged first, then tags without a key tag, then key tags; each kind from the end.
+KINDS_DROP_ORDER = [3, 0, 5, 1, 7, 6, 4, 2]
 
 
 @pytest.fixture(scope="module")
@@ -167,6 +210,48 @@ class TestWholeTextInMisp:
         notes = KEV["CVE-2025-39682"]["notes"]
         assert len(notes) == 870
         assert _meta(_attribute(_kev_item("CVE-2025-39682"), "602"))["cisa_notes"] == notes
+
+    def test_the_kev_vendor_and_product_reach_misp_whole(self):
+        """CVE-2020-11261: a product of 179 characters, the only ``vendorProject`` or ``product`` of the catalogue
+        over 100 characters; ``NVD_META`` holds it whole, with no ``...``."""
+        entry = KEV["CVE-2020-11261"]
+        assert len(entry["product"]) == 179
+        meta = _meta(_attribute(_kev_item("CVE-2020-11261"), "602"))
+        assert meta["product"] == entry["product"] and not meta["product"].endswith("...")
+        assert meta["vendor"] == entry["vendorProject"]
+
+    def test_vendor_and_product_lose_only_control_characters_and_non_bmp_characters(self):
+        # Constructed: no recorded name holds either.
+        item = dict(_kev_item("CVE-2024-3400"), vendor=" Acme\x07 Corp\U0001f600 ", product="Series " * 40)
+        meta = _meta(_attribute(item, "602"))
+        assert meta["vendor"] == "Acme Corp" and meta["product"] == ("Series " * 40).strip()
+
+    def test_the_cisa_ics_first_product_reaches_misp_whole(self):
+        """Constructed advisory (CSAF 2.0 shape): a first product name of 149 characters."""
+        from collectors.cisa_ics_collector import CISAICSCollector
+
+        product = "Example Series " * 10
+        advisory = {
+            "document": {
+                "title": "Example Controls Example Series",
+                "tracking": {"id": "ICSA-26-999-02", "initial_release_date": "2026-11-05T06:00:00.000000Z"},
+                "distribution": {"tlp": {"label": "WHITE"}},
+            },
+            "product_tree": {
+                "branches": [
+                    {
+                        "category": "vendor",
+                        "name": "Example Controls",
+                        "branches": [{"category": "product_name", "name": product.strip()}],
+                    }
+                ]
+            },
+            "vulnerabilities": [{"cve": "CVE-2026-99998", "notes": [{"category": "summary", "text": "A note."}]}],
+        }
+        (item,), _ = CISAICSCollector(misp_writer=MagicMock()).parse_advisory(advisory, "2026/y.json")
+        meta = _meta(_attribute(item, "603"))
+        assert len(product.strip()) == 149 and meta["product"] == product.strip()
+        assert meta["vendor"] == "Example Controls"
 
     def test_characters_outside_the_basic_multilingual_plane_are_stripped(self):
         # Constructed: no recorded CVE text holds one. JSON escapes them, so MISP would store the escape and the
@@ -315,6 +400,71 @@ class TestNvdKeys:
         assert [(d["vendor"], d["product"]) for d in adp["affectedData"]] == [("novisurvey", "novi_survey")]
         assert "affected" not in _meta(_attribute(_nvd_item("CVE-2023-29492"), "601"))
 
+    def test_a_package_only_entry_keeps_its_package_name(self):
+        """CVE-2025-10854: the CNA names the product only as a PyPI package (``collectionURL`` + ``packageName``),
+        the record's only product identity (it has no configurations)."""
+        cve = NVD["CVE-2025-10854"]["cve"]
+        ((data,),) = [a["affectedData"] for a in cve["affected"]]
+        assert "vendor" not in data and "product" not in data and data["packageName"] == "txtai"
+        assert not cve.get("configurations")
+        assert nvd_affected(cve) == [{"product": "txtai"}]
+        assert _meta(_attribute(_nvd_item("CVE-2025-10854"), "601"))["affected"] == [{"product": "txtai"}]
+
+    def test_a_real_product_comes_before_the_package_name(self):
+        """CVE-2023-40660: the upstream entry names only the package ``OpenSC``; the Red Hat entries name a product
+        and a package (``opensc``) and keep the product."""
+        assert nvd_affected(NVD["CVE-2023-40660"]["cve"]) == [
+            {"product": "OpenSC"},
+            {"vendor": "Red Hat", "product": "Red Hat Enterprise Linux 8"},
+            {"vendor": "Red Hat", "product": "Red Hat Enterprise Linux 9"},
+            {"vendor": "Red Hat", "product": "Red Hat Enterprise Linux 7"},
+        ]
+
+    def test_every_placeholder_in_any_case_and_an_overlong_name_are_no_names(self):
+        # Constructed: the recorded records hold only "n/a".
+        long_name = "N" * 257
+        cve = {
+            "sourceIdentifier": "cna@example.org",
+            "affected": [
+                {
+                    "source": "cna@example.org",
+                    "affectedData": [
+                        {"vendor": "Unknown", "product": "Widget"},
+                        {"vendor": "UNKNOWN", "product": "*"},
+                        {"vendor": "-", "product": "Gadget"},
+                        {"vendor": "N/A", "product": "Tool"},
+                        {"vendor": "Acme", "product": long_name},
+                        {"vendor": long_name, "product": "N" * 256},
+                        {"vendor": "*", "packageName": "unknown"},
+                        {"collectionURL": "https://example.org", "packageName": "pkg"},
+                    ],
+                }
+            ],
+        }
+        assert nvd_affected(cve) == [
+            {"product": "Widget"},
+            {"product": "Gadget"},
+            {"product": "Tool"},
+            {"vendor": "Acme"},
+            {"product": "N" * 256},
+            {"product": "pkg"},
+        ]
+
+    def test_the_collectors_string_bounds(self):
+        # Constructed: no recorded state, scorer or type comes near its bound.
+        assert nvd_vuln_status({"vulnStatus": "S" * 32}) == "S" * 32
+        assert nvd_vuln_status({"vulnStatus": "S" * 33}) == ""
+        metrics = {
+            "cvssMetricV31": [{"source": "s" * 129, "type": "Primary"}],
+            "cvssMetricV30": [{"source": "nvd@nist.gov", "type": "T" * 33}],
+            "cvssMetricV2": [{"source": "s" * 128, "type": "T" * 32}],
+        }
+        assert nvd_cvss_scorers(metrics) == {
+            "cvss_v31_data": {"score_type": "Primary"},
+            "cvss_v30_data": {"scored_by": "nvd@nist.gov"},
+            "cvss_v2_data": {"scored_by": "s" * 128, "score_type": "T" * 32},
+        }
+
     def test_at_most_twenty_pairs(self):
         cve = NVD["CVE-2023-28229"]["cve"]
         pairs = list(
@@ -342,8 +492,28 @@ class TestNvdKeys:
         ]
         assert meta["cwe_names_version"] == "5.0"
 
-    def test_the_new_keys_are_the_ones_the_update_paths_know(self):
-        assert NVD_META_SOURCE_TEXT_KEYS == NEW_KEYS
+    def test_the_listed_keys_are_exactly_the_facts_the_writer_adds(self):
+        """``NVD_META_SOURCE_TEXT_KEYS`` against the writer: over every recorded NVD record and KEV entry, clearing
+        the listed facts of an item removes exactly the listed keys, and each listed key is written for some record.
+        Against a copy MISP stored on 2026-10-13 (before these keys), every key the writer adds now is listed, but
+        for ``ssvc`` and ``known_ransomware_use``, keys of their own that copy predates."""
+        items = [_nvd_item(cve_id) for cve_id in NVD] + [_kev_item(cve_id) for cve_id in KEV]
+        added = set()
+        for item in items:
+            cleared = dict(item, **{key: None for key in NVD_META_SOURCE_TEXT_KEYS})
+            gained = set(_meta(_attribute(item, "601"))) - set(_meta(_attribute(cleared, "601")))
+            assert gained <= set(NVD_META_SOURCE_TEXT_KEYS), item["cve_id"]
+            added |= gained
+        assert added == set(NVD_META_SOURCE_TEXT_KEYS)
+        stored_fixture = json.loads(
+            (TESTS / "fixtures" / "nvd_incremental_2026_10_14.json").read_text(encoding="utf-8")
+        )
+        stored = nvd_meta_of_comment(stored_fixture["misp"]["CVE-2025-0237"]["comment"])
+        collector = NVDCollector.__new__(NVDCollector)
+        collector.tag = collector.source_name = "nvd"
+        current = _meta(_attribute(collector._vulnerability_item(stored_fixture["nvd"]["CVE-2025-0237"]), "601"))
+        new_since = set(current) - set(stored) - {"ssvc", "known_ransomware_use"}
+        assert new_since and new_since <= set(NVD_META_SOURCE_TEXT_KEYS)
 
     def test_the_order_of_the_cwe_lists_is_no_change(self):
         """``cwe`` is compared without its order (NVD built it from a set before 2026-10), so are the names made from
@@ -368,6 +538,97 @@ class TestNvdKeys:
         item = {k: v for k, v in _nvd_item("CVE-2023-29492").items() if k not in NEW_KEYS}
         meta = _meta(_attribute(item, "601"))
         assert not set(NEW_KEYS) & set(meta)
+
+
+# ------------------------------------------------------------------------------------------ the writer's own checks
+class TestWriterChecks:
+    """The writer checks every value again, whatever the collector did: constructed items passed straight to
+    ``create_vulnerability_attribute``, each value at or just over its bound."""
+
+    @staticmethod
+    def _meta_of(**facts: Any) -> Dict[str, Any]:
+        return _meta(_attribute(dict(_nvd_item("CVE-2023-29492"), **facts), "601"))
+
+    def test_a_url_listed_again_merges_its_tags(self):
+        url = "https://example.org/advisory"
+        refs = [{"url": url, "tags": ["Patch"]}, {"url": " " + url, "tags": ["Exploit", "Patch"]}, {"url": "  "}]
+        assert self._meta_of(references=refs)["references"] == [{"url": url, "tags": ["Patch", "Exploit"]}]
+
+    def test_an_overlong_url_or_tag_is_left_out_and_twenty_tags_are_kept(self):
+        long_url = "https://example.org/" + "a" * 2029
+        assert len(long_url) == 2049
+        tags = [f"Tag {i}" for i in range(25)] + ["T" * 65]
+        refs = [
+            {"url": long_url, "tags": ["Exploit"]},
+            {"url": "https://example.org/short", "tags": ["T" * 65, *tags]},
+            {"url": "https://example.org/" + "b" * 2028},
+        ]
+        assert self._meta_of(references=refs)["references"] == [
+            {"url": "https://example.org/short", "tags": tags[:20]},
+            {"url": "https://example.org/" + "b" * 2028},
+        ]
+
+    def test_at_most_a_thousand_urls_and_a_kept_url_still_merges(self):
+        refs = [{"url": f"h:{i}"} for i in range(1001)] + [{"url": "h:0", "tags": ["Exploit"]}]
+        kept = self._meta_of(references=refs)["references"]
+        assert len(kept) == 1000 and kept[0] == {"url": "h:0", "tags": ["Exploit"]}
+        assert kept[-1] == {"url": "h:999"}
+
+    def test_affected_names_pairs_and_shapes(self):
+        pairs = [
+            {"vendor": "V" * 257, "product": "P" * 256},
+            "Acme Widget",
+            {"vendor": "Acme", "product": "Widget"},
+            {"vendor": " Acme ", "product": "Widget"},
+            {"vendor": "", "product": None},
+        ]
+        assert self._meta_of(affected=pairs)["affected"] == [
+            {"product": "P" * 256},
+            {"vendor": "Acme", "product": "Widget"},
+        ]
+
+    def test_short_strings_over_their_bound_are_left_out(self):
+        meta = self._meta_of(
+            nvd_vuln_status="S" * 33,
+            cisa_forensic_triage="Y" * 17,
+            cwe_names=["CWE-20: Improper Input Validation"],
+            cwe_names_version="V" * 33,
+        )
+        assert not {"nvd_vuln_status", "cisa_forensic_triage", "cwe_names_version"} & set(meta)
+        assert meta["cwe_names"] == ["CWE-20: Improper Input Validation"]
+        meta = self._meta_of(nvd_vuln_status=" " + "S" * 32, cisa_forensic_triage="Y" * 16)
+        assert meta["nvd_vuln_status"] == "S" * 32 and meta["cisa_forensic_triage"] == "Y" * 16
+
+    def test_cwe_names_and_ids_are_bounded_whole(self):
+        names = ["CWE-1: " + "n" * 293, "CWE-2: " + "n" * 294] + [f"CWE-{i}: name" for i in range(3, 63)]
+        assert len(names[0]) == 300 and len(names[1]) == 301
+        meta = self._meta_of(cwe_names=names, cwe_names_version="5.0")
+        assert meta["cwe_names"] == [names[0], *names[2:51]] and len(meta["cwe_names"]) == 50
+        ids = ["CWE-20", "CWE-20", "CWE-" + "9" * 13] + [f"CWE-{i}" for i in range(100, 160)]
+        assert self._meta_of(cisa_cwes=ids)["cisa_cwes"] == ["CWE-20", *ids[3:52]]
+
+    def test_cvss_scorers_over_their_bound_are_left_out(self):
+        scorers = {
+            "cvss_v31_data": {"scored_by": "s" * 129, "score_type": "T" * 33},
+            "cvss_v2_data": {"scored_by": "nvd@nist.gov", "score_type": "Primary"},
+            "cvss_v30_data": {"scored_by": "s" * 128, "score_type": "T" * 32},
+            "other": {"scored_by": "nvd@nist.gov"},
+        }
+        assert self._meta_of(cvss_scorers=scorers)["cvss_scorers"] == {
+            "cvss_v30_data": {"scored_by": "s" * 128, "score_type": "T" * 32},
+            "cvss_v2_data": {"scored_by": "nvd@nist.gov", "score_type": "Primary"},
+        }
+
+    def test_the_kev_collector_passes_raw_values_and_the_writer_bounds_them(self):
+        """The KEV collector copies ``forensicTriage`` and ``cwes`` as CISA gives them: the writer's check is the
+        only one on that path."""
+        entry = dict(KEV["CVE-2025-39682"], forensicTriage="Yes, see the advisory", cwes=["CWE-754", "CWE-" + "7" * 13])
+        collector = CISACollector.__new__(CISACollector)
+        collector.tag = "cisa_kev"
+        item = collector._kev_item(entry)
+        assert item["cisa_forensic_triage"] == entry["forensicTriage"] and item["cisa_cwes"] == entry["cwes"]
+        meta = _meta(_attribute(item, "602"))
+        assert "cisa_forensic_triage" not in meta and meta["cisa_cwes"] == ["CWE-754"]
 
 
 # ------------------------------------------------------------------------------------------ new KEV keys
@@ -428,16 +689,24 @@ class TestBudget:
     def test_the_budget_is_under_the_comment_column(self):
         assert NVD_META_BUDGET_BYTES < MISP_COMMENT_COLUMN_BYTES == 65_535
 
-    def test_the_largest_real_record_fits_whole(self, caplog):
-        """CVE-2014-6271: 341 references, the most of NVD's KEV page; 171 URLs, every one kept with its tags."""
-        refs = NVD["CVE-2014-6271"]["cve"]["references"]
-        assert len(refs) == 341
+    @pytest.mark.parametrize(
+        "cve_id, references, urls, at_least",
+        [
+            # The most references of NVD's KEV page (1,769 records on 2026-11-07).
+            ("CVE-2014-6271", 341, 171, 24_000),
+            # The largest comment of that page: 26,598 bytes measured on 2026-11-07.
+            ("CVE-2023-44487", 292, 173, 26_500),
+        ],
+    )
+    def test_the_largest_real_records_fit_whole(self, cve_id, references, urls, at_least, caplog):
+        """Every URL kept with its tags, nothing shrunk: the budget sits above the largest real record."""
+        refs = NVD[cve_id]["cve"]["references"]
+        assert len(refs) == references
         with caplog.at_level(logging.WARNING, logger=mw.logger.name):
-            attribute = _attribute(_nvd_item("CVE-2014-6271"), "601")
+            attribute = _attribute(_nvd_item(cve_id), "601")
         meta = _meta(attribute)
-        assert len(meta["references"]) == len({r["url"] for r in refs}) == 171
-        assert _comment_bytes(attribute) <= NVD_META_BUDGET_BYTES < MISP_COMMENT_COLUMN_BYTES
-        assert _comment_bytes(attribute) > 20_000, "the record is large: the budget is exercised near its size"
+        assert len(meta["references"]) == len({r["url"] for r in refs}) == urls
+        assert at_least < _comment_bytes(attribute) <= NVD_META_BUDGET_BYTES < MISP_COMMENT_COLUMN_BYTES
         assert not [r for r in caplog.records if "[NVD_META]" in r.getMessage()], "nothing was shrunk"
 
     @pytest.mark.parametrize("budget", [6_000, 12_000, 18_000])
@@ -467,8 +736,8 @@ class TestBudget:
             return 0 if not tags else 2 if {"Exploit", "Patch", "Vendor Advisory", "Mitigation"} & set(tags) else 1
 
         assert max(kind(e) for e in dropped) <= min(kind(e) for e in kept)
-        # As few as make it fit: keeping one more does not fit.
-        order = mw._reference_drop_order(full_meta["references"])
+        # As few as make it fit: keeping one more does not fit (the order rebuilt here, not read from the writer).
+        order = sorted(range(len(full_meta["references"])), key=lambda i: (kind(full_meta["references"][i]), -i))
         one_more = [full_meta["references"][i] for i in sorted(set(range(len(order))) - set(order[: len(dropped) - 1]))]
         assert len(mw._render_nvd_meta(dict(meta, references=one_more)).encode("utf-8")) > budget
         (line,) = [r.getMessage() for r in caplog.records if "[NVD_META]" in r.getMessage()]
@@ -508,16 +777,125 @@ class TestBudget:
         assert out["cwe_names"] == meta["cwe_names"]
 
     def test_the_last_resort_keeps_the_json_and_the_record(self, caplog):
-        """Constructed: a description far beyond any CVE record (100,000 characters) is cut at a word end, the
+        """Constructed: a description far beyond any CVE record (over 100,000 characters) is cut at a word end, the
         only case a source text is cut; the record keeps its id fields and scores."""
-        item = dict(_nvd_item("CVE-2024-3400"), description="word " * 20_000)
+        source = _words("word", 15_000)
+        assert len(source) > 100_000
+        item = dict(_nvd_item("CVE-2024-3400"), description=source)
         with caplog.at_level(logging.ERROR, logger=mw.logger.name):
             attribute = WRITER.create_vulnerability_attribute(item)
         meta = _meta(attribute)
         assert _comment_bytes(attribute) <= NVD_META_BUDGET_BYTES
-        assert meta["description"].startswith("word ") and not meta["description"].endswith("wor")
+        assert _cut_at_a_word_end(meta["description"], source)
         assert meta["cvss_v31_data"] and meta["published"]
         assert any("[NVD_META]" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_a_cut_ends_at_a_word_end(self):
+        assert mw._cut_at_word("alpha beta", 20) == "alpha beta"
+        assert mw._cut_at_word("alpha beta gamma", 12) == "alpha beta"
+        assert mw._cut_at_word("alpha beta", 5) == "alpha"
+        assert mw._cut_at_word("alpha\nbeta", 8) == "alpha"
+        assert mw._cut_at_word("alpha  beta", 7) == "alpha"
+        assert mw._cut_at_word("alphabeta", 5) == "alpha", "a text without whitespace is cut where it must be"
+
+    def test_the_last_resort_cuts_the_kev_notes(self, caplog):
+        """Constructed: KEV notes far over the budget are cut at a word end; the description stays whole and only
+        the lists go (``cwe_names`` with its version)."""
+        notes = _words("note", 12_000)
+        meta = dict(_meta(_attribute(_kev_item("CVE-2025-39682"), "602")), cisa_notes=notes)
+        with caplog.at_level(logging.ERROR, logger=mw.logger.name):
+            comment = mw._fit_nvd_meta(meta, ref="CVE-2025-39682")
+        out = nvd_meta_of_comment(comment)
+        assert len(comment.encode("utf-8")) <= NVD_META_BUDGET_BYTES
+        assert _cut_at_a_word_end(out["cisa_notes"], notes)
+        assert out["description"] == meta["description"]
+        assert set(out) == set(meta) - {"cwe_names", "cwe_names_version"}
+        assert any("[NVD_META]" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_the_longer_text_is_cut_first(self):
+        """Constructed: a description of about 4,000 characters (a CVE record's bound) beside notes far over the
+        budget: cutting the notes fits, so the description stays whole."""
+        description, notes = _words("desc", 500), _words("note", 12_000)
+        assert 3_500 < len(description) <= 4_096
+        meta = dict(_meta(_attribute(_kev_item("CVE-2025-39682"), "602")), description=description, cisa_notes=notes)
+        out = nvd_meta_of_comment(mw._fit_nvd_meta(meta, ref="CVE-2025-39682"))
+        assert out["description"] == description and _cut_at_a_word_end(out["cisa_notes"], notes)
+
+    @staticmethod
+    def _small_record() -> Dict[str, Any]:
+        """CVE-2024-3400's NVD_META with a constructed description too short for the last resort to cut."""
+        return dict(_meta(_attribute(_nvd_item("CVE-2024-3400"), "601")), description="A short description.")
+
+    def test_the_last_resort_drops_the_largest_key_first(self, caplog):
+        """Constructed: a huge ``cisa_required_action`` and an ``ssvc`` of about 1 KB; dropping the largest key is
+        enough, so ``ssvc`` stays."""
+        meta = dict(
+            self._small_record(),
+            cisa_required_action=_words("act", 700),
+            ssvc={"exploitation": "active", "note": "s" * 1_000},
+        )
+        expected = {
+            k: v
+            for k, v in meta.items()
+            if k not in {"references", "affected", "version_constraints", "cwe_names", "cwe_names_version"}
+            and k != "cisa_required_action"
+        }
+        with caplog.at_level(logging.ERROR, logger=mw.logger.name):
+            comment = mw._fit_nvd_meta(meta, budget=_size(expected), ref="CVE-2024-3400")
+        assert nvd_meta_of_comment(comment) == expected
+        assert any("[NVD_META]" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_the_last_resort_keeps_every_core_key(self, caplog):
+        """Constructed: a budget only the core keys fit: every other key goes, the CVSS payloads and dates stay."""
+        meta = self._small_record()
+        core = {k: v for k, v in meta.items() if k in CORE_KEYS}
+        assert {"published", "last_modified", "description", "status", "cvss_v31_data"} <= set(core)
+        with caplog.at_level(logging.ERROR, logger=mw.logger.name):
+            comment = mw._fit_nvd_meta(meta, budget=_size(core) + 2, ref="CVE-2024-3400")
+        assert nvd_meta_of_comment(comment) == core
+        assert any("[NVD_META]" in r.getMessage() and r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_the_cna_pairs_go_before_the_version_ranges(self):
+        """Constructed: 20 pairs and 10 version ranges; once the references and the pairs are gone, the ranges go
+        from the end, as few as make the comment fit."""
+        meta = dict(
+            _meta(_attribute(_nvd_item("CVE-2023-29492"), "601")),
+            references=[{"url": "https://example.org/r"}],
+            affected=[{"vendor": f"Vendor {i}", "product": "x" * 200} for i in range(20)],
+            version_constraints=[
+                {"cpe": f"cpe:2.3:a:example:product_{i}:*:*:*:*:*:*:*:*" + "x" * 80, "version_end": f"{i}.0"}
+                for i in range(10)
+            ],
+        )
+        budget = _size({k: v for k, v in meta.items() if k not in {"references", "affected"}}) - 400
+        out = nvd_meta_of_comment(mw._fit_nvd_meta(meta, budget=budget, ref="CVE-2023-29492"))
+        assert "references" not in out and "affected" not in out
+        kept = out["version_constraints"]
+        assert 0 < len(kept) < 10 and kept == meta["version_constraints"][: len(kept)]
+        assert out["cwe_names"] == meta["cwe_names"] and out["description"] == meta["description"]
+
+    def test_the_cwe_version_goes_with_the_last_cwe_name(self):
+        """Constructed budget: the comment fits only without every CWE name; the version goes with them and the
+        last resort does not run."""
+        meta = {
+            k: v
+            for k, v in _meta(_attribute(_nvd_item("CVE-2022-46169"), "601")).items()
+            if k not in {"references", "affected", "version_constraints"}
+        }
+        assert len(meta["cwe_names"]) == 3 and meta["cwe_names_version"]
+        expected = {k: v for k, v in meta.items() if k not in {"cwe_names", "cwe_names_version"}}
+        out = nvd_meta_of_comment(mw._fit_nvd_meta(meta, budget=_size(expected), ref="CVE-2022-46169"))
+        assert out == expected
+
+    def test_the_reference_drop_order_by_kind(self):
+        assert mw._reference_drop_order(KINDS_OF_REFERENCES) == KINDS_DROP_ORDER
+
+    @pytest.mark.parametrize("dropped", [1, 3, 5])
+    def test_the_references_kept_by_kind(self, dropped):
+        meta = dict(_meta(_attribute(_nvd_item("CVE-2023-29492"), "601")), references=KINDS_OF_REFERENCES)
+        expected = [r for i, r in enumerate(KINDS_OF_REFERENCES) if i not in KINDS_DROP_ORDER[:dropped]]
+        comment = mw._fit_nvd_meta(meta, budget=_size(dict(meta, references=expected)), ref="CVE-2023-29492")
+        assert nvd_meta_of_comment(comment)["references"] == expected
 
 
 # ------------------------------------------------------------------------------------------ the sync

@@ -1256,6 +1256,15 @@ def _meta_short_string(value: Any, max_chars: int) -> str:
     return value.strip() if isinstance(value, str) and len(value.strip()) <= max_chars else ""
 
 
+def _meta_whole_name(value: Any) -> str:
+    """A source's vendor or product name as ``NVD_META`` holds it (``vendor`` / ``product``, 2026-11-07): whole,
+    control characters and characters outside the Basic Multilingual Plane removed, trimmed; never cut (C1: MISP
+    holds the source's text, a cut belongs to the sync). ``""`` for a value that is no string."""
+    if not isinstance(value, str):
+        return ""
+    return _strip_non_bmp(re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", value)).strip()
+
+
 def _meta_references(values: Any) -> List[Dict[str, Any]]:
     """``NVD_META.references`` (2026-11-07): ``[{"url", "tags"}]``, each URL once (a URL listed again adds the
     tags it lacked), ``tags`` left out when there are none, at most ``_MAX_META_REFERENCES``. A URL over
@@ -3469,6 +3478,7 @@ class MISPWriter:
             if ransomware == "Known":
                 tags.append("ransomware:known")
 
+        # The plain comment (a record without NVD_META) is a short note: its parts are cut there.
         description = sanitize_value(vuln.get("description", ""), max_length=200)
         vendor = sanitize_value(vuln.get("vendor", ""), max_length=100)
         product = sanitize_value(vuln.get("product", ""), max_length=100)
@@ -3497,8 +3507,9 @@ class MISPWriter:
             # 2026-11-07: the source's whole text (the collectors no longer cut it), characters outside the Basic
             # Multilingual Plane stripped as in every MISP text (C1); the sync caps what the graph holds.
             "description": _strip_non_bmp(source_text) if isinstance(source_text, str) else source_text,
-            "vendor": vendor,
-            "product": product,
+            # 2026-11-07: KEV's vendorProject / product and an ICS advisory's first vendor / product, whole (C1).
+            "vendor": _meta_whole_name(vuln.get("vendor")),
+            "product": _meta_whole_name(vuln.get("product")),
             # CISA KEV exploitability intelligence
             "cisa_exploit_add": vuln.get("cisa_exploit_add", ""),
             "cisa_action_due": vuln.get("cisa_action_due", ""),

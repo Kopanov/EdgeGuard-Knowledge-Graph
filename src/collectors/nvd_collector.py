@@ -275,7 +275,7 @@ MAX_AFFECTED_NAME_CHARS = 256
 AFFECTED_PLACEHOLDERS = frozenset({"n/a", "unknown", "*", "-"})
 # NVD's analysis states ("Analyzed", "Awaiting Analysis", "Deferred", ...) are short.
 MAX_VULN_STATUS_CHARS = 32
-# Who scored a CVSS metric (an e-mail or a UUID) and its type ("Primary" for NVD, "Secondary" otherwise).
+# Who scored a CVSS metric (an e-mail or a UUID) and NVD's type label for it ("Primary" / "Secondary" as given).
 MAX_SCORED_BY_CHARS = 128
 MAX_SCORE_TYPE_CHARS = 32
 # The CVSS payload keys of the item (``NVD_META``) and the NVD metric lists they are read from.
@@ -329,7 +329,9 @@ def nvd_affected(cve_data: Any) -> List[Dict[str, str]]:
     Only the entries the CNA itself wrote, those whose ``source`` is the record's ``sourceIdentifier``: an ADP
     container (CISA-ADP) lists the same products again in CPE words. A placeholder (``n/a``, ``Unknown``, ``*``,
     ``-``, any case) or an overlong name counts as no name: a pair keeps the name it has (``{"product": ...}``)
-    and is left out when it has none. Each pair once, in the CNA's order, at most ``MAX_AFFECTED_PAIRS``.
+    and is left out when it has none. An entry that names its product only by its package (CVE JSON 5's
+    ``collectionURL`` + ``packageName``, e.g. a PyPI or git package) keeps the package name as its ``product``;
+    a real ``product`` comes first. Each pair once, in the CNA's order, at most ``MAX_AFFECTED_PAIRS``.
     The version ranges stay out (MISP holds NVD's CPE ranges in ``version_constraints``). Never raises.
     """
     if not isinstance(cve_data, dict):
@@ -348,7 +350,7 @@ def nvd_affected(cve_data: Any) -> List[Dict[str, str]]:
                 key: name
                 for key, name in (
                     ("vendor", _affected_name(product.get("vendor"))),
-                    ("product", _affected_name(product.get("product"))),
+                    ("product", _affected_name(product.get("product")) or _affected_name(product.get("packageName"))),
                 )
                 if name
             }
@@ -363,11 +365,14 @@ def nvd_cvss_scorers(metrics: Any) -> Dict[str, Dict[str, str]]:
     """Who scored each CVSS payload of the item and how (2026-11-07).
 
     The collector reads the first metric NVD lists for each CVSS version; this names its ``source`` (an e-mail
-    or a UUID: ``nvd@nist.gov``, a CNA's PSIRT, CISA-ADP) as ``scored_by`` and its ``type`` (``Primary``: NVD's
-    own score; ``Secondary``: another scorer's) as ``score_type``, keyed by the payload key
+    or a UUID: ``nvd@nist.gov``, a CNA's PSIRT, CISA-ADP) as ``scored_by`` and its ``type`` as NVD gives it
+    (``Primary`` / ``Secondary``) as ``score_type``, keyed by the payload key
     (``{"cvss_v31_data": {"scored_by": ..., "score_type": ...}}``). A version without a metric, or whose first
-    metric names neither, has no entry. The first-listed v3.1 metric is the CNA's on 88% of recent records; the
-    score keeps that choice, and these keys say whose it is. Never raises.
+    metric names neither, has no entry. ``Primary`` is mostly ``nvd@nist.gov``, but NVD also labels some CNA
+    metrics ``Primary`` (``secure@microsoft.com`` on 3 of the 1,769 records of NVD's KEV page on 2026-11-07) and
+    its own metric ``Secondary`` on others (65), so ``scored_by``, not ``score_type``, says who scored it. The
+    first-listed v3.1 metric is the CNA's on 88% of recent records; the score keeps that choice, and these keys say
+    whose it is. Never raises.
     """
     out: Dict[str, Dict[str, str]] = {}
     if not isinstance(metrics, dict):
