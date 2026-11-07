@@ -1277,7 +1277,9 @@ def run_cisa_ics_collection(**context):
 
     2026-11-07: the writer knows when the task's ``execution_timeout`` ends (``_task_ends_at``), so the pushes of
     the run's report records (``MISPWriter.push_reports``) start no record later than 10 minutes before it and the
-    collector saves ``report_pending`` before Airflow kills the task.
+    collector saves ``report_pending`` before Airflow kills the task. The CVE items' push (``push_items``) also
+    stops a failing streak 10 minutes before that end (``MISPWriter._arm_push_cap``), besides
+    ``EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC``.
     """
     try:
         from config import ENABLE_CISA_ICS as _cisa_ics_enabled

@@ -80,11 +80,12 @@ INDICATORS_HARD_MAX = 20000
 # records: an OTX description is at most 1,024 characters at the source; the 1,389 CISA ICS advisories of
 # 2024-2026 (read 2026-11-07) give at most 85 distinct remediations and 644 affected products for one CVE
 # (ICSA-26-113-03, ICSA-24-235-03), 497 products and 486 CVEs for one advisory (ICSA-24-193-05,
-# ICSA-25-226-07), a vulnerability note of 4,102 characters, a product name of 219 characters and a record
-# of about 940 KB (ICSA-26-295-11). A list item longer than its cap is left out, never cut (a cut name or
-# URL would be another value); a text longer than its cap is cut at a word end; a list longer than its
-# item cap keeps its first items in sort order, and ``list_cuts`` names such a list so the caller can log
-# it. The graph's own caps (summary 500, title 255, ...) are applied by the sync.
+# ICSA-25-226-07), a vulnerability summary of 3,998 characters as the record holds it (4,102 with the source's
+# CRLF line ends), a product name of 219 characters and a record of about 940 KB (ICSA-26-295-11). A list
+# item longer than its cap is left out, never cut (a cut name or URL would be another value); a text longer
+# than its cap is cut at a word end; a list longer than its item cap keeps its first items in sort order, and
+# ``list_cuts`` names such a list so the caller can log it. The graph's own caps (summary 500, title 255, ...)
+# are applied by the sync.
 DESCRIPTION_MAX_CHARS = 1_000_000
 TITLE_MAX_CHARS = 2000
 URL_MAX_CHARS = 2048
