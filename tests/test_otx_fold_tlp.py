@@ -34,7 +34,7 @@ def _pulse(pid, tlp, iocs, families=()):
         "created": now,
         "modified": now,
         "adversary": "",
-        "TLP": tlp,
+        "tlp": tlp,
         "attack_ids": [],
         "malware_families": list(families),
         "indicators": [{"type": "IPv4", "indicator": v, "description": "ioc"} for v in iocs],

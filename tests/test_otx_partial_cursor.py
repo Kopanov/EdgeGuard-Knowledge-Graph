@@ -128,7 +128,7 @@ def _pulse(pid: str, modified: str, iocs: List[str], ioc_type: str = "IPv4") -> 
         "description": "",
         "created": "2026-10-13T11:11:02.458000",
         "modified": modified,
-        "TLP": "white",
+        "tlp": "white",
         "adversary": "",
         "tags": [],
         "references": [],

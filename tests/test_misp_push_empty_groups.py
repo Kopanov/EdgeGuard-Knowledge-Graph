@@ -333,7 +333,7 @@ def _otx_pulse(pulse_id: str, modified: str, iocs: List[str], cve_references: Li
         "description": "",
         "created": "2026-10-13T11:11:02.458000",
         "modified": modified,
-        "TLP": "white",
+        "tlp": "white",
         "adversary": "",
         "tags": [],
         "references": [],

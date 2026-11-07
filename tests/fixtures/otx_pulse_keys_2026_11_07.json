@@ -1,0 +1,51 @@
+{
+ "_provenance": "Read from OTX on 2026-11-07 with a subscriber key: GET /api/v1/pulses/subscribed?limit=5&page=1 to page=8, 40 pulses, each page HTTP 200 (a page of limit=20 answered HTTP 504). 'subscribed_keys' are the keys of every result row, the same on all 40; 'subscribed_tlp_values' counts the values of 'tlp'; 'subscribed_description_max_chars' is the longest description of the 40 (8 rows at that length; GET /api/v1/pulses/{id} of three of them answered the same text). 'by_id_keys' are the keys of the answer by id recorded in tests/fixtures/otx_pulse_by_id_2026_11_02.json. Key names and counts only; no pulse content.",
+ "subscribed_keys": [
+  "adversary",
+  "attack_ids",
+  "author_name",
+  "created",
+  "description",
+  "extract_source",
+  "id",
+  "indicators",
+  "industries",
+  "malware_families",
+  "modified",
+  "more_indicators",
+  "name",
+  "public",
+  "references",
+  "revision",
+  "tags",
+  "targeted_countries",
+  "tlp"
+ ],
+ "subscribed_tlp_values": {
+  "white": 40
+ },
+ "subscribed_description_max_chars": 1024,
+ "by_id_keys": [
+  "TLP",
+  "adversary",
+  "attack_ids",
+  "author",
+  "author_name",
+  "created",
+  "description",
+  "groups",
+  "id",
+  "in_group",
+  "indicators",
+  "industries",
+  "is_subscribing",
+  "malware_families",
+  "modified",
+  "name",
+  "public",
+  "references",
+  "revision",
+  "tags",
+  "targeted_countries"
+ ]
+}

@@ -26,7 +26,7 @@ _PULSE = {
     "author_name": "example",
     "created": "2026-10-13T11:11:02.458000",
     "modified": "2026-10-13T23:37:29.579000",
-    "TLP": "white",
+    "tlp": "white",
     "tags": [],
     "references": [],
     "industries": [],
