@@ -1238,7 +1238,13 @@ class CISAICSCollector:
                     pending_failures = 0
                 else:
                     consecutive_failures = 0
-                if path in change_ts and (processed_max_ts is None or change_ts[path] > processed_max_ts):
+                # A pending record's advisory read for its record only moves no cursor: change_ts holds every path
+                # the run selected before the cap, and the cursor must not pass the capped-off advisories.
+                if (
+                    pending_ref is None
+                    and path in change_ts
+                    and (processed_max_ts is None or change_ts[path] > processed_max_ts)
+                ):
                     processed_max_ts = change_ts[path]
                 try:
                     items, skipped = self.parse_advisory(data, path)

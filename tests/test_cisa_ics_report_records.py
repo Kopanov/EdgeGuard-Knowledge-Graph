@@ -701,6 +701,26 @@ class TestPendingRecords:
         assert "cisa_ics:ICSA-25-317-15" in {r["record_ref"] for r in pushed_records(c)}
         assert pending() == {}
 
+    def test_a_pending_record_past_the_run_cap_moves_no_cursor(self, monkeypatch):
+        """A capped run reads a pending record's advisory past the cap for its record only; its change time must not
+        become the cursor, which would pass the advisories the cap left unread and the pending advisory's items."""
+        monkeypatch.setattr(mod, "CISA_ICS_MAX_ADVISORIES_PER_RUN", 1)
+        put_on_pending("cisa_ics:ICSA-26-043-08")  # NX
+        t1, t2, t3 = "2026-11-01T00:00:00.000000Z", "2026-11-02T00:00:00.000000Z", "2026-11-03T00:00:00.000000Z"
+        http = _HTTP(
+            {
+                "changes.csv": changes((COMOS, t1), (ROCKWELL, t2), (NX, t3)),
+                COMOS: advisory(COMOS),
+                ROCKWELL: advisory(ROCKWELL),
+                NX: advisory(NX),
+            }
+        )
+        c = collector(monkeypatch, http)
+        c.collect(push_to_misp=True, baseline=False)
+        assert http.advisories() == [COMOS, NX]
+        assert "cisa_ics:ICSA-26-043-08" in {r["record_ref"] for r in pushed_records(c)}
+        assert cursor() == t1
+
     def test_failing_pending_reads_stop_after_their_own_streak_and_the_run_goes_on(self, monkeypatch, caplog):
         # Constructed: five pending records whose advisories the listing names (outside the look-back) and that
         # answer HTTP 404; the run's own advisory is read first and fetched.
