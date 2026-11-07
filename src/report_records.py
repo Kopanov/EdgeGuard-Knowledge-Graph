@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import re
+import sys
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
@@ -75,10 +76,15 @@ REPORT_EVENT_SUFFIX = "-reports"
 # accepts any list up to it, so a record written under a larger setting still reads.
 INDICATORS_HARD_MAX = 20000
 
-# Safety caps of the meta block. They bound what one record can put into MISP; real records stay far
-# below them (an OTX description is at most 1,024 characters at the source). A list item longer than its
-# cap is left out, never cut (a cut name or URL would be another value); a text longer than its cap is
-# cut at a word end. The graph's own caps (summary 500, title 255, ...) are applied by the sync.
+# Safety caps of the meta block. They bound what one record can put into MISP and sit well above the real
+# records: an OTX description is at most 1,024 characters at the source; the 1,389 CISA ICS advisories of
+# 2024-2026 (read 2026-11-07) give at most 85 distinct remediations and 644 affected products for one CVE
+# (ICSA-26-113-03, ICSA-24-235-03), 497 products and 486 CVEs for one advisory (ICSA-24-193-05,
+# ICSA-25-226-07), a vulnerability note of 4,102 characters, a product name of 219 characters and a record
+# of about 940 KB (ICSA-26-295-11). A list item longer than its cap is left out, never cut (a cut name or
+# URL would be another value); a text longer than its cap is cut at a word end; a list longer than its
+# item cap keeps its first items in sort order, and ``list_cuts`` names such a list so the caller can log
+# it. The graph's own caps (summary 500, title 255, ...) are applied by the sync.
 DESCRIPTION_MAX_CHARS = 1_000_000
 TITLE_MAX_CHARS = 2000
 URL_MAX_CHARS = 2048
@@ -93,7 +99,8 @@ _REMEDIATION_DETAILS_MAX_CHARS = 8000
 _PRODUCT_MAX_CHARS = 300
 _CWE_NAME_MAX_CHARS = 300
 _MAX_CWES = 20
-_MAX_REMEDIATIONS = 50
+_MAX_REMEDIATIONS = 500
+_MAX_AFFECTED_PRODUCTS = 5000
 _MAX_VULNERABILITIES = 1000
 _CVE_ID_RE = re.compile(r"^CVE-\d{4}-\d{4,}$")
 _CWE_ID_RE = re.compile(r"^CWE-\d+$")
@@ -148,7 +155,7 @@ _SOURCE_FIELDS: Dict[str, Tuple[Tuple[str, str, Dict[str, int]], ...]] = {
         ("kind", "text", {"max_chars": 16}),
         ("csaf_url", "url", {"max_chars": URL_MAX_CHARS}),
         ("vendors", "texts", {"max_items": 100, "max_chars": NAME_MAX_CHARS}),
-        ("products", "texts", {"max_items": 500, "max_chars": _PRODUCT_MAX_CHARS}),
+        ("products", "texts", {"max_items": 2000, "max_chars": _PRODUCT_MAX_CHARS}),
         ("deployment_sectors", "texts", {"max_items": 100, "max_chars": NAME_MAX_CHARS}),
         ("deployment_countries", "texts", {"max_items": 300, "max_chars": NAME_MAX_CHARS}),
         ("vendor_headquarters", "text", {"max_chars": NAME_MAX_CHARS}),
@@ -342,7 +349,9 @@ def _pairs(values: Any) -> List[List[str]]:
     return [list(pair) for pair in sorted(kept)]
 
 
-def _remediations(values: Any) -> List[Dict[str, str]]:
+def _remediations(values: Any, max_items: Optional[int] = None) -> List[Dict[str, str]]:
+    """Remediation entries ``{"category", "details"}``, one per distinct pair, sorted, the first *max_items*
+    (default ``_MAX_REMEDIATIONS``)."""
     if not isinstance(values, (list, tuple)):
         return []
     kept = {}
@@ -354,13 +363,13 @@ def _remediations(values: Any) -> List[Dict[str, str]]:
             continue
         details = cut_at_word_end(_block_text(entry.get("details")), _REMEDIATION_DETAILS_MAX_CHARS)
         kept[(category, details)] = {"category": category, "details": details}
-    return [kept[key] for key in sorted(kept)][:_MAX_REMEDIATIONS]
+    return [kept[key] for key in sorted(kept)][: _MAX_REMEDIATIONS if max_items is None else max_items]
 
 
-def _cwes(values: Any) -> List[Dict[str, Optional[str]]]:
+def _cwes(values: Any, max_items: Optional[int] = None) -> List[Dict[str, Optional[str]]]:
     """CWE entries ``{"id": "CWE-<n>", "name": <the advisory's name or None>}``: an entry without a valid id is
     left out, a name longer than 300 characters is None; one entry per id (of several names, the first in sort
-    order, so the order given does not matter), sorted by id number, the first 20."""
+    order, so the order given does not matter), sorted by id number, the first *max_items* (default 20)."""
     if not isinstance(values, (list, tuple)):
         return []
     kept: Dict[str, Optional[str]] = {}
@@ -376,17 +385,17 @@ def _cwes(values: Any) -> List[Dict[str, Optional[str]]]:
         if cwe_id not in kept or (name_or_none is not None and (given is None or name_or_none < given)):
             kept[cwe_id] = name_or_none
     ordered = sorted(kept, key=lambda c: (int(c[4:]), c))
-    return [{"id": cwe_id, "name": kept[cwe_id]} for cwe_id in ordered][:_MAX_CWES]
+    return [{"id": cwe_id, "name": kept[cwe_id]} for cwe_id in ordered][: _MAX_CWES if max_items is None else max_items]
 
 
 _VULN_KEYS = ("cve_id", "summary", "remediations", "affected_products", "cwes")
 
 
-def _vulns(values: Any) -> List[Dict[str, Any]]:
+def _vulns(values: Any, max_items: Optional[int] = None) -> List[Dict[str, Any]]:
     """CISA ICS per-CVE entries: ``cve_id``, the vulnerability's ``summary`` note, its ``remediations``
     (CSAF ``category`` and ``details``), its ``affected_products`` and its ``cwes`` (``id`` and ``name``,
     ``_cwes``); an entry without a valid CVE id is left out, an entry with another key raises ``ValueError``;
-    sorted by CVE id (then by content), the first 1,000."""
+    sorted by CVE id (then by content), the first *max_items* (default 1,000)."""
     if not isinstance(values, (list, tuple)):
         return []
     kept: Dict[str, Dict[str, Any]] = {}
@@ -403,11 +412,12 @@ def _vulns(values: Any) -> List[Dict[str, Any]]:
             "cve_id": cve,
             "summary": cut_at_word_end(_block_text(entry.get("summary")), _CVE_SUMMARY_MAX_CHARS),
             "remediations": _remediations(entry.get("remediations")),
-            "affected_products": _texts(entry.get("affected_products"), 500, _PRODUCT_MAX_CHARS),
+            "affected_products": _texts(entry.get("affected_products"), _MAX_AFFECTED_PRODUCTS, _PRODUCT_MAX_CHARS),
             "cwes": _cwes(entry.get("cwes")),
         }
         kept[_canonical_json(clean)] = clean
-    return [kept[key] for key in sorted(kept, key=lambda k: (kept[k]["cve_id"], k))][:_MAX_VULNERABILITIES]
+    ordered = [kept[key] for key in sorted(kept, key=lambda k: (kept[k]["cve_id"], k))]
+    return ordered[: _MAX_VULNERABILITIES if max_items is None else max_items]
 
 
 def _normalise_value(kind: str, value: Any, opts: Dict[str, int], max_indicators: int) -> Any:
@@ -515,6 +525,45 @@ def _normalise(source: str, fields: Mapping[str, Any], *, max_indicators: Option
         record[name] = values[name]
     record["digest"] = compute_digest(record)
     return record
+
+
+def list_cuts(source: str, fields: Mapping[str, Any]) -> List[Tuple[str, int, int]]:
+    """The lists of *fields* that ``build_record`` cuts at their item cap, as ``(list, kept, given)``: *given* is
+    the number of distinct items after normalisation, *kept* the cap. A CISA ICS per-CVE list is named
+    ``vulnerabilities[<CVE id>].<list>``. The indicator list is not named: ``indicator_count`` keeps its total.
+    Empty for a record within every cap. Call it with fields ``build_record`` accepts."""
+    cuts: List[Tuple[str, int, int]] = []
+    unbounded = sys.maxsize
+    for name, kind, opts in _fields_of(source):
+        value = fields.get(name)
+        if kind == "texts":
+            given, cap = len(_texts(value, unbounded, opts["max_chars"])), opts["max_items"]
+        elif kind == "urls":
+            given, cap = len(_urls(value, unbounded, opts["max_chars"])), opts["max_items"]
+        elif kind == "cves":
+            given, cap = len(_cves(value, unbounded)), opts["max_items"]
+        elif kind == "vulns":
+            given, cap = len(_vulns(value, unbounded)), _MAX_VULNERABILITIES
+            for entry in value if isinstance(value, (list, tuple)) else []:
+                cve = _cve(entry.get("cve_id")) if isinstance(entry, Mapping) else None
+                if not cve:
+                    continue
+                for part, count, part_cap in (
+                    ("remediations", len(_remediations(entry.get("remediations"), unbounded)), _MAX_REMEDIATIONS),
+                    (
+                        "affected_products",
+                        len(_texts(entry.get("affected_products"), unbounded, _PRODUCT_MAX_CHARS)),
+                        _MAX_AFFECTED_PRODUCTS,
+                    ),
+                    ("cwes", len(_cwes(entry.get("cwes"), unbounded)), _MAX_CWES),
+                ):
+                    if count > part_cap:
+                        cuts.append((f"vulnerabilities[{cve}].{part}", part_cap, count))
+        else:
+            continue
+        if given > cap:
+            cuts.append((name, cap, given))
+    return cuts
 
 
 def compute_digest(record: Mapping[str, Any]) -> str:

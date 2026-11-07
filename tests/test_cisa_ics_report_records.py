@@ -3,14 +3,15 @@
 One report record per CSAF advisory (``report_records``, schema ``edgeguard.report.v1``, source ``cisa_ics``): the
 advisory summary, sectors, countries deployed, vendor headquarters, TLP, dates, revision, vendors, products, and per
 CVE the whole vulnerability note, the remediations, the affected products and the CWE. ``collect`` pushes the records
-with ``MISPWriter.push_reports`` before the CVE items and before the return of a run without items; a record whose
+with ``MISPWriter.push_reports`` after the CVE items and before the return of a run without items; a record whose
 push fails waits on ``report_pending`` (baselines included) and does not hold the cursor. Also here: the sector-list
-split (``"..., and Energy"``), the whole vulnerability note in ``NVD_META``.
+split (``"..., and Energy"``), the countries list, the record caps, the whole vulnerability note in ``NVD_META``.
 
-Fixture: ``tests/fixtures/cisa_ics_csaf_2026_11_07.json``, real CSAF advisories recorded from cisagov/CSAF on
-2026-11-07 (its ``_provenance`` names each and the one reduction). No advisory of 2024-2026 names no CVE (1,389
-read), so the advisory without a CVE is constructed from a recorded one with its ``vulnerabilities`` emptied, and
-says so where it is built.
+Fixtures: ``tests/fixtures/cisa_ics_csaf_2026_11_07.json`` and ``tests/fixtures/cisa_ics_csaf_more_2026_11_07.json``,
+real CSAF advisories recorded from cisagov/CSAF on 2026-11-07 (their ``_provenance`` names each and the two
+reductions). No advisory of 2024-2026 names no CVE (1,389 read), so the advisory without a CVE is constructed from a
+recorded one with its ``vulnerabilities`` emptied, and says so where it is built; other constructed inputs say so
+too.
 
 No network and no MISP: HTTP goes through a fake ``request_with_rate_limit_retries``, the writer is a mock whose
 ``push_reports`` answers as ``MISPWriter.push_reports`` does. The cursor and ``report_pending`` live in the per-test
@@ -41,10 +42,11 @@ from resilience import CircuitBreaker  # noqa: E402
 # The report_records module the collector uses, whatever another test module re-imported.
 rr = mod.report_records
 
-_FIXTURE = json.loads(
-    (Path(__file__).resolve().parent / "fixtures" / "cisa_ics_csaf_2026_11_07.json").read_text(encoding="utf-8")
-)
-ADVISORIES: Dict[str, Dict[str, Any]] = _FIXTURE["advisories"]
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+ADVISORIES: Dict[str, Dict[str, Any]] = {
+    **json.loads((_FIXTURES / "cisa_ics_csaf_2026_11_07.json").read_text(encoding="utf-8"))["advisories"],
+    **json.loads((_FIXTURES / "cisa_ics_csaf_more_2026_11_07.json").read_text(encoding="utf-8"))["advisories"],
+}
 BASE = "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/"
 
 COMOS = "2025/icsa-25-317-15.json"  # two CVEs, a vulnerability note of 1,501 characters
@@ -59,6 +61,10 @@ ROCKWELL = "2025/icsa-25-226-26.json"  # each CVE affects another product
 SIMATIC = "2026/icsa-26-134-10.json"  # the longest vulnerability note of 2024-2026 (reduced to that CVE)
 COUNTRIES = "2026/icsa-26-148-05.json"  # countries 'India, Nepal, United Arab Emirates, Gambia'
 TWO_HQ = "2026/icsa-26-300-02.json"  # two notes 'Company headquarters location' (reduced to its first CVE)
+RELATIONSHIPS = "2024/icsa-24-326-03.json"  # affected products that only product_tree.relationships name
+DETAILS_ONLY = "2025/icsa-25-093-01.json"  # CVE-2024-11499: its description in a single 'details' note
+DETAILS_AND_SCORE = "2025/icsa-25-037-02.json"  # CVE-2024-2658: a 'details' description, then a 'details' score
+MIDDLE_EAST = "2024/icsa-24-291-05.json"  # countries 'Europe, the Middle East and Asia.'
 
 _FROZEN_NOW = _dt.datetime(2026, 11, 7, 12, 0, tzinfo=_dt.timezone.utc)
 CHANGED = "2026-11-06T06:00:00.000000Z"  # inside the 30-day look-back of a run without a cursor
@@ -264,6 +270,9 @@ class TestParseAdvisoryRecord:
         no_fix = [r for r in vuln["remediations"] if r["category"] == "no_fix_planned"]
         source = [r for r in data["vulnerabilities"][0]["remediations"] if r["category"] == "no_fix_planned"]
         assert len(no_fix) == 1 and no_fix[0]["details"] == source[0]["details"].strip()
+        # Its only note is of category description: the summary falls back to it.
+        assert [n["category"] for n in data["vulnerabilities"][0]["notes"]] == ["description"]
+        assert vuln["summary"] == vuln_note(data, "CVE-2024-2461") and vuln["summary"]
         assert self.record(XMC20)["products"] == ["Hitachi Energy XMC20"]  # its product_family branch
         assert vuln["affected_products"] == [
             "XMC20 R15A and older including all subversions",
@@ -388,7 +397,7 @@ class TestCollectPushesRecords:
         assert st["stats"]["records"] == 1
         assert cursor() == CHANGED
 
-    def test_the_records_go_before_the_cve_items_and_in_batches(self, monkeypatch):
+    def test_the_records_go_after_the_cve_items_and_in_batches(self, monkeypatch):
         monkeypatch.setattr(mod, "REPORT_BATCH", 2)
         http = _HTTP(
             {
@@ -401,7 +410,8 @@ class TestCollectPushesRecords:
         c = collector(monkeypatch, http)
         st = c.collect(push_to_misp=True, baseline=False)
         names = [call[0] for call in c.misp_writer.mock_calls if call[0] in ("push_reports", "push_items")]
-        assert names == ["push_reports", "push_reports", "push_items"]
+        # An item batch's answer carries every report of the event: the records come after the items.
+        assert names == ["push_items", "push_reports", "push_reports"]
         assert [len(call.args[1]) for call in c.misp_writer.push_reports.call_args_list] == [2, 1]
         assert sorted(r["record_ref"] for r in pushed_records(c)) == [
             "cisa_ics:ICSA-25-226-26",
@@ -478,12 +488,17 @@ class TestCollectPushesRecords:
 # --------------------------------------------------------------------------- #
 
 
-def put_on_pending(*refs: str) -> None:
+def _ago(days: float) -> str:
+    """An ISO time *days* before the real clock: ``report_records`` dates ``report_pending`` by the real clock (the
+    tests freeze only the collector's)."""
+    return (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).isoformat()
+
+
+def put_on_pending(*refs: str, days_ago: float = 1) -> None:
     update_source_incremental(
         "cisa_ics",
         report_pending=[
-            {"record_ref": ref, "first_failed_at": "2026-11-06T00:00:00+00:00", "attempts": 1, "last_reason": "x"}
-            for ref in refs
+            {"record_ref": ref, "first_failed_at": _ago(days_ago), "attempts": 1, "last_reason": "x"} for ref in refs
         ],
     )
 
@@ -511,13 +526,61 @@ class TestPendingRecords:
         assert st["stats"]["pending_fetched"] == 1 and st["stats"]["attempted"] == 1
         assert cursor() == CHANGED
 
-    def test_a_pending_record_the_listing_no_longer_names_leaves_the_list(self, monkeypatch):
+    def test_a_pending_record_the_listing_does_not_name_is_a_failed_try(self, monkeypatch, caplog):
         put_on_pending("cisa_ics:ICSA-99-001-01")
         http = _HTTP({"changes.csv": changes((NX, CHANGED)), NX: advisory(NX)})
         c = collector(monkeypatch, http)
-        st = c.collect(push_to_misp=True, baseline=False)
-        assert pending() == {} and st["stats"]["pending_not_listed"] == 1
+        with caplog.at_level("WARNING"):
+            st = c.collect(push_to_misp=True, baseline=False)
+        entry = pending()["cisa_ics:ICSA-99-001-01"]
+        assert entry["attempts"] == 2 and "last_tried_at" in entry and "does not name" in entry["last_reason"]
+        assert st["stats"]["pending_not_listed"] == 1 and st["report_counts"]["reports_failed"] == 1
         assert http.advisories() == [NX]
+        assert any(
+            r.levelname == "WARNING" and "[REPORT-PENDING]" in r.getMessage() and "ICSA-99-001-01" in r.getMessage()
+            for r in caplog.records
+        )
+        assert cursor() == CHANGED
+
+    def test_a_not_listed_record_past_the_deadline_is_given_up_with_an_error_and_the_metric(self, monkeypatch, caplog):
+        import metrics_server
+
+        monkeypatch.setenv("EDGEGUARD_REPORT_PENDING_MAX_DAYS", "7")
+        metric = MagicMock()
+        monkeypatch.setattr(metrics_server, "record_report_pending", metric)
+        put_on_pending("cisa_ics:ICSA-99-001-01", days_ago=8)
+        http = _HTTP({"changes.csv": changes((NX, CHANGED)), NX: advisory(NX)})
+        c = collector(monkeypatch, http)
+        with caplog.at_level("ERROR"):
+            st = c.collect(push_to_misp=True, baseline=False)
+        assert pending() == {} and st["report_counts"]["given_up"] == 1
+        assert any(
+            r.levelname == "ERROR"
+            and "[REPORT-GAVE-UP] cisa_ics" in r.getMessage()
+            and "ICSA-99-001-01" in r.getMessage()
+            for r in caplog.records
+        )
+        assert metric.call_args.args[0] == "cisa_ics" and metric.call_args.args[3] == 1
+
+    @pytest.mark.parametrize(
+        "listing",
+        [
+            "",
+            # Constructed: a listing whose rows no longer have the YYYY/<file>.json form.
+            '"white/2025/icsa-25-317-15.json","2026-11-06T06:00:00.000000Z"\n',
+        ],
+    )
+    def test_a_listing_without_a_row_leaves_the_pending_records_untouched(self, monkeypatch, caplog, listing):
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        before = pending()["cisa_ics:ICSA-25-317-15"]
+        http = _HTTP({"changes.csv": listing})
+        c = collector(monkeypatch, http)
+        with caplog.at_level("WARNING"):
+            st = c.collect(push_to_misp=True, baseline=False)
+        assert pending() == {"cisa_ics:ICSA-25-317-15": before}
+        assert st["stats"]["pending_not_listed"] == 0 and st["report_counts"]["reports_failed"] == 0
+        assert http.advisories() == []
+        assert any("[REPORT-PENDING]" in r.getMessage() and "no advisory" in r.getMessage() for r in caplog.records)
 
     def test_a_pending_advisory_that_cannot_be_fetched_counts_as_a_try_and_holds_nothing(self, monkeypatch):
         put_on_pending("cisa_ics:ICSA-25-317-15")
@@ -527,6 +590,7 @@ class TestPendingRecords:
         entry = pending()["cisa_ics:ICSA-25-317-15"]
         assert entry["attempts"] == 2 and "last_tried_at" in entry and "fetched" in entry["last_reason"]
         assert st["stats"]["fetch_failed"] == 0 and st["stats"]["pending_failed"] == 1
+        assert st["report_counts"]["reports_failed"] == 1 and st["report_counts"]["given_up"] == 0
         assert cursor() == CHANGED
 
     def test_a_baseline_window_applies_to_an_advisory_without_a_cve(self, monkeypatch):
@@ -561,3 +625,288 @@ class TestPendingRecords:
         ]
         assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}
         assert st["stats"]["outside_window"] == 2 and pending() == {}
+        assert st["stats"]["pending_not_listed"] == 0
+
+    def test_a_baseline_reads_a_pending_record_listed_outside_its_years(self, monkeypatch):
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        # A 300-day baseline from the frozen clock selects 2026 only: COMOS (2025) is listed, not selected.
+        http = _HTTP({"index.txt": f"{NX}\n{COMOS}\n", NX: advisory(NX), COMOS: advisory(COMOS)})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=True, baseline_days=300)
+        assert http.advisories() == [NX, COMOS]
+        assert sorted(r["record_ref"] for r in pushed_records(c)) == [
+            "cisa_ics:ICSA-25-317-15",
+            "cisa_ics:ICSA-26-043-08",
+        ]
+        assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}
+        assert st["stats"]["pending_fetched"] == 1 and st["stats"]["pending_not_listed"] == 0
+        assert pending() == {}
+
+    def test_a_pending_advisory_that_is_malformed_counts_as_a_try(self, monkeypatch):
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), (COMOS, "2026-09-01T00:00:00.000000Z")),
+                NX: advisory(NX),
+                COMOS: {"document": {}},  # constructed: a payload without a vulnerabilities list
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        entry = pending()["cisa_ics:ICSA-25-317-15"]
+        assert entry["attempts"] == 2 and "last_tried_at" in entry and "malformed" in entry["last_reason"]
+        assert st["stats"]["pending_failed"] == 1 and st["stats"]["malformed"] == 0
+        assert cursor() == CHANGED
+
+    def test_one_run_reads_at_most_report_pending_per_run_records(self, monkeypatch):
+        monkeypatch.setattr(mod, "REPORT_PENDING_PER_RUN", 1)
+        put_on_pending("cisa_ics:ICSA-25-317-15", "cisa_ics:ICSA-25-226-26")
+        old = "2026-09-01T00:00:00.000000Z"
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), (COMOS, old), (ROCKWELL, old)),
+                NX: advisory(NX),
+                COMOS: advisory(COMOS),
+                ROCKWELL: advisory(ROCKWELL),
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert len(http.advisories()) == 2 and st["stats"]["pending_fetched"] == 1
+        assert len(pending()) == 1
+
+    def test_the_item_limit_does_not_stop_the_pending_reads(self, monkeypatch):
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), (COMOS, "2026-09-01T00:00:00.000000Z")),
+                NX: advisory(NX),
+                COMOS: advisory(COMOS),
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(limit=1, push_to_misp=True, baseline=False)
+        assert http.advisories() == [NX, COMOS] and st["stats"]["pending_fetched"] == 1
+        assert "cisa_ics:ICSA-25-317-15" in {r["record_ref"] for r in pushed_records(c)}
+        assert pending() == {}
+
+    def test_a_list_that_cannot_be_read_does_not_stop_the_run(self, monkeypatch):
+        monkeypatch.setattr(rr, "pending_record_refs", MagicMock(side_effect=OSError("unreadable")))
+        http = _HTTP({"changes.csv": changes((COMOS, CHANGED)), COMOS: advisory(COMOS)})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True and st["count"] == 2
+        assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-25-317-15"]
+
+
+# --------------------------------------------------------------------------- #
+# Records the run cannot build or read
+# --------------------------------------------------------------------------- #
+
+
+class TestRecordsNotBuiltOrRead:
+    def test_a_record_that_cannot_be_built_waits_on_report_pending(self, monkeypatch):
+        monkeypatch.setattr(rr, "build_record", MagicMock(side_effect=ValueError("no record")))
+        http = _HTTP({"changes.csv": changes((COMOS, CHANGED)), COMOS: advisory(COMOS)})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        entry = pending()["cisa_ics:ICSA-25-317-15"]
+        assert entry["attempts"] == 1 and "built" in entry["last_reason"]
+        assert st["report_counts"]["reports_failed"] == 1 and st["report_counts"]["records"] == 0
+        c.misp_writer.push_reports.assert_not_called()
+        assert st["count"] == 2  # the CVE items are pushed
+        assert cursor() == CHANGED
+
+    def test_an_over_long_advisory_id_gives_no_record_and_waits_on_report_pending(self, monkeypatch):
+        data = advisory(COMOS)
+        data["document"]["tracking"]["id"] = "ICSA-" + "X" * 409  # constructed: longer than a record id may be
+        http = _HTTP({"changes.csv": changes((COMOS, CHANGED)), COMOS: data})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        (entry,) = pending().values()
+        assert entry["attempts"] == 1 and "built" in entry["last_reason"]
+        assert st["report_counts"]["reports_failed"] == 1
+
+    def test_a_baseline_lists_an_advisory_of_the_window_that_could_not_be_fetched(self, monkeypatch):
+        # COMOS (2025-11-11, inside the 730-day window) answers 404 on the baseline.
+        http = _HTTP({"index.txt": f"{NX}\n{COMOS}\n", NX: advisory(NX)})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=True, baseline_days=730)
+        assert st["stats"]["fetch_failed"] == 1 and list(pending()) == ["cisa_ics:ICSA-25-317-15"]
+        assert cursor() is None
+        # The next scheduled run reads it for its record only, though it changed before the look-back.
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), (COMOS, "2025-11-11T00:00:00.000000Z")),
+                NX: advisory(NX),
+                COMOS: advisory(COMOS),
+            }
+        )
+        c = collector(monkeypatch, http)
+        c.collect(push_to_misp=True, baseline=False)
+        assert "cisa_ics:ICSA-25-317-15" in {r["record_ref"] for r in pushed_records(c)}
+        assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}
+        assert pending() == {}
+
+    def test_a_baseline_does_not_list_an_advisory_outside_the_window_that_could_not_be_fetched(self, monkeypatch):
+        # DICOM's file name dates it 2024-02-27, before the 730-day cutoff 2024-11-07; the margin makes it fetched.
+        monkeypatch.setattr(mod, "FILENAME_DATE_MARGIN_DAYS", 400)
+        http = _HTTP({"index.txt": f"{NX}\n{DICOM}\n", NX: advisory(NX)})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=True, baseline_days=730)
+        assert st["stats"]["fetch_failed"] == 1 and DICOM in http.advisories()
+        assert pending() == {}
+
+    def test_a_baseline_does_not_list_a_record_outside_the_window_that_could_not_be_built(self, monkeypatch):
+        monkeypatch.setattr(mod, "FILENAME_DATE_MARGIN_DAYS", 400)
+        data = advisory(DICOM)
+        data["document"]["tracking"]["id"] = "ICSMA-" + "X" * 409  # constructed: no record can be built
+        http = _HTTP({"index.txt": f"{NX}\n{DICOM}\n", NX: advisory(NX), DICOM: data})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=True, baseline_days=730)
+        assert st["stats"]["outside_window"] == 1 and pending() == {}
+
+    def test_a_list_that_cannot_be_saved_holds_the_cursor_on_a_run_without_items(self, monkeypatch):
+        # Constructed: the recorded DICOM advisory without its vulnerability, so the run has no CVE item and returns
+        # before the item push; its record's push fails and report_pending cannot be saved.
+        http = _HTTP({"changes.csv": changes((DICOM, CHANGED)), DICOM: without_cves(DICOM)})
+        c = collector(monkeypatch, http, failed={"cisa_ics:ICSMA-24-058-01"})
+        saving = rr.note_report_push
+        monkeypatch.setattr(rr, "note_report_push", MagicMock(side_effect=OSError("disk full")))
+        st = c.collect(push_to_misp=True, baseline=False)
+        c.misp_writer.push_items.assert_not_called()
+        assert st["count"] == 0 and st["report_counts"]["pending_saved"] is False
+        assert cursor() is None
+        # Control: once the list saves, the same run moves the cursor.
+        monkeypatch.setattr(rr, "note_report_push", saving)
+        c.collect(push_to_misp=True, baseline=False)
+        assert list(pending()) == ["cisa_ics:ICSMA-24-058-01"]
+        assert cursor() == CHANGED
+
+
+# --------------------------------------------------------------------------- #
+# Notes and products the record reads
+# --------------------------------------------------------------------------- #
+
+
+def _record(path: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    c = mod.CISAICSCollector(misp_writer=MagicMock())
+    return c.parse_advisory_record(data if data is not None else advisory(path), path)
+
+
+def _details_text(data: Dict[str, Any], cve: str, title: str) -> str:
+    vuln = next(v for v in data["vulnerabilities"] if v.get("cve") == cve)
+    return next(n["text"] for n in vuln["notes"] if n["category"] == "details" and n["title"] == title).strip()
+
+
+class TestNotesAndProducts:
+    def test_a_description_filed_as_a_details_note_is_the_summary(self):
+        data = advisory(DETAILS_ONLY)
+        by_cve = {v["cve_id"]: v["summary"] for v in _record(DETAILS_ONLY)["vulnerabilities"]}
+        assert by_cve["CVE-2024-11499"] == _details_text(data, "CVE-2024-11499", "CVE description")
+        assert by_cve["CVE-2024-10037"] == vuln_note(data, "CVE-2024-10037")  # its description note
+        data = advisory(DETAILS_AND_SCORE)
+        (vuln,) = _record(DETAILS_AND_SCORE)["vulnerabilities"]
+        assert vuln["summary"] == _details_text(data, "CVE-2024-2658", "Vulnerability Details")
+
+    def test_a_score_note_is_no_summary(self):
+        data = advisory(XMC20)
+        description = vuln_note(data, "CVE-2024-2461")
+        vuln = data["vulnerabilities"][0]
+        # Constructed: an SSVC details note before the description note (as in ICSA-25-322-01).
+        vuln["notes"].insert(0, {"category": "details", "title": "SSVC", "text": "SSVC: Exploitation: none"})
+        assert mod.vulnerability_summary(vuln) == description and description
+        # Constructed: only score notes give no summary.
+        vuln["notes"] = [
+            {"category": "details", "title": "SSVC", "text": "SSVC: Exploitation: none"},
+            {"category": "details", "title": "CVSS v4.0  Score", "text": "CVSS v4.0 base score 8.7"},
+        ]
+        assert mod.vulnerability_summary(vuln) == ""
+
+    def test_affected_products_named_only_by_relationships_are_resolved(self):
+        by_cve = {v["cve_id"]: v["affected_products"] for v in _record(RELATIONSHIPS)["vulnerabilities"]}
+        assert by_cve == {
+            "CVE-2024-8933": [
+                "EcoStruxure™ Control Expert Versions prior to 16.2 HF003",
+                "Modicon M340 CPU Firmware Versions prior to SV3.70 installed on Modicon M340 CPU Controller "
+                "(part numbers BMXP34*)",
+                "Modicon MC80 Firmware All Versions installed on Modicon MC80 Controller (part numbers BMKC80)",
+                "Modicon Momentum Unity M1E Processor Firmware Versions prior to SV2.90 installed on Modicon Momentum "
+                "Unity M1E Processor Controller (171CBU*)",
+            ],
+            "CVE-2024-8935": [
+                "EcoStruxure™ Control Expert Versions prior to 16.2 HF003",
+                "Modicon M340 CPU Firmware Versions since SV3.60 and prior to SV3.70 installed on Modicon M340 CPU "
+                "Controller (part numbers BMXP34*)",
+            ],
+        }
+
+    def test_a_top_level_full_product_name_is_resolved(self):
+        # Constructed: CSAF 2.0, 3.2.2.2; no CISA advisory of 2024-2026 (1,389 read) uses top-level
+        # full_product_names.
+        tree = {"full_product_names": [{"product_id": "CSAFPID-9001", "name": "Constructed product"}]}
+        assert mod.product_id_names(tree) == {"CSAFPID-9001": "Constructed product"}
+
+    def test_the_countries_note_ends_its_sentence_and_joins_its_last_names_with_and(self):
+        assert note_text(advisory(MIDDLE_EAST), "Countries/areas deployed") == "Europe, the Middle East and Asia."
+        assert _record(MIDDLE_EAST)["deployment_countries"] == ["Asia", "Europe", "the Middle East"]
+        assert mod.split_countries_note("Bosnia and Herzegovina, Serbia") == ["Bosnia and Herzegovina", "Serbia"]
+        assert mod.split_countries_note("Jamaica and Trinidad and Tobago") == ["Jamaica", "Trinidad and Tobago"]
+        assert mod.split_countries_note("U.S.") == ["U.S."]
+        assert mod.split_countries_note("Worldwide") == ["Worldwide"]
+
+
+# --------------------------------------------------------------------------- #
+# Record caps
+# --------------------------------------------------------------------------- #
+
+
+class TestRecordCaps:
+    """The record caps sit above the real advisories: of the 1,389 of 2024-2026, ICSA-26-113-03 gives 85 distinct
+    remediations (82 vendor_fix, 3 mitigation) for each CVE, ICSA-24-235-03 644 affected products for
+    CVE-2023-34873, ICSA-24-193-05 497 products. The lists here are constructed to those sizes and above."""
+
+    def test_85_remediations_of_one_cve_are_all_kept(self, caplog):
+        data = advisory(COMOS)
+        vuln = data["vulnerabilities"][0]
+        vuln["remediations"] = [  # constructed
+            *({"category": "vendor_fix", "details": f"Product {n}: update to V{n}.1"} for n in range(82)),
+            *({"category": "mitigation", "details": f"Mitigation {n}"} for n in range(3)),
+        ]
+        with caplog.at_level("WARNING"):
+            record = _record(COMOS, data)
+        kept = record["vulnerabilities"][0]["remediations"]
+        assert len(kept) == 85 and sum(r["category"] == "vendor_fix" for r in kept) == 82
+        assert not [r for r in caplog.records if "[REPORTS]" in r.getMessage()]
+
+    def test_644_affected_products_of_one_cve_and_600_products_are_all_kept(self):
+        fields = {
+            "record_id": "ICSA-00-000-00",
+            "products": [f"Vendor Product {n:04d}" for n in range(600)],  # constructed
+            "vulnerabilities": [
+                {"cve_id": "CVE-2023-34873", "affected_products": [f"Product {n:04d} firmware" for n in range(644)]}
+            ],
+        }
+        record = rr.build_record("cisa_ics", fields)
+        assert len(record["products"]) == 600
+        assert len(record["vulnerabilities"][0]["affected_products"]) == 644
+        assert rr.list_cuts("cisa_ics", fields) == []
+
+    def test_no_recorded_advisory_reaches_a_cap(self, caplog):
+        with caplog.at_level("WARNING"):
+            for path in ADVISORIES:
+                _record(path)
+        assert not [r for r in caplog.records if "[REPORTS]" in r.getMessage()]
+
+    def test_a_list_a_cap_cuts_is_named_and_logged(self, monkeypatch, caplog):
+        monkeypatch.setattr(rr, "_MAX_REMEDIATIONS", 3)
+        with caplog.at_level("WARNING"):
+            record = _record(DICOM)  # 5 remediations
+        (vuln,) = record["vulnerabilities"]
+        assert len(vuln["remediations"]) == 3
+        (line,) = [r for r in caplog.records if "[REPORTS]" in r.getMessage()]
+        assert line.levelname == "WARNING"
+        assert line.getMessage() == (
+            f"[REPORTS] CISA ICS cisa_ics:ICSMA-24-058-01: the record keeps 3 of the 5 "
+            f"vulnerabilities[{vuln['cve_id']}].remediations (its cap)"
+        )

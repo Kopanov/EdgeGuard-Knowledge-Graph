@@ -135,6 +135,26 @@ HEADQUARTERS_NOTE_TITLE = "company headquarters location"
 # sectors). ``split_note_list`` keeps it whole.
 LISTED_NAMES_WITH_COMMAS: Tuple[str, ...] = ("Nuclear Reactors, Materials, and Waste",)
 _LEADING_CONJUNCTION_RE = re.compile(r"^(?:and|&)\s+", re.IGNORECASE)
+# Country and territory names (ISO 3166) that hold "and" themselves: ``split_countries_note`` keeps them whole.
+COUNTRY_NAMES_WITH_AND: Tuple[str, ...] = (
+    "Antigua and Barbuda",
+    "Bosnia and Herzegovina",
+    "Heard Island and McDonald Islands",
+    "Saint Kitts and Nevis",
+    "Saint Pierre and Miquelon",
+    "Saint Vincent and the Grenadines",
+    "Sao Tome and Principe",
+    "South Georgia and the South Sandwich Islands",
+    "Svalbard and Jan Mayen",
+    "Trinidad and Tobago",
+    "Turks and Caicos Islands",
+    "Wallis and Futuna",
+)
+_AND_RE = re.compile(r"\s+and\s+", re.IGNORECASE)
+# The full stop that ends a note's sentence: after a lower-case letter only, so ``"U.S."`` keeps its own.
+_SENTENCE_END_RE = re.compile(r"(?<=[a-z])\.\s*$")
+# The title of a vulnerability note of category ``details`` that holds a score, not the vulnerability's text.
+_SCORE_NOTE_TITLE_RE = re.compile(r"^\s*(?:cvss|ssvc)\b", re.IGNORECASE)
 _SECTOR_SUFFIX_RE = re.compile(r"\s+sector$", re.IGNORECASE)
 # The CSAF product_status lists that name affected products (CSAF 2.0, 3.2.3.9).
 AFFECTED_PRODUCT_STATUSES: Tuple[str, ...] = ("first_affected", "known_affected", "last_affected")
@@ -249,6 +269,28 @@ def split_note_list(text: str) -> List[str]:
         name = kept.get(name, name)
         if name and "\x00" not in name and name not in out:
             out.append(name)
+    return out
+
+
+def split_countries_note(text: str) -> List[str]:
+    """The names the note "Countries/areas deployed" lists, in order, each once: ``split_note_list`` of the text
+    without the full stop that ends its sentence (``"Asia."``; ``"U.S."`` keeps its own), and a part that still
+    joins names with ``and`` (``"Europe, the Middle East and Asia."``) split there, except within a country name
+    that holds ``and`` itself (``COUNTRY_NAMES_WITH_AND``)."""
+    out: List[str] = []
+    for part in split_note_list(_SENTENCE_END_RE.sub("", str(text or "").strip())):
+        protected = part
+        kept: Dict[str, str] = {}
+        for index, name in enumerate(COUNTRY_NAMES_WITH_AND):
+            token = f"\x00{index}\x00"
+            kept[token] = name
+            protected = re.sub(re.escape(name), token, protected, flags=re.IGNORECASE)
+        for piece in _AND_RE.split(protected):
+            name = piece.strip()
+            for token, original in kept.items():
+                name = name.replace(token, original)
+            if name and name not in out:
+                out.append(name)
     return out
 
 
@@ -502,12 +544,18 @@ def affected_product_names(vuln: Dict[str, Any], names: Dict[str, str]) -> List[
 def vulnerability_summary(vuln: Dict[str, Any]) -> str:
     """The vulnerability's own text, whole: its first note of category ``summary`` (CISA's "Vulnerability
     Summary"), else its first of category ``description`` (the "CVE Description" of an advisory converted from a
-    vendor's), else ``""``. Notes of other categories (the SSVC and CVSS ``details``) are no summary."""
+    vendor's), else its first of category ``details`` whose title names no score (a converted advisory that files
+    its "CVE description" or "Vulnerability Details" there: 2 of the 7,764 vulnerabilities of 2024-2026), else
+    ``""``. A ``details`` note titled CVSS or SSVC (a score) and a note of another category (an untitled
+    ``other`` heading) are no summary."""
     notes = [n for n in (vuln.get("notes") or []) if isinstance(n, dict) and str(n.get("text") or "").strip()]
     for category in ("summary", "description"):
         for note in notes:
             if note.get("category") == category:
                 return str(note["text"]).strip()
+    for note in notes:
+        if note.get("category") == "details" and not _SCORE_NOTE_TITLE_RE.match(str(note.get("title") or "")):
+            return str(note["text"]).strip()
     return ""
 
 
@@ -947,17 +995,21 @@ class CISAICSCollector:
           initial date when there is no current one); ``revision``: the number of ``tracking.revision_history``
           entries; ``version``: ``tracking.version`` as given (a whole number, or a version such as ``1.0.1``);
         * ``deployment_sectors``, ``deployment_countries``: the names the notes "Critical infrastructure sectors"
-          and "Countries/areas deployed" list (``split_note_list``); ``vendor_headquarters``: the text of the
-          note "Company headquarters location" (the texts of several such notes joined with ``", "``);
+          and "Countries/areas deployed" list (``split_note_list``, ``split_countries_note``);
+          ``vendor_headquarters``: the text of the note "Company headquarters location" (the texts of several
+          such notes joined with ``", "``);
         * ``vendors``, ``products``: the vendor names and ``"<vendor> <product>"`` labels of the product tree,
-          all of them (``product_tree_names``); a tree without a ``product_name`` branch (14 of the 1,389
-          advisories of 2024-2026) gives its ``"<vendor> <family>"`` labels;
+          all of them (``product_tree_names``); a tree without a ``product_name`` branch gives its
+          ``"<vendor> <family>"`` labels (13 of the 1,389 advisories of 2024-2026; one more, ICSA-25-303-01,
+          has only specification branches and gives no product);
         * ``cve_ids`` and ``vulnerabilities``, one entry per vulnerability with a valid CVE id: ``cve_id``,
           ``summary`` (``vulnerability_summary``, whole), ``remediations`` (category and details),
           ``affected_products`` (``affected_product_names``) and ``cwes`` (id and name).
 
         Raises ``ValueError`` for a payload ``parse_advisory`` refuses. An advisory without a CVE gets a record
-        with empty ``cve_ids`` and ``vulnerabilities``.
+        with empty ``cve_ids`` and ``vulnerabilities``. A list the record's item cap cuts (``report_records.list_cuts``;
+        no advisory of 2024-2026 reaches one) is logged at WARNING ``[REPORTS]`` with the record reference and the
+        counts.
         """
         document, vulnerabilities, tracking, advisory_id = _advisory_parts(data, path)
         raw_url = self.base_url + path
@@ -989,7 +1041,7 @@ class CISAICSCollector:
         ]
         countries: List[str] = []
         for text in note_texts(document, COUNTRIES_NOTE_TITLE):
-            countries.extend(name for name in split_note_list(text) if name not in countries)
+            countries.extend(name for name in split_countries_note(text) if name not in countries)
         history = tracking.get("revision_history")
         fields = {
             "record_id": advisory_id,
@@ -1012,7 +1064,16 @@ class CISAICSCollector:
             "cve_ids": [entry["cve_id"] for entry in entries],
             "vulnerabilities": entries,
         }
-        return report_records.build_record(report_records.SOURCE_CISA_ICS, fields)
+        record = report_records.build_record(report_records.SOURCE_CISA_ICS, fields)
+        for name, kept, given in report_records.list_cuts(report_records.SOURCE_CISA_ICS, fields):
+            logger.warning(
+                "[REPORTS] CISA ICS %s: the record keeps %d of the %d %s (its cap)",
+                record["record_ref"],
+                kept,
+                given,
+                name,
+            )
+        return record
 
     # ------------------------------------------------------------------
     # Collect
@@ -1028,13 +1089,16 @@ class CISAICSCollector:
 
         Report records (2026-11-07): every advisory fetched and parsed in the window gets its report record
         (``parse_advisory_record``), an advisory without a CVE included. With ``push_to_misp`` the records are
-        written (``_push_records``: ``MISPWriter.push_reports``, ``REPORT_BATCH`` at a time) before the CVE items
-        and before the return of a run without items, and those whose push failed or was not tried go on the
-        ``report_pending`` list of the ``cisa_ics`` incremental state (``report_records.note_report_push``,
-        baselines included). Each run that pushes also reads the advisories of up to ``REPORT_PENDING_PER_RUN``
-        records on that list (``_pending_paths``) for their records only. A record failure does not hold the
-        cursor: the list keeps the record. The cursor stays only while a record is neither in MISP nor saved on
-        the list (the list could not be saved).
+        written (``_push_records``: ``MISPWriter.push_reports``, ``REPORT_BATCH`` at a time) after the CVE items
+        (an item batch's answer carries every report of the event, so records written first would come back with
+        every batch) and before the return of a run without items, and those whose push failed or was not tried
+        go on the ``report_pending`` list of the ``cisa_ics`` incremental state (``report_records.note_report_push``,
+        baselines included). So do the records the run could not build or read: an advisory in the window that
+        could not be fetched (by its file name's date on a baseline), a record that could not be built. Each run
+        that pushes also reads the advisories of up to ``REPORT_PENDING_PER_RUN`` records on that list
+        (``_pending_paths``) for their records only. A record failure does not hold the cursor: the list keeps the
+        record. The cursor stays only while a record is neither in MISP nor saved on the list (the list could not
+        be saved).
         """
         if not self.is_enabled():
             logger.info(
@@ -1095,11 +1159,14 @@ class CISAICSCollector:
             if push_to_misp:
                 pending_paths, not_listed, pending_refs = self._pending_paths(paths)
                 stats["pending_not_listed"] = len(not_listed)
+                # A failed try, not a permanent exit: an advisory really withdrawn is given up after
+                # EDGEGUARD_REPORT_PENDING_MAX_DAYS ([REPORT-GAVE-UP], the given-up metric), a listing read badly once
+                # loses nothing.
                 record_failures.extend(
                     {
                         "record_ref": ref,
-                        "reason": "the listing no longer names the advisory: its record cannot be read",
-                        "permanent": True,
+                        "reason": "the listing does not name the advisory: its record cannot be read",
+                        "permanent": False,
                     }
                     for ref in not_listed
                 )
@@ -1133,6 +1200,20 @@ class CISAICSCollector:
                         )
                     else:
                         stats["fetch_failed"] += 1
+                        # The record waits on report_pending: a baseline sets no cursor, and the look-back of the
+                        # run after it may not reach this advisory again. On a baseline only an advisory whose file
+                        # name dates it inside the window (a record on the list is written whatever its date).
+                        published = path_published_date(path)
+                        if cutoff is None or published is None or published >= cutoff:
+                            record_failures.append(
+                                {
+                                    "record_ref": report_records.format_record_ref(
+                                        SOURCE_ID, _listed_record_key(path).upper()
+                                    ),
+                                    "reason": f"the advisory could not be fetched ({type(e).__name__})",
+                                    "permanent": False,
+                                }
+                            )
                     if consecutive_failures >= MAX_CONSECUTIVE_FETCH_FAILURES:
                         raise CISAICSTransientError(
                             f"CISA ICS: {consecutive_failures} consecutive advisory fetch failures — upstream broken"
@@ -1154,17 +1235,15 @@ class CISAICSCollector:
                         stats["malformed"] += 1
                     continue
                 record: Optional[Dict[str, Any]] = None
+                failure: Optional[Dict[str, Any]] = None
+                record_ref = report_records.format_record_ref(SOURCE_ID, _advisory_parts(data, path)[3])
                 try:
                     record = self.parse_advisory_record(data, path)
                 except ValueError as e:
-                    ref = report_records.format_record_ref(SOURCE_ID, _advisory_parts(data, path)[3])
-                    logger.warning(f"CISA ICS: the report record of {ref} could not be built: {e}")
-                    record_failures.append(
-                        {"record_ref": ref, "reason": "the record could not be built", "permanent": False}
-                    )
+                    logger.warning(f"CISA ICS: the report record of {record_ref} could not be built: {e}")
+                    failure = {"record_ref": record_ref, "reason": "the record could not be built", "permanent": False}
                 if pending_ref:
-                    if record is not None:
-                        records[record["record_ref"]] = record
+                    self._keep_record(records, record_failures, record, failure)
                     continue
                 stats["parsed_ok"] += 1
                 stats["skipped_vulns"] += skipped
@@ -1174,11 +1253,10 @@ class CISAICSCollector:
                     if initial is not None and initial < cutoff:
                         stats["outside_window"] += 1
                         # A record on report_pending is written whatever its date: an earlier run collected it.
-                        if record is not None and record["record_ref"] in pending_refs:
-                            records[record["record_ref"]] = record
+                        if record_ref in pending_refs:
+                            self._keep_record(records, record_failures, record, failure)
                         continue
-                if record is not None:
-                    records[record["record_ref"]] = record
+                self._keep_record(records, record_failures, record, failure)
                 processed.extend(items)
 
             if limit is not None:
@@ -1210,12 +1288,11 @@ class CISAICSCollector:
             if not push_to_misp:
                 return processed
 
-            # 2026-11-07: the records first, before the return of a run without items, so an advisory that names
-            # no CVE still gets its record.
-            report_counts, unsaved = self._push_records(self.last_records, record_failures)
-            hold_cursor_for_records = bool(unsaved)
-
             if not processed:
+                # 2026-11-07: the records before the return of a run without items, so an advisory that names no CVE
+                # still gets its record.
+                report_counts, unsaved = self._push_records(self.last_records, record_failures)
+                hold_cursor_for_records = bool(unsaved)
                 st = self._return_status(True, 0, failed=0)
                 st["stats"] = dict(stats)
                 st["report_counts"] = report_counts
@@ -1243,6 +1320,10 @@ class CISAICSCollector:
                 logger.info(f"[OK] CISA ICS: Successfully pushed {success} items to MISP")
             if failed > 0:
                 logger.warning(f"[WARN] CISA ICS: Failed to push {failed} items to MISP")
+            # 2026-11-07: the records after the CVE items. MISP answers each item batch with the whole event, every
+            # report included (live check L6), so records written first would come back with every batch.
+            report_counts, unsaved = self._push_records(self.last_records, record_failures)
+            hold_cursor_for_records = bool(unsaved)
 
             st = status_after_misp_push(SOURCE_ID, len(processed), success, failed)
             st["circuit_breaker_state"] = CISA_ICS_CIRCUIT_BREAKER.state.name
@@ -1296,12 +1377,21 @@ class CISAICSCollector:
         the listing does not name, {every record_ref considered})``. Up to ``REPORT_PENDING_PER_RUN`` records,
         those tried longest ago first (``report_records.pending_record_refs``); a record whose advisory the run
         reads anyway (*selected*) needs no path of its own, and its record is written even outside the baseline's
-        window. A list that cannot be read is logged and gives nothing."""
+        window. A record whose advisory the listing does not name is a failed try (logged at WARNING with its
+        reference); a listing without a row names nothing, so it leaves every entry untouched and untried. A list
+        that cannot be read is logged and gives nothing."""
         try:
             refs = report_records.pending_record_refs(report_records.SOURCE_CISA_ICS)
         except Exception as exc:  # noqa: BLE001 - an unreadable list must not stop the collection
             logger.warning(
                 "[REPORT-PENDING] CISA ICS: report_pending could not be read (%s: %s)", type(exc).__name__, exc
+            )
+            return {}, [], set()
+        if refs and not self._listing:
+            logger.warning(
+                "[REPORT-PENDING] CISA ICS: the listing gave no advisory: the %d record(s) on report_pending are left "
+                "untouched",
+                len(refs),
             )
             return {}, [], set()
         chosen = set(selected)
@@ -1317,11 +1407,18 @@ class CISAICSCollector:
         if paths or not_listed:
             logger.info(
                 "[REPORT-PENDING] CISA ICS: %d of %d record(s) on report_pending: %d advisory file(s) read for their "
-                "records, %d no longer listed (they leave the list)",
-                min(len(refs), max(0, REPORT_PENDING_PER_RUN)),
+                "records, %d not listed (a failed try each)",
+                len(considered),
                 len(refs),
                 len(paths),
                 len(not_listed),
+            )
+        if not_listed:
+            logger.warning(
+                "[REPORT-PENDING] CISA ICS: the listing does not name the advisory of %d record(s) on report_pending: "
+                "%s",
+                len(not_listed),
+                ", ".join(not_listed[:50]) + (" ..." if len(not_listed) > 50 else ""),
             )
         return paths, not_listed, set(considered)
 
@@ -1389,6 +1486,19 @@ class CISAICSCollector:
             counts["given_up"] += len(settled.given_up)
         self._log_report_counts(counts)
         return counts, set()
+
+    @staticmethod
+    def _keep_record(
+        records: Dict[str, Dict[str, Any]],
+        failures: List[Dict[str, Any]],
+        record: Optional[Dict[str, Any]],
+        failure: Optional[Dict[str, Any]],
+    ) -> None:
+        """The run writes *record*, or lists *failure* (the record could not be built) on report_pending."""
+        if record is not None:
+            records[record["record_ref"]] = record
+        elif failure is not None:
+            failures.append(failure)
 
     @staticmethod
     def _log_report_counts(counts: Dict[str, Any]) -> None:
