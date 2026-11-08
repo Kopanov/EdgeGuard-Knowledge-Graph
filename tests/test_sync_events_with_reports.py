@@ -6,8 +6,9 @@ companion event ``EdgeGuard-alienvault_otx-<date>-reports`` (no attributes) when
 it reads any EdgeGuard event and ignore the reports:
 
 * the event index keeps both events, and the source of each is ``alienvault_otx``;
-* the whole-event fetch (PyMISP ``get_event``, and the REST fallback) returns the event with its ``EventReport``
-  list and its attributes; PyMISP's ``MISPEvent`` loads such an event;
+* the whole-event fetch (the view without galaxy clusters, and when MISP refuses it PyMISP ``get_event`` and
+  the REST fallback) returns the event with its ``EventReport`` list and its attributes; PyMISP's ``MISPEvent``
+  loads such an event;
 * the paged fetch reads the event's metadata, which carries no reports;
 * processing writes the same items with and without the reports, and an event with reports and no attributes is
   processed, counted and writes nothing; an incremental run in which only a report changed writes nothing;
@@ -113,6 +114,28 @@ def test_the_index_keeps_the_day_event_and_its_reports_companion():
 
 # --------------------------------------------------------------------------- the fetch paths
 
+_VIEW_WITHOUT_GALAXIES = "/events/view/122/excludeGalaxy:1"
+
+
+def _session(answers: Dict[str, Any]) -> MagicMock:
+    """A requests session whose GET answers each path of ``answers`` (a URL path → a ``Response``)."""
+    session = MagicMock()
+    session.get.side_effect = lambda url, **_kw: answers[url.split("://m", 1)[1]]
+    return session
+
+
+def _syncer(answers: Dict[str, Any]) -> MISPToNeo4jSync:
+    syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
+    syncer.misp_url = "https://m"
+    syncer.session = _session(answers)
+    return syncer
+
+
+def test_the_whole_event_fetch_without_galaxies_returns_the_event_with_its_reports():
+    syncer = _syncer({_VIEW_WITHOUT_GALAXIES: Response(200, _day_event())})
+    event = syncer.fetch_event_details("122")
+    assert event["info"] == DAY and len(event["Attribute"]) == 6 and len(event["EventReport"]) == 3
+
 
 def test_the_whole_event_fetch_through_pymisp_returns_the_event_with_its_reports(monkeypatch):
     import pymisp
@@ -126,7 +149,9 @@ def test_the_whole_event_fetch_through_pymisp_returns_the_event_with_its_reports
             return _day_event()
 
     monkeypatch.setattr(pymisp, "PyMISP", _PyMISP)
-    event = MISPToNeo4jSync(neo4j_client=MagicMock()).fetch_event_details("122")
+    # PyMISP is read when MISP refuses the view without galaxy clusters.
+    syncer = _syncer({_VIEW_WITHOUT_GALAXIES: Response(404, {"message": "Not found"})})
+    event = syncer.fetch_event_details("122")
     assert event["info"] == DAY and len(event["Attribute"]) == 6 and len(event["EventReport"]) == 3
 
 
@@ -138,11 +163,15 @@ def test_the_rest_fallback_returns_the_event_with_its_reports(monkeypatch):
             raise RuntimeError("PyMISP unavailable")
 
     monkeypatch.setattr(pymisp, "PyMISP", _Failing)
-    syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
-    syncer.session = MagicMock()
-    syncer.session.get.return_value = Response(200, _day_event())
+    syncer = _syncer(
+        {_VIEW_WITHOUT_GALAXIES: Response(404, {"message": "Not found"}), "/events/122": Response(200, _day_event())}
+    )
     event = syncer.fetch_event_details("122")
     assert event["info"] == DAY and len(event["Attribute"]) == 6 and len(event["EventReport"]) == 3
+    assert [c.args[0] for c in syncer.session.get.call_args_list] == [
+        f"https://m{_VIEW_WITHOUT_GALAXIES}",
+        "https://m/events/122",
+    ]
 
 
 def test_pymisp_loads_an_event_with_reports():

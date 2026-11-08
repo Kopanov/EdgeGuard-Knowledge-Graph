@@ -24,7 +24,7 @@ docker exec edgeguard_airflow airflow config get-value scheduler task_instance_h
 
 Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies appear in **Airflow scheduler** logs.
 
-**Docker Compose — Airflow container memory:** `docker-compose.yml` sets **`deploy.resources.limits.memory: ${AIRFLOW_MEMORY_LIMIT:-12g}`** on **`airflow`**. Large MISP events (100K+ attributes) are sized at **8-12GB**: the sync holds an event's attribute list in memory. Events with up to **`EDGEGUARD_MISP_PAGED_FETCH_ABOVE`** attributes (default **20000**) are fetched whole (PyMISP `get_event`, REST `/events/view` as fallback), larger ones as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 joined into one list; the list is then parsed and written to Neo4j in pages of 5000. **-9** with free host RAM usually means the **container** cgroup limit — check **`docker inspect … OOMKilled`**, **`docker stats`**, and [SETUP_GUIDE.md](SETUP_GUIDE.md) § troubleshooting.
+**Docker Compose — Airflow container memory:** `docker-compose.yml` sets **`deploy.resources.limits.memory: ${AIRFLOW_MEMORY_LIMIT:-12g}`** on **`airflow`**. Large MISP events (100K+ attributes) are sized at **8-12GB**: the sync holds an event's attribute list in memory. Events with up to **`EDGEGUARD_MISP_PAGED_FETCH_ABOVE`** attributes (default **20000**) are fetched whole (`/events/view/<id>/excludeGalaxy:1`, without the galaxy clusters; PyMISP `get_event` and REST `/events/<id>` when MISP refuses it), larger ones as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5000 joined into one list; the list is then parsed and written to Neo4j in pages of 5000. **-9** with free host RAM usually means the **container** cgroup limit — check **`docker inspect … OOMKilled`**, **`docker stats`**, and [SETUP_GUIDE.md](SETUP_GUIDE.md) § troubleshooting.
 
 ## MISP → Neo4j–specific notes
 
@@ -39,10 +39,11 @@ Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Airflow container memory: an event fetched whole is read as `/events/view/<id>/excludeGalaxy:1`, without the galaxy clusters (the text named PyMISP `get_event` with a REST fallback).
 - 2026-11-02 — A stopped scheduler detects no heartbeat timeout and a DAG run stays `running`; pointer to the scheduler guide and its alert.
 - 2026-10-25 — Airflow container memory: events over `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (default 20000) attributes are fetched as metadata plus attribute pages of 5000 joined into one list (the page said the initial fetch loads the full event JSON).
 - 2026-10-18 — Removed the procedures for data written by earlier versions (the project re-baselines after larger changes).

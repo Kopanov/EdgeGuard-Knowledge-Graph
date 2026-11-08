@@ -2580,10 +2580,55 @@ class MISPToNeo4jSync:
             logger.warning("[FETCH] Had raw MISP payload but normalized to 0 events — check API response shape")
         return normalized
 
+    def _fetch_event_view_without_galaxies(self, event_id: str) -> Optional[Dict]:
+        """The event as ``GET /events/view/<id>/excludeGalaxy:1`` answers it, or None (2026-11).
+
+        MISP attaches to every galaxy tag of the event and of its attributes the whole galaxy cluster (an
+        ATT&CK card with its relation lists) under ``Galaxy``. The sync reads only the tag names, which MISP
+        keeps in the ``Tag`` lists with the parameter. Measured on MISP 2.5.50 for the ATT&CK event (1,889
+        attributes): 118 MB in 22 s with the clusters, 13.7 MB in 0.6 s without, with the same attributes in
+        the same order and the same event and attribute tags, ``misp-galaxy:*`` tags included.
+
+        None, after a ``[MISP-VIEW-FALLBACK]`` warning, when MISP answers a status other than 2xx or a body
+        that is not an event: the caller then reads the event as before, once (PyMISP ``get_event``, then
+        REST ``/events/<id>``). Transport errors (connection, timeout, a broken body) are raised, as on the
+        REST request below, so that ``retry_with_backoff`` retries the fetch.
+        """
+        path = f"/events/view/{event_id}/excludeGalaxy:1"
+        response = self.session.get(
+            f"{self.misp_url}{path}",
+            verify=SSL_VERIFY,
+            timeout=(MISP_CONNECT_TIMEOUT, MISP_REQUEST_TIMEOUT),
+        )
+        if 200 <= response.status_code < 300:
+            try:
+                plain = misp_event_object_to_event_dict(response.json())
+            except ValueError:
+                plain = None
+            if plain is not None:
+                return plain
+            reason = "a body that is not an event"
+        else:
+            reason = f"HTTP {response.status_code}"
+        logger.warning(
+            "[MISP-VIEW-FALLBACK] Event %s: %s answered %s; reading the event once with its galaxy clusters "
+            "(PyMISP get_event, then REST /events/%s)",
+            event_id,
+            path,
+            reason,
+            event_id,
+        )
+        return None
+
     @retry_with_backoff(max_retries=MAX_RETRIES)
     def fetch_event_details(self, event_id: str) -> Optional[Dict]:
         """
-        Fetch full event details including attributes using PyMISP.
+        Fetch one event whole, with its attributes and tags.
+
+        First without the galaxy clusters (``_fetch_event_view_without_galaxies``); when MISP does not answer
+        that request with an event, once with them: PyMISP ``get_event``, then REST ``/events/<id>``. The
+        retries (``retry_with_backoff``) cover transport errors and HTTP 5xx of the REST request; each retry
+        starts again without the clusters.
 
         Args:
             event_id: MISP event ID
@@ -2592,6 +2637,9 @@ class MISPToNeo4jSync:
             Full event dict or None
         """
         try:
+            plain = self._fetch_event_view_without_galaxies(event_id)
+            if plain is not None:
+                return plain
             try:
                 from pymisp import PyMISP
 
