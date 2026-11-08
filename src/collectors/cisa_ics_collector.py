@@ -1191,6 +1191,15 @@ class CISAICSCollector:
                     )
                     break
                 if not CISA_ICS_CIRCUIT_BREAKER.can_execute():
+                    if pending_ref:
+                        # The run's own advisories are all read (the pending reads come last): a breaker the
+                        # pending reads opened stops them, not the push of what the run read.
+                        logger.warning(
+                            "[REPORT-PENDING] CISA ICS: the circuit breaker opened during the reads for report_pending "
+                            "records: the %d record(s) left are not tried this run",
+                            len(pending_paths) - stats["pending_fetched"],
+                        )
+                        break
                     raise CISAICSTransientError("CISA ICS circuit breaker opened mid-run — aborting before push")
                 stats["pending_fetched" if pending_ref else "attempted"] += 1
                 try:

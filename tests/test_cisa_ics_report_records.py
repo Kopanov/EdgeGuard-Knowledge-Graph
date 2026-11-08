@@ -131,6 +131,8 @@ class _HTTP:
         if path not in self.routes:
             return _Response(status_code=404, text="not found")
         value = self.routes[path]
+        if isinstance(value, _Response):
+            return value
         return _Response(text=value) if isinstance(value, str) else _Response(payload=value)
 
     def advisories(self) -> List[str]:
@@ -743,6 +745,52 @@ class TestPendingRecords:
             for r in caplog.records
         )
         assert cursor() == CHANGED
+
+    def test_a_breaker_the_pending_reads_open_stops_them_and_the_run_still_pushes(self, monkeypatch, caplog):
+        """Constructed: two pending records whose advisories answer HTTP 503. The retries of the first read open the
+        breaker (three failures); the second pending read is not tried, and the run pushes the items and the record
+        of the advisory it read itself."""
+        old = "2026-09-01T00:00:00.000000Z"
+        down = ["2025/icsa-25-001-01.json", "2025/icsa-25-001-02.json"]
+        put_on_pending("cisa_ics:ICSA-25-001-01", "cisa_ics:ICSA-25-001-02")
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), *((p, old) for p in down)),
+                NX: advisory(NX),
+                **{p: _Response(status_code=503, text="unavailable") for p in down},
+            }
+        )
+        c = collector(monkeypatch, http)
+        with caplog.at_level("WARNING"):
+            st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True and st["stats"]["fetch_failed"] == 0
+        assert st["stats"]["pending_fetched"] == 1 and st["stats"]["pending_failed"] == 1
+        assert down[1] not in http.paths
+        assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}
+        assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-26-043-08"]
+        assert set(pending()) == {"cisa_ics:ICSA-25-001-01", "cisa_ics:ICSA-25-001-02"}
+        assert any(
+            r.levelname == "WARNING" and "[REPORT-PENDING]" in r.getMessage() and "circuit breaker" in r.getMessage()
+            for r in caplog.records
+        )
+        assert cursor() == CHANGED
+
+    def test_a_breaker_open_during_the_run_s_own_reads_still_aborts_before_the_push(self, monkeypatch):
+        """Constructed: the run's own advisories answer HTTP 503, so the breaker opens among them; the run aborts
+        before any push and raises the transient error, as before."""
+        down = [f"2026/icsa-26-001-0{n}.json" for n in range(1, 3)]
+        http = _HTTP(
+            {
+                "changes.csv": changes(*((p, CHANGED) for p in down)),
+                **{p: _Response(status_code=503, text="unavailable") for p in down},
+            }
+        )
+        c = collector(monkeypatch, http)
+        with pytest.raises(mod.CISAICSTransientError, match="aborting before push"):
+            c.collect(push_to_misp=True, baseline=False)
+        assert down[1] not in http.paths
+        c.misp_writer.push_items.assert_not_called()
+        c.misp_writer.push_reports.assert_not_called()
 
     def test_a_pending_read_that_succeeds_ends_the_pending_streak(self, monkeypatch):
         # Constructed: pending records read in record-reference order, two whose advisories answer HTTP 404, then
