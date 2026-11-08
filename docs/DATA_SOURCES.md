@@ -50,7 +50,7 @@
 - Malware family names
 - CVE references
 - Adversary names (no pulse descriptions on items: a pulse's description, which describes the report, is stored on no item, and the families and adversaries it names carry none; it is used for sector classification and kept in the pulse's report record)
-- One report record per pulse, as one MISP Event Report in the OTX day event: title, URL, full description, author, TLP, dates, revision, industries, targeted countries, tags, references, adversary, malware families, ATT&CK ids, CVE ids and the indicators (at most `EDGEGUARD_REPORT_MAX_INDICATORS`, 2,000, with the exact count); a record whose push fails waits on `report_pending` ([COLLECTORS.md § Report records](COLLECTORS.md#report-records)); the sync does not read the records yet
+- One report record per pulse, as one MISP Event Report in the OTX day event, or in its `-reports` companion event once the day event holds more than `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (always on a baseline day): title, URL, full description, author, TLP, dates, revision, industries, targeted countries, tags, references, adversary, malware families, ATT&CK ids, CVE ids and the indicators (at most `EDGEGUARD_REPORT_MAX_INDICATORS`, 2,000, with the exact count); a record whose push fails waits on `report_pending` ([COLLECTORS.md § Report records](COLLECTORS.md#report-records)); the sync does not read the records yet
 - An amber, amber+strict or red pulse, or one without a known TLP, puts no copy of its name, tags, references or targeted countries on its indicators: that text stays in its report record (MISP distribution 0, this organisation only)
 
 **How classified:**

@@ -206,7 +206,7 @@ Defects found in the code; each is fixed in its own change.
 - `scripts/preflight_ci.sh`: `DagBag(include_examples=...)` raises `TypeError` on Airflow 3.3, so the script, `scripts/deployment_wiring_check.sh` and `make deploy-check` stop at the DAG parse step.
 - `scripts/preflight_baseline.sh` (check `[11]`, part c): runs `.venv/bin/python`; without the repository's `.venv` it reports the three critical-chain tasks as missing `retries=0`.
 - `dags/edgeguard_pipeline.py`: `run_virustotal_enrichment_collection` is wired to no task, while the module docstring lists `virustotal_collector.py` as a daily collector and the energy and healthcare placeholders as collectors.
-- `src/collectors/energy_feed_collector.py` and `src/collectors/healthcare_feed_collector.py`: the module docstrings call public sources "already working" and "actively collected", and the skip reasons say the sector advisories are collected by `cisa_collector`; CISA's ICS advisories come from the opt-in `cisa_ics` collector.
+- `src/collectors/energy_feed_collector.py` and `src/collectors/healthcare_feed_collector.py`: the module docstrings call public sources "already working" and "actively collected", and the skip reasons say the sector advisories are collected by `cisa_collector`; CISA's ICS advisories come from the `cisa_ics` collector, which is on by default.
 - `src/metrics.py` (`PipelineMetrics`): nothing records a run, so `edgeguard stats` shows no pipeline summary and `src/health_check.py` always reports the last pipeline run as "Never".
 - `src/neo4j_client.py` (`scrape_list_dedup_sizes`): no task calls it, so the histogram `edgeguard_neo4j_list_dedup_size` holds no data.
 - `src/opentelemetry_config.py` (`init_tracing`): nothing calls it, so `EDGEGUARD_DEV_MODE` and the `OTEL_EXPORTER_OTLP_*` settings have no effect.
@@ -221,10 +221,11 @@ Defects found in the code; each is fixed in its own change.
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Energy and healthcare placeholders: the `cisa_ics` collector they point to is on by default.
 - 2026-11-02 — Live graph invariants: `baseline_postcheck` runs the acceptance script's ATT&CK link, CVE score coverage and per-source delivery statements after each baseline, and the `neo4j-integration` CI job runs the acceptance queries and part of the relationship-build statements (the items said the checks run by hand only and none of these statements in CI). Baseline safety: the planned naming of the collectors that delivered nothing exists in `baseline_postcheck`; the item now states the remaining gap, a source that delivered nothing and is not required, and plans a postcheck failure for a default source that delivered nothing.
 - 2026-11-02 — Curated packages: the item on the 0.7 actor-technique writes of `run_pipeline.py` is closed; that path and `create_actor_technique_relationship` are removed. Issue #57 no longer names `run_pipeline.py --baseline` as a holder of the baseline lock (its in-process baseline is retired).
 - 2026-10-26 — CI safety net: the entry for the collection-time stubs of `tests/test_graphql_api.py` is reworded; the stubs are in a fixture that puts `sys.modules` back after that file's tests, and test modules no longer leave second copies of `neo4j_client`, `run_misp_to_neo4j`, `build_relationships`, `enrichment_jobs` or `stix_exporter` behind. Still planned: a session hook that fails when a test module leaves either.

@@ -12,7 +12,7 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
                                                         REST API (port 8000)  +  GraphQL API (port 4001)
 ```
 
-- **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist and, behind their enable flags, CISA ICS and MalwareBazaar
+- **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist CISA ICS (on unless `EDGEGUARD_ENABLE_CISA_ICS=false`) and, behind its enable flag, MalwareBazaar
 - **MISP** is the only place collector output lands first — no collector writes directly to Neo4j
 - **Neo4j:** `src/run_misp_to_neo4j.py` syncs from MISP (run by the `edgeguard_baseline` DAG and the scheduled sync DAG). **Development only:** `run_pipeline.py` runs the collectors into MISP and writes nothing to Neo4j; its `--baseline`, `--fresh-baseline`, `--baseline-days` and `--stix-flow` exit 2 (`docs/AIRFLOW_DAGS.md`, "One baseline path")
 - **Optional allowlist:** `EDGEGUARD_COLLECT_SOURCES` — canonical names in `src/collector_allowlist.py` (import this from DAGs at parse time, **not** `collectors/__init__.py`, which loads every collector)

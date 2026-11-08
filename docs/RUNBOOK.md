@@ -1221,7 +1221,7 @@ again. The `baseline_in_progress.lock` sentinel is held by the DAG
    ```bash
    docker compose exec airflow python -c "from collectors.misp_writer import MISPWriter; r = MISPWriter().report_preflight(); print('ok' if r.ok else '\n'.join(r.problems))"
    ```
-   prints `ok` and writes nothing to MISP. Otherwise it prints one line for each problem: the role lacks `perm_tagger` or has `perm_sync_authoritative`, tags the writer sets are missing and the role lacks `perm_tag_editor`, or the role or the tags could not be read. Before the run, fix the role or create the missing tags in MISP ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)). The task log shows the same result as `[REPORT-PREFLIGHT]`.
+   prints `ok` and writes nothing to MISP. Otherwise it prints one line for each problem: the role lacks `perm_tagger` or has `perm_sync_authoritative`, tags the writer sets are missing and the role lacks `perm_tag_editor`, or the role or the tags could not be read. Before the run, fix the role or create the missing tags in MISP ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)). The command's own log lines carry the same result as `[REPORT-PREFLIGHT]`; no task runs the check.
 
 ### During the run
 
