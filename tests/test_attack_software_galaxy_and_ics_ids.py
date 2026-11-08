@@ -201,6 +201,25 @@ class TestEveryCollectorPathReadsTheIcsId:
         tools = _parsed([_ics_only(net, "S0039")], domain=mc.ATTACK_DOMAIN_ENTERPRISE)["tools"]
         assert [(t["name"], t["mitre_id"]) for t in tools] == [("Net", "S0039")]
 
+    def test_a_group_names_a_used_tool_with_only_an_ics_id_by_that_id(self):
+        """Constructed: Sandworm Team uses Net, whose id is moved to a ``mitre-ics-attack`` reference. The
+        relationship map carries the tool's id, so ``uses_tools`` names it by S0039 (before: by its name)."""
+        (net,) = [o for o in TEXT_FIXTURE["enterprise"] if o.get("type") == "tool" and o.get("name") == "Net"]
+        (group,) = [
+            o
+            for o in TEXT_FIXTURE["enterprise"]
+            if o.get("type") == "intrusion-set" and o.get("name") == "Sandworm Team"
+        ]
+        rel = {
+            "type": "relationship",
+            "id": "relationship--00000000-0000-4000-8000-000000000005",
+            "relationship_type": "uses",
+            "source_ref": group["id"],
+            "target_ref": net["id"],
+        }
+        parsed = _parsed([group, _ics_only(net, "S0039"), rel], domain=mc.ATTACK_DOMAIN_ENTERPRISE)
+        assert _one(parsed["actors"], "Sandworm Team")["uses_tools"] == ["S0039"]
+
     def test_a_tool_without_any_id_is_still_skipped(self):
         """Negative: the fallback does not keep a tool that has neither reference (constructed)."""
         (net,) = [o for o in TEXT_FIXTURE["enterprise"] if o.get("type") == "tool" and o.get("name") == "Net"]
@@ -263,6 +282,21 @@ class TestTheDeprecatedRuleIsUnchanged:
             malware = _parsed([triton, copy_])["malware"]
         assert [(m["name"], m["mitre_id"], m["deprecated"]) for m in malware] == [("Triton", "S1009", False)]
         assert any("'TRITON' (ics, S1099) for 'Triton' (ics, S1009)" in r.getMessage() for r in caplog.records)
+
+    def test_an_ics_id_another_object_holds_reaches_no_item(self):
+        """Negative, real objects: ATT&CK's deprecated ICS copy of EKANS has only a ``mitre-ics-attack`` id, S0017,
+        which is the ``mitre-attack`` id of the Enterprise BISCUIT. The copy is left out beside the active EKANS
+        (S0605), so no ICS item carries S0017, and after the merge only BISCUIT does."""
+        ekans, ekans_copy, biscuit = _object("ics", "S0605"), _object("ics", "S0017"), _object("enterprise", "S0017")
+        assert ekans_copy["name"] == "EKANS" and ekans_copy.get("x_mitre_deprecated") is True
+        assert mc._attack_external_id(ekans_copy) == "S0017" and biscuit["name"] == "BISCUIT"
+        ics = _parsed([ekans, ekans_copy])
+        assert [(m["name"], m["mitre_id"], m["deprecated"]) for m in ics["malware"]] == [("EKANS", "S0605", False)]
+        merged = mc.MITRECollector._merge_domain_bundles(_parsed([biscuit], domain=mc.ATTACK_DOMAIN_ENTERPRISE), ics)
+        assert sorted((m["name"], m["mitre_id"], m["deprecated"]) for m in merged["malware"]) == [
+            ("BISCUIT", "S0017", False),
+            ("EKANS", "S0605", False),
+        ]
 
     def test_a_deprecated_ics_technique_reaches_misp_marked_and_with_its_cluster(self):
         technique = {t["mitre_id"]: t for t in _ics_items()["techniques"]}["T0850"]
