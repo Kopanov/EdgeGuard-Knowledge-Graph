@@ -1189,13 +1189,19 @@ class CISAICSCollector:
             for path in [*paths, *pending_paths]:
                 pending_ref = pending_paths.get(path)
                 if pending_ref is None and limit is not None and len(processed) >= limit:
-                    continue
+                    # The item limit is reached: the run reads no more advisories for their items. One whose record
+                    # waits on report_pending is still read for its record (``_pending_paths`` left it out as an
+                    # advisory the run selected), so its entry is tried and, in the end, given up.
+                    listed_ref = report_records.format_record_ref(SOURCE_ID, _listed_record_key(path).upper())
+                    if listed_ref not in pending_refs:
+                        continue
+                    pending_ref = listed_ref
                 if pending_ref and pending_failures >= MAX_CONSECUTIVE_FETCH_FAILURES:
                     logger.warning(
                         "[REPORT-PENDING] CISA ICS: %d consecutive advisory reads for report_pending records failed: "
                         "the %d record(s) left are not tried this run",
                         pending_failures,
-                        len(pending_paths) - stats["pending_fetched"],
+                        max(0, len(pending_paths) - stats["pending_fetched"]),
                     )
                     break
                 if not CISA_ICS_CIRCUIT_BREAKER.can_execute():
@@ -1208,7 +1214,7 @@ class CISAICSCollector:
                             "after the run's own reads"
                             if stats["pending_fetched"] == 0
                             else "since the reads for report_pending records",
-                            len(pending_paths) - stats["pending_fetched"],
+                            max(0, len(pending_paths) - stats["pending_fetched"]),
                         )
                         break
                     raise CISAICSTransientError("CISA ICS circuit breaker opened mid-run — aborting before push")

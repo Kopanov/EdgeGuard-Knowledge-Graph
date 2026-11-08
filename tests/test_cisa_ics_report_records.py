@@ -727,6 +727,32 @@ class TestPendingRecords:
         assert "cisa_ics:ICSA-26-043-08" in {r["record_ref"] for r in pushed_records(c)}
         assert cursor() == t1
 
+    def test_an_advisory_the_item_limit_skips_is_still_read_for_its_pending_record(self, monkeypatch):
+        """Constructed: an item limit of 1 (only an override such as ``EDGEGUARD_MAX_ENTRIES`` sets one for CISA ICS).
+        NX's items reach it; COMOS, selected by the run and so not queued as a pending read, has its record on
+        report_pending and is read for that record only; ROCKWELL, without one, is not read. The cursor stays at
+        NX, the last advisory read for its items."""
+        t1, t2, t3 = "2026-11-01T00:00:00.000000Z", "2026-11-02T00:00:00.000000Z", "2026-11-03T00:00:00.000000Z"
+        put_on_pending("cisa_ics:ICSA-25-317-15")  # COMOS
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, t1), (COMOS, t2), (ROCKWELL, t3)),
+                NX: advisory(NX),
+                COMOS: advisory(COMOS),
+                ROCKWELL: advisory(ROCKWELL),
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(limit=1, push_to_misp=True, baseline=False)
+        assert http.advisories() == [NX, COMOS]
+        assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}, "COMOS's items stay out"
+        assert sorted(r["record_ref"] for r in pushed_records(c)) == [
+            "cisa_ics:ICSA-25-317-15",
+            "cisa_ics:ICSA-26-043-08",
+        ]
+        assert pending() == {} and st["stats"]["pending_fetched"] == 1
+        assert cursor() == t1
+
     def test_failing_pending_reads_stop_after_their_own_streak_and_the_run_goes_on(self, monkeypatch, caplog):
         # Constructed: five pending records whose advisories the listing names (outside the look-back) and that
         # answer HTTP 404; the run's own advisory is read first and fetched.
