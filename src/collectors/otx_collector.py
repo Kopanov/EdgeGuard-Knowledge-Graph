@@ -1218,7 +1218,7 @@ class OTXCollector:
                         records.append(
                             report_records.otx_pulse_record(pulse, _record_pairs(pulse, self.map_indicator_type))
                         )
-                    except (TypeError, ValueError, AttributeError) as exc:
+                    except Exception as exc:  # noqa: BLE001 - a record is a side output: it fails, not the run
                         reason = f"the record could not be built ({type(exc).__name__})"
                         logger.warning("[REPORTS] OTX: %s: %s", ref, reason)
                         stats["failed"].append({"record_ref": ref, "reason": reason, "permanent": False})
@@ -1339,7 +1339,7 @@ class OTXCollector:
             else:
                 try:
                     body = response.json()
-                except ValueError:
+                except (ValueError, RecursionError):  # not JSON, or nested deeper than the decoder goes
                     body = None
                 if isinstance(body, dict) and str(body.get("id")) == pid:
                     pulse = body
@@ -1347,6 +1347,23 @@ class OTXCollector:
                     problem = "an answer that is not the pulse"
         time.sleep(2)  # OTX free tier: 30 requests a minute, as between page requests
         return pulse, problem, stop
+
+    def _fetch_pending_report_pulses_or_none(
+        self, exclude: Set[str], per_run: int
+    ) -> Tuple[List[Dict[str, Any]], List[str], List[str], int, bool]:
+        """``_fetch_pending_report_pulses``, which never raises. These fetches come before the window's push, and
+        their pulses give records only: when they raise, the run logs an ERROR, fetches none of them, and pushes
+        its window as usual; the list counts as not saved, so the run reports it as last saved."""
+        try:
+            return self._fetch_pending_report_pulses(exclude, per_run)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            logger.error(
+                "[REPORT-PENDING] OTX: the fetches for report_pending failed (%s: %s): its records wait for the next "
+                "run",
+                type(exc).__name__,
+                exc,
+            )
+            return [], [], [], 0, False
 
     def _fetch_pending_report_pulses(
         self, exclude: Set[str], per_run: int
@@ -1785,7 +1802,7 @@ class OTXCollector:
                 )
             elif push_to_misp:
                 pending_pulses, pending_not_found, pending_fetch_failed, pending_given_up, pending_fetch_saved = (
-                    self._fetch_pending_report_pulses(
+                    self._fetch_pending_report_pulses_or_none(
                         {str(p.get("id")) for p in pulses if p.get("id")}
                         | {str(p.get("id")) for p in retried}
                         | set(retry_not_found)

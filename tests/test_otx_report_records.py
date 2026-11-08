@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -304,6 +304,46 @@ def test_a_record_that_cannot_be_built_counts_as_failed_and_waits_on_report_pend
     assert counts["reports_failed"] == 1 and counts["reports_added"] == 1
 
 
+def test_a_pulse_date_past_the_calendar_in_utc_gives_a_record_without_that_date():
+    """Constructed: a ``created`` of 9999-12-31 23:00 at UTC-5 parses but is past year 9999 in UTC. The record is
+    built without the date and written, not failed on every run (an OverflowError the build did not catch would
+    have ended the run before its cursor moved)."""
+    assert rr._iso("9999-12-31T23:00:00-05:00") is None
+    good, odd = _recorded(range(2))
+    odd["created"] = "9999-12-31T23:00:00-05:00"
+    collector = _collector()
+    collector.misp_writer = _RecordWriter()
+    counts = otx_collector._new_report_counts()
+    assert collector._push_report_records([odd, good], counts, set()) == set()
+    records = {r["record_id"]: r for r in collector.misp_writer.pushed_records()}
+    assert set(records) == {odd["id"], good["id"]} and records[odd["id"]]["published"] is None
+    assert _pending() == [] and counts["reports_failed"] == 0
+
+
+def test_a_record_build_that_raises_any_error_fails_that_record_only(monkeypatch):
+    """Any error of a record's build (here a constructed RuntimeError) fails that record, which waits on
+    ``report_pending``; the other records are pushed and the run goes on."""
+    good, bad = _recorded(range(2))
+    real = rr.otx_pulse_record
+
+    def build(pulse, pairs):
+        if pulse["id"] == bad["id"]:
+            raise RuntimeError("constructed")
+        return real(pulse, pairs)
+
+    monkeypatch.setattr(otx_collector.report_records, "otx_pulse_record", build)
+    collector = _collector()
+    collector.misp_writer = _RecordWriter()
+    counts = otx_collector._new_report_counts()
+    assert collector._push_report_records([bad, good], counts, set()) == set()
+    assert [r["record_id"] for r in collector.misp_writer.pushed_records()] == [good["id"]]
+    (entry,) = _pending()
+    assert (
+        entry["record_ref"] == _ref(bad["id"])
+        and entry["last_reason"] == "the record could not be built (RuntimeError)"
+    )
+
+
 def test_a_pulse_listed_twice_in_one_push_gives_one_record():
     pulse = _recorded(range(1))[0]
     collector = _collector()
@@ -516,6 +556,52 @@ def test_a_404_or_another_error_lets_the_pending_fetches_go_on(caplog):
     assert _pending_refs() == [_ref(p5["id"])]
     counts = run.status["report_counts"]
     assert (counts["pending_not_found"], counts["pending_fetch_failed"], counts["pending_fetched"]) == (1, 1, 1)
+
+
+def test_an_answer_nested_deeper_than_the_decoder_goes_is_not_the_pulse(caplog):
+    """Constructed: OTX answers HTTP 200 with a body ``json`` cannot decode without a RecursionError. The fetch
+    counts it as an answer that is not the pulse (a failed fetch), and the other pending pulses are still
+    fetched."""
+    p7, p5 = _waiting(7, 5)
+    otx = _Otx(_recorded(range(3)))
+    for pulse in (p7, p5):
+        otx.by_id_only[pulse["id"]] = pulse
+    plain = otx.by_id
+
+    def by_id(pid):
+        if pid == p7["id"]:
+            otx.by_id_requests.append(pid)
+            response = MagicMock(status_code=200)
+            response.json.side_effect = RecursionError("maximum recursion depth exceeded while decoding")
+            return response
+        return plain(pid)
+
+    otx.by_id = by_id
+    run = _collect(otx, {"otx_last_pulse_modified": ROWS[2]["modified"]}, caplog, limit=None, writer=_RecordWriter())
+    assert otx.by_id_requests == [p7["id"], p5["id"]]
+    assert _pending_refs() == [_ref(p7["id"])]
+    counts = run.status["report_counts"]
+    assert (counts["pending_fetch_failed"], counts["pending_fetched"]) == (1, 1)
+
+
+def test_fetches_for_report_pending_that_raise_do_not_stop_the_window_s_push(caplog, monkeypatch):
+    """The fetches for ``report_pending`` come before the window's push. When they raise (a constructed
+    RuntimeError), the run logs an ERROR, fetches none of them this run, and still pushes the window's items and
+    records and moves its cursor."""
+    waiting = _waiting(7)
+    monkeypatch.setattr(
+        OTXCollector, "_fetch_pending_report_pulses", lambda self, *_a, **_k: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    otx = _Otx(_recorded(range(3)))
+    otx.by_id_only[waiting[0]["id"]] = waiting[0]
+    writer = _RecordWriter()
+    run = _collect(otx, {"otx_last_pulse_modified": ROWS[2]["modified"]}, caplog, limit=None, writer=writer)
+    assert run.status["success"] is True
+    assert writer.pushed and writer.pushed_records()
+    assert waiting[0]["id"] not in [r["record_id"] for r in writer.pushed_records()]
+    assert _pending_refs() == [_ref(waiting[0]["id"])]
+    assert run.status["report_counts"]["pending_saved"] is False
+    assert any(r.levelname == "ERROR" and "[REPORT-PENDING]" in r.getMessage() for r in caplog.records)
 
 
 def test_a_baseline_fetches_the_pending_pulses_too(caplog):

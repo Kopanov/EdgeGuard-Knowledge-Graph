@@ -248,7 +248,10 @@ def _iso(value: Any) -> Optional[str]:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat()
+    try:
+        return dt.astimezone(timezone.utc).isoformat()
+    except (OverflowError, ValueError):  # a date at the end of the calendar whose zone puts it past year 9999
+        return None
 
 
 def iso_datetime(value: Any) -> Optional[datetime]:
