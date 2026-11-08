@@ -91,6 +91,36 @@ def _is_sha256(value: str) -> bool:
     return len(value) == 64 and set(value) <= _HEX
 
 
+def _is_hex(value: object, length: int) -> bool:
+    """True for a lower-case hex string of *length* characters (an md5 or sha1 digest)."""
+    return isinstance(value, str) and len(value) == length and set(value) <= _HEX
+
+
+# Verdict categories of ``last_analysis_stats`` that count as an engine's answer (the denominator of
+# ``_calculate_confidence``); ``type-unsupported``, ``timeout``, ``confirmed-timeout`` and ``failure`` are
+# no answer.
+_VERDICT_KEYS = ("malicious", "suspicious", "harmless", "undetected")
+
+
+def _detection_counts(stats: object) -> dict:
+    """``{"detection_malicious": n, "detection_total": m}`` from ``last_analysis_stats`` (2026-11-07).
+
+    ``detection_total`` counts the engines that gave a verdict (malicious, suspicious, harmless,
+    undetected). ``{}`` when the stats are missing, or one of those four counts is missing or not a
+    non-negative int, so no count is invented. Time-variant: the values of the analysis VirusTotal held
+    at the lookup.
+    """
+    if not isinstance(stats, dict):
+        return {}
+    counts = {}
+    for key in _VERDICT_KEYS:
+        value = stats.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return {}
+        counts[key] = value
+    return {"detection_malicious": counts["malicious"], "detection_total": sum(counts.values())}
+
+
 class VTCollector:
     """
     VirusTotal lookup-enrichment collector for MISP.
@@ -309,11 +339,12 @@ class VTCollector:
             last_seen_ts = attrs.get("last_submission_date", 0)
             last_seen = datetime.fromtimestamp(last_seen_ts, tz=timezone.utc).isoformat() if last_seen_ts else None
 
-            # Get file type
-            file_type = attrs.get("type_description", "unknown")
-
-            # Get file size
-            size = attrs.get("size", 0)
+            # File type and size as VirusTotal gives them (2026-11-07: empty / None when absent; they were
+            # "unknown" and 0, values VirusTotal never reported).
+            file_type = str(attrs.get("type_description") or "").strip()
+            size = attrs.get("size")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                size = None
 
             # Build description
             names = attrs.get("names", [])
@@ -359,6 +390,10 @@ class VTCollector:
             # MISP writer's ``_apply_source_truthful_timestamps`` only
             # writes the MISP-native ``Attribute.first_seen`` field when
             # the key is non-empty, so omission is the right signal.
+            # 2026-11-07: the facts of the file and the detection counts as TF_META keys (``file_md5``,
+            # ``file_sha1``, ``file_size``, ``file_type``, ``meaningful_name``, ``threat_category``,
+            # ``detection_malicious``, ``detection_total``). The counts are those of VirusTotal's last
+            # analysis at the time of the lookup; the writer records that time as ``as_of``.
             item: Dict[str, Any] = {
                 "indicator_type": "hash",
                 "value": value,
@@ -367,12 +402,13 @@ class VTCollector:
                 "source": [self.tag],
                 "confidence_score": confidence,
                 "description": description[:500],
-                "md5": md5,
-                "sha1": sha1,
+                "file_md5": md5 if _is_hex(md5, 32) else "",
+                "file_sha1": sha1 if _is_hex(sha1, 40) else "",
                 "sha256": sha256,
                 "file_type": file_type,
                 "file_size": size,
-                "vt_reputation": attrs.get("reputation", 0),
+                "meaningful_name": str(meaningful_name or "").strip(),
+                "vt_reputation": attrs.get("reputation"),
                 "vt_names": names[:5] if isinstance(names, list) else [str(names)],
                 "yara_rules": yara_rules,
                 "sigma_rules": sigma_rules,
@@ -380,6 +416,7 @@ class VTCollector:
                 "threat_label": threat_label,
                 "threat_category": threat_category,
             }
+            item.update(_detection_counts(attrs.get("last_analysis_stats")))
             if first_seen is not None:
                 item["first_seen"] = first_seen
             if last_seen is not None:

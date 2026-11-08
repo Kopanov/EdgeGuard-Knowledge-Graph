@@ -58,6 +58,18 @@ def path(monkeypatch: pytest.MonkeyPatch):
     return run
 
 
+def _assert_block_stays_in_misp(row: Dict[str, Any], *absent: str) -> None:
+    """2026-11-07: the edge's ``raw_data`` takes no metadata block. ``pulse_name`` falls back to a plain
+    comment only, so the TF_META of an item without a pulse name or a family (SSL Blacklist, AbuseIPDB,
+    VirusTotal, an unlabelled MalwareBazaar sample) stays in MISP with the list-source fields it holds."""
+    raw = row["raw_data"]
+    assert raw["pulse_name"] == "", "no pulse name, no family, no plain comment: nothing to name"
+    text = json.dumps(raw)
+    assert "TF_META" not in text
+    for word in absent:
+        assert word not in text, f"{word!r} is a MISP-only field or value"
+
+
 def _vt_item(**extra: Any) -> Dict[str, Any]:
     from collectors.vt_collector import VTCollector
 
@@ -116,11 +128,35 @@ def test_virustotal_does_not_overwrite_the_family_or_reference_of_another_source
     assert "n.threat_label = coalesce(item.threat_label, n.threat_label)" in query
 
 
-def test_virustotal_item_without_a_classification_keeps_a_plain_comment(path) -> None:
+def test_virustotal_item_without_a_classification_carries_its_file_facts(path) -> None:
+    """2026-11-07: the file facts and detection counts are TF_META keys, so a lookup without a classification
+    still writes TF_META; the node gets no classification property from it."""
     item = _vt_item(popular_threat_classification={}, crowdsourced_yara_results=[], sigma_analysis_results=[])
     attr, _sync_item, row = path(item)
-    assert not attr["comment"].startswith("TF_META:"), "nothing to carry: the description stays readable in MISP"
+    meta = json.loads(attr["comment"][len("TF_META:") :])
+    assert meta["file_type"] == "ELF" and meta["meaningful_name"] == "bot.arm7" and meta["file_size"] == 82344
+    assert (meta["detection_malicious"], meta["detection_total"]) == (48, 63)
     assert "threat_label" not in row and "yara_rules" not in row
+    _assert_block_stays_in_misp(row, "meaningful_name", "file_size", "bot.arm7")
+
+
+def test_virustotal_item_with_nothing_structured_keeps_a_plain_comment(path) -> None:
+    item = _vt_item(
+        popular_threat_classification={},
+        crowdsourced_yara_results=[],
+        sigma_analysis_results=[],
+        md5=None,
+        sha1=None,
+        type_description=None,
+        size=None,
+        names=[],
+        meaningful_name=None,
+        last_analysis_stats={},
+    )
+    attr, _sync_item, row = path(item)
+    assert attr["comment"] == "Malicious file detected by VirusTotal", "nothing to carry: a readable comment"
+    assert "threat_label" not in row and "yara_rules" not in row
+    assert row["raw_data"]["pulse_name"] == attr["comment"], "a plain comment is still the edge's pulse_name"
 
 
 def test_one_hash_from_three_sources_is_one_node(path) -> None:
@@ -170,9 +206,18 @@ def test_malwarebazaar_family_reference_and_first_seen_reach_the_node(path) -> N
     assert row["first_seen_at_source"] == "2026-10-12T21:16:06+00:00" and row["last_seen_at_source"] is None
     assert row["raw_data"]["tf_tags"] == ["elf"], "the file type stays with the source record"
 
-    unlabelled = mb.build_item({"first_seen_utc": "2026-10-12 21:16:06", "sha256_hash": SHA, "signature": "n/a"})
-    _attr, _sync_item, row = path(unlabelled)
+    unlabelled = mb.build_item(
+        {
+            "first_seen_utc": "2026-10-12 21:16:06",
+            "sha256_hash": SHA,
+            "file_name": "invoice_2026.exe",
+            "signature": "n/a",
+        }
+    )
+    attr, _sync_item, row = path(unlabelled)
     assert "malware_family" not in row, "an unlabelled sample makes no family claim"
+    assert json.loads(attr["comment"][len("TF_META:") :])["file_name"] == "invoice_2026.exe"
+    _assert_block_stays_in_misp(row, "file_name", "invoice_2026")
 
 
 def test_threatfox_first_seen_with_utc_suffix_reaches_the_edge(path) -> None:
@@ -218,6 +263,7 @@ def test_urlhaus_status_and_last_online_reach_the_node(path) -> None:
     _attr, _sync_item, row = path(item)
     assert row["url_status"] == "online" and row["last_online"] == "2026-09-01 23:10:00"
     assert row["last_seen_at_source"] == "2026-09-01T23:10:00+00:00"
+    _assert_block_stays_in_misp(row, "as_of")
 
 
 def test_feodo_node_carries_family_last_online_and_the_activity_window(path, monkeypatch) -> None:
@@ -257,6 +303,86 @@ def test_feodo_node_carries_family_last_online_and_the_activity_window(path, mon
         "family:Dridex",
     ]
     assert row["raw_data"]["threat_type"] == "botnet_cc"
+
+
+def test_threatfox_value_of_two_records_passes_the_sync_with_the_primary_record(path) -> None:
+    """2026-11-07: the merged ThreatFox block (lists of ports, ids, families, threat types, an int level)
+    still parses, and the node keeps the primary record's family and reference."""
+    from collectors.global_feed_collector import ThreatFoxCollector, threatfox_merge_iocs
+
+    base = {
+        "threat_type": "botnet_cc",
+        "threat_type_desc": "Indicator that identifies a botnet command&control server (C&C)",
+        "ioc_type": "ip:port",
+        "malware_malpedia": "https://malpedia.caad.fkie.fraunhofer.de/details/win.cobalt_strike",
+        "malware_printable": "Cobalt Strike",
+        "reporter": "reporter-a",
+    }
+    records = [
+        {
+            **base,
+            "id": "41",
+            "ioc": "198.51.100.30:443",
+            "confidence_level": 75,
+            "first_seen": "2026-11-05 10:00:00 UTC",
+        },
+        {
+            **base,
+            "id": "42",
+            "ioc": "198.51.100.30:8080",
+            "confidence_level": 100,
+            "first_seen": "2026-11-06 10:00:00 UTC",
+        },
+    ]
+    (item,) = threatfox_merge_iocs(records, ThreatFoxCollector.__new__(ThreatFoxCollector)._map_ioc_type)
+    attr, sync_item, row = path(item)
+    meta = json.loads(attr["comment"][len("TF_META:") :])
+    assert meta["ports"] == [443, 8080] and meta["ioc_ids"] == ["41", "42"] and meta["confidence_level"] == 100
+    assert (row["value"], row["malware_family"], row["confidence"]) == ("198.51.100.30", "Cobalt Strike", 0.8)
+    assert sync_item["ioc_id"] == "42" and row["raw_data"]["threat_type"] == "botnet_cc"
+    assert row["first_seen_at_source"] == "2026-11-05T10:00:00+00:00"
+
+
+def test_sslbl_and_abuseipdb_blocks_pass_the_sync(path) -> None:
+    """2026-11-07: SSL Blacklist and AbuseIPDB attributes now carry TF_META; the sync parses them and the
+    node gets the certificate page as ``reference``, never a family from the listing reason."""
+    sha1 = "ee44c0aa609918ca30691fe0f49b87945d450bcd"
+    sslbl = {
+        "indicator_type": "x509-fingerprint-sha1",
+        "value": sha1,
+        "zone": ["global"],
+        "tag": "ssl_blacklist",
+        "source": ["ssl_blacklist"],
+        "first_seen": "2026-10-21 09:43:46",
+        "confidence_score": 0.6,
+        "listing_reason": "Vidar C&C",
+        "listing_family": "Vidar",
+        "threat_type": "botnet_cc",
+        "reference": f"https://sslbl.abuse.ch/ssl-certificates/sha1/{sha1}/",
+    }
+    _attr, _sync_item, row = path(sslbl)
+    assert row["reference"] == sslbl["reference"]
+    assert "malware_family" not in row, "the family of a listing reason is kept in MISP only, never linked"
+    _assert_block_stays_in_misp(row, "listing_reason", "listing_family", "Vidar")
+
+    abuse = {
+        "indicator_type": "ipv4",
+        "value": "203.0.113.9",
+        "zone": ["global"],
+        "tag": "abuseipdb",
+        "source": ["abuseipdb"],
+        "last_seen": "2026-11-06T21:14:03+00:00",
+        "last_updated": "2026-11-07T06:00:00+00:00",
+        "confidence_score": 1.0,
+        "abuse_confidence_score": 100,
+        "ip_country_code": "NL",
+        "description": "AbuseIPDB blacklist, confidence: 100%, Country: NL",
+    }
+    attr, _sync_item, row = path(abuse)
+    assert json.loads(attr["comment"][len("TF_META:") :])["ip_country_code"] == "NL"
+    assert row["source_id"] == "abuseipdb" and row["confidence"] == 0.8
+    assert "targeted_countries" not in row, "the address's own country is never a targeted country"
+    _assert_block_stays_in_misp(row, "abuse_confidence_score", "ip_country_code", "NL")
 
 
 # ---------------------------------------------------------------------------

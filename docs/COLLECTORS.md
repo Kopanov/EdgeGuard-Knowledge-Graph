@@ -82,7 +82,7 @@ The duplicate check above drops every indicator the source already holds in MISP
 - **Cost in MISP.** The cross-event prefetch reads every attribute of the source; for the refresh it keeps uuid, timestamp and dates for the keys the push reports, and reads each row's event name (no extra request; measured on 150,000 rows in the MISP 2.5 listing format and a push reporting 20,000 indicators, the parse of the listing takes 48 ms instead of 31 ms and about 3 MB more memory, against the seconds each listed page takes MISP to serve). Each refresh is one MISP request (`POST /attributes/edit/{uuid}`, retried like the NVD edits), paced with `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` after every 50 edits, which is also where the parent-DAG liveness check runs, the longest unwritten first. A run stops refreshing at `EDGEGUARD_MISP_REFRESH_MAX_PER_RUN` edits (default 2,000), once `EDGEGUARD_MISP_REFRESH_MAX_SECONDS` (default 600) is spent, or after 5 failed edits in a row (MISP failing: a failed edit costs up to three attempts with a 600 s read timeout each). An edit in flight is not interrupted, so a run can exceed the time budget by one edit's attempts; the shortest collector task limit is 1 hour.
 - **Cost in the sync.** Each refresh moves the timestamp of the event that holds the copy: after a baseline, the source's baseline event, or for a source the writer splits, the part that holds the copy. The incremental sync selects events by event timestamp, downloads every attribute of each selected event (events with up to `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` attributes, default 20,000, whole with PyMISP `get_event`; larger ones as `/events/restSearch` metadata plus `/attributes/restSearch` pages of 5,000, held in memory as one list), writes only the changed attributes, and for changed OTX items also parses the event's unchanged attributes to find the ones of the same pulses (report-scoped linking). Once refreshes begin, 30 days after a baseline, most incremental syncs therefore download and parse the OTX baseline event (149,270 attributes on 2026-10-13; the writer does not split OTX events). An NVD edit of a stored CVE or a URLhaus refresh makes the sync download the part that holds the copy, of at most `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` (20,000) attributes, fetched whole because the sync pages only events above `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` (also 20,000). The writer adds attributes only to the event of the push day, so an event of an earlier day keeps its size, also one larger than the limit (an OTX event, which is never split, or an event written with the split off or at a higher limit); an edit or a refresh of a copy in such an event makes the sync download that whole event, in `/attributes/restSearch` pages above `EDGEGUARD_MISP_PAGED_FETCH_ABOVE`. The Feodo Tracker, SSL Blacklist and AbuseIPDB events (7,607 / 10,967 / 10,000 attributes) are read whole too. This has not been measured on the 730-day instance: time one incremental sync after the first refreshes, and set `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS=0` if the sync becomes too slow.
 - **Accounting.** Refreshed, failed and deferred edits are counted in the writer's stats (`attributes_refreshed`, `attributes_refresh_failed`, `attributes_refresh_deferred`) and logged (`[REFRESH] N re-reported indicator(s) whose stored copy MISP last wrote more than 30 days ago: R refreshed, F failed, D left for a later run (reason)`; the push summary names the refreshed count). A failed or deferred refresh does not fail the push: the stored timestamp stays old and the next run that reports the indicator tries again.
-- **Limit.** The refresh changes nothing but MISP's timestamp and, when the source claims a later date, `last_seen`. An existing IOC listed by a new OTX pulse does not receive that pulse's families, adversaries, report id or TLP: those travel in the attribute's `OTX_META` comment and tags, which this path never rewrites.
+- **Limit.** The refresh changes nothing but MISP's timestamp and, when the source claims a later date, `last_seen`. An existing IOC listed by a new OTX pulse does not receive that pulse's families, adversaries, report id or TLP: those travel in the attribute's `OTX_META` comment and tags, which this path never rewrites. For the same reason the values of a `TF_META` comment that change at the source (URLhaus `url_status`, `last_online`; Feodo Tracker `c2_status`, `last_online`; the AbuseIPDB score; the VirusTotal detection counts) are those of the first report for the life of the attribute: the comment records when they were read (`as_of`), and they read as "at first report". The same holds for the records a source merges into one value: an indicator ThreatFox or Feodo Tracker reports again with a new port, record id, family or threat type keeps the `ports`, `ioc_ids`, `families` and `threat_types` (and the primary record's keys, `confidence_level`, tags and confidence) of the run that first wrote it.
 - **Off switch.** `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS=0`. All three variables are forwarded by `docker-compose.yml`.
 
 ### The source date an indicator ages from
@@ -610,7 +610,7 @@ def detect_sectors(self, text):
 
 ### What It Does
 Fetches IP reputation / blacklist data from the AbuseIPDB API v2 and pushes indicators to MISP:
-- The blacklist (`GET /blacklist`, `confidenceMinimum` 90): for each address, the abuse confidence score (`confidence_score` = score / 100), the country code and `lastReportedAt` (the last-seen time the source reports; the endpoint gives no first-seen date). MISP receives the address, `last_seen`, the tags and the comment `AbuseIPDB confidence: N%, Country: XX`. Reverse DNS, hostnames, ISP, usage type, the Tor and whitelist flags and reports come only from the `check` endpoint (`check_ip`, `enrich_ip`), which no DAG task calls.
+- The blacklist (`GET /blacklist`, `confidenceMinimum` 90): for each address, the abuse confidence score (`confidence_score` = score / 100), the country code and `lastReportedAt` (the last-seen time the source reports; the endpoint gives no first-seen date). MISP receives the address, `last_seen`, the tags and a `TF_META` comment with `abuse_confidence_score` (AbuseIPDB's 0-100 score, an integer), `ip_country_code` (the country AbuseIPDB gives for the address: where the address is, never a country the activity targets, so it never feeds `targeted_countries`) and `as_of` (the collection time: the score changes at the source, and MISP keeps the first report's value, see [Re-reported indicators](#re-reported-indicators)). A field the answer does not carry is left out: an entry without a score gets no score and the writer's default confidence (`confidence:medium`), and the blacklist answer has no report or reporter counts, so the item carries none. Reverse DNS, hostnames, ISP, usage type, the Tor and whitelist flags, report counts and reports come only from the `check` endpoint (`check_ip`, `enrich_ip`), which no DAG task calls; a count it does not return is `None`, never 0.
 
 ### Source
 - **Base URL:** `https://api.abuseipdb.com/api/v2`
@@ -655,7 +655,7 @@ What a lookup adds to the graph:
 | `yara_rules`, `sigma_rules` | names of matching crowdsourced rules (added to the lists on the node) | `crowdsourced_yara_results`, `sigma_analysis_results` |
 | `zone` | sectors detected in file names, tags and sandbox verdicts (usually `global`) | keyword detector |
 
-VirusTotal deliberately sends no `malware_family` and no `reference`: both are single-valued on the node and the last writer wins, so a corroborating source would overwrite the family reported by ThreatFox or MalwareBazaar. For the same reason a lookup creates no `INDICATES` edge by itself. MD5, SHA-1, file size and sandbox verdicts are not carried. The label and rule names travel in the shared feed-metadata comment (`TF_META`), written only when VirusTotal returns them.
+VirusTotal deliberately sends no `malware_family` and no `reference`: both are single-valued on the node and the last writer wins, so a corroborating source would overwrite the family reported by ThreatFox or MalwareBazaar. For the same reason a lookup creates no `INDICATES` edge by itself. The label and rule names travel in the shared feed-metadata comment (`TF_META`), written only when VirusTotal returns them, and so do the facts of the file and the counts of the last analysis: `threat_category` (the first `popular_threat_category`), `meaningful_name`, `file_type` (`type_description`), `file_size`, `file_md5`, `file_sha1`, `detection_malicious` and `detection_total` (the engines that gave a verdict: malicious, suspicious, harmless, undetected). A field VirusTotal does not return is left out (the file type is never set to `unknown`, a missing size is never set to 0 while a size of 0 that VirusTotal reports for an empty file is kept, and partial analysis stats give no counts). The counts change at VirusTotal after the lookup; they are the values of the analysis at the time of the lookup, recorded with `as_of`. MISP keeps them (the sync does not read them); sandbox verdicts are not carried.
 
 Hashes are looked up **once** while the ledger remembers them. It keeps the most recent 20,000 delivered lookups (`LOOKED_UP_MAX`), hashes unknown to VirusTotal (HTTP 404) included, so a remembered hash is not looked up again. An enriched hash is remembered only after its MISP push succeeded. The ledger is the only record of what was looked up (MISP cannot tell which hashes of other sources were enriched): if the file is lost, hashes inside the candidate window are looked up again, which costs quota but creates no duplicate attributes. The query shape was confirmed against a live MISP 2.5 on 2026-10-12 (HTTP 200, `response.Attribute` list).
 
@@ -699,8 +699,9 @@ def _detect_zones_from_attributes(self, attrs):
     'source': ['virustotal'],
     'first_seen': '2024-01-01T00:00:00+00:00',   # first_submission_date (source-truthful)
     'confidence_score': 0.85,           # from last_analysis_stats
-    'md5': '...', 'sha1': '...', 'sha256': '...',
-    'file_type': 'Win32 EXE', 'file_size': 123456,
+    'file_md5': '...', 'file_sha1': '...', 'sha256': '...',
+    'file_type': 'Win32 EXE', 'file_size': 123456, 'meaningful_name': 'invoice.exe',
+    'detection_malicious': 52, 'detection_total': 70,
     'vt_reputation': -12, 'vt_names': ['invoice.exe'],
     'threat_label': 'trojan.emotet/heodo', 'threat_category': 'trojan',
     'yara_rules': [...], 'sigma_rules': [...], 'sandbox_verdicts': {...}
@@ -718,8 +719,8 @@ def _detect_zones_from_attributes(self, attrs):
 
 ### What It Does
 Collects two abuse.ch feeds historically associated with banking trojans:
-- **Feodo Tracker:** botnet C&C server IPs (QakBot, Emotet, TrickBot, Dridex, BumbleBee, Pikabot) with the malware family, port and online/offline status
-- **SSL Blacklist:** SHA-1 fingerprints of malicious TLS certificates with the listing reason, stored as `x509-fingerprint-sha1` indicators (see below)
+- **Feodo Tracker:** botnet C&C server IPs (QakBot, Emotet, TrickBot, Dridex, BumbleBee, Pikabot) with the malware families, ports and online/offline status
+- **SSL Blacklist:** SHA-1 fingerprints of malicious TLS certificates with the listing reason (kept verbatim, with its role and family part apart), stored as `x509-fingerprint-sha1` indicators (see below)
 
 ### Sources
 - **Feodo (regular runs):** `https://feodotracker.abuse.ch/downloads/ipblocklist.csv` — C2 servers active in the last 30 days
@@ -745,7 +746,7 @@ Both collectors use `detect_zones_from_text()` on malware names and listing reas
 zones = detect_zones_from_text(" ".join(rec["families"]).lower())   # every family of the merged address
 
 # SSL Blacklist Collector
-zones = detect_zones_from_text(reason)
+zones = detect_zones_from_text(reason.lower())
 ```
 
 The keyword detector deliberately contains no malware family names (families are linked to sectors through graph relationships), so in practice both feeds are tagged `zone:Global`: measured on 2026-10-12, all 7,980 Feodo rows (7,607 servers) and all 10,964 SSL Blacklist rows. Neither feed is hard-coded to Finance.
@@ -753,7 +754,7 @@ The keyword detector deliberately contains no malware family names (families are
 ### Feodo Tracker: what is loaded and what reaches the graph
 - **The feed is a historical snapshot at present.** Both downloads carry the header `# Last updated: 2026-03-04 14:28:39 UTC` (checked 2026-10-12): abuse.ch has not updated Feodo Tracker for seven months. A baseline loads the history once; the daily task then finds nothing new until the feed moves again. The collector logs a warning when the header is older than 7 days.
 - **Parsing.** CSV with every field quoted and CRLF line endings, read with the `csv` module; the header row is recognised by name.
-- **One record per address.** The feed has one row per address and port, and a re-used address appears again under another family: 7,980 rows describe 7,607 addresses (290 addresses on several rows, 81 with more than one family). MISP holds one attribute per value, so rows are merged per address: earliest `first_seen`, latest `last_online`, every port, every family. The primary family is that of the most recently active row.
+- **One record per address.** The feed has one row per address and port, and a re-used address appears again under another family: 7,980 rows describe 7,607 addresses (290 addresses on several rows, 81 with more than one family). MISP holds one attribute per value, so rows are merged per address: earliest `first_seen`, latest `last_online`, every port, every family. The primary family is that of the most recently active row. The attribute's `TF_META` comment carries every port as `ports` (integers, ascending), every family as `families` (the primary first) and the most recent row's `c2_status`, with `as_of` (the time it was read: `c2_status` and `last_online` are first-report values, see [Re-reported indicators](#re-reported-indicators)); the same facts are also kept as the labels `c2_status:…`, `port:…`, `family:…` in `tags`. The merge covers the rows of one run: a port or family the list adds for an address MISP already holds does not reach its stored comment ([Re-reported indicators](#re-reported-indicators)).
 - **Actionable or historical.** A server counts as recently active when its `last_online` date is within 30 days of the collection day (`FEODO_ACTIVE_DAYS`). The `c2_status` column is not used for this: it is only as fresh as the feed (the single "online" row of 2026-10-12 was last seen online on 2026-03-12). Recently active: `confidence:medium`, MISP detection flag set. Everything else: `confidence:low`, `to_ids=false`. abuse.ch advises against blocking on the complete history because addresses are re-used. On 2026-10-12 all 7,607 servers were historical.
 - **Not rewritten.** EdgeGuard does not rewrite the confidence tag or the detection flag of an attribute MISP already holds (the refresh of a re-reported indicator edits `last_seen` only), so both stay as they were at the first collection.
 - **Outages (Feodo Tracker and SSL Blacklist).** A timeout, a connection error, a truncated transfer or an HTTP 429 / 5xx after the retries is raised as a transient error: the Airflow task is skipped (`transient_external_error`) and the alert path is used. An open circuit breaker skips the run (`feodo_circuit_breaker_open`, `sslbl_circuit_breaker_open`). HTTP 401 / 403 skips (`*_auth_denied`). Any other HTTP status, or a defect in the code, fails the task. A body that is not the CSV yields zero items and a warning.
@@ -777,8 +778,16 @@ Each row is the SHA-1 fingerprint of a TLS certificate seen on malware infrastru
 | Graph element | Value | From |
 |---|---|---|
 | `Indicator {indicator_type: "x509-fingerprint-sha1", value}` | the fingerprint, 40 lower-case hexadecimal characters | `SHA1` |
-| `zone` | keyword detector on the listing reason (`global` in practice); the reason itself is not written to MISP | `Listingreason` |
+| `reference` | the certificate's SSL Blacklist page, `https://sslbl.abuse.ch/ssl-certificates/sha1/<sha1>/` (the link form of the site's own certificate list; the page can show no entry for a recent listing) | built from the fingerprint |
+| `zone` | keyword detector on the listing reason (`global` in practice) | `Listingreason` |
 | `(Indicator)-[:SOURCED_FROM]->(Source {source_id: "ssl_blacklist"})` | `source_reported_first_at` = the listing date | `Listingdate` |
+
+In MISP the attribute carries a `TF_META` comment with the certificate page as `reference` and the listing reason three ways:
+- `listing_reason`: the reason as the list gives it (`Vidar C&C`, `Malware C&C`, `NetSupport RAT malware distribution`, `Vawtrak MITM`, `doxbin.cy`);
+- `threat_type`: the role, in ThreatFox's vocabulary: `botnet_cc` for `<family> C&C`, `payload_delivery` for `<family> malware distribution`; none for `<family> MITM` and for a reason without a role suffix;
+- `listing_family`: the family part of a reason with a role suffix, in the list's spelling. A family part that is a category word (`Malware C&C`, `Malware distribution`, `Ransomware C&C`) gives none, by the rule that keeps such words out of Malware node names (`node_identity.is_placeholder_name`); so does a word the list uses for a kind of server (`Spambot C&C`, `Steal C&C`, `Downloder-Bot C&C`, `hVNC C&C`, one listing each on 2026-11-07; `Stealc C&C` keeps `Stealc`), and a reason without a role suffix (`QuasarRAT`, `Sinkhole`, `FIN7`, `doxbin.cy`) gives none, because it does not say whether it names a family. A listing family is the list's own label: it may name a malware family, an actor (`TA505 C&C`, `Sofacy C&C`), a legitimate product (`ConnectWise C&C`) or a traffic-distribution cluster (`KongTuke C&C`).
+
+The family is never written as `malware_family`, so the sync does not link it as a feed family label: `listing_family` is kept in MISP only, and no graph link is made from it. Of the 11,164 listings of 2026-11-07, 405 were `Malware C&C`, 22 `Malware distribution` and 25 `Ransomware C&C`; 265 distinct reasons, the longest 35 characters.
 
 ### Example Output
 
@@ -800,7 +809,10 @@ Each row is the SHA-1 fingerprint of a TLS certificate seen on malware infrastru
     'status': 'offline',
     'reference': 'https://feodotracker.abuse.ch/browse/host/103.61.101.11/',
     'threat_type': 'botnet_cc',
-    'tags': ['c2_status:offline', 'port:447', 'port:449', 'family:TrickBot', 'family:Dridex']
+    'tags': ['c2_status:offline', 'port:447', 'port:449', 'family:TrickBot', 'family:Dridex'],
+    'ports': [447, 449],                   # → TF_META.ports
+    'families': ['TrickBot', 'Dridex'],    # → TF_META.families (primary first)
+    'c2_status': 'offline'                 # → TF_META.c2_status (with TF_META.as_of)
 }
 
 # SSL Blacklist Indicator (TLS certificate fingerprint; MISP type x509-fingerprint-sha1)
@@ -813,7 +825,10 @@ Each row is the SHA-1 fingerprint of a TLS certificate seen on malware infrastru
     'first_seen': '2024-01-10',
     'last_updated': '2024-01-15T09:00:00+00:00',  # emitted (wall-clock time); MISPWriter never reads it
     'confidence_score': 0.6,
-    'listing_reason': 'dridex'
+    'listing_reason': 'Dridex C&C',               # verbatim
+    'threat_type': 'botnet_cc',                   # the role
+    'listing_family': 'Dridex',                   # the family part (none for "Malware C&C")
+    'reference': 'https://sslbl.abuse.ch/ssl-certificates/sha1/a1b2c3d4e5f6.../'
 }
 ```
 
@@ -842,10 +857,23 @@ Neither feed has a cursor: each run reads a window, ThreatFox `get_iocs` the IOC
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `EDGEGUARD_THREATFOX_MAX_PER_RUN` | `10000` | IOCs collected per run, baseline and daily. A run whose window lists more keeps the newest by `first_seen` and logs a warning naming how many older IOCs it left out |
+| `EDGEGUARD_THREATFOX_MAX_PER_RUN` | `10000` | IOC records collected per run, baseline and daily (before the records of one value are merged, below). A run whose window lists more keeps the newest by `first_seen` and logs a warning naming how many older IOCs it left out |
 | `EDGEGUARD_URLHAUS_MAX_PER_RUN` | `100000` | URLs collected per run from `recent.csv`, baseline and daily. A run whose file lists more keeps the newest by `dateadded` and logs a warning |
 
 The feeds' own order does not matter: a run that reaches its cap sorts by the date field first. `EDGEGUARD_MAX_ENTRIES` and an explicit baseline limit still apply when lower; `0` removes the cap. Entries MISP already holds for the source are not pushed again (cross-event duplicate prefetch), so a daily run that re-reads the window writes only the new entries (and refreshes the stored copies MISP last wrote more than `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` ago, see [Re-reported indicators](#re-reported-indicators)). Both variables are forwarded into the containers by `docker-compose.yml` (`x-common-env`) with the code defaults.
+
+### ThreatFox: one item per value
+
+`get_iocs` lists one record per IOC report, and an `ip:port` IOC carries its port in the value. MISP `ip-dst` takes no port, so the port is stripped, and MISP holds one attribute per value: two records `IP:443` and `IP:8080`, or a value reported twice for two families, are one attribute. The collector therefore merges the records of a value into one item (`threatfox_merge_iocs`), as Feodo Tracker merges its rows per address:
+
+- the scalar keys (`malware_family`, `threat_type`, `threat_type_desc`, `ioc_id`, `malware_alias`, `malware_malpedia`, `reporter`, `reference`) are the primary record's, the most recent one (`first_seen`, then the higher id); `reference` and `reporter` fall back to the most recent other record that has one, `malware_malpedia` only to a record of the primary record's family (the Malpedia page names the family);
+- `first_seen` is the earliest and `last_seen` the latest of the records;
+- the lists hold every record's value once: `ports` (integers, ascending, from `ip:port` IOCs), `ioc_ids` (ascending), `families` (`malware_printable`) and `threat_types` with the primary record's value first, and `tags`;
+- `confidence_level` is the highest ThreatFox `confidence_level` (0-100, an integer) of the records, and `confidence_score` that value / 100. A record without a level adds none; a value whose records state none gets no `confidence_level` and a `confidence_score` of 0.5.
+
+The merge covers the records of one run. The attribute keeps what the run that first wrote the value merged: every `TF_META` key (the primary record's keys, the lists, `tags` and `confidence_level`) and the attribute's tags and confidence. A record a later run reads for a value MISP already holds (a new port, id, family or threat type) is not pushed again (the cross-event duplicate check above), and the refresh of a re-reported indicator changes only `last_seen` ([Re-reported indicators](#re-reported-indicators)).
+
+Every key of the item reaches MISP in the `TF_META` comment when the value is first written. Three confidence fields are kept apart: `TF_META.confidence_level` is ThreatFox's own 0-100 scale; the edge's `confidence` is EdgeGuard's bucket of the attribute's `confidence:*` tag (0.8 / 0.5 / 0.3); the node's `source_confidence` is the highest of its sources' values (0-1). The Malpedia family id needs no key of its own: it is the last path segment of `malware_malpedia`.
 
 ### Zone Detection
 
@@ -854,8 +882,8 @@ def get_zones_from_malware(malware_name):
     """Determine ALL zones based on malware family name."""
     return detect_zones_from_text(malware_name or "")
 
-# ThreatFox uses malware family
-zones = get_zones_from_malware(malware)
+# ThreatFox uses the families of the value's records
+zones = get_zones_from_malware(" ".join(families))
 
 # URLhaus uses threat tags
 zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
@@ -881,6 +909,12 @@ zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
     'malware_malpedia': 'https://malpedia.caad.fkie.fraunhofer.de/details/win.emotet',
     'reference': 'https://threatfox.abuse.ch/ioc/12345/',
     'tags': ['emotet', 'epoch4', 'tier1'],    # IOC classification labels
+    'ioc_id': '12345',                        # the primary record
+    'ioc_ids': ['12340', '12345'],            # every record of the value
+    'families': ['emotet'],
+    'threat_types': ['botnet_cc'],
+    'confidence_level': 75,                   # ThreatFox's 0-100 level (the highest of the records)
+    # 'ports': [443, 8080] for an ip:port value
 }
 
 # URLhaus Indicator
@@ -1169,9 +1203,9 @@ Both variables are forwarded into the containers by `docker-compose.yml` (`x-com
     'first_seen': '2026-10-12T19:25:15+00:00',   # first_seen_utc, tz-aware UTC (source-truthful)
     'confidence_score': 0.7,                # 0.6 when the family label is n/a
     'malware_family': 'Mirai',              # '' when signature is n/a
-    'md5': '2cbdeeb34862d4f0a40aabcc3236b891',
-    'sha1': 'd382bede96d914347228a5392812851da046858f',
-    'file_name': 'net.arm5',
+    'file_md5': '2cbdeeb34862d4f0a40aabcc3236b891',    # '' when n/a or not 32 hex characters
+    'file_sha1': 'd382bede96d914347228a5392812851da046858f',
+    'file_name': 'net.arm5',                # as the export gives it
     'file_type': 'elf',
     'mime_type': 'application/x-executable',
     'reporter': 'abuse_ch',
@@ -1180,7 +1214,7 @@ Both variables are forwarded into the containers by `docker-compose.yml` (`x-com
 }
 ```
 
-In MISP the attribute is `sha256` with the tags `source:MalwareBazaar`, `zone:*`, `tlp:*`, `confidence:*`, the MISP-native `first_seen`, and a `TF_META:` comment carrying `malware_family`, `reporter`, `reference` and `tags`.
+In MISP the attribute is `sha256` with the tags `source:MalwareBazaar`, `zone:*`, `tlp:*`, `confidence:*`, the MISP-native `first_seen`, and a `TF_META:` comment carrying `malware_family`, `reporter`, `reference`, `tags` and the facts of the sample's file: `file_name`, `file_md5`, `file_sha1` and `file_type` (each only when the export gives it). The MD5 and SHA-1 are facts of the file, the same for every source; the sync does not read them. A file name is a lure name chosen by the attacker and may name a company or a person: it is public source data, kept in MISP, and stays out of deliverables and training samples.
 
 ### Acceptance
 `python scripts/verify_fresh_baseline.py --require-malwarebazaar` fails unless `Source {source_id: 'malwarebazaar'}` exists with at least one sha256 hash indicator sourced from it.
@@ -1218,8 +1252,16 @@ Indicators arrive in Neo4j only through MISP. Fields beyond type, value, tags an
 | `url_status`, `last_online` (optional) | same names | URLhaus; Feodo Tracker (`last_online`) |
 | `threat_label`, `yara_rules`, `sigma_rules` (optional) | same names | VirusTotal |
 | `tags`, `threat_type`, `threat_type_desc`, `ioc_id`, `malware_alias` | none: kept in `raw_data` on the `SOURCED_FROM` edge | ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker |
+| `ports`, `families` (optional) | none: MISP only | ThreatFox, Feodo Tracker |
+| `ioc_ids`, `threat_types`, `confidence_level` (optional) | none: MISP only | ThreatFox |
+| `c2_status` (optional) | none: MISP only | Feodo Tracker |
+| `listing_reason`, `listing_family`, `threat_type` (optional for this source) | none: MISP only (`threat_type` in `raw_data`) | SSL Blacklist |
+| `abuse_confidence_score`, `ip_country_code` (optional) | none: MISP only | AbuseIPDB |
+| `file_name`, `file_md5`, `file_sha1`, `file_type` (optional) | none: MISP only | MalwareBazaar, VirusTotal (`file_name` MalwareBazaar only) |
+| `threat_category`, `meaningful_name`, `file_size`, `detection_malicious`, `detection_total` (optional) | none: MISP only | VirusTotal |
+| `as_of` | none: the time the comment was written, present when the comment holds a value that changes at the source (`url_status`, `last_online`, `c2_status`, `abuse_confidence_score`, `detection_malicious`, `detection_total`) | URLhaus, Feodo Tracker, AbuseIPDB, VirusTotal |
 
-The optional keys are written only when the item carries a value, and the sync sets a property only when the key is present, so a source never blanks another source's value on a shared node. `tests/test_source_graph_footprint.py` checks this path per source up to the row handed to the MERGE query.
+The optional keys are written only when the item carries a value, and the sync sets a property only when the key is present, so a source never blanks another source's value on a shared node. The list-source keys (`ports` to `detection_total` above) are written as the source gives them, never cut by the writer, and no value is invented for a field the source does not give (no 0, no `unknown`); the sync does not read them, so they are kept in MISP only. The edge's `raw_data.pulse_name` is the OTX pulse name, else the feed's `malware_family`, else a plain comment, never a metadata block, so the `TF_META` of an item with neither (SSL Blacklist, AbuseIPDB, VirusTotal, an unlabelled MalwareBazaar sample) does not reach the graph. Their time-variant values are the first report's: the writer never re-comments a stored attribute ([Re-reported indicators](#re-reported-indicators)), so they read as "at first report", dated by `as_of`; for the same reason the merged lists (`ports`, `ioc_ids`, `families`, `threat_types`) hold the records of the run that first wrote the value. `tests/test_source_graph_footprint.py` checks this path per source up to the row handed to the MERGE query.
 
 A comment whose JSON after the prefix is not an object (`OTX_META:null`, `OTX_META:["x"]`, `TF_META:"s"`, `MITRE_USES_TECHNIQUES:null`, written by a MISP user or a federated instance) is read as no metadata, with a `[META]` warning naming the attribute's UUID, and the attribute is synced without it, so such a comment does not fail its event (`tests/test_malformed_meta_comments.py`). A list-valued key holding a string (`{"t":"T1059"}`) is ignored instead of being split into characters, and a list keeps only its strings and numbers (numbers as strings), because Neo4j refuses a node property list holding a map, a list, a null or mixed types and would fail the whole batch. A technique's `MITRE_TACTIC_PHASES` block is read the same way (a string such as `{"p":"execution"}` is ignored, and a list keeps only its strings and numbers); its bare-list form, which no writer produces, keeps its strings and numbers. `TF_META.tags` is not list-only: URLhaus writes it as the feed's comma-separated string.
 
@@ -1377,6 +1419,8 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — Sync: the `raw_data.pulse_name` of a `SOURCED_FROM` edge takes a plain comment only, never a metadata block (the whole `TF_META` of an item without a family, every URLhaus item among them, was copied into it, and the list-source fields with it).
+- 2026-11-07 — List sources: the fields the collectors dropped before MISP reach the `TF_META` comment. ThreatFox merges the records of one value into one item (two records `IP:443` and `IP:8080` were two items, and MISP kept only the first record's port, id, family and threat type; the port was lost on every `ip:port` IOC) with `ports`, `ioc_ids`, `families`, `threat_types` and the integer `confidence_level` (a record without a level raised `TypeError`). SSL Blacklist writes the listing reason verbatim (it was lower-cased and never reached MISP), the certificate page as `reference`, the role as `threat_type` and the family part as `listing_family`, never a category word ("Malware C&C", "Ransomware C&C"). Feodo Tracker adds `ports`, `families` and `c2_status`. AbuseIPDB writes `abuse_confidence_score` and `ip_country_code` in `TF_META` (they were in a prose comment) and leaves out a field the answer lacks (a missing score was 0 and `confidence:low`; the blacklist item held report and reporter counts of 0 the endpoint never returns). MalwareBazaar adds `file_name`, `file_md5`, `file_sha1` and `file_type`; VirusTotal adds `threat_category`, `meaningful_name`, `file_type`, `file_size`, `file_md5`, `file_sha1` and the detection counts (the file type was `unknown` and the size 0 when VirusTotal gave none). Values that change at the source carry `as_of`. The merged lists of ThreatFox and Feodo Tracker hold the records of the run that first wrote the value.
 - 2026-11-07 — NVD and ATT&CK descriptions: the MISP → Neo4j sync writes at most 1,000 characters of a CVE's description and 500 of an ATT&CK description to the graph, markup stripped and cut at a sentence or word end; MISP keeps what the collectors send.
 - 2026-11-07 — OTX: the pulse TLP is read from `tlp`, the field the subscribed list answers (only `TLP`, the field of an answer by id, was read, so every pulse of a window reached MISP without its level and was written at the default; on the 730-day test graph of 2026-11-03 every OTX indicator was `white` and `pulse_tlp` was empty on every OTX `SOURCED_FROM` edge).
 - 2026-11-06 — OTX adversaries: a list is not split inside parentheses or before a company's legal form, a name that is only a legal form is dropped, and no name keeps unbalanced parentheses (the split had made the actors `black owl (bo team` and `ltd.`).

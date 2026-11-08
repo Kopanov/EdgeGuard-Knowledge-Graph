@@ -30,7 +30,7 @@ Several numbers (**200**, **500**) appear across EdgeGuard docs and code. They c
 
 - NVD: `EDGEGUARD_NVD_MAX_PER_RUN` (5,000).
 - MalwareBazaar: `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500).
-- ThreatFox and URLhaus: `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) and `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000), each above its feed's whole window (URLhaus: the `recent.csv` export, the URLs added in the past 30 days: about 63,000 on 2026-10-24).
+- ThreatFox and URLhaus: `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) and `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000), each above its feed's whole window (URLhaus: the `recent.csv` export, the URLs added in the past 30 days: about 63,000 on 2026-10-24). The ThreatFox cap counts IOC records; the records of one value are then merged into one MISP attribute ([COLLECTORS.md § ThreatFox: one item per value](COLLECTORS.md#threatfox-one-item-per-value)), so a run writes at most as many attributes as records.
 - Feodo Tracker and SSL Blacklist: `EDGEGUARD_FEODO_MAX_PER_RUN` (15,000) and `EDGEGUARD_SSLBL_MAX_PER_RUN` (20,000).
 - AbuseIPDB: `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (10,000), the request limit of its one blacklist request per run.
 - CISA KEV: the whole catalogue every run; entries are added without a cap, and at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) stored copies are edited.
@@ -38,6 +38,8 @@ Several numbers (**200**, **500**) appear across EdgeGuard docs and code. They c
 - MITRE ATT&CK: the whole bundle when it changed, with no item cap.
 
 VirusTotal stays within `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (60) lookups per run, below the 200, so in effect `EDGEGUARD_INCREMENTAL_LIMIT` cuts OTX, where it counts the distinct pulses modified after the cursor, oldest first, and leaves the rest to the next run ([COLLECTORS.md](COLLECTORS.md#scheduled-runs-limit-and-cursor)). `docker-compose.yml` forwards the eight source caps above (the seven `*_MAX_PER_RUN` caps and `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN`) and `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`, but not `EDGEGUARD_INCREMENTAL_LIMIT` or `EDGEGUARD_MAX_ENTRIES`, so on that deployment `.env` does not change the two generic limits.
+
+**Metadata comment budget.** Each indicator's `OTX_META` or `TF_META` comment is held to 4,000 characters without breaking its JSON; the order in which lists and strings are shortened is in [MISP_SOURCES.md § Metadata Comment Prefixes](MISP_SOURCES.md#metadata-comment-prefixes). The list-source fields of `TF_META` are written whole and only this budget shortens them.
 
 ### MISP event parts
 
@@ -99,10 +101,11 @@ VirusTotal stays within `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (60) lookups 
 
 ---
 
-_Last updated: 2026-11-03_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — The ThreatFox cap counts IOC records, merged per value afterwards; the metadata comment budget points to its shrink order.
 - 2026-11-03 — MISP event parts: a push the writer stops once MISP has kept failing for `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` creates no further part, and the attributes of the parts not created count as failed and are listed.
 - 2026-11-02 — `EDGEGUARD_INCREMENTAL_LIMIT` for OTX: it counts the pulses modified after the cursor, oldest first, and leaves the rest to the next run, and the overlap's re-reads are processed on top (it took the pulses in OTX's order, newest first, and the cursor passed the older ones).
 - 2026-11-02 — CVE paragraph and `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`: the measurements still to be made are no longer named; the CVE paragraph names the sync's `Duration:` line. The URLhaus cap and the event-part volumes name the export's window, the URLs added in the past 30 days.

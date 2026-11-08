@@ -71,7 +71,7 @@
 
 **What we get:**
 - SSL certificate SHA1 fingerprints, stored as MISP `x509-fingerprint-sha1` attributes and `x509-fingerprint-sha1` Indicators
-- Listing reason (for example `Dridex C&C`), used only for sector detection. It is not written to MISP, and no malware family is emitted
+- Listing reason (for example `Dridex C&C`), written to MISP verbatim with its role (`threat_type`: `botnet_cc` for "C&C", `payload_delivery` for "malware distribution") and its family part (`listing_family`, the list's own label, which may name an actor or a product; none for a category word such as "Malware C&C" or "Ransomware C&C" and for a word the list uses for a kind of server such as "Spambot C&C") kept apart, and the certificate's page as `reference`. No `malware_family` is emitted and no graph link is made from the listing family ([COLLECTORS.md § 7](COLLECTORS.md#ssl-blacklist-what-reaches-the-graph))
 
 **How classified:**
 - Keyword detector on the listing reason; no malware family is mapped to a sector by name (Method 2 below), so the rows are tagged Global
@@ -245,7 +245,7 @@ MISP is the staging hub every collector pushes into (361,546 attributes after th
 **What we get:**
 - C&C server IPs
 - Malware family (QakBot, BumbleBee, TrickBot, Emotet, Dridex, Pikabot) — carried to MISP and Neo4j, where it links the indicator to the `Malware` node (`INDICATES`)
-- Last-online date as `Indicator.last_online` and as the source-reported last-seen time; ports and status kept with the source record. Servers not seen online in the last 30 days are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
+- Last-online date as `Indicator.last_online` and as the source-reported last-seen time; every port, every family and the status kept with the source record (in MISP as `ports`, `families`, `c2_status`, as the run that first wrote the address read them). Servers not seen online in the last 30 days are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
 
 **Per-run cap:** a run reports every server of the list it reads (the 30-day list daily, the complete history on a baseline), up to `EDGEGUARD_FEODO_MAX_PER_RUN` (default 15,000 servers, about twice the history). A run whose list is longer keeps the servers seen online most recently and logs a warning.
 
@@ -288,7 +288,7 @@ MISP is the staging hub every collector pushes into (361,546 attributes after th
 | Classification | ✅ `detect_zones_from_text()` on country code, ISP, usage type and domain |
 
 **What we get:**
-- IP addresses with AbuseIPDB's confidence score (`confidence_score` = score / 100), country and `lastReportedAt` (the source-reported last-seen time; the endpoint gives no first-seen date)
+- IP addresses with AbuseIPDB's confidence score (`confidence_score` = score / 100; the 0-100 score itself as `abuse_confidence_score` in MISP), the address's country (`ip_country_code`, never a targeted country) and `lastReportedAt` (the source-reported last-seen time; the endpoint gives no first-seen date)
 
 **Plan limits and the per-run cap:** the collector makes at most one blacklist request per run: the daily run at most one, a baseline at most one more, and none when a run reuses the answer fetched earlier on the same UTC day (the free plan allows 5 blacklist requests per UTC day; the daily and the baseline runs share one cache key, [COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector), "Blacklist quota and cached answer"). The cap `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (default 10,000), not `EDGEGUARD_INCREMENTAL_LIMIT`, is that request's `limit`, because the stored copy of an address a run leaves out is not refreshed and ages while the blacklist still lists it; the cap changes the size of the answer, not the number of requests. 10,000 is the most one request returns on the free plan (`AbuseIPDBCollector.BLACKLIST_MAX_PER_REQUEST`), so a larger value has no effect until that ceiling is raised for a plan that returns more. AbuseIPDB chooses which addresses fill the request; an answer longer than the request keeps the addresses reported most recently. The live source key check uses the `check` endpoint (1,000 a day on the free plan), not the blacklist ([COLLECTORS.md § 5](COLLECTORS.md#5-abuseipdb-collector)).
 
@@ -313,10 +313,11 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — SSL Blacklist: the listing reason reaches MISP (verbatim, with its role and family part apart, and the certificate page); AbuseIPDB's score and the address's country, and Feodo Tracker's ports, families and status, are structured keys in MISP.
 - 2026-11-02 — OTX: the per-run limit counts the pulses modified after the cursor, oldest first, and the overlap's re-reads are processed without counting; OTX returns the pulses newest-modified first, and the limit took the newest, so the cursor passed the older pulses of a window larger than the limit.
 - 2026-11-02 — MITRE ATT&CK (overview row 4, § 5): a run pushes the whole bundle whenever it changed, every technique, tactic, group, malware and tool, one item per graph node, with the G and S ids of groups and software; the daily DAG collects it with an ETag check, and `EDGEGUARD_INCREMENTAL_LIMIT` does not apply; the relationships are listed by type, `USES_MALWARE`, `USES_TOOL`, `SUBTECHNIQUE_OF` and `IN_TACTIC` included (the section gave a periodic update of 500 items, 300 techniques, 100 threat actors and 100 malware, with 1,459 technique edges, and the overview about 300).
 - 2026-11-02 — OTX: the per-run limit counts distinct pulses; a pulse a later page returned again was processed twice and took a slot of the limit.

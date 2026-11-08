@@ -303,6 +303,12 @@ _META_SHRINK_LISTS = (
     "tags",
     "yara_rules",
     "sigma_rules",
+    # 2026-11-07: the list-source lists of ``TF_META`` (``_TF_META_SOURCE_LISTS``), after the feed's tags:
+    # the ports first, the record ids last (they name the source records).
+    "ports",
+    "threat_types",
+    "families",
+    "ioc_ids",
 )
 # Optional keys of the shared feed-metadata comment (``TF_META``). They are written only when
 # the item carries a value and are rehydrated by the sync into the Indicator properties of the
@@ -313,7 +319,97 @@ _TF_META_OPTIONAL_STRINGS = ("url_status", "last_online", "threat_label")
 _TF_META_OPTIONAL_LISTS = ("yara_rules", "sigma_rules")
 _TF_META_MAX_LIST_ITEMS = 20
 _TF_META_MAX_ITEM_CHARS = 200
-_META_SHRINK_STRINGS = ("description", "pulse_name", "reference")
+# 2026-11-07: list-source fields of ``TF_META``, optional like the keys above (written only when the item
+# carries a value) and written as the source gives them, never cut by the writer; only the comment budget
+# shortens them (``_fit_meta_comment``). ``c2_status`` (Feodo Tracker); ``listing_reason`` (verbatim),
+# ``listing_family`` (the family part of the reason, the list's own label, never a category word) (SSL Blacklist);
+# ``ip_country_code`` (where the address is, never a targeted country) (AbuseIPDB); ``file_name``,
+# ``file_md5``, ``file_sha1``, ``file_type`` (MalwareBazaar, VirusTotal); ``meaningful_name``,
+# ``threat_category`` (VirusTotal).
+_TF_META_SOURCE_STRINGS = (
+    "c2_status",
+    "listing_reason",
+    "listing_family",
+    "ip_country_code",
+    "file_name",
+    "file_md5",
+    "file_sha1",
+    "file_type",
+    "meaningful_name",
+    "threat_category",
+)
+# Non-negative ints: ``confidence_level`` (ThreatFox's 0-100 scale, the highest of the value's records; apart
+# from the node's ``source_confidence`` and the edge's ``confidence``), ``abuse_confidence_score`` (AbuseIPDB,
+# 0-100), ``file_size`` (bytes), ``detection_malicious`` / ``detection_total`` (VirusTotal engines).
+_TF_META_SOURCE_INTS = (
+    "confidence_level",
+    "abuse_confidence_score",
+    "file_size",
+    "detection_malicious",
+    "detection_total",
+)
+# Lists of every record of a value: ``ports`` (ints; ThreatFox ip:port, Feodo Tracker), ``ioc_ids``,
+# ``threat_types`` (ThreatFox), ``families`` (ThreatFox, Feodo Tracker; the primary record's family first).
+_TF_META_SOURCE_LISTS = ("ports", "ioc_ids", "threat_types", "families")
+# Facts that change at the source after the first report. The writer never re-comments a stored attribute (a
+# re-reported value only gets ``last_seen``, ``_refresh_stored_copies``), so MISP keeps the values of the
+# first report for the life of the attribute; ``as_of`` records when they were read.
+_TF_META_TIME_VARIANT = (
+    "url_status",
+    "last_online",
+    "c2_status",
+    "abuse_confidence_score",
+    "detection_malicious",
+    "detection_total",
+)
+_META_SHRINK_STRINGS = ("description", "pulse_name", "reference", "file_name", "meaningful_name", "listing_reason")
+
+
+def _tf_meta_source_fields(indicator: Dict[str, Any]) -> Dict[str, Any]:
+    """The list-source keys of ``TF_META`` an item carries (2026-11-07), in the order of the key tuples.
+
+    Strings are stripped and kept whole; ints are kept when they are non-negative ints (not bools); a list
+    keeps its distinct non-empty entries in order, ints for ``ports`` (1-65535) and strings otherwise, all of
+    them: only the comment budget shortens a list (``_fit_meta_comment``, with its warning). A key without a
+    usable value is left out, so no value is invented.
+    """
+    fields: Dict[str, Any] = {}
+    for key in _TF_META_SOURCE_STRINGS:
+        value = indicator.get(key)
+        if isinstance(value, str) and value.strip():
+            fields[key] = value.strip()
+    for key in _TF_META_SOURCE_INTS:
+        value = indicator.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            fields[key] = value
+    for key in _TF_META_SOURCE_LISTS:
+        raw = indicator.get(key)
+        if not isinstance(raw, (list, tuple)):
+            continue
+        kept: List[Any] = []
+        seen: set = set()
+        for entry in raw:
+            if key == "ports":
+                if isinstance(entry, bool) or not isinstance(entry, int) or not 0 < entry < 65536:
+                    continue
+            elif isinstance(entry, str) and entry.strip():
+                entry = entry.strip()
+            elif isinstance(entry, int) and not isinstance(entry, bool):
+                entry = str(entry)
+            else:
+                continue
+            if entry not in seen:
+                seen.add(entry)
+                kept.append(entry)
+        if kept:
+            fields[key] = kept
+    return fields
+
+
+def _tf_meta_as_of() -> str:
+    """``TF_META.as_of`` (2026-11-07): the time the attribute is built, ISO 8601 UTC to the second. The
+    collectors push right after reading their source, so it dates the time-variant values of the report."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # 2026-10: the several-actor marks of a metadata block: ``sap`` (judged with the canonical threat-actor
@@ -2786,11 +2882,12 @@ class MISPWriter:
                 "several_actor_pulses_by_name",
             )
         )
-        has_tf_meta = (
+        has_tf_meta = bool(
             indicator.get("malware_malpedia")
             or indicator.get("reference")
             or indicator.get("tags")
             or any(indicator.get(_k) for _k in _TF_META_OPTIONAL_STRINGS + _TF_META_OPTIONAL_LISTS)
+            or _tf_meta_source_fields(indicator)
         )
 
         if has_otx_meta:
@@ -2901,6 +2998,10 @@ class MISPWriter:
                 ]
                 if _vals:
                     tf_meta[_k] = _vals[:_TF_META_MAX_LIST_ITEMS]
+            # 2026-11-07: the list-source fields, then the time of the first report's time-variant values.
+            tf_meta.update(_tf_meta_source_fields(indicator))
+            if any(_k in tf_meta for _k in _TF_META_TIME_VARIANT):
+                tf_meta["as_of"] = _tf_meta_as_of()
             comment = _fit_meta_comment("TF_META:", tf_meta)
         else:
             comment = sanitize_value(indicator.get("pulse_name") or indicator.get("description", ""), max_length=255)
