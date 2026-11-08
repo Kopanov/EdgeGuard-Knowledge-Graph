@@ -832,6 +832,26 @@ class TestPendingRecords:
         assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-25-317-15"]
         assert pending() == {}
 
+    @pytest.mark.parametrize("field", ["remediations", "product_status"])
+    def test_a_record_build_error_of_an_advisory_the_run_reads_fails_the_record_only(self, monkeypatch, field):
+        """Constructed: NX, read by the run for its items, carries a number where CSAF has a list
+        (``remediations``, or ``known_affected`` in ``product_status``). The items accept it; the record build fails
+        with a TypeError, which fails that record (it waits on report_pending) and not the run."""
+        bad = advisory(NX)
+        if field == "remediations":
+            bad["vulnerabilities"][0]["remediations"] = 5
+        else:
+            bad["vulnerabilities"][0]["product_status"] = {"known_affected": 5}
+        http = _HTTP({"changes.csv": changes((NX, CHANGED)), NX: bad})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True
+        assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}
+        assert pushed_records(c) == []
+        entry = pending()["cisa_ics:ICSA-26-043-08"]
+        assert entry["last_reason"] == "the record could not be built (TypeError)"
+        assert cursor() == CHANGED
+
     def test_failing_pending_reads_stop_after_their_own_streak_and_the_run_goes_on(self, monkeypatch, caplog):
         # Constructed: five pending records whose advisories the listing names (outside the look-back) and that
         # answer HTTP 404; the run's own advisory is read first and fetched.

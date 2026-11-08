@@ -1300,8 +1300,6 @@ class CISAICSCollector:
                             }
                         )
                     continue
-                record: Optional[Dict[str, Any]] = None
-                failure: Optional[Dict[str, Any]] = None
                 record_ref = report_records.format_record_ref(SOURCE_ID, _advisory_parts(data, path)[3])
                 if listed_ref in pending_refs and record_ref != listed_ref:
                     logger.warning(
@@ -1318,11 +1316,7 @@ class CISAICSCollector:
                             "permanent": True,
                         }
                     )
-                try:
-                    record = self.parse_advisory_record(data, path)
-                except ValueError as e:
-                    logger.warning(f"CISA ICS: the report record of {record_ref} could not be built: {e}")
-                    failure = {"record_ref": record_ref, "reason": "the record could not be built", "permanent": False}
+                record, failure = self._record_or_failure(data, path, record_ref)
                 stats["parsed_ok"] += 1
                 stats["skipped_vulns"] += skipped
                 if cutoff is not None:
@@ -1564,6 +1558,25 @@ class CISAICSCollector:
             counts["given_up"] += len(settled.given_up)
         self._log_report_counts(counts)
         return counts, set()
+
+    def _record_or_failure(
+        self, data: Any, path: str, record_ref: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """The record of an advisory the run reads for its items, or the failure that puts it on report_pending.
+
+        The record is a side output: any error of its build (a ``ValueError`` the builder raises, or a ``TypeError``
+        from a CSAF list field holding a number) fails the record only, never the run's items."""
+        try:
+            return self.parse_advisory_record(data, path), None
+        except Exception as e:  # noqa: BLE001 - see the docstring
+            logger.warning(
+                "CISA ICS: the report record of %s could not be built (%s: %s)", record_ref, type(e).__name__, e
+            )
+            return None, {
+                "record_ref": record_ref,
+                "reason": f"the record could not be built ({type(e).__name__})",
+                "permanent": False,
+            }
 
     def _read_pending_record(
         self,
