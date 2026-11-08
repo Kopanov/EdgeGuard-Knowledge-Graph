@@ -8,6 +8,12 @@ and five NVD API 2.0 records of the kernel.org CNA whose descriptions hold a ``[
 intervals, a memory region, an indented kernel log that NVD ends in ``[    2\n---truncated---``). Older MISP copies
 are made by the writer's own cut (``misp_writer.sanitize_value``: a length with "..."). The other texts are
 constructed, each to isolate one rule, and say so.
+
+List markers and emphasis (2026-11-08): ``tests/fixtures/text_caps_markers_emphasis_2026_11_08.json`` holds seven
+attributes of the MISP ATT&CK event of the 730-day test instance as MISP answered them (ATT&CK's description after
+the ``MITRE_*`` block line; three cut inside a bulleted list, HTML ``<b>`` tags, a markdown bold deprecation banner,
+angle brackets inside backtick code spans) and the NVD API 2.0 record of CVE-2025-30652, whose description is cut
+inside a bulleted list indented with two spaces.
 """
 
 from __future__ import annotations
@@ -45,6 +51,10 @@ KERNEL = {
     for v in FIXTURE["nvd_kernel"]
 }
 REAL_TEXTS = [*ATTACK.values(), *NVD.values(), *KERNEL.values()]
+MARKERS_FIXTURE = json.loads((TESTS / "fixtures" / "text_caps_markers_emphasis_2026_11_08.json").read_text())
+# ATT&CK's description, as MISPWriter writes it after the comment's ``MITRE_TACTIC_PHASES`` line.
+MISP_ATTACK = {a["value"].split(" ", 1)[0]: a["comment"].split("\n", 1)[1] for a in MARKERS_FIXTURE["mitre_attributes"]}
+MARKER_CVE = next(d["value"] for d in MARKERS_FIXTURE["nvd"][0]["cve"]["descriptions"] if d["lang"] == "en")
 MARKUP = ("(Citation:", "](", "<code>", "</code>")
 
 
@@ -410,6 +420,170 @@ class TestCut:
         assert cap_text(text, 11)[0] == "aaaa\nbbbb"
 
 
+# ---------------------------------------------------------------------------------------------- list markers
+class TestListMarkers:
+    """A cut inside a bulleted list kept the next item's marker on a line of its own (``...\\n*``); the cut drops a
+    last line that holds only a marker, with the separators before it. Every text, every cap."""
+
+    def test_the_fixture_texts_are_what_the_tests_need(self):
+        for ext_id in ("T1213.002", "T1195", "T1685.006"):
+            text = MISP_ATTACK[ext_id]
+            assert "\n* " in text and len(text) > ENTITY_DESCRIPTION_CAP, ext_id
+            # The marker of the next item falls inside the cap: the cut at the last whitespace keeps it.
+            window = strip_markup(text, True, True)[: ENTITY_DESCRIPTION_CAP + 1]
+            assert re.search(r"\n\*\s", window[window.rfind("\n") :]), ext_id
+        assert len(MARKER_CVE) == 1032 and MARKER_CVE.count("\n  *  from ") == 12
+
+    @pytest.mark.parametrize(
+        "ext_id,end",
+        [
+            ("T1213.002", "\n* Physical / logical network diagrams\n* System architecture diagrams"),
+            ("T1195", "\n* Manipulation of software update/distribution mechanisms"),
+            ("T1685.006", "\n* `/var/log/utmp or /var/log/wtmp`: Login records"),
+        ],
+    )
+    def test_an_attack_description_cut_inside_a_list_keeps_no_lone_marker(self, ext_id, end):
+        text = MISP_ATTACK[ext_id]
+        out, truncated, full = cap_text(text, ENTITY_DESCRIPTION_CAP, True, True)
+        assert truncated and full == len(strip_markup(text, True, True))
+        assert out.endswith(end) and len(out) <= ENTITY_DESCRIPTION_CAP
+        assert strip_markup(text, True, True).startswith(out)
+        assert cap_text(out, ENTITY_DESCRIPTION_CAP, True, True) == (out, False, len(out))
+
+    def test_a_cve_description_cut_inside_an_indented_list_keeps_no_lone_marker(self):
+        out, truncated, full = cap_text(MARKER_CVE, CVE_DESCRIPTION_CAP)
+        assert (truncated, full, len(out)) == (True, 1032, 992)
+        assert out.endswith("\n  *  from 23.4-EVO before 23.4R2-S4-EVO") and MARKER_CVE.startswith(out)
+        assert cap_text(out, CVE_DESCRIPTION_CAP) == (out, False, len(out))
+
+    @pytest.mark.parametrize("marker", ["*", "-", "+", "  *", "\t*", "  +"])
+    def test_every_marker_line_goes(self, marker):
+        # Constructed: the cut at the last whitespace keeps the next item's marker.
+        text = f"Items:\n* alpha\n{marker} beta gamma"
+        assert cap_text(text, len(text) - 7) == ("Items:\n* alpha", True, len(text))
+
+    def test_marker_lines_one_after_another_go_too(self):
+        # Constructed.
+        assert cap_text("Intro text.\n*\n* *\n+ more words here", 21)[0] == "Intro text."
+
+    def test_a_marker_that_is_the_whole_kept_text_leaves_none(self):
+        # Constructed: like a first word longer than the cap.
+        assert cap_text("* alphabet", 3) == ("", True, 10)
+
+    @pytest.mark.parametrize(
+        "text,cap,out",
+        [
+            # A line that holds a marker and text is an item, and stays.
+            ("Items:\n* alpha beta", 16, "Items:\n* alpha"),
+            # A closing "**" is not a marker (and "*" is no separator the cut drops).
+            ("NVD says ** REJECT ** here", 21, "NVD says ** REJECT **"),
+            # A marker inside a line is text.
+            ("a * b c", 5, "a * b"),
+            ("Footnote*\n* x y", 13, "Footnote*\n* x"),
+        ],
+    )
+    def test_no_other_text_is_dropped(self, text, cap, out):
+        # Constructed: the negative cases.
+        assert cap_text(text, cap)[0] == out
+
+    def test_a_text_within_the_cap_keeps_its_marker(self):
+        # Constructed: only a cut drops a marker line; a whole text is left as the source wrote it.
+        assert cap_text("Items:\n*", 500) == ("Items:\n*", False, 8)
+
+
+# ---------------------------------------------------------------------------------------------- emphasis
+class TestEmphasis:
+    """Step 1b (``emphasis=True``, the entity descriptions): ``**`` and ``<b>``, ``<strong>``, ``<i>``, ``<em>``
+    with their closing tags go outside backtick code spans; code spans and bullet lists stay."""
+
+    def test_the_fixture_texts_are_what_the_tests_need(self):
+        assert MISP_ATTACK["T1064"].startswith("**This technique has been deprecated.")
+        assert MISP_ATTACK["T1677"].count("<b>") == MISP_ATTACK["T1677"].count("</b>") == 3
+        assert "`/proc/<PID>/maps`" in MISP_ATTACK["T1003.007"] and "`<script>`" in MISP_ATTACK["T1027.017"]
+
+    def test_a_deprecation_banner_loses_its_bold(self):
+        out = cap_text(MISP_ATTACK["T1064"], ENTITY_DESCRIPTION_CAP, True, True)[0]
+        assert out.startswith(
+            "This technique has been deprecated. Please use Command and Scripting Interpreter where appropriate."
+            "\n\nAdversaries may use scripts"
+        )
+        assert "*" not in out
+
+    def test_html_bold_tags_go_and_their_text_stays(self):
+        out = cap_text(MISP_ATTACK["T1677"], ENTITY_DESCRIPTION_CAP, True, True)[0]
+        assert "\n* In a Direct Pipeline Execution scenario, the threat actor" in out
+        assert "<b>" not in out and "</b>" not in out
+
+    @pytest.mark.parametrize("ext_id,span", [("T1003.007", "`/proc/<PID>/maps`"), ("T1027.017", "`<script>`")])
+    def test_code_spans_keep_their_angle_brackets(self, ext_id, span):
+        text = MISP_ATTACK[ext_id]
+        out = cap_text(text, ENTITY_DESCRIPTION_CAP, True, True)[0]
+        assert span in out
+        assert strip_markup(text, True, True) == strip_markup(text, True)
+
+    def test_without_emphasis_nothing_changes(self):
+        """The CVE descriptions: NVD's ``** REJECT **``, a ``/**/`` and a tag a flaw is named by are text."""
+        for text in (
+            "Rejected reason: ** REJECT ** DO NOT USE THIS CANDIDATE NUMBER.",
+            "SQL injection via UNION/**/SELECT in the id parameter.",
+            "XSS via a crafted <i> or <b> element in the title.",
+        ):
+            assert strip_markup(text) == text and cap_text(text, CVE_DESCRIPTION_CAP) == (text, False, len(text))
+        assert cap_text(MISP_ATTACK["T1064"], ENTITY_DESCRIPTION_CAP)[0].startswith("**This technique")
+
+    @pytest.mark.parametrize(
+        "text,out",
+        [
+            ("**Note:** this is distinct.", "Note: this is distinct."),
+            ("(**Note:** this is similar)", "(Note: this is similar)"),
+            ("* **Hooks procedures**, which intercept", "* Hooks procedures, which intercept"),
+            ("A <STRONG>b</strong> <i>c</I> <em>d</em> e.", "A b c d e."),
+            ("Run `a **b** <b>c</b>` then **d**.", "Run `a **b** <b>c</b>` then d."),
+            # A backtick left open runs to the end of the text, as a cut can leave one.
+            ("Run **x** `a **b", "Run x `a **b"),
+            # Not the tags of step 1b: an attribute, another tag, a lone "*".
+            ('A <b class="x">y</b> <script>z</script> *w*.', 'A <b class="x">y <script>z</script> *w*.'),
+        ],
+    )
+    def test_constructed_cases(self, text, out):
+        assert strip_markup(text, emphasis=True) == out
+
+    def test_bullet_lists_stay(self):
+        text = "Mechanisms:\n\n* **One**, first\n* Two\n- Three"
+        assert strip_markup(text, emphasis=True) == "Mechanisms:\n\n* One, first\n* Two\n- Three"
+
+    def test_the_rankings_apply_it_to_the_entity_descriptions_only(self):
+        from description_ranking import CVE_DESCRIPTIONS, ENTITY_DESCRIPTIONS
+
+        assert (CVE_DESCRIPTIONS.emphasis, ENTITY_DESCRIPTIONS.emphasis) == (False, True)
+        assert ENTITY_DESCRIPTIONS.record("**Note:** x", "mitre_attck").text == "Note: x"
+        assert ENTITY_DESCRIPTIONS.capped("**Note:** x") == "Note: x"
+        assert CVE_DESCRIPTIONS.record("** REJECT ** x", "nvd").text == "** REJECT ** x"
+        assert CVE_DESCRIPTIONS.capped("** REJECT ** x") == "** REJECT ** x"
+
+    def test_idempotent_on_mixed_texts(self):
+        """Constructed texts from tokens of steps 1b and 2 (emphasis, backticks, markers, line breaks) with the
+        other markup, with a fixed seed: capping a capped text changes nothing, no text exceeds its cap, and the
+        capped text is a prefix of the stripped text."""
+        tokens = [
+            "word", "Word.", "**", "*", "`", "<b>", "</b>", "<em>", "</I>", "<strong>", "\n", "\n* ", "\n  * ", "\n+",
+            "\n-", " ", "  ", "(Citation: A)", "[N](http://x)", "<code>", "e.g.", "...", ",", ":",
+        ]  # fmt: skip
+        rnd = random.Random(20261108)
+        for _ in range(20000):
+            text = "".join(rnd.choice(tokens) + rnd.choice(["", " ", " "]) for _ in range(rnd.randint(1, 60)))
+            cap = rnd.randint(1, 120)
+            for older_cut in (False, True):
+                for emphasis in (False, True):
+                    out, _truncated, _full = cap_text(text, cap, older_cut, emphasis)
+                    assert len(out) <= cap, (text, cap, older_cut, emphasis)
+                    again = cap_text(out, cap, older_cut, emphasis)
+                    assert again == (out, False, len(out)), (text, cap, older_cut, emphasis)
+            for emphasis in (False, True):
+                stripped = strip_markup(text, emphasis=emphasis)
+                assert stripped.startswith(cap_text(text, cap, emphasis=emphasis)[0]), (text, cap, emphasis)
+
+
 # ---------------------------------------------------------------------------------------------- "[" without a link
 class TestBracketsThatOpenNoLink:
     """Kernel CVE descriptions (NVD API 2.0, kernel.org CNA) hold a "[" that opens no link: it and the text's
@@ -466,8 +640,22 @@ class TestTime:
             "[" * 16000 + "a" + "](u)" * 12000,
             "[x" * 12000 + "](u)" * 12000,
             "(Citation: x " * 5000,
+            "`a **b " * 9000,
+            "**<b>*" * 11000,
+            "\n*" * 31000,
         ],
-        ids=["unclosed", "x[", "older-cut-names", "older-cut-citations", "nested-links", "nested-names", "citations"],
+        ids=[
+            "unclosed",
+            "x[",
+            "older-cut-names",
+            "older-cut-citations",
+            "nested-links",
+            "nested-names",
+            "citations",
+            "code-spans",
+            "emphasis",
+            "markers",
+        ],
     )
     def test_a_64_kb_text(self, text):
         import time
@@ -475,8 +663,9 @@ class TestTime:
         assert len(text) > 60000
         start = time.perf_counter()
         for older_cut in (False, True):
-            for cap in (CVE_DESCRIPTION_CAP, ENTITY_DESCRIPTION_CAP):
-                cap_text(text, cap, older_cut)
+            for emphasis in (False, True):
+                for cap in (CVE_DESCRIPTION_CAP, ENTITY_DESCRIPTION_CAP):
+                    cap_text(text, cap, older_cut, emphasis)
         assert time.perf_counter() - start < 2.0
 
 

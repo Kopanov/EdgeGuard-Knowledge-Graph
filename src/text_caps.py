@@ -9,7 +9,7 @@ text bound for Neo4j is made here, on the sync's write path (``Neo4jClient``), n
 - CISA KEV's ``shortDescription`` as a node property of its own (``CVE.cisa_short_description``, which no writer
   sets): ``CISA_SHORT_DESCRIPTION_CAP`` (500).
 
-``cap_text(text, cap, older_cut=False)`` returns ``(text, truncated, full_length)``:
+``cap_text(text, cap, older_cut=False, emphasis=False)`` returns ``(text, truncated, full_length)``:
 
 1. **Markup is stripped first.** A markdown link ``[Name](url)`` becomes ``Name``; every ``(Citation: X)`` is
    removed, also a run of several; the tags ``<code>`` and ``</code>`` are removed and the text between them is
@@ -29,6 +29,13 @@ text bound for Neo4j is made here, on the sync's write path (``Neo4jClient``), n
    text is read (its last ``_OLDER_CUT_TAIL`` characters), and only a text that ends in ``...``. A
    ``CVE`` or ``Vulnerability`` description never held ATT&CK markup, so its ``...`` copies (``rb_threads[c...``)
    keep their ``[``.
+1b. **Emphasis** (``emphasis=True``, for the entity descriptions only): markdown bold ``**`` and the inline HTML
+   tags ``<b>``, ``<strong>``, ``<i>`` and ``<em>`` with their closing tags are removed, the text between them
+   kept, outside backtick code spans. A code span runs from a backtick to the next one, or to the end of the text
+   for a backtick left open; its content is kept as it is (``/proc/<PID>/maps``, ``<DOMAIN>``, ``<script>``).
+   This is part of the stripping of step 1 and repeats with it. Bullet lists are kept. A ``CVE`` or
+   ``Vulnerability`` description keeps its ``**`` and tags: NVD writes ``** REJECT **`` and ``** DISPUTED **``,
+   and a description of a flaw can name a tag or hold ``/**/``.
 2. **A text longer than the cap is cut**, at the last sentence end within the cap that keeps at least half of
    it, otherwise at the last whitespace within the cap. A sentence end is ``.``, ``!`` or ``?`` (with any
    closing quotes or brackets after it) followed by whitespace and then by no lowercase letter. A ``.`` does not
@@ -36,8 +43,10 @@ text bound for Neo4j is made here, on the sync's write path (``Neo4jClient``), n
    letter (``J.``), dotted letters (``U.S.``, ``a.k.a.``) or an ellipsis; a ``.`` inside a token (``v1.2``,
    ``1.2.3``, ``example.com``) is followed by no whitespace and so ends nothing. The cut never splits a word
    and never appends an ellipsis; separators the cut leaves at the end (whitespace, ``,``, ``;``, ``:``, an
-   opening bracket, a dash) are dropped. The kept text is a prefix of the stripped text (with ``older_cut``, of
-   the stripped text before step 1a reads the cut's own end).
+   opening bracket, a dash) are dropped, and so is a last line that holds only a list marker (``*``, ``-`` or
+   ``+``, after any spaces or tabs) left by a cut inside a bulleted list, with the separators before it. ``*`` is
+   not a separator: a closing ``**`` stays. The kept text is a prefix of the stripped text (with ``older_cut``,
+   of the stripped text before step 1a reads the cut's own end).
 3. **``full_length``** is the length of the whole stripped text; ``truncated`` is whether the text was cut.
 
 Edge cases, decided:
@@ -73,6 +82,11 @@ _CITATION_RE = re.compile(r"\(Citation:[^()]*(?:\([^()]*\)[^()]*)*\)")
 # ("https://en.wikipedia.org/wiki/Foo_(bar)").
 _LINK_RE = re.compile(r"\[([^\[\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)")
 _CODE_TAG_RE = re.compile(r"</?code>", re.IGNORECASE)
+# Step 1b (``emphasis``): markdown bold and the inline HTML emphasis tags, removed outside backtick code spans.
+_EMPHASIS_RE = re.compile(r"\*\*|</?(?:b|strong|i|em)>", re.IGNORECASE)
+# A backtick code span: a backtick up to the next one, or to the end of the text for a backtick left open (a cut
+# can fall inside a span, and what it keeps of the span is still code).
+_CODE_SPAN_RE = re.compile(r"`[^`]*(?:`|\Z)")
 # The markup an older writer's cut left unclosed before the "..." it appended (step 1a): a citation, also one cut
 # inside the word "Citation" ("(Cita...") or inside a name with a year ("(Citation: Microsoft (20..."); a
 # ``<code>`` tag; a link cut after its name ("[APT39]...") or inside its URL ("[Name](https://attack.mi...");
@@ -147,12 +161,29 @@ _ABBREVIATIONS = frozenset(
 )
 # What the cut drops at the end of the text it keeps.
 _CUT_TAIL_CHARS = " \t\r\n,;:([{-–—"
+# A last line that holds only a list marker: what a cut inside a bulleted list leaves ("...\n*", "...\n  *").
+_MARKER_LINE_END_RE = re.compile(r"(?:\A|\n)[ \t]*[*+-]\Z")
 
 
-def _strip_once(text: str) -> str:
+def _strip_emphasis(text: str) -> str:
+    """``text`` without ``**`` and the inline HTML emphasis tags outside backtick code spans (step 1b)."""
+    if "`" not in text:
+        return _EMPHASIS_RE.sub("", text)
+    parts = []
+    start = 0
+    for span in _CODE_SPAN_RE.finditer(text):
+        parts.append(_EMPHASIS_RE.sub("", text[start : span.start()]))
+        parts.append(span.group())
+        start = span.end()
+    parts.append(_EMPHASIS_RE.sub("", text[start:]))
+    return "".join(parts)
+
+
+def _strip_once(text: str, emphasis: bool = False) -> str:
     text = _CITATION_RE.sub("", text)
     text = _LINK_RE.sub(r"\1", text)
-    return _CODE_TAG_RE.sub("", text)
+    text = _CODE_TAG_RE.sub("", text)
+    return _strip_emphasis(text) if emphasis else text
 
 
 def _normalise_spaces(text: str) -> str:
@@ -181,15 +212,16 @@ def _strip_older_cut(text: str) -> str:
     return text
 
 
-def strip_markup(text: str, older_cut: bool = False) -> str:
+def strip_markup(text: str, older_cut: bool = False, emphasis: bool = False) -> str:
     """``text`` without markdown links, ``(Citation: X)`` and ``<code>`` tags, spaces normalised where something
     was stripped (step 1 of the module docstring); with ``older_cut``, also without the markup an older writer's
-    cut left unclosed at the end (step 1a). A text without markup is returned as it is."""
+    cut left unclosed at the end (step 1a); with ``emphasis``, also without ``**`` and the inline HTML emphasis
+    tags outside backtick code spans (step 1b). A text without markup is returned as it is."""
     stripped = text
     # The spaces are normalised in each pass that changed the text, since normalising can close markup
     # ("[N](http://x . )" becomes the link "[N](http://x.)").
     for _ in range(_MAX_STRIP_PASSES):
-        again = _strip_once(stripped)
+        again = _strip_once(stripped, emphasis)
         if again == stripped:
             break
         stripped = _normalise_spaces(again)
@@ -230,18 +262,23 @@ def _cut(text: str, cap: int) -> str:
     space = max(window.rfind(" "), window.rfind("\t"), window.rfind("\n"), window.rfind("\r"))
     if space <= 0:
         return ""
-    return text[:space].rstrip(_CUT_TAIL_CHARS)
+    out = text[:space].rstrip(_CUT_TAIL_CHARS)
+    # A cut inside a bulleted list can keep a last line that holds only the next item's marker.
+    while _MARKER_LINE_END_RE.search(out):
+        out = _MARKER_LINE_END_RE.sub("", out).rstrip(_CUT_TAIL_CHARS)
+    return out
 
 
-def cap_text(text: Any, cap: int, older_cut: bool = False) -> Tuple[str, bool, int]:
+def cap_text(text: Any, cap: int, older_cut: bool = False, emphasis: bool = False) -> Tuple[str, bool, int]:
     """``(text, truncated, full_length)``: ``text`` without markup and cut to at most ``cap`` characters at a
     sentence or word end; whether it was cut; the length of the whole stripped text (module docstring).
-    ``older_cut``: the text may be a copy an older writer cut inside markup (step 1a; the entity descriptions)."""
+    ``older_cut``: the text may be a copy an older writer cut inside markup (step 1a; the entity descriptions).
+    ``emphasis``: ``**`` and the inline HTML emphasis tags are markup too (step 1b; the entity descriptions)."""
     if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
         raise ValueError(f"cap_text: the cap must be a positive int, not {cap!r}")
     if not isinstance(text, str):
         return "", False, 0
-    stripped = strip_markup(text, older_cut)
+    stripped = strip_markup(text, older_cut, emphasis)
     full_length = len(stripped)
     if full_length <= cap:
         return stripped, False, full_length
@@ -251,8 +288,8 @@ def cap_text(text: Any, cap: int, older_cut: bool = False) -> Tuple[str, bool, i
     return (_strip_older_cut(out) if older_cut else out), True, full_length
 
 
-def capped(text: Any, cap: int, older_cut: bool = False) -> Any:
+def capped(text: Any, cap: int, older_cut: bool = False, emphasis: bool = False) -> Any:
     """The capped form of ``text`` (``cap_text``'s first value) when it is a string; any other value as it is."""
     if not isinstance(text, str):
         return text
-    return cap_text(text, cap, older_cut)[0]
+    return cap_text(text, cap, older_cut, emphasis)[0]
