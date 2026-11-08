@@ -33,12 +33,13 @@
 
 ## Overview
 
-EdgeGuard Knowledge Graph collects public threat intelligence (ten sources by default and three opt-in, plus FIRST EPSS scores), stores every collected record in MISP as the single source of truth, and builds from it a Neo4j knowledge graph that links CVEs, indicators, threat actors, malware, tools, ATT&CK techniques and campaigns, labelled by sector (healthcare, energy, finance, global). Every node and relationship built from a source names the sources and MISP events behind it, and every linking relationship carries its match type and confidence. The graph is served through a REST API with STIX 2.1 and Wazuh CDB exports and a GraphQL API on port 4001, and its CVE and CVSS nodes follow the ResilMesh/CRUSOE data model. It is the first module of the EdgeGuard framework for graph-augmented explainable AI on edge infrastructure.
+EdgeGuard Knowledge Graph collects public threat intelligence (eleven sources by default and two opt-in, plus FIRST EPSS scores), stores every collected record in MISP as the single source of truth, and builds from it a Neo4j knowledge graph that links CVEs, indicators, threat actors, malware, tools, ATT&CK techniques and campaigns, labelled by sector (healthcare, energy, finance, global). Every node and relationship built from a source names the sources and MISP events behind it, and every linking relationship carries its match type and confidence. The graph is served through a REST API with STIX 2.1 and Wazuh CDB exports and a GraphQL API on port 4001, and its CVE and CVSS nodes follow the ResilMesh/CRUSOE data model. It is the first module of the EdgeGuard framework for graph-augmented explainable AI on edge infrastructure.
 
 ### What it does
 
 - **Collects** vulnerabilities, ATT&CK data and indicators from external sources ([Sources](#sources)).
 - **Stages** every collected record in MISP, tagged with its source, sector, TLP level and confidence.
+- **Keeps** each AlienVault OTX pulse and CISA ICS advisory as the source states it in one MISP Event Report, a report record, in the source's day event or, once that event is full, in its `EdgeGuard-<source>-<date>-reports` companion event. The text of an amber or red pulse is kept only there. The sync does not read the report records yet ([docs/MISP_SOURCES.md § Report records](docs/MISP_SOURCES.md#report-records-event-reports)).
 - **Builds** the Neo4j graph from MISP and links it on exact keys: actors, malware and tools to techniques, indicators to malware and CVEs, everything to its sectors.
 - **Enriches** the graph after every sync: indicator aging, actor merges (ATT&CK aliases and a shipped canonical threat-actor reference), ATT&CK malware twin merges, campaigns, the Vulnerability–CVE bridge and FIRST EPSS scores.
 - **Serves** it through REST and GraphQL, and **exports** STIX 2.1 bundles and Wazuh CDB lists.
@@ -60,11 +61,11 @@ SOC teams, sector analysts (healthcare, energy, finance) and ResilMesh deploymen
 ```mermaid
 flowchart LR
     subgraph SRC["Sources"]
-        VUL["Vulnerabilities<br/>NVD · CISA KEV"]
+        VUL["Vulnerabilities<br/>NVD · CISA KEV · CISA ICS"]
         ATT["MITRE ATT&CK"]
         IND["Indicators<br/>OTX · ThreatFox · URLhaus<br/>Feodo Tracker · SSL Blacklist<br/>AbuseIPDB · VirusTotal lookups"]
     end
-    OPT["Opt-in sources<br/>CISA ICS · ATT&CK for ICS<br/>MalwareBazaar"]
+    OPT["Opt-in sources<br/>ATT&CK for ICS<br/>MalwareBazaar"]
     CUR["Curated packages"]
     AF["Airflow<br/>baseline + 5 scheduled DAGs"]
     COL["Collectors"]
@@ -111,11 +112,11 @@ Component detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the diagrams 
 |---|---|---|---|
 | Vulnerabilities | NVD | CVEs, CVSS v2 to v4.0, CISA SSVC | on |
 | | CISA KEV | Known-exploited CVEs | on |
-| | CISA ICS advisories | ICS CVEs with the sectors CISA names | opt-in |
+| | CISA ICS advisories | ICS CVEs with the sectors CISA names; one report record per advisory | on |
 | | FIRST EPSS | Exploitation score and percentile per CVE | on |
 | ATT&CK | MITRE ATT&CK Enterprise | Techniques, tactics, groups, software | on |
 | | MITRE ATT&CK for ICS | ICS techniques and tactics | opt-in |
-| Indicators | AlienVault OTX | Pulses: indicators, actors, malware, CVEs | on, key |
+| Indicators | AlienVault OTX | Pulses: indicators, actors, malware, CVEs; one report record per pulse | on, key |
 | | ThreatFox | Indicators with malware family | on, key |
 | | URLhaus | Malicious URLs | on, key |
 | | Feodo Tracker | Botnet C2 servers | on |
@@ -129,10 +130,10 @@ Component detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the diagrams 
 - **History per source.** A baseline reaches back 730 days wherever the source's API does. ThreatFox's API returns at most the last 7 days, URLhaus its recent export, the URLs added in the last 30 days (about 63,000 on 2026-10-24), MalwareBazaar's export the last 48 hours and AbuseIPDB its current blacklist; ATT&CK has no time window.
 - **VirusTotal.** The free tier allows lookups only (4 per minute, 500 per day). EdgeGuard looks up the hashes already in MISP within a daily budget of 400 lookups and 60 per run; it scans and uploads nothing.
 - **Feodo Tracker.** A baseline loads the complete C2 history; the daily runs read the list of the last 30 days, and the collector logs a warning when the feed's own header is older than 7 days ([docs/COLLECTORS.md § 7](docs/COLLECTORS.md#7-finance-feed-collector)).
-- **Placeholders.** The energy and healthcare sector modules are placeholders that no DAG task runs; member-only ISAC feeds are not collected. Sector labels come from keyword detection in every collector, from the industries an OTX pulse names and, with CISA ICS enabled, from the sectors CISA names.
+- **Placeholders.** The energy and healthcare sector modules are placeholders that no DAG task runs; member-only ISAC feeds are not collected. Sector labels come from keyword detection in every collector, from the industries an OTX pulse names and from the sectors CISA names in its ICS advisories.
 - **FIRST EPSS** is not collected into MISP: the last enrichment job writes the day's scores to the `CVE` nodes that exist.
 - **Curated packages** are imported through MISP with `scripts/import_curated_package.py` after the baseline, and again after every fresh baseline, whose wipe deletes their MISP event; their claims attach to nodes that already exist ([docs/RUNBOOK.md § Importing a curated package](docs/RUNBOOK.md#importing-a-curated-package)).
-- **Opt-in sources** are switched on with flags ([Configuration](#configuration)).
+- **Source flags.** The opt-in sources are switched on with flags, and CISA ICS, on by default, is switched off with `EDGEGUARD_ENABLE_CISA_ICS=false` ([Configuration](#configuration)).
 
 Per-source detail: [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) and [docs/COLLECTORS.md](docs/COLLECTORS.md).
 
@@ -159,7 +160,9 @@ Every node built from MISP keeps three back-pointers to its raw evidence:
 |---|---|---|
 | Attribute | `n.misp_attribute_ids[]` | `GET /attributes/<uuid>` |
 | Event | `n.misp_event_ids[]` | `GET /events/<id>` |
-| Source record | `raw_data` on the `SOURCED_FROM` edge | none (stored in Neo4j) |
+| Parsed source record | `raw_data` on the `SOURCED_FROM` edge (description capped as the node's) | none (stored in Neo4j) |
+
+The graph holds a short form of a source's text. A `CVE` or `Vulnerability` description has at most 1,000 characters, and a `ThreatActor`, `Malware`, `Tool`, `Technique` or `Tactic` description at most 500, with markup removed. MISP keeps the whole text the collector sent, the source fields the sync does not read, and the source report records ([docs/KNOWLEDGE_GRAPH.md § Descriptions and their source](docs/KNOWLEDGE_GRAPH.md#descriptions-and-their-source)).
 
 `n.uuid` is not a MISP key: it is a deterministic UUIDv5 that keeps a node's identity across environments and matches its STIX id. Each `SOURCED_FROM` edge also names its source's MISP events and record ids, and the GraphQL `Indicator` type returns ready-made MISP links (`mispAttributeUrls`, `mispEventUrls`).
 
@@ -265,7 +268,7 @@ Edit `.env`:
 | Variable | Set by | Purpose |
 |---|---|---|
 | `MISP_URL` | you | Base URL of your MISP, reachable from the containers |
-| `MISP_API_KEY` | you | MISP automation key |
+| `MISP_API_KEY` | you | MISP automation key of a user whose role can create events and tag (see below) |
 | `NEO4J_PASSWORD` | `install.sh` | Neo4j password (Neo4j keeps the one of its first start) |
 | `EDGEGUARD_API_KEY` | `install.sh` | Key the REST and GraphQL APIs require |
 | `AIRFLOW_API_AUTH_JWT_SECRET` | `install.sh` | Signing secret of the Airflow API server |
@@ -275,6 +278,7 @@ Edit `.env`:
 | `EDGEGUARD_ENV` | you, optional | Unset means production |
 
 - `install.sh` never replaces a value you set. It generates `NEO4J_PASSWORD` only before Neo4j's first start, and `GRAFANA_ADMIN_PASSWORD` only when it creates `.env` itself.
+- The `MISP_API_KEY` user's role must be able to create events and add, edit and tag attributes. It must have `perm_tagger` and must not have `perm_sync_authoritative`, or MISP drops or strips the tags of the report records. Every tag the writer sets (`EdgeGuard`, the source tags, `tlp:*`) must already exist on the MISP unless the role has `perm_tag_editor`. Details: [docs/MISP_SOURCES.md § Report records](docs/MISP_SOURCES.md#report-records-event-reports) and [docs/API_KEYS_SETUP.md](docs/API_KEYS_SETUP.md).
 - `EDGEGUARD_ENV` unset, empty or any value other than `dev`, `development`, `local`, `staging` or `test` counts as production: the APIs then refuse to start without `EDGEGUARD_API_KEY`.
 - Apply a change with `docker compose up -d`; a plain `docker compose restart` keeps the old values.
 
@@ -374,7 +378,7 @@ Full lock semantics: [docs/RUNBOOK.md § Baseline-day protocol](docs/RUNBOOK.md#
 - A fresh baseline deletes the EdgeGuard-managed nodes in Neo4j (every node with `--wipe-all`), the EdgeGuard events in MISP and the collector checkpoints. Nodes a partner created stay, so a database shared with ResilMesh keeps its data.
 - The backup gate refuses a wipe of non-empty stores unless `EDGEGUARD_LAST_BACKUP_AT` records a backup within `EDGEGUARD_BACKUP_MAX_AGE_HOURS` (240 hours by default). Its bypasses are explicit and logged (`--skip-backup-check`, or `skip_backup_check: true` in the DAG run configuration); an empty Neo4j and MISP need no backup. Backup and restore: [docs/BACKUP.md](docs/BACKUP.md).
 - `edgeguard baseline --days N` and `edgeguard fresh-baseline --days N` trigger the same DAG; they refuse while the Airflow scheduler is not healthy or a baseline run is queued or running, and `fresh-baseline` shows what it would delete, asks for a typed confirmation and runs the backup gate first.
-- Before a fresh baseline, deploy the current commit, keep MISP's default Import Regexp rules, take a snapshot, and start with the opt-in sources off, enabling them one at a time afterwards: [docs/BASELINE_LAUNCH_CHECKLIST.md § 6](docs/BASELINE_LAUNCH_CHECKLIST.md#6-fresh-baseline-deploy-misp-import-rule-flags-re-feed).
+- Before a fresh baseline, deploy the current commit, keep MISP's default Import Regexp rules, take a snapshot, and start with ATT&CK for ICS and MalwareBazaar off (CISA ICS runs by default), enabling them one at a time afterwards: [docs/BASELINE_LAUNCH_CHECKLIST.md § 6](docs/BASELINE_LAUNCH_CHECKLIST.md#6-fresh-baseline-deploy-misp-import-rule-flags-re-feed).
 
 ### Steps
 
@@ -444,7 +448,7 @@ set -a; . ./.env; set +a
 python3 scripts/verify_fresh_baseline.py
 ```
 
-Exit 0 means every mandatory check passed. Run it while no sync, `build_relationships` or enrichment run is in progress: until the runs after a sync are done, the checks of the links `build_relationships` and the campaign builder write fail by design ([docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance)). With an opt-in source enabled, add its flag, so that the script fails when that source left no data: `--require-cisa-ics` (CISA ICS), `--require-ics` (ATT&CK for ICS), `--require-malwarebazaar` (MalwareBazaar); after a baseline that collected OTX, add `--require-otx-industries`.
+Exit 0 means every mandatory check passed. Run it while no sync, `build_relationships` or enrichment run is in progress: until the runs after a sync are done, the checks of the links `build_relationships` and the campaign builder write fail by design ([docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance)). Add `--require-cisa-ics` so that the script fails when CISA ICS (on by default) left no data, and, with an opt-in source enabled, its flag: `--require-ics` (ATT&CK for ICS), `--require-malwarebazaar` (MalwareBazaar); after a baseline that collected OTX, add `--require-otx-industries`.
 
 ---
 
@@ -457,12 +461,12 @@ Exit 0 means every mandatory check passed. Run it while no sync, `build_relation
 | `edgeguard_pipeline` | Every 30 minutes | OTX |
 | `edgeguard_medium_freq` | Every 4 hours | CISA KEV, VirusTotal lookups |
 | `edgeguard_low_freq` | Every 8 hours | NVD |
-| `edgeguard_daily` | 02:00 daily | ATT&CK, AbuseIPDB and the abuse.ch feeds |
+| `edgeguard_daily` | 02:00 daily | ATT&CK, CISA ICS, AbuseIPDB and the abuse.ch feeds |
 | `edgeguard_neo4j_sync` | Every 72 hours | MISP → Neo4j sync, relationships, enrichment |
 | `edgeguard_baseline` | Manual | Full historical load |
 
 - Airflow registers the five scheduled DAGs paused. Unpause them after the first baseline's `baseline_complete` task has succeeded; while a baseline holds the lock they skip.
-- `edgeguard_daily` runs ATT&CK, AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker and SSL Blacklist, plus CISA ICS and MalwareBazaar when they are enabled.
+- `edgeguard_daily` runs ATT&CK, CISA ICS, AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker and SSL Blacklist, plus MalwareBazaar when it is enabled.
 - Every collector task runs in the Airflow pool `edgeguard_collectors` (4 slots, `EDGEGUARD_COLLECTOR_POOL_SLOTS`), which the Compose `airflow` service creates at every start.
 
 Task chains, run configuration and troubleshooting: [docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md).
@@ -514,16 +518,16 @@ The alert rules in `prometheus/alerts.yml` cover staleness and stuck runs per DA
 
 All settings are environment variables. Docker Compose reads `.env` and forwards each setting to the services that use it (`x-common-env` and each service's `environment` in `docker-compose.yml`), so a value in `.env` reaches the containers only where Compose forwards it. A few values are fixed in `docker-compose.yml`, such as `NEO4J_URI=bolt://neo4j:7687` inside the stack and the API ports. Outside Docker, export the settings before you run any command (`set -a; . ./.env; set +a`).
 
-**Optional sources**
+**Source flags**
 
 | Flag | Default | Adds |
 |---|---|---|
-| `EDGEGUARD_ENABLE_CISA_ICS` | `false` | CISA ICS advisories with the sectors CISA names |
+| `EDGEGUARD_ENABLE_CISA_ICS` | `true` | CISA ICS advisories with the sectors CISA names |
 | `EDGEGUARD_ENABLE_MITRE_ICS` | `false` | MITRE ATT&CK for ICS |
 | `EDGEGUARD_ENABLE_MALWAREBAZAAR` | `false` | MalwareBazaar sample hashes |
 | `EDGEGUARD_ENABLE_EPSS` | `true` | FIRST EPSS scores on CVE nodes |
 
-Set a flag in `.env` and run `docker compose up -d airflow`. On an existing graph, CISA ICS and ATT&CK for ICS load their history with an additive baseline (for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works); MalwareBazaar builds up over the daily runs. `EDGEGUARD_COLLECT_SOURCES` limits collection to a comma-separated list of collectors.
+Set a flag in `.env` and run `docker compose up -d airflow`; `EDGEGUARD_ENABLE_CISA_ICS=false` turns CISA ICS off. On an existing graph built without them, CISA ICS and ATT&CK for ICS load their history with an additive baseline (for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works); MalwareBazaar builds up over the daily runs. `EDGEGUARD_COLLECT_SOURCES` limits collection to a comma-separated list of collectors.
 
 **TLS.** `EDGEGUARD_SSL_VERIFY` (default `true`) controls certificate verification for MISP and the HTTPS feeds; set it to `false` only for a development MISP with a self-signed certificate. `true`, `1`, `yes` and `on` verify, `false`, `0`, `no` and `off` do not (case-insensitive); any other value keeps verification on and is reported in the log, by `edgeguard validate` and by the baseline preflight. Neo4j TLS is chosen by the `NEO4J_URI` scheme (`bolt+s://`, `bolt+ssc://`). A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it.
 
@@ -546,6 +550,7 @@ Set a flag in `.env` and run `docker compose up -d airflow`. On an existing grap
 - **Cypher injection.** Every Cypher value is a parameter; labels, relationship types and property names, which Cypher cannot parameterise, pass the allowlist validators `_validate_label`, `_validate_rel_type` and `_validate_prop_name`.
 - **TLS verification** is on by default for MISP and every HTTPS source, and only a recognised "off" value of `EDGEGUARD_SSL_VERIFY` turns it off: a typo keeps it on. The CA bundle is `certifi`.
 - **MISP trust boundary.** Source-stated timestamps are accepted only from the MISP organisations in `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` or `EDGEGUARD_TRUSTED_MISP_ORG_NAMES`; while both are empty, a startup warning and the gauge `edgeguard_misp_tag_impersonation_defense_disabled` report it ([docs/SECURITY_ROADMAP.md](docs/SECURITY_ROADMAP.md)).
+- **Report text in MISP's logs.** `MISPWriter.push_reports` stores whole pulse and advisory texts as MISP Event Reports. A report from an amber or red record, or from a record that states no known TLP level, stays within the writer's organisation (MISP distribution 0). MISP still logs every Event Report add and edit with its full content, and MISP's site administrators can read those entries. EdgeGuard's own logs carry no report text. Do not share MISP log exports outside the operating organisation ([docs/RUNBOOK.md § Report text in MISP's logs](docs/RUNBOOK.md#report-text-in-misps-logs)).
 - **Destructive operations.** A fresh baseline passes the backup gate, and the Neo4j wipes of a fresh baseline, of `edgeguard clear` and of `scripts/clear_neo4j.py` are recorded in `logs/destructive_ops.jsonl` and the counter `edgeguard_destructive_ops_total`.
 - **Request limits.** Per-address rate limits (REST 60 per minute, admin queries 10, GraphQL 120), a request-body cap, and GraphQL depth and alias limits.
 - **Secrets** live in the environment and `.env` (ignored by git); the images contain none.
@@ -584,10 +589,11 @@ Every document, by topic: [docs/README.md](docs/README.md).
 ```
 EdgeGuard-Knowledge-Graph/
 ├── src/                     # Pipeline, sync, enrichment, APIs, CLI (edgeguard.py)
-│   └── collectors/          # One module per source, and the MISP writer
+│   ├── collectors/          # One module per source, and the MISP writer
+│   └── reference/           # Pinned reference data: canonical threat actors, ATT&CK revoked-id map, MITRE CWE names
 ├── dags/                    # Airflow DAGs (baseline, five schedules, metrics)
 ├── plugins/                 # Airflow listener plugin (DAG run in progress)
-├── scripts/                 # Preflight, acceptance, curated import, wipe and deploy helpers
+├── scripts/                 # Preflight, acceptance, curated import, reference-list builders, wipe and deploy helpers
 ├── demo/                    # Alert enrichment demo
 ├── migrations/              # Historical schema migration notes
 ├── tests/                   # Pytest suite
@@ -611,10 +617,10 @@ Module map: [docs/ARCHITECTURE.md § Key Files](docs/ARCHITECTURE.md#key-files).
 
 ## License and acknowledgements
 
-MIT License; see [LICENSE](LICENSE).
+MIT License; see [LICENSE](LICENSE). Third-party data keeps its own terms: MITRE ATT&CK text and the pinned MITRE CWE name list (`src/reference/cwe_names.json`) are used under MITRE's terms of use, whose notices are in [docs/DATA_SOURCES.md § 5](docs/DATA_SOURCES.md#5-mitre-attck) and [§ 9b](docs/DATA_SOURCES.md#9b-mitre-cwe-list-reference-data).
 
 EdgeGuard is developed by IICT-BAS and Ratio1 and financed by ResilMesh Open Call 2.
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-08_

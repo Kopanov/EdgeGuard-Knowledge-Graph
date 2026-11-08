@@ -121,7 +121,7 @@ class EdgeGuardPipeline:
             "otx": OTXCollector(misp_writer=self.misp_writer),
             "nvd": NVDCollector(misp_writer=self.misp_writer),
             "cisa": CISACollector(misp_writer=self.misp_writer),
-            # 2026-10: CISA ICS advisories (flag-guarded; collect() skips unless EDGEGUARD_ENABLE_CISA_ICS)
+            # CISA ICS advisories (on by default; collect() skips when EDGEGUARD_ENABLE_CISA_ICS=false)
             "cisa_ics": CISAICSCollector(misp_writer=self.misp_writer),
             "mitre": MITRECollector(misp_writer=self.misp_writer),
             "virustotal": VTCollector(misp_writer=self.misp_writer),

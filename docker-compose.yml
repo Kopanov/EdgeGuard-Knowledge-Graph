@@ -73,7 +73,7 @@ x-common-env: &common-env
   EDGEGUARD_DEBUG_GC: ${EDGEGUARD_DEBUG_GC:-}
   # restSearch substring for EdgeGuard event discovery (default EdgeGuard in code if unset).
   EDGEGUARD_MISP_EVENT_SEARCH: ${EDGEGUARD_MISP_EVENT_SEARCH:-}
-  # Issue #62: min fraction of ATTEMPTED MISP pushes that must succeed or the
+  # Minimum fraction of ATTEMPTED MISP pushes that must succeed or the
   # collector task fails RED (default 0.95 in code; 0 disables the gate).
   EDGEGUARD_MISP_MIN_SUCCESS_RATE: ${EDGEGUARD_MISP_MIN_SUCCESS_RATE:-}
   # 2026-10 fresh-baseline train — optional sources and levers (set in .env; defaults mirror src/config.py).
@@ -84,7 +84,7 @@ x-common-env: &common-env
   MITRE_ICS_ATTACK_URL: ${MITRE_ICS_ATTACK_URL:-}
   MITRE_FORCE_REFETCH: ${MITRE_FORCE_REFETCH:-}
   EDGEGUARD_MITRE_CONDITIONAL_GET: ${EDGEGUARD_MITRE_CONDITIONAL_GET:-true}
-  EDGEGUARD_ENABLE_CISA_ICS: ${EDGEGUARD_ENABLE_CISA_ICS:-false}
+  EDGEGUARD_ENABLE_CISA_ICS: ${EDGEGUARD_ENABLE_CISA_ICS:-true}
   EDGEGUARD_ENABLE_EPSS: ${EDGEGUARD_ENABLE_EPSS:-true}
   EPSS_URL: ${EPSS_URL:-https://epss.empiricalsecurity.com/epss_scores-current.csv.gz}
   EPSS_MAX_BYTES: ${EPSS_MAX_BYTES:-67108864}
@@ -263,28 +263,18 @@ services:
     networks:
       - edgeguard_net
     healthcheck:
-      # PR-A audit fix (Prod Readiness HIGH): the previous ``wget --spider`` test
-      # checked HTTP port 7474 was OPEN — but a Neo4j in disk-full read-only
-      # mode keeps the HTTP listener up while refusing all writes, so the
-      # service shows ``healthy`` while every Cypher write fails. Replace with
-      # cypher-shell that creates+deletes a sentinel node — proves writability
-      # AND auth in one round-trip. The sentinel is _HC label (no schema
-      # collision) and DELETE is idempotent.
-      # PR-A audit fix (Bugbot MED on commit f60e213): quote BOTH env vars
-      # so passwords containing shell metacharacters ($, &, ;, spaces, etc.)
-      # don't break the healthcheck. Without quoting, e.g. NEO4J_PASSWORD="a&b"
-      # would split mid-arg and the healthcheck would fail with a confusing
-      # auth error rather than the actual writability test.
-      #
-      # PR-A audit fix (Bugbot LOW on commit 8ab02ac): drop the
-      # EG_NEO4J_USER / EG_NEO4J_PASSWORD aliases that duplicated the
-      # credentials already in NEO4J_AUTH as separate env vars (visible
-      # to every process in the container). Parse NEO4J_AUTH directly
-      # using POSIX shell parameter expansion (``${VAR%%/*}`` =
-      # everything before first ``/``; ``${VAR#*/}`` = everything after
-      # first ``/``). dash supports both per POSIX spec — the prior
-      # comment claiming this was "/bin/sh-fragile" was incorrect.
-      # Result: one fewer copy of the password on disk + in process env.
+      # The healthcheck creates and deletes a sentinel node with cypher-shell, which
+      # proves writability and authentication in one round trip. An open HTTP port
+      # alone is not enough: a Neo4j in disk-full read-only mode keeps port 7474 up
+      # while refusing every write. The _HC label does not collide with the schema,
+      # and DELETE is idempotent.
+      # Both credentials are quoted so passwords containing shell metacharacters
+      # ($, &, ;, spaces) do not split the argument and fail with a misleading
+      # authentication error.
+      # The credentials are parsed from NEO4J_AUTH with POSIX parameter expansion
+      # (``${VAR%%/*}`` = everything before the first ``/``; ``${VAR#*/}`` =
+      # everything after it; dash supports both), so no second copy of the
+      # password lives in the container environment.
       test: ["CMD-SHELL",
              "cypher-shell -u \"$${NEO4J_AUTH%%/*}\" -p \"$${NEO4J_AUTH#*/}\" 'CREATE (n:_HC) DELETE n' || exit 1"]
       interval: 30s
@@ -423,13 +413,9 @@ services:
       <<: *common-env
       # Mounted repo src at /opt/airflow/src — ensure all PythonOperator imports resolve without relying only on DAG sys.path hacks.
       PYTHONPATH: /opt/airflow/src
-      # Airflow 3.x config key for the API server port is
-      # `AIRFLOW__API__PORT` — the port moved from the [webserver] section
-      # to the [api] section when the webserver was split into a separate
-      # API server process. There is NO `[api_server]` config section in
-      # Airflow (an earlier version of this compose file set a
-      # non-existent `AIRFLOW__API_SERVER__WEB_SERVER_PORT`, which
-      # silently did nothing — caught by bugbot on PR #26).
+      # Airflow 3.x reads the API server port from `AIRFLOW__API__PORT` (the
+      # [api] section). Airflow has no `[api_server]` section, so a variable such
+      # as `AIRFLOW__API_SERVER__WEB_SERVER_PORT` has no effect.
       # The old AIRFLOW__WEBSERVER__WEB_SERVER_PORT is kept as well so
       # the variable is harmless if a stale Airflow 2.x image is ever
       # pulled by accident during rollback.
@@ -645,31 +631,23 @@ services:
     image: edgeguard-kg:latest
     container_name: edgeguard_api
     restart: unless-stopped
-    # PR-A audit fix (Red Team HIGH): use the ``__main__`` block in
-    # src/query_api.py instead of the uvicorn CLI flags, so the EDGEGUARD_API_HOST
-    # / EDGEGUARD_API_KEY safety check (the module-level startup check in
-    # src/query_api.py, ``_IS_PROD`` / ``_BIND_HOST``) actually
-    # gates the bind. The previous ``--host 0.0.0.0`` CLI flag bypassed the env-var
-    # check: the Python module saw EDGEGUARD_API_HOST=127.0.0.1 (default), the A6
-    # check passed, then uvicorn bound 0.0.0.0 anyway — making the API reachable
-    # from any other container on edgeguard_net WITHOUT auth. Now: the module
-    # reads EDGEGUARD_API_HOST at startup. In production (EDGEGUARD_ENV unset,
-    # empty or any value other than dev / development / local / staging / test)
-    # it refuses to start without EDGEGUARD_API_KEY, whatever
-    # EDGEGUARD_ALLOW_UNAUTH says. In non-production it refuses to start unless
-    # EDGEGUARD_API_KEY is set OR the host is loopback OR the operator opts in
-    # via EDGEGUARD_ALLOW_UNAUTH=1.
+    # The api service starts through the ``__main__`` block of src/query_api.py
+    # rather than the uvicorn CLI, so the bind safety check of src/query_api.py
+    # (``_IS_PROD`` / ``_BIND_HOST``) gates the address actually bound; a uvicorn
+    # ``--host`` flag would bypass it. The module reads EDGEGUARD_API_HOST at startup.
+    # In production (EDGEGUARD_ENV unset, empty or any value other than dev /
+    # development / local / staging / test) it refuses to start without
+    # EDGEGUARD_API_KEY, whatever EDGEGUARD_ALLOW_UNAUTH says. In non-production it
+    # refuses to start unless EDGEGUARD_API_KEY is set, the host is loopback, or
+    # EDGEGUARD_ALLOW_UNAUTH=1.
     #
-    # PR-A audit fix (Red Team CRITICAL C1, follow-up): the safety check has
-    # to remain at 0.0.0.0 in compose because Docker port-forwarding from
-    # ``ports: 127.0.0.1:8000:8000`` requires the container app to bind to
-    # 0.0.0.0 (binding to the container's own 127.0.0.1 makes the docker
-    # bridge unable to deliver traffic). To keep ``./install.sh && docker
-    # compose up`` from crashlooping on the safety check, install.sh
-    # auto-generates a strong EDGEGUARD_API_KEY in .env whenever it is blank
-    # (see install.sh and the comment block in .env.example).
-    # Operators who clone + ``docker compose up`` without install.sh hit
-    # the safety check's RuntimeError with an actionable message.
+    # Compose keeps the bind at 0.0.0.0 because Docker port forwarding from
+    # ``127.0.0.1:8000:8000`` needs the container application to listen on 0.0.0.0
+    # (a bind to the container's own 127.0.0.1 is unreachable from the bridge).
+    # install.sh writes a strong EDGEGUARD_API_KEY into .env whenever it is blank
+    # (see install.sh and .env.example), so ``./install.sh && docker compose up``
+    # passes the check. ``docker compose up`` without install.sh stops at the
+    # check's RuntimeError with an actionable message.
     command: ["python", "-m", "src.query_api"]
     ports:
       - "127.0.0.1:8000:8000"   # REST API — host loopback only; use a reverse proxy for external access
@@ -682,12 +660,8 @@ services:
       EDGEGUARD_GIT_SHA: ${EDGEGUARD_GIT_SHA:-}
       EDGEGUARD_API_HOST: ${EDGEGUARD_API_HOST:-0.0.0.0}
       EDGEGUARD_API_PORT: "8000"
-      # PR-A audit fix (Bugbot MED on commit 8dde4de): the symmetric
-      # EDGEGUARD_GRAPHQL_WORKERS=2 was set on the graphql service below,
-      # but EDGEGUARD_API_WORKERS was forgotten — the api service would
-      # fall back to the __main__ default of 1, halving the production
-      # throughput posture compared to the pre-refactor ``--workers 2``
-      # CLI flag we removed. Restore parity.
+      # Two workers, matching EDGEGUARD_GRAPHQL_WORKERS on the graphql service
+      # (the ``__main__`` default is 1).
       EDGEGUARD_API_WORKERS: "2"
       EDGEGUARD_ENABLE_ADMIN_QUERY: ${EDGEGUARD_ENABLE_ADMIN_QUERY:-false}
       EDGEGUARD_ADMIN_TOKEN: ${EDGEGUARD_ADMIN_TOKEN:-}
@@ -695,8 +669,7 @@ services:
       # defaults 60/minute and 10/minute, query_api._env_rate_limit).
       EDGEGUARD_RATE_LIMIT_READ: ${EDGEGUARD_RATE_LIMIT_READ:-}
       EDGEGUARD_RATE_LIMIT_ADMIN: ${EDGEGUARD_RATE_LIMIT_ADMIN:-}
-      # PR-A audit fix (Bugbot MED on commit b2c0479): the .env.example
-      # documents EDGEGUARD_ALLOW_UNAUTH=1 as the "LAST RESORT" escape
+      # .env.example documents EDGEGUARD_ALLOW_UNAUTH=1 as the "LAST RESORT" escape
       # hatch of the non-loopback bind check (the startup checks in
       # src/query_api.py and src/graphql_api.py). It applies only when
       # EDGEGUARD_ENV is a non-production label (dev, development, local,
@@ -740,10 +713,8 @@ services:
     image: edgeguard-kg:latest
     container_name: edgeguard_graphql
     restart: unless-stopped
-    # PR-A audit fix (Red Team HIGH): symmetric with ``api`` above — invoke the
-    # Python module directly so the EDGEGUARD_GRAPHQL_HOST env-var safety check
-    # actually gates the bind. The previous ``--host 0.0.0.0`` CLI flag bypassed
-    # the env check.
+    # As on the api service, the Python module is started directly so the
+    # EDGEGUARD_GRAPHQL_HOST safety check of src/graphql_api.py gates the bind.
     command: ["python", "-m", "src.graphql_api"]
     ports:
       - "127.0.0.1:4001:4001"   # GraphQL API — loopback only
@@ -765,10 +736,9 @@ services:
       # defaults 15 and 2000, graphql_api._env_positive_int).
       EDGEGUARD_GRAPHQL_MAX_ALIASES: ${EDGEGUARD_GRAPHQL_MAX_ALIASES:-}
       EDGEGUARD_GRAPHQL_MAX_SELECTIONS: ${EDGEGUARD_GRAPHQL_MAX_SELECTIONS:-}
-      # PR-A audit fix (Bugbot MED on commit b2c0479): symmetric with the
-      # api service above — forward EDGEGUARD_ALLOW_UNAUTH so the .env.example
-      # escape hatch documentation actually works for graphql too (non-production
-      # EDGEGUARD_ENV only; in production EDGEGUARD_API_KEY is always required).
+      # Forwarded as on the api service, so the EDGEGUARD_ALLOW_UNAUTH escape hatch
+      # of .env.example applies to graphql too (non-production EDGEGUARD_ENV only;
+      # in production EDGEGUARD_API_KEY is always required).
       EDGEGUARD_ALLOW_UNAUTH: ${EDGEGUARD_ALLOW_UNAUTH:-}
       PYTHONPATH: /app/src
     depends_on:

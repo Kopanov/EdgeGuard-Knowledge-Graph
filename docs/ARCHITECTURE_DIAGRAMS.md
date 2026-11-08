@@ -26,11 +26,11 @@ graph TB
         FD[Feodo Tracker]
         SSL[SSL Blacklist]
         MB[MalwareBazaar<br/>flag-guarded]
-        ICS[CISA ICS advisories<br/>flag-guarded]
+        ICS[CISA ICS advisories]
     end
 
     subgraph EdgeGuard Pipeline
-        COLL[Collectors<br/>10 sources + 2 flag-guarded]
+        COLL[Collectors<br/>11 sources + 1 flag-guarded]
         MISP[(MISP 2.4 / 2.5<br/>Single Source of Truth<br/>port 8443)]
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ _MispFallbackHardError sentinel<br/>+ MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
@@ -80,7 +80,7 @@ flowchart LR
         C2[NVD] --> MW
         C3[CISA] --> MW
         C4[MITRE] --> MW
-        C5["Others<br/>8 more (2 flag-guarded)"] --> MW
+        C5["Others<br/>8 more (1 flag-guarded)"] --> MW
     end
 
     subgraph MISP
@@ -343,10 +343,11 @@ campaign builder and 6/6 FIRST EPSS. Jobs 2/6, 3/6 and 6/6 are not drawn above.
 
 ---
 
-_Last updated: 2026-11-03_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS advisories run by default: the diagrams count 11 sources and 1 flag-guarded (MalwareBazaar).
 - 2026-11-03 — Retry diagram: a MISP batch has three retries (it had four), the event lookups keep four, and the retries end sooner when the next wait would reach the push's cap on failure time (`EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC`).
 - 2026-11-02 — § 6: the reconnect loop of `run_pipeline.py` is gone with its Neo4j load (it now runs the collectors into MISP only).
 - 2026-11-01 — § 3: the `HAS_CVSS_v*` edges are written by `merge_cve` and, in the sync, by the CVSS statement of its CVE batches (`merge_cves_batch`); the note named `merge_cve` alone.

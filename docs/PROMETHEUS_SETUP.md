@@ -161,7 +161,7 @@ A `source` label names a source in one of two ways. Both come from `src/source_r
 | Metrics | `source` value | Values |
 |---------|----------------|--------|
 | Collector and job metrics: `edgeguard_indicators_collected_total`, `edgeguard_collector_last_run_outcome`, `edgeguard_collection_failures_total`, `edgeguard_collection_duration_seconds`, `edgeguard_last_success_timestamp`, `edgeguard_collector_skips_total`, `edgeguard_source_health`, `edgeguard_pipeline_errors_total`, `edgeguard_misp_events_total`, `edgeguard_misp_push_duration_seconds` | The collector's name, which is the source's CLI name (`cli_id`); for a job that is not a collector, the job's name | `otx`, `nvd`, `cisa`, `mitre`, `virustotal`, `abuseipdb`, `urlhaus`, `threatfox`, `feodo`, `sslbl`, `cisa_ics`, `malwarebazaar`; jobs: `virustotal_enrich` (VirusTotal's re-enrichment of hashes already in MISP), `misp_to_neo4j` (the MISP → Neo4j sync), `neo4j` (the sync's Neo4j connection failure) |
-| Writer metrics: `edgeguard_misp_push_permanent_failure_total`, `edgeguard_misp_push_backoff_triggered_total`, `edgeguard_misp_honest_null_violation_total`, `edgeguard_neo4j_merge_ineffective_batch_total`, `edgeguard_neo4j_batch_permanent_failure_total`, `edgeguard_merge_reject_placeholder_total` | The source's canonical id, the key of its `Source` node | `alienvault_otx`, `nvd`, `cisa_kev`, `mitre_attck`, `feodo_tracker`, `ssl_blacklist`, … |
+| Writer and report metrics: `edgeguard_misp_push_permanent_failure_total`, `edgeguard_misp_push_backoff_triggered_total`, `edgeguard_misp_honest_null_violation_total`, `edgeguard_neo4j_merge_ineffective_batch_total`, `edgeguard_neo4j_batch_permanent_failure_total`, `edgeguard_merge_reject_placeholder_total`, `edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds`, `edgeguard_report_pending_given_up_total` | The source's canonical id, the key of its `Source` node | `alienvault_otx`, `nvd`, `cisa_kev`, `mitre_attck`, `feodo_tracker`, `ssl_blacklist`, …; the report_pending metrics carry only the report sources `alienvault_otx` and `cisa_ics` |
 
 So one source can appear as `otx` in one panel and as `alienvault_otx` in another. No alert or Grafana panel joins the two kinds of metric on `source`, and the Grafana panels group by `source` without filtering on a value. `edgeguard_misp_event_attributes_truncated_total` (the command-line MISP collector) carries the source the MISP event's tags name, or the collector's tag; `edgeguard_misp_attributes_total` and `edgeguard_source_latency_seconds` are defined but written by no code path. The `source_id` label of the source-truthful counters is described under "Source-truthful Timestamp Pipeline" below.
 
@@ -817,10 +817,11 @@ docker volume rm <project>_prometheus_data <project>_grafana_data <project>_aler
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — The source-label table places the report_pending metrics (`edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds`, `edgeguard_report_pending_given_up_total`) with the metrics that carry the canonical source id.
 - 2026-11-07 — The CISA ICS collector writes report records and sets `edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds` and `edgeguard_report_pending_given_up_total` for `source="cisa_ics"`.
 - 2026-11-07 — The OTX collector sets the `report_pending` gauges of `alienvault_otx` on every run that pushes; `edgeguard_report_pending_given_up_total` also counts the records whose source record kept failing to be fetched for `EDGEGUARD_REPORT_PENDING_MAX_DAYS`.
 - 2026-11-07 — The gauges `edgeguard_report_pending_records` and `edgeguard_report_pending_oldest_failure_timestamp_seconds` and the counter `edgeguard_report_pending_given_up_total`, per report source: the records whose MISP Event Report push failed or was not tried. A fresh baseline's wipe sets the gauges to empty lists. No alert reads them yet.

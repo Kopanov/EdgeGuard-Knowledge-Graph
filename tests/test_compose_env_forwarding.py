@@ -24,7 +24,7 @@ FORWARDED = [
     ("MITRE_ICS_ATTACK_URL", None),
     ("MITRE_FORCE_REFETCH", None),
     ("EDGEGUARD_MITRE_CONDITIONAL_GET", "true"),
-    ("EDGEGUARD_ENABLE_CISA_ICS", "false"),
+    ("EDGEGUARD_ENABLE_CISA_ICS", "true"),  # on by default, as in src/config.py
     ("EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS", "30"),  # int(os.environ.get(...)) — empty would raise
     ("EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN", None),  # _env_int tolerates empty
     ("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES", None),

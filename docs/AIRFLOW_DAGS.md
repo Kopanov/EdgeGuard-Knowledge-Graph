@@ -84,7 +84,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | Every 30 min | High-frequency updates | AlienVault OTX |
 | `edgeguard_medium_freq` | Every 4 hours | Medium-frequency sources | CISA KEV, VirusTotal |
 | `edgeguard_low_freq` | Every 8 hours | Low-frequency sources | NVD |
-| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, CISA ICS Advisories (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`), ThreatFox, AbuseIPDB, URLhaus, Feodo, SSLBlacklist, MalwareBazaar (flag-guarded, `EDGEGUARD_ENABLE_MALWAREBAZAAR`) |
+| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, CISA ICS Advisories (on by default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off), ThreatFox, AbuseIPDB, URLhaus, Feodo, SSLBlacklist, MalwareBazaar (flag-guarded, `EDGEGUARD_ENABLE_MALWAREBAZAAR`) |
 | `edgeguard_neo4j_sync` | Every 72 h (`timedelta(days=3)`) | MISP → Neo4j sync + `build_relationships` + `run_enrichment_jobs` | All sources |
 
 **Concurrency and timeout guards (all 6 DAGs):**
@@ -94,8 +94,8 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | 1 | 5h 30m | Covers OTX with full retry chain |
 | `edgeguard_medium_freq` | 1 | 5h | CISA + VT with retries; both take a slot of the shared collector pool, so they run in parallel only while it has a free slot |
 | `edgeguard_low_freq` | 1 | 8h 30m | NVD with full retry chain |
-| `edgeguard_daily` | 1 | 8h 30m | 8 collectors with retries on the shared collector pool (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4); the timeout is sized for all 8 in parallel, and if every attempt reached its 2h `execution_timeout` they would need two rounds (about 12h 45m), so the second round would be skipped; real daily runs take minutes (`collect_cisa_ics` and `collect_malwarebazaar` are no-op skips while their flags are off) |
-| `edgeguard_baseline` | 1 | 32h | Full historical collection + sync. `tier2_feeds` also runs `collect_cisa_ics` (baseline load of the 24-month advisory history; no-op skip while `EDGEGUARD_ENABLE_CISA_ICS` is off) and `collect_malwarebazaar` (recent export only; no-op skip while `EDGEGUARD_ENABLE_MALWAREBAZAAR` is off) |
+| `edgeguard_daily` | 1 | 8h 30m | 8 collectors with retries on the shared collector pool (`EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4); the timeout is sized for all 8 in parallel, and if every attempt reached its 2h `execution_timeout` they would need two rounds (about 12h 45m), so the second round would be skipped; real daily runs take minutes (`collect_malwarebazaar` is a no-op skip while its flag is off, the default, and `collect_cisa_ics` while `EDGEGUARD_ENABLE_CISA_ICS=false`) |
+| `edgeguard_baseline` | 1 | 32h | Full historical collection + sync. `tier2_feeds` also runs `collect_cisa_ics` (baseline load of the 24-month advisory history; no-op skip while `EDGEGUARD_ENABLE_CISA_ICS=false`) and `collect_malwarebazaar` (recent export only; no-op skip while `EDGEGUARD_ENABLE_MALWAREBAZAAR` is off) |
 | `edgeguard_neo4j_sync` | 1 | 68h | Full sync + relationships + enrichment. Every task of the chain failing on all three attempts takes 55h 57 min (`run_neo4j_sync` 3 × 8h (its default limit, `EDGEGUARD_NEO4J_SYNC_TIMEOUT_HOURS`) + 2 × 5 min, `build_relationships` and `run_enrichment_jobs` 3 × 5h + 2 × 5 min each, the checks 1h 27 min), plus 20% ≈ 67h. A requested full sync stands until it succeeds, so it may use all three attempts; a long run only delays the next scheduled one (`max_active_runs=1`) |
 
 **Collector pool:** every `collect_*` task of every DAG runs in the Airflow pool `edgeguard_collectors` (slots: `EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4), so at most that many collectors run at once across all DAGs; the rest queue. Without it, the 7 baseline tier-2 collectors (or a daily catch-up run plus OTX, VirusTotal and NVD) all start together and exhaust MISP php-fpm workers or the `airflow` container memory limit. The Compose `airflow` service creates/resizes the pool on every start; outside Compose run `airflow pools set edgeguard_collectors 4 "Collector tasks"`, otherwise collector tasks are never scheduled. A new size needs a recreate of the container: see [Collector pool: setup and resizing](#collector-pool-setup-and-resizing).
@@ -142,7 +142,7 @@ the `dag_run.conf` JSON when triggered:
 **`baseline_clean` task semantics:**
 
 - Reads `dag_run.conf.fresh_baseline`. Accepts Python `True`, integer `1`, or strings `"true"`/`"True"`/`"1"`/`"yes"`/`"on"` (case- and whitespace-insensitive). Anything else (including the explicit-falsy strings `"false"`/`"0"`) is treated as additive — a typo in the JSON config does NOT trigger destruction.
-- Calls `src.baseline_clean.reset_baseline_data(wipe_scope=…)` — atomic 3-step wipe (checkpoints → Neo4j → MISP DELETE) followed by a settle period and a verify-poll until all three datastores read zero. The Neo4j step deletes only EdgeGuard-managed nodes (`clear_edgeguard_managed`) unless `dag_run.conf.wipe_scope` is `"all"` (`clear_all`), so partner data on a shared ResilMesh database is kept by default.
+- Calls `src.baseline_clean.reset_baseline_data(wipe_scope=…)` — atomic 3-step wipe (checkpoints → Neo4j → MISP DELETE) followed by a settle period and a verify-poll until all three datastores read zero. The Neo4j step deletes only EdgeGuard-managed nodes (`clear_edgeguard_managed`) unless `dag_run.conf.wipe_scope` is `"all"` (`clear_all`), so partner data on a shared ResilMesh database is kept by default. The checkpoint step deletes the checkpoint file: the baseline checkpoints, the cursors and the rest of the incremental state, the OTX retry list and the `report_pending` lists of OTX and CISA ICS included. It also sets the retry-list and `report_pending` gauges to empty lists. The MISP step deletes every event whose `info` contains `EdgeGuard`, the `-part<N>` and `-reports` events included, and with them their Event Reports. MISP's own log entries, which hold the report text, stay ([RUNBOOK.md § Report text in MISP's logs](RUNBOOK.md#report-text-in-misps-logs)).
 - Has `retries=0` and `trigger_rule=ALL_SUCCESS` — destructive task does NOT auto-retry on failure (would re-execute the wipe), and ONLY runs after `misp_health_check`, `source_key_check` and `baseline_acquire_lock` have succeeded (its direct upstream is `baseline_acquire_lock`).
 - **What it logs:** after the wipe, `BASELINE_CLEAN: deleted <N> Neo4j nodes, <M> MISP events, <K> checkpoint entries (<s>s)`: the nodes the Neo4j step deleted (every node under `wipe_scope` `all`, the EdgeGuard-managed ones otherwise), the MISP events it deleted, and the checkpoint entries found before the wipe.
 - **Refusals before the wipe:** a typo'd destructive key (see *Unknown keys* below) and, for a fresh baseline, a `wipe_scope` other than `edgeguard` / `all` or the backup-timestamp gate fail the task and wipe nothing. The gate requires `EDGEGUARD_LAST_BACKUP_AT` within `EDGEGUARD_BACKUP_MAX_AGE_HOURS` (default 240 h); it is skipped when Neo4j and MISP are both empty (every probe succeeded), with `backup_check_passed_cli` or with `skip_backup_check`. Such a refusal also releases the baseline lock, so the corrected run is not refused by it: re-trigger with a corrected conf, or clear `baseline_clean` after fixing the environment (it takes the lock again before the wipe).
@@ -206,7 +206,7 @@ Every baseline, a 7-day smoke run or the 730-day run, additive or fresh, runs th
 | Source | DAG | Rate Limit | Items/Run |
 |--------|-----|------------|-----------|
 | MITRE ATT&CK | `edgeguard_daily` | No limit | The whole ATT&CK bundle when it changed (ETag, `EDGEGUARD_MITRE_CONDITIONAL_GET`): every technique, group, software and tactic in it; nothing when it is unchanged (`EDGEGUARD_MAX_ENTRIES` caps it when set) |
-| CISA ICS Advisories (`collect_cisa_ics`) | `edgeguard_daily` | Polite: ≤ 4 req/s, ≤ `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1200) files | Advisories changed since the cursor (`changes.csv`); **task is skipped with success unless `EDGEGUARD_ENABLE_CISA_ICS=true`** |
+| CISA ICS Advisories (`collect_cisa_ics`) | `edgeguard_daily` | Polite: ≤ 4 req/s, ≤ `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1200) files | Advisories changed since the cursor (`changes.csv`); **task is skipped with success when `EDGEGUARD_ENABLE_CISA_ICS=false`** |
 | ThreatFox | `edgeguard_daily` | No limit | The IOCs of the last 7 days (about 7,400), at most `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000), the newest kept when the cap is reached |
 | AbuseIPDB | `edgeguard_daily` | At most one blacklist request per run, none when the run reuses the answer fetched earlier on the same UTC day (free plan: at most 10,000 addresses per request, 5 blacklist requests per UTC day) | The blacklist, at most `EDGEGUARD_ABUSEIPDB_MAX_PER_RUN` (10,000) addresses, the request's `limit` |
 | URLhaus | `edgeguard_daily` | One export download per run (about 16 MB) | The URLs of the `recent.csv` export (about 63,000 on 2026-10-24), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000), the newest kept when the cap is reached; skipped without `THREATFOX_API_KEY` |
@@ -232,7 +232,7 @@ Every baseline, a 7-day smoke run or the 730-day run, additive or fresh, runs th
 | URLhaus | `URLhausCollector` | `global_feed_collector.py` | Tags |
 | Feodo | `FeodoCollector` | `finance_feed_collector.py` | Hardcoded Finance |
 | SSL Blacklist | `SSLBlacklistCollector` | `finance_feed_collector.py` | Malware family |
-| CISA ICS Advisories | `CISAICSCollector` | `cisa_ics_collector.py` | Source-asserted CISA sector → fixed table (Energy / Healthcare and Public Health / Financial Services); **flag-guarded**: `run_cisa_ics_collection` logs "disabled by flag" and returns a skipped status (success, 0 items) unless `EDGEGUARD_ENABLE_CISA_ICS=true` |
+| CISA ICS Advisories | `CISAICSCollector` | `cisa_ics_collector.py` | Source-asserted CISA sector → fixed table (Energy / Healthcare and Public Health / Financial Services); **on by default**: with `EDGEGUARD_ENABLE_CISA_ICS=false`, `run_cisa_ics_collection` logs "disabled by flag" and returns a skipped status (success, 0 items) |
 | MalwareBazaar | `MalwareBazaarCollector` | `global_feed_collector.py` | Malware family label (`signature`); **flag-guarded**: `run_malwarebazaar_collection` / `run_baseline_malwarebazaar` log "disabled by flag" and return a skipped status (success, 0 items) unless `EDGEGUARD_ENABLE_MALWAREBAZAAR=true` |
 
 ### Placeholder Collectors (Not Yet Active)
@@ -500,11 +500,11 @@ export EDGEGUARD_BASE_DIR="/path/to/EdgeGuard-Knowledge-Graph"
 export EDGEGUARD_ENABLE_METRICS=true     # Enable Prometheus metrics
 export EDGEGUARD_METRICS_PORT=8001       # Must not conflict with FastAPI (8000)
 
-# Optional collectors (default off)
-export EDGEGUARD_ENABLE_CISA_ICS=true    # CISA ICS advisories (edgeguard_daily → collect_cisa_ics); off → task skipped with success
+# Collector flags
+# export EDGEGUARD_ENABLE_CISA_ICS=false   # CISA ICS advisories (edgeguard_daily → collect_cisa_ics, baseline tier 2), on by default; false → task skipped with success
 # export EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN=1200   # per-run file cap (politeness toward GitHub raw)
 # export EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES=50    # baseline sanity floor → transient skip + alert
-export EDGEGUARD_ENABLE_MALWAREBAZAAR=true    # MalwareBazaar (edgeguard_daily → collect_malwarebazaar, baseline tier 2); off → task skipped with success
+export EDGEGUARD_ENABLE_MALWAREBAZAAR=true    # MalwareBazaar (edgeguard_daily → collect_malwarebazaar, baseline tier 2), off by default → task skipped with success
 # export EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN=500   # per-run cap on samples pushed (labelled first; 0 = no cap)
 ```
 
@@ -740,10 +740,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — `collect_cisa_ics` runs by default in `edgeguard_daily` and the baseline; `EDGEGUARD_ENABLE_CISA_ICS=false` skips it with success. `baseline_clean`: what the wipe clears: the checkpoint file with the whole incremental state, the OTX retry list and the `report_pending` lists included, and their gauges set to empty lists; the EdgeGuard events with their `-part<N>` and `-reports` events and Event Reports. MISP's log entries stay.
 - 2026-11-07 — The writer of the scheduled `collect_cisa_ics` is given its task's end (`task_ends_at`) too.
 - 2026-11-07 — The writer of the scheduled `collect_otx` is given its task's end (`task_ends_at`), as the baseline's writer is: a failing streak and the pushes of the run's report records stop 10 minutes before it.
 - 2026-11-07 — Deduplication: the constraint table names `ThreatReport` and `VulnerabilityAdvisory`, unique on `record_ref`, which `create_constraints` creates ahead of the sync that writes report records.

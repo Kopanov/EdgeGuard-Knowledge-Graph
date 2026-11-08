@@ -61,7 +61,7 @@ Every command accepts `--help`. `edgeguard --update` is a synonym of `edgeguard 
 | `dag kill` | Force-fail stuck DAG runs |
 
 - **`stats`**: `--full` adds node counts by sector and by source and the MISP event summary; `--by-zone` and `--by-source` show one breakdown each; `--misp` counts MISP events and attributes per source over every page of `/events/index` that matches `EdgeGuard`, up to 200 pages of 500 events (a warning names a stop at that cap), each event once (a MISP that ignores the query-string paging answers the whole listing on every page).
-- **`checkpoint status`**: `--source` filters one source. **`checkpoint clear`** keeps the incremental cursors unless `--include-incremental` is given; `--source` clears one source and `--force` skips the confirmation.
+- **`checkpoint status`**: `--source` filters one source. **`checkpoint clear`** keeps each source's incremental state (the cursors, the OTX retry list and the `report_pending` lists of OTX and CISA ICS) unless `--include-incremental` is given, which clears it as well; `--source` clears one source and `--force` skips the confirmation.
 - **`dag status`**: `--dag-id`, `--state` (`running`, `queued`, `failed`, `success`) and `--limit` (runs per DAG, default 5). It reads Airflow's health answer first: when the scheduler or the metadata database is not healthy (`airflow standalone` keeps the API server up when the scheduler dies), it still lists the runs, states that the runs shown as running or queued are not progressing, and exits 1. The recovery it prints keeps the runs: restore the metadata database first when it is unhealthy, let a running task end when the run's time allows (a restart runs it again from its start), restart Airflow, and do not trigger the runs again. A triggerer or DAG processor that Airflow lists without status runs no job of its own and is information. **`dag kill`** keeps the checkpoints; `--dag-id`, `--dry-run` and `--force`.
 - `stats`, `checkpoint status`, `dag status` and `preflight` accept `--json`; the JSON follows a text banner on standard output.
 
@@ -95,8 +95,8 @@ The run configuration keys are listed in [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md); the
 | Command | Purpose |
 |---|---|
 | `clear neo4j` | Delete the graph data (constraints stay) |
-| `clear misp` | Delete every EdgeGuard event from MISP |
-| `clear all` | Neo4j, MISP and checkpoints |
+| `clear misp` | Delete every EdgeGuard event from MISP, with its Event Reports |
+| `clear all` | Neo4j, MISP and checkpoints (incremental state included) |
 
 - `clear neo4j --edgeguard-only` deletes only the nodes EdgeGuard created (`edgeguard_managed = true`) and their relationships; nodes a partner created first stay, also where EdgeGuard enriched them. Use it on a database shared with ResilMesh.
 - Every `clear` command asks for confirmation; `--force` skips it. Each MISP event delete may wait up to `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` (900 s by default).
@@ -179,6 +179,7 @@ Run them from the repository root with the settings exported.
 | `scripts/resilmesh_stix_smoke.sh` | Export one STIX bundle of every type |
 | `scripts/build_canonical_threat_actors.py` | Rebuild the canonical threat-actor reference |
 | `scripts/build_attack_revoked_ids.py` | Rebuild the revoked ATT&CK id map |
+| `scripts/build_cwe_names.py` | Rebuild the pinned MITRE CWE name list |
 | `scripts/run_cypher_catalog_http.py` | Run the Cypher catalog over the HTTP API |
 | `scripts/runtime_smoke_checklist.sh` | Print and probe the runtime smoke steps |
 | `scripts/debug_zone_check.py` | Standalone check of the sector logic |
@@ -197,6 +198,7 @@ Run them from the repository root with the settings exported.
   ```
 
 - **`import_curated_package.py <package.json>`** validates the package; `--check-graph` reports which claims would attach to existing nodes, and `--push` creates the MISP event ([RUNBOOK.md § Importing a curated package](RUNBOOK.md#importing-a-curated-package)).
+- **`build_cwe_names.py <cwec_latest.xml.zip> [--captured-at YYYY-MM-DD]`** rebuilds `src/reference/cwe_names.json`, the CWE names the NVD and KEV collectors write into each CVE record, from MITRE's CWE list zip. `--captured-at` is the download day (default today) and `--output` writes another file. Run it only before a fresh baseline, never between baselines ([RUNBOOK.md § Rebuilding the CWE name list](RUNBOOK.md#rebuilding-the-cwe-name-list)).
 - **`clear_neo4j.py`** deletes, with `--force`, the nodes EdgeGuard created (`edgeguard_managed = true`) and their relationships, through the wipe of the fresh baseline; nodes another system created, such as a partner's `Vulnerability` and `CVE` nodes, stay, also where EdgeGuard enriched them. `--label` deletes only the EdgeGuard-created nodes of one label (no `--force` needed; the label must be one the graph client allows). `--full-wipe` deletes every node in the database, partner data included: it prints how many nodes EdgeGuard did not create and asks to type `FULL-WIPE`, also with `--force`; it cannot be combined with `--label`. `--dry-run` prints the scope and the nodes kept, and deletes nothing. After a delete the script recreates the `Source` nodes (`--no-recreate` leaves them out; never with `--label`) and clears the collector checkpoints. Every delete writes a line to the destructive-operations audit trail ([BACKUP.md](BACKUP.md#audit-trail-and-what-this-procedure-does-not-cover)), also a delete that fails part-way: that line has `details.outcome = "failed"` and counts the nodes and relationships deleted before the failure. Exit 0: done or dry run; 1: no action given, refused, aborted or failed; 2: `--label` with `--full-wipe`.
 - **`clear_misp.py`** deletes the EdgeGuard MISP events; `clear_misp.py --old DAYS` deletes the events older than that. Both scripts take `--dry-run` and `--force`.
 - **`preflight_ci.sh`** compiles `dags/` and `src/collectors/`, runs the unit tests and loads the DAGs with `DagBag(include_examples=False)`. On Airflow 3.3, whose `DagBag` has no `include_examples` argument, that step stops with a `TypeError`; check the DAG parse with `docker compose exec airflow airflow dags list-import-errors` instead.
@@ -228,10 +230,11 @@ A baseline, smoke or 730-day, runs through the `edgeguard_baseline` DAG on every
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — `checkpoint clear` keeps or clears the whole incremental state of a source: the cursors, the OTX retry list and the `report_pending` lists of OTX and CISA ICS (the page named the cursors only); `clear misp` deletes the events' Event Reports with them. Operator scripts: `build_cwe_names.py` rebuilds the pinned MITRE CWE name list `src/reference/cwe_names.json`, only before a fresh baseline.
 - 2026-11-02 — `run_pipeline.py` does not read the baseline lock, so it is run only while no `edgeguard_baseline` run is queued or running (the page did not say so), and the pipeline lock holds the PID of a running `python src/run_pipeline.py` (it said an in-process run). `baseline` and `fresh-baseline` also exit 2 when the trigger fails or is not answered in time. `preflight_baseline.sh`: `dag` is the only launch path, and check `[13]` also fails on a metadata database Airflow does not report healthy (the text named the scheduler only).
 - 2026-11-02 — `stats --misp` counts each event once on a MISP that answers the whole listing on every page.
 - 2026-11-02 — `run_pipeline.py` runs the collectors into MISP only, exits 1 when a collector failed and 2 on `--baseline`, `--fresh-baseline`, `--baseline-days` and `--stix-flow`, with directions to the `edgeguard_baseline` DAG through the `edgeguard` baseline commands on every install, `airflow dags trigger` as the raw alternative (it loaded Neo4j through a STIX import, and its `--baseline` built a reduced graph); the module list runs it instead of its baseline. The refusal and `--help` need no Neo4j or MISP settings (`config` and the collectors are imported after them). `preflight_baseline.sh` refuses `--launch-path=cli`.

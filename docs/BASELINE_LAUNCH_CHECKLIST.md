@@ -337,6 +337,17 @@ clearing:
    short SHA of the checkout.
    `edgeguard doctor` must report Airflow `3.3.x` with no drift warning; the DAG list must
    load with zero parse errors.
+
+   Check the MISP writer key for report records (one MISP Event Report per OTX pulse and per CISA ICS advisory). The check only reads from MISP and writes nothing. It runs in the recreated `airflow` container with the deployment's MISP URL and key:
+   ```bash
+   docker exec edgeguard_airflow python -c "from collectors.misp_writer import MISPWriter; r = MISPWriter().report_preflight(); print('ok' if r.ok else '\n'.join(r.problems))"
+   ```
+   The last line on stdout must be `ok`. Log lines on stderr (the SSL setting, `[REPORT-PREFLIGHT]`) do not count. The check needs three things:
+   - the key's role has `perm_tagger`;
+   - the role does not have `perm_sync_authoritative`;
+   - every tag the writer sets on a report (`EdgeGuard`, the OTX and CISA ICS source tags, and `tlp:white`, `tlp:clear`, `tlp:green`, `tlp:amber`, `tlp:amber+strict` and `tlp:red`) exists in MISP, or the role has `perm_tag_editor`.
+
+   If one of these fails, MISP keeps the reports but drops their tags. Each printed line names the problem. Fix it in MISP: change the role of the key's user (*Administration → List Roles*) or create the missing tags. Then run the check again ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)).
 1. **MISP Import Regexp: keep MISP's default rules.** MISP applies the rules under
    *Input Filters → Import Regexp* to every attribute value it stores, and a fresh MISP
    database holds the default rules. They normalise Windows paths in
@@ -350,10 +361,11 @@ clearing:
    ATT&CK id, the sync skips the value with an `[ATTACK-VALUE]` warning, and the
    acceptance check `mangled_attack_entries_present` reports the ATT&CK entries named
    "Windows …" that are missing from the graph.
-2. **Flags.** Decide `EDGEGUARD_ENABLE_MITRE_ICS`, `EDGEGUARD_ENABLE_CISA_ICS` and
-   `EDGEGUARD_ENABLE_MALWAREBAZAAR` (all default `false`). Recommended: run the baseline
-   with all three **off**, run `scripts/verify_fresh_baseline.py`, then enable them one at
-   a time (step 6).
+2. **Flags.** Decide `EDGEGUARD_ENABLE_MITRE_ICS` and `EDGEGUARD_ENABLE_MALWAREBAZAAR`
+   (default `false`) and `EDGEGUARD_ENABLE_CISA_ICS` (default `true`: the baseline collects
+   the CISA ICS advisories unless it is set to `false`). Recommended: run the baseline with
+   the two opt-in sources **off**, run `scripts/verify_fresh_baseline.py --require-cisa-ics`,
+   then enable them one at a time (step 6).
    On the Compose deployment the flags live in `.env` and reach the `airflow`
    container only through the `x-common-env` block of `docker-compose.yml`; after
    changing `.env` run `docker compose up -d airflow`. `EDGEGUARD_DEFAULT_TLP` (`white`),
@@ -379,12 +391,13 @@ clearing:
    EdgeGuard wrote to them. The command then runs the backup gate
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
-   finishes, run `python scripts/verify_fresh_baseline.py` with `NEO4J_USER`,
+   finishes, run `python scripts/verify_fresh_baseline.py --require-cisa-ics` with `NEO4J_USER`,
    `NEO4J_PASSWORD` and `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` of the instance under test
    in the environment (on the Compose host, `set -a; . ./.env; set +a`). It reads the Compose
    Neo4j at `http://127.0.0.1:7474`; when the instance under test is another one, set
    `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) to its HTTP address. Every mandatory check must
-   pass before the instance is handed to the partners or the demo.
+   pass before the instance is handed to the partners or the demo. Leave out
+   `--require-cisa-ics` only when `EDGEGUARD_ENABLE_CISA_ICS=false`.
    `uses_malware_complete` / `uses_tool_complete` are mandatory as soon
    as a MITRE actor exists: zero claims then means the `m` / `s` lists were lost in transit,
    not "collector not run yet". With OTX collected, add `--require-otx-industries`: it fails
@@ -444,7 +457,8 @@ clearing:
      TLP level.
 6. **Enable the optional sources one at a time** (each followed by the acceptance script
    with `--require-cisa-ics` / `--require-ics` / `--require-malwarebazaar`):
-   - `EDGEGUARD_ENABLE_CISA_ICS=true`, `docker compose up -d airflow`, then one **additive**
+   - CISA ICS, only on a graph built with `EDGEGUARD_ENABLE_CISA_ICS=false`: remove the
+     setting (or set it to `true`), `docker compose up -d airflow`, then one **additive**
      `edgeguard baseline --days 730` (same DAG, no wipe). The daily task alone would load
      only the last `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS` (30) days of advisories.
    - `EDGEGUARD_ENABLE_MITRE_ICS=true`, `docker compose up -d airflow`, then either the same
@@ -613,7 +627,7 @@ and never fails; the others (`claims_with_target`) are the claims judged.
 | ATT&CK domains (`in_tactic_same_domain`, always) | no `IN_TACTIC` between a technique and a tactic of different `attack_domain`; informational without an `IN_TACTIC` link. With `--require-ics` (`ics_techniques_present`), at least one `attack_domain = 'ics'` technique |
 | Technique → tactic (`in_tactic_complete`) | every kill-chain phase of a `Technique` (`tactic_phases`) whose `Tactic` exists in the technique's ATT&CK domain (by `shortname`) has its `IN_TACTIC` (`build_relationships` step 1), and a technique with phases reaches a tactic. Fails when the techniques carry no phases at all. Informational without a `Technique`. |
 | ATT&CK links of groups, software and indicators (`employs_technique_complete`, `implements_technique_complete`, `uses_technique_complete`) | every technique a node claims, translated through the revoked-id map as the writer translates it, has its link once the `Technique` exists: `EMPLOYS_TECHNIQUE` from a `ThreatActor` and `IMPLEMENTS_TECHNIQUE` from a `Malware` or `Tool` labelled `mitre_explicit` (`uses_techniques`, steps 5, 6 and 10), `USES_TECHNIQUE` from an `Indicator` (`attack_ids` of its OTX report, step 8). MITRE actors, malware or tools without a single claim fail (the claims were lost on the way to the node). Informational without MITRE nodes and claims of the label, `uses_technique_complete` without an indicator claim, and when no claim reaches an existing `Technique` (`claims_with_target` 0; a graph without any `Technique` fails `mangled_attack_entries_present`). Malware and Tool are read by two statements. Indicator claims that name a technique the graph does not hold are reported, not judged (the step 8 skip count) |
-| CISA ICS (`cisa_ics_source_present`, with `--require-cisa-ics`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges, and the sectors its advisories state linked as `advisory_sector` once its records carry their zones (`cisa_stated_sectors_linked_as_advisory_sector`, see "Sector evidence" below). Pass the flag after a baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`; without it the check is informational |
+| CISA ICS (`cisa_ics_source_present`, with `--require-cisa-ics`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges, and the sectors its advisories state linked as `advisory_sector` once its records carry their zones (`cisa_stated_sectors_linked_as_advisory_sector`, see "Sector evidence" below). Pass the flag after every baseline that ran with CISA ICS on (the default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off); without it the check is informational and a missing source is the warning of `default_sources_delivered` |
 | MalwareBazaar (`malwarebazaar_source_present`, with `--require-malwarebazaar`) | `Source {source_id: 'malwarebazaar'}` present with at least one sha256 hash indicator sourced from it. Pass the flag after a baseline with `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`; without it the check is informational |
 | Revoked ATT&CK objects (`no_revoked_attack_techniques`, `no_revoked_attack_groups`, `no_revoked_attack_software`; `revoked_group_names_folded` is a **warning**) | no `Technique` carries an id `src/reference/attack_revoked_ids.json` lists, no `ThreatActor` from MITRE is a revoked group and no `Malware` / `Tool` from MITRE is revoked software (by name); a warning when an actor from another source bears a revoked group's name (the alias merge folds it into the successor). Informational without Technique nodes / MITRE actors / MITRE software; all three fail when the map cannot be read |
 | Explainability (`translated_links_record_cited_ids`; `actor_merges_recorded` is informational) | every `USES_TECHNIQUE` link from an indicator to the successor of a revoked id in its `attack_ids` names that id in `r.cited_ids`; the count of actors with `merged_from` and of the names folded into them. Informational without such links; fails when the map cannot be read |
@@ -644,7 +658,7 @@ and never fails; the others (`claims_with_target`) are the claims judged.
 | FIRST EPSS and CISA's SSVC (`cve_epss_and_ssvc`, **warning**) | warns when `CVE` nodes exist and none carries `epss_score`: EPSS is off (`EDGEGUARD_ENABLE_EPSS=false`) or the feed was unavailable (the enrichment task log has an `[EPSS]` line). Reports the CVEs with EPSS, the number of EPSS score dates (one expected; more mean a run stopped before clearing, or matched too few nodes to clear) and the latest, and the CVEs with a CISA SSVC decision and with `ssvc_exploitation = 'active'`. Informational while there is no CVE |
 | Sector evidence (`sector_links_name_only_feeds_that_gave_the_sector`, `advisory_sector_only_where_cisa_stated`, `cisa_stated_sectors_linked_as_advisory_sector`, `sector_links_cite_only_records_that_gave_the_sector`, `otx_industries_only_where_otx_stated`, `otx_stated_sectors_linked_as_otx_industries`, `sector_confidence_follows_label`) | every link to a `Sector` names only the feeds whose `SOURCED_FROM.zones` hold that sector (not judged when no edge has `zones` or no EdgeGuard link reaches a `Sector`); `advisory_sector` only on `AFFECTS` from a CVE to a sector the `cisa_ics` edge lists in `stated_zones`, and every such stated sector linked with it (with `--require-cisa-ics`, at least one once the `cisa_ics` edges carry `zones`); a sector link cites, of the CISA ICS advisories, only those whose sector note names its sector (the edge's `stated_refs`; not judged when no `cisa_ics` edge has them or no EdgeGuard link reaches a `Sector`); `otx_industries` only on `TARGETS` from an Indicator, ThreatActor or Malware to a sector the `alienvault_otx` edge lists in `stated_zones`, citing one of the pulses its `stated_refs` record for that sector, and every such stated sector linked with it (`otx_industries_only_where_otx_stated` informational while no link carries the label, `otx_stated_sectors_linked_as_otx_industries` while no OTX record states a sector; with `--require-otx-industries`, at least one stated sector once the `alienvault_otx` edges give a sector); the confidence of a sector link is its label's value in `src/sector_evidence.py` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9). Reported: `sector_links_by_evidence_label`, `sector_evidence_breakdown`, `cisa_ics_contribution` (per sector: stated, by CISA alone, also inferred; CISA records with no tracked sector) and `node_sectors_without_a_feed` (and nodes with `global` next to a sector) |
 | Ranked descriptions and indicator aging (`descriptions_name_their_source`, `indicators_have_aging_basis`) | every EdgeGuard node with a ranked description (labels from `src/description_ranking.py`) names its source in `description_source`; every EdgeGuard `Indicator` has `aging_basis` and `source_confidence`. Informational while the graph holds no such node |
-| Per-source presence (`default_sources_delivered`, **warning**) | the `SOURCED_FROM` count of every `Source` node is listed; a source collected by default (`cisa_kev`, `mitre_attck`, `nvd`, `feodo_tracker`, `ssl_blacklist`) with none is a warning — look at that collector's task in the baseline run (an upstream outage skips it without failing the run). Keyed sources without data (`alienvault_otx`, `virustotal`, `threatfox`, `urlhaus`, `abuseipdb`: skipped by design without a key; URLhaus uses `THREATFOX_API_KEY`) and the flag-guarded ones (`cisa_ics`, `malwarebazaar`) are only listed |
+| Per-source presence (`default_sources_delivered`, **warning**) | the `SOURCED_FROM` count of every `Source` node is listed; a source collected by default (`cisa_kev`, `cisa_ics`, `mitre_attck`, `nvd`, `feodo_tracker`, `ssl_blacklist`) with none is a warning — look at that collector's task in the baseline run (an upstream outage skips it without failing the run). Keyed sources without data (`alienvault_otx`, `virustotal`, `threatfox`, `urlhaus`, `abuseipdb`: skipped by design without a key; URLhaus uses `THREATFOX_API_KEY`) and the flag-guarded one (`malwarebazaar`) are only listed |
 
 Reported only, never judged: `inventory` (node and relationship counts), `evidence_labels_breakdown`
 (`match_type` per relationship type) and `relationship_sources_breakdown` (`r.sources` per relationship type).
@@ -693,10 +707,11 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS is on by default: step 2 runs the baseline with it and the acceptance script with `--require-cisa-ics`; step 6 turns it back on only for a graph built with `EDGEGUARD_ENABLE_CISA_ICS=false`; `default_sources_delivered` counts `cisa_ics` among the default sources. Step 0: the read-only check of the MISP writer key for report records (`MISPWriter.report_preflight`: `perm_tagger`, no `perm_sync_authoritative`, the report tags present or `perm_tag_editor`), with the fix when it fails. Step 4 runs the acceptance script with `--require-cisa-ics`.
 - 2026-11-07 — Malware twins: the MITRE node's ATT&CK id is read from its `mitre_id`, else the delivered record's, before the description's link.
 - 2026-11-07 — Item [7]: the version check no longer quotes a CalVer number (main moved to 2026.11.7); the commit check is unchanged.
 - 2026-11-06 — Acceptance check `campaign_indicators_have_evidence`; `campaign_malware_has_evidence` and `campaigns_have_evidence` judge a link to a shared malware (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`, default 7) as evidence only for the indicators of its own records; the three judge each campaign with the list of shared malware its build recorded, and the script runs with the deployment's value (sourced `.env`); the campaign checks can fail by design until the enrichment run after a sync.

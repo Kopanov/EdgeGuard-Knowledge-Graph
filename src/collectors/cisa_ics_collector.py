@@ -24,9 +24,10 @@ the graph a mapped sector is the CVE's ``AFFECTS`` link labelled
 
 Safety contract (2026-10)
 -------------------------
-- **Flag-guarded**: ``EDGEGUARD_ENABLE_CISA_ICS`` (default OFF). When off,
-  ``collect()`` logs "disabled by flag" and returns a skipped status
-  (``success=True``, ``count=0``) without a single HTTP request.
+- **Flag-guarded, on by default**: ``EDGEGUARD_ENABLE_CISA_ICS`` (default
+  true). When an operator sets it to false, ``collect()`` logs "disabled by
+  flag" and returns a skipped status (``success=True``, ``count=0``) without
+  a single HTTP request.
 - **Isolated**: shares nothing with the KEV collector except the generic
   helpers in ``collector_utils`` (retry, rate limiter, status factory).
 - **Polite**: sequential fetches through a ``RateLimiter`` (4 req/s), HTTP
@@ -783,10 +784,13 @@ class CISAICSCollector:
 
     @staticmethod
     def is_enabled() -> bool:
-        """Return ``config.ENABLE_CISA_ICS`` (resolved when ``config`` is imported; tests patch the attribute)."""
+        """Return ``config.ENABLE_CISA_ICS`` (resolved when ``config`` is imported; tests patch the attribute).
+
+        Without the attribute the collector follows the default of ``EDGEGUARD_ENABLE_CISA_ICS``: on.
+        """
         import config as _config
 
-        return bool(getattr(_config, "ENABLE_CISA_ICS", False))
+        return bool(getattr(_config, "ENABLE_CISA_ICS", True))
 
     def health_check(self) -> Dict[str, Any]:
         """Check reachability of the advisory index on GitHub raw."""
@@ -1112,7 +1116,8 @@ class CISAICSCollector:
         """
         if not self.is_enabled():
             logger.info(
-                "CISA ICS collector disabled by flag (EDGEGUARD_ENABLE_CISA_ICS is not true) — skipping, 0 items"
+                "CISA ICS collector disabled by flag (EDGEGUARD_ENABLE_CISA_ICS is not true; unset it or set it to true "
+                "to collect again) — skipping, 0 items"
             )
             if push_to_misp:
                 return make_skipped_optional_source(

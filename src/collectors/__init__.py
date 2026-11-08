@@ -10,7 +10,7 @@ Available Collectors:
 - ThreatFoxCollector: Malware IOCs from ThreatFox
 - URLhausCollector: Malware URLs from URLhaus
 - CISACollector: Known Exploited Vulnerabilities from CISA
-- CISAICSCollector: CISA ICS advisories (CSAF 2.0) with source-asserted sectors (flag-guarded)
+- CISAICSCollector: CISA ICS advisories (CSAF 2.0) with source-asserted sectors (on by default)
 - MalwareBazaarCollector: Malware sample hashes with family labels from MalwareBazaar (flag-guarded)
 - MITRECollector: MITRE ATT&CK framework data
 - NVDCollector: National Vulnerability Database

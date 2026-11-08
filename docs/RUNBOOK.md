@@ -1217,6 +1217,11 @@ again. The `baseline_in_progress.lock` sentinel is held by the DAG
    `[edgeguard] collector pool edgeguard_collectors set to <n> slots`. Without
    the pool, no collector task is scheduled
    ([AIRFLOW_DAGS.md § Collector pool: setup and resizing](AIRFLOW_DAGS.md#collector-pool-setup-and-resizing)).
+9. **Report writer key checked.** The read-only check of the writer key for report records:
+   ```bash
+   docker compose exec airflow python -c "from collectors.misp_writer import MISPWriter; r = MISPWriter().report_preflight(); print('ok' if r.ok else '\n'.join(r.problems))"
+   ```
+   prints `ok` and writes nothing to MISP. Otherwise it prints one line for each problem: the role lacks `perm_tagger` or has `perm_sync_authoritative`, tags the writer sets are missing and the role lacks `perm_tag_editor`, or the role or the tags could not be read. Before the run, fix the role or create the missing tags in MISP ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)). The command's own log lines carry the same result as `[REPORT-PREFLIGHT]`; no task runs the check.
 
 ### During the run
 
@@ -1265,6 +1270,19 @@ RETURN label, c ORDER BY c DESC;
 
 Any non-zero on #1–#3 = regression; file issue.
 
+Then check the report records. The OTX collector, and the CISA ICS collector when `EDGEGUARD_ENABLE_CISA_ICS` is true, logs one report-records line per run. A record that fails never fails the task, and no alert reads the `report_pending` gauges, so a run whose records all failed still ends green:
+
+```bash
+docker logs edgeguard_airflow 2>&1 | grep -E '\[REPORTS\] (OTX|CISA ICS):'
+# expected: [REPORTS] OTX: N pulse record(s) this run: … 0 failed, 0 not tried; 0 record(s) on report_pending after the run, 0 given up
+#           [REPORTS] CISA ICS: N advisory record(s) this run: … 0 failed, 0 not tried; 0 record(s) on report_pending after the run, 0 given up
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=edgeguard_report_pending_records' | \
+  jq '.data.result[] | {source: .metric.source, value: .value[1]}'
+# expected: 0 for alienvault_otx and cisa_ics
+```
+
+A line at WARNING, a count above 0 or a line that is missing has its own section: [OTX report records waiting on report_pending](#otx-report-records-waiting-on-report_pending) and [CISA ICS report records waiting on report_pending](#cisa-ics-report-records-waiting-on-report_pending). Records given up are counted by `edgeguard_report_pending_given_up_total`.
+
 Then run the acceptance script, `python scripts/verify_fresh_baseline.py`
 ([BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § "Fresh-baseline
 acceptance"). It reads the Compose Neo4j at `http://127.0.0.1:7474` with
@@ -1293,7 +1311,7 @@ It also reports, without judging, the sector links by type and label (`sector_li
 and by type, start label, sector and label (`sector_evidence_breakdown`), what CISA ICS adds per sector (`cisa_ics_contribution`: stated, by CISA
 alone, also inferred, and the CISA records whose advisory named no tracked sector) and the node sectors no
 feed gave and the nodes holding `global` next to a sector (`node_sectors_without_a_feed`). After the
-730-day baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`, run it with `--require-cisa-ics`, and after a
+730-day baseline with CISA ICS on (the default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off), run it with `--require-cisa-ics`, and after a
 baseline that collected OTX with `--require-otx-industries` (a run that lost the pulses' industries on the
 way to the sync otherwise looks like a graph without OTX statements, which the OTX checks do not judge).
 
@@ -1679,10 +1697,11 @@ MISP logs every Event Report that `MISPWriter.push_reports` adds or edits with i
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Acceptance: CISA ICS is on by default, so the script runs with `--require-cisa-ics` after every 730-day baseline that kept it on. Before a 730d baseline run: item 9 runs the read-only check of the report writer key (`MISPWriter.report_preflight`) and says what to fix. After the run: check the report records, using the `[REPORTS] OTX` and `[REPORTS] CISA ICS` lines and `edgeguard_report_pending_records`, because a record that fails never fails the task and no alert reads the gauges.
 - 2026-11-07 — New section "Rebuilding the CWE name list": the pinned MITRE CWE list the NVD and KEV collectors name CWE ids from, rebuilt only before a fresh baseline. CISA KEV revisions: a change to an entry's notes, CWE ids or forensic-triage flag is an edit too.
 - 2026-11-07 — MISP push stopped: the writer of the scheduled `collect_cisa_ics` also stops a failing streak 10 minutes before its task's end.
 - 2026-11-07 — New section "CISA ICS report records waiting on report_pending": the list, its signals and log lines, a list that cannot be saved, and how to recover.

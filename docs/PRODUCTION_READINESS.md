@@ -19,7 +19,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Component | Status | Notes |
 |---|---|---|
 | Docker Compose stack | Ready | Started by `./install.sh`; MISP is external |
-| Data collectors | Ready | 10 sources by default, 3 opt-in, FIRST EPSS |
+| Data collectors | Ready | 11 sources by default, 2 opt-in, FIRST EPSS |
 | MISP integration | Ready | Sanitised writes, retries, adaptive batches |
 | MISP → Neo4j sync | Ready | Paged event listing, chunked writes |
 | Knowledge graph schema | Ready | Constraints, provenance on every source-built link |
@@ -37,14 +37,14 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Automated code review | Ready | Pull-request review with project rules |
 
 - **Docker Compose stack.** One host runs Neo4j with APOC, Airflow with its PostgreSQL, the `metrics` service and the REST and GraphQL APIs, every port published on 127.0.0.1; `./install.sh` generates the secrets and starts it.
-- **Data collectors.** OTX, NVD, CISA KEV, MITRE ATT&CK, VirusTotal (lookups of hashes already in MISP), AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker and SSL Blacklist write to MISP; CISA ICS, ATT&CK for ICS and MalwareBazaar are off by default; FIRST EPSS scores go to the `CVE` nodes directly. Curated packages are imported through MISP.
-- **MISP integration.** MISP is the single source of truth for collected data; `OTX_META` / `TF_META` / `NVD_META` comment blocks and `alias:<name>` tags carry metadata and aliases to Neo4j.
+- **Data collectors.** OTX, NVD, CISA KEV, MITRE ATT&CK, VirusTotal (lookups of hashes already in MISP), AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist and CISA ICS write to MISP (CISA ICS unless `EDGEGUARD_ENABLE_CISA_ICS=false`); ATT&CK for ICS and MalwareBazaar are off by default; FIRST EPSS scores go to the `CVE` nodes directly. Curated packages are imported through MISP.
+- **MISP integration.** MISP is the single source of truth for collected data; `OTX_META` / `TF_META` / `NVD_META` comment blocks and `alias:<name>` tags carry metadata and aliases to Neo4j. MISP also keeps one Event Report per OTX pulse and per CISA ICS advisory, the source record as the source states it; the sync does not read these reports yet ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)).
 - **Knowledge graph schema.** Single-key `MERGE` deduplication across sources; every relationship built from the sources names its sources, their record ids and the MISP events (`sources[]`, `source_refs[]`, `misp_event_ids[]`), and the linking ones carry `match_type` and a confidence. The shared-database contract marks nodes EdgeGuard creates with `edgeguard_managed` and partner nodes it writes to with `edgeguard_enriched`; `CVE` and its CVSS sub-nodes follow the ResilMesh data model, and partner-owned labels get no UNIQUE constraint.
 - **Post-sync enrichment.** Vulnerability–CVE bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging, campaigns and FIRST EPSS ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)).
 - **Airflow DAGs.** `max_active_runs=1` and a `dagrun_timeout` on the baseline and the five scheduled DAGs (the metrics DAGs of `dags/edgeguard_metrics_server.py` have no `dagrun_timeout`), `execution_timeout` on every task, failure and success callbacks; the baseline DAG is created unpaused, the five scheduled DAGs paused. The sync runs every 72 hours.
 - **Baseline safety.** The baseline DAG holds the baseline lock for the whole run, so the scheduled DAGs skip; `edgeguard baseline` and `edgeguard fresh-baseline` refuse to trigger while the Airflow scheduler or metadata database is not healthy, while an `edgeguard_baseline` run is queued or running, or when Airflow cannot be read ([CLI.md § Baseline triggers](CLI.md#baseline-triggers)); a destructive baseline passes the backup gate, and its Neo4j wipe, like those of `edgeguard clear` and `scripts/clear_neo4j.py`, is recorded in `logs/destructive_ops.jsonl` and the counter `edgeguard_destructive_ops_total` ([BACKUP.md](BACKUP.md)).
 - **REST and GraphQL APIs.** `X-API-Key` authentication (required in production), rate limits, a request-body cap and `GET /health` with HTTP 503 while Neo4j is degraded. STIX 2.1 bundles are deterministic and parse under strict `stix2.parse` ([RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md)); the Graph Explorer reads `GET /graph/explore` ([GRAPH_EXPLORER.md](GRAPH_EXPLORER.md)).
-- **Monitoring and metrics.** The metrics of every Airflow task process are served by the `metrics` service on 8001 (Prometheus scrapes `metrics:8001` over `edgeguard_net`); the alert rules evaluate in Prometheus and a Grafana dashboard is provisioned. Once `prometheus/secrets/slack_api_url` is provided, Slack receives the critical and the collector alerts; the circuit-breaker alerts go to PagerDuty and every other alert to the default e-mail receiver, both placeholders, so those alerts are delivered only after a mailbox or a rendered key is configured ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#alertmanager-notifications)).
+- **Monitoring and metrics.** The metrics of every Airflow task process are served by the `metrics` service on 8001 (Prometheus scrapes `metrics:8001` over `edgeguard_net`); the alert rules evaluate in Prometheus and a Grafana dashboard is provisioned. Once `prometheus/secrets/slack_api_url` is provided, Slack receives the critical and the collector alerts; the circuit-breaker alerts go to PagerDuty and every other alert to the default e-mail receiver, both placeholders, so those alerts are delivered only after a mailbox or a rendered key is configured ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md#alertmanager-notifications)). The report-record metrics (`edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds`, `edgeguard_report_pending_given_up_total`) have no alert rule and no Grafana panel, so records that are waiting to be written to MISP, or were given up, show only in a Prometheus query ([PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md)).
 - **Automated code review.** Pull requests are reviewed automatically against project rules kept in the repository.
 - **Resilience.** Circuit breakers guard the feed fetches and the sync's MISP and Neo4j connection checks; VirusTotal, AbuseIPDB, FIRST EPSS and the collectors' MISP writes have none ([RESILIENCE_CONFIG.md](RESILIENCE_CONFIG.md)). Timestamps are timezone-aware UTC throughout ([TIMESTAMPS.md](TIMESTAMPS.md)).
 - **CLI.** `preflight`, `doctor`, `stats`, `dag`, `checkpoint`, the baseline triggers, `clear` and the install commands ([CLI.md](CLI.md)).
@@ -192,10 +192,11 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Data collectors: CISA ICS writes to MISP by default (`EDGEGUARD_ENABLE_CISA_ICS=false` turns it off). The collectors count 11 sources by default and 2 opt-in. MISP integration names the Event Reports kept per OTX pulse and CISA ICS advisory, which the sync does not read yet; Monitoring states that the report-record metrics have no alert rule and no Grafana panel.
 - 2026-11-07 — Feed values: the ThreatFox port is kept in `TF_META.ports`, and the records of one value in a run are merged.
 - 2026-11-02 — Baseline safety names the trigger check of `edgeguard baseline` and `fresh-baseline`. Testing Status describes the CI checks and when they run; the dated table of manual tests and CI runs (March and April 2026, with their file and test counts) is removed.
 - 2026-10-23 — The baseline-safety control names the Neo4j wipe of `scripts/clear_neo4j.py` among those the destructive-operations trail records.

@@ -21,8 +21,8 @@ de-risk the **730-day baseline production-test**.
 
 ## Why this document exists
 
-EdgeGuard's data path is 12 collectors (10 always on, MalwareBazaar and
-CISA ICS flag-guarded) → MISP → Neo4j → STIX/GraphQL/REST, with
+EdgeGuard's data path is 12 collectors (11 on by default, MalwareBazaar
+flag-guarded) → MISP → Neo4j → STIX/GraphQL/REST, with
 deterministic merge, zone detection, cross-event dedup, creator-org trust
 checks, and resumable checkpoints along the way.
 Any single file shows a fragment. This document shows the whole.
@@ -306,10 +306,11 @@ This keeps the cost of lying in a diagram at exactly "CI fails," which is the on
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — The data path counts 11 collectors on by default (CISA ICS among them) and MalwareBazaar flag-guarded.
 - 2026-11-01 — The sync writes the CVEs of a chunk with `merge_cves_batch` (in batches) instead of one `merge_cve` call per CVE.
 - 2026-11-01 — § 1 names the `edgeguard_baseline` DAG in `dags/edgeguard_pipeline.py` as the orchestration of a baseline (it named `src/run_pipeline.py`, which the DAG does not use).
 - 2026-10-18 — The pin-test is described as it runs: env vars, container names in `docker` commands, `src/*.py` paths and the removed `python -m` command forms; `edgeguard` subcommands are not checked.

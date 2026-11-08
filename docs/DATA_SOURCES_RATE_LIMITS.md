@@ -18,7 +18,7 @@
 | Feodo Tracker | ❌ No | No limit (CSV) | Free | CSV |
 | SSL Blacklist | ❌ No | No limit (CSV) | Free | CSV |
 | MalwareBazaar (flag-guarded) | ✅ Yes (abuse.ch Auth-Key, export) | One export download per run (about 450 KB) | Free | CSV |
-| CISA ICS advisories (flag-guarded) | ❌ No | GitHub raw files (`cisagov/CSAF`) | Free | CSAF 2.0 JSON |
+| CISA ICS advisories (on by default) | ❌ No | GitHub raw files (`cisagov/CSAF`) | Free | CSAF 2.0 JSON |
 | ThreatFox | ✅ Yes | Varies by key | Free tier | JSON |
 | MISP | ✅ Yes | Varies (self-hosted) | Free (self-hosted) | JSON |
 
@@ -355,10 +355,11 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-11-01_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS advisories are collected by default (`EDGEGUARD_ENABLE_CISA_ICS=false` turns them off).
 - 2026-11-01 — Environment variables: Airflow runs the scheduled DAGs and every baseline, also without Docker (the block called it optional); the block sets a PostgreSQL metadata database with placeholder credentials and names SQLite as development only.
 - 2026-10-25 — URLhaus: the export is regenerated every 5 minutes (the table said hourly); the recent export lists the URLs added in the past 30 days; the full dump is a v2 export with the Auth-Key of the URLs active or added in the past 90 days (the keyless `downloads/csv_all/` answers HTTP 410).
 - 2026-10-25 — The setup checklist names URLhaus and MalwareBazaar among the sources skipped without their key.

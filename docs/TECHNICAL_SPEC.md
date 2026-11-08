@@ -114,15 +114,13 @@ Auth:    Configured via environment variables
                             // corresponding STIX SDO id. See src/node_identity.py.
   // OTX enrichment fields
   attack_ids: LIST,              // MITRE ATT&CK technique IDs from OTX pulse
-  targeted_countries: LIST,      // ISO country codes from OTX pulse
+  targeted_countries: LIST,      // ISO country codes from the OTX pulse; only from a white, clear or green pulse
+                                 // (an amber or red pulse, or one that states no known TLP, keeps them in its report record)
   // ThreatFox enrichment fields
   malware_family: STRING,        // Associated malware family name
   malware_malpedia: STRING,      // Malpedia URL for the malware family
   reference: STRING,             // Source URL (ThreatFox IOC page, etc.)
   reporter: STRING,              // Who reported the IOC
-  // AbuseIPDB enrichment fields
-  domain: STRING,                // Reverse DNS domain
-  hostnames: LIST,               // Associated hostnames
   // VT enrichment fields
   yara_rules: LIST,                  // Crowdsourced YARA rule names
   sigma_rules: LIST,                 // Sigma detection rule titles
@@ -134,8 +132,14 @@ Auth:    Configured via environment variables
   pulse_malware_families: LIST,      // malware families named by the OTX pulse(s) that listed the IOC, without an ATT&CK software id suffix
   pulse_malware_actor_pairs: LIST,   // "family::adversary::pulse" pairs named by the same pulse, the family without the suffix
   several_actor_pulses: LIST,        // The OTX pulses that listed the IOC and that the OTX collector judged, with the canonical threat-actor reference, to name several actors (OTX_META.sap; a judgement by name without it, OTX_META.sapn, is not stored); step 2d links no pair of them and removes the same-pulse links resting only on them
-  // AbuseIPDB enrichment
-  abuse_categories: LIST,            // Abuse category IDs
+  // Not set by the sync: domain, hostnames and abuse_categories (written only from an item that carries them;
+  // no MISP record carries them, so the APIs return them empty).
+  // Not on the node yet: the TF_META of a list-source record in MISP also holds ports and families (ThreatFox,
+  // Feodo Tracker), ioc_ids, threat_types and confidence_level (ThreatFox), c2_status (Feodo Tracker),
+  // listing_reason and listing_family (SSL Blacklist), abuse_confidence_score and ip_country_code (AbuseIPDB),
+  // file_name, file_md5, file_sha1 and file_type (MalwareBazaar, VirusTotal), meaningful_name, threat_category,
+  // file_size, detection_malicious and detection_total (VirusTotal), and as_of
+  // (docs/MISP_SOURCES.md, "Metadata Comment Prefixes").
   // OTX enrichment
   indicator_role: STRING             // Role classification (C2, Dropper, etc.)
 })
@@ -187,11 +191,12 @@ Auth:    Configured via environment variables
   name: STRING,             // Technique name
   description: STRING,      // Ranked text: MITRE ATT&CK > a curated source > any other source; at most 500 characters, markup stripped (src/text_caps.py)
   description_source: STRING, // The source of description
-  platforms: LIST,          // Target platforms
   is_subtechnique: BOOLEAN, // true when mitre_id is dotted (T####.###), whatever the record says
   tactic_phases: LIST,      // Kill-chain phase shortnames (IN_TACTIC)
   attack_domain: STRING,    // enterprise / ics / mobile (default enterprise)
-  detection: STRING,        // ATT&CK detection text
+  // No platforms property: ATT&CK's platforms (every platform: tag, read in ATT&CK's spelling by src/attack_platforms.py)
+  // are kept only in the record's raw_data on SOURCED_FROM.
+  detection: STRING,        // Always an empty string: MISP holds no ATT&CK detection text, so the sync has none to write
   deprecated: BOOLEAN,      // ATT&CK's status: set and cleared by an ATT&CK record; another source only sets it
   source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   confidence_score: FLOAT,  // 0.0-1.0
@@ -1033,10 +1038,11 @@ other type is compared as given.
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Indicator: `domain`, `hostnames` and `abuse_categories` are set by no sync path; the list-source fields of `TF_META` stay in MISP; `targeted_countries` comes only from a white, clear or green pulse. Technique: no `platforms` property (ATT&CK's platforms are in the record's `raw_data` on `SOURCED_FROM`); `detection` is always an empty string, since MISP holds no ATT&CK detection text.
 - 2026-11-07 — CVE: MISP's `NVD_META` holds the source's whole description and the source facts not yet on the node (NVD analysis state, tagged references, CNA pairs, CVSS scorers, CWE names, KEV notes, CWE ids and forensic-triage flag).
 - 2026-11-07 — Descriptions: at most 1,000 characters on `CVE` and `Vulnerability` and 500 on `Malware`, `ThreatActor`, `Tool`, `Technique` and `Tactic`, markup stripped and cut at a sentence or word end by the sync (`src/text_caps.py`).
 - 2026-11-07 — Constraints `threatreport_key` and `vulnerabilityadvisory_key` (`record_ref`) for the report labels, created before any sync writes their nodes.

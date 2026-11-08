@@ -396,8 +396,9 @@ _REGISTRY: Tuple[Source, ...] = (
         reliable_first_seen=True,
     ),
     # CISA ICS advisories (2026-10): CSAF 2.0 files from cisagov/CSAF with a
-    # source-asserted critical-infrastructure sector per advisory. Flag-guarded
-    # (EDGEGUARD_ENABLE_CISA_ICS, default OFF) — hence cli_default_enabled=False.
+    # source-asserted critical-infrastructure sector per advisory. On by default
+    # (EDGEGUARD_ENABLE_CISA_ICS, default true; false turns it off) and needs no
+    # key — hence cli_default_enabled=True.
     Source(
         canonical_id="cisa_ics",
         aliases=("cisa-ics", "ics_advisories"),
@@ -407,7 +408,7 @@ _REGISTRY: Tuple[Source, ...] = (
         cli_id="cisa_ics",
         api_key_env=None,
         rate_limit="unlimited",
-        cli_default_enabled=False,
+        cli_default_enabled=True,
         cli_description="ICS-CERT advisories with critical-infrastructure sectors",
         misp_tag="source:CISA-ICS",
         # initial_release_date / current_release_date are CISA's own publish

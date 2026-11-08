@@ -29,7 +29,7 @@ COLLECT_SOURCES_CANONICAL: FrozenSet[str] = frozenset(
         "urlhaus",
         "feodo",
         "sslbl",
-        # CISA ICS advisories (2026-10) — flag-guarded by EDGEGUARD_ENABLE_CISA_ICS
+        # CISA ICS advisories — on by default; EDGEGUARD_ENABLE_CISA_ICS=false turns it off
         "cisa_ics",
         # MalwareBazaar (2026-10) — flag-guarded by EDGEGUARD_ENABLE_MALWAREBAZAAR
         "malwarebazaar",

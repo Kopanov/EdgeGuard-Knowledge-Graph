@@ -1266,12 +1266,12 @@ def run_mitre_collection(**context):
 
 
 def run_cisa_ics_collection(**context):
-    """Run the CISA ICS advisories collector with metrics (flag-guarded, default OFF).
+    """Run the CISA ICS advisories collector with metrics (flag-guarded, on by default).
 
-    ``EDGEGUARD_ENABLE_CISA_ICS`` unset/false → log "disabled by flag" and
+    ``EDGEGUARD_ENABLE_CISA_ICS=false`` → log "disabled by flag" and
     return a skipped status (success, 0 items) WITHOUT instantiating the
     collector or touching MISP — the task can never fail while the flag is
-    off. When enabled it goes through ``run_collector_with_metrics`` exactly
+    off. Unset or true (the default) → it goes through ``run_collector_with_metrics`` exactly
     like the other collectors (transient upstream failure → skip + alert;
     code defects fail loudly).
 
@@ -1291,8 +1291,8 @@ def run_cisa_ics_collection(**context):
         from collectors.collector_utils import make_skipped_optional_source
 
         logger.info(
-            "CISA_ICS skipped — disabled by flag (set EDGEGUARD_ENABLE_CISA_ICS=true to enable); "
-            "task success with 0 items"
+            "CISA_ICS skipped — disabled by flag (EDGEGUARD_ENABLE_CISA_ICS is not true; unset it or set it to true "
+            "to collect again); task success with 0 items"
         )
         return make_skipped_optional_source(
             "cisa_ics",
@@ -2015,8 +2015,8 @@ collect_mitre_daily = PythonOperator(
     dag=daily_dag,
 )
 
-# CISA ICS advisories (2026-10): flag-guarded by EDGEGUARD_ENABLE_CISA_ICS
-# (default OFF → task logs "disabled by flag" and succeeds with 0 items).
+# CISA ICS advisories: flag-guarded by EDGEGUARD_ENABLE_CISA_ICS, on by default
+# (false → task logs "disabled by flag" and succeeds with 0 items).
 collect_cisa_ics_daily = PythonOperator(
     task_id="collect_cisa_ics",
     pool=COLLECTOR_POOL,
@@ -2080,7 +2080,7 @@ log_daily_summary = BashOperator(
     bash_command="""
         echo "Daily Collectors Complete - $(date)"
         echo "  - MITRE ATT&CK"
-        echo "  - CISA ICS Advisories (flag-guarded: EDGEGUARD_ENABLE_CISA_ICS)"
+        echo "  - CISA ICS Advisories (on by default; EDGEGUARD_ENABLE_CISA_ICS=false turns it off)"
         echo "  - AbuseIPDB"
         echo "  - ThreatFox"
         echo "  - URLhaus"
@@ -3028,7 +3028,7 @@ def run_baseline_cisa(**context):
 
 
 def run_baseline_cisa_ics(**context):
-    """Baseline load of CISA ICS advisories (2026-10; flag-guarded like the daily task).
+    """Baseline load of CISA ICS advisories (flag-guarded like the daily task, on by default).
 
     Without this task the 24-month advisory history would only ever arrive through
     the daily ``changes.csv`` increments — i.e. never on a fresh re-feed.
@@ -3041,7 +3041,10 @@ def run_baseline_cisa_ics(**context):
     if not _cisa_ics_enabled:
         from collectors.collector_utils import make_skipped_optional_source
 
-        logger.info("CISA_ICS baseline skipped — disabled by flag (EDGEGUARD_ENABLE_CISA_ICS)")
+        logger.info(
+            "CISA_ICS baseline skipped — disabled by flag (EDGEGUARD_ENABLE_CISA_ICS is not true; unset it or set it "
+            "to true to collect again)"
+        )
         return make_skipped_optional_source(
             "cisa_ics",
             skip_reason="disabled by flag EDGEGUARD_ENABLE_CISA_ICS",
@@ -4430,8 +4433,8 @@ with TaskGroup(
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
-    # 2026-10: CISA ICS advisories — flag-guarded (EDGEGUARD_ENABLE_CISA_ICS); the
-    # wrapper returns a skipped status when the flag is off, so the task is inert.
+    # CISA ICS advisories — flag-guarded (EDGEGUARD_ENABLE_CISA_ICS, on by default); the
+    # wrapper returns a skipped status when the flag is false, so the task is inert.
     bl_cisa_ics = PythonOperator(
         task_id="collect_cisa_ics",
         pool=COLLECTOR_POOL,

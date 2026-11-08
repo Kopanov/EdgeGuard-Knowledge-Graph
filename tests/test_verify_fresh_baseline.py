@@ -81,13 +81,14 @@ def _healthy_scan() -> List[Dict[str, Any]]:
     return rows
 
 
-# ``SOURCED_FROM`` count per ``Source`` node on a correct default baseline: the keyed sources whose
-# key the deployment holds delivered, VirusTotal (no key) and the two flag-guarded sources did not,
-# and the alias nodes (``otx``, ``cisa``) never receive edges.
+# ``SOURCED_FROM`` count per ``Source`` node on a correct default baseline: the default sources
+# (CISA ICS among them) and the keyed sources whose key the deployment holds delivered, VirusTotal
+# (no key) and the flag-guarded MalwareBazaar did not, and the alias nodes (``otx``, ``cisa``) never
+# receive edges.
 _SOURCE_ROWS = [
     {"source_id": "abuseipdb", "sourced_from": 10000},
     {"source_id": "alienvault_otx", "sourced_from": 149000},
-    {"source_id": "cisa_ics", "sourced_from": 0},
+    {"source_id": "cisa_ics", "sourced_from": 2400},
     {"source_id": "cisa_kev", "sourced_from": 1500},
     {"source_id": "feodo_tracker", "sourced_from": 7600},
     {"source_id": "malwarebazaar", "sourced_from": 0},
@@ -1929,9 +1930,9 @@ class TestDefaultSourcesDelivered:
         assert c["ok"] is True and c["mandatory"] is False and rep.warnings == []
         assert c["detail"]["sourced_from_by_source"] == _SOURCE_ROWS
         assert c["detail"]["keyed_sources_without_data"] == ["virustotal"]
-        assert c["detail"]["flag_guarded_sources_without_data"] == ["cisa_ics", "malwarebazaar"]
+        assert c["detail"]["flag_guarded_sources_without_data"] == ["malwarebazaar"]
 
-    @pytest.mark.parametrize("source", ["feodo_tracker", "nvd", "ssl_blacklist"])
+    @pytest.mark.parametrize("source", ["feodo_tracker", "nvd", "ssl_blacklist", "cisa_ics"])
     def test_a_silent_default_source_warns_without_failing(self, vfb, monkeypatch, source):
         def override(st, rows):
             if "AS sourced_from" in st:
@@ -1984,7 +1985,8 @@ class TestDefaultSourcesDelivered:
         keyed = {canonical(name) for s in needs_key for name in s.sources} - flagged
         assert "urlhaus" in keyed, "the URLhaus export carries the abuse.ch key (THREATFOX_API_KEY)"
         assert set(vfb.KEYED_SOURCES) == keyed
-        assert set(vfb.FLAG_GUARDED_SOURCES) == flagged == {"cisa_ics", "malwarebazaar"}
+        assert set(vfb.FLAG_GUARDED_SOURCES) == flagged == {"malwarebazaar"}
+        assert "cisa_ics" in vfb.DEFAULT_SOURCES, "CISA ICS is on by default (EDGEGUARD_ENABLE_CISA_ICS)"
         assert set(vfb.DEFAULT_SOURCES) == collectors - keyed - flagged
         assert "nvd" in vfb.DEFAULT_SOURCES, "NVD needs no key (needs_key=False): it is collected by default"
 
