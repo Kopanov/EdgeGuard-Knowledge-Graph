@@ -728,7 +728,8 @@ class TestPendingRecords:
         assert cursor() == t1
 
     def test_an_advisory_the_item_limit_skips_is_still_read_for_its_pending_record(self, monkeypatch):
-        """Constructed: an item limit of 1 (only an override such as ``EDGEGUARD_MAX_ENTRIES`` sets one for CISA ICS).
+        """Constructed: an item limit of 1 (for CISA ICS only ``EDGEGUARD_MAX_ENTRIES`` on a scheduled run, or an explicit
+        baseline limit on a baseline, sets one).
         NX's items reach it; COMOS, selected by the run and so not queued as a pending read, has its record on
         report_pending and is read for that record only; ROCKWELL, without one, is not read. The cursor stays at
         NX, the last advisory read for its items."""
@@ -752,6 +753,84 @@ class TestPendingRecords:
         ]
         assert pending() == {} and st["stats"]["pending_fetched"] == 1
         assert cursor() == t1
+
+    def test_the_left_count_of_a_streak_stop_counts_the_reads_still_to_come(self, monkeypatch, caplog):
+        """Constructed: an item limit of 1 that NX reaches; three advisories the run selected have their records on
+        report_pending and answer HTTP 404 (read for their records, three failures in a row); two more records wait,
+        listed outside the look-back. The WARNING names the two reads left, not a count from the stats."""
+        monkeypatch.setattr(mod, "MAX_CONSECUTIVE_FETCH_FAILURES", 3)
+        t0 = "2026-11-04T00:00:00.000000Z"
+        own = [f"2026/icsa-26-300-1{n}.json" for n in range(1, 4)]
+        old = "2026-09-01T00:00:00.000000Z"
+        put_on_pending(
+            *(f"cisa_ics:ICSA-26-300-1{n}" for n in range(1, 4)), "cisa_ics:ICSMA-24-058-01", "cisa_ics:ICSA-25-016-07"
+        )
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, t0), *((p, CHANGED) for p in own), (DICOM, old), (XMC20, old)),
+                NX: advisory(NX),
+                DICOM: advisory(DICOM),
+                XMC20: advisory(XMC20),
+            }
+        )
+        c = collector(monkeypatch, http)
+        with caplog.at_level("WARNING"):
+            c.collect(limit=1, push_to_misp=True, baseline=False)
+        assert DICOM not in http.paths and XMC20 not in http.paths
+        assert any(
+            "3 consecutive advisory reads" in r.getMessage() and "the 2 record(s) left" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_the_left_count_of_a_breaker_stop_counts_the_reads_still_to_come(self, monkeypatch, caplog):
+        """Constructed: an item limit of 1 that NX reaches; COMOS, selected and on report_pending, answers HTTP 503
+        and its retries open the breaker; DICOM and XMC20 wait, listed outside the look-back. The WARNING names the
+        two reads left."""
+        t1, t2 = "2026-11-01T00:00:00.000000Z", "2026-11-02T00:00:00.000000Z"
+        old = "2026-09-01T00:00:00.000000Z"
+        put_on_pending("cisa_ics:ICSA-25-317-15", "cisa_ics:ICSMA-24-058-01", "cisa_ics:ICSA-25-016-07")
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, t1), (COMOS, t2), (DICOM, old), (XMC20, old)),
+                NX: advisory(NX),
+                COMOS: _Response(status_code=503, text="unavailable"),
+                DICOM: advisory(DICOM),
+                XMC20: advisory(XMC20),
+            }
+        )
+        c = collector(monkeypatch, http)
+        with caplog.at_level("WARNING"):
+            st = c.collect(limit=1, push_to_misp=True, baseline=False)
+        assert st["success"] is True and DICOM not in http.paths and XMC20 not in http.paths
+        assert any(
+            "circuit breaker is open" in r.getMessage() and "the 2 report_pending record(s)" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_a_malformed_advisory_the_run_reads_tries_its_pending_entry(self, monkeypatch):
+        """Constructed: COMOS, selected by the run, has its record on report_pending and comes back without a
+        ``vulnerabilities`` list. The run's own read tries the entry (a failed try), as a pending read would."""
+        bad = advisory(COMOS)
+        del bad["vulnerabilities"]
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        http = _HTTP({"changes.csv": changes((NX, CHANGED), (COMOS, CHANGED)), NX: advisory(NX), COMOS: bad})
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert st["stats"]["malformed"] == 1 and st["stats"]["pending_fetched"] == 0
+        entry = pending()["cisa_ics:ICSA-25-317-15"]
+        assert entry["attempts"] == 2 and "malformed" in entry["last_reason"]
+
+    def test_an_advisory_the_run_reads_under_another_id_takes_its_pending_entry_off(self, monkeypatch):
+        """Constructed: the entry is kept under a file name (an earlier failed fetch), and the run reads that file
+        for its items; it holds COMOS (tracking.id ICSA-25-317-15). The record is written under COMOS's id and the
+        entry, which no file bears, leaves the list."""
+        stray = "2025/icsa-25-001-01.json"
+        put_on_pending("cisa_ics:ICSA-25-001-01")
+        http = _HTTP({"changes.csv": changes((stray, CHANGED)), stray: advisory(COMOS)})
+        c = collector(monkeypatch, http)
+        c.collect(push_to_misp=True, baseline=False)
+        assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-25-317-15"]
+        assert pending() == {}
 
     def test_failing_pending_reads_stop_after_their_own_streak_and_the_run_goes_on(self, monkeypatch, caplog):
         # Constructed: five pending records whose advisories the listing names (outside the look-back) and that

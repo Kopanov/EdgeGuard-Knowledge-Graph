@@ -1186,22 +1186,36 @@ class CISAICSCollector:
             # run's own reads, and a burst of failures among them stops them, not the run (advisories the listing
             # names that cannot be fetched would otherwise abort every run before its push, never given up).
             pending_failures = 0
-            for path in [*paths, *pending_paths]:
+            order = [*paths, *pending_paths]
+
+            def _listed_ref(listed_path: str) -> str:
+                """The report_pending reference of an advisory by its file name, as ``_pending_paths`` keys it."""
+                return report_records.format_record_ref(SOURCE_ID, _listed_record_key(listed_path).upper())
+
+            def _pending_reads_left(start: int) -> int:
+                """The reads for report_pending records from *start* on: the queued ones and, once the item limit is
+                reached, the run's own advisories still to come whose record is on the list."""
+                limit_reached = limit is not None and len(processed) >= limit
+                return sum(
+                    1 for p in order[start:] if p in pending_paths or (limit_reached and _listed_ref(p) in pending_refs)
+                )
+
+            for position, path in enumerate(order):
                 pending_ref = pending_paths.get(path)
                 if pending_ref is None and limit is not None and len(processed) >= limit:
                     # The item limit is reached: the run reads no more advisories for their items. One whose record
                     # waits on report_pending is still read for its record (``_pending_paths`` left it out as an
-                    # advisory the run selected), so its entry is tried and, in the end, given up.
-                    listed_ref = report_records.format_record_ref(SOURCE_ID, _listed_record_key(path).upper())
-                    if listed_ref not in pending_refs:
+                    # advisory the run selected), so its entry is tried: settled when the record is written, given
+                    # up in the end only if the advisory keeps failing.
+                    if _listed_ref(path) not in pending_refs:
                         continue
-                    pending_ref = listed_ref
+                    pending_ref = _listed_ref(path)
                 if pending_ref and pending_failures >= MAX_CONSECUTIVE_FETCH_FAILURES:
                     logger.warning(
                         "[REPORT-PENDING] CISA ICS: %d consecutive advisory reads for report_pending records failed: "
                         "the %d record(s) left are not tried this run",
                         pending_failures,
-                        max(0, len(pending_paths) - stats["pending_fetched"]),
+                        _pending_reads_left(position),
                     )
                     break
                 if not CISA_ICS_CIRCUIT_BREAKER.can_execute():
@@ -1214,7 +1228,7 @@ class CISAICSCollector:
                             "after the run's own reads"
                             if stats["pending_fetched"] == 0
                             else "since the reads for report_pending records",
-                            max(0, len(pending_paths) - stats["pending_fetched"]),
+                            _pending_reads_left(position),
                         )
                         break
                     raise CISAICSTransientError("CISA ICS circuit breaker opened mid-run — aborting before push")
@@ -1269,15 +1283,41 @@ class CISAICSCollector:
                 # every path the run selected before the cap, and the cursor must not pass the capped-off advisories.
                 if path in change_ts and (processed_max_ts is None or change_ts[path] > processed_max_ts):
                     processed_max_ts = change_ts[path]
+                # An advisory the run reads for its items may also have its record on report_pending (an earlier
+                # failed fetch keyed it by its file name); its entry is tried here, as a pending read would try it.
+                listed_ref = _listed_ref(path)
                 try:
                     items, skipped = self.parse_advisory(data, path)
                 except ValueError as e:
                     logger.warning(f"CISA ICS: malformed advisory skipped — {e}")
                     stats["malformed"] += 1
+                    if listed_ref in pending_refs:
+                        record_failures.append(
+                            {
+                                "record_ref": listed_ref,
+                                "reason": f"the advisory is malformed ({type(e).__name__})",
+                                "permanent": False,
+                            }
+                        )
                     continue
                 record: Optional[Dict[str, Any]] = None
                 failure: Optional[Dict[str, Any]] = None
                 record_ref = report_records.format_record_ref(SOURCE_ID, _advisory_parts(data, path)[3])
+                if listed_ref in pending_refs and record_ref != listed_ref:
+                    logger.warning(
+                        "[REPORT-PENDING] CISA ICS: %s names the advisory %s: its record is written under that id, and "
+                        "the entry %s leaves report_pending",
+                        path,
+                        record_ref,
+                        listed_ref,
+                    )
+                    record_failures.append(
+                        {
+                            "record_ref": listed_ref,
+                            "reason": f"the advisory's tracking.id gives {record_ref}",
+                            "permanent": True,
+                        }
+                    )
                 try:
                     record = self.parse_advisory_record(data, path)
                 except ValueError as e:
