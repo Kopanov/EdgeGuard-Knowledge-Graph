@@ -915,6 +915,44 @@ def record_report_pending(source: str, pending: int, oldest_first_failure: float
         REPORT_PENDING_GIVEN_UP.labels(source=source).inc(given_up)
 
 
+# 2026-11-08: counter series that start at 0. Prometheus' increase() and rate() do not count the value a series
+# already holds in its first sample, and the multi-process mode exports no ``_created`` sample that would mark where
+# a series began. A series created by its first run's increment therefore added nothing to increase(): after a first
+# deployment or an emptied PROMETHEUS_MULTIPROC_DIR, EdgeGuardNoIndicatorsCollected fired for about 26 hours for
+# every source that had collected. ``run_collector_with_metrics`` records a run under the zone its status names,
+# and no collector's status names one, so every run is counted under ``global``.
+ZERO_START_ZONE = "global"
+ZERO_START_STATUS = "success"
+
+
+def start_series_at_zero() -> int:
+    """Create at 0 the counter series that ``increase()`` reads, before a run adds to them (2026-11-08).
+
+    ``edgeguard_indicators_collected_total{source, zone="global", status="success"}`` for every collector name
+    (``collector_allowlist.COLLECT_SOURCES_CANONICAL``) and ``edgeguard_report_pending_given_up_total{source}``
+    for every report source (``report_records.REPORT_SOURCES``). The DAG calls it at the start of every collector
+    task (``ensure_metrics_server``), before the collector runs, so a scrape during the run sees the series at 0
+    and ``increase()`` counts the run's indicators; a run of one source also creates the series of every other
+    source before that source's first run.
+
+    A series that already exists keeps its value: the call adds 0, which in the multi-process mode writes a 0
+    into this process's own file, and the aggregate sums it with the other processes' values. It sets no gauge,
+    so a source that never runs gets no ``edgeguard_source_health`` series and EdgeGuardNoIndicatorsCollected
+    does not fire for it. Returns the number of series.
+    """
+    from collector_allowlist import COLLECT_SOURCES_CANONICAL
+    from report_records import REPORT_SOURCES
+
+    created = 0
+    for source in sorted(COLLECT_SOURCES_CANONICAL):
+        INDICATORS_COLLECTED.labels(source=source, zone=ZERO_START_ZONE, status=ZERO_START_STATUS).inc(0)
+        created += 1
+    for source in REPORT_SOURCES:
+        REPORT_PENDING_GIVEN_UP.labels(source=source).inc(0)
+        created += 1
+    return created
+
+
 def record_collection_duration(source: str, zone: str, duration: float):
     """Record collection duration."""
     COLLECTION_DURATION.labels(source=source, zone=zone).observe(duration)

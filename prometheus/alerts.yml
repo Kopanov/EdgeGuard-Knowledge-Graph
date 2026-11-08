@@ -131,6 +131,13 @@ groups:
         # (edgeguard_collector_last_run_outcome); a source whose last run succeeded and collected
         # nothing (`empty`) still fires. Access-denied skips have their own alert
         # (EdgeGuardSourceAccessDenied).
+        #
+        # 2026-11-08: increase() does not count the value a series already holds in its first
+        # sample, and the multi-process exporter gives no `_created` sample. Every collector task
+        # creates the `success` series of every source at 0 before it collects
+        # (start_series_at_zero in src/metrics_server.py), so a scrape sees 0 first and the first
+        # run after a first deployment or an emptied PROMETHEUS_MULTIPROC_DIR is counted; before,
+        # the alert fired for about 26 h for every source that had collected.
         expr: |
           sum by (source) (increase(edgeguard_indicators_collected_total[26h])) == 0
           and on (source)

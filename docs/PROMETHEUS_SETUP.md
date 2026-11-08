@@ -171,7 +171,7 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `edgeguard_indicators_collected_total` | Counter | `source`, `zone`, `status` | Total indicators collected. One increment per collector run. `status`: `success`, `not_modified` (HTTP 304), `skipped`, `failed` |
+| `edgeguard_indicators_collected_total` | Counter | `source`, `zone`, `status` | Total indicators collected. One increment per collector run, under `zone="global"` (no collector's status names a zone). `status`: `success`, `not_modified` (HTTP 304), `skipped`, `failed`. The `success` series of every collector exists at 0 from the start of the first collector task, before a run adds to it ([Counter series start at 0](#counter-series-start-at-0)) |
 | `edgeguard_collector_last_run_outcome` | Gauge | `source`, `outcome` | Outcome of the source's most recent run, `1` for that outcome and `0` for the others: `collected`, `empty` (success, nothing collected), `not_modified` (HTTP 304), `skipped`, `failed` |
 | `edgeguard_collection_failures_total` | Counter | `source` | Collection failures |
 | `edgeguard_collection_duration_seconds` | Histogram | `source`, `zone` | Collection time |
@@ -183,7 +183,7 @@ So one source can appear as `otx` in one panel and as `alienvault_otx` in anothe
 | `edgeguard_otx_retry_given_up_total` | Counter | - | OTX pulses given up from the retry list (`[OTX-RETRY-GAVE-UP]`): still failing `EDGEGUARD_OTX_RETRY_MAX_DAYS` after their first failure and tried since, or beyond `EDGEGUARD_OTX_RETRY_MAX_PULSES` (read by `EdgeGuardOtxRetryPulsesGivenUp`) |
 | `edgeguard_report_pending_records` | Gauge | `source` | Report records on the source's `report_pending` list (`alienvault_otx`, `cisa_ics`), set whenever the list is written: records whose MISP Event Report push failed or was not tried, which later pushes write again ([MISP_SOURCES.md](MISP_SOURCES.md#report-records-event-reports)); set to 0 by a fresh baseline's wipe. For `alienvault_otx` every OTX run that pushes sets it, after each batch of 100 records and once in a run without records ([COLLECTORS.md](COLLECTORS.md#report-records)); the CISA ICS collector sets it (`source="cisa_ics"`) on every run that pushes. No alert reads it yet |
 | `edgeguard_report_pending_oldest_failure_timestamp_seconds` | Gauge | `source` | First failure (Unix time) of the record that has waited longest on the source's `report_pending` list; `0` when the list is empty |
-| `edgeguard_report_pending_given_up_total` | Counter | `source` | Report records given up from the source's `report_pending` list (`[REPORT-GAVE-UP]`): still failing `EDGEGUARD_REPORT_PENDING_MAX_DAYS` after their first failure and tried since, or their source record failing to be fetched for that long |
+| `edgeguard_report_pending_given_up_total` | Counter | `source` | Report records given up from the source's `report_pending` list (`[REPORT-GAVE-UP]`): still failing `EDGEGUARD_REPORT_PENDING_MAX_DAYS` after their first failure and tried since, or their source record failing to be fetched for that long. Both series exist at 0 from the start of the first collector task ([Counter series start at 0](#counter-series-start-at-0)), so a panel or `increase()` shows 0 before the first give-up |
 
 ### MISP Metrics
 
@@ -505,6 +505,30 @@ install, set `PROMETHEUS_MULTIPROC_DIR` and run the standalone server (Option A)
 
 If the directory cannot be created or written (for example a volume mounted with the wrong ownership), the process logs an ERROR, removes `PROMETHEUS_MULTIPROC_DIR` from its own environment and keeps in-process metrics, so DAG parsing and task imports never fail because of metrics. The image creates `/opt/airflow/metrics_multiproc` owned by the `airflow` user so the named volume inherits writable ownership on first mount.
 
+### Counter series start at 0
+
+Prometheus' `increase()` and `rate()` do not count the value a series already holds in its first sample, and
+the multi-process mode exports no `_created` sample that would mark where a series began. So every collector
+task, at its start and before its collector runs, creates these series at 0 (`ensure_metrics_server()`, which
+calls `start_series_at_zero()` in `src/metrics_server.py`):
+
+- `edgeguard_indicators_collected_total{zone="global", status="success"}` for every collector name
+  (`COLLECT_SOURCES_CANONICAL` in `src/collector_allowlist.py`), the series a run's count is added to;
+- `edgeguard_report_pending_given_up_total` for `alienvault_otx` and `cisa_ics`.
+
+A series that exists keeps its value: the task adds 0. A task is a new process, so the series also come back
+with the first collector task after the multi-process directory was emptied, and a run of one source creates
+the series of every other source before that source's first run. `EdgeGuardNoIndicatorsCollected` therefore
+counts the first run after a first deployment or an emptied directory. No gauge is set, so a source that never
+runs has no `edgeguard_source_health` series and the alert does not fire for it. `run_neo4j_sync` creates the
+series too (it calls `ensure_metrics_server()`). The `metrics` service does not: it only reads the directory,
+and a process that keeps running cannot put a series back once its file was removed with the directory's
+contents.
+
+One case is left: when the first collector task after the directory was emptied, or of a new deployment, ends
+within one scrape interval (30 s), its count is added before Prometheus has read the 0, and
+`EdgeGuardNoIndicatorsCollected` fires for that source until its next run adds to the series.
+
 ### DAG run in progress
 
 `edgeguard_dag_run_in_progress_start_timestamp{dag_id}` (read by `EdgeGuardDAGRunStuck`) is written
@@ -604,7 +628,7 @@ list (including the disk, inode and `build_relationships` alerts), grep
 |-------|-----------|----------|
 | `EdgeGuardCollectionHighFailureRate` | >20% failure rate | warning |
 | `EdgeGuardCollectionStale` | No success for longer than twice the collector's cadence (OTX 2 h; CISA, VirusTotal 9 h; NVD 17 h; daily sources 26 h; `misp_to_neo4j`, the MISP→Neo4j sync, 98 h: the longest gap between two sync starts, 96 h after a baseline's or a forced sync, plus the attempts of the tasks before the sync — recording rule `edgeguard:collector_max_stale_seconds`) | critical |
-| `EdgeGuardNoIndicatorsCollected` | No indicator from a healthy source in 26 hours. A source whose last run was `not_modified` (HTTP 304, MITRE's unchanged bundle) or `skipped` (no API key, not in `EDGEGUARD_COLLECT_SOURCES`, a baseline in progress, a transient error) is left out (`edgeguard_collector_last_run_outcome`); a source whose last run succeeded and collected nothing still fires | warning |
+| `EdgeGuardNoIndicatorsCollected` | No indicator from a healthy source in 26 hours. A source whose last run was `not_modified` (HTTP 304, MITRE's unchanged bundle) or `skipped` (no API key, not in `EDGEGUARD_COLLECT_SOURCES`, a baseline in progress, a transient error) is left out (`edgeguard_collector_last_run_outcome`); a source whose last run succeeded and collected nothing still fires. The counter's series start at 0 before a source's first run ([Counter series start at 0](#counter-series-start-at-0)), so the first run after a first deployment or an emptied multi-process directory is counted | warning |
 | `EdgeGuardSourceAccessDenied` | A collector was skipped with `reason_class=*_auth_denied` in the last 25 hours: the provider refuses the request (rejected or revoked API key, blocked client). The task is green and nothing is collected; check with `python src/source_key_check.py` | warning |
 | `EdgeGuardOtxRetryPulsesWaiting` | `edgeguard_otx_retry_pulses > 0` and the oldest pulse on the OTX retry list first failed more than 24 hours ago (`edgeguard_otx_retry_oldest_failure_timestamp_seconds`), for 30m: its items have failed up to one retry per run (more when Airflow retries a red run) while the cursor and the other pulses moved on. Nothing is lost yet; find the cause in the `collect_otx` log ([RUNBOOK.md](RUNBOOK.md), "OTX retry backlog and given-up pulses"), where `EdgeGuardDAGRunFailures` and `EdgeGuardSourceUnhealthy` firing for the same runs are explained | warning |
 | `EdgeGuardOtxRetryPulsesGivenUp` | `edgeguard_otx_retry_given_up_total` rose in the last 24 hours, or appeared for the first time: OTX pulses left the retry list without being stored (`EDGEGUARD_OTX_RETRY_MAX_DAYS`, `EDGEGUARD_OTX_RETRY_MAX_PULSES`) and no scheduled run collects them. Warning, not critical: the loss is bounded to the pulses the `[OTX-RETRY-GAVE-UP]` lines name, holds nothing else back, and a baseline whose window reaches their `modified` collects them once the cause is fixed; for pulses given up by age `EdgeGuardOtxRetryPulsesWaiting` has fired for six days before, and pulses given up beyond the cap mean the list overflowed | warning |
@@ -821,6 +845,7 @@ _Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Every collector task creates, before its collector runs, the `success` series of `edgeguard_indicators_collected_total` of every collector and the `edgeguard_report_pending_given_up_total` series of both report sources at 0 ([Counter series start at 0](#counter-series-start-at-0)). A series created by its first run's count added nothing to `increase()`: after a first deployment or an emptied multi-process directory, `EdgeGuardNoIndicatorsCollected` fired for about 26 hours for every source that had collected (8 sources after a 730-day baseline), and the given-up counter had no series until its first give-up.
 - 2026-11-08 — The source-label table places the report_pending metrics (`edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds`, `edgeguard_report_pending_given_up_total`) with the metrics that carry the canonical source id.
 - 2026-11-07 — The CISA ICS collector writes report records and sets `edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds` and `edgeguard_report_pending_given_up_total` for `source="cisa_ics"`.
 - 2026-11-07 — The OTX collector sets the `report_pending` gauges of `alienvault_otx` on every run that pushes; `edgeguard_report_pending_given_up_total` also counts the records whose source record kept failing to be fetched for `EDGEGUARD_REPORT_PENDING_MAX_DAYS`.
