@@ -1238,7 +1238,8 @@ class OTXCollector:
                 unsaved = {_record_pulse_id(ref) for ref, _pulse in todo[start:] if ref not in done}
                 left = len(todo) - start - len(chunk)
                 counts["pending_saved"] = False
-                if left:
+                if left:  # the later batches, not pushed: counted as records and as not tried
+                    counts["records"] += left
                     counts["reports_skipped"] += left
                 logger.error(
                     "[REPORT-PENDING] OTX: report_pending could not be saved (%s: %s): %s",

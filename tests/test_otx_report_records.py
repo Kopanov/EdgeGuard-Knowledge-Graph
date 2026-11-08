@@ -1119,6 +1119,19 @@ def _many(count: int) -> List[Dict[str, Any]]:
     ]
 
 
+def test_after_a_failed_save_the_record_counts_still_add_up(monkeypatch):
+    """250 pulses, the second batch's save fails after its records reached MISP: the 50 records of the third batch are
+    not pushed and count both as records and as not tried, so ``records`` is the sum of the outcomes."""
+    _saves_failing_from(monkeypatch, 2)
+    collector = _collector()
+    collector.misp_writer = _RecordWriter()
+    counts = otx_collector._new_report_counts()
+    unsaved = collector._push_report_records(_many(250), counts, set())
+    assert len(unsaved) == 50 and counts["pending_saved"] is False  # the second batch is in MISP
+    assert counts["records"] == 250 and counts["reports_skipped"] == 50
+    assert counts["records"] == sum(counts[key] for key in otx_collector._REPORT_COUNT_KEYS)
+
+
 def test_the_records_are_pushed_in_batches_each_saved_on_report_pending(caplog, monkeypatch):
     saves: List[int] = []
     real = rr.note_report_push
