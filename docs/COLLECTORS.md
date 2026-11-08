@@ -828,7 +828,7 @@ The keyword detector deliberately contains no malware family names (families are
 | `confidence_score` | 0.5 recently active, 0.3 historical (the node keeps the highest value across its sources) | recency rule |
 | `zone` | `global` | keyword detector on the family names |
 | `(Indicator)-[:SOURCED_FROM]->(Source {source_id: "feodo_tracker"})` | `source_reported_first_at` = `first_seen_utc`; `source_reported_last_at` = `last_online` (the first-seen time when both fall on the same day; absent when the feed gives no date); `raw_data` JSON keeps `threat_type=botnet_cc` and the labels `c2_status:…`, `port:…`, `family:…` | per source |
-| `(Indicator)-[:INDICATES]->(Malware)` | built by `build_relationships` to the Malware nodes whose name or alias equals `malware_family` (case-insensitive) or, when none matches, to the one node whose name equals it without whitespace, hyphens, underscores and dots ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Feed family labels"); QakBot, Emotet, TrickBot, Dridex, BumbleBee and Pikabot all match MITRE ATT&CK software | family match |
+| `(Indicator)-[:INDICATES]->(Malware)` | built by `build_relationships` to the Malware nodes whose name or alias equals `malware_family` (case-insensitive) or, when none matches, to the one node whose name equals it without whitespace, hyphens, underscores and dots, or of several such nodes to the ATT&CK node when every other is OTX-only ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Feed family labels"); QakBot, Emotet, TrickBot, Dridex, BumbleBee and Pikabot all match MITRE ATT&CK software | family match |
 
 The source's dates matter for campaigns: for an indicator without a last-seen time, a Campaign's `last_seen` takes the edge's first-seen claim (`first_seen_utc`), and the time MISP recorded the row only for a row without a date ([TIMESTAMPS.md](TIMESTAMPS.md#seen-dates-of-an-indicator-campaigns-alert-enrichment)); with the record time, a botnet that stopped in 2021 would look active on the day it was collected.
 
@@ -1509,6 +1509,7 @@ _Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Feodo Tracker, `INDICATES` row: of several nodes whose name equals the family label without separators, the ATT&CK node is linked when every other is OTX-only.
 - 2026-11-08 — MITRE ATT&CK, descriptions: the node's text also loses markdown bold and the inline HTML emphasis tags outside backtick code spans, and a cut inside a bulleted list keeps no lone list marker.
 - 2026-11-08 — Cost in the sync: an event of up to `EDGEGUARD_MISP_PAGED_FETCH_ABOVE` attributes is downloaded as `/events/view/<id>/excludeGalaxy:1`, without the galaxy clusters (the text named PyMISP `get_event`).
 - 2026-11-08 — MITRE ATT&CK in MISP: malware and tools carry the `mitre-software` galaxy cluster tag when the MISP has that galaxy enabled (one galaxy-list read per writer; `mitre-malware` / `mitre-tool` otherwise and on a failed read), since the MISP galaxy repository updates only the merged galaxy; an object's ATT&CK id is its `mitre-attack` id, else its `mitre-ics-attack` one, so `BlackEnergy 3` carries S1002 and 12 deprecated ICS techniques are kept and marked (they were skipped for want of a `mitre-attack` id); ATT&CK for ICS 20.1 counts; why MISP returns platform tags in lower case on a MISP that held them.

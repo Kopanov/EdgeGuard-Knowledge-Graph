@@ -145,9 +145,11 @@ def _family_target_params(client) -> Optional[Dict[str, Any]]:
     """``$family_targets`` of step 9 (2026-11-02): the Malware node names each feed family label names.
 
     Read once, when the step starts: the distinct ``Indicator.malware_family`` labels and the names and
-    aliases of the Malware nodes, resolved by ``family_resolution.resolve_feed_families``. The labels
-    whose name without separators several nodes carry are logged and linked to none. ``None`` when a
-    read raises: the step is not run and counts as failed (an empty map would link nothing)."""
+    aliases of the Malware nodes, resolved by ``family_resolution.resolve_feed_families``. A label whose
+    name without separators several nodes carry is linked to the one ATT&CK node among them when every
+    other is OTX-only (logged at INFO); any other such label is logged as a warning and linked to none.
+    ``None`` when a read raises: the step is not run and counts as failed (an empty map would link
+    nothing)."""
     try:
         rows = client.run(_FEED_FAMILIES_READ) or []
         labels = {row.get("family"): row.get("indicators") for row in rows if isinstance(row, dict)}
@@ -165,6 +167,16 @@ def _family_target_params(client) -> Optional[Dict[str, Any]]:
         len(resolution.unresolved),
         len(resolution.placeholders),
     )
+    for label, passed_over in sorted(resolution.attack_preferred.items()):
+        logger.info(
+            "[LINK] step 9: family %r (%s indicators): without separators it is the name of %d Malware nodes; "
+            "linked to the ATT&CK node %s, not to the OTX-only %s",
+            label,
+            labels.get(label),
+            len(passed_over) + 1,
+            resolution.separator_free_matches.get(label),
+            ", ".join(passed_over),
+        )
     for label, names in sorted(resolution.ambiguous.items()):
         logger.warning(
             "[LINK] step 9: family %r (%s indicators): without separators it is the name of %d Malware nodes "
@@ -1423,7 +1435,8 @@ def build_relationships():
         # (``i.malware_family``: ThreatFox, MalwareBazaar, Feodo Tracker). 2026-11-02: the Malware nodes a
         # label names are decided once per run in Python (``family_resolution.resolve_feed_families``: the
         # name or an alias, stripped and lower-cased; only when that finds none, the name without
-        # whitespace, hyphens, underscores and dots, and only when exactly one node has it) and passed as
+        # whitespace, hyphens, underscores and dots, and only when exactly one node has it, or, 2026-11-08,
+        # when one of the nodes that have it carries an ATT&CK id and every other is OTX-only) and passed as
         # ``$family_targets``, keyed by the label as stored, so the statement compares nothing itself and
         # finds each node by its indexed name. Before, every indicator compared its label with every
         # Malware node (about 5 minutes on the 730-day graph), and "SalatStealer" never reached the node

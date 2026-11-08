@@ -13,8 +13,18 @@ The rule, decided once per run for every distinct label (``resolve_feed_families
    ``xloader``, whose alias it is);
 2. only when the exact match finds no node: the label without separators (lower-case; whitespace, hyphens,
    underscores and dots removed, ``separator_free``) equals a node's name without separators. Names only,
-   never aliases. One such node is the target (``"SalatStealer"`` → ``salat stealer``); several are none,
-   and the label is reported as ambiguous (``ambiguous``).
+   never aliases. One such node is the target (``"SalatStealer"`` → ``salat stealer``). Of several such
+   nodes, the one that carries an ATT&CK software id is the target when it is the only one with an id and
+   every other is OTX-only (``attack_preferred``): ``"RedLineStealer"`` → the ATT&CK node ``redline stealer``
+   (S1240), not the OTX spelling ``red line stealer``. Any other set of several nodes names none, and the
+   label is reported as ambiguous (``ambiguous``).
+
+A node carries an ATT&CK software id when its ``mitre_id`` is one (``S`` and four digits; the sync sets it
+from an ATT&CK attribute only). A node is OTX-only when its ``source`` list names AlienVault OTX
+(``alienvault_otx``, the canonical id the writers store) and no other source: a twin OTX created under
+another spelling of an ATT&CK family. A node with another source beside it or instead of it (a curated
+package, a MISP galaxy tag, ATT&CK without an id), or with no source, is not OTX-only, so such a set stays
+ambiguous.
 
 A placeholder label (``"Unknown malware"``, ``"Unknown Loader"``: ``node_identity.is_placeholder_name``)
 names no node, and a node whose name is a placeholder is never a target. A label that names no node stays
@@ -44,19 +54,25 @@ from node_identity import is_placeholder_name
 
 # The source id of the MITRE ATT&CK collector (``source`` of the nodes it delivered).
 MITRE_SOURCE = "mitre_attck"
+# The source id of the AlienVault OTX collector: a node whose sources are only this one is OTX-only (rule 2).
+OTX_SOURCE = "alienvault_otx"
 
 # The distinct family labels on the indicators, with the number of indicators of each.
 CYPHER_FEED_FAMILIES_READ = (
     "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL RETURN i.malware_family AS family, count(*) AS indicators"
 )
-# The names and aliases of the Malware nodes (``source``: ``tool_named_malware`` leaves the MITRE ones out).
+# The names and aliases of the Malware nodes (``source``: ``tool_named_malware`` leaves the MITRE ones out;
+# ``source`` and ``mitre_id``: the ATT&CK node rule 2 prefers to OTX-only twins).
 CYPHER_MALWARE_NAMES_READ = (
-    "MATCH (m:Malware) WHERE m.name IS NOT NULL RETURN m.name AS name, m.aliases AS aliases, m.source AS source"
+    "MATCH (m:Malware) WHERE m.name IS NOT NULL "
+    "RETURN m.name AS name, m.aliases AS aliases, m.source AS source, m.mitre_id AS mitre_id"
 )
 
 # Separators a family name is written with or without: "Salat Stealer", "Salat-Stealer", "salat_stealer",
 # "lockbit.black". ``\s`` is Unicode whitespace.
 _SEPARATORS_RE = re.compile(r"[\s\-_.]+")
+# An ATT&CK software id as ``Malware.mitre_id`` holds it.
+_SOFTWARE_ID_RE = re.compile(r"S[0-9]{4}", re.IGNORECASE | re.ASCII)
 
 
 def family_key(name: Any) -> str:
@@ -81,18 +97,36 @@ def _is_mitre(row: Mapping[str, Any]) -> bool:
     return MITRE_SOURCE in _as_list(row.get("source"))
 
 
+def node_software_id(row: Mapping[str, Any]) -> str:
+    """The node's ATT&CK software id (``mitre_id``, upper-case), or ``""`` when it carries none."""
+    value = row.get("mitre_id")
+    if not isinstance(value, str) or not _SOFTWARE_ID_RE.fullmatch(value.strip()):
+        return ""
+    return value.strip().upper()
+
+
+def is_otx_only(row: Mapping[str, Any]) -> bool:
+    """Whether the node's ``source`` list names AlienVault OTX and no other source (blank entries ignored)."""
+    sources = {s.strip() for s in _as_list(row.get("source")) if isinstance(s, str) and s.strip()}
+    return sources == {OTX_SOURCE}
+
+
 @dataclass(frozen=True)
 class FamilyResolution:
     """What ``resolve_feed_families`` decided, each keyed by the label as stored.
 
     ``targets`` — the names of the ``Malware`` nodes the label names (sorted): ``$family_targets`` of step 9;
     ``separator_free_matches`` — the labels of ``targets`` found by rule 2, with their node;
-    ``ambiguous`` — labels whose rule-2 match finds several nodes, with those nodes (linked to none);
+    ``attack_preferred`` — of those, the labels whose rule-2 match found several nodes and took the one ATT&CK
+    node, with the OTX-only nodes passed over (sorted);
+    ``ambiguous`` — labels whose rule-2 match finds several nodes and no ATT&CK node to prefer, with those nodes
+    (linked to none);
     ``unresolved`` — labels that name no node; ``placeholders`` — placeholder labels (sorted lists).
     """
 
     targets: Dict[str, List[str]] = field(default_factory=dict)
     separator_free_matches: Dict[str, str] = field(default_factory=dict)
+    attack_preferred: Dict[str, List[str]] = field(default_factory=dict)
     ambiguous: Dict[str, List[str]] = field(default_factory=dict)
     unresolved: List[str] = field(default_factory=list)
     placeholders: List[str] = field(default_factory=list)
@@ -101,8 +135,8 @@ class FamilyResolution:
         """The resolution in numbers, with ``indicators`` — label → number of indicators that carry it
         (``CYPHER_FEED_FAMILIES_READ``): ``claims`` (indicators whose label is no placeholder), ``target_missing``
         (of them, those whose label names no node: unresolved or ambiguous), ``placeholder_indicators``, the
-        labels found by rule 2, the ambiguous labels, and the unresolved labels with their indicators (the
-        ``limit`` largest)."""
+        labels found by rule 2, those of them that took the ATT&CK node over OTX-only twins, the ambiguous
+        labels, and the unresolved labels with their indicators (the ``limit`` largest)."""
 
         def count(label: str) -> int:
             value = indicators.get(label)
@@ -115,6 +149,14 @@ class FamilyResolution:
             "target_missing": sum(count(label) for label in unlinked),
             "placeholder_indicators": sum(count(label) for label in self.placeholders),
             "separator_free_matches": dict(sorted(self.separator_free_matches.items())),
+            "attack_preferred": {
+                label: {
+                    "indicators": count(label),
+                    "node": self.separator_free_matches.get(label),
+                    "passed_over": nodes,
+                }
+                for label, nodes in sorted(self.attack_preferred.items())
+            },
             "ambiguous": {
                 label: {"indicators": count(label), "nodes": nodes} for label, nodes in sorted(self.ambiguous.items())
             },
@@ -128,11 +170,14 @@ def resolve_feed_families(labels: Iterable[Any], nodes: Iterable[Mapping[str, An
 
     ``labels`` — the ``Indicator.malware_family`` values (``CYPHER_FEED_FAMILIES_READ``; duplicates and
     non-strings are ignored, and so is a label that is blank once stripped, which step 9 never reads);
-    ``nodes`` — rows ``{"name", "aliases"}`` of the ``Malware`` nodes (``CYPHER_MALWARE_NAMES_READ``; an alias
-    stored as a single value counts as one alias, a blank or non-string one as none).
+    ``nodes`` — rows ``{"name", "aliases", "source", "mitre_id"}`` of the ``Malware`` nodes
+    (``CYPHER_MALWARE_NAMES_READ``; an alias stored as a single value counts as one alias, a blank or non-string
+    one as none; ``source`` and ``mitre_id`` are read only where rule 2 finds several nodes).
     """
     exact: Dict[str, Set[str]] = {}
     by_separator_free_name: Dict[str, Set[str]] = {}
+    attack_ids: Dict[str, str] = {}  # name -> ATT&CK software id, for the nodes that carry one
+    not_otx_only: Set[str] = set()  # names of a node that is not OTX-only
     for row in nodes:
         name = row.get("name")
         if not isinstance(name, str) or not family_key(name) or is_placeholder_name(name):
@@ -143,9 +188,14 @@ def resolve_feed_families(labels: Iterable[Any], nodes: Iterable[Mapping[str, An
         bare = separator_free(name)
         if bare:
             by_separator_free_name.setdefault(bare, set()).add(name)
+        if node_software_id(row):
+            attack_ids.setdefault(name, node_software_id(row))
+        if not is_otx_only(row):
+            not_otx_only.add(name)
 
     targets: Dict[str, List[str]] = {}
     separator_free_matches: Dict[str, str] = {}
+    attack_preferred: Dict[str, List[str]] = {}
     ambiguous: Dict[str, List[str]] = {}
     unresolved: Set[str] = set()
     placeholders: Set[str] = set()
@@ -166,12 +216,20 @@ def resolve_feed_families(labels: Iterable[Any], nodes: Iterable[Mapping[str, An
             targets[label] = [node]
             separator_free_matches[label] = node
         elif candidates:
-            ambiguous[label] = sorted(candidates)
+            with_id = sorted(n for n in candidates if n in attack_ids)
+            others = sorted(n for n in candidates if n not in attack_ids)
+            if len(with_id) == 1 and not any(n in not_otx_only for n in others):
+                targets[label] = with_id
+                separator_free_matches[label] = with_id[0]
+                attack_preferred[label] = others
+            else:
+                ambiguous[label] = sorted(candidates)
         else:
             unresolved.add(label)
     return FamilyResolution(
         targets=targets,
         separator_free_matches=separator_free_matches,
+        attack_preferred=attack_preferred,
         ambiguous=ambiguous,
         unresolved=sorted(unresolved),
         placeholders=sorted(placeholders),
