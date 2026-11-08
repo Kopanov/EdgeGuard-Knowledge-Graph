@@ -510,7 +510,8 @@ class TestDocs:
 
     @pytest.mark.parametrize("name", CHANGED_DOCS)
     def test_history_bullets_follow_each_other_without_blank_lines(self, name):
-        """The History section holds this change's bullet, newest first, with no blank line between bullets.
+        """The History section holds this change's bullet; every bullet opens with its date (a day, or a month for
+        a few older ones), newest first; ``_Last updated`` is the newest bullet's day; no blank line between bullets.
 
         No date is pinned to the top: a later change adds a newer bullet above it."""
         text = (DOCS / name).read_text()
@@ -518,7 +519,12 @@ class TestDocs:
         bullets = [i for i, line in enumerate(lines) if line.startswith("- ")]
         assert len(bullets) > 1
         assert any(lines[i].startswith("- 2026-11-07 — ") for i in bullets)
-        dates = [m.group(1) for i in bullets if (m := re.match(r"- (\d{4}-\d{2}-\d{2}) ", lines[i]))]
+        dated = [re.match(r"- (\d{4}-\d{2}(?:-\d{2})?) — ", lines[i]) for i in bullets]
+        undated = [lines[i][:60] for i, m in zip(bullets, dated, strict=True) if m is None]
+        assert undated == [], f"{name}: History bullet without a leading date: {undated}"
+        dates = [m.group(1) for m in dated if m is not None]
         assert dates == sorted(dates, reverse=True), f"{name}: History is not newest first"
+        last = re.search(r"_Last updated: (\d{4}-\d{2}-\d{2})_", text)
+        assert last is not None and last.group(1) == dates[0], f"{name}: _Last updated is not the newest History date"
         blank = [lines[i - 1] for i in range(bullets[0], bullets[-1] + 1) if not lines[i].strip()]
         assert blank == [], f"{name}: blank line after {blank[0][:60]!r}"
