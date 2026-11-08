@@ -1295,8 +1295,8 @@ def run_checks(
 
     # 10a5. Malware twins folded (2026-10): no Malware node from another source is named after an
     #       ATT&CK software id ("cobalt strike - s0154", the MISP galaxy naming OTX uses), or carries
-    #       such an alias of its own name, when a MITRE Malware node of that id (read from the record
-    #       MITRE delivered) or of that base name exists, or, for software without one (an ATT&CK
+    #       such an alias of its own name, when a MITRE Malware node of that id (its mitre_id, else read
+    #       from the record MITRE delivered) or of that base name exists, or, for software without one (an ATT&CK
     #       tool), when a node of its base name exists: the enrichment job ``merge_malware_attack_twins``
     #       folds it into that node. The decision is the job's own (``attack_software_names.
     #       plan_twin_folds``), so a twin the job leaves (no such node) is reported, not failed; an
@@ -1314,10 +1314,10 @@ def run_checks(
         for row in _post(
             "MATCH (c:Malware) WHERE 'mitre_attck' IN coalesce(c.source, []) "
             "OPTIONAL MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: 'mitre_attck'}) "
-            "WITH c, head(collect(sf.raw_data)) AS attack_raw RETURN c.name AS name, attack_raw"
+            "WITH c, head(collect(sf.raw_data)) AS attack_raw RETURN c.name AS name, c.mitre_id AS attack_id, attack_raw"
         ):
             if row.get("name"):
-                attack_ids[row["name"]] = attack_software_id(row.get("attack_raw"), row["name"])
+                attack_ids[row["name"]] = attack_software_id(row.get("attack_raw"), row["name"], row.get("attack_id"))
     bases = twin_base_names(twins)
     base_nodes: Dict[str, Any] = {}
     if bases:

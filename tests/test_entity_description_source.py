@@ -66,6 +66,13 @@ from run_misp_to_neo4j import (  # noqa: E402
     MISPToNeo4jSync,
     _entity_comment_description,
 )
+from text_caps import ENTITY_DESCRIPTION_CAP, cap_text  # noqa: E402
+
+
+def as_stored(text: str) -> str:
+    """A description as the node holds it (2026-11-07): markup stripped, capped (``text_caps``)."""
+    return cap_text(text, ENTITY_DESCRIPTION_CAP, older_cut=True)[0]
+
 
 WRITER = misp_writer.MISPWriter.__new__(misp_writer.MISPWriter)
 
@@ -610,7 +617,7 @@ class TestMergeStatements:
         assert getattr(client, _MERGE[kind])(item, source_id="mitre_attck")
         _label, _key, query, params = _node_merges(session)[-1]
         assert item["description"], "MISP holds ATT&CK's text (cut to the writer's length)"
-        assert _ranked(query, params) == (item["description"], "mitre_attck", ENTITY_DESCRIPTIONS.top_rank)
+        assert _ranked(query, params) == (as_stored(item["description"]), "mitre_attck", ENTITY_DESCRIPTIONS.top_rank)
         _apply({}, query, params)  # no other assignment of the description
 
     @pytest.mark.parametrize("source_id", ["alienvault_otx", "stix_import", "misp", "coreideas"])
@@ -644,7 +651,7 @@ class TestMergeOrder:
         mitre = (kind, synced(written(kind, mitre_items()[kind])), "mitre_attck")
         otx = (kind, otx_item_before_2026_10(kind, otx_name), "alienvault_otx")
         node = merged(*((mitre, otx) if first == "mitre" else (otx, mitre)))
-        assert node == {"description": mitre[1]["description"], "description_source": "mitre_attck"}
+        assert node == {"description": as_stored(mitre[1]["description"]), "description_source": "mitre_attck"}
 
     @pytest.mark.parametrize("kind", ["technique", "tactic"])
     @pytest.mark.parametrize("first", ["mitre", "misp"])
@@ -653,7 +660,7 @@ class TestMergeOrder:
         mitre = (kind, synced(written(kind, mitre_items()[kind])), "mitre_attck")
         other = (kind, dict(mitre_items()[kind], description="A MISP-native attribute's text"), "misp")
         node = merged(*((mitre, other) if first == "mitre" else (other, mitre)))
-        assert node == {"description": mitre[1]["description"], "description_source": "mitre_attck"}
+        assert node == {"description": as_stored(mitre[1]["description"]), "description_source": "mitre_attck"}
 
     @pytest.mark.parametrize("first", ["stix_import", "misp"])
     def test_without_mitre_a_registered_source_wins_over_an_unregistered_one(self, first):
@@ -688,7 +695,7 @@ class TestMergeOrder:
         assert merged(native, curated, stored=legacy) == legacy
         mitre = ("malware", synced(written("malware", mitre_items()["malware"])), "mitre_attck")
         node = merged(native, mitre, curated, stored=legacy)
-        assert node == {"description": mitre[1]["description"], "description_source": "mitre_attck"}
+        assert node == {"description": as_stored(mitre[1]["description"]), "description_source": "mitre_attck"}
 
 
 class TestSyncEndToEnd:
@@ -719,7 +726,7 @@ class TestSyncEndToEnd:
         assert text_after_block(otx_attr) == REPORT_TEXT
         otx = (otx_attr, "alienvault_otx")
         node = self._node_after_sync(*((mitre, otx) if first == "mitre" else (otx, mitre)))
-        assert description_of(node) == text_after_block(mitre[0])
+        assert description_of(node) == as_stored(text_after_block(mitre[0]))
 
     def test_an_otx_only_family_shows_nothing(self):
         node = self._node_after_sync(

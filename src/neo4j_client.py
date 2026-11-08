@@ -1917,6 +1917,8 @@ def _prepare_cve_write(data: Dict, source_id: str) -> Optional[Dict[str, Any]]:
     # merge_node_with_source
     canonical = source_registry.canonical_source_id(source_id) or source_id
     raw_data = {k: v for k, v in data.items() if k not in key_props}
+    if "description" in raw_data:  # 2026-11-07: capped as in merge_node_with_source (``text_caps``)
+        raw_data["description"] = CVE_DESCRIPTIONS.capped(raw_data["description"])
     if data.get("original_source"):
         raw_data["original_source"] = data["original_source"]
     claimed_confidence = data.get("confidence_score")
@@ -3191,6 +3193,9 @@ class Neo4jClient:
 
             # Serialize raw data to JSON string for storage
             raw_data = {k: v for k, v in data.items() if k not in key_props}
+            # 2026-11-07: the record's copy holds the description as capped as the node's (``text_caps``).
+            if ranking is not None and "description" in raw_data:
+                raw_data["description"] = ranking.capped(raw_data["description"])
 
             # Get source as array (like zone)
             source_array = _canonical_source_list(data.get("source", [source_id]))
@@ -5151,6 +5156,8 @@ class Neo4jClient:
                         continue
 
                     raw_data = {k: v for k, v in item.items() if k not in ["cve_id", "tag"]}
+                    if "description" in raw_data:  # 2026-11-07: capped as the node's (``text_caps``)
+                        raw_data["description"] = CVE_DESCRIPTIONS.capped(raw_data["description"])
                     # Extract zone from item (always a list — defensive coercion)
                     zone = item.get("zone", ["global"])
                     if isinstance(zone, str):

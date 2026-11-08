@@ -385,7 +385,7 @@ This answers: *"Log4Shell affects which of our hosts, and what missions depend o
 | Property | ResilMesh type | EdgeGuard output | Status |
 |----------|---------------|------------------|--------|
 | `cve_id` | STRING | ✅ `cve_id` | Aligned |
-| `description` | STRING | ✅ `description` (NVD's text, at most 1,000 characters, when NVD has a record of the CVE; otherwise the next source in the ranking: CISA KEV's text, at most 500 characters, then CISA ICS's, at most 1,000) | Aligned |
+| `description` | STRING | ✅ `description` (NVD's text when NVD has a record of the CVE; otherwise the next source in the ranking: CISA KEV's text, then CISA ICS's; at most 1,000 characters, markup stripped and cut at a sentence or word end) | Aligned |
 | `description_source` | — | ✅ `description_source`, the source of `description` (`nvd`, `cisa_kev`, `cisa_ics`, …) | EdgeGuard extension |
 | `published` | STRING | ✅ `published` (ISO 8601), NVD's date when NVD has a record of the CVE | Aligned |
 | `last_modified` | STRING | ✅ `last_modified` (ISO 8601), NVD's date when NVD has a record of the CVE | Aligned |
@@ -785,10 +785,11 @@ RETURN h.hostname AS host, c.cve_id AS cve,
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — `CVE.description`: at most 1,000 characters whatever the source, markup stripped and cut at a sentence or word end by the sync (it gave each source's own length).
 - 2026-11-06 — `ThreatActor` `name`: a list in a source's actor field is not split inside parentheses or before a company's legal form, so `Black Owl (BO Team, Hackers of the Black Owl)` is `Black Owl` and `Integrity Technology Group, Inc.` one name; a name that is only a legal form (`Ltd.`) creates no node, and no name has unbalanced parentheses (the split had made names such as `black owl (bo team` and `ltd.`).
 - 2026-11-06 — `Campaign`, `USES_MALWARE`, `RUNS`, `PART_OF_CAMPAIGN`: an indicator of a malware many actors share (Cobalt Strike) joins a campaign only through a link that a record reporting it cites, and a link to such a malware is campaign evidence only while it counts for one of its indicators; a campaign is deleted when its actor has no campaign evidence left; `shared_malware_actors` and `shared_malware` on the campaign.
 - 2026-11-05 — `ThreatActor` `name`: state intelligence and security agencies on their own (`MOIS`, `GRU`, `Russian Federal Security Service`) are dropped like country names, and a name the canonical threat-actor reference lists as no actor (`not_actors`: reviewed OTX adversary names such as `ClickFix` or `Proton66`, a technique and a hosting network) creates no node.

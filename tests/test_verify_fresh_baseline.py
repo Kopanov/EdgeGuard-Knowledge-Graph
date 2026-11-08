@@ -2259,6 +2259,31 @@ class TestMalwareTwinsFolded:
         assert check["ok"] is False and check["mandatory"] is True
         assert check["detail"]["examples_foldable"] == [f"{twin['name']} -> {target}"]
 
+    @pytest.mark.parametrize("read", ["node", "record"])
+    def test_a_twin_of_a_mitre_node_the_sync_wrote_is_found_by_its_id(self, vfb, monkeypatch, read):
+        """End to end from the writer: the MITRE node and its SOURCED_FROM record as ``merge_malware`` writes them
+        for ATT&CK's Cobalt Strike, whose description has lost its link to S0154 (``test_sync_text_caps``). A
+        twin whose base name is no node's ("cobaltstrike", alias "CobaltStrike - S0154") is foldable by the id,
+        read from the node's ``mitre_id`` or the record's."""
+        from test_sync_text_caps import without_mitre_id, written_attack_record
+
+        node, raw = written_attack_record("malware")
+        attack_id, record = (node["mitre_id"], without_mitre_id(raw)) if read == "node" else (None, raw)
+
+        def override(statement, rows):
+            if "d.name =~ $suffixed" in statement:
+                return [{"name": "cobaltstrike", "aliases": ["CobaltStrike - S0154"]}]
+            if "AS attack_raw" in statement:
+                assert "c.mitre_id AS attack_id" in statement
+                return [{"name": node["name"], "attack_id": attack_id, "attack_raw": record}]
+            if "b.name IN $bases" in statement:
+                return []
+            return rows
+
+        check = _check(_run(vfb, monkeypatch, override), "malware_attack_twins_folded")
+        assert check["ok"] is False
+        assert check["detail"]["examples_foldable"] == ["cobaltstrike -> cobalt strike"]
+
     def test_an_ambiguous_twin_fails(self, vfb, monkeypatch):
         # Its id names one MITRE node and its base name another (whose id cannot be read).
         rep = self._run_with(vfb, monkeypatch, [{"name": "agent tesla - s0154", "aliases": []}])

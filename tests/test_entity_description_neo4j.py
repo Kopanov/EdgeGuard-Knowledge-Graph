@@ -90,6 +90,13 @@ def _mitre(kind: str) -> dict:
     return synced(written(kind, mitre_items()[kind]))
 
 
+def _stored(text: str) -> str:
+    """A description as the node holds it (2026-11-07): markup stripped, capped (``text_caps``)."""
+    from test_entity_description_source import as_stored
+
+    return as_stored(text)
+
+
 def _otx_before_2026_10(kind: str) -> dict:
     """The OTX collector's item until 2026-10: the pulse's description as the entity's."""
     from test_entity_description_source import otx_item_before_2026_10
@@ -106,8 +113,10 @@ def test_attacks_text_wins_in_both_orders(client, raw_driver, kind, first):
     for item, source in records if first == "mitre" else records[::-1]:
         assert getattr(client, MERGE[kind])(item, source_id=source)
     node = _node(raw_driver, kind)
-    assert (node["description"], node["description_source"]) == (mitre["description"], "mitre_attck")
-    assert node["description"].startswith(f"[{ATTACK_NAMES[kind]}]")
+    assert (node["description"], node["description_source"]) == (_stored(mitre["description"]), "mitre_attck")
+    # ATT&CK's text opens with a link to the entity's own page; the node keeps the link's name (2026-11-07).
+    assert mitre["description"].startswith(f"[{ATTACK_NAMES[kind]}]")
+    assert node["description"].startswith(f"{ATTACK_NAMES[kind]} ")
     assert set(node["source"]) == {"mitre_attck", "alienvault_otx"}, "both records were merged"
 
 
@@ -128,9 +137,9 @@ def test_each_record_replaces_a_lower_ranked_text_and_none_replaces_mitres(clien
     assert client.merge_actor(bundle, source_id="stix_import")
     assert _described(raw_driver, "actor") == ("A MISP-native attribute's text", "misp")
     assert client.merge_actor(_mitre("actor"), source_id="mitre_attck")
-    assert _described(raw_driver, "actor") == (_mitre("actor")["description"], "mitre_attck")
+    assert _described(raw_driver, "actor") == (_stored(_mitre("actor")["description"]), "mitre_attck")
     assert client.merge_actor(native, source_id="misp")
-    assert _described(raw_driver, "actor") == (_mitre("actor")["description"], "mitre_attck")
+    assert _described(raw_driver, "actor") == (_stored(_mitre("actor")["description"]), "mitre_attck")
 
 
 def test_a_tool_takes_mitres_revised_text_and_no_other(client, raw_driver):
@@ -138,7 +147,7 @@ def test_a_tool_takes_mitres_revised_text_and_no_other(client, raw_driver):
     assert client.merge_tool(dict(_mitre("tool"), description="ATT&CK v17 text"), source_id="mitre_attck")
     assert client.merge_tool(_mitre("tool"), source_id="mitre_attck")
     assert client.merge_tool(dict(_mitre("tool"), description="A STIX bundle's text"), source_id="stix_import")
-    assert _node(raw_driver, "tool")["description"] == _mitre("tool")["description"]
+    assert _node(raw_driver, "tool")["description"] == _stored(_mitre("tool")["description"])
 
 
 def test_otx_records_as_synced_since_2026_10_write_no_description(client, raw_driver):

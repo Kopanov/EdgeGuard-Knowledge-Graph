@@ -1538,7 +1538,10 @@ attribute (its properties minus the node's key, as a JSON string) in
 (`src/neo4j_client.py:_upsert_sourced_relationship`). Useful when you
 need the source's record without a round-trip to MISP. On a `CVE` the
 edge holds the source's latest record, replaced on every write from a MISP
-attribute; on other labels, the record that created the edge.
+attribute; on other labels, the record that created the edge. The
+`description` of a CVE, Vulnerability, Malware, ThreatActor, Tool, Technique
+or Tactic record is capped as the node's (1,000 or 500 characters,
+`src/text_caps.py`); MISP keeps the text the collector sent.
 
 ```cypher
 MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'})
@@ -1579,7 +1582,7 @@ curl -s -H "Authorization: $MISP_API_KEY" -H "Accept: application/json" -H "Cont
      "$MISP_URL/attributes/restSearch"
 ```
 
-For a CVE the comment is the record's `NVD_META:{...}` block, whose `description` field is the source's text (NVD, CISA KEV, CISA ICS), or a plain text; for a `Malware` (`malware-type`), `ThreatActor` (`threat-actor`), `Tool`, `Technique` or `Tactic` (`text`) attribute it is the text MISPWriter wrote after the `MITRE_*` block's line. The node holds the text as MISP holds it (MISPWriter cuts an entity's description to the length [COLLECTORS.md](COLLECTORS.md) gives per kind); the source's own record is named in `r.source_refs[]` where the feed has record ids (`mitre_attck:G0016`). The `source:` tag of each source is its `misp_tag` in `src/source_registry.py` (`source:NVD`, `source:CISA-KEV`, `source:CISA-ICS`, `source:AlienVault-OTX`, `source:MITRE-ATT&CK`, …). A description whose source is not a MISP source (`resilmesh` for a ResilMesh-native write, `stix_import` or another name an external STIX bundle gave) is not in MISP.
+For a CVE the comment is the record's `NVD_META:{...}` block, whose `description` field is the source's text (NVD, CISA KEV, CISA ICS), or a plain text; for a `Malware` (`malware-type`), `ThreatActor` (`threat-actor`), `Tool`, `Technique` or `Tactic` (`text`) attribute it is the text MISPWriter wrote after the `MITRE_*` block's line. MISP holds the text MISPWriter wrote, cut to the length [COLLECTORS.md](COLLECTORS.md) gives per kind. The node holds that text without its markup (a markdown link keeps its name; `(Citation: …)` markers and `<code>` tags are removed), capped by the sync at 1,000 characters on a `CVE` or `Vulnerability` and 500 on a `Malware`, `ThreatActor`, `Tool`, `Technique` or `Tactic` and cut at a sentence or word end ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#descriptions-and-their-source)); the source's own record is named in `r.source_refs[]` where the feed has record ids (`mitre_attck:G0016`). The `source:` tag of each source is its `misp_tag` in `src/source_registry.py` (`source:NVD`, `source:CISA-KEV`, `source:CISA-ICS`, `source:AlienVault-OTX`, `source:MITRE-ATT&CK`, …). A description whose source is not a MISP source (`resilmesh` for a ResilMesh-native write, `stix_import` or another name an external STIX bundle gave) is not in MISP.
 
 ### Coverage
 
@@ -1624,6 +1627,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — Descriptions: a node's description and the description in `r.raw_data` hold MISP's text without markup, capped at 1,000 (`CVE`, `Vulnerability`) or 500 (`Malware`, `ThreatActor`, `Tool`, `Technique`, `Tactic`) characters; MISP keeps the text the collector sent.
 - 2026-11-07 — New section "Report text in MISP's logs": MISP logs the full content of every Event Report add and edit, amber and red records included; MISP's site administrators can read it.
 - 2026-11-06 — 7c: `requirements.txt` pins `apache-airflow~=3.3.2` (`~=3.3` admitted 3.4).
 - 2026-11-06 — Canonical threat-actor reference: version `2026.11.06` lists `Videostrong Technology Co., Ltd.` as no actor beside `Videostrong Technology Co.` (39 names in 19 decisions). The actor-name hygiene no longer splits inside parentheses or before a legal form, so that OTX adversary field is one name, which the 2026-11-05 decision did not cover; built from the same galaxies and graph export, the reference is otherwise unchanged.
