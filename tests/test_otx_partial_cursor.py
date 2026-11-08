@@ -37,6 +37,7 @@ the event edit returning the stored event (HTTP 200), a validation error (HTTP 4
 
 import os
 import sys
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
@@ -44,7 +45,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest  # noqa: E402
 import requests  # noqa: E402
-from test_otx_incremental_order import ROWS, _collect, _ids, _Otx, _recorded, _value  # noqa: E402  (its OTX harness)
+from test_otx_incremental_order import ROWS, _collect, _ids, _Otx, _recorded, _utc, _value  # noqa: E402  (its OTX harness)
 
 from collectors import misp_writer as mw  # noqa: E402
 from collectors import otx_collector  # noqa: E402
@@ -115,6 +116,19 @@ class _Misp:
             else:
                 self.stored.extend(a["value"] for a in attrs)
                 r.json.return_value = {"Event": {"id": url.rsplit("/", 1)[1], "Attribute": [dict(a) for a in attrs]}}
+        elif "/eventReports/add/" in url:
+            # 2026-11-07: a report record (``MISPWriter.push_reports``) is stored as sent; the answer has the keys the
+            # writer checks (``tests/fixtures/misp_event_reports_2026_11_07/answers.json``, ``add_ok``).
+            sent = body["EventReport"]
+            self.__dict__.setdefault("reports", []).append(sent)
+            r.json.return_value = {
+                "EventReport": {
+                    **sent,
+                    "id": str(len(self.reports)),
+                    "event_id": url.rsplit("/", 1)[1],
+                    "deleted": False,
+                }
+            }
         else:  # pragma: no cover
             raise AssertionError(url)
         return r
@@ -634,6 +648,10 @@ def test_a_failure_at_the_event_holds_the_cursor_whether_or_not_misp_held_items_
     misp.event_errors = {}
     otx = _Otx(pulses)
     answered = _collect(otx, state, caplog, limit=20, writer=writer)
-    assert counts[2] == (20, 0) and otx.by_id_requests == []
+    # 2026-11-07: no pulse is fetched for the retry list; the pulses whose report records the run before could not
+    # write (its day-event lookup failed) and that this window does not read are fetched by id for their records.
+    read = {p["id"] for p in otx.ordered(_utc(ROWS[49]["modified"]) - timedelta(seconds=300))}
+    pending_not_read = set(_ids(range(39, 60))) - read
+    assert counts[2] == (20, 0) and sorted(otx.by_id_requests) == sorted(pending_not_read) != []
     assert answered.cursor == ROWS[29]["modified"]
     assert {_value(i) for i in range(29, 49)} <= _misp_values(misp)

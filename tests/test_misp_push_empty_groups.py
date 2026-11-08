@@ -108,6 +108,11 @@ class _FakeMisp:
             self.calls.append(("per_event", body["eventid"]))
             rows = [a for a in self.stored if a["event_id"] == body["eventid"]]
             r.json.return_value = {"response": {"Attribute": rows}}
+        elif "/eventReports/add/" in url:
+            # 2026-11-07: an OTX run also writes its pulses' report records (``MISPWriter.push_reports``); stored as
+            # sent, with the keys of MISP's answer the writer checks.
+            self.calls.append(("report", body["EventReport"]["uuid"]))
+            r.json.return_value = {"EventReport": {**body["EventReport"], "deleted": False}}
         else:  # pragma: no cover - a request the writer must not send here
             raise AssertionError(f"unexpected MISP request {url}")
         return r

@@ -750,13 +750,18 @@ OTX_BASELINE_MAX_PAGES = _env_int("EDGEGUARD_OTX_BASELINE_MAX_PAGES", 200)
 
 
 def otx_retry_per_run() -> int:
-    """``EDGEGUARD_OTX_RETRY_PER_RUN`` (default 50; ``0`` = no retries): the pulses of the OTX retry list a
+    """``EDGEGUARD_OTX_RETRY_PER_RUN`` (default 50; ``0`` = no fetches by id): the pulses of the OTX retry list a
     scheduled run fetches by id (``/api/v1/pulses/{id}``) and pushes again, those tried longest ago first. A
     pulse goes on the list when the writer lists one of its items as unstored and the cursor moves on
-    (``otx_collector``, 2026-11-02). Each fetch is one OTX request, 2 s apart like the page requests (OTX
-    allows about 30 a minute), so 50 add at least 100 s of fetch pauses to a run of ``collect_otx`` (limit 1
-    hour). The pulses of the list are pushed after the window's push, each in batches of its own, within
-    ``EDGEGUARD_OTX_RETRY_MAX_SECONDS``."""
+    (``otx_collector``, 2026-11-02). Counted apart, the same number bounds the pulses whose report record waits
+    on ``report_pending`` (2026-11-07): every OTX run that pushes, a baseline included, fetches those by id for
+    their records only (their items are not pushed again), and none once the retry list's fetches stopped.
+    Each fetch is one OTX request with a 2 s pause after it, as between page requests (OTX allows about 30 a
+    minute): at the default a scheduled run adds at least 100 s of pauses for the retry list and up to another
+    100 s for ``report_pending``, a baseline only the latter; ``collect_otx`` has a limit of 1 hour. With ``0``
+    a pending record is pushed again only when a run's window reads its pulse, and it is not given up by age
+    before a push tries it. The pulses of the retry list are pushed after the window's push, each in batches of
+    its own, within ``EDGEGUARD_OTX_RETRY_MAX_SECONDS``."""
     return max(0, _env_int("EDGEGUARD_OTX_RETRY_PER_RUN", 50))
 
 

@@ -248,7 +248,10 @@ def _iso(value: Any) -> Optional[str]:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat()
+    try:
+        return dt.astimezone(timezone.utc).isoformat()
+    except (OverflowError, ValueError):  # a date at the end of the calendar whose zone puts it past year 9999
+        return None
 
 
 def iso_datetime(value: Any) -> Optional[datetime]:
@@ -758,7 +761,9 @@ def digest_matches(description: str, meta: Mapping[str, Any]) -> bool:
 # fresh baseline's wipe clears it with MISP, which frees every report uuid (live check L12).
 # Each entry: ``record_ref``, ``first_failed_at`` (UTC ISO 8601), ``attempts`` (pushes that failed),
 # ``last_tried_at`` (the last push that failed; absent when the record was never tried) and
-# ``last_reason`` (printable ASCII, at most 300 characters).
+# ``last_reason`` (printable ASCII, at most 300 characters). An entry whose source record a run could not
+# fetch also holds ``first_fetch_failed_at`` and ``last_fetch_failed_at`` (the fetches that failed since the
+# record was last read; no push try): they order the list and give up a record whose source keeps failing.
 PENDING_STATE_KEY = "report_pending"
 _PENDING_REASON_MAX = 300
 _GAVE_UP_PER_LINE = 50
@@ -781,7 +786,8 @@ def _reason(text: Any) -> str:
 
 def _pending_entries(raw: Any, source: str, now: datetime) -> List[Dict[str, Any]]:
     """The stored list, copied: entries whose ``record_ref`` belongs to *source*, the first of each; a
-    ``first_failed_at`` that does not read is *now*, ``attempts`` that is not a whole number 0."""
+    ``first_failed_at`` that does not read is *now*, ``attempts`` that is not a whole number 0; the fetch-failure
+    times are kept when both read."""
     if not isinstance(raw, list):
         return []
     entries: List[Dict[str, Any]] = []
@@ -801,6 +807,11 @@ def _pending_entries(raw: Any, source: str, now: datetime) -> List[Dict[str, Any
         if tried is not None:
             kept["last_tried_at"] = _utc_iso(tried)
         kept["last_reason"] = _reason(entry.get("last_reason"))
+        first_fetch = iso_datetime(entry.get("first_fetch_failed_at"))
+        last_fetch = iso_datetime(entry.get("last_fetch_failed_at"))
+        if first_fetch is not None and last_fetch is not None:
+            kept["first_fetch_failed_at"] = _utc_iso(first_fetch)
+            kept["last_fetch_failed_at"] = _utc_iso(last_fetch)
         entries.append(kept)
     return entries
 
@@ -813,12 +824,19 @@ def load_report_pending(source: str, now: Optional[datetime] = None) -> List[Dic
     return _pending_entries(get_source_incremental(pending_state_source(source)).get(PENDING_STATE_KEY), source, now)
 
 
-def pending_record_refs(source: str) -> List[str]:
-    """The record references on *source*'s ``report_pending`` list, tried longest ago first (never tried
-    first of all)."""
+def _last_touched(entry: Mapping[str, Any]) -> datetime:
+    """The later of an entry's last push try and its last failed fetch (the earliest time when neither)."""
     epoch = datetime.min.replace(tzinfo=timezone.utc)
+    times = [iso_datetime(entry.get(key)) for key in ("last_tried_at", "last_fetch_failed_at")]
+    return max((t for t in times if t is not None), default=epoch)
+
+
+def pending_record_refs(source: str) -> List[str]:
+    """The record references on *source*'s ``report_pending`` list, those tried or fetched in vain longest ago
+    first (neither first of all): a record whose source record keeps failing to be fetched goes behind the
+    others, so it cannot hold them back."""
     entries = load_report_pending(source)
-    entries.sort(key=lambda e: (iso_datetime(e.get("last_tried_at")) or epoch, e["record_ref"]))
+    entries.sort(key=lambda e: (_last_touched(e), e["record_ref"]))
     return [e["record_ref"] for e in entries]
 
 
@@ -829,7 +847,8 @@ class PendingSettled(NamedTuple):
     added: List[str]  # records put on the list now
     cleared: List[str]  # records taken off: settled in MISP, or a permanent failure
     still: List[str]  # records that failed again and stay
-    given_up: List[Dict[str, Any]]  # entries given up (failing EDGEGUARD_REPORT_PENDING_MAX_DAYS and tried since)
+    given_up: List[Dict[str, Any]]  # entries given up (failing EDGEGUARD_REPORT_PENDING_MAX_DAYS and tried since,
+    # or its source record failing to be fetched for that long)
 
 
 def settle_report_pending(
@@ -839,6 +858,8 @@ def settle_report_pending(
     failed: Iterable[Tuple[str, str]] = (),
     skipped: Iterable[Tuple[str, str]] = (),
     permanent: Iterable[str] = (),
+    fetch_failed: Iterable[Tuple[str, str]] = (),
+    fetched: Iterable[str] = (),
     now: datetime,
     max_days: int,
 ) -> PendingSettled:
@@ -847,11 +868,22 @@ def settle_report_pending(
     (a uuid in a foreign event): taken off, not added. *failed*: ``(record_ref, reason)`` of records whose
     push failed: an entry's ``attempts`` + 1 and ``last_tried_at`` *now*, or a new entry. *skipped*:
     ``(record_ref, reason)`` of records not tried (the deadline came, MISP kept failing, no day event): a new
-    entry without ``last_tried_at``; an entry on the list is left as it is. An entry first failed more than
-    *max_days* ago is then given up when it was tried after that deadline, so a record waiting while no run
-    tried it gets one try first."""
+    entry without ``last_tried_at``; an entry on the list is left as it is. *fetch_failed*: ``(record_ref,
+    reason)`` of records on the list whose source record could not be fetched: ``last_fetch_failed_at`` *now*
+    (``first_fetch_failed_at`` too when absent) and ``last_reason``; no try, so ``attempts`` and
+    ``last_tried_at`` stay. *fetched*: records whose source record was read; a try (*failed*) also reads it.
+    Either ends the entry's fetch failures. An entry first failed more than *max_days* ago is then given up when
+    it was tried after that deadline, so a record waiting while no run tried it gets one try first, or when its
+    source record has failed to be fetched for more than *max_days* and the last of those fetches came after
+    the deadline, so a record whose source never answers does not stay on the list for ever while a fetch
+    failure shorter than *max_days* gives up nothing."""
     by_ref: Dict[str, Dict[str, Any]] = {e["record_ref"]: dict(e) for e in entries}
     now_iso = _utc_iso(now)
+    for ref in fetched:
+        entry = by_ref.get(ref)
+        if entry is not None:
+            entry.pop("first_fetch_failed_at", None)
+            entry.pop("last_fetch_failed_at", None)
     cleared: List[str] = []
     for ref in [*settled, *permanent]:
         if by_ref.pop(ref, None) is not None:
@@ -871,11 +903,20 @@ def settle_report_pending(
         entry["attempts"] = int(entry.get("attempts") or 0) + 1
         entry["last_tried_at"] = now_iso
         entry["last_reason"] = _reason(reason)
+        entry.pop("first_fetch_failed_at", None)
+        entry.pop("last_fetch_failed_at", None)
     for ref, reason in skipped:
         if ref in permanent_refs or ref in by_ref:
             continue
         by_ref[ref] = {"record_ref": ref, "first_failed_at": now_iso, "attempts": 0, "last_reason": _reason(reason)}
         added.append(ref)
+    for ref, reason in fetch_failed:
+        entry = by_ref.get(ref)
+        if entry is None or ref in permanent_refs:
+            continue
+        entry.setdefault("first_fetch_failed_at", now_iso)
+        entry["last_fetch_failed_at"] = now_iso
+        entry["last_reason"] = _reason(reason)
     span = timedelta(days=max(1, max_days))
     kept: List[Dict[str, Any]] = []
     given_up: List[Dict[str, Any]] = []
@@ -883,6 +924,11 @@ def settle_report_pending(
         first = iso_datetime(entry["first_failed_at"]) or now
         tried = iso_datetime(entry.get("last_tried_at"))
         expired = tried is not None and min(tried, now) - span > first
+        first_fetch = iso_datetime(entry.get("first_fetch_failed_at"))
+        last_fetch = iso_datetime(entry.get("last_fetch_failed_at"))
+        if first_fetch is not None and last_fetch is not None:
+            last_fetch = min(last_fetch, now)
+            expired = expired or (last_fetch - span > first and last_fetch - first_fetch > span)
         (given_up if expired else kept).append(entry)
     return PendingSettled(kept, added, cleared, still, given_up)
 
@@ -899,7 +945,12 @@ def _log_given_up(source: str, given_up: List[Dict[str, Any]], max_days: int) ->
             max_days,
             "; ".join(
                 f"{e['record_ref']} (attempts {e.get('attempts', 0)}, first failed {e.get('first_failed_at')}, "
-                f"last reason: {e.get('last_reason') or 'unknown'})"
+                + (
+                    f"its source record not fetched since {e['first_fetch_failed_at']}, "
+                    if e.get("first_fetch_failed_at")
+                    else ""
+                )
+                + f"last reason: {e.get('last_reason') or 'unknown'})"
                 for e in chunk
             ),
         )
@@ -926,6 +977,8 @@ def update_report_pending(
     failed: Iterable[Tuple[str, str]] = (),
     skipped: Iterable[Tuple[str, str]] = (),
     permanent: Iterable[str] = (),
+    fetch_failed: Iterable[Tuple[str, str]] = (),
+    fetched: Iterable[str] = (),
     now: Optional[datetime] = None,
 ) -> PendingSettled:
     """Settle *source*'s ``report_pending`` list (``settle_report_pending``) and store it in the incremental
@@ -943,6 +996,8 @@ def update_report_pending(
         failed=list(failed),
         skipped=list(skipped),
         permanent=list(permanent),
+        fetch_failed=list(fetch_failed),
+        fetched=list(fetched),
         now=now,
         max_days=max_days,
     )

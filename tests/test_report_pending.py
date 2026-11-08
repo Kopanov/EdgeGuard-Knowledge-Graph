@@ -4,7 +4,8 @@ Per source, the records whose Event Report push failed or was not tried, kept in
 source's collector (``checkpoints[otx|cisa_ics]["incremental"]["report_pending"]``) on baselines and scheduled runs,
 apart from the OTX item retry list. A record leaves the list when a push settles it, is never added when its failure
 is permanent (a uuid in a foreign event), and is given up with an ERROR ``[REPORT-GAVE-UP]`` once it has failed for
-``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` and a push tried it after that. The end-to-end tests run
+``EDGEGUARD_REPORT_PENDING_MAX_DAYS`` and a push tried it after that, or once its source record has failed to be
+fetched for longer than that (a failed fetch is no try; it puts the entry behind the others). The end-to-end tests run
 ``MISPWriter.push_reports`` against the recorded-answer double and hand its stats to ``note_report_push``.
 """
 
@@ -135,6 +136,86 @@ class TestSettle:
             "alienvault_otx", skipped=[("alienvault_otx:6abf0b86fb14812f2dc84f0c", "deadline")], now=NOW
         )
         assert rr.pending_record_refs("alienvault_otx") == ["alienvault_otx:6abf0b86fb14812f2dc84f0c", OTX_A, OTX_B]
+
+    def test_a_failed_fetch_is_no_try_and_puts_the_entry_behind_the_others(self):
+        """A's source record cannot be fetched an hour after B's push failed: A keeps its attempts and its last
+        try, and goes behind B, so a record whose source keeps failing holds no other back."""
+        rr.update_report_pending("alienvault_otx", failed=[(OTX_A, "x")], now=NOW - timedelta(hours=1))
+        rr.update_report_pending("alienvault_otx", failed=[(OTX_B, "x")], now=NOW)
+        assert rr.pending_record_refs("alienvault_otx") == [OTX_A, OTX_B]
+        later = NOW + timedelta(hours=1)
+        rr.update_report_pending("alienvault_otx", fetch_failed=[(OTX_A, "fetch by id failed: HTTP 504")], now=later)
+        rr.update_report_pending(
+            "alienvault_otx", fetch_failed=[(OTX_A, "fetch by id failed: HTTP 429")], now=later + timedelta(hours=1)
+        )
+        entry = {e["record_ref"]: e for e in rr.load_report_pending("alienvault_otx")}[OTX_A]
+        assert entry["attempts"] == 1 and entry["last_tried_at"] == (NOW - timedelta(hours=1)).isoformat()
+        assert entry["first_fetch_failed_at"] == later.isoformat()
+        assert entry["last_fetch_failed_at"] == (later + timedelta(hours=1)).isoformat()
+        assert entry["last_reason"] == "fetch by id failed: HTTP 429"
+        assert rr.pending_record_refs("alienvault_otx") == [OTX_B, OTX_A]
+
+    def test_a_failed_fetch_of_a_record_not_on_the_list_adds_nothing(self):
+        result = rr.update_report_pending("alienvault_otx", fetch_failed=[(OTX_A, "HTTP 504")], now=NOW)
+        assert result.entries == [] and _incremental("otx")["report_pending"] == []
+
+    @pytest.mark.parametrize("how", ["fetched", "failed"])
+    def test_a_read_or_a_try_ends_the_fetch_failures(self, how):
+        rr.update_report_pending("alienvault_otx", failed=[(OTX_A, "x")], now=NOW)
+        rr.update_report_pending("alienvault_otx", fetch_failed=[(OTX_A, "HTTP 504")], now=NOW + timedelta(hours=1))
+        later = NOW + timedelta(hours=2)
+        if how == "fetched":
+            rr.update_report_pending("alienvault_otx", fetched=[OTX_A], now=later)
+        else:
+            rr.update_report_pending("alienvault_otx", failed=[(OTX_A, "the add answered HTTP 500")], now=later)
+        (entry,) = rr.load_report_pending("alienvault_otx")
+        assert "first_fetch_failed_at" not in entry and "last_fetch_failed_at" not in entry
+        assert entry["attempts"] == (1 if how == "fetched" else 2)
+
+    def test_fetch_failure_times_that_do_not_read_are_dropped(self):
+        baseline_checkpoint.update_source_incremental(
+            "otx",
+            report_pending=[
+                {
+                    "record_ref": OTX_A,
+                    "first_failed_at": NOW.isoformat(),
+                    "first_fetch_failed_at": "not a date",
+                    "last_fetch_failed_at": NOW.isoformat(),
+                }
+            ],
+        )
+        (entry,) = rr.load_report_pending("alienvault_otx", now=NOW)
+        assert "first_fetch_failed_at" not in entry and "last_fetch_failed_at" not in entry
+
+    def test_a_record_whose_source_keeps_failing_to_be_fetched_is_given_up(self, monkeypatch, caplog):
+        """Never tried (skipped at NOW), its source record failing to be fetched from day 1 to day 8 and 1 hour:
+        past the deadline and failing for more than 7 days, it is given up and the line says since when."""
+        monkeypatch.setenv("EDGEGUARD_REPORT_PENDING_MAX_DAYS", "7")
+        rr.update_report_pending("alienvault_otx", skipped=[(OTX_A, "the push's deadline came")], now=NOW)
+        day_1 = NOW + timedelta(days=1)
+        rr.update_report_pending("alienvault_otx", fetch_failed=[(OTX_A, "HTTP 504")], now=day_1)
+        kept = rr.update_report_pending(
+            "alienvault_otx", fetch_failed=[(OTX_A, "HTTP 504")], now=day_1 + timedelta(days=7)
+        )
+        assert kept.given_up == [], "failing for exactly 7 days"
+        with caplog.at_level(logging.ERROR, logger=rr.logger.name):
+            result = rr.update_report_pending(
+                "alienvault_otx", fetch_failed=[(OTX_A, "HTTP 504")], now=day_1 + timedelta(days=7, hours=1)
+            )
+        assert [e["record_ref"] for e in result.given_up] == [OTX_A] and result.entries == []
+        (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[REPORT-GAVE-UP]")]
+        assert f"its source record not fetched since {day_1.isoformat()}" in line and "attempts 0" in line
+
+    def test_a_fetch_failure_shorter_than_the_limit_gives_up_nothing(self):
+        """A record first failed 30 days ago and never tried: one fetch failure, or failures over six days, give
+        nothing up (a fetch failure is no try)."""
+        old = NOW - timedelta(days=30)
+        rr.update_report_pending("alienvault_otx", skipped=[(OTX_A, "deadline")], now=old)
+        first = rr.update_report_pending("alienvault_otx", fetch_failed=[(OTX_A, "HTTP 429")], now=NOW)
+        later = rr.update_report_pending(
+            "alienvault_otx", fetch_failed=[(OTX_A, "HTTP 429")], now=NOW + timedelta(days=6)
+        )
+        assert first.given_up == [] and later.given_up == [] and [e["record_ref"] for e in later.entries] == [OTX_A]
 
 
 class TestWhereTheListLives:
