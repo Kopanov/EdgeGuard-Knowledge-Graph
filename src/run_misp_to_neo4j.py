@@ -2589,10 +2589,12 @@ class MISPToNeo4jSync:
         attributes): 118 MB in 22 s with the clusters, 13.7 MB in 0.6 s without, with the same attributes in
         the same order and the same event and attribute tags, ``misp-galaxy:*`` tags included.
 
-        None, after a ``[MISP-VIEW-FALLBACK]`` warning, when MISP answers a status other than 2xx or a body
-        that is not an event: the caller then reads the event as before, once (PyMISP ``get_event``, then
-        REST ``/events/<id>``). Transport errors (connection, timeout, a broken body) are raised, as on the
-        REST request below, so that ``retry_with_backoff`` retries the fetch.
+        None, after a ``[MISP-VIEW-FALLBACK]`` warning, when MISP answers a 4xx or another status that is
+        neither 2xx nor 5xx, or a body that is not an event: the caller then reads the event as before, once
+        (PyMISP ``get_event``, then REST ``/events/<id>``). A 5xx is raised as ``MispTransientServerError``,
+        like transport errors (connection, timeout, a broken body), so that ``retry_with_backoff`` retries
+        the light request: a MISP that is struggling gets no read with the clusters, and after the retries
+        the event goes to the paged fetch as before.
         """
         path = f"/events/view/{event_id}/excludeGalaxy:1"
         response = self.session.get(
@@ -2600,6 +2602,9 @@ class MISPToNeo4jSync:
             verify=SSL_VERIFY,
             timeout=(MISP_CONNECT_TIMEOUT, MISP_REQUEST_TIMEOUT),
         )
+        if response.status_code >= 500:
+            logger.warning("MISP returned HTTP %s for %s — will retry via backoff", response.status_code, path)
+            raise MispTransientServerError(f"MISP {response.status_code} on {path}", response=response)
         if 200 <= response.status_code < 300:
             try:
                 plain = misp_event_object_to_event_dict(response.json())
@@ -2627,7 +2632,7 @@ class MISPToNeo4jSync:
 
         First without the galaxy clusters (``_fetch_event_view_without_galaxies``); when MISP does not answer
         that request with an event, once with them: PyMISP ``get_event``, then REST ``/events/<id>``. The
-        retries (``retry_with_backoff``) cover transport errors and HTTP 5xx of the REST request; each retry
+        retries (``retry_with_backoff``) cover transport errors and HTTP 5xx of either request; each retry
         starts again without the clusters.
 
         Args:

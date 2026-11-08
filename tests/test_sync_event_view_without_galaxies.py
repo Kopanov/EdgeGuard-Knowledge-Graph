@@ -3,9 +3,10 @@
 MISP attaches to every galaxy tag (``misp-galaxy:mitre-attack-pattern="... - T1677"``) the whole cluster under
 ``Galaxy``; on the ATT&CK event of the 730-day test instance the clusters were 88% of a 118 MB answer. The sync reads
 only tag names, so ``fetch_event_details`` asks for ``/events/view/<id>/excludeGalaxy:1``, which answered 13.7 MB with
-the same attributes and tags. When MISP answers that request with a status other than 2xx, or with a body that is
-not an event, a ``[MISP-VIEW-FALLBACK]`` warning is logged and the event is read once as before (PyMISP
-``get_event``, then REST ``/events/<id>``). Transport errors and the 5xx retries keep their handling.
+the same attributes and tags. When MISP answers that request with a 4xx, or with a body that is not an event, a
+``[MISP-VIEW-FALLBACK]`` warning is logged and the event is read once as before (PyMISP ``get_event``, then REST
+``/events/<id>``). A 5xx of that request is retried like a transport error, so a struggling MISP gets no read with
+the clusters; after the retries the event goes to the paged fetch.
 
 Answers: ``tests/fixtures/misp_event_view_galaxies_2026_11_08.json``, MISP 2.5.50's answers to both views of event 135
 (EdgeGuard-mitre_attck-2026-11-08), reduced to the attributes T1677 and T1027.017. The PyMISP double and the HTTP
@@ -180,7 +181,7 @@ def test_the_sync_writes_the_same_items_from_both_views(pymisp_double):
     bare = _processing_syncer({VIEW: Response(200, WITHOUT_GALAXIES)})
     assert bare._process_single_event(EVENT_ID, INFO, 2) == (2, 0, 0)
     assert pymisp_double.calls == []
-    full = _processing_syncer({VIEW: Response(500, {"message": "error"})})
+    full = _processing_syncer({VIEW: Response(400, {"message": "error"})})
     assert full._process_single_event(EVENT_ID, INFO, 2) == (2, 0, 0)
     assert pymisp_double.calls == [EVENT_ID]
     assert bare.written == full.written
@@ -201,7 +202,7 @@ def test_the_stix_fallback_reads_the_view_without_galaxy_clusters(pymisp_double)
 # --------------------------------------------------------------------------- MISP refuses the view
 
 
-@pytest.mark.parametrize("status", [400, 403, 404, 405, 500, 502, 503])
+@pytest.mark.parametrize("status", [400, 403, 404, 405])
 def test_a_refused_view_is_read_once_with_its_clusters(pymisp_double, caplog, status):
     syncer = _syncer({VIEW: Response(status, {"message": "refused"})})
     with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
@@ -266,19 +267,32 @@ def test_a_transport_error_of_the_view_is_retried_without_the_fallback(pymisp_do
     assert _paths(syncer) == [VIEW, VIEW, VIEW] and pymisp_double.calls == []
 
 
-def test_a_5xx_everywhere_is_retried_and_then_raised(pymisp_double):
-    """Each attempt starts again without the clusters and reads the event once with them; after the retries the
-    5xx of the REST request is raised, and ``_process_single_event`` turns to the paged fetch."""
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_a_5xx_of_the_view_is_retried_and_then_raised_without_the_clusters(pymisp_double, caplog, status):
+    """A 5xx of the light request is retried like a transport error and never followed by the read with the
+    clusters; after the retries it is raised, and ``_process_single_event`` turns to the paged fetch."""
     pymisp_double.answer = RuntimeError("Error code 500")
-    syncer = _syncer({VIEW: Response(500, {}), REST: Response(503, {})})
+    syncer = _syncer({VIEW: Response(status, {}), REST: Response(503, {})})
+    with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
+        with pytest.raises(MispTransientServerError):
+            syncer.fetch_event_details(EVENT_ID)
+    assert _paths(syncer) == [VIEW] * (MAX_RETRIES + 1)
+    assert pymisp_double.calls == []
+    assert not any("[MISP-VIEW-FALLBACK]" in r.getMessage() for r in caplog.records)
+
+
+def test_the_view_answers_again_after_a_5xx(pymisp_double):
+    pymisp_double.answer = RuntimeError("Error code 500")
+    syncer = _syncer({VIEW: [Response(503, {}), Response(200, WITHOUT_GALAXIES)], REST: Response(503, {})})
+    assert syncer.fetch_event_details(EVENT_ID) == WITHOUT_GALAXIES["Event"]
+    assert _paths(syncer) == [VIEW, VIEW] and pymisp_double.calls == []
+
+
+def test_a_5xx_of_the_rest_request_after_a_refused_view_is_retried(pymisp_double):
+    """The old path keeps its handling: after a 4xx of the light request, a 5xx of the REST request is retried."""
+    pymisp_double.answer = RuntimeError("Error code 500")
+    syncer = _syncer({VIEW: Response(404, {}), REST: Response(503, {})})
     with pytest.raises(MispTransientServerError):
         syncer.fetch_event_details(EVENT_ID)
     assert _paths(syncer) == [VIEW, REST] * (MAX_RETRIES + 1)
     assert pymisp_double.calls == [EVENT_ID] * (MAX_RETRIES + 1)
-
-
-def test_the_view_answers_again_after_a_5xx_round(pymisp_double):
-    pymisp_double.answer = RuntimeError("Error code 500")
-    syncer = _syncer({VIEW: [Response(503, {}), Response(200, WITHOUT_GALAXIES)], REST: Response(503, {})})
-    assert syncer.fetch_event_details(EVENT_ID) == WITHOUT_GALAXIES["Event"]
-    assert _paths(syncer) == [VIEW, REST, VIEW]
