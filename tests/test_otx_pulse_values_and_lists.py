@@ -27,6 +27,7 @@ from __future__ import annotations
 import copy
 import json
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from unittest.mock import MagicMock
@@ -218,8 +219,10 @@ def test_a_value_is_refanged_as_misp_stores_it(misp_type, value, stored):
         ("url", "http://evil{.}example/a"),
         ("url", "http://evil[DOT]example/a"),
         ("url", "http://evil.example/hxxp/a"),
-        ("url", " hxxp://evil.example"),
         ("email-src", "ops(at)evil.example"),
+        # MISP trims before it refangs; ``refang_as_misp`` takes the trimmed value (``_pulse_indicator_value``
+        # trims it), so an untrimmed one is not matched by the start-of-value rule.
+        ("url", " hxxp://evil.example"),
         # Rules that belong to other types.
         ("domain", "hxxp-evil.example"),
         ("domain", "evil.example[:]8080"),
@@ -532,16 +535,20 @@ def test_an_item_a_white_and_an_amber_pulse_list_carries_no_copy(caplog, amber_f
     """The white shape pulse and an amber pulse listing the same indicators: each attribute names the first in
     ``pulse_id`` and the other in ``report_ids``, takes amber (the most restrictive) and carries no copy, also when
     the white pulse came first and its copies were the kept item's; the sync gives it no pulse name. Each pulse
-    keeps its own record at its own level."""
+    keeps its own record at its own level. OTX answers the newest-modified pulse first (``_Otx``), so the later
+    pulse is dated a minute before the first; the attributes' ``pulse_id`` pins the order the run read them in."""
     white = _gated("white")
     amber = _gated("amber", pid="6a019c5f0a3344d92c43aaaa", name="Amber report on the same infrastructure")
     first, later = (amber, white) if amber_first else (white, amber)
+    later["modified"] = (
+        datetime.fromisoformat(first["modified"]) - timedelta(minutes=1)
+    ).isoformat()  # read after *first*
     misp = _Misp()
     _collect(_Otx([first, later]), {}, caplog, limit=None, baseline=True, writer=_real_writer(misp))
     assert len(_indicators_in(misp)) == 2
     for n, attribute in enumerate(_indicators_in(misp)):
         meta = _otx_meta(attribute)
-        assert {meta["pulse_id"], *meta["report_ids"]} == {white["id"], amber["id"]}
+        assert meta["pulse_id"] == first["id"] and meta["report_ids"] == [later["id"]]
         assert meta["pulse_tlp"] == "amber" and _copies(meta) == NO_COPIES
         assert {"name": "tlp:amber"} in attribute["Tag"]
         assert not [text for text in _text_of(white) + _text_of(amber) if text in attribute["comment"]]
