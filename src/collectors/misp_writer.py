@@ -987,7 +987,8 @@ _TRANSIENT_HTTP_ERRORS = (
 # (``_event_split_above``). The writer keeps the cap of the call in
 # ``_misp_push_failing_cap`` (seconds; 0 or unset:
 # no cap), the start of the streak in ``_misp_push_failing_since`` (``time.monotonic()``; unset: none) and, for a
-# writer given its task's end (the baseline's), ``_misp_push_failing_end_by``; all are read with ``getattr``
+# writer given its task's end (``task_ends_at``: the baseline's and the scheduled OTX and CISA ICS runs'),
+# ``_misp_push_failing_end_by``; all are read with ``getattr``
 # defaults that mean no cap, because many tests build the writer without ``__init__`` and ``_push_batch`` is also
 # called outside a push.
 

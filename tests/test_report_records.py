@@ -82,13 +82,14 @@ ICS_FIELDS = {
     ],
     "deployment_countries": ["Worldwide"],
     "cve_ids": ["CVE-2026-32645", "cve-2026-39460"],
-    "revision_count": 2,
+    "version": "2",
     "vulnerabilities": [
         {
             "cve_id": "cve-2026-39460",
             "summary": "Plaintext passwords.",
             "remediations": [{"category": "no_fix_planned", "details": "Red Lion Controls does not plan a fix."}],
             "affected_products": ["Red Lion Controls 700 Series: <=Firmware_3.11.0"],
+            "cwes": [{"id": "CWE-522", "name": "Insufficiently Protected Credentials"}],
         },
         {
             "cve_id": "CVE-2026-32645",
@@ -183,13 +184,37 @@ class TestIcsRecord:
     def test_the_advisory_facts_are_normalised(self):
         record = _ics_record()
         assert record["record_ref"] == "cisa_ics:ICSA-26-281-01"
-        assert (record["tlp"], record["revision"], record["revision_count"]) == ("white", 2, 2)
+        assert (record["tlp"], record["revision"], record["version"]) == ("white", 2, "2")
         assert record["cve_ids"] == ["CVE-2026-32645", "CVE-2026-39460"]
         assert [v["cve_id"] for v in record["vulnerabilities"]] == ["CVE-2026-32645", "CVE-2026-39460"]
         first = record["vulnerabilities"][0]
         assert [r["category"] for r in first["remediations"]] == ["mitigation", "vendor_fix"]
         assert record["deployment_sectors"][3] == "Energy" and record["vendor_headquarters"] is None
         assert record["published"] == "2026-10-08T06:00:00+00:00"
+
+    def test_the_cwes_of_a_vulnerability_are_checked_and_sorted_by_number(self):
+        long_name = "x" * 301
+        entry = {
+            "cve_id": "CVE-2026-32645",
+            "cwes": [
+                {"id": "cwe-1021", "name": "Improper Restriction of Rendered UI Layers or Frames"},
+                {"id": "CWE-79", "name": long_name},
+                {"id": "CWE-79", "name": "Cross-site Scripting"},
+                {"id": "NVD-CWE-noinfo", "name": "Insufficient Information"},
+                {"id": "CWE-89"},
+                "CWE-22",
+            ],
+        }
+        (vuln,) = _ics_record(vulnerabilities=[entry])["vulnerabilities"]
+        assert vuln["cwes"] == [
+            {"id": "CWE-79", "name": "Cross-site Scripting"},
+            {"id": "CWE-89", "name": None},
+            {"id": "CWE-1021", "name": "Improper Restriction of Rendered UI Layers or Frames"},
+        ]
+        assert _ics_record()["vulnerabilities"][1]["cwes"] == [
+            {"id": "CWE-522", "name": "Insufficiently Protected Credentials"}
+        ]
+        assert _ics_record()["vulnerabilities"][0]["cwes"] == []
 
     def test_a_vulnerability_entry_with_another_key_is_refused(self):
         with pytest.raises(ValueError, match="vulnerability entry"):

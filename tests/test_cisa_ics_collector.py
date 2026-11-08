@@ -234,10 +234,17 @@ def _isolate(monkeypatch):
     yield
 
 
+def settled_reports(source: str, records: Any, **_kw: Any) -> Dict[str, Any]:
+    """``MISPWriter.push_reports`` as MISP answers when every record is added (2026-11-07)."""
+    refs = [r["record_ref"] for r in records]
+    return {"source": source, "reports_added": len(refs), "settled": refs, "failed": [], "skipped": []}
+
+
 def _collector(http: _FakeHTTP, monkeypatch, push_ok: int = 0, push_failed: int = 0) -> mod.CISAICSCollector:
     monkeypatch.setattr(mod, "request_with_rate_limit_retries", http)
     writer = MagicMock()
     writer.push_items.return_value = (push_ok, push_failed)
+    writer.push_reports.side_effect = settled_reports
     c = mod.CISAICSCollector(misp_writer=writer)
     assert c.base_url == BASE
     return c
@@ -847,13 +854,18 @@ def test_dag_wrapper_flag_on_goes_through_run_collector_with_metrics(monkeypatch
     import config
 
     monkeypatch.setattr(config, "ENABLE_CISA_ICS", True)
+    writer_class = MagicMock()
+    task = MagicMock(execution_timeout=_dt.timedelta(hours=2))
     with (
         patch.object(ep, "run_collector_with_metrics", MagicMock(return_value={"success": True, "count": 0})) as run,
-        patch("collectors.misp_writer.MISPWriter", MagicMock()),
+        patch("collectors.misp_writer.MISPWriter", writer_class),
     ):
-        ep.run_cisa_ics_collection()
+        ep.run_cisa_ics_collection(task=task)
     assert run.call_args[0][0] == "cisa_ics"
     assert run.call_args[0][1] is mod.CISAICSCollector
+    # 2026-11-07: the writer knows the task's end, so the record pushes stop before Airflow kills the task.
+    ends_at = writer_class.call_args.kwargs["task_ends_at"]
+    assert isinstance(ends_at, float) and 7000 < ends_at - _dt.datetime.now().timestamp() <= 7200
 
 
 def test_daily_dag_wires_the_task_next_to_mitre():
