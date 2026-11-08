@@ -348,15 +348,22 @@ def _todays_cve_items() -> List[Tuple[Dict[str, Any], str]]:
 
 class TestTodaysTexts:
     def test_todays_cve_descriptions_reach_the_graph_unchanged(self):
+        """A text within the cap reaches the graph unchanged; a longer one (the NVD collector no longer cuts at
+        1,000 characters, 2026-11-07) is capped."""
         items = _todays_cve_items()
         described = [(i, s) for i, s in items if isinstance(i.get("description"), str) and i["description"].strip()]
         assert len(described) > 50
         assert {s for _i, s in described} >= {"nvd", "cisa_kev", "cisa_ics"}
+        longer = 0
         for item, source_id in described:
             assert strip_markup(item["description"]) == item["description"], item["cve_id"]
+            expected, truncated, _ = cap_text(item["description"], CVE_DESCRIPTION_CAP)
+            assert truncated == (len(item["description"]) > CVE_DESCRIPTION_CAP), item["cve_id"]
+            longer += truncated
             row = nc._prepare_cve_write(copy.deepcopy(item), source_id)
-            assert row["node"]["description"] == item["description"], item["cve_id"]
-            assert json.loads(row["edge"]["raw_data"])["description"] == item["description"], item["cve_id"]
+            assert row["node"]["description"] == expected, item["cve_id"]
+            assert json.loads(row["edge"]["raw_data"])["description"] == expected, item["cve_id"]
+        assert 0 < longer < len(described)
 
     def test_the_raw_data_copy_keeps_every_other_field(self):
         item = _synced_cve("CVE-2026-69245")

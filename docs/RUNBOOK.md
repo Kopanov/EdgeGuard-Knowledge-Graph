@@ -755,7 +755,7 @@ A scheduled OTX run (`collect_otx`, every 30 minutes) whose MISP push leaves ite
 
 ## CISA KEV revisions
 
-Every `collect_cisa` run (`edgeguard_medium_freq`, every 4 hours, and the baseline) compares the whole KEV catalogue with EdgeGuard's `source:CISA-KEV` copies in MISP: a CVE MISP lacks is added, a copy of an entry CISA revised (ransomware use, due date, required action, name, description) is edited in place, at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) per run ([COLLECTORS.md § 3](COLLECTORS.md#revisions-every-run-compares-the-catalogue-with-misp)). The incremental MISP → Neo4j sync then re-reads the edited attributes. To spread the edits over more runs, lower `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`; `EDGEGUARD_KEV_UPDATE_EXISTING=false` stops editing (new entries are still added).
+Every `collect_cisa` run (`edgeguard_medium_freq`, every 4 hours, and the baseline) compares the whole KEV catalogue with EdgeGuard's `source:CISA-KEV` copies in MISP: a CVE MISP lacks is added, a copy of an entry CISA revised (ransomware use, due date, required action, name, description, notes, CWE ids, forensic-triage flag) is edited in place, at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) per run ([COLLECTORS.md § 3](COLLECTORS.md#revisions-every-run-compares-the-catalogue-with-misp)). The incremental MISP → Neo4j sync then re-reads the edited attributes. To spread the edits over more runs, lower `EDGEGUARD_KEV_MAX_EDITS_PER_RUN`; `EDGEGUARD_KEV_UPDATE_EXISTING=false` stops editing (new entries are still added).
 
 - **What the logs show.** One summary line per run:
   ```bash
@@ -1440,6 +1440,26 @@ When the release revokes groups, take a new MISP galaxy dump as well, so that th
 
 **Checking a graph.** `python scripts/verify_fresh_baseline.py` fails when a Technique node carries an id the map lists, a ThreatActor node from MITRE is a revoked group, or a Malware / Tool node from MITRE is revoked software, and warns (`revoked_group_names_folded`) when an actor from another source still bears a revoked group's name: the actor alias merge (enrichment, `[ACTOR-ALIAS-MERGE]` lines) folds such a node into the successor, whose aliases carry the name.
 
+## Rebuilding the CWE name list
+
+`src/reference/cwe_names.json` gives the names of the CWE ids NVD and CISA KEV name. The NVD and KEV collectors write them into each CVE record's `NVD_META` (`cwe_names`, with `cwe_names_version`), so the names MISP holds are those of the list version current at collection ([COLLECTORS.md](COLLECTORS.md#cwe-names)).
+
+**When.** Only before a fresh baseline (wipe and re-collect), never between baselines: KEV edits every stored copy whose names changed (at most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` per run), but an NVD copy changes only when NVD sends the record again, so MISP would hold names of two CWE versions. MITRE publishes a CWE version a few times a year.
+
+**How.**
+
+1. Download `https://cwe.mitre.org/data/xml/cwec_latest.xml.zip` into a folder of its own (not inside a `restricted` tree, which the script refuses).
+2. Build, with the download day:
+
+   ```bash
+   python scripts/build_cwe_names.py /path/to/cwec_latest.xml.zip --captured-at 2026-11-07
+   ```
+
+   It prints the CWE version, its date and the number of names. Check that the copyright designation and the licence in `notices.cwe` still match the CWE Terms of Use (<https://cwe.mitre.org/about/termsofuse.html>) and the footer of cwe.mitre.org (the year range), and update `CWE_COPYRIGHT` / `CWE_LICENSE` in the script when they changed.
+3. Review the diff of the file (renamed and new entries), run `pytest tests/test_cve_source_text.py`, and commit the file with the script's output in the message.
+
+**When the list is missing or unreadable.** The collectors log once `CWE name list <path> could not be read (<reason>): records get no CWE names` and write the records without `cwe_names`; no run fails.
+
 ## Malware ATT&CK-id twin merge
 
 OTX names malware families as the MISP ATT&CK galaxy does (`"Cobalt Strike - S0154"`). The collectors and the sync name the node by the base name, so that a family's indicators do not split between two nodes. The enrichment job `merge_malware_attack_twins` folds the twins a graph holds into the ATT&CK node (for software without a MITRE `Malware` node, into the node of the base name once one exists) at each `run_enrichment_jobs` (`docs/KNOWLEDGE_GRAPH.md`, "Malware named after an ATT&CK software id").
@@ -1663,6 +1683,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — New section "Rebuilding the CWE name list": the pinned MITRE CWE list the NVD and KEV collectors name CWE ids from, rebuilt only before a fresh baseline. CISA KEV revisions: a change to an entry's notes, CWE ids or forensic-triage flag is an edit too.
 - 2026-11-07 — MISP push stopped: the writer of the scheduled `collect_cisa_ics` also stops a failing streak 10 minutes before its task's end.
 - 2026-11-07 — New section "CISA ICS report records waiting on report_pending": the list, its signals and log lines, a list that cannot be saved, and how to recover.
 - 2026-11-07 — CVE descriptions: a revised CISA ICS advisory revises its report record in MISP; the CVE's attribute keeps the first advisory's text.

@@ -23,7 +23,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from collectors.misp_writer import MISPWriter, nvd_meta_digest  # noqa: E402
+from collectors.misp_writer import NVD_META_SOURCE_TEXT_KEYS, MISPWriter, nvd_meta_digest  # noqa: E402
 from collectors.nvd_collector import CISA_ADP_NVD_SOURCE, NVDCollector, cisa_ssvc  # noqa: E402
 
 FIXTURES = json.loads((Path(__file__).resolve().parent / "fixtures" / "nvd_incremental_2026_10_14.json").read_text())
@@ -159,7 +159,8 @@ class TestThroughMisp:
 
     def test_a_copy_written_before_ssvc_differs_only_where_cisa_decided(self):
         # The hosted baseline of 2026-10-13 wrote CVE-2025-0237 without the key. NVD's record has
-        # CISA's decision, so the rebuilt copy differs by it, and by nothing else.
+        # CISA's decision, so the rebuilt copy differs by it, and by nothing else but the source facts
+        # added on 2026-11-07, which that copy predates too (tests/test_cve_source_text.py).
         stored = _meta(FIXTURES["misp"]["CVE-2025-0237"]["comment"])
         assert "ssvc" not in stored
         rebuilt = _item(_record("CVE-2025-0237"))
@@ -167,7 +168,9 @@ class TestThroughMisp:
         writer = MISPWriter(url="https://misp.test", api_key="test", verify_ssl=True)
         meta = _meta(writer.create_vulnerability_attribute(rebuilt)["comment"])
         assert nvd_meta_digest(meta) != nvd_meta_digest(stored)
-        assert nvd_meta_digest(dict(meta, ssvc=None)) == nvd_meta_digest(stored)
+        later = {key: None for key in NVD_META_SOURCE_TEXT_KEYS}
+        assert nvd_meta_digest(dict(meta, **later)) != nvd_meta_digest(stored)
+        assert nvd_meta_digest(dict(meta, ssvc=None, **later)) == nvd_meta_digest(stored)
 
     def test_a_record_without_ssvc_changes_no_stored_copy(self):
         stored = _meta(FIXTURES["misp"]["CVE-2025-0237"]["comment"])

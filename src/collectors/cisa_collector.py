@@ -47,6 +47,7 @@ from config import (
     kev_update_existing,
     resolve_collection_limit,
 )
+from cwe_names import item_fields as cwe_name_fields
 from resilience import get_circuit_breaker, record_collection_failure
 
 # 2026-10: no incremental window. Every run compares the whole catalogue with EdgeGuard's MISP copies
@@ -337,7 +338,9 @@ class CISACollector:
         return {
             "type": "vulnerability",
             "cve_id": cve_id,
-            "description": short_desc[:500],
+            # 2026-11-07: the whole text (it was cut at 500 characters here, mid-word; 9 entries are longer, up to
+            # 821). MISP holds what CISA gives; the sync caps what the graph holds (``text_caps``).
+            "description": short_desc,
             "zone": sectors,  # zone is now an array
             "tag": self.tag,
             "source": [self.tag],
@@ -369,8 +372,13 @@ class CISACollector:
             "required_action": required_action,
             "due_date": due_date,
             "known_ransomware_use": known_ransomware,
+            # 2026-11-07: CISA's own CWE ids, its notes (vendor advisory and patch URLs, some with a label such as
+            # "BOD 26-04: <url>") and whether BOD 26-04 requires forensic triage ("Yes" / "No"), in NVD_META; the
+            # names of the CWE ids from the pinned MITRE list (``cwe_names``).
             "cisa_cwes": vuln.get("cwes", []),
             "cisa_notes": vuln.get("notes", ""),
+            "cisa_forensic_triage": vuln.get("forensicTriage", ""),
+            **cwe_name_fields(vuln.get("cwes") if isinstance(vuln.get("cwes"), list) else []),
             # KEV marker round-trip (2026-06): every CVE in this
             # feed IS the KEV list, but only NVD-sourced CVEs used
             # to get a queryable ``cisa_exploit_add`` property (via

@@ -68,14 +68,29 @@ def stored_attribute(cve_id: str) -> dict:
     return copy.deepcopy(FIXTURES["misp"][cve_id])
 
 
+def with_source_text_keys(attr: dict, cve_id: str) -> dict:
+    """``attr`` with the ``NVD_META`` keys added on 2026-11-07 (``misp_writer.NVD_META_SOURCE_TEXT_KEYS``) as the
+    current writer writes them from NVD's record: the hosted baseline of 2026-10-13 predates them."""
+    collector = NVDCollector.__new__(NVDCollector)
+    collector.tag = "nvd"
+    rebuilt = MISPWriter.__new__(MISPWriter).create_vulnerability_attribute(
+        collector._vulnerability_item(nvd_record(cve_id))
+    )
+    current = json.loads(rebuilt["comment"][len("NVD_META:") :])
+    meta = json.loads(attr["comment"][len("NVD_META:") :])
+    meta.update({k: current[k] for k in misp_writer.NVD_META_SOURCE_TEXT_KEYS if k in current})
+    return dict(attr, comment="NVD_META:" + json.dumps(meta))
+
+
 def stored_attribute_with_ssvc(cve_id: str) -> dict:
-    """The stored copy as a baseline written since 2026-10 holds it: ``NVD_META`` also carries CISA's
-    SSVC decision from NVD's record. The hosted baseline of 2026-10-13 predates the ``ssvc`` key."""
+    """The stored copy as a baseline written since 2026-11-07 holds it: ``NVD_META`` also carries CISA's
+    SSVC decision from NVD's record and the source facts added on 2026-11-07 (``with_source_text_keys``). The
+    hosted baseline of 2026-10-13 predates the ``ssvc`` key and those facts."""
     attr = stored_attribute(cve_id)
     meta = json.loads(attr["comment"][len("NVD_META:") :])
     meta["ssvc"] = nvd_collector.cisa_ssvc(nvd_record(cve_id)["cve"].get("metrics"))
     attr["comment"] = "NVD_META:" + json.dumps(meta)
-    return attr
+    return with_source_text_keys(attr, cve_id)
 
 
 class FakeNvd:
@@ -323,19 +338,24 @@ class TestReadingTheWindow:
 class TestIncrementalRun:
     def _fakes(self, cursor=None, ssvc_in_stored_copies=True):
         nvd = FakeNvd([nvd_record(c) for c in ALL])
-        stored = stored_attribute_with_ssvc if ssvc_in_stored_copies else stored_attribute
+        stored = (
+            stored_attribute_with_ssvc
+            if ssvc_in_stored_copies
+            else (lambda cve_id: with_source_text_keys(stored_attribute(cve_id), cve_id))
+        )
         misp = FakeMisp([stored(c) for c in KNOWN])
         return nvd, misp, CursorStore(cursor)
 
     def test_copies_written_before_ssvc_are_edited_once_to_add_it(self, env):
         # The hosted MISP of 2026-10-14: NVD has CISA's decision for both CVEs it did not change, and the
-        # copies predate the ``ssvc`` key, so each is edited once, with nothing but ``ssvc`` added.
+        # copies predate the ``ssvc`` key, so each is edited once, with nothing but ``ssvc`` added (the copies
+        # are given the source facts of 2026-11-07, which tests/test_cve_source_text.py covers).
         env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
         nvd, misp, store = self._fakes(ssvc_in_stored_copies=False)
         status = run(env, nvd, misp, store)
         edits = dict(misp.edits())
         for cve_id in UNCHANGED:
-            before = json.loads(stored_attribute(cve_id)["comment"][len("NVD_META:") :])
+            before = json.loads(with_source_text_keys(stored_attribute(cve_id), cve_id)["comment"][len("NVD_META:") :])
             after = json.loads(edits[stored_attribute(cve_id)["uuid"]]["comment"][len("NVD_META:") :])
             assert after["ssvc"]["exploitation"] == "none"
             assert misp_writer.nvd_meta_digest(dict(after, ssvc=None)) == misp_writer.nvd_meta_digest(before)

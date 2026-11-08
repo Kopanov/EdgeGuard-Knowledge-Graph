@@ -39,7 +39,7 @@ Auth:    Configured via environment variables
   // other source, named in description_source (src/description_ranking.py). A MISP metadata block
   // (OTX_META:{...}, NVD_META:{...}) and an OTX pulse reference ("Referenced in OTX pulse: <name>")
   // are never a description. At most 1,000 characters, markup stripped, cut at a sentence or word
-  // end (src/text_caps.py); MISP keeps the text the collector sent.
+  // end (src/text_caps.py); MISP keeps the source's whole text (NVD_META.description).
   description: STRING,      // Vulnerability description (at most 1,000 characters)
   description_source: STRING, // The source of description ("nvd", "cisa_kev", ...)
   zone: LIST,               // Zone(s): ['finance'], ['energy', 'global'] — always a list
@@ -467,6 +467,10 @@ Auth:    Configured via environment variables
   epss_score: FLOAT,        // and epss_percentile, epss_score_date, epss_model_version, epss_updated_at (FIRST EPSS; see Vulnerability above)
   ssvc_exploitation: STRING, // and ssvc_automatable, ssvc_technical_impact, ssvc_version, ssvc_timestamp (CISA's SSVC from NVD's record)
   cisa_exploit_add: STRING, // and the other CISA KEV fields (see Vulnerability above); zone, source and tlp as on every EdgeGuard node
+  // Not on the node yet: the NVD_META of an NVD or KEV record in MISP also holds nvd_vuln_status, references (with
+  // their tags), affected (the CNA's vendor / product pairs), cvss_scorers (scored_by, score_type per CVSS payload),
+  // cwe_names and cwe_names_version (the pinned MITRE CWE list), cisa_notes, cisa_cwes and cisa_forensic_triage,
+  // within a byte budget of 32,768 (docs/MISP_SOURCES.md, "NVD_META (CVE records)").
   tag: STRING,              // Data provenance tag
   first_seen: DATETIME,     // First observed (merge_resilmesh_cve); the MISP sync path writes first_imported_at
   last_updated: DATETIME    // Last update
@@ -1033,6 +1037,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — CVE: MISP's `NVD_META` holds the source's whole description and the source facts not yet on the node (NVD analysis state, tagged references, CNA pairs, CVSS scorers, CWE names, KEV notes, CWE ids and forensic-triage flag).
 - 2026-11-07 — Descriptions: at most 1,000 characters on `CVE` and `Vulnerability` and 500 on `Malware`, `ThreatActor`, `Tool`, `Technique` and `Tactic`, markup stripped and cut at a sentence or word end by the sync (`src/text_caps.py`).
 - 2026-11-07 — Constraints `threatreport_key` and `vulnerabilityadvisory_key` (`record_ref`) for the report labels, created before any sync writes their nodes.
 - 2026-11-06 — `RUNS`, `PART_OF_CAMPAIGN`: an indicator of a malware many actors share joins a campaign only through a link that a record reporting it cites; a campaign is deleted when its actor has no campaign evidence left.

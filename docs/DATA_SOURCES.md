@@ -117,16 +117,17 @@
 **What we get:**
 - CVE IDs
 - Vendor/product names
-- Description
+- Description (CISA's short description, whole in MISP)
 - Date added to KEV
 - Known ransomware campaign use (`known_ransomware_use` on the `CVE` node; no CVSS score is derived from it — the catalogue carries none, and the node's score comes from its CVSS sub-nodes)
+- CISA's notes (vendor advisory and patch URLs), CWE ids and the forensic-triage flag of BOD 26-04 (`Yes` on 97 of 1,769 entries on 2026-11-06), in MISP (`NVD_META`: `cisa_notes`, `cisa_cwes`, `cisa_forensic_triage`); the sync does not set them on the node yet
 
 **How classified:**
 - Vendor, product and short description searched for sector keywords
 
 **Scope:** every run, the baseline and the run every 4 hours, takes the **whole catalogue** (1,748 entries on 2026-10-16), not only the entries added within a window: a KEV entry is a CVE known to be exploited, so its age is no reason to leave it out (Log4Shell, added to the catalogue in 2021-12, lies outside a 730-day window). `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false` applies the `dateAdded` window of the baseline length instead; an entry outside it is then neither added nor edited, so it follows no revision, and where NVD's record (the NVD KEV sweep) alone gives its KEV fields, that record only fills them on the `CVE` node. `EDGEGUARD_CISA_INCREMENTAL_DAYS` is not read.
 
-**Revisions:** CISA revises entries in place (26 ransomware uses Unknown → Known, a moved due date and an extended description between 2026-05-22 and 2026-10-16, all on entries older than 30 days) and publishes no per-entry modification date. Every run therefore compares each catalogue entry with EdgeGuard's stored MISP copy: a CVE MISP lacks is added, a copy that differs is edited in place (its `NVD_META` and tags, `ransomware:known` included), so MISP holds CISA's latest statement and the sync carries it to the `CVE` node, whose four KEV fields the KEV record owns. At most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) edits per run, the rest on the next run; `EDGEGUARD_KEV_UPDATE_EXISTING=false` adds new entries only. An entry removed from the catalogue is counted and logged, not removed. `notes`, `cwes` and `forensicTriage` are not stored in MISP (`cwes` and `notes` are read onto the item but not written to `NVD_META`). Details: [COLLECTORS.md § 3](COLLECTORS.md#revisions-every-run-compares-the-catalogue-with-misp).
+**Revisions:** CISA revises entries in place (26 ransomware uses Unknown → Known, a moved due date and an extended description between 2026-05-22 and 2026-10-16, all on entries older than 30 days) and publishes no per-entry modification date. Every run therefore compares each catalogue entry with EdgeGuard's stored MISP copy: a CVE MISP lacks is added, a copy that differs is edited in place (its `NVD_META` and tags, `ransomware:known` included), so MISP holds CISA's latest statement and the sync carries it to the `CVE` node, whose four KEV fields the KEV record owns. At most `EDGEGUARD_KEV_MAX_EDITS_PER_RUN` (500) edits per run, the rest on the next run; `EDGEGUARD_KEV_UPDATE_EXISTING=false` adds new entries only. An entry removed from the catalogue is counted and logged, not removed. `notes`, `cwes` and `forensicTriage` are in MISP (`NVD_META`: `cisa_notes`, `cisa_cwes`, `cisa_forensic_triage`), so a change to them is an edit; the sync does not set them on the `CVE` node yet. Details: [COLLECTORS.md § 3](COLLECTORS.md#revisions-every-run-compares-the-catalogue-with-misp).
 
 ---
 
@@ -220,7 +221,8 @@
 
 **What we get:**
 - CVE IDs
-- Descriptions
+- Descriptions (whole in MISP; the graph holds at most 1,000 characters)
+- NVD's analysis state, every reference with its tags, the CNA's vendor / product pairs, and who scored each CVSS metric with NVD's Primary / Secondary label for it (`scored_by` names the scorer; the label is NVD's as given), in MISP (`NVD_META`, [MISP_SOURCES.md](MISP_SOURCES.md#nvd_meta-cve-records)); the sync does not read them yet
 - CVSS scores (including v4 when present); a CVE's `cvss_score` / `severity` come from its first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`cvss_version` names it), and a CVE without any CVSS has no score and severity `UNKNOWN`
 - Attack vectors
 - NVD's record status (`status`, `["active"]` or `["rejected"]`)
@@ -296,6 +298,19 @@ MISP is the staging hub every collector pushes into (361,546 attributes after th
 
 ---
 
+### 9b. MITRE CWE list (reference data)
+Not a collected source: a pinned copy of MITRE's CWE list gives the names of the CWE ids that NVD and CISA KEV name (`src/reference/cwe_names.json`, read by `src/cwe_names.py`; [COLLECTORS.md](COLLECTORS.md#cwe-names)).
+
+| Attribute | Value |
+|-----------|-------|
+| URL | `https://cwe.mitre.org/data/xml/cwec_latest.xml.zip` (downloaded once per list version by `scripts/build_cwe_names.py`, never by a run) |
+| Version | CWE 5.0 of 2026-10-28: 1,415 names (984 weaknesses, 431 groupings) |
+| Update | Only before a fresh baseline ([RUNBOOK.md](RUNBOOK.md#rebuilding-the-cwe-name-list)) |
+
+**Terms:** CWE is free to use for research, development and commercial purposes under the CWE Terms of Use (<https://cwe.mitre.org/about/termsofuse.html>): a copy must reproduce MITRE's copyright designation and the licence. The reference file carries both (`notices.cwe`): "Copyright © 2006–2026, The MITRE Corporation. CWE, CWSS, CWRAF, and the CWE logo are trademarks of The MITRE Corporation." CWE is a trademark of The MITRE Corporation.
+
+---
+
 ## Classification Methods
 
 ### Method 1: Keyword Matching
@@ -319,6 +334,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — NVD and CISA KEV: the whole description in MISP; NVD's analysis state, tagged references, CNA vendor / product pairs and CVSS scorers, KEV's notes, CWE ids and forensic-triage flag in `NVD_META` (the KEV source notes said they were not stored); CVSS scorers named by `scored_by`, NVD's Primary / Secondary label kept as given; § 9b, the pinned MITRE CWE list and its terms of use.
 - 2026-11-07 — CISA ICS: one report record per advisory in MISP.
 - 2026-11-07 — MITRE ATT&CK (§ 5): the terms of use and MITRE's notice for the ATT&CK text EdgeGuard copies.
 - 2026-11-07 — SSL Blacklist: the listing reason reaches MISP (verbatim, with its role and family part apart, and the certificate page); AbuseIPDB's score and the address's country, and Feodo Tracker's ports, families and status, are structured keys in MISP.
