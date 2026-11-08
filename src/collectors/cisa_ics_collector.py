@@ -109,6 +109,14 @@ RETRY_DELAY_BASE = 2  # seconds
 # A burst of consecutive per-file failures means the upstream is broken for
 # everyone, not just one advisory — abort instead of grinding through 900 files.
 MAX_CONSECUTIVE_FETCH_FAILURES = 10
+# The fetch errors a run's own advisory read counts as a failed fetch (anything else raises, as it did before
+# report_pending); a read for a report_pending record counts every error as a failed try of its entry.
+_OWN_READ_FETCH_ERRORS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.HTTPError,  # includes CISAICSTransientError after retries
+    ValueError,  # JSON decode error
+)
 
 INDEX_FILE = "index.txt"
 CHANGES_FILE = "changes.csv"
@@ -1192,11 +1200,14 @@ class CISAICSCollector:
                     break
                 if not CISA_ICS_CIRCUIT_BREAKER.can_execute():
                     if pending_ref:
-                        # The run's own advisories are all read (the pending reads come last): a breaker the
-                        # pending reads opened stops them, not the push of what the run read.
+                        # The run's own advisories are all read (the pending reads come last): an open breaker stops
+                        # the pending reads, not the push of what the run read. A failed own read holds the cursor.
                         logger.warning(
-                            "[REPORT-PENDING] CISA ICS: the circuit breaker opened during the reads for report_pending "
-                            "records: the %d record(s) left are not tried this run",
+                            "[REPORT-PENDING] CISA ICS: the circuit breaker is open %s: the %d report_pending record(s) "
+                            "left are not tried this run",
+                            "after the run's own reads"
+                            if stats["pending_fetched"] == 0
+                            else "since the reads for report_pending records",
                             len(pending_paths) - stats["pending_fetched"],
                         )
                         break
@@ -1204,12 +1215,12 @@ class CISAICSCollector:
                 stats["pending_fetched" if pending_ref else "attempted"] += 1
                 try:
                     data = self._get(self.base_url + path).json()
-                except (
-                    requests.exceptions.Timeout,
-                    requests.exceptions.ConnectionError,
-                    requests.exceptions.HTTPError,  # includes CISAICSTransientError after retries
-                    ValueError,  # JSON decode error
-                ) as e:
+                except Exception as e:  # noqa: BLE001 - a pending read's failure of any kind is a failed try
+                    # The run's own reads fail on these and raise anything else, as before; a read for a
+                    # report_pending record counts every failure (ChunkedEncodingError, TooManyRedirects, a body
+                    # JSON cannot hold) as a failed try, so it never stops the push of what the run read.
+                    if not pending_ref and not isinstance(e, _OWN_READ_FETCH_ERRORS):
+                        raise
                     logger.warning(f"CISA ICS: fetch failed for {path}: {type(e).__name__}: {e}")
                     if pending_ref:
                         pending_failures += 1
@@ -1245,27 +1256,18 @@ class CISAICSCollector:
                     continue
                 if pending_ref:
                     pending_failures = 0
-                else:
-                    consecutive_failures = 0
-                # A pending record's advisory read for its record only moves no cursor: change_ts holds every path
-                # the run selected before the cap, and the cursor must not pass the capped-off advisories.
-                if (
-                    pending_ref is None
-                    and path in change_ts
-                    and (processed_max_ts is None or change_ts[path] > processed_max_ts)
-                ):
+                    self._read_pending_record(data, path, pending_ref, records, record_failures, stats)
+                    continue
+                consecutive_failures = 0
+                # A pending record's advisory, read for its record only (above), moves no cursor: change_ts holds
+                # every path the run selected before the cap, and the cursor must not pass the capped-off advisories.
+                if path in change_ts and (processed_max_ts is None or change_ts[path] > processed_max_ts):
                     processed_max_ts = change_ts[path]
                 try:
                     items, skipped = self.parse_advisory(data, path)
                 except ValueError as e:
                     logger.warning(f"CISA ICS: malformed advisory skipped — {e}")
-                    if pending_ref:
-                        stats["pending_failed"] += 1
-                        record_failures.append(
-                            {"record_ref": pending_ref, "reason": "the advisory is malformed", "permanent": False}
-                        )
-                    else:
-                        stats["malformed"] += 1
+                    stats["malformed"] += 1
                     continue
                 record: Optional[Dict[str, Any]] = None
                 failure: Optional[Dict[str, Any]] = None
@@ -1275,9 +1277,6 @@ class CISAICSCollector:
                 except ValueError as e:
                     logger.warning(f"CISA ICS: the report record of {record_ref} could not be built: {e}")
                     failure = {"record_ref": record_ref, "reason": "the record could not be built", "permanent": False}
-                if pending_ref:
-                    self._keep_record(records, record_failures, record, failure)
-                    continue
                 stats["parsed_ok"] += 1
                 stats["skipped_vulns"] += skipped
                 if cutoff is not None:
@@ -1519,6 +1518,57 @@ class CISAICSCollector:
             counts["given_up"] += len(settled.given_up)
         self._log_report_counts(counts)
         return counts, set()
+
+    def _read_pending_record(
+        self,
+        data: Any,
+        path: str,
+        pending_ref: str,
+        records: Dict[str, Dict[str, Any]],
+        failures: List[Dict[str, Any]],
+        stats: Dict[str, Any],
+    ) -> None:
+        """The record of an advisory read for the report_pending entry *pending_ref*; its items are not pushed.
+
+        The advisory is checked as the run's own reads check it (``parse_advisory``). Any error in the check or the
+        build is a failed try of the entry (a file CISA serves malformed would otherwise stop every run before its
+        push, and its entry would never be given up). A file whose ``tracking.id`` is not *pending_ref* gives the
+        record of that id, and the entry, kept under a name the file does not bear, leaves the list."""
+        try:
+            self.parse_advisory(data, path)
+            record = self.parse_advisory_record(data, path)
+        except Exception as e:  # noqa: BLE001 - see the docstring
+            logger.warning(
+                "[REPORT-PENDING] CISA ICS: the advisory of %s could not be read for its record (%s: %s)",
+                pending_ref,
+                type(e).__name__,
+                e,
+            )
+            stats["pending_failed"] += 1
+            failures.append(
+                {
+                    "record_ref": pending_ref,
+                    "reason": f"the advisory is malformed ({type(e).__name__})",
+                    "permanent": False,
+                }
+            )
+            return
+        records[record["record_ref"]] = record
+        if record["record_ref"] != pending_ref:
+            logger.warning(
+                "[REPORT-PENDING] CISA ICS: %s names the advisory %s: its record is written under that id, and the "
+                "entry %s leaves report_pending",
+                path,
+                record["record_ref"],
+                pending_ref,
+            )
+            failures.append(
+                {
+                    "record_ref": pending_ref,
+                    "reason": f"the advisory's tracking.id gives {record['record_ref']}",
+                    "permanent": True,
+                }
+            )
 
     @staticmethod
     def _keep_record(

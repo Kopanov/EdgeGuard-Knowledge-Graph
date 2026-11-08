@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
@@ -118,7 +119,8 @@ class _Response:
 
 
 class _HTTP:
-    """Answers GETs by path below ``BASE``; an unknown path answers 404. Records the paths asked for."""
+    """Answers GETs by path below ``BASE``; an unknown path answers 404, a route holding an exception raises it.
+    Records the paths asked for."""
 
     def __init__(self, routes: Dict[str, Any]):
         self.routes = routes
@@ -131,6 +133,8 @@ class _HTTP:
         if path not in self.routes:
             return _Response(status_code=404, text="not found")
         value = self.routes[path]
+        if isinstance(value, BaseException):
+            raise value
         if isinstance(value, _Response):
             return value
         return _Response(text=value) if isinstance(value, str) else _Response(payload=value)
@@ -791,6 +795,121 @@ class TestPendingRecords:
         assert down[1] not in http.paths
         c.misp_writer.push_items.assert_not_called()
         c.misp_writer.push_reports.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead"),
+            requests.exceptions.TooManyRedirects("Exceeded 30 redirects."),
+            RecursionError("maximum recursion depth exceeded while decoding a JSON object"),
+        ],
+        ids=lambda e: type(e).__name__,
+    )
+    def test_any_error_of_a_pending_read_is_a_failed_try_and_the_run_still_pushes(self, monkeypatch, error):
+        """Constructed: the pending record's advisory read raises an error outside the run's own fetch errors (a
+        broken body is retried, then raised; a redirect loop; a body JSON cannot hold). It counts as a failed try,
+        and the run pushes the items and the record of the advisory it read itself."""
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), (COMOS, "2026-09-01T00:00:00.000000Z")),
+                NX: advisory(NX),
+                COMOS: error,
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True and st["stats"]["pending_failed"] == 1 and st["stats"]["fetch_failed"] == 0
+        assert {i["cve_id"] for i in pushed_items(c)} == {"CVE-2026-22923"}
+        assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-26-043-08"]
+        entry = pending()["cisa_ics:ICSA-25-317-15"]
+        assert entry["attempts"] == 2 and type(error).__name__ in entry["last_reason"]
+        assert cursor() == CHANGED
+
+    def test_an_error_outside_the_fetch_errors_on_the_run_s_own_read_still_raises(self, monkeypatch):
+        """The run's own reads keep their errors: one outside the timeout, connection, HTTP and JSON errors raises
+        out of the run, as before report_pending."""
+        http = _HTTP(
+            {"changes.csv": changes((NX, CHANGED)), NX: requests.exceptions.TooManyRedirects("Exceeded 30 redirects.")}
+        )
+        c = collector(monkeypatch, http)
+        with pytest.raises(requests.exceptions.TooManyRedirects):
+            c.collect(push_to_misp=True, baseline=False)
+        c.misp_writer.push_items.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["notes", "references", "remediations", "product_status"])
+    def test_a_pending_advisory_whose_lists_are_not_lists_is_a_failed_try(self, monkeypatch, field):
+        """Constructed: the pending record's advisory is a CSAF file whose list field holds a number (schema-invalid
+        CSAF). Reading it fails with a TypeError; that is a failed try, not the end of the run."""
+        bad = copy.deepcopy(advisory(COMOS))
+        if field in ("notes", "references"):
+            bad["document"][field] = 5
+        elif field == "remediations":
+            bad["vulnerabilities"][0]["remediations"] = 5
+        else:
+            bad["vulnerabilities"][0]["product_status"] = {"known_affected": 5}
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), (COMOS, "2026-09-01T00:00:00.000000Z")),
+                NX: advisory(NX),
+                COMOS: bad,
+            }
+        )
+        c = collector(monkeypatch, http)
+        st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True and st["stats"]["pending_failed"] == 1
+        assert [r["record_ref"] for r in pushed_records(c)] == ["cisa_ics:ICSA-26-043-08"]
+        assert pending()["cisa_ics:ICSA-25-317-15"]["attempts"] == 2
+        assert cursor() == CHANGED
+
+    def test_a_pending_file_naming_another_advisory_gives_that_record_and_its_entry_leaves(self, monkeypatch, caplog):
+        """Constructed: the entry is kept under a file name (a failed fetch), and the file it names holds COMOS
+        (tracking.id ICSA-25-317-15). The record is written under COMOS's id, and the entry, which no file bears,
+        leaves the list instead of being read on every run and never given up."""
+        stray = "2025/icsa-25-001-01.json"
+        put_on_pending("cisa_ics:ICSA-25-001-01")
+        http = _HTTP(
+            {
+                "changes.csv": changes((NX, CHANGED), (stray, "2026-09-01T00:00:00.000000Z")),
+                NX: advisory(NX),
+                stray: advisory(COMOS),
+            }
+        )
+        c = collector(monkeypatch, http)
+        with caplog.at_level("WARNING"):
+            st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True
+        assert sorted(r["record_ref"] for r in pushed_records(c)) == [
+            "cisa_ics:ICSA-25-317-15",
+            "cisa_ics:ICSA-26-043-08",
+        ]
+        assert pending() == {}
+        assert any("[REPORT-PENDING]" in r.getMessage() and "ICSA-25-001-01" in r.getMessage() for r in caplog.records)
+
+    def test_a_breaker_the_run_s_own_last_read_opened_is_named_so(self, monkeypatch, caplog):
+        """Constructed: the run's own last advisory answers HTTP 503 and its retries open the breaker; the pending
+        reads that follow are not tried, the WARNING says the breaker was open after the run's own reads, and the
+        failed read holds the cursor."""
+        down = "2026/icsa-26-001-01.json"
+        put_on_pending("cisa_ics:ICSA-25-317-15")
+        http = _HTTP(
+            {
+                "changes.csv": changes(
+                    (NX, CHANGED), (down, "2026-11-06T07:00:00.000000Z"), (COMOS, "2026-09-01T00:00:00.000000Z")
+                ),
+                NX: advisory(NX),
+                down: _Response(status_code=503, text="unavailable"),
+                COMOS: advisory(COMOS),
+            }
+        )
+        c = collector(monkeypatch, http)
+        with caplog.at_level("WARNING"):
+            st = c.collect(push_to_misp=True, baseline=False)
+        assert st["success"] is True and st["stats"]["fetch_failed"] == 1 and st["stats"]["pending_fetched"] == 0
+        assert COMOS not in http.paths
+        assert any("after the run's own reads" in r.getMessage() for r in caplog.records)
+        assert cursor() is None
 
     def test_a_pending_read_that_succeeds_ends_the_pending_streak(self, monkeypatch):
         # Constructed: pending records read in record-reference order, two whose advisories answer HTTP 404, then
