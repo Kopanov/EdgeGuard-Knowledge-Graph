@@ -177,6 +177,32 @@ class TestWholeTextInMisp:
         meta = _meta(_attribute(item, "602"))
         assert meta["description"] == "Flag  text" and meta["cisa_notes"] == "a  b"
 
+    def test_the_cisa_ics_note_reaches_misp_whole(self):
+        """Constructed advisory (CSAF 2.0 shape): a vulnerability note of 1,200 characters (the longest live note
+        measured on 2026-11-07 has 1,189), which the ICS collector cut at 1,000 with its header before."""
+        from collectors.cisa_ics_collector import CISAICSCollector
+
+        note = ("The device accepts a crafted request on its management port. " * 20).strip()
+        assert len(note) > 1000
+        advisory = {
+            "document": {
+                "title": "Example Controls Example Series",
+                "tracking": {"id": "ICSA-26-999-01", "initial_release_date": "2026-11-05T06:00:00.000000Z"},
+                "distribution": {"tlp": {"label": "WHITE"}},
+            },
+            "vulnerabilities": [
+                {"cve": "CVE-2026-99999", "notes": [{"category": "summary", "title": "Summary", "text": note}]}
+            ],
+        }
+        (item,), skipped = CISAICSCollector(misp_writer=MagicMock()).parse_advisory(advisory, "2026/x.json")
+        assert skipped == 0
+        assert item["description"] == f"ICSA-26-999-01: Example Controls Example Series \u2014 {note}"
+        assert _meta(_attribute(item, "603"))["description"] == item["description"]
+        ranked = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+            _attribute(item, "603"), {"id": "603", "info": "EdgeGuard-cisa_ics-2026-11-07", "Tag": []}
+        )[0]
+        assert ranked["description"] == item["description"], "the sync reads the whole text; its writes cap it"
+
 
 # ------------------------------------------------------------------------------------------ capped text in the graph
 class TestCappedTextInTheGraph:
