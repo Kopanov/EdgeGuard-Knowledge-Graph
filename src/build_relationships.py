@@ -1494,7 +1494,7 @@ def build_relationships():
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
         # The outer statement's indicators whose label has no entry in ``$family_targets``: a label that
-        # names no node, or whose name without separators several nodes carry.
+        # names no node, or whose name without separators several nodes carry with no ATT&CK node to prefer.
         _q9_skip = (
             "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL "
             "AND size(trim(i.malware_family)) > 0 "

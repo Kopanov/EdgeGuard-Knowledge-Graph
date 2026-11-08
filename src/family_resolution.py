@@ -172,7 +172,7 @@ def resolve_feed_families(labels: Iterable[Any], nodes: Iterable[Mapping[str, An
     non-strings are ignored, and so is a label that is blank once stripped, which step 9 never reads);
     ``nodes`` — rows ``{"name", "aliases", "source", "mitre_id"}`` of the ``Malware`` nodes
     (``CYPHER_MALWARE_NAMES_READ``; an alias stored as a single value counts as one alias, a blank or non-string
-    one as none; ``source`` and ``mitre_id`` are read only where rule 2 finds several nodes).
+    one as none; ``source`` and ``mitre_id`` decide only where rule 2 finds several nodes).
     """
     exact: Dict[str, Set[str]] = {}
     by_separator_free_name: Dict[str, Set[str]] = {}
