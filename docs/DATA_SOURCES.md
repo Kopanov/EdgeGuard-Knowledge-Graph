@@ -49,7 +49,9 @@
 - IPs, domains, URLs, hashes
 - Malware family names
 - CVE references
-- Adversary names (no pulse descriptions: a pulse's description, which describes the report, is stored on no item, and the families and adversaries it names carry none; it is used for sector classification)
+- Adversary names (no pulse descriptions on items: a pulse's description, which describes the report, is stored on no item, and the families and adversaries it names carry none; it is used for sector classification and kept in the pulse's report record)
+- One report record per pulse, as one MISP Event Report in the OTX day event: title, URL, full description, author, TLP, dates, revision, industries, targeted countries, tags, references, adversary, malware families, ATT&CK ids, CVE ids and the indicators (at most `EDGEGUARD_REPORT_MAX_INDICATORS`, 2,000, with the exact count); a record whose push fails waits on `report_pending` ([COLLECTORS.md § Report records](COLLECTORS.md#report-records)); the sync does not read the records yet
+- An amber, amber+strict or red pulse, or one without a known TLP, puts no copy of its name, tags, references or targeted countries on its indicators: that text stays in its report record (MISP distribution 0, this organisation only)
 
 **How classified:**
 - The whole pulse — name, tags, description, indicators — searched for keywords (hospital, scada, bank, etc.); the sectors found apply to every item of the pulse
@@ -143,7 +145,7 @@
 | Classification | ✅ Fixed table on the advisory's `"Critical infrastructure sectors"` note: `Energy → energy`, `Healthcare and Public Health → healthcare`, `Financial Services → finance`; other sectors contribute nothing; `global` only when no sector maps |
 
 **What we get:**
-- CVE IDs with CWE, CVSS v3.x score/vector (→ `CVSSv31`/`CVSSv30` sub-nodes), vulnerability summary. A CSAF score block has no impact or exploitability sub-score, so the sub-node gets none. On a CVE NVD also describes, NVD's values hold: a sub-node NVD has asserted and NVD's lists (CWE, references, products) are only filled by CISA's record where they lack a value, whatever the order of the sync. When NVD's record drops a CVSS version CISA also gives, CISA's next record sets that sub-node's values again
+- CVE IDs with CWE, CVSS v3.x score/vector (→ `CVSSv31`/`CVSSv30` sub-nodes), and a description made of the advisory id and title and the vulnerability's summary note (whole in MISP; the graph holds at most 1,000 characters). A CSAF score block has no impact or exploitability sub-score, so the sub-node gets none. On a CVE NVD also describes, NVD's values hold: a sub-node NVD has asserted and NVD's lists (CWE, references, products) are only filled by CISA's record where they lack a value, whatever the order of the sync. When NVD's record drops a CVSS version CISA also gives, CISA's next record sets that sub-node's values again
 - Advisory id, title, cisa.gov URL, vendor and affected products
 - One report record per advisory, an advisory without a CVE included, as one MISP Event Report: the advisory summary, sectors, countries deployed, vendor headquarters, TLP, dates, revision, vendors and products, and per CVE the whole note, the remediations (`vendor_fix`, `mitigation`, `no_fix_planned`, ...), the affected products and the CWE ([COLLECTORS.md § 12](COLLECTORS.md#advisory-report-records))
 - `initial_release_date` / `current_release_date` as source-truthful `first_seen` / `last_seen`
@@ -173,9 +175,10 @@
 | Terms | Free of charge for commercial and non-commercial use (https://bazaar.abuse.ch/faq/#tos) |
 
 **What we get:**
-- sha256 (the indicator), md5 and sha1 of the sample
+- sha256 (the indicator)
+- The sample's md5, sha1, file name (as the export gives it) and file type guess, in MISP as the `TF_META` keys `file_md5`, `file_sha1`, `file_name` and `file_type`, each only when the export gives it; the sync does not read these keys. The file type is also the item's tag (`TF_META.tags`, kept in the `raw_data` of the `SOURCED_FROM` edge)
 - Family label (`signature`, "n/a" when unknown) → `malware_family` → `Indicator → Malware` `INDICATES` edges (`match_type = malware_family`), the same path as the ThreatFox family
-- File name, file type guess, MIME type, reporter, sample page URL
+- Reporter and the sample page URL (`reporter`, `reference` in `TF_META`), which the sync writes as `Indicator` properties; the MIME type is not stored
 - `first_seen_utc` as source-truthful `first_seen` (tz-aware UTC)
 
 **Selection:** labelled samples are kept before unlabelled ones, then the list is cut at the per-run cap (and at the regular collection limit when that is lower).
@@ -194,11 +197,13 @@
 | Auth | None (public) |
 | Update | Daily (`edgeguard_daily` → `collect_mitre`), only when the bundle changed (ETag, `EDGEGUARD_MITRE_CONDITIONAL_GET`); a baseline always downloads it; `EDGEGUARD_INCREMENTAL_LIMIT` does not apply (`EDGEGUARD_MAX_ENTRIES` does when set) |
 | Classification | ❌ N/A - provides relationships |
-| Terms | ATT&CK's terms of use (https://attack.mitre.org/resources/legal-and-branding/terms-of-use/; `LICENSE.txt` of the ATT&CK STIX repositories): a non-exclusive, royalty-free licence for research, development and commercial use, provided every copy reproduces MITRE's copyright designation and the licence. EdgeGuard copies ATT&CK's text into MISP (attribute comments), the graph (node descriptions, capped) and its APIs and STIX export. Notice: "© 2026 The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation." The MISP galaxy clusters MISP attaches to the ATT&CK attributes are MISP's (https://github.com/MISP/misp-galaxy, CC0 1.0 or BSD 2-Clause) |
+| Terms | ATT&CK's terms of use (https://attack.mitre.org/resources/legal-and-branding/terms-of-use/; `LICENSE.txt` of the ATT&CK STIX repositories): a non-exclusive, royalty-free licence for research, development and commercial use, provided every copy reproduces MITRE's copyright designation and the licence. EdgeGuard copies ATT&CK's text into MISP (attribute comments), the graph (node descriptions, at most 500 characters) and its APIs and STIX export. Notice: "© 2026 The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation." The MISP galaxy clusters MISP attaches to the ATT&CK attributes are MISP's (https://github.com/MISP/misp-galaxy, CC0 1.0 or BSD 2-Clause) |
 
 **What we get:**
 - Techniques and tactics
 - Groups (threat actors, with their G ids), malware and tools (with their S ids)
+- Descriptions (whole in MISP, with ATT&CK's markup, up to 8,000 characters; the graph holds at most 500, markup stripped)
+- In MISP, as tags ([COLLECTORS.md § MISP tags](COLLECTORS.md#misp-tags)): every platform of techniques, malware and tools; the ATT&CK domains of each item; the aliases of groups, malware and tools; ATT&CK's own galaxy cluster tag beside the community one. The graph keeps the domain of techniques and tactics (`attack_domain`), the aliases of groups and malware (`aliases`), and a technique's platforms only in the `raw_data` of its `SOURCED_FROM` edge. It takes nothing from the platforms of malware and tools, the domains of groups, malware and tools, the aliases of tools or the galaxy tags
 - **Relationships** — the `uses` relationships as `EMPLOYS_TECHNIQUE` (group → technique, attribution), `IMPLEMENTS_TECHNIQUE` (malware or tool → technique, capability), `USES_MALWARE` and `USES_TOOL` (group → software); the sub-technique hierarchy as `SUBTECHNIQUE_OF` and each technique's tactics as `IN_TACTIC`
 
 **How classified:**
@@ -334,7 +339,7 @@ _Last updated: 2026-11-08_
 
 ## History
 
-- 2026-11-08 — CISA ICS Advisories is active by default (`EDGEGUARD_ENABLE_CISA_ICS` defaults to `true`; `false` turns it off): 11 active sources, 1 flag-guarded.
+- 2026-11-08 — CISA ICS Advisories is active by default (`EDGEGUARD_ENABLE_CISA_ICS` defaults to `true`; `false` turns it off): 11 active sources, 1 flag-guarded. OTX: one report record per pulse in MISP; the text of an amber, amber+strict or red pulse, or of one without a known TLP, stays off its indicators. MITRE ATT&CK (§ 5): whole descriptions, platforms, domains, aliases and ATT&CK's galaxy tags in MISP, and what the graph keeps of them. MalwareBazaar (§ 4c): the MISP keys of the sample's file facts (`file_md5`, `file_sha1`, `file_name`, `file_type`, which the sync does not read) and of the reporter and sample page; the MIME type is not stored. CISA ICS (§ 4b): the CVE description (advisory id and title, then the vulnerability's summary note) is whole in MISP; the graph holds at most 1,000 characters.
 - 2026-11-07 — NVD and CISA KEV: the whole description in MISP; NVD's analysis state, tagged references, CNA vendor / product pairs and CVSS scorers, KEV's notes, CWE ids and forensic-triage flag in `NVD_META` (the KEV source notes said they were not stored); CVSS scorers named by `scored_by`, NVD's Primary / Secondary label kept as given; § 9b, the pinned MITRE CWE list and its terms of use.
 - 2026-11-07 — CISA ICS: one report record per advisory in MISP.
 - 2026-11-07 — MITRE ATT&CK (§ 5): the terms of use and MITRE's notice for the ATT&CK text EdgeGuard copies.

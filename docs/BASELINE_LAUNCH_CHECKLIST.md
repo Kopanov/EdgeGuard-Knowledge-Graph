@@ -337,6 +337,17 @@ clearing:
    short SHA of the checkout.
    `edgeguard doctor` must report Airflow `3.3.x` with no drift warning; the DAG list must
    load with zero parse errors.
+
+   Check the MISP writer key for report records (one MISP Event Report per OTX pulse and per CISA ICS advisory). The check only reads from MISP and writes nothing. It runs in the recreated `airflow` container with the deployment's MISP URL and key:
+   ```bash
+   docker exec edgeguard_airflow python -c "from collectors.misp_writer import MISPWriter; r = MISPWriter().report_preflight(); print('ok' if r.ok else '\n'.join(r.problems))"
+   ```
+   The last line on stdout must be `ok`. Log lines on stderr (the SSL setting, `[REPORT-PREFLIGHT]`) do not count. The check needs three things:
+   - the key's role has `perm_tagger`;
+   - the role does not have `perm_sync_authoritative`;
+   - every tag the writer sets on a report (`EdgeGuard`, the OTX and CISA ICS source tags, and `tlp:white`, `tlp:clear`, `tlp:green`, `tlp:amber`, `tlp:amber+strict` and `tlp:red`) exists in MISP, or the role has `perm_tag_editor`.
+
+   If one of these fails, MISP keeps the reports but drops their tags. Each printed line names the problem. Fix it in MISP: change the role of the key's user (*Administration → List Roles*) or create the missing tags. Then run the check again ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)).
 1. **MISP Import Regexp: keep MISP's default rules.** MISP applies the rules under
    *Input Filters → Import Regexp* to every attribute value it stores, and a fresh MISP
    database holds the default rules. They normalise Windows paths in
@@ -380,12 +391,13 @@ clearing:
    EdgeGuard wrote to them. The command then runs the backup gate
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
-   finishes, run `python scripts/verify_fresh_baseline.py` with `NEO4J_USER`,
+   finishes, run `python scripts/verify_fresh_baseline.py --require-cisa-ics` with `NEO4J_USER`,
    `NEO4J_PASSWORD` and `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` of the instance under test
    in the environment (on the Compose host, `set -a; . ./.env; set +a`). It reads the Compose
    Neo4j at `http://127.0.0.1:7474`; when the instance under test is another one, set
    `NEO4J_HTTP_URL` (or `NEO4J_HTTP`) to its HTTP address. Every mandatory check must
-   pass before the instance is handed to the partners or the demo.
+   pass before the instance is handed to the partners or the demo. Leave out
+   `--require-cisa-ics` only when `EDGEGUARD_ENABLE_CISA_ICS=false`.
    `uses_malware_complete` / `uses_tool_complete` are mandatory as soon
    as a MITRE actor exists: zero claims then means the `m` / `s` lists were lost in transit,
    not "collector not run yet". With OTX collected, add `--require-otx-industries`: it fails
@@ -699,7 +711,7 @@ _Last updated: 2026-11-08_
 
 ## History
 
-- 2026-11-08 — CISA ICS is on by default: step 2 runs the baseline with it and the acceptance script with `--require-cisa-ics`; step 6 turns it back on only for a graph built with `EDGEGUARD_ENABLE_CISA_ICS=false`; `default_sources_delivered` counts `cisa_ics` among the default sources.
+- 2026-11-08 — CISA ICS is on by default: step 2 runs the baseline with it and the acceptance script with `--require-cisa-ics`; step 6 turns it back on only for a graph built with `EDGEGUARD_ENABLE_CISA_ICS=false`; `default_sources_delivered` counts `cisa_ics` among the default sources. Step 0: the read-only check of the MISP writer key for report records (`MISPWriter.report_preflight`: `perm_tagger`, no `perm_sync_authoritative`, the report tags present or `perm_tag_editor`), with the fix when it fails. Step 4 runs the acceptance script with `--require-cisa-ics`.
 - 2026-11-07 — Malware twins: the MITRE node's ATT&CK id is read from its `mitre_id`, else the delivered record's, before the description's link.
 - 2026-11-07 — Item [7]: the version check no longer quotes a CalVer number (main moved to 2026.11.7); the commit check is unchanged.
 - 2026-11-06 — Acceptance check `campaign_indicators_have_evidence`; `campaign_malware_has_evidence` and `campaigns_have_evidence` judge a link to a shared malware (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`, default 7) as evidence only for the indicators of its own records; the three judge each campaign with the list of shared malware its build recorded, and the script runs with the deployment's value (sourced `.env`); the campaign checks can fail by design until the enrichment run after a sync.

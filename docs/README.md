@@ -36,7 +36,7 @@ Every document of the repository, by topic. The [README](../README.md) at the re
 | [BACKUP.md](BACKUP.md) | Backup and restore of Neo4j and MISP; the backup gate |
 | [PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md) | Prometheus, Grafana and Alertmanager; metrics and alert rules |
 | [HEARTBEAT.md](HEARTBEAT.md) | Airflow heartbeats, failed-but-finished tasks, memory kills |
-| [MISP_SOURCES.md](MISP_SOURCES.md) | How collectors stage data in MISP and how the sync reads it back |
+| [MISP_SOURCES.md](MISP_SOURCES.md) | How collectors stage data in MISP, including the report records (Event Reports), and how the sync reads the attributes back |
 | [MIGRATIONS.md](MIGRATIONS.md) | Neo4j schema changes: pause the scheduled DAGs, wipe, rebaseline, verify |
 | [RESILIENCE_CONFIG.md](RESILIENCE_CONFIG.md) | Circuit breakers: where they are used, thresholds, recovery timeouts, metrics |
 | [DEPLOYMENT_READINESS_CHECKLIST.md](DEPLOYMENT_READINESS_CHECKLIST.md) | Ordered deployment gates (`make deploy-check`) |
@@ -47,7 +47,7 @@ Every document of the repository, by topic. The [README](../README.md) at the re
 
 | Document | Description |
 |---|---|
-| [DATA_SOURCES.md](DATA_SOURCES.md) | Source inventory (collectors, opt-in feeds, placeholders, FIRST EPSS): classification, volume |
+| [DATA_SOURCES.md](DATA_SOURCES.md) | Source inventory (collectors, opt-in feeds, placeholders, FIRST EPSS, the MITRE CWE reference list): classification, volume, terms of use |
 | [COLLECTORS.md](COLLECTORS.md) | Per-collector behaviour, sector detection, limits, example output |
 | [DATA_SOURCES_RATE_LIMITS.md](DATA_SOURCES_RATE_LIMITS.md) | Source API rate limits and endpoints |
 | [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md) | Graph schema: nodes, relationships, provenance, aging, sectors |
@@ -109,9 +109,10 @@ These record a past state and are not maintained; each opens with a pointer to t
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — The MISP_SOURCES description names the report records (Event Reports); the DATA_SOURCES description names the MITRE CWE reference list and the terms of use.
 - 2026-11-02 — The historical record of the per-source timestamp change in `migrations/` is listed; only the Graph Explorer needs a web server, while `demo.html` and `architecture_presentation.html` open from disk (the map said all three are served); the ROADMAP row names its known defects and open issues with implemented work. `demo.html` and `architecture_presentation.html` are listed as historical records, the presentation pages of Sprint 1 (March 2026), with pointers to the current documents (they were listed under Tools and demos as current pages, while they show the schema of that time: the architecture presentation the generic `USES` relationship, `Malware.family` and a malware-family to Finance mapping, the overview page `sources` arrays and `is_family` in its property table).
 - 2026-10-23 — Created as the full documentation index, taken from the README's documentation section and completed with the documents it did not list (RUNBOOK, BACKUP, MEMORY_TUNING, MISP_TUNING, BASELINE_LAUNCH_CHECKLIST, TIMESTAMPS, SECURITY_ROADMAP, CLOUD_SYNC, AIRFLOW_DAG_DESIGN, ARCHITECTURE_FLOW, ADDING_A_NODE_LABEL, CONFIGURATION, CLI, ROADMAP); the SETUP_GUIDE, MIGRATIONS, RESILIENCE_CONFIG and DATA_SOURCES descriptions state what those documents cover.

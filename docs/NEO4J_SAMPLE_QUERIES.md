@@ -138,10 +138,12 @@ LIMIT 5
 
 ### Find techniques by tactic phase
 ```cypher
-// `merge_technique` in src/neo4j_client.py writes `tactic_phases`, `detection`,
+// `merge_technique` in src/neo4j_client.py writes `tactic_phases`,
 // `is_subtechnique` (from the dotted id), `attack_domain`, `deprecated`, `name`,
-// `description` and `description_source`; it sets no `t.platforms`, so a filter
-// on platforms returns zero rows. Filter on `tactic_phases`, which is populated:
+// `description` and `description_source`; `detection` is always an empty string,
+// as MISP holds no detection text. It sets no `t.platforms` (the platforms are in
+// `raw_data` on the `SOURCED_FROM` edge, from the record that created the edge),
+// so a filter on platforms returns zero rows. Filter on `tactic_phases`, which is populated:
 MATCH (t:Technique)
 WHERE 'lateral-movement' IN t.tactic_phases
 RETURN t.mitre_id, t.name
@@ -367,10 +369,11 @@ LIMIT 25
 
 *Save queries to test the prototype*
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Technique sample: `detection` is always an empty string; the platforms are in `raw_data` on the `SOURCED_FROM` edge, not on the node.
 - 2026-11-02 — Label note: `:Vulnerability` is empty on a graph the pipeline builds, as no step creates such a node (the note gave the production snapshot of 2026-05-25: 99,757 `:CVE`, 0 `:Vulnerability`).
 - 2026-11-02 — Sector labels: campaigns get theirs from `build_campaign_nodes`, after the sync.
 - 2026-11-01 — Label note: the sync writes CVEs in batches (`merge_cves_batch`), each as `merge_cve()` writes it.

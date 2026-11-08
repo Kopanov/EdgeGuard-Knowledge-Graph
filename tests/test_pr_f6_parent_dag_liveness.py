@@ -544,8 +544,8 @@ class TestDocsExist:
             content = fh.read()
         assert "EDGEGUARD_PARENT_DAG_LIVENESS_CHECK" in content
         assert "EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC" in content
-        # Operator-facing rationale must reference the incident
-        assert "Issue #65" in content or "PR-F6" in content
+        # Operator-facing rationale must name the check and the incident it guards against
+        assert "Parent-DAG liveness check" in content
         assert "Event 19" in content or "orphan" in content.lower()
 
     def test_design_doc_documents_the_liveness_check(self):

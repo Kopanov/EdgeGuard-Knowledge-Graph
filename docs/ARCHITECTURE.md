@@ -32,6 +32,8 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │    - ALL detected specific zones get tagged equally       │
 │    - Events organized by zone in MISP                     │
 │  • Stores everything (single source of truth)             │
+│  • Report records: one Event Report per OTX pulse and     │
+│    per CISA ICS advisory (src/report_records.py)          │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
@@ -45,6 +47,8 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │  • MERGE nodes + relationships (not a STIX bundle load)     │
 │  • MISP ``Object`` / nested attrs: not ingested (flat       │
 │    ``Attribute`` list only) — see run_misp_to_neo4j logs    │
+│  • Event Reports (report records): not read; their events   │
+│    are read as any EdgeGuard event, ``-reports`` included   │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
@@ -113,7 +117,7 @@ Priority 2: Event-level zone/sector tags + zone from Event.info  (merged; "globa
 Priority 3: "global"  (fallback only)
 ```
 
-**MISP events created by `MISPWriter`** use **`EdgeGuard-{source}-{date}`** as the event name (continued in `-part2`, `-part3`, ... once the event holds `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes, OTX events excepted; [COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts)), with the **`EdgeGuard`** tag at event level. **Zone classification** lives exclusively on **attribute-level tags** (`zone:Finance`, `zone:Healthcare`) — a single event can contain multi-zone attributes. Attribute `zone:` tags are the primary classification signal for Neo4j sync.
+**MISP events created by `MISPWriter`** use **`EdgeGuard-{source}-{date}`** as the event name (continued in `-part2`, `-part3`, ... once the event holds `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes, OTX events excepted; [COLLECTION_AND_SYNC_LIMITS.md § MISP event parts](COLLECTION_AND_SYNC_LIMITS.md#misp-event-parts)), with the **`EdgeGuard`** tag at event level. The report records (one MISP Event Report per OTX pulse and per CISA ICS advisory) go to the source's day event, or, once that event holds more than `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (OTX included), to **`EdgeGuard-{source}-{date}-reports`**, which holds no attributes; the sync reads that event like every EdgeGuard event and does not read the reports ([MISP_SOURCES.md § Report records](MISP_SOURCES.md#report-records-event-reports)). **Zone classification** lives exclusively on **attribute-level tags** (`zone:Finance`, `zone:Healthcare`) — a single event can contain multi-zone attributes. Attribute `zone:` tags are the primary classification signal for Neo4j sync.
 
 **Collectors → MISP:** Optional **per-event attribute prefetch** and **source-specific** incremental cursors reduce duplicate writes when event names rotate by date — see [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance*.
 
@@ -381,7 +385,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 |------|---------|
 | `src/config.py` | Settings, sector keywords and detection, per-source collection limits (`get_effective_limit`) |
 | `src/tls_verify.py` | The one rule for `EDGEGUARD_SSL_VERIFY` / `SSL_VERIFY` (fail-closed; `config.SSL_VERIFY` and the scripts read it) |
-| `src/collectors/misp_writer.py` | MISP tagging with `_get_zones_to_tag()` |
+| `src/collectors/misp_writer.py` | MISP writes: day events, attributes with their tags (`_get_zones_to_tag()`) and metadata comments (`NVD_META`, `TF_META`, `MITRE_*`), and the report records as Event Reports (`push_reports`) |
 | `src/collectors/otx_collector.py` | AlienVault OTX collector |
 | `src/collectors/nvd_collector.py` | NVD CVE collector |
 | `src/collectors/cisa_collector.py` | CISA KEV collector |
@@ -391,7 +395,8 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/virustotal_collector.py` | VirusTotal — `VirusTotalCollector`, CLI / on-demand enrichment (not scheduled) |
 | `src/collectors/finance_feed_collector.py` | Feodo, SSL Blacklist collectors |
 | `src/collectors/global_feed_collector.py` | URLhaus, ThreatFox, MalwareBazaar collectors |
-| `src/collectors/cisa_ics_collector.py` | CISA ICS advisories (CSAF 2.0), on by default |
+| `src/collectors/cisa_ics_collector.py` | CISA ICS advisories (CSAF 2.0), on by default (`EDGEGUARD_ENABLE_CISA_ICS`) |
+| `src/cwe_names.py` | CWE names from the pinned MITRE CWE list (`src/reference/cwe_names.json`, built by `scripts/build_cwe_names.py`); the NVD and KEV collectors write them into `NVD_META` |
 | `src/collectors/virustotal_budget.py` | VirusTotal free-tier daily ledger (budget, per-run cap, lookup memory) |
 | `src/source_key_check.py` | Live check of the source API keys (preflight, baseline task `source_key_check`) |
 | `src/collectors/healthcare_feed_collector.py` | Healthcare placeholder |
@@ -407,6 +412,8 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/sector_evidence.py` | Evidence label and confidence of links to `Sector` (`zone_classification` 0.5, `otx_industries` 0.6, `advisory_sector` 0.9) and the zones a record states |
 | `src/description_ranking.py` | Fixed source ranking of node descriptions |
 | `src/text_caps.py` | Caps on the texts the sync writes to Neo4j (`cap_text`: markup stripped, cut at a sentence or word end) |
+| `src/report_records.py` | Report records (schema `edgeguard.report.v1`; one MISP Event Report per OTX pulse and per CISA ICS advisory): normalisation, digest, Event Report content, report uuid, `report_pending`; network-free, `push_reports` writes them ([MISP_SOURCES.md](MISP_SOURCES.md)) |
+| `src/attack_platforms.py` | ATT&CK's platform names in ATT&CK's spelling; the sync maps the `platform:` tags it reads with `canonical_attack_platforms` |
 | `src/relationship_provenance.py` | `sources` / `source_refs` / `misp_event_ids` on derived links; curated claims |
 | `src/baseline_lock.py` | Baseline lock sentinel (collectors and sync tasks skip while a baseline holds it) |
 | `src/collectors/vulnerability_update.py` | CISA KEV whole-catalogue compare; in-place edits of the stored MISP copies |
@@ -513,7 +520,7 @@ _Last updated: 2026-11-08_
 
 ## History
 
-- 2026-11-08 — CISA ICS is one of the 11 active sources (on by default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off); MalwareBazaar is the one flag-guarded source.
+- 2026-11-08 — CISA ICS is one of the 11 active sources (on by default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off); MalwareBazaar is the one flag-guarded source. MISP holds report records: one Event Report per OTX pulse and per CISA ICS advisory, in the day event or the `EdgeGuard-{source}-{date}-reports` event. The sync does not read them. Key Files: `src/report_records.py`, `src/cwe_names.py` and `src/attack_platforms.py`; the `misp_writer.py` row names the day events, the metadata comments and the report records (`push_reports`).
 - 2026-11-07 — `src/text_caps.py` in the module table.
 - 2026-11-06 — An indicator of a malware that at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (7) actors share counts for a campaign only through a link that a record reporting it cites (`src/campaign_evidence.py`).
 - 2026-11-02 — `ATTRIBUTED_TO`: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label (the row described the exact match as a producer).
