@@ -287,6 +287,7 @@ try:
         record_task_duration,
         set_source_health,
         start_metrics_server,
+        start_series_at_zero,
     )
 
     METRICS_SERVER_AVAILABLE = True
@@ -306,11 +307,21 @@ _metrics_server_lock = threading.Lock()
 def ensure_metrics_server():
     """
     Ensure the metrics server is running.
-    Call this in each task to ensure metrics are exposed.
+    Call this in each task to ensure metrics are exposed. Called at the start of every collector task
+    (``run_collector_with_metrics``, before the collector runs) and of ``run_neo4j_sync``; it also creates the
+    counter series that ``increase()`` reads at 0 (``start_series_at_zero``).
     """
     global _metrics_server_instance
     if not ENABLE_PROMETHEUS_METRICS or not METRICS_SERVER_AVAILABLE:
         return None
+    # 2026-11-08: the counter series that alerts read with increase() exist at 0 before this task adds to them
+    # (metrics_server.start_series_at_zero). A task is a new process, so the series come back with the first
+    # collector task after the multi-process directory was emptied, and a run of one source creates the series
+    # of every other source before that source's first run.
+    try:
+        start_series_at_zero()
+    except Exception as e:  # never let bookkeeping fail a task
+        logger.warning("Counter series not created at 0 (increase() may not count this run): %s", e)
     if MULTIPROC_METRICS_DIR:
         # Values are written to the shared directory and served by the `metrics` compose service;
         # an in-task HTTP server would expose only this process. Compact the directory when the
