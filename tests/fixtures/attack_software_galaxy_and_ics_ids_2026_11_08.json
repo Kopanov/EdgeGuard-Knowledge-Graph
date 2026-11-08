@@ -1,0 +1,994 @@
+{
+ "_provenance": "Real payloads. 'ics', 'enterprise', 'mobile': STIX objects copied verbatim from the ATT&CK bundles of mitre/cti (master, ATT&CK 20.1, fetched 2026-11-08): ics-attack/ics-attack.json (BlackEnergy 3 S1002, Role Identification T0850 and Modify Control Logic T0833, deprecated objects whose only ATT&CK id is a 'mitre-ics-attack' reference; Service Stop T0881 and Triton S1009, active objects with a 'mitre-attack' id), enterprise-attack/enterprise-attack.json (Shared Webroot T1051, with a 'capec' id beside its 'mitre-attack' one) and mobile-attack/mobile-attack.json (T1425, revoked, a 'mitre-mobile-attack' id only; EdgeGuard does not read this bundle). 'galaxies_index_rows': the rows of the ATT&CK galaxies in the answer of GET /galaxies/index of the project's test MISP (2.5.50, 2026-11-08; 136 rows, 264,678 bytes, as returned). 'galaxy_clusters': the clusters of six values in that MISP's mitre-software (v2), mitre-malware (v42) and mitre-tool (v40) galaxies (GET /galaxies/view/<id>, fields id, uuid, value, tag_name, version).",
+ "ics": [
+  {
+   "type": "malware",
+   "id": "malware--89ab0ca5-f7e0-4d16-bf2a-17d68117fa4b",
+   "created": "2017-05-31T21:32:59.661Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "external_references": [
+    {
+     "source_name": "mitre-ics-attack",
+     "url": "https://collaborate.mitre.org/attackics/index.php/Software/S0004",
+     "external_id": "S1002"
+    },
+    {
+     "source_name": "Booz Allen Hamilton",
+     "description": "Booz Allen Hamilton. (n.d.). When The Lights Went Out. Retrieved October 22, 2019.",
+     "url": "https://www.boozallen.com/content/dam/boozallen/documents/2016/09/ukraine-report-when-the-lights-went-out.pdf"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-04-18T18:00:55.679Z",
+   "name": "BlackEnergy 3",
+   "description": "[BlackEnergy 3](https://collaborate.mitre.org/attackics/index.php/Software/S0004) is a malware toolkit that has been used by both criminal and APT actors. It support various plug-ins including a variant of KillDisk. It is known to have been used against the Ukrainian power grid. (Citation: Booz Allen Hamilton)",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows"
+   ],
+   "x_mitre_deprecated": true,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.0",
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_aliases": [
+    "BlackEnergy 3"
+   ],
+   "labels": [
+    "malware"
+   ]
+  },
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--23270e54-1d68-4c3b-b763-b25607bcef80",
+   "created": "2020-05-21T17:43:26.506Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "external_references": [
+    {
+     "source_name": "mitre-ics-attack",
+     "url": "https://attack.mitre.org/techniques/T0850",
+     "external_id": "T0850"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-10-24T17:48:31.492Z",
+   "name": "Role Identification",
+   "description": "Adversaries may perform role identification of devices involved with physical processes of interest in a target control system. Control systems devices often work in concert to control a physical process. Each device can have one or more roles that it performs within that control process. By collecting this role-based data, an adversary can construct a more targeted attack.\n\nFor example, a power generation plant may have unique devices such as one that monitors power output of a generator and another that controls the speed of a turbine. Examining devices roles allows the adversary to observe how the two devices work together to monitor and control a physical process. Understanding the role of a target device can inform the adversary's decision on what action to take, in order to cause Impact and influence or disrupt the integrity of operations. Furthermore, an adversary may be able to capture control system protocol traffic. By studying this traffic, the adversary may be able to determine which devices are outstations, and which are masters. Understanding of master devices and their role within control processes can enable the use of Rogue Master Device",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-ics-attack",
+     "phase_name": "collection"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_deprecated": true,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows",
+    "Human-Machine Interface",
+    "Control Server",
+    "Data Historian",
+    "Field Controller/RTU/PLC/IED"
+   ],
+   "x_mitre_version": "1.0"
+  },
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--e0d74479-86d2-465d-bf36-903ebecef43e",
+   "created": "2020-05-21T17:43:26.506Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "external_references": [
+    {
+     "source_name": "mitre-ics-attack",
+     "url": "https://attack.mitre.org/techniques/T0833",
+     "external_id": "T0833"
+    },
+    {
+     "source_name": "Stuxnet - Langner - 201311",
+     "description": "Ralph Langner. (2013, November). To Kill a Centrifuge: A Technical Analysis of What Stuxnet's Creators Tried to Achieve. Retrieved March 27, 2018.",
+     "url": "https://www.langner.com/wp-content/uploads/2017/03/to-kill-a-centrifuge.pdf"
+    },
+    {
+     "source_name": "Maroochy - MITRE - 200808",
+     "description": "Marshall Abrams. (2008, July 23). Malicious Control System Cyber Security Attack Case Study– Maroochy Water Services, Australia. Retrieved March 27, 2018.",
+     "url": "https://www.mitre.org/sites/default/files/pdf/08%201145.pdf"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-10-24T17:49:30.517Z",
+   "name": "Modify Control Logic",
+   "description": "Adversaries may place malicious code in a system, which can cause the system to malfunction by modifying its control logic. Control system devices use programming languages (e.g. relay ladder logic) to control physical processes by affecting actuators, which cause machines to operate, based on environment sensor readings. These devices often include the ability to perform remote control logic updates. \n\nProgram code is normally edited in a vendor-specific Integrated Development Environment (IDE) that relies on proprietary tools and features. These IDEs allow an engineer to perform host target development and may have the ability to run the code on the machine it is programmed for. The IDE will transmit the control logic to the testing device, and will perform the required device-specific functions to apply the changes and make them active.\n\nAn adversary may attempt to use this host target IDE to modify device control logic. Even though proprietary tools are often used to edit and update control logic, the process can usually be reverse-engineered and reproduced with open-source tools.\n\nAn adversary can de-calibrate a sensor by removing functions in control logic that account for sensor error. This can be used to change a control process without actually spoofing command messages to a controller or device. \n\nIt is believed this process happened in the lesser known over-pressurizer attacks build into Stuxnet. Pressure sensors are not perfect at translating pressure into an analog output signal, but their errors can be corrected by calibration. The pressure controller can be told what the “real” pressure is for given analog signals and then automatically linearize the measurement to what would be the “real” pressure. If the linearization is overwritten by malicious code on the S7-417 controller, analog pressure readings will be “corrected” during the attack by the pressure controller, which then interprets all analog pressure readings as perfectly normal pressure no matter how high or low their analog values are. The pressure controller then acts accordingly by never opening the stage exhaust valves. In the meantime, actual pressure keeps rising. (Citation: Stuxnet - Langner - 201311)\n\nIn the Maroochy Attack, Vitek Boden gained remote computer access to the control system and altered data so that whatever function should have occurred at affected pumping stations did not occur or occurred in a different way. The software program installed in the laptop was one developed by Hunter Watertech for its use in changing configurations in the PDS computers. This ultimately led to 800,000 liters of raw sewage being spilled out into the community. (Citation: Maroochy - MITRE - 200808)",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-ics-attack",
+     "phase_name": "impair-process-control"
+    },
+    {
+     "kill_chain_name": "mitre-ics-attack",
+     "phase_name": "inhibit-response-function"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_deprecated": true,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Safety Instrumented System/Protection Relay",
+    "Field Controller/RTU/PLC/IED"
+   ],
+   "x_mitre_version": "1.0"
+  },
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--063b5b92-5361-481a-9c3f-95492ed9a2d8",
+   "created": "2020-05-21T17:43:26.506Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T0881",
+     "external_id": "T0881"
+    },
+    {
+     "source_name": "Enterprise ATT&CK",
+     "description": "Enterprise ATT&CK Enterprise ATT&CK   Service Stop Retrieved. 2019/10/29  Service Stop Retrieved. 2019/10/29 ",
+     "url": "https://attack.mitre.org/techniques/T1489/"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-10-13T17:48:44.278Z",
+   "name": "Service Stop",
+   "description": "Adversaries may stop or disable services on a system to render those services unavailable to legitimate users. Stopping critical services can inhibit or stop response to an incident or aid in the adversary's overall objectives to cause damage to the environment. (Citation: Enterprise ATT&CK)  Services may not allow for modification of their data stores while running. Adversaries may stop services in order to conduct Data Destruction. (Citation: Enterprise ATT&CK)",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-ics-attack",
+     "phase_name": "inhibit-response-function"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Embedded",
+    "Windows",
+    "Linux",
+    "Network Devices"
+   ],
+   "x_mitre_version": "1.1"
+  },
+  {
+   "type": "malware",
+   "id": "malware--80099a91-4c86-4bea-9ccb-dac55d61960e",
+   "created": "2019-03-26T15:02:14.907Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/software/S1009",
+     "external_id": "S1009"
+    },
+    {
+     "source_name": "Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer December 2017",
+     "description": "Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer 2017, December 14 Attackers Deploy New ICS Attack Framework TRITON and Cause Operational Disruption to Critical Infrastructure Retrieved. 2018/01/12 ",
+     "url": "https://www.fireeye.com/blog/threat-research/2017/12/attackers-deploy-new-ics-attack-framework-triton.html"
+    },
+    {
+     "source_name": "DHS CISA February 2019",
+     "description": "DHS CISA 2019, February 27 MAR-17-352-01 HatManSafety System Targeted Malware (Update B) Retrieved. 2019/03/08 ",
+     "url": "https://ics-cert.us-cert.gov/sites/default/files/documents/MAR-17-352-01%20HatMan%20-%20Safety%20System%20Targeted%20Malware%20%28Update%20B%29.pdf"
+    },
+    {
+     "source_name": "Dragos December 2017",
+     "description": "Dragos 2017, December 13 TRISIS Malware Analysis of Safety System Targeted Malware Retrieved. 2018/01/12 ",
+     "url": "https://dragos.com/blog/trisis/TRISIS-01.pdf"
+    },
+    {
+     "source_name": "Jos Wetzels January 2018",
+     "description": "Jos Wetzels 2018, January 16 Analyzing the TRITON industrial malware Retrieved. 2019/10/22 ",
+     "url": "https://www.midnightbluelabs.com/blog/2018/1/16/analyzing-the-triton-industrial-malware"
+    },
+    {
+     "source_name": "Julian Gutmanis March 2019",
+     "description": "Julian Gutmanis 2019, March 11 Triton - A Report From The Trenches Retrieved. 2019/03/11 ",
+     "url": "https://www.youtube.com/watch?v=XwSJ8hloGvY"
+    },
+    {
+     "source_name": "Schneider December 2018",
+     "description": "Schneider 2018, December 14 Security Notification  EcoStruxure Triconex Tricon V3 Retrieved. 2019/03/08 ",
+     "url": "https://download.schneider-electric.com/files?p_enDocType=Technical+leaflet&p_File_Name=SEVD-2017-347-01+Triconex+V3.pdf&p_Doc_Ref=SEVD-2017-347-01"
+    },
+    {
+     "source_name": "Schneider Electric January 2018",
+     "description": "Schneider Electric 2018, January 23 TRITON - Schneider Electric Analysis and Disclosure Retrieved. 2019/03/14 ",
+     "url": "https://www.youtube.com/watch?v=f09E75bWvkk&index=3&list=PL8OWO1qWXF4qYG19p7An4Vw3N2YZ86aRS&t=0s"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2026-05-12T15:12:00.736Z",
+   "name": "Triton",
+   "description": "[Triton](https://attack.mitre.org/software/S1009) is an attack framework built to interact with Triconex Safety Instrumented System (SIS) controllers.(Citation: Blake Johnson, Dan Caban, Marina Krotofil, Dan Scali, Nathan Brubaker, Christopher Glyer December 2017)(Citation: Dragos December 2017)(Citation: DHS CISA February 2019)(Citation: Schneider Electric January 2018)(Citation: Julian Gutmanis March 2019)(Citation: Schneider December 2018)(Citation: Jos Wetzels January 2018)",
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "ics-attack"
+   ],
+   "x_mitre_version": "1.2",
+   "x_mitre_attack_spec_version": "3.3.0",
+   "x_mitre_aliases": [
+    "Triton",
+    "TRISIS",
+    "HatMan"
+   ],
+   "labels": [
+    "malware"
+   ]
+  }
+ ],
+ "enterprise": [
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--804c042c-cfe6-449e-bc1a-ba0a998a70db",
+   "created": "2017-05-31T21:30:46.047Z",
+   "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "revoked": false,
+   "external_references": [
+    {
+     "source_name": "mitre-attack",
+     "url": "https://attack.mitre.org/techniques/T1051",
+     "external_id": "T1051"
+    },
+    {
+     "source_name": "Apache Server 2018",
+     "description": "Apache. (n.d.). Apache HTTP Server Version 2.4 Documentation - Web Site Content. Retrieved July 27, 2018.",
+     "url": "http://httpd.apache.org/docs/2.4/getting-started.html#content"
+    },
+    {
+     "source_name": "Webroot PHP 2011",
+     "description": "Brandt, Andrew. (2011, February 22). Malicious PHP Scripts on the Rise. Retrieved October 3, 2018.",
+     "url": "https://www.webroot.com/blog/2011/02/22/malicious-php-scripts-on-the-rise/"
+    },
+    {
+     "source_name": "Microsoft Web Root OCT 2016",
+     "description": "Microsoft. (2016, October 20). How to: Find the Web Application Root. Retrieved July 27, 2018."
+    },
+    {
+     "source_name": "capec",
+     "url": "https://capec.mitre.org/data/definitions/563.html",
+     "external_id": "CAPEC-563"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-10-24T17:49:01.739Z",
+   "name": "Shared Webroot",
+   "description": "**This technique has been deprecated and should no longer be used.**\n\nAdversaries may add malicious content to an internally accessible website through an open network file share that contains the website's webroot or Web content directory (Citation: Microsoft Web Root OCT 2016) (Citation: Apache Server 2018) and then browse to that content with a Web browser to cause the server to execute the malicious content. The malicious content will typically run under the context and permissions of the Web server process, often resulting in local system or administrative privileges, depending on how the Web server is configured.\n\nThis mechanism of shared access and remote execution could be used for lateral movement to the system running the Web server. For example, a Web server running PHP with an open network share could allow an adversary to upload a remote access tool and PHP script to execute the RAT on the system running the Web server when a specific page is visited. (Citation: Webroot PHP 2011)",
+   "kill_chain_phases": [
+    {
+     "kill_chain_name": "mitre-attack",
+     "phase_name": "lateral-movement"
+    }
+   ],
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_deprecated": true,
+   "x_mitre_domains": [
+    "enterprise-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_platforms": [
+    "Windows"
+   ],
+   "x_mitre_version": "1.1"
+  }
+ ],
+ "mobile": [
+  {
+   "type": "attack-pattern",
+   "id": "attack-pattern--11bd699b-f2c2-4e48-bf46-fb3f8acd9799",
+   "created": "2017-10-25T14:48:30.462Z",
+   "revoked": true,
+   "external_references": [
+    {
+     "source_name": "mitre-mobile-attack",
+     "url": "https://attack.mitre.org/techniques/T1425",
+     "external_id": "T1425"
+    }
+   ],
+   "object_marking_refs": [
+    "marking-definition--fa42a846-8d90-4e51-bc29-71d5b4802168"
+   ],
+   "modified": "2025-10-24T17:48:25.548Z",
+   "name": "Insecure Third-Party Libraries",
+   "x_mitre_attack_spec_version": "3.2.0",
+   "x_mitre_deprecated": false,
+   "x_mitre_domains": [
+    "mobile-attack"
+   ],
+   "x_mitre_is_subtechnique": false,
+   "x_mitre_modified_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+   "x_mitre_version": "1.0"
+  }
+ ],
+ "galaxies_index_rows": [
+  {
+   "Galaxy": {
+    "id": "80",
+    "uuid": "d5cbd1a2-78f6-11e7-a833-7b9bccca9649",
+    "name": "MITRE ATT&CK Tools",
+    "type": "mitre-tool",
+    "description": "Legitimate tools abused by adversaries, tracked by MITRE ATT&CK.",
+    "version": "9",
+    "icon": "gavel",
+    "namespace": "deprecated",
+    "enabled": true,
+    "local_only": false,
+    "kill_chain_order": null,
+    "default": true,
+    "org_id": "0",
+    "orgc_id": "0",
+    "created": "2026-10-31 06:59:55",
+    "modified": "2026-10-31 06:59:55",
+    "distribution": "3"
+   },
+   "Org": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   },
+   "Orgc": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   }
+  },
+  {
+   "Galaxy": {
+    "id": "79",
+    "uuid": "69634931-c2d9-48ed-830a-b2a719407f9e",
+    "name": "MITRE ATT&CK Software",
+    "type": "mitre-software",
+    "description": "Malware and legitimate tools used by adversaries, tracked by MITRE ATT&CK.",
+    "version": "1",
+    "icon": "optin-monster",
+    "namespace": "mitre",
+    "enabled": true,
+    "local_only": false,
+    "kill_chain_order": null,
+    "default": true,
+    "org_id": "0",
+    "orgc_id": "0",
+    "created": "2026-10-31 06:59:55",
+    "modified": "2026-10-31 06:59:55",
+    "distribution": "3"
+   },
+   "Org": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   },
+   "Orgc": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   }
+  },
+  {
+   "Galaxy": {
+    "id": "71",
+    "uuid": "d752161c-78f6-11e7-a0ea-bfa79b407ce4",
+    "name": "MITRE ATT&CK Malware",
+    "type": "mitre-malware",
+    "description": "Malicious software tracked by MITRE ATT&CK.",
+    "version": "8",
+    "icon": "optin-monster",
+    "namespace": "deprecated",
+    "enabled": true,
+    "local_only": false,
+    "kill_chain_order": null,
+    "default": true,
+    "org_id": "0",
+    "orgc_id": "0",
+    "created": "2026-10-31 06:59:55",
+    "modified": "2026-10-31 06:59:55",
+    "distribution": "3"
+   },
+   "Org": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   },
+   "Orgc": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   }
+  },
+  {
+   "Galaxy": {
+    "id": "70",
+    "uuid": "1023f364-7831-11e7-8318-43b5531983ab",
+    "name": "MITRE ATT&CK Groups",
+    "type": "mitre-intrusion-set",
+    "description": "Adversary groups tracked by MITRE ATT&CK.",
+    "version": "9",
+    "icon": "user-secret",
+    "namespace": "mitre",
+    "enabled": true,
+    "local_only": false,
+    "kill_chain_order": null,
+    "default": true,
+    "org_id": "0",
+    "orgc_id": "0",
+    "created": "2026-10-31 06:59:55",
+    "modified": "2026-10-31 06:59:55",
+    "distribution": "3"
+   },
+   "Org": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   },
+   "Orgc": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   }
+  },
+  {
+   "Galaxy": {
+    "id": "67",
+    "uuid": "9443a27f-f8b0-4bc7-ba88-7c023d727932",
+    "name": "MITRE ATT&CK ICS Software",
+    "type": "mitre-ics-software",
+    "description": "Software from MITRE ATT&CK for ICS.",
+    "version": "3",
+    "icon": "file-code",
+    "namespace": "deprecated",
+    "enabled": true,
+    "local_only": false,
+    "kill_chain_order": null,
+    "default": true,
+    "org_id": "0",
+    "orgc_id": "0",
+    "created": "2026-10-31 06:59:55",
+    "modified": "2026-10-31 06:59:55",
+    "distribution": "3"
+   },
+   "Org": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   },
+   "Orgc": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   }
+  },
+  {
+   "Galaxy": {
+    "id": "50",
+    "uuid": "c4e851fa-775f-11e7-8163-b774922098cd",
+    "name": "MITRE ATT&CK Techniques",
+    "type": "mitre-attack-pattern",
+    "description": "Techniques, sub-techniques and tactics from MITRE ATT&CK (Enterprise, Mobile, PRE and ICS).",
+    "version": "20",
+    "icon": "map",
+    "namespace": "mitre",
+    "enabled": true,
+    "local_only": false,
+    "kill_chain_order": {
+     "attack-Containers": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "impact"
+     ],
+     "attack-ESXi": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "exfiltration",
+      "impact"
+     ],
+     "attack-IaaS": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "exfiltration",
+      "impact"
+     ],
+     "attack-Identity-Provider": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement"
+     ],
+     "attack-Linux": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "exfiltration",
+      "impact"
+     ],
+     "attack-Network-Devices": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "exfiltration",
+      "impact"
+     ],
+     "attack-Office-365": [
+      "initial-access",
+      "stealth",
+      "lateral-movement"
+     ],
+     "attack-Office-Suite": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "exfiltration",
+      "impact"
+     ],
+     "attack-PRE": [
+      "reconnaissance",
+      "resource-development"
+     ],
+     "attack-SaaS": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "exfiltration",
+      "impact"
+     ],
+     "attack-Windows": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "exfiltration",
+      "impact"
+     ],
+     "attack-macOS": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "stealth",
+      "defense-impairment",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "exfiltration",
+      "impact"
+     ],
+     "ics-attack": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "evasion",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "inhibit-response-function",
+      "impair-process-control",
+      "impact"
+     ],
+     "ics-attack-Control-Server": [
+      "collection"
+     ],
+     "ics-attack-Data-Historian": [
+      "collection"
+     ],
+     "ics-attack-Engineering-Workstation": [
+      "initial-access"
+     ],
+     "ics-attack-Field-Controller/RTU/PLC/IED": [
+      "execution",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "inhibit-response-function",
+      "impair-process-control"
+     ],
+     "ics-attack-Human-Machine-Interface": [
+      "collection"
+     ],
+     "ics-attack-Input/Output-Server": [
+      "discovery"
+     ],
+     "ics-attack-Safety-Instrumented-System/Protection-Relay": [
+      "execution",
+      "lateral-movement",
+      "inhibit-response-function",
+      "impair-process-control"
+     ],
+     "ics-attack-Windows": [
+      "initial-access",
+      "execution",
+      "discovery",
+      "lateral-movement",
+      "collection"
+     ],
+     "mobile-attack-Android": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "defense-evasion",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "exfiltration",
+      "impact",
+      "network-effects",
+      "remote-service-effects"
+     ],
+     "mobile-attack-iOS": [
+      "initial-access",
+      "execution",
+      "persistence",
+      "privilege-escalation",
+      "defense-evasion",
+      "credential-access",
+      "discovery",
+      "lateral-movement",
+      "collection",
+      "command-and-control",
+      "exfiltration",
+      "impact",
+      "network-effects",
+      "remote-service-effects"
+     ],
+     "pre-attack": [
+      "priority-definition-planning",
+      "priority-definition-direction",
+      "target-selection",
+      "technical-information-gathering",
+      "people-information-gathering",
+      "organizational-information-gathering",
+      "technical-weakness-identification",
+      "people-weakness-identification",
+      "organizational-weakness-identification",
+      "adversary-opsec",
+      "establish-&-maintain-infrastructure",
+      "persona-development",
+      "build-capabilities",
+      "test-capabilities",
+      "stage-capabilities",
+      "launch",
+      "compromise"
+     ]
+    },
+    "default": true,
+    "org_id": "0",
+    "orgc_id": "0",
+    "created": "2026-10-31 06:59:55",
+    "modified": "2026-10-31 06:59:55",
+    "distribution": "3"
+   },
+   "Org": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   },
+   "Orgc": {
+    "id": "0",
+    "name": "MISP",
+    "date_created": "",
+    "date_modified": "",
+    "description": "Automatically generated MISP organisation",
+    "type": "",
+    "nationality": "Not specified",
+    "sector": "",
+    "created_by": "0",
+    "uuid": "0",
+    "contacts": "",
+    "local": true,
+    "restricted_to_domain": [],
+    "landingpage": null
+   }
+  }
+ ],
+ "galaxy_clusters": {
+  "BlackEnergy 3 - S1002": [
+   {
+    "galaxy": "mitre-software",
+    "id": "22821",
+    "uuid": "89ab0ca5-f7e0-4d16-bf2a-17d68117fa4b",
+    "value": "BlackEnergy 3 - S1002",
+    "tag_name": "misp-galaxy:mitre-software=\"BlackEnergy 3 - S1002\"",
+    "version": "2"
+   }
+  ],
+  "Triton - S1009": [
+   {
+    "galaxy": "mitre-software",
+    "id": "22998",
+    "uuid": "80099a91-4c86-4bea-9ccb-dac55d61960e",
+    "value": "Triton - S1009",
+    "tag_name": "misp-galaxy:mitre-software=\"Triton - S1009\"",
+    "version": "2"
+   }
+  ],
+  "Net - S0039": [
+   {
+    "galaxy": "mitre-software",
+    "id": "23063",
+    "uuid": "03342581-f790-4f03-ba41-e82e67392e23",
+    "value": "Net - S0039",
+    "tag_name": "misp-galaxy:mitre-software=\"Net - S0039\"",
+    "version": "2"
+   },
+   {
+    "galaxy": "mitre-tool",
+    "id": "23792",
+    "uuid": "03342581-f790-4f03-ba41-e82e67392e23",
+    "value": "Net - S0039",
+    "tag_name": "misp-galaxy:mitre-tool=\"Net - S0039\"",
+    "version": "40"
+   }
+  ],
+  "Industroyer2 - S1072": [
+   {
+    "galaxy": "mitre-software",
+    "id": "23184",
+    "uuid": "6a0d0ea9-b2c4-43fe-a552-ac41a3009dc5",
+    "value": "Industroyer2 - S1072",
+    "tag_name": "misp-galaxy:mitre-software=\"Industroyer2 - S1072\"",
+    "version": "2"
+   },
+   {
+    "galaxy": "mitre-malware",
+    "id": "21962",
+    "uuid": "6a0d0ea9-b2c4-43fe-a552-ac41a3009dc5",
+    "value": "Industroyer2 - S1072",
+    "tag_name": "misp-galaxy:mitre-malware=\"Industroyer2 - S1072\"",
+    "version": "42"
+   }
+  ],
+  "Empire - S0363": [
+   {
+    "galaxy": "mitre-software",
+    "id": "23503",
+    "uuid": "3433a9e8-1c47-4320-b9bf-ed449061d1c3",
+    "value": "Empire - S0363",
+    "tag_name": "misp-galaxy:mitre-software=\"Empire - S0363\"",
+    "version": "2"
+   },
+   {
+    "galaxy": "mitre-tool",
+    "id": "23838",
+    "uuid": "3433a9e8-1c47-4320-b9bf-ed449061d1c3",
+    "value": "Empire - S0363",
+    "tag_name": "misp-galaxy:mitre-tool=\"Empire - S0363\"",
+    "version": "40"
+   }
+  ],
+  "FrostyGoop - S1165": [
+   {
+    "galaxy": "mitre-software",
+    "id": "23725",
+    "uuid": "b34df04a-9d30-4d84-a03f-0d536ee19a05",
+    "value": "FrostyGoop - S1165",
+    "tag_name": "misp-galaxy:mitre-software=\"FrostyGoop - S1165\"",
+    "version": "2"
+   }
+  ]
+ }
+}
