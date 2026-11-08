@@ -180,6 +180,33 @@ def _attack_external_id(obj: dict) -> str:
 
 # Lists that items of one node unite when they are kept as one (the same STIX object in both bundles).
 _UNION_LIST_KEYS = ("uses_techniques", "uses_malware", "uses_tools")
+# 2026-11-07: facts of the object that such items unite too; a deprecated item left out loses none of the kept
+# item's links by them, so they are not checked for the warning on lost links.
+_UNION_FACT_KEYS = ("attack_domains", "platforms")
+
+# 2026-11-07: ATT&CK's domain names (``x_mitre_domains``) as EdgeGuard names a domain (``attack_domain``).
+_ATTACK_DOMAIN_BY_STIX = {"enterprise-attack": "enterprise", "ics-attack": "ics", "mobile-attack": "mobile"}
+# 2026-11-07: a technique's zones are read from the first 500 characters of its description, the text the
+# collector passed on before it passed the whole (read whole, 3 Enterprise and 20 ICS techniques of ATT&CK 20.1
+# would gain a sector from a keyword deeper in the text). The description itself goes on in full.
+_TECHNIQUE_ZONE_TEXT_CHARS = 500
+
+
+def _attack_domains(obj: dict, domain: str) -> list:
+    """The ATT&CK domains of a group or software object (``x_mitre_domains``: ``enterprise-attack`` →
+    ``enterprise``, ``ics-attack`` → ``ics``, ``mobile-attack`` → ``mobile``), order kept; the bundle's
+    ``domain`` when the object lists none that is known (2026-11-07)."""
+    out: list = []
+    for name in obj.get("x_mitre_domains") or []:
+        mapped = _ATTACK_DOMAIN_BY_STIX.get(str(name).strip().lower())
+        if mapped and mapped not in out:
+            out.append(mapped)
+    return out or [domain]
+
+
+def _platforms(obj: dict) -> list:
+    """ATT&CK's platforms of a technique or software object (``x_mitre_platforms``), as ATT&CK writes them."""
+    return [p for p in obj.get("x_mitre_platforms") or [] if isinstance(p, str) and p.strip()]
 
 
 def _node_key(item: dict, label: str) -> str:
@@ -202,7 +229,7 @@ def _one_item_per_node_key(items: list, label: str) -> list:
     ``Killdisk`` marked the active ``KillDisk`` node deprecated and replaced its description.
 
     In each group of items of one node key (``_node_key``), the first active item is kept (Enterprise
-    comes first) and takes the ``_UNION_LIST_KEYS`` entries of the other active items; deprecated items
+    comes first) and takes the ``_UNION_LIST_KEYS`` and ``_UNION_FACT_KEYS`` entries of the other active items; deprecated items
     are left out when the group holds an active one. The deprecated copies ATT&CK publishes carry no
     relationships; one with a link the kept item lacks is named in a warning, since it is not kept. A group of
     deprecated items only keeps the first, as for active ones. Order is kept. ``Tool`` nodes are keyed
@@ -219,7 +246,7 @@ def _one_item_per_node_key(items: list, label: str) -> list:
         winners = active or group
         kept = winners[0]
         for other in winners[1:]:
-            for list_key in _UNION_LIST_KEYS:
+            for list_key in _UNION_LIST_KEYS + _UNION_FACT_KEYS:
                 have = list(kept.get(list_key) or [])
                 seen = set(have)
                 extra = []
@@ -831,7 +858,8 @@ class MITRECollector:
                 ]
 
                 if mitre_id:
-                    description = obj.get("description", "")[:500]
+                    # 2026-11-07: ATT&CK's whole description; MISP keeps it, the sync caps the node's copy.
+                    description = obj.get("description", "") or ""
                     techniques.append(
                         {
                             "type": "technique",
@@ -839,7 +867,7 @@ class MITRECollector:
                             "mitre_id": mitre_id,
                             "name": obj.get("name", ""),
                             "description": description,
-                            "zone": self.detect_sectors(description) or ["global"],
+                            "zone": self.detect_sectors(description[:_TECHNIQUE_ZONE_TEXT_CHARS]) or ["global"],
                             "tag": self.tag,
                             "source": [self.tag],
                             # PR (S5): MITRE STIX objects carry created/modified
@@ -849,7 +877,7 @@ class MITRECollector:
                             # parse_attribute will then route to first_seen_at_source.
                             "first_seen": obj.get("created"),
                             "last_seen": obj.get("modified"),
-                            "platforms": obj.get("x_mitre_platforms", []),
+                            "platforms": _platforms(obj),
                             "data_sources": obj.get("x_mitre_data_sources", []),
                             "tactic_phases": tactic_phases,
                             "detection": (obj.get("x_mitre_detection", "") or "")[:1000],
@@ -880,8 +908,8 @@ class MITRECollector:
                             "shortname": shortname,
                             # 2026-10: ATT&CK's description of the tactic. It was read for zoning only, so
                             # MISP held MISPWriter's placeholder "MITRE ATT&CK tactic" and the sync stored
-                            # that as every Tactic node's description.
-                            "description": tactic_desc[:500],
+                            # that as every Tactic node's description. 2026-11-07: whole; the sync caps the node's copy.
+                            "description": tactic_desc,
                             "zone": self.detect_sectors(tactic_desc) or ["global"],
                             "tag": self.tag,
                             "source": [self.tag],
@@ -914,7 +942,10 @@ class MITRECollector:
                         # (UNC2452 → APT29), so lookups and the actor alias merge find it by them.
                         "aliases": _with_extra_aliases(obj.get("aliases", []), extra_aliases.get(obj.get("id"), [])),
                         "deprecated": deprecated,
-                        "description": description[:500],
+                        # 2026-11-07: ATT&CK's whole description (the sync caps the node's copy) and the
+                        # group's ATT&CK domains.
+                        "description": description,
+                        "attack_domains": _attack_domains(obj, domain),
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
@@ -964,7 +995,11 @@ class MITRECollector:
                         # STIX 2 uses ``labels``; some bundles also use ``malware_types``.
                         "malware_types": obj.get("malware_types", []) or obj.get("labels", []),
                         "family": obj.get("name", ""),
-                        "description": description[:500],
+                        # 2026-11-07: ATT&CK's whole description (the sync caps the node's copy), the
+                        # software's ATT&CK domains and platforms.
+                        "description": description,
+                        "attack_domains": _attack_domains(obj, domain),
+                        "platforms": _platforms(obj),
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
@@ -1007,11 +1042,15 @@ class MITRECollector:
                         "mitre_id": mitre_id,
                         "name": tool_name,
                         # 2026-10: ATT&CK's aliases plus the names of the software it revoked in
-                        # this tool's favour (Ngrok S9000 → ngrok S0508). Tool aliases do not
-                        # travel through MISP (the writer tags aliases of actors and malware only).
+                        # this tool's favour (Ngrok S9000 → ngrok S0508). 2026-11-07: the writer tags
+                        # them (``alias:``) as it tags those of groups and malware.
                         "aliases": _with_extra_aliases(_object_aliases(obj), extra_aliases.get(obj.get("id"), [])),
                         "deprecated": deprecated,
-                        "description": description[:500],
+                        # 2026-11-07: ATT&CK's whole description (the sync caps the node's copy), the
+                        # tool's ATT&CK domains and platforms.
+                        "description": description,
+                        "attack_domains": _attack_domains(obj, domain),
+                        "platforms": _platforms(obj),
                         "tool_types": obj.get("labels", []),
                         "zone": sectors,
                         "tag": self.tag,

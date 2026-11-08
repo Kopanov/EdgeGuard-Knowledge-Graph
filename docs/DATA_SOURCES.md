@@ -192,6 +192,7 @@
 | Auth | None (public) |
 | Update | Daily (`edgeguard_daily` → `collect_mitre`), only when the bundle changed (ETag, `EDGEGUARD_MITRE_CONDITIONAL_GET`); a baseline always downloads it; `EDGEGUARD_INCREMENTAL_LIMIT` does not apply (`EDGEGUARD_MAX_ENTRIES` does when set) |
 | Classification | ❌ N/A - provides relationships |
+| Terms | ATT&CK's terms of use (https://attack.mitre.org/resources/legal-and-branding/terms-of-use/; `LICENSE.txt` of the ATT&CK STIX repositories): a non-exclusive, royalty-free licence for research, development and commercial use, provided every copy reproduces MITRE's copyright designation and the licence. EdgeGuard copies ATT&CK's text into MISP (attribute comments), the graph (node descriptions, capped) and its APIs and STIX export. Notice: "© 2026 The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation." The MISP galaxy clusters MISP attaches to the ATT&CK attributes are MISP's (https://github.com/MISP/misp-galaxy, CC0 1.0 or BSD 2-Clause) |
 
 **What we get:**
 - Techniques and tactics
@@ -317,6 +318,7 @@ _Last updated: 2026-11-07_
 
 ## History
 
+- 2026-11-07 — MITRE ATT&CK (§ 5): the terms of use and MITRE's notice for the ATT&CK text EdgeGuard copies.
 - 2026-11-07 — SSL Blacklist: the listing reason reaches MISP (verbatim, with its role and family part apart, and the certificate page); AbuseIPDB's score and the address's country, and Feodo Tracker's ports, families and status, are structured keys in MISP.
 - 2026-11-02 — OTX: the per-run limit counts the pulses modified after the cursor, oldest first, and the overlap's re-reads are processed without counting; OTX returns the pulses newest-modified first, and the limit took the newest, so the cursor passed the older pulses of a window larger than the limit.
 - 2026-11-02 — MITRE ATT&CK (overview row 4, § 5): a run pushes the whole bundle whenever it changed, every technique, tactic, group, malware and tool, one item per graph node, with the G and S ids of groups and software; the daily DAG collects it with an ETag check, and `EDGEGUARD_INCREMENTAL_LIMIT` does not apply; the relationships are listed by type, `USES_MALWARE`, `USES_TOOL`, `SUBTECHNIQUE_OF` and `IN_TACTIC` included (the section gave a periodic update of 500 items, 300 techniques, 100 threat actors and 100 malware, with 1,459 technique edges, and the overview about 300).

@@ -36,6 +36,7 @@ import requests
 import urllib3
 
 from actor_name_hygiene import clean_actor_names
+from attack_platforms import canonical_attack_platforms
 from attack_revoked import load_revoked_ids
 from attack_software_names import split_attack_software_id
 from attack_values import AttackValue, attack_object_id, looks_like_attack_value, parse_attack_value
@@ -1809,8 +1810,9 @@ def _pulse_family_lists(otx_meta: Dict[str, Any]) -> Tuple[List[str], List[str]]
 def _extract_alias_tags(tags: List[Dict[str, Any]]) -> List[str]:
     """Rehydrate ``alias:<name>`` MISP tags into an aliases list.
 
-    The MISP-side carrier is written by MISPWriter for ThreatActor and
-    Malware attributes (capped at 20 tags / 100 chars each at write time).
+    The MISP-side carrier is written by MISPWriter for ThreatActor,
+    Malware and Tool (not read yet) attributes (capped at 20 tags / 100
+    chars each at write time).
     This is the read half of the alias round-trip (2026-06) — before it
     existed, parse_attribute hardcoded ``aliases: []`` and every
     MISP-sourced actor/malware lost its aliases, disabling the
@@ -4730,11 +4732,10 @@ class MISPToNeo4jSync:
                 logger.debug("Skipping technique attribute %s: a revoked ATT&CK id", mitre_id)
                 return None, []
 
-            platforms = []
-            for tag in tags:
-                tag_name = tag.get("name", "")
-                if tag_name.startswith("platform:"):
-                    platforms.append(tag_name.replace("platform:", ""))
+            # 2026-11-07: in ATT&CK's spelling whatever casing MISP holds the tag in (``attack_platforms``).
+            platforms = canonical_attack_platforms(
+                tag.get("name", "")[len("platform:") :] for tag in tags if tag.get("name", "").startswith("platform:")
+            )
 
             # Parse tactic_phases from MITRE_TACTIC_PHASES: comment prefix
             raw_comment = attr.get("comment", "") or ""

@@ -447,8 +447,8 @@ class TestSyncedDescription:
         item = synced(attr)
         assert item["tag"] == "mitre_attck"
         assert item["description"] == text_after_block(attr)
-        # ATT&CK's text, cut by MISPWriter (groups and techniques at 255 characters, software at 400)
-        assert len(item["description"]) > 200 and item["description"].removesuffix("...") in ATTACK_TEXT[kind]
+        # ATT&CK's whole text (2026-11-07; MISPWriter cut groups and techniques at 255 characters, software at 400)
+        assert item["description"] == ATTACK_TEXT[kind].strip()
 
     def test_a_mitre_tactic_gives_attacks_text(self):
         # The MITRE collector read the tactic's description for zoning only; MISP held the placeholder.
@@ -585,16 +585,16 @@ class TestSyncedDescription:
 
 
 class TestWhereMispWriterWritesTheText:
-    """Where MISPWriter puts ATT&CK's text and how much of it (docs/COLLECTORS.md, MITRE "Descriptions")."""
+    """Where MISPWriter puts ATT&CK's text and how much of it (docs/COLLECTORS.md, MITRE "Descriptions"): all of it
+    (2026-11-07; it cut groups, techniques and tactics at 255 characters and malware and tools at 400)."""
 
-    @pytest.mark.parametrize(
-        ("kind", "cut"), [("actor", 255), ("technique", 255), ("tactic", 255), ("malware", 400), ("tool", 400)]
-    )
-    def test_the_cut_length_of_each_kind(self, kind, cut):
-        long_text = "Lorem ipsum dolor sit amet. " * 18  # 504 characters, over the MITRE collector's 500
-        attr = written(kind, dict(mitre_items()[kind], description=long_text[:500]))
-        text = synced(attr)["description"]
-        assert len(text) == cut and text.endswith("...") and long_text.startswith(text[:-3])
+    @pytest.mark.parametrize("kind", ["actor", "technique", "tactic", "malware", "tool"])
+    def test_misp_holds_the_whole_text_of_each_kind(self, kind):
+        long_text = ("Lorem ipsum dolor sit amet. " * 18).strip()  # 503 characters, over the old cuts and 500
+        attr = written(kind, dict(mitre_items()[kind], description=long_text))
+        stored = text_after_block(attr) if _METADATA_COMMENT_RE.match(attr["comment"]) else attr["comment"]
+        assert stored == long_text
+        assert synced(attr)["description"] == long_text
 
     @pytest.mark.parametrize(
         ("kind", "without"),
@@ -604,7 +604,7 @@ class TestWhereMispWriterWritesTheText:
         item = {k: v for k, v in mitre_items()[kind].items() if k not in without}
         comment = written(kind, item)["comment"]
         assert not _METADATA_COMMENT_RE.match(comment) and "\n" not in comment
-        assert len(comment) > 40 and ATTACK_TEXT[kind].startswith(comment.removesuffix("..."))
+        assert comment == ATTACK_TEXT[kind].strip()
         assert synced(written(kind, item))["description"] == comment
 
 

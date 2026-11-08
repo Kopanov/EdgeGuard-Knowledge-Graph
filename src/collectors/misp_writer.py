@@ -279,6 +279,109 @@ def _deprecated_tags(item: Dict[str, Any]) -> List[str]:
     return [ATTACK_DEPRECATED_TAG] if item.get("deprecated") is True else []
 
 
+# 2026-11-07: MISP holds the source's text; the MISP -> Neo4j sync caps what reaches the graph (``text_caps``).
+# The description of a technique, tactic, group, malware or tool is written in full: after the comment's
+# ``MITRE_*`` block, or as the whole comment without one. ATT&CK's longest is 4,668 characters (T1553.003,
+# Enterprise ATT&CK 20.1); the bound only guards the comment column (TEXT, 64 KB) against a runaway text.
+ENTITY_DESCRIPTION_MAX_CHARS = 8000
+# 2026-11-07: every platform ATT&CK lists (at most 10 on one object of ATT&CK 20.1, 22 values in all), in
+# ATT&CK's casing. The count bound never binds on ATT&CK; a value longer than the length bound is skipped.
+_MAX_PLATFORM_TAGS = 32
+_MAX_PLATFORM_CHARS = 64
+# ATT&CK's own MISP galaxies (cluster value "<name> - <ATT&CK id>"), by item type. Techniques carry
+# ``mitre-attack-pattern``; ATT&CK publishes no galaxy of tactics.
+_ATTACK_GALAXY_BY_TYPE = {"actor": "mitre-intrusion-set", "malware": "mitre-malware", "tool": "mitre-tool"}
+_ATTACK_ID_RE_BY_TYPE = {
+    "actor": re.compile(r"^G\d{4}$", re.ASCII),
+    "malware": re.compile(r"^S\d{4}$", re.ASCII),
+    "tool": re.compile(r"^S\d{4}$", re.ASCII),
+}
+_ATTACK_DOMAINS = ("enterprise", "ics", "mobile")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _entity_description(item: Dict[str, Any], limit: int = ENTITY_DESCRIPTION_MAX_CHARS) -> str:
+    """The item's ``description`` as MISP stores it (2026-11-07): control characters removed (as
+    ``sanitize_value`` does), surrounding whitespace stripped, otherwise the source's text, markup included.
+
+    A text over ``limit`` characters (none of ATT&CK's) is cut at its last whitespace within the limit, or at the
+    limit when it holds none, with no "..." appended, and a ``[ENTITY-TEXT]`` warning gives the lengths."""
+    text = item.get("description")
+    if not isinstance(text, str):
+        return ""
+    text = _CONTROL_CHARS_RE.sub("", text).strip()
+    if len(text) <= limit:
+        return text
+    window = text[: limit + 1]
+    space = max(window.rfind(" "), window.rfind("\t"), window.rfind("\n"), window.rfind("\r"))
+    out = text[:space].rstrip() if space > 0 else text[:limit]
+    logger.warning(
+        "[ENTITY-TEXT] %s %s: description of %d characters written as its first %d (limit %d)",
+        item.get("type") or "item",
+        item.get("mitre_id") or "",
+        len(text),
+        len(out),
+        limit,
+    )
+    return out
+
+
+def _platform_tags(item: Dict[str, Any]) -> List[str]:
+    """``platform:<name>`` for every ATT&CK platform of a technique or software item, in ATT&CK's casing
+    (``platform:Network Devices``, ``platform:Field Controller/RTU/PLC/IED``), de-duplicated
+    case-insensitively, order kept (2026-11-07; the writer kept the first 3, lower-cased). MISP keeps the casing of
+    a tag it already holds; the sync reads the values back in ATT&CK's spelling (``attack_platforms``)."""
+    tags: List[str] = []
+    seen: set = set()
+    for platform in item.get("platforms") or []:
+        if not isinstance(platform, str):
+            continue
+        name = " ".join(_CONTROL_CHARS_RE.sub("", platform).split())
+        if not name or len(name) > _MAX_PLATFORM_CHARS or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        tags.append(f"platform:{name}")
+        if len(tags) == _MAX_PLATFORM_TAGS:
+            break
+    return tags
+
+
+def _alias_tags(item: Dict[str, Any]) -> List[str]:
+    """``alias:<name>`` for each of the item's ``aliases`` (at most 20, each up to 100 characters): the MISP-side
+    carrier of the alias round trip for actors, malware and (2026-11-07) tools."""
+    tags: List[str] = []
+    for alias in (item.get("aliases") or [])[:20]:
+        alias_s = sanitize_value(str(alias), max_length=100)
+        if alias_s:
+            tags.append(f"alias:{alias_s}")
+    return tags
+
+
+def _attack_domain_tags(item: Dict[str, Any]) -> List[str]:
+    """``attack-domain:<domain>`` for each ATT&CK domain a group or software item lists (``attack_domains``, from
+    ``x_mitre_domains``; 2026-11-07), order kept. An item without the key (any source but ATT&CK) gets none."""
+    tags: List[str] = []
+    for domain in item.get("attack_domains") or []:
+        name = str(domain).strip().lower()
+        tag = f"attack-domain:{name}"
+        if name in _ATTACK_DOMAINS and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _attack_galaxy_tags(item: Dict[str, Any], name: str) -> List[str]:
+    """ATT&CK's own MISP galaxy cluster tag for a group, malware or tool item with an ATT&CK id (2026-11-07):
+    ``misp-galaxy:mitre-intrusion-set="APT29 - G0016"``, ``misp-galaxy:mitre-malware="BlackEnergy - S0089"``,
+    ``misp-galaxy:mitre-tool="Net - S0039"``. MISP attaches the cluster (ATT&CK's full card) to the attribute.
+    It goes beside the community cluster tag; an item without a valid id (another source) gets none."""
+    item_type = str(item.get("type") or "")
+    galaxy = _ATTACK_GALAXY_BY_TYPE.get(item_type)
+    attack_id = str(item.get("mitre_id") or "").strip().upper()
+    if galaxy is None or not _ATTACK_ID_RE_BY_TYPE[item_type].match(attack_id) or '"' in name:
+        return []
+    return [f'misp-galaxy:{galaxy}="{name} - {attack_id}"']
+
+
 # 2026-10 audit: the 730-day baseline is ONE collector run, so a family named in N pulses carries
 # all N ids in `rids`; the earlier 32 cut every link beyond the 33rd pulse (Mirai, Cobalt Strike,
 # AgentTesla appear in hundreds). MISP `comment` is TEXT (64 KB); 500 × ~27 chars ≈ 13 KB.
@@ -3369,17 +3472,18 @@ class MISPWriter:
         # attribution: the old Q2 Branch-3 path that read m.aliases was
         # removed 2026-06 as a forgery vector — see build_relationships.py.)
         # Cap matches the actor path.
-        aliases = malware.get("aliases", [])
-        for alias in aliases[:20]:
-            alias_s = sanitize_value(str(alias), max_length=100)
-            if alias_s:
-                tags.append(f"alias:{alias_s}")
+        tags.extend(_alias_tags(malware))
 
         # Add MITRE ATT&CK galaxy tag for malware - CRITICAL for STIX conversion
         tags.append(f'misp-galaxy:malware="{name}"')
+        # 2026-11-07: ATT&CK's own cluster beside it, its domains and its platforms (ATT&CK software only).
+        tags.extend(_attack_galaxy_tags(malware, name))
+        tags.extend(_attack_domain_tags(malware))
+        tags.extend(_platform_tags(malware))
         tags.extend(_deprecated_tags(malware))  # 2026-10: ATT&CK x_mitre_deprecated
 
-        description = sanitize_value(malware.get("description", ""), max_length=400)
+        # 2026-11-07: the source's full text (``_entity_description``); the graph's cap is the sync's.
+        description = _entity_description(malware)
 
         # Preserve technique IDs and the source report id through MISP (same idea as
         # NVD_META for CVEs). ``run_misp_to_neo4j.parse_attribute`` reads the keys back:
@@ -3395,7 +3499,6 @@ class MISPWriter:
                 comment = comment + "\n" + description
         else:
             comment = description if description else f"Malware from {source}"
-            comment = sanitize_value(comment, max_length=500)
 
         attribute = {
             "type": "malware-type",
@@ -3454,17 +3557,17 @@ class MISPWriter:
         # 5-10 aliases and the old cap could drop the very alias an analyst
         # searches by ("Cozy Bear" vs "APT29"); 20 covers the ATT&CK p99
         # while still bounding MISP tag growth from a hostile feed.
-        aliases = actor.get("aliases", [])
-        for alias in aliases[:20]:
-            alias_s = sanitize_value(str(alias), max_length=100)
-            if alias_s:
-                tags.append(f"alias:{alias_s}")
+        tags.extend(_alias_tags(actor))
 
         # Add MITRE threat-actor galaxy tag - CRITICAL for STIX conversion
         tags.append(f'misp-galaxy:threat-actor="{name}"')
+        # 2026-11-07: ATT&CK's own cluster beside the community one, and the group's domains (ATT&CK groups only).
+        tags.extend(_attack_galaxy_tags(actor, name))
+        tags.extend(_attack_domain_tags(actor))
         tags.extend(_deprecated_tags(actor))  # 2026-10: ATT&CK x_mitre_deprecated
 
-        description = sanitize_value(actor.get("description", ""), max_length=255)
+        # 2026-11-07: the source's full text (``_entity_description``); the graph's cap is the sync's.
+        description = _entity_description(actor)
 
         # Preserve technique IDs + source report id through MISP (same keys as the
         # malware path: "t" explicit, "rt" reported, "pid" pulse id).
@@ -3532,12 +3635,8 @@ class MISPWriter:
         tags.append(_tlp_tag(technique))  # 2026-10: TLP on every attribute
         tags.append(f"attack-domain:{_attack_domain(technique)}")  # 2026-10: enterprise | ics
 
-        # Add platform tags
-        platforms = technique.get("platforms", [])
-        for platform in platforms[:3]:  # Limit to 3 platforms
-            plat = sanitize_value(str(platform), max_length=50).lower()
-            if plat:
-                tags.append(f"platform:{plat}")
+        # 2026-11-07: every platform, in ATT&CK's casing (``_platform_tags``).
+        tags.extend(_platform_tags(technique))
 
         # Add MITRE ATT&CK galaxy tags - CRITICAL for STIX conversion
         # This enables PyMISP to recognize and convert to attack-pattern
@@ -3545,7 +3644,8 @@ class MISPWriter:
         tags.append(f'mitre-attack:technique="{mitre_id}"')
         tags.extend(_deprecated_tags(technique))  # 2026-10: ATT&CK x_mitre_deprecated
 
-        description = sanitize_value(technique.get("description", ""), max_length=255)
+        # 2026-11-07: the source's full text (``_entity_description``); the graph's cap is the sync's.
+        description = _entity_description(technique)
         tactic_phases = technique.get("tactic_phases") or []
 
         # Preserve technique→tactic phase mapping through MISP.
@@ -3611,7 +3711,8 @@ class MISPWriter:
             tags.append(f"mitre-tactic:{shortname.lower()}")
         tags.extend(_deprecated_tags(tactic))  # 2026-10: ATT&CK x_mitre_deprecated
 
-        description = sanitize_value(str(tactic.get("description", "")), max_length=255)
+        # 2026-11-07: the source's full text (``_entity_description``); the graph's cap is the sync's.
+        description = _entity_description(tactic)
 
         attribute = {
             "type": "text",
@@ -3657,13 +3758,20 @@ class MISPWriter:
 
         # Tag as tool type for MISP galaxy compatibility
         tags.append(f'misp-galaxy:tool="{name}"')
+        # 2026-11-07: ATT&CK's own cluster beside the community one, the tool's aliases (as actors and malware
+        # carry theirs), its domains and its platforms.
+        tags.extend(_attack_galaxy_tags(tool, name))
+        tags.extend(_alias_tags(tool))
+        tags.extend(_attack_domain_tags(tool))
+        tags.extend(_platform_tags(tool))
         tags.extend(_deprecated_tags(tool))  # 2026-10: ATT&CK x_mitre_deprecated
         for ttype in tool.get("tool_types", []):
             tt = sanitize_value(str(ttype), max_length=50).lower()
             if tt:
                 tags.append(f"tool-type:{tt}")
 
-        description = sanitize_value(str(tool.get("description", "")), max_length=400)
+        # 2026-11-07: the source's full text (``_entity_description``); the graph's cap is the sync's.
+        description = _entity_description(tool)
         uses_techniques = tool.get("uses_techniques") or []
 
         if uses_techniques:
@@ -3673,7 +3781,6 @@ class MISPWriter:
                 comment = comment + "\n" + description
         else:
             comment = description if description else f"MITRE ATT&CK tool: {name}"
-            comment = sanitize_value(comment, max_length=500)
 
         attribute = {
             "type": "text",
