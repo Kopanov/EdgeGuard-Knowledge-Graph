@@ -289,8 +289,16 @@ ENTITY_DESCRIPTION_MAX_CHARS = 8000
 _MAX_PLATFORM_TAGS = 32
 _MAX_PLATFORM_CHARS = 64
 # ATT&CK's own MISP galaxies (cluster value "<name> - <ATT&CK id>"), by item type. Techniques carry
-# ``mitre-attack-pattern``; ATT&CK publishes no galaxy of tactics.
+# ``mitre-attack-pattern``; ATT&CK publishes no galaxy of tactics. Malware and tools: the galaxies of a MISP
+# without ``ATTACK_SOFTWARE_GALAXY``.
 _ATTACK_GALAXY_BY_TYPE = {"actor": "mitre-intrusion-set", "malware": "mitre-malware", "tool": "mitre-tool"}
+# 2026-11-08: the MISP galaxy of ATT&CK software. The MISP galaxy repository merged ``mitre-malware``,
+# ``mitre-tool`` and the ICS software into ``mitre-software`` on 2026-08-30, marked the old galaxies deprecated
+# and updates only the merged one since: its clusters hold every value of the two it replaces, with the same
+# value and uuid, plus the ICS software (``BlackEnergy 3 - S1002``) and the software ATT&CK added later
+# (``Vidar - S9050``). The writer tags malware and tools with it when the MISP it writes to has the galaxy
+# (``_resolve_attack_software_galaxy``), else with ``mitre-malware`` / ``mitre-tool``.
+ATTACK_SOFTWARE_GALAXY = "mitre-software"
 _ATTACK_ID_RE_BY_TYPE = {
     "actor": re.compile(r"^G\d{4}$", re.ASCII),
     "malware": re.compile(r"^S\d{4}$", re.ASCII),
@@ -369,17 +377,50 @@ def _attack_domain_tags(item: Dict[str, Any]) -> List[str]:
     return tags
 
 
-def _attack_galaxy_tags(item: Dict[str, Any], name: str) -> List[str]:
+def _attack_software_id(item: Dict[str, Any]) -> str:
+    """The ATT&CK id of a malware or tool item (``S####``, trimmed and upper-cased), else ``""`` (2026-11-08)."""
+    item_type = str(item.get("type") or "")
+    attack_id = str(item.get("mitre_id") or "").strip().upper()
+    if item_type in ("malware", "tool") and _ATTACK_ID_RE_BY_TYPE[item_type].match(attack_id):
+        return attack_id
+    return ""
+
+
+def _attack_galaxy_tags(item: Dict[str, Any], name: str, software_galaxy: Optional[str] = None) -> List[str]:
     """ATT&CK's own MISP galaxy cluster tag for a group, malware or tool item with an ATT&CK id (2026-11-07):
     ``misp-galaxy:mitre-intrusion-set="APT29 - G0016"``, ``misp-galaxy:mitre-malware="BlackEnergy - S0089"``,
     ``misp-galaxy:mitre-tool="Net - S0039"``. MISP attaches the cluster (ATT&CK's full card) to the attribute.
-    It goes beside the community cluster tag; an item without a valid id (another source) gets none."""
+    It goes beside the community cluster tag; an item without a valid id (another source) gets none.
+
+    *software_galaxy* (2026-11-08): the galaxy of malware and tools when the MISP has it (``ATTACK_SOFTWARE_GALAXY``,
+    ``misp-galaxy:mitre-software="BlackEnergy - S0089"``); None keeps ``mitre-malware`` / ``mitre-tool``. A group's
+    galaxy is ``mitre-intrusion-set`` either way."""
     item_type = str(item.get("type") or "")
     galaxy = _ATTACK_GALAXY_BY_TYPE.get(item_type)
     attack_id = str(item.get("mitre_id") or "").strip().upper()
     if galaxy is None or not _ATTACK_ID_RE_BY_TYPE[item_type].match(attack_id) or '"' in name:
         return []
+    if software_galaxy and item_type in ("malware", "tool"):
+        galaxy = software_galaxy
     return [f'misp-galaxy:{galaxy}="{name} - {attack_id}"']
+
+
+def _misp_lists_galaxy(answer: Any, galaxy_type: str) -> bool:
+    """Whether MISP's ``GET /galaxies/index`` answer lists an enabled galaxy of type *galaxy_type* (2026-11-08).
+
+    The answer is a list of ``{"Galaxy": {...}}`` rows (MISP 2.4 and 2.5); a row may also be the galaxy itself.
+    A galaxy whose ``enabled`` is false does not count; a row without the field (an older MISP) does."""
+    rows = answer.get("response") if isinstance(answer, dict) else answer
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        galaxy = row.get("Galaxy", row) if isinstance(row, dict) else None
+        if not isinstance(galaxy, dict) or galaxy.get("type") != galaxy_type:
+            continue
+        if galaxy.get("enabled", True) in (False, 0, "0", "false"):
+            continue
+        return True
+    return False
 
 
 # 2026-10 audit: the 730-day baseline is ONE collector run, so a family named in N pulses carries
@@ -2339,6 +2380,49 @@ class MISPWriter:
         # 2026-11-03: set by each ``push_items`` call (see its docstring); defaults for a writer that pushed nothing.
         self.last_push_unsent_items: List[int] = []
         self.last_push_stopped = False
+        # 2026-11-08: the galaxy of ATT&CK software on this MISP, read once per writer
+        # (``_resolve_attack_software_galaxy``); None until read and when MISP lacks it. Read with ``getattr`` defaults.
+        self._attack_software_galaxy: Optional[str] = None
+        self._attack_software_galaxy_read = False
+
+    def _resolve_attack_software_galaxy(self) -> Optional[str]:
+        """``ATTACK_SOFTWARE_GALAXY`` when this MISP has that galaxy enabled, else None (2026-11-08).
+
+        One ``GET /galaxies/index`` per writer, the first time ``push_items`` gets a malware or tool item with an
+        ATT&CK id; the answer holds for the writer's life (one collector run). Any failure (no answer, an HTTP
+        status other than 200, a body that is not JSON) leaves the software on ``mitre-malware`` / ``mitre-tool``
+        with a warning, and the list is not read again by this writer. One INFO line names the galaxy used."""
+        if getattr(self, "_attack_software_galaxy_read", False):
+            return getattr(self, "_attack_software_galaxy", None)
+        self._attack_software_galaxy_read = True
+        self._attack_software_galaxy = None
+        try:
+            response = self.session.get(
+                f"{self.url}/galaxies/index", verify=self.verify_ssl, timeout=self.COOLDOWN_PROBE_TIMEOUT
+            )
+            if response.status_code != 200:
+                raise MispLookupError(f"HTTP {response.status_code}")
+            listed = _misp_lists_galaxy(response.json(), ATTACK_SOFTWARE_GALAXY)
+        except Exception as exc:
+            logger.warning(
+                "[ATTACK-GALAXY] MISP's galaxy list could not be read (%s: %s); ATT&CK malware and tools are "
+                "tagged with the mitre-malware / mitre-tool galaxies in this run",
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+        if listed:
+            self._attack_software_galaxy = ATTACK_SOFTWARE_GALAXY
+            logger.info(
+                "[ATTACK-GALAXY] ATT&CK malware and tools are tagged with the %s galaxy", ATTACK_SOFTWARE_GALAXY
+            )
+        else:
+            logger.info(
+                "[ATTACK-GALAXY] this MISP has no enabled %s galaxy; ATT&CK malware and tools are tagged with the "
+                "mitre-malware / mitre-tool galaxies",
+                ATTACK_SOFTWARE_GALAXY,
+            )
+        return self._attack_software_galaxy
 
     def _restsearch_events_for_name(self, event_name: str) -> List[Any]:
         """Look up the event named ``event_name`` through ``/events/restSearch``.
@@ -3801,7 +3885,8 @@ class MISPWriter:
         # Add MITRE ATT&CK galaxy tag for malware - CRITICAL for STIX conversion
         tags.append(f'misp-galaxy:malware="{name}"')
         # 2026-11-07: ATT&CK's own cluster beside it, its domains and its platforms (ATT&CK software only).
-        tags.extend(_attack_galaxy_tags(malware, name))
+        # 2026-11-08: the cluster of the software galaxy this MISP has (``_resolve_attack_software_galaxy``).
+        tags.extend(_attack_galaxy_tags(malware, name, getattr(self, "_attack_software_galaxy", None)))
         tags.extend(_attack_domain_tags(malware))
         tags.extend(_platform_tags(malware))
         tags.extend(_deprecated_tags(malware))  # 2026-10: ATT&CK x_mitre_deprecated
@@ -4084,7 +4169,7 @@ class MISPWriter:
         tags.append(f'misp-galaxy:tool="{name}"')
         # 2026-11-07: ATT&CK's own cluster beside the community one, the tool's aliases (as actors and malware
         # carry theirs), its domains and its platforms.
-        tags.extend(_attack_galaxy_tags(tool, name))
+        tags.extend(_attack_galaxy_tags(tool, name, getattr(self, "_attack_software_galaxy", None)))
         tags.extend(_alias_tags(tool))
         tags.extend(_attack_domain_tags(tool))
         tags.extend(_platform_tags(tool))
@@ -4380,6 +4465,13 @@ class MISPWriter:
             # The batch key of an attribute (2026-11-02): *batch_key* of the first item it was built from.
             positions = item_positions_by_key.get(_within_push_key(attr))
             return batch_key(items[positions[0]]) if batch_key is not None and positions else None
+
+        # 2026-11-08: the galaxy of ATT&CK software is read once per writer, before its first software item with an
+        # ATT&CK id is converted; a push without one sends no request for it.
+        if not getattr(self, "_attack_software_galaxy_read", False) and any(
+            _attack_software_id(it) for it in items if isinstance(it, dict)
+        ):
+            self._resolve_attack_software_galaxy()
 
         for item_position, item in enumerate(items):
             source = item.get("tag", "unknown")

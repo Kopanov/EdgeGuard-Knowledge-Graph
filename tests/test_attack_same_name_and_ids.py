@@ -174,7 +174,8 @@ class TestOneItemPerNodeKey:
         with caplog.at_level(logging.INFO, logger=mc.logger.name):
             _pushed_items(monkeypatch)
         lines = [r.getMessage() for r in caplog.records if "[ATTACK-SAME-NAME]" in r.getMessage()]
-        assert any("'Killdisk' (ics, no ATT&CK id) for 'KillDisk' (ics, S0607)" in line for line in lines)
+        # 2026-11-08: the deprecated ICS copy's id is its ``mitre-ics-attack`` one (``_attack_external_id``).
+        assert any("'Killdisk' (ics, S1005) for 'KillDisk' (ics, S0607)" in line for line in lines)
         assert any("'TRITON' (enterprise, S0609) for 'Triton' (ics, S1009)" in line for line in lines)
 
     def test_a_left_out_object_with_links_of_its_own_is_warned_about(self, monkeypatch, caplog):

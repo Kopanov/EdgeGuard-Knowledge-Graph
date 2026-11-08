@@ -170,11 +170,25 @@ def _revoked_successor_aliases(objects: list, revoked_ids: set) -> Tuple[dict, d
     return extra, stats
 
 
+# 2026-11-08: the ``external_references`` source names that carry an object's ATT&CK id, in order of preference.
+# Every object of the Enterprise bundle and every active object of the ICS bundle has a ``mitre-attack`` id;
+# 19 deprecated objects of the ICS bundle (ATT&CK 20.1) have only a ``mitre-ics-attack`` one: 7 malware
+# (``BlackEnergy 3`` S1002, ``Killdisk`` S1005 ...) and 12 techniques (``Role Identification`` T0850 ...).
+# Other source names (``capec``, ``NIST Mobile Threat Catalogue``, citations) are never read as the id.
+_ATTACK_ID_SOURCE_NAMES = ("mitre-attack", "mitre-ics-attack")
+
+
 def _attack_external_id(obj: dict) -> str:
-    """The ATT&CK id (``T1086``, ``G0007`` …) in an object's ``external_references``, else ``""``."""
-    for ext in obj.get("external_references") or []:
-        if isinstance(ext, dict) and ext.get("source_name") == "mitre-attack":
-            return str(ext.get("external_id") or "")
+    """The ATT&CK id (``T1086``, ``G0007``, ``S1002`` …) in an object's ``external_references``, else ``""``.
+
+    The id of the first reference named ``mitre-attack``; for an object without one, that of the first named
+    ``mitre-ics-attack`` (``_ATTACK_ID_SOURCE_NAMES``). The one reader of the id for every object type of
+    ``_parse_bundle`` and for the revoked-technique check."""
+    refs = [ext for ext in obj.get("external_references") or [] if isinstance(ext, dict)]
+    for source_name in _ATTACK_ID_SOURCE_NAMES:
+        for ext in refs:
+            if ext.get("source_name") == source_name and ext.get("external_id"):
+                return str(ext["external_id"])
     return ""
 
 
@@ -223,8 +237,8 @@ def _one_item_per_node_key(items: list, label: str) -> list:
     ``ThreatActor`` and ``Malware`` nodes are keyed by the lower-cased name (``canonicalize_merge_key``),
     and MISP stores only one of two values of one event that differ in case. ATT&CK publishes such
     pairs: the deprecated Enterprise ``TRITON`` (S0609) beside the active ICS ``Triton`` (S1009), and
-    the ICS bundle keeps deprecated copies without an ATT&CK id of software it now shares with
-    Enterprise (``Killdisk`` beside ``KillDisk`` S0607, ``Stuxnet`` beside ``Stuxnet`` S0603). Both
+    the ICS bundle keeps deprecated copies, with only an ATT&CK for ICS id, of software it now shares with
+    Enterprise (``Killdisk`` S1005 beside ``KillDisk`` S0607, ``Stuxnet`` S1008 beside ``Stuxnet`` S0603). Both
     reached MISP and the node: MISP kept ``TRITON`` and dropped ``Triton``, and the deprecated
     ``Killdisk`` marked the active ``KillDisk`` node deprecated and replaced its description.
 
@@ -641,6 +655,10 @@ class MITRECollector:
         carries ``deprecated: False``. A deprecated group or software of the same name as an active
         one is left out, and items of one name are emitted once (``_one_item_per_node_key``, 2026-11).
         Groups and malware carry their ATT&CK id (``mitre_id``) like techniques, tactics and tools.
+        The id is read by ``_attack_external_id``: the ``mitre-attack`` reference, else the
+        ``mitre-ics-attack`` one (2026-11-08), so the deprecated ICS objects that have only the latter
+        (12 techniques and ``BlackEnergy 3`` of ATT&CK 20.1) are kept and marked like any deprecated
+        object; a technique or tool without either id is still skipped.
 
         Returns:
             dict with keys ``techniques``, ``tactics``, ``actors``, ``malware``,
@@ -672,25 +690,17 @@ class MITRECollector:
                 continue
 
             if obj_type == "attack-pattern":
-                external_ids = obj.get("external_references", [])
-                mitre_id = ""
-                for ext in external_ids:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
-                id_map[stix_id] = {"type": "technique", "mitre_id": mitre_id, "name": obj.get("name", "")}
+                id_map[stix_id] = {
+                    "type": "technique",
+                    "mitre_id": _attack_external_id(obj),
+                    "name": obj.get("name", ""),
+                }
 
             elif obj_type == "x-mitre-tactic":
-                external_ids = obj.get("external_references", [])
-                mitre_id = ""
-                for ext in external_ids:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
                 shortname = obj.get("x_mitre_shortname", "")
                 id_map[stix_id] = {
                     "type": "tactic",
-                    "mitre_id": mitre_id,
+                    "mitre_id": _attack_external_id(obj),
                     "name": obj.get("name", ""),
                     "shortname": shortname,
                 }
@@ -702,13 +712,7 @@ class MITRECollector:
                 id_map[stix_id] = {"type": "malware", "name": obj.get("name", "")}
 
             elif obj_type == "tool":
-                external_ids = obj.get("external_references", [])
-                mitre_id = ""
-                for ext in external_ids:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
-                id_map[stix_id] = {"type": "tool", "mitre_id": mitre_id, "name": obj.get("name", "")}
+                id_map[stix_id] = {"type": "tool", "mitre_id": _attack_external_id(obj), "name": obj.get("name", "")}
 
         # Second pass: extract relationships
         relationships = []
@@ -844,12 +848,7 @@ class MITRECollector:
 
             if obj_type == "attack-pattern":
                 # Technique — also extract kill-chain phases for IN_TACTIC linkage
-                external_ids = obj.get("external_references", [])
-                mitre_id = ""
-                for ext in external_ids:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
+                mitre_id = _attack_external_id(obj)
 
                 tactic_phases = [
                     kc["phase_name"]
@@ -889,12 +888,7 @@ class MITRECollector:
 
             elif obj_type == "x-mitre-tactic":
                 # Tactic node — required for IN_TACTIC relationships
-                external_ids = obj.get("external_references", [])
-                mitre_id = ""
-                for ext in external_ids:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
+                mitre_id = _attack_external_id(obj)
 
                 shortname = obj.get("x_mitre_shortname", "")
                 if mitre_id and shortname:
@@ -978,7 +972,8 @@ class MITRECollector:
                     {
                         "type": "malware",
                         "attack_domain": domain,
-                        # 2026-11: the software's ATT&CK id (S####); the deprecated ICS copies have none.
+                        # 2026-11: the software's ATT&CK id (S####); 2026-11-08: a deprecated ICS copy's is its
+                        # ``mitre-ics-attack`` id (``BlackEnergy 3`` S1002; ``_attack_external_id``).
                         "mitre_id": _attack_external_id(obj),
                         "name": obj.get("name", ""),
                         # ATT&CK malware SDOs carry aliases in the MITRE
@@ -1024,12 +1019,7 @@ class MITRECollector:
                 tool_name = obj.get("name", "")
 
                 # Extract MITRE ID (S####) from external_references
-                external_ids = obj.get("external_references", [])
-                mitre_id = ""
-                for ext in external_ids:
-                    if ext.get("source_name") == "mitre-attack":
-                        mitre_id = ext.get("external_id", "")
-                        break
+                mitre_id = _attack_external_id(obj)
 
                 if not mitre_id:
                     logger.debug("Tool %s has no MITRE ID — skipping", tool_name)
