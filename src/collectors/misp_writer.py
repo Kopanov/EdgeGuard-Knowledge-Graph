@@ -1555,6 +1555,38 @@ def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any], written_aft
     return True
 
 
+# How MISP refangs a value before it stores it (MISP 2.5, ``ComplexTypeTool::REFANG_REGEX_TABLE``, applied by
+# ``refangValue`` to the trimmed value on every attribute save): each rule rewrites a value of the listed types, in
+# this order. The patterns are MISP's: the scheme rule only at the start of the value and ignoring case, the others
+# exactly as written. Other defang forms (``(.)``, ``{.}``, ``(at)``) MISP stores as given.
+_MISP_REFANG_RULES: Tuple[Tuple["re.Pattern[str]", str, frozenset], ...] = (
+    (re.compile(r"^(hxxp|hxtp|htxp|meow|h\[tt\]p)", re.IGNORECASE), "http", frozenset({"link", "url"})),
+    (
+        re.compile(r"(\[\.\]|\[dot\]|\(dot\))"),
+        ".",
+        frozenset(
+            {"link", "url", "ip-dst", "ip-src", "domain|ip", "domain", "hostname", "email", "email-src", "email-dst"}
+        ),
+    ),
+    (re.compile(r"\[hxxp://\]"), "http://", frozenset({"link", "url"})),
+    (re.compile(r"\[@\]|\[at\]"), "@", frozenset({"email", "email-src", "email-dst"})),
+    (re.compile(r"\[:\]"), ":", frozenset({"url", "link"})),
+)
+
+
+def refang_as_misp(misp_type: Any, value: Any) -> Any:
+    """*value* refanged as MISP refangs a value of MISP type *misp_type* on save (``_MISP_REFANG_RULES``):
+    ``https://bashupload.com/uCiPm/SENT_Kill[.]zip`` as ``url`` is ``https://bashupload.com/uCiPm/SENT_Kill.zip``,
+    the value MISP stores. A type the rules do not name, and a value that is not a string, are returned unchanged.
+    MISP refangs the trimmed value; a caller passes the value it sends, trimmed."""
+    if not isinstance(value, str):
+        return value
+    for pattern, replacement, types in _MISP_REFANG_RULES:
+        if misp_type in types:
+            value = pattern.sub(replacement, value)
+    return value
+
+
 # 2026-11: the attribute types whose value MISP changes in case on save (MISP 2.5,
 # ``AttributeValidationTool::modifyBeforeValidation``): hashes and other fingerprints, host names,
 # domains, e-mail addresses, IP addresses (an IPv6 address is written in lower case), MAC addresses,

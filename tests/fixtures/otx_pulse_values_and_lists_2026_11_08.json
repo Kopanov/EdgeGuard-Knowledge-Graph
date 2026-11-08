@@ -1,0 +1,1251 @@
+{
+ "_provenance": "Read from OTX on 2026-11-08 with a subscriber key: GET /api/v1/pulses/<id> for each pulse below, each answered HTTP 200. 'pulse' keeps the keys the OTX collector and the report record read and, of 'indicators', the entries at 'indicator_positions' of the answer (in their order; 'n_indicators' is the answer's count), each with the keys the collector reads. 'why' says what the pulse shows. 'misp_pairs' are the (type, value) pairs of the attributes a MISP 2.5 test instance held on 2026-11-08 for the kept indicators (OTX day event of the 730-day baseline of 2026-11-08, attributes whose OTX_META names the pulse in pulse_id or report_ids), read without writing; 'misp_otx_meta_lists' are the list copies of one such attribute's OTX_META as that run wrote them. 'misp_record' holds the TLP, the indicator count and the lists of the pulse's report record as that MISP held it (for the whole pulse, all of its indicators).",
+ "pulses": {
+  "5d8dcf197ec3aea4d3e338df": {
+   "why": "five URLs listed twice, once with an upper-case host after the lower-case one (positions 3/77, 17/87, 25/76, 43/78, 46/81), and one upper-case host listed once (90)",
+   "n_indicators": 99,
+   "indicator_positions": [
+    0,
+    3,
+    17,
+    25,
+    43,
+    46,
+    54,
+    55,
+    63,
+    76,
+    77,
+    78,
+    81,
+    87,
+    90,
+    93
+   ],
+   "misp_pairs": [
+    [
+     "domain",
+     "setseta.com"
+    ],
+    [
+     "domain",
+     "www.icherryls.com"
+    ],
+    [
+     "md5",
+     "e55adc77da695df375ab985469b5e5e4"
+    ],
+    [
+     "sha256",
+     "316c7341dda84ff946cc0c486b4c2471f48e727bce941c7f3654536e84850be3"
+    ],
+    [
+     "url",
+     "http://J5h4f9b6.com/set.exe"
+    ],
+    [
+     "url",
+     "http://d3f4.com.hk/OfJ3qDlVoGBRGjYK/conf.php"
+    ],
+    [
+     "url",
+     "http://icherryls.com/exec.exe"
+    ],
+    [
+     "url",
+     "http://inewsmvo.com/set.exe"
+    ],
+    [
+     "url",
+     "http://k0j8h7f6d5s4.com/set.exe"
+    ],
+    [
+     "url",
+     "http://setseta.com/"
+    ],
+    [
+     "url",
+     "http://setseta.com/set.exe"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     "magecart",
+     "kpot"
+    ],
+    "pulse_references": [
+     "https://mp.weixin.qq.com/s/zgBxZUaY48mEPKTSqvfr8A"
+    ],
+    "attack_ids": [],
+    "targeted_countries": [],
+    "otx_industries": []
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 99,
+    "tags": [
+     "kpot",
+     "magecart"
+    ],
+    "references": [
+     "https://mp.weixin.qq.com/s/zgBxZUaY48mEPKTSqvfr8A"
+    ],
+    "attack_ids": [],
+    "targeted_countries": [],
+    "industries": []
+   },
+   "pulse": {
+    "id": "5d8dcf197ec3aea4d3e338df",
+    "name": "Magecarts fifth team began using KPOT for stealing activities",
+    "description": "In August 2019, Antiy CERT monitored several incidents involving the use of KPOT Trojans for stealing.",
+    "author_name": "AlienVault",
+    "created": "2019-09-27T08:58:01.895000",
+    "modified": "2025-12-05T12:02:08.116000",
+    "revision": 1,
+    "TLP": "white",
+    "tags": [
+     "magecart",
+     "kpot"
+    ],
+    "references": [
+     "https://mp.weixin.qq.com/s/zgBxZUaY48mEPKTSqvfr8A"
+    ],
+    "targeted_countries": [],
+    "industries": [],
+    "adversary": "Magecart",
+    "malware_families": [
+     "KPOT Stealer"
+    ],
+    "attack_ids": [],
+    "indicators": [
+     {
+      "id": 2138948237,
+      "indicator": "http://setseta.com/",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948240,
+      "indicator": "http://setseta.com/set.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 1607219330,
+      "indicator": "http://icherryls.com/exec.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948259,
+      "indicator": "http://d3f4.com.hk/OfJ3qDlVoGBRGjYK/conf.php",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 1836596231,
+      "indicator": "http://inewsmvo.com/set.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948276,
+      "indicator": "http://k0j8h7f6d5s4.com/set.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948283,
+      "indicator": "www.icherryls.com",
+      "type": "hostname",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948284,
+      "indicator": "316c7341dda84ff946cc0c486b4c2471f48e727bce941c7f3654536e84850be3",
+      "type": "FileHash-SHA256",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2119416957,
+      "indicator": "setseta.com",
+      "type": "domain",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948297,
+      "indicator": "http://D3f4.com.hk/OfJ3qDlVoGBRGjYK/conf.php",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948298,
+      "indicator": "http://Setseta.com/set.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948299,
+      "indicator": "http://Inewsmvo.com/set.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948302,
+      "indicator": "http://K0j8h7f6d5s4.com/set.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948308,
+      "indicator": "http://Icherryls.com/exec.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948311,
+      "indicator": "http://J5h4f9b6.com/set.exe",
+      "type": "URL",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 2138948314,
+      "indicator": "e55adc77da695df375ab985469b5e5e4",
+      "type": "FileHash-MD5",
+      "created": "2019-09-27T08:58:03",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  },
+  "6389edf4071ec7c595fc8204": {
+   "why": "a defanged URL (position 6, '[.]'), which MISP stored refanged",
+   "n_indicators": 13,
+   "indicator_positions": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+   ],
+   "misp_pairs": [
+    [
+     "domain",
+     "bashupload.com"
+    ],
+    [
+     "domain",
+     "temp.sh"
+    ],
+    [
+     "md5",
+     "5748e201ac18944dd2ae67287944a5ee"
+    ],
+    [
+     "sha1",
+     "08274fbe89bbc3fb5da9c463b33f707749bc2cfa"
+    ],
+    [
+     "sha1",
+     "9b43a8b4034deabb35d920053949d79f7d189eb4"
+    ],
+    [
+     "sha1",
+     "f550adb28f966c90fe47605c013587346f074021"
+    ],
+    [
+     "sha256",
+     "07117c02a09410f47a326b52c7f17407e63ba5e6ff97277446efc75b862d2799"
+    ],
+    [
+     "sha256",
+     "350ba7fca67721c74385faff083914ecdd66ef107a765dfb7ac08b38d5c9c0bd"
+    ],
+    [
+     "sha256",
+     "51eb749d6cbd08baf9d43c2f83abd9d4d86eb5206f62ba43b768251a98ce9d3e"
+    ],
+    [
+     "sha256",
+     "c4c8be0c939e4c24e11bad90549e3951b7969e78056d819425ca53e87af8d8ed"
+    ],
+    [
+     "sha256",
+     "e28188e516db1bda9015c30de59a2e91996b67c2e2b44989a6b0f562577fd757"
+    ],
+    [
+     "url",
+     "https://bashupload.com/uCiPm/SENT_Kill.zip"
+    ],
+    [
+     "url",
+     "https://downloads.level.io/level.msi"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     "blackbasta",
+     "conti",
+     "ransomware"
+    ],
+    "pulse_references": [
+     "https://www.zscaler.com/blogs/security-research/back-black-basta"
+    ],
+    "attack_ids": [
+     "T1027",
+     "T1102",
+     "T1140",
+     "T1471"
+    ],
+    "targeted_countries": [],
+    "otx_industries": []
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 13,
+    "tags": [
+     "blackbasta",
+     "conti",
+     "ransomware"
+    ],
+    "references": [
+     "https://www.zscaler.com/blogs/security-research/back-black-basta"
+    ],
+    "attack_ids": [
+     "T1027",
+     "T1102",
+     "T1140",
+     "T1471"
+    ],
+    "targeted_countries": [],
+    "industries": []
+   },
+   "pulse": {
+    "id": "6389edf4071ec7c595fc8204",
+    "name": "BlackBasta ransomware",
+    "description": "Members of the Conti ransomware group appear to have splintered into multiple threat groups including BlackBasta, which has become one of the most significant ransomware threats. ThreatLabz has observed more than five victims that have been compromised by BlackBasta 2.0 since the new version’s release in mid-November 2022. This demonstrates that the threat group is very successful at compromising organizations and the latest version of the ransomware will likely enable them to better evade antivirus and EDRs.",
+    "author_name": "AlienVault",
+    "created": "2022-12-02T12:22:12.999000",
+    "modified": "2025-03-23T00:03:10.218000",
+    "revision": 4,
+    "TLP": "white",
+    "tags": [
+     "blackbasta",
+     "conti",
+     "ransomware"
+    ],
+    "references": [
+     "https://www.zscaler.com/blogs/security-research/back-black-basta"
+    ],
+    "targeted_countries": [],
+    "industries": [],
+    "adversary": "",
+    "malware_families": [
+     "Conti",
+     "BlackBasta"
+    ],
+    "attack_ids": [
+     "T1027",
+     "T1102",
+     "T1140",
+     "T1471"
+    ],
+    "indicators": [
+     {
+      "id": 3595223856,
+      "indicator": "07117c02a09410f47a326b52c7f17407e63ba5e6ff97277446efc75b862d2799",
+      "type": "FileHash-SHA256",
+      "created": "2022-12-02T12:22:13",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 3595223857,
+      "indicator": "350ba7fca67721c74385faff083914ecdd66ef107a765dfb7ac08b38d5c9c0bd",
+      "type": "FileHash-SHA256",
+      "created": "2022-12-02T12:22:13",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 3595223858,
+      "indicator": "51eb749d6cbd08baf9d43c2f83abd9d4d86eb5206f62ba43b768251a98ce9d3e",
+      "type": "FileHash-SHA256",
+      "created": "2022-12-02T12:22:13",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 3595223859,
+      "indicator": "c4c8be0c939e4c24e11bad90549e3951b7969e78056d819425ca53e87af8d8ed",
+      "type": "FileHash-SHA256",
+      "created": "2022-12-02T12:22:13",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 3595223860,
+      "indicator": "e28188e516db1bda9015c30de59a2e91996b67c2e2b44989a6b0f562577fd757",
+      "type": "FileHash-SHA256",
+      "created": "2022-12-02T12:22:13",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4034406284,
+      "indicator": "https://downloads.level.io/level.msi",
+      "type": "URL",
+      "created": "2025-02-06T15:58:37",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4034406285,
+      "indicator": "https://bashupload.com/uCiPm/SENT_Kill[.]zip",
+      "type": "URL",
+      "created": "2025-02-06T15:58:37",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 3253411257,
+      "indicator": "bashupload.com",
+      "type": "domain",
+      "created": "2025-02-06T15:58:37",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 3709659946,
+      "indicator": "temp.sh",
+      "type": "domain",
+      "created": "2025-02-06T15:58:37",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4034406286,
+      "indicator": "08274fbe89bbc3fb5da9c463b33f707749bc2cfa",
+      "type": "FileHash-SHA1",
+      "created": "2025-02-06T15:58:37",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4034406287,
+      "indicator": "f550adb28f966c90fe47605c013587346f074021",
+      "type": "FileHash-SHA1",
+      "created": "2025-02-06T15:58:37",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4034406288,
+      "indicator": "9b43a8b4034deabb35d920053949d79f7d189eb4",
+      "type": "FileHash-SHA1",
+      "created": "2025-02-06T15:58:37",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4039101202,
+      "indicator": "5748e201ac18944dd2ae67287944a5ee",
+      "type": "FileHash-MD5",
+      "created": "2025-02-21T16:19:55",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  },
+  "689455e11e25236fe810364b": {
+   "why": "tags [''] (2,107 attributes in MISP carried pulse_tags [''])",
+   "n_indicators": 2107,
+   "indicator_positions": [
+    0,
+    1
+   ],
+   "misp_pairs": [
+    [
+     "domain",
+     "7yamy.com"
+    ],
+    [
+     "domain",
+     "8320.cn"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     ""
+    ],
+    "pulse_references": [],
+    "attack_ids": [
+     "TA0011"
+    ],
+    "targeted_countries": [],
+    "otx_industries": []
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 2107,
+    "tags": [],
+    "references": [],
+    "attack_ids": [
+     "TA0011"
+    ],
+    "targeted_countries": [],
+    "industries": []
+   },
+   "pulse": {
+    "id": "689455e11e25236fe810364b",
+    "name": "Infrastructure of Interest: Medium Confidence Command And Control",
+    "description": "These indicators of compromise (IOCs) were identified through LevelBlue Labs' proprietary collection and threat hunting processes, leveraging AI-driven heuristics to detect anomalous patterns, behavioral analysis of malicious activity, and cross-referenced intelligence from endpoint telemetry and external sources. The IOCs included in this pulse are associated with command and control (C2) infrastructure, facilitating malware communication, data exfiltration, and persistent threat actor operations. Use this data to enhance detection rules, block malicious infrastructure, or correlate with existing incident investigations.\n\nThese indicators have been assigned a medium confidence level regarding their maliciousness. They are therefore subject to further review, and feedback is greatly appreciated.",
+    "author_name": "AlienVault",
+    "created": "2025-08-07T07:29:37.542000",
+    "modified": "2026-03-04T16:37:16.270000",
+    "revision": 6,
+    "TLP": "white",
+    "tags": [
+     ""
+    ],
+    "references": [],
+    "targeted_countries": [],
+    "industries": [],
+    "adversary": "",
+    "malware_families": [],
+    "attack_ids": [
+     "TA0011"
+    ],
+    "indicators": [
+     {
+      "id": 4119001431,
+      "indicator": "8320.cn",
+      "type": "domain",
+      "created": "2025-08-12T07:12:24",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4119001432,
+      "indicator": "7yamy.com",
+      "type": "domain",
+      "created": "2025-08-12T07:12:24",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  },
+  "686bd1d71a879c051d569c88": {
+   "why": "references ['']",
+   "n_indicators": 4,
+   "indicator_positions": [
+    0,
+    3
+   ],
+   "misp_pairs": [
+    [
+     "domain",
+     "notif.su"
+    ],
+    [
+     "sha256",
+     "3acf8d410f30186a800d5e8c3b0b061a6faf7c0939b129d230de42e9034ce6c3"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     "powershell",
+     "persistence",
+     "windows defender evasion",
+     "xmrig",
+     "cryptomining",
+     "lolbas",
+     "monero"
+    ],
+    "pulse_references": [
+     ""
+    ],
+    "attack_ids": [
+     "T1053.005",
+     "T1489",
+     "T1007",
+     "T1082",
+     "T1059.001",
+     "T1562.001",
+     "T1571",
+     "T1068",
+     "T1012",
+     "T1059.003",
+     "T1569.002"
+    ],
+    "targeted_countries": [
+     "Azerbaijan",
+     "Belgium",
+     "China",
+     "Greece",
+     "Russian Federation",
+     "Uzbekistan"
+    ],
+    "otx_industries": []
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 4,
+    "tags": [
+     "cryptomining",
+     "lolbas",
+     "monero",
+     "persistence",
+     "powershell",
+     "windows defender evasion",
+     "xmrig"
+    ],
+    "references": [],
+    "attack_ids": [
+     "T1007",
+     "T1012",
+     "T1053.005",
+     "T1059.001",
+     "T1059.003",
+     "T1068",
+     "T1082",
+     "T1489",
+     "T1562.001",
+     "T1569.002",
+     "T1571"
+    ],
+    "targeted_countries": [
+     "Azerbaijan",
+     "Belgium",
+     "China",
+     "Greece",
+     "Russian Federation",
+     "Uzbekistan"
+    ],
+    "industries": []
+   },
+   "pulse": {
+    "id": "686bd1d71a879c051d569c88",
+    "name": "Digging Gold with a Spoon – Resurgence of Monero-mining Malware",
+    "description": "A resurgence of malware deploying XMRig cryptominer was discovered in mid-April 2025, coinciding with a rally in Monero cryptocurrency value. The malware uses a multi-staged approach and LOLBAS techniques, leveraging Windows tools like PowerShell for payload delivery, detection evasion, and persistence. The attack chain involves three stages: initial infection via a batch file, persistence establishment, and cryptomining execution. The malware targets diverse countries, including Russia, Belgium, Greece, and China. It disables Windows Update services, evades Windows Defender, and uses scheduled tasks for persistence. The XMRig miner creates registry entries and drops files for continued operation. Despite its simple, unobfuscated nature, the malware proved effective in avoiding detection.",
+    "author_name": "AlienVault",
+    "created": "2025-07-07T13:55:35.401000",
+    "modified": "2025-07-07T21:08:32.063000",
+    "revision": 2,
+    "TLP": "white",
+    "tags": [
+     "powershell",
+     "persistence",
+     "windows defender evasion",
+     "xmrig",
+     "cryptomining",
+     "lolbas",
+     "monero"
+    ],
+    "references": [
+     ""
+    ],
+    "targeted_countries": [
+     "Azerbaijan",
+     "Belgium",
+     "China",
+     "Greece",
+     "Russian Federation",
+     "Uzbekistan"
+    ],
+    "industries": [],
+    "adversary": "",
+    "malware_families": [
+     "XMRig"
+    ],
+    "attack_ids": [
+     "T1053.005",
+     "T1489",
+     "T1007",
+     "T1082",
+     "T1059.001",
+     "T1562.001",
+     "T1571",
+     "T1068",
+     "T1012",
+     "T1059.003",
+     "T1569.002"
+    ],
+    "indicators": [
+     {
+      "id": 4057639332,
+      "indicator": "3acf8d410f30186a800d5e8c3b0b061a6faf7c0939b129d230de42e9034ce6c3",
+      "type": "FileHash-SHA256",
+      "created": "2025-07-07T13:55:36",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4084590129,
+      "indicator": "notif.su",
+      "type": "domain",
+      "created": "2025-07-07T13:55:36",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  },
+  "69d41711b3984d53ffc4f8ce": {
+   "why": "attack_ids ['']",
+   "n_indicators": 23,
+   "indicator_positions": [
+    0,
+    1
+   ],
+   "misp_pairs": [
+    [
+     "vulnerability",
+     "CVE-2023-21529"
+    ],
+    [
+     "vulnerability",
+     "CVE-2023-27350"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     "psexec",
+     "medusa",
+     "remote access",
+     "ransomware",
+     "storm-1175",
+     "exploit"
+    ],
+    "pulse_references": [
+     "https://www.microsoft.com/en-us/security/blog/2026/04/06/storm-1175-focuses-gaze-on-vulnerable-web-facing-assets-in-high-tempo-medusa-ransomware-operations/"
+    ],
+    "attack_ids": [
+     ""
+    ],
+    "targeted_countries": [],
+    "otx_industries": []
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 23,
+    "tags": [
+     "exploit",
+     "medusa",
+     "psexec",
+     "ransomware",
+     "remote access",
+     "storm-1175"
+    ],
+    "references": [
+     "https://www.microsoft.com/en-us/security/blog/2026/04/06/storm-1175-focuses-gaze-on-vulnerable-web-facing-assets-in-high-tempo-medusa-ransomware-operations/"
+    ],
+    "attack_ids": [],
+    "targeted_countries": [],
+    "industries": []
+   },
+   "pulse": {
+    "id": "69d41711b3984d53ffc4f8ce",
+    "name": "Storm-1175 focuses gaze on vulnerable web-facing assets in high ...",
+    "description": "The financially motivated cybercriminal actor tracked by Microsoft Threat Intelligence as Storm-1175 operates high-velocity ransomware campaigns that weaponize N-days, targeting vulnerable, web-facing systems during the window between vulnerability disclosure and widespread patch adoption. Following successful exploitation, Storm-1175 rapidly moves from initial access to data exfiltration and deployment of Medusa ransomware, often within a few days and, in some cases, within 24 hours. The threat actor’s high operational tempo and proficiency in identifying exposed perimeter assets have proven successful, with recent intrusions heavily impacting healthcare organizations, as well as those in the education, professional services, and finance sectors in Australia, United Kingdom, and United States.",
+    "author_name": "AlienVault",
+    "created": "2026-04-06T20:26:57.836000",
+    "modified": "2026-05-06T00:02:38.802000",
+    "revision": 2,
+    "TLP": "white",
+    "tags": [
+     "psexec",
+     "medusa",
+     "remote access",
+     "ransomware",
+     "storm-1175",
+     "exploit"
+    ],
+    "references": [
+     "https://www.microsoft.com/en-us/security/blog/2026/04/06/storm-1175-focuses-gaze-on-vulnerable-web-facing-assets-in-high-tempo-medusa-ransomware-operations/"
+    ],
+    "targeted_countries": [],
+    "industries": [],
+    "adversary": "Storm-1175",
+    "malware_families": [
+     "Medusa"
+    ],
+    "attack_ids": [
+     ""
+    ],
+    "indicators": [
+     {
+      "id": 3634012359,
+      "indicator": "CVE-2023-21529",
+      "type": "CVE",
+      "created": "2026-04-06T20:26:58",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 3668139736,
+      "indicator": "CVE-2023-27350",
+      "type": "CVE",
+      "created": "2026-04-06T20:26:58",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  },
+  "677d38cbdaeb986028ebc193": {
+   "why": "a blank tag between real ones",
+   "n_indicators": 7,
+   "indicator_positions": [
+    0,
+    1
+   ],
+   "misp_pairs": [
+    [
+     "md5",
+     "82c7d11916fdfbf24eae6bf9200a48c9"
+    ],
+    [
+     "sha1",
+     "7d7c0517ed4f0f909258edb0f46b66fccecb8c73"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     "cve-2024-4577",
+     "php",
+     "packetcrypt",
+     "",
+     "cryptomining",
+     "Stake-to-Earn"
+    ],
+    "pulse_references": [
+     "https://isc.sans.edu/diary/rss/31564"
+    ],
+    "attack_ids": [
+     "T1573.001",
+     "T1588.001",
+     "T1059.004",
+     "T1571",
+     "T1102.002",
+     "T1496",
+     "T1071.001",
+     "T1105",
+     "T1569.002"
+    ],
+    "targeted_countries": [],
+    "otx_industries": []
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 7,
+    "tags": [
+     "Stake-to-Earn",
+     "cryptomining",
+     "cve-2024-4577",
+     "packetcrypt",
+     "php"
+    ],
+    "references": [
+     "https://isc.sans.edu/diary/rss/31564"
+    ],
+    "attack_ids": [
+     "T1059.004",
+     "T1071.001",
+     "T1102.002",
+     "T1105",
+     "T1496",
+     "T1569.002",
+     "T1571",
+     "T1573.001",
+     "T1588.001"
+    ],
+    "targeted_countries": [],
+    "industries": []
+   },
+   "pulse": {
+    "id": "677d38cbdaeb986028ebc193",
+    "name": "PacketCrypt Classic Cryptocurrency Miner on PHP Servers",
+    "description": "A cryptocurrency mining campaign targeting vulnerable PHP servers has been identified. The attack exploits misconfigured or unpatched servers, allowing unauthorized access to php-cgi.exe. The malware, initially delivered as dr0p.exe, downloads a secondary payload pkt1.exe, which then spawns packetcrypt.exe to mine PacketCrypt Classic (PKTC) cryptocurrency. The mined coins are sent to a specific wallet address. The attack chain involves multiple stages and uses various techniques to ensure successful execution. Server administrators are advised to patch and audit their web servers to prevent such attacks and mitigate potential performance issues caused by unauthorized crypto mining activities.",
+    "author_name": "AlienVault",
+    "created": "2025-01-07T14:23:07.751000",
+    "modified": "2025-02-06T14:01:34.601000",
+    "revision": 2,
+    "TLP": "white",
+    "tags": [
+     "cve-2024-4577",
+     "php",
+     "packetcrypt",
+     "",
+     "cryptomining",
+     "Stake-to-Earn"
+    ],
+    "references": [
+     "https://isc.sans.edu/diary/rss/31564"
+    ],
+    "targeted_countries": [],
+    "industries": [],
+    "adversary": "",
+    "malware_families": [],
+    "attack_ids": [
+     "T1573.001",
+     "T1588.001",
+     "T1059.004",
+     "T1571",
+     "T1102.002",
+     "T1496",
+     "T1071.001",
+     "T1105",
+     "T1569.002"
+    ],
+    "indicators": [
+     {
+      "id": 4024253065,
+      "indicator": "82c7d11916fdfbf24eae6bf9200a48c9",
+      "type": "FileHash-MD5",
+      "created": "2025-01-07T14:23:08",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4024253066,
+      "indicator": "7d7c0517ed4f0f909258edb0f46b66fccecb8c73",
+      "type": "FileHash-SHA1",
+      "created": "2025-01-07T14:23:08",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  },
+  "6acf8607ba5b3757d207eb86": {
+   "why": "a blank ATT&CK id before a real one",
+   "n_indicators": 11,
+   "indicator_positions": [
+    0,
+    1
+   ],
+   "misp_pairs": [
+    [
+     "domain",
+     "joinconnect.cfd"
+    ],
+    [
+     "domain",
+     "joinconnect.works"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     "calendly spoofing",
+     "job scam",
+     "2fa bypass",
+     "social engineering",
+     "phishing",
+     "account takeover",
+     "meta impersonation",
+     "credential theft"
+    ],
+    "pulse_references": [
+     "https://www.malwarebytes.com/blog/threat-intel/2026/10/fake-calendly-meta-careers-pages-steal-facebook-and-google-logins"
+    ],
+    "attack_ids": [
+     "",
+     "T1566"
+    ],
+    "targeted_countries": [],
+    "otx_industries": [
+     "Technology"
+    ]
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 11,
+    "tags": [
+     "2fa bypass",
+     "account takeover",
+     "calendly spoofing",
+     "credential theft",
+     "job scam",
+     "meta impersonation",
+     "phishing",
+     "social engineering"
+    ],
+    "references": [
+     "https://www.malwarebytes.com/blog/threat-intel/2026/10/fake-calendly-meta-careers-pages-steal-facebook-and-google-logins"
+    ],
+    "attack_ids": [
+     "T1566"
+    ],
+    "targeted_countries": [],
+    "industries": [
+     "Technology"
+    ]
+   },
+   "pulse": {
+    "id": "6acf8607ba5b3757d207eb86",
+    "name": "Fake Calendly \"Meta Careers\" pages steal Facebook and Google logins",
+    "description": "A wave of fraudulent websites mimicking Calendly booking pages for Meta job interviews has been identified, targeting job seekers to steal credentials. Victims select interview time slots, provide personal information, and complete fake CAPTCHA verifications before being prompted to log into Facebook and Google accounts. The sophisticated phishing kit captures login credentials and bypasses two-factor authentication by relaying authentication codes in real-time to attackers. The pages use convincing replicas of legitimate login screens with fake address bars displaying authentic URLs. Eleven domains following similar naming patterns have been identified, utilizing generic recruiting-related terms. The collection infrastructure operates through Amazon API Gateway in Singapore, with code comments in Vietnamese suggesting the operation's possible origins.",
+    "author_name": "AlienVault",
+    "created": "2026-10-14T13:39:19.583000",
+    "modified": "2026-10-15T09:59:20.180000",
+    "revision": 2,
+    "TLP": "white",
+    "tags": [
+     "calendly spoofing",
+     "job scam",
+     "2fa bypass",
+     "social engineering",
+     "phishing",
+     "account takeover",
+     "meta impersonation",
+     "credential theft"
+    ],
+    "references": [
+     "https://www.malwarebytes.com/blog/threat-intel/2026/10/fake-calendly-meta-careers-pages-steal-facebook-and-google-logins"
+    ],
+    "targeted_countries": [],
+    "industries": [
+     "Technology"
+    ],
+    "adversary": "",
+    "malware_families": [],
+    "attack_ids": [
+     "",
+     "T1566"
+    ],
+    "indicators": [
+     {
+      "id": 4527142362,
+      "indicator": "joinconnect.cfd",
+      "type": "domain",
+      "created": "2026-10-14T13:39:20",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4527142363,
+      "indicator": "joinconnect.works",
+      "type": "domain",
+      "created": "2026-10-14T13:39:20",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  },
+  "6a019c5f0a3344d92c4302a3": {
+   "why": "a blank reference before a real one",
+   "n_indicators": 10,
+   "indicator_positions": [
+    0,
+    2
+   ],
+   "misp_pairs": [
+    [
+     "md5",
+     "c25f7fb9f4e1f5f7c2c9c25c0d827b04"
+    ],
+    [
+     "sha1",
+     "1e4e8c4289d00e54be118e54e1144ac9ebbf4c79"
+    ]
+   ],
+   "misp_otx_meta_lists": {
+    "pulse_tags": [
+     "ton network",
+     "trickmo",
+     "device takeover",
+     "godfather",
+     "network pivot",
+     "socks5 proxy",
+     "accessibility abuse",
+     "android",
+     "ssh tunnelling",
+     "banking trojan"
+    ],
+    "pulse_references": [
+     "",
+     "https://www.threatfabric.com/blogs/new-trickmo-variant-device-take-over-malware-targeting-banking-fintech-wallet-auth-app"
+    ],
+    "attack_ids": [],
+    "targeted_countries": [
+     "Austria",
+     "France",
+     "Italy"
+    ],
+    "otx_industries": [
+     "Finance"
+    ]
+   },
+   "misp_record": {
+    "tlp": "white",
+    "indicator_count": 10,
+    "tags": [
+     "accessibility abuse",
+     "android",
+     "banking trojan",
+     "device takeover",
+     "godfather",
+     "network pivot",
+     "socks5 proxy",
+     "ssh tunnelling",
+     "ton network",
+     "trickmo"
+    ],
+    "references": [
+     "https://www.threatfabric.com/blogs/new-trickmo-variant-device-take-over-malware-targeting-banking-fintech-wallet-auth-app"
+    ],
+    "attack_ids": [],
+    "targeted_countries": [
+     "Austria",
+     "France",
+     "Italy"
+    ],
+    "industries": [
+     "Finance"
+    ]
+   },
+   "pulse": {
+    "id": "6a019c5f0a3344d92c4302a3",
+    "name": "New TrickMo Variant: Device Take Over malware targeting Banking, Fintech, Wallet & Auth apps",
+    "description": "A new variant of the TrickMo Android banking trojan was identified between January and February 2026, representing a substantial platform redesign rather than new capabilities. The malware has migrated its command-and-control infrastructure entirely onto The Open Network (TON) using .adnl endpoints, moving away from conventional internet infrastructure. Active campaigns have targeted banking and wallet users in France, Italy, and Austria. Once accessibility permissions are granted, operators gain real-time device control including credential phishing, keylogging, screen recording, SMS interception, and bidirectional remote control. New features include network reconnaissance capabilities and SSH tunnelling that transform infected devices into programmable network pivots and SOCKS5 proxy exit nodes, enabling operators to bypass IP-based fraud detection systems while accessing victim networks.",
+    "author_name": "AlienVault",
+    "created": "2026-05-11T09:07:43.650000",
+    "modified": "2026-05-11T09:47:41.450000",
+    "revision": 3,
+    "TLP": "white",
+    "tags": [
+     "ton network",
+     "trickmo",
+     "device takeover",
+     "godfather",
+     "network pivot",
+     "socks5 proxy",
+     "accessibility abuse",
+     "android",
+     "ssh tunnelling",
+     "banking trojan"
+    ],
+    "references": [
+     "",
+     "https://www.threatfabric.com/blogs/new-trickmo-variant-device-take-over-malware-targeting-banking-fintech-wallet-auth-app"
+    ],
+    "targeted_countries": [
+     "Austria",
+     "France",
+     "Italy"
+    ],
+    "industries": [
+     "Finance"
+    ],
+    "adversary": "",
+    "malware_families": [
+     "TrickMo",
+     "Godfather"
+    ],
+    "attack_ids": [],
+    "indicators": [
+     {
+      "id": 4353846606,
+      "indicator": "c25f7fb9f4e1f5f7c2c9c25c0d827b04",
+      "type": "FileHash-MD5",
+      "created": "2026-05-11T09:07:44",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     },
+     {
+      "id": 4353846608,
+      "indicator": "1e4e8c4289d00e54be118e54e1144ac9ebbf4c79",
+      "type": "FileHash-SHA1",
+      "created": "2026-05-11T09:07:44",
+      "title": "",
+      "description": "",
+      "is_active": 1
+     }
+    ]
+   }
+  }
+ }
+}

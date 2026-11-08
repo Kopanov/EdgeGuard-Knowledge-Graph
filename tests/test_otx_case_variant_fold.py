@@ -237,7 +237,15 @@ class TestRealPulses:
         ):
             assert kept in urls
 
-    def test_a_defanged_value_is_not_folded_with_its_refanged_twin(self):
+    def test_a_defanged_value_is_refanged_before_the_fold(self):
+        """2026-11-08: a defanged value is refanged as MISP refangs it on save, then keyed
+        (``_pulse_indicator_value``). The pulse's own spelling (``SENT_Kill[.]zip``, read from OTX on 2026-11-08,
+        ``tests/fixtures/otx_pulse_values_and_lists_2026_11_08.json``) folds into the stored twin listed before it.
+        This fixture's lower-cased spelling (the confirmation key of the 2026-11-01 run) differs from the twin in
+        the case of its path, so it stays an item of its own, refanged."""
+        real = json.loads((TESTS / "fixtures" / "otx_pulse_values_and_lists_2026_11_08.json").read_text("utf-8"))
+        as_listed = real["pulses"][FIXTURE["defanged_url_pulse"]]["pulse"]["indicators"][6]["indicator"]
+        assert as_listed == "https://bashupload.com/uCiPm/SENT_Kill[.]zip"
         pulse = {
             "id": FIXTURE["defanged_url_pulse"],
             "name": "BlackBasta ransomware",
@@ -245,10 +253,14 @@ class TestRealPulses:
             "adversary": "",
             "indicators": [
                 {"type": "URL", "indicator": FIXTURE["defanged_url_twin"]},
+                {"type": "URL", "indicator": as_listed},
                 {"type": "URL", "indicator": FIXTURE["defanged_url"]},
             ],
         }
-        assert _urls(_collect(*_pulses([pulse]))) == [FIXTURE["defanged_url_twin"], FIXTURE["defanged_url"]]
+        assert _urls(_collect(*_pulses([pulse]))) == [
+            FIXTURE["defanged_url_twin"],
+            "https://bashupload.com/ucipm/sent_kill.zip",
+        ]
 
     def test_a_hash_listed_in_two_cases_is_one_item(self):
         first = _pulses([FIXTURE["dcrat_pulses"][2]])[0]
