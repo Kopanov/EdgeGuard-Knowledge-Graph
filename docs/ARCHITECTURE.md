@@ -17,8 +17,8 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              COLLECTORS (per source)                       │
-│  • Fetch data from 10 active sources (+ 2 flag-guarded:     │
-│    MalwareBazaar, CISA ICS; + 2 sector placeholders)        │
+│  • Fetch data from 11 active sources (+ 1 flag-guarded:     │
+│    MalwareBazaar; + 2 sector placeholders)                  │
 │  • Detect zone(s) using detect_zones_from_text()          │
 │  • Return indicators with zone: ['healthcare', 'finance'] │
 └─────────────────────────┬───────────────────────────────────┘
@@ -361,7 +361,7 @@ steps in `build_relationships.py`; every uuid is stamped at write time.
 | urlhaus | URLhaus | Threat Intel | global_feed_collector.py |
 | threatfox | ThreatFox | Threat Intel | global_feed_collector.py |
 | malwarebazaar | MalwareBazaar | Threat Intel | global_feed_collector.py (flag-guarded, `EDGEGUARD_ENABLE_MALWAREBAZAAR`) |
-| cisa_ics | CISA ICS Advisories | Advisory | cisa_ics_collector.py (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`) |
+| cisa_ics | CISA ICS Advisories | Advisory | cisa_ics_collector.py (on by default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off) |
 | healthcare | Healthcare Feeds | Threat Intel | healthcare_feed_collector.py (placeholder) |
 | energy | Energy Feeds | Threat Intel | energy_feed_collector.py (placeholder) |
 
@@ -391,7 +391,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/virustotal_collector.py` | VirusTotal — `VirusTotalCollector`, CLI / on-demand enrichment (not scheduled) |
 | `src/collectors/finance_feed_collector.py` | Feodo, SSL Blacklist collectors |
 | `src/collectors/global_feed_collector.py` | URLhaus, ThreatFox, MalwareBazaar collectors |
-| `src/collectors/cisa_ics_collector.py` | CISA ICS advisories (CSAF 2.0), flag-guarded |
+| `src/collectors/cisa_ics_collector.py` | CISA ICS advisories (CSAF 2.0), on by default |
 | `src/collectors/virustotal_budget.py` | VirusTotal free-tier daily ledger (budget, per-run cap, lookup memory) |
 | `src/source_key_check.py` | Live check of the source API keys (preflight, baseline task `source_key_check`) |
 | `src/collectors/healthcare_feed_collector.py` | Healthcare placeholder |
@@ -509,10 +509,11 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS is one of the 11 active sources (on by default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off); MalwareBazaar is the one flag-guarded source.
 - 2026-11-07 — `src/text_caps.py` in the module table.
 - 2026-11-06 — An indicator of a malware that at least `EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS` (7) actors share counts for a campaign only through a link that a record reporting it cites (`src/campaign_evidence.py`).
 - 2026-11-02 — `ATTRIBUTED_TO`: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label (the row described the exact match as a producer).

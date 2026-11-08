@@ -81,11 +81,11 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 
 ---
 
-## Optional sources
+## Source flags
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `EDGEGUARD_ENABLE_CISA_ICS` | `false` | CISA ICS advisories (CSAF 2.0) with CISA's sectors |
+| `EDGEGUARD_ENABLE_CISA_ICS` | `true` | CISA ICS advisories (CSAF 2.0) with CISA's sectors; `false` turns the source off |
 | `EDGEGUARD_ENABLE_MITRE_ICS` | `false` | MITRE ATT&CK for ICS in the MITRE collector |
 | `EDGEGUARD_ENABLE_MALWAREBAZAAR` | `false` | MalwareBazaar sample hashes with the family label |
 | `EDGEGUARD_ENABLE_EPSS` | `true` | FIRST EPSS scores on existing CVE nodes |
@@ -94,7 +94,8 @@ Every EdgeGuard setting is an environment variable; a few baseline and sync cont
 - ATT&CK for ICS items carry `attack_domain = ics`; a failed ICS fetch never affects the Enterprise ingest.
 - MalwareBazaar reads the export of the last 48 hours (abuse.ch Auth-Key required); its samples link to `Malware` nodes by `INDICATES`.
 - EPSS runs after every Neo4j sync and the baseline; a feed outage is logged and skipped.
-- On an existing graph, an additive baseline loads the history of CISA ICS and ATT&CK for ICS; for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works.
+- A flag is on for `true`, `1`, `yes` or `on` (case-insensitive) and off for any other value; set but empty, it is off. On the Compose deployment an unset or empty `EDGEGUARD_ENABLE_CISA_ICS` reaches the `airflow` container as `true` (`docker-compose.yml`).
+- On an existing graph built without them, an additive baseline loads the history of CISA ICS and ATT&CK for ICS; for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works.
 
 ---
 
@@ -472,10 +473,11 @@ When to set it, and when to lower `EDGEGUARD_EARLIEST_IOC_DATE` for historical c
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS is on by default: `EDGEGUARD_ENABLE_CISA_ICS` defaults to `true`, and `false` turns the source off; the section is named "Source flags" and says which values turn a flag on.
 - 2026-11-07 — Report records: a CISA ICS run reads the advisories of up to 100 records of its `report_pending` list for their records. The scheduled CISA ICS run's writer is given its task's end, so a failing streak of its item push also stops 10 minutes before that end.
 - 2026-11-07 — The OTX collector writes a report record per pulse: `EDGEGUARD_REPORT_MAX_INDICATORS`, `EDGEGUARD_MISP_REPORT_THROTTLE_SEC` and `EDGEGUARD_REPORT_PENDING_MAX_DAYS` take effect for it, and `EDGEGUARD_OTX_RETRY_PER_RUN` also bounds the fetches by id of the pulses whose record waits on `report_pending`. `EDGEGUARD_REPORT_PENDING_MAX_DAYS` also gives up a record whose source record keeps failing to be fetched. The scheduled OTX writer is given its task's end.
 - 2026-11-07 — `EDGEGUARD_REPORT_MAX_INDICATORS` (2000), `EDGEGUARD_MISP_REPORT_THROTTLE_SEC` (0.1) and `EDGEGUARD_REPORT_PENDING_MAX_DAYS` (7): report records, one MISP Event Report per OTX pulse and CISA ICS advisory, written by `MISPWriter.push_reports`, and the `report_pending` list of the records whose push failed. `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC` and `EDGEGUARD_MISP_PUSH_MAX_FAILING_SEC_BASELINE` also cap a `push_reports` call. No collector writes records yet.

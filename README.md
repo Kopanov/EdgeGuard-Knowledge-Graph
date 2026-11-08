@@ -60,11 +60,11 @@ SOC teams, sector analysts (healthcare, energy, finance) and ResilMesh deploymen
 ```mermaid
 flowchart LR
     subgraph SRC["Sources"]
-        VUL["Vulnerabilities<br/>NVD · CISA KEV"]
+        VUL["Vulnerabilities<br/>NVD · CISA KEV · CISA ICS"]
         ATT["MITRE ATT&CK"]
         IND["Indicators<br/>OTX · ThreatFox · URLhaus<br/>Feodo Tracker · SSL Blacklist<br/>AbuseIPDB · VirusTotal lookups"]
     end
-    OPT["Opt-in sources<br/>CISA ICS · ATT&CK for ICS<br/>MalwareBazaar"]
+    OPT["Opt-in sources<br/>ATT&CK for ICS<br/>MalwareBazaar"]
     CUR["Curated packages"]
     AF["Airflow<br/>baseline + 5 scheduled DAGs"]
     COL["Collectors"]
@@ -111,7 +111,7 @@ Component detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the diagrams 
 |---|---|---|---|
 | Vulnerabilities | NVD | CVEs, CVSS v2 to v4.0, CISA SSVC | on |
 | | CISA KEV | Known-exploited CVEs | on |
-| | CISA ICS advisories | ICS CVEs with the sectors CISA names | opt-in |
+| | CISA ICS advisories | ICS CVEs with the sectors CISA names | on |
 | | FIRST EPSS | Exploitation score and percentile per CVE | on |
 | ATT&CK | MITRE ATT&CK Enterprise | Techniques, tactics, groups, software | on |
 | | MITRE ATT&CK for ICS | ICS techniques and tactics | opt-in |
@@ -129,10 +129,10 @@ Component detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the diagrams 
 - **History per source.** A baseline reaches back 730 days wherever the source's API does. ThreatFox's API returns at most the last 7 days, URLhaus its recent export, the URLs added in the last 30 days (about 63,000 on 2026-10-24), MalwareBazaar's export the last 48 hours and AbuseIPDB its current blacklist; ATT&CK has no time window.
 - **VirusTotal.** The free tier allows lookups only (4 per minute, 500 per day). EdgeGuard looks up the hashes already in MISP within a daily budget of 400 lookups and 60 per run; it scans and uploads nothing.
 - **Feodo Tracker.** A baseline loads the complete C2 history; the daily runs read the list of the last 30 days, and the collector logs a warning when the feed's own header is older than 7 days ([docs/COLLECTORS.md § 7](docs/COLLECTORS.md#7-finance-feed-collector)).
-- **Placeholders.** The energy and healthcare sector modules are placeholders that no DAG task runs; member-only ISAC feeds are not collected. Sector labels come from keyword detection in every collector, from the industries an OTX pulse names and, with CISA ICS enabled, from the sectors CISA names.
+- **Placeholders.** The energy and healthcare sector modules are placeholders that no DAG task runs; member-only ISAC feeds are not collected. Sector labels come from keyword detection in every collector, from the industries an OTX pulse names and from the sectors CISA names in its ICS advisories.
 - **FIRST EPSS** is not collected into MISP: the last enrichment job writes the day's scores to the `CVE` nodes that exist.
 - **Curated packages** are imported through MISP with `scripts/import_curated_package.py` after the baseline, and again after every fresh baseline, whose wipe deletes their MISP event; their claims attach to nodes that already exist ([docs/RUNBOOK.md § Importing a curated package](docs/RUNBOOK.md#importing-a-curated-package)).
-- **Opt-in sources** are switched on with flags ([Configuration](#configuration)).
+- **Source flags.** The opt-in sources are switched on with flags, and CISA ICS, on by default, is switched off with `EDGEGUARD_ENABLE_CISA_ICS=false` ([Configuration](#configuration)).
 
 Per-source detail: [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) and [docs/COLLECTORS.md](docs/COLLECTORS.md).
 
@@ -444,7 +444,7 @@ set -a; . ./.env; set +a
 python3 scripts/verify_fresh_baseline.py
 ```
 
-Exit 0 means every mandatory check passed. Run it while no sync, `build_relationships` or enrichment run is in progress: until the runs after a sync are done, the checks of the links `build_relationships` and the campaign builder write fail by design ([docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance)). With an opt-in source enabled, add its flag, so that the script fails when that source left no data: `--require-cisa-ics` (CISA ICS), `--require-ics` (ATT&CK for ICS), `--require-malwarebazaar` (MalwareBazaar); after a baseline that collected OTX, add `--require-otx-industries`.
+Exit 0 means every mandatory check passed. Run it while no sync, `build_relationships` or enrichment run is in progress: until the runs after a sync are done, the checks of the links `build_relationships` and the campaign builder write fail by design ([docs/BASELINE_LAUNCH_CHECKLIST.md § Fresh-baseline acceptance](docs/BASELINE_LAUNCH_CHECKLIST.md#fresh-baseline-acceptance)). Add `--require-cisa-ics` so that the script fails when CISA ICS (on by default) left no data, and, with an opt-in source enabled, its flag: `--require-ics` (ATT&CK for ICS), `--require-malwarebazaar` (MalwareBazaar); after a baseline that collected OTX, add `--require-otx-industries`.
 
 ---
 
@@ -457,12 +457,12 @@ Exit 0 means every mandatory check passed. Run it while no sync, `build_relation
 | `edgeguard_pipeline` | Every 30 minutes | OTX |
 | `edgeguard_medium_freq` | Every 4 hours | CISA KEV, VirusTotal lookups |
 | `edgeguard_low_freq` | Every 8 hours | NVD |
-| `edgeguard_daily` | 02:00 daily | ATT&CK, AbuseIPDB and the abuse.ch feeds |
+| `edgeguard_daily` | 02:00 daily | ATT&CK, CISA ICS, AbuseIPDB and the abuse.ch feeds |
 | `edgeguard_neo4j_sync` | Every 72 hours | MISP → Neo4j sync, relationships, enrichment |
 | `edgeguard_baseline` | Manual | Full historical load |
 
 - Airflow registers the five scheduled DAGs paused. Unpause them after the first baseline's `baseline_complete` task has succeeded; while a baseline holds the lock they skip.
-- `edgeguard_daily` runs ATT&CK, AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker and SSL Blacklist, plus CISA ICS and MalwareBazaar when they are enabled.
+- `edgeguard_daily` runs ATT&CK, CISA ICS, AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker and SSL Blacklist, plus MalwareBazaar when it is enabled.
 - Every collector task runs in the Airflow pool `edgeguard_collectors` (4 slots, `EDGEGUARD_COLLECTOR_POOL_SLOTS`), which the Compose `airflow` service creates at every start.
 
 Task chains, run configuration and troubleshooting: [docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md).
@@ -514,16 +514,16 @@ The alert rules in `prometheus/alerts.yml` cover staleness and stuck runs per DA
 
 All settings are environment variables. Docker Compose reads `.env` and forwards each setting to the services that use it (`x-common-env` and each service's `environment` in `docker-compose.yml`), so a value in `.env` reaches the containers only where Compose forwards it. A few values are fixed in `docker-compose.yml`, such as `NEO4J_URI=bolt://neo4j:7687` inside the stack and the API ports. Outside Docker, export the settings before you run any command (`set -a; . ./.env; set +a`).
 
-**Optional sources**
+**Source flags**
 
 | Flag | Default | Adds |
 |---|---|---|
-| `EDGEGUARD_ENABLE_CISA_ICS` | `false` | CISA ICS advisories with the sectors CISA names |
+| `EDGEGUARD_ENABLE_CISA_ICS` | `true` | CISA ICS advisories with the sectors CISA names |
 | `EDGEGUARD_ENABLE_MITRE_ICS` | `false` | MITRE ATT&CK for ICS |
 | `EDGEGUARD_ENABLE_MALWAREBAZAAR` | `false` | MalwareBazaar sample hashes |
 | `EDGEGUARD_ENABLE_EPSS` | `true` | FIRST EPSS scores on CVE nodes |
 
-Set a flag in `.env` and run `docker compose up -d airflow`. On an existing graph, CISA ICS and ATT&CK for ICS load their history with an additive baseline (for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works); MalwareBazaar builds up over the daily runs. `EDGEGUARD_COLLECT_SOURCES` limits collection to a comma-separated list of collectors.
+Set a flag in `.env` and run `docker compose up -d airflow`; `EDGEGUARD_ENABLE_CISA_ICS=false` turns CISA ICS off. On an existing graph built without them, CISA ICS and ATT&CK for ICS load their history with an additive baseline (for ATT&CK for ICS, `MITRE_FORCE_REFETCH=true` for one daily run also works); MalwareBazaar builds up over the daily runs. `EDGEGUARD_COLLECT_SOURCES` limits collection to a comma-separated list of collectors.
 
 **TLS.** `EDGEGUARD_SSL_VERIFY` (default `true`) controls certificate verification for MISP and the HTTPS feeds; set it to `false` only for a development MISP with a self-signed certificate. `true`, `1`, `yes` and `on` verify, `false`, `0`, `no` and `off` do not (case-insensitive); any other value keeps verification on and is reported in the log, by `edgeguard validate` and by the baseline preflight. Neo4j TLS is chosen by the `NEO4J_URI` scheme (`bolt+s://`, `bolt+ssc://`). A private CA goes into a bundle named by `REQUESTS_CA_BUNDLE` on a pip install; `docker-compose.yml` does not forward it.
 
@@ -617,4 +617,4 @@ EdgeGuard is developed by IICT-BAS and Ratio1 and financed by ResilMesh Open Cal
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-08_

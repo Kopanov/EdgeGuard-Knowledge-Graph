@@ -430,14 +430,14 @@ CAMPAIGN_SEEN_DATES_CHECK_QUERY = (
 # Per-source presence (2026-10): the canonical ``Source.source_id`` of every collector, by how a
 # default deployment runs it (``src/source_registry.py``, the collector flags in ``src/config.py``,
 # the keys in ``src/source_key_check.py``; pinned by a test). Collected by default, without a key
-# or a flag (NVD also answers without a key, at a lower rate):
-DEFAULT_SOURCES = ("cisa_kev", "mitre_attck", "nvd", "feodo_tracker", "ssl_blacklist")
+# or a flag set (NVD also answers without a key, at a lower rate; CISA ICS is on unless
+# EDGEGUARD_ENABLE_CISA_ICS=false, and --require-cisa-ics makes its presence mandatory):
+DEFAULT_SOURCES = ("cisa_kev", "cisa_ics", "mitre_attck", "nvd", "feodo_tracker", "ssl_blacklist")
 # Skipped by design without an API key; this script cannot see which keys the deployment holds.
 # URLhaus reads its export with the abuse.ch Auth-Key (``THREATFOX_API_KEY``).
 KEYED_SOURCES = ("alienvault_otx", "virustotal", "threatfox", "urlhaus", "abuseipdb")
-# Off unless EDGEGUARD_ENABLE_CISA_ICS / EDGEGUARD_ENABLE_MALWAREBAZAAR is set; judged by
-# --require-cisa-ics / --require-malwarebazaar.
-FLAG_GUARDED_SOURCES = ("cisa_ics", "malwarebazaar")
+# Off unless EDGEGUARD_ENABLE_MALWAREBAZAAR is set; judged by --require-malwarebazaar.
+FLAG_GUARDED_SOURCES = ("malwarebazaar",)
 
 
 def _post(statement: str, params: Optional[Dict[str, Any]] = None, timeout: int = 180) -> List[Dict[str, Any]]:
@@ -1109,7 +1109,8 @@ def run_checks(
     )
     rep.add("actor_merges_recorded", None, r, mandatory=False)
 
-    # 10. CISA ICS advisories (opt-in).
+    # 10. CISA ICS advisories: mandatory with --require-cisa-ics; otherwise the source is judged with
+    #     the other default sources (15., a warning when it delivered nothing).
     r = _one(
         "OPTIONAL MATCH (s:Source {source_id: 'cisa_ics'}) RETURN s IS NOT NULL AS present, COUNT { (s)<-[:SOURCED_FROM]-() } AS edges"
     )
@@ -1684,7 +1685,8 @@ def run_checks(
     #     default that delivered nothing is a warning, not a failure: an upstream outage skips its
     #     collector without failing the run, and the collector's task log says why. A keyed source
     #     is skipped by design without its API key, a flag-guarded one without its flag (judged by
-    #     ``--require-cisa-ics`` / ``--require-malwarebazaar``); both are only listed.
+    #     ``--require-malwarebazaar``); both are only listed. CISA ICS is a default source (on unless
+    #     ``EDGEGUARD_ENABLE_CISA_ICS=false``); ``--require-cisa-ics`` also makes its presence mandatory.
     delivered = {x.get("source_id"): x.get("sourced_from") or 0 for x in source_rows}
     silent = [s for s in DEFAULT_SOURCES if not delivered.get(s)]
     rep.add(

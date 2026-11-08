@@ -37,7 +37,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Automated code review | Ready | Pull-request review with project rules |
 
 - **Docker Compose stack.** One host runs Neo4j with APOC, Airflow with its PostgreSQL, the `metrics` service and the REST and GraphQL APIs, every port published on 127.0.0.1; `./install.sh` generates the secrets and starts it.
-- **Data collectors.** OTX, NVD, CISA KEV, MITRE ATT&CK, VirusTotal (lookups of hashes already in MISP), AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker and SSL Blacklist write to MISP; CISA ICS, ATT&CK for ICS and MalwareBazaar are off by default; FIRST EPSS scores go to the `CVE` nodes directly. Curated packages are imported through MISP.
+- **Data collectors.** OTX, NVD, CISA KEV, MITRE ATT&CK, VirusTotal (lookups of hashes already in MISP), AbuseIPDB, ThreatFox, URLhaus, Feodo Tracker, SSL Blacklist and CISA ICS write to MISP (CISA ICS unless `EDGEGUARD_ENABLE_CISA_ICS=false`); ATT&CK for ICS and MalwareBazaar are off by default; FIRST EPSS scores go to the `CVE` nodes directly. Curated packages are imported through MISP.
 - **MISP integration.** MISP is the single source of truth for collected data; `OTX_META` / `TF_META` / `NVD_META` comment blocks and `alias:<name>` tags carry metadata and aliases to Neo4j.
 - **Knowledge graph schema.** Single-key `MERGE` deduplication across sources; every relationship built from the sources names its sources, their record ids and the MISP events (`sources[]`, `source_refs[]`, `misp_event_ids[]`), and the linking ones carry `match_type` and a confidence. The shared-database contract marks nodes EdgeGuard creates with `edgeguard_managed` and partner nodes it writes to with `edgeguard_enriched`; `CVE` and its CVSS sub-nodes follow the ResilMesh data model, and partner-owned labels get no UNIQUE constraint.
 - **Post-sync enrichment.** Vulnerability–CVE bridge, actor alias merge, Malware ATT&CK-id twin merge, indicator aging, campaigns and FIRST EPSS ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)).
@@ -192,10 +192,11 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Data collectors: CISA ICS writes to MISP by default (`EDGEGUARD_ENABLE_CISA_ICS=false` turns it off).
 - 2026-11-07 — Feed values: the ThreatFox port is kept in `TF_META.ports`, and the records of one value in a run are merged.
 - 2026-11-02 — Baseline safety names the trigger check of `edgeguard baseline` and `fresh-baseline`. Testing Status describes the CI checks and when they run; the dated table of manual tests and CI runs (March and April 2026, with their file and test counts) is removed.
 - 2026-10-23 — The baseline-safety control names the Neo4j wipe of `scripts/clear_neo4j.py` among those the destructive-operations trail records.

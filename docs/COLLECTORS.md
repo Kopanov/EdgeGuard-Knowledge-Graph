@@ -1000,7 +1000,7 @@ zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
 Placeholder for healthcare-specific threat feed collection.
 
 ### Decision
-No healthcare-specific feed is collected: Health-ISAC (H-ISAC) requires a membership that is not budgeted, and HC3, a public source of the US Department of Health and Human Services, is not collected. The `healthcare` sector comes from keyword detection in every collector, from the industries an OTX pulse names and, with `EDGEGUARD_ENABLE_CISA_ICS=true`, from the sectors CISA names in its ICS advisories. No DAG task calls this module.
+No healthcare-specific feed is collected: Health-ISAC (H-ISAC) requires a membership that is not budgeted, and HC3, a public source of the US Department of Health and Human Services, is not collected. The `healthcare` sector comes from keyword detection in every collector, from the industries an OTX pulse names and from the sectors CISA names in its ICS advisories (collected by default). No DAG task calls this module.
 
 ### Current State
 Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
@@ -1026,7 +1026,7 @@ Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
 Placeholder for energy/ICS-specific threat feed collection.
 
 ### Decision
-No energy member-only feed collector is planned: EE-ISAC (European Energy ISAC) membership is not budgeted. CISA ICS-CERT energy sector advisories are collected by the flag-guarded CISA ICS Advisories collector (`cisa_ics`); MITRE ATT&CK for ICS is available through the MITRE collector flag. No DAG task calls this module.
+No energy member-only feed collector is planned: EE-ISAC (European Energy ISAC) membership is not budgeted. CISA ICS-CERT energy sector advisories are collected by the CISA ICS Advisories collector (`cisa_ics`, on by default); MITRE ATT&CK for ICS is available through the MITRE collector flag. No DAG task calls this module.
 
 ### Current State
 Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
@@ -1119,7 +1119,7 @@ SOURCE_TAG_MAPPING = {
 
 ## 12. CISA ICS Advisories Collector
 
-**File:** `src/collectors/cisa_ics_collector.py` — **flag-guarded, OFF by default** (`EDGEGUARD_ENABLE_CISA_ICS=true` to enable).
+**File:** `src/collectors/cisa_ics_collector.py` — **on by default**; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off.
 
 ### What It Does
 Collects CISA ICS-CERT advisories (`ICSA-*`) and ICS medical advisories (`ICSMA-*`) published as **CSAF 2.0** JSON files in the public `cisagov/CSAF` GitHub repository and emits **one `vulnerability` item per CVE** (the advisories that name one CVE are merged, see *One item per CVE* below) and **one report record per advisory** (see *Advisory report records* below). The point of this collector is the **source-asserted critical-infrastructure sector**: every advisory carries a `"Critical infrastructure sectors"` note written by CISA (e.g. `"Critical Manufacturing, Energy, Information Technology"`). The keyword sector detector (`detect_zones_from_text`) is **deliberately not applied** to these items.
@@ -1229,7 +1229,7 @@ The settings are defined in the CISA ICS advisories section of `src/config.py`; 
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `EDGEGUARD_ENABLE_CISA_ICS` | `false` | Master switch. Off → the daily task and `collect()` log "disabled by flag" and return a skipped status (success, 0 items) **without any HTTP request** |
+| `EDGEGUARD_ENABLE_CISA_ICS` | `true` | Master switch. `false` → the daily and baseline tasks and `collect()` log "disabled by flag" and return a skipped status (success, 0 items) **without any HTTP request** |
 | `EDGEGUARD_CISA_ICS_BASE_URL` | GitHub raw `OT/white/` folder | Where `index.txt`, `changes.csv` and the advisory files live |
 | `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` | `1200` | Hard cap on advisory files fetched per run (a 24-month baseline is ~900); the per-run limit of daily runs too, which `EDGEGUARD_INCREMENTAL_LIMIT` does not cut |
 | `EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES` | `50` | Baseline-only sanity floor (see below) |
@@ -1324,7 +1324,7 @@ In MISP the attribute is `sha256` with the tags `source:MalwareBazaar`, `zone:*`
 | Healthcare | — (HC3 / Health-ISAC not planned) | ⏳ Placeholder | - |
 | Energy | — (EE-ISAC not planned; ICS-CERT via `cisa_ics`) | ⏳ Placeholder | - |
 | MISP | Local MISP | ✅ Active | `detect_sectors()` → list |
-| CISA ICS | cisagov/CSAF (ICS-CERT advisories) | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) | Source-asserted sector → fixed table (`map_sectors_to_zones()`), no keyword detector |
+| CISA ICS | cisagov/CSAF (ICS-CERT advisories) | ✅ Active (on by default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off) | Source-asserted sector → fixed table (`map_sectors_to_zones()`), no keyword detector |
 | MalwareBazaar | abuse.ch recent sample export (sha256 + family label) | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) | `detect_zones_from_text()` on the family label → list |
 
 ---
@@ -1383,7 +1383,7 @@ What each collector pulls on a 730-day baseline, and the upstream limit behind i
 - **VirusTotal.** Not in the baseline DAG. The scheduled lookups stay within `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (60) per run and `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` (400) per UTC day; the free tier allows 4 requests per minute and 500 per day, lookups only (`GET /files/{hash}`), with no feed or search endpoint. They enrich hashes already in MISP ([§ 6](#6-virustotal-lookup-enrichment)); the ledger in `./state` carries the daily counter across runs and remembers looked-up hashes. A premium key raises the two settings.
 - **Feodo Tracker and SSL Blacklist.** Public CSV and text feeds without a rate limit. Feodo Tracker: the complete C2 history (`ipblocklist_aggressive.csv`) on baselines, the 30-day list on regular runs, at most `EDGEGUARD_FEODO_MAX_PER_RUN` (15,000) servers per run; the state of the feed itself is in [§ 7](#7-finance-feed-collector). SSL Blacklist: the whole feed, at most `EDGEGUARD_SSLBL_MAX_PER_RUN` (20,000) per run. Both apply their caps in the baseline and the daily runs, keep the newest entries when a cap is reached, and ignore the incremental default of 200.
 - **ThreatFox and URLhaus.** ThreatFox's `get_iocs` takes `days` from 1 to 7 ([ThreatFox API](https://threatfox.abuse.ch/api/)), so the collector clamps it to 7; older IOCs are only in the [ThreatFox export](https://threatfox.abuse.ch/export/), which EdgeGuard does not read ([ROADMAP.md](ROADMAP.md#collection-depth-and-scale)). URLhaus reads its `recent.csv` export, the URLs added in the past 30 days (abuse.ch Auth-Key required; about 63,000 on 2026-10-24). The caps `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) and `EDGEGUARD_URLHAUS_MAX_PER_RUN` (100,000) cover each whole window with headroom, apply in the baseline and the daily runs, keep the newest entries when reached, and replace the incremental default of 200.
-- **CISA ICS Advisories.** Flag-guarded, default off. The advisory files of the index entries in the window, at most `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200), about 900 on a 730-day run, one item per CVE; public GitHub raw files without authentication, fetched sequentially at no more than 4 requests per second. A baseline that parses fewer than `EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES` (50) is skipped with an alert instead of loading a thin dataset.
+- **CISA ICS Advisories.** On by default (`EDGEGUARD_ENABLE_CISA_ICS=false` turns it off). The advisory files of the index entries in the window, at most `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1,200), about 900 on a 730-day run, one item per CVE; public GitHub raw files without authentication, fetched sequentially at no more than 4 requests per second. A baseline that parses fewer than `EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES` (50) is skipped with an alert instead of loading a thin dataset.
 - **MalwareBazaar.** Flag-guarded, default off. The export (abuse.ch Auth-Key required) covers the last 48 hours (about 830 to 1,000 samples); at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) SHA-256 indicators per run, labelled samples first. The full export, the whole history, is not used, so a baseline loads the same window as a daily run and the history builds up over the daily runs.
 - **Energy and Healthcare.** Placeholder modules that return `skipped=True` (`skip_reason_class="placeholder"`) and that no DAG task calls. No member-only feed (EE-ISAC, Health-ISAC) is collected, and HC3, a public US HHS source, is not collected either. CISA's ICS advisories ([§ 12](#12-cisa-ics-advisories-collector), `EDGEGUARD_ENABLE_CISA_ICS`) give `energy`, `healthcare` and `finance` from CISA's own sector statement.
 
@@ -1503,10 +1503,11 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS Advisories is on by default (`EDGEGUARD_ENABLE_CISA_ICS` defaults to `true`; `false` turns it off).
 - 2026-11-07 — NVD, CISA KEV and CISA ICS: no collector cuts a CVE text before MISP (NVD's description was cut at 1,000 characters, KEV's short description at 500). New `NVD_META` source facts: NVD's `nvd_vuln_status`, `references` with their tags, the CNA's `affected` pairs and `cvss_scorers`; KEV's `cisa_notes`, `cisa_cwes` and `cisa_forensic_triage`, so the KEV comparison sees a change to them; `cwe_names` from a pinned MITRE CWE list (§ CWE names). KEV's `vendorProject` / `product` and an ICS advisory's first vendor / product reach `NVD_META` whole (cut at 100 characters with `...` before); a CNA entry that names only a package keeps its package name as `product`; `score_type` is NVD's label as given (the text said Primary meant NVD's own score); the KEV source notes said `notes`, `cwes` and `forensicTriage` were not stored.
 - 2026-11-07 — CISA ICS: one report record per advisory (summary, sectors, countries, vendor headquarters, TLP, dates, `revision` as the number of revision-history entries and `version` as `tracking.version`, vendors, products, and per CVE the whole note, remediations, affected products and CWE), also for an advisory without a CVE, pushed after the CVE items and, on a run without items, before its return. Records whose push failed or was not tried wait on `report_pending` instead of holding the cursor, and so do the record that cannot be built and the record of an advisory in the window that could not be fetched (on a baseline, by its file-name date); each run reads the advisories of up to 100 listed records for their records only, with a fetch-failure streak of their own that stops these reads, not the run, and so does an open circuit breaker; any error of such a read is a failed try; a record whose advisory the listing does not name is a failed try, and a listing without a row leaves the list untouched. The record's list caps are 500 remediations and 5,000 affected products per CVE and 2,000 products per advisory (the record library's 50, 500 and 500: 50 remediations had cut ICSA-26-113-03 and 500 affected products ICSA-24-235-03), and a cut is logged. The vulnerability summary falls back to a `details` note that holds no score; the countries note is split at `and` and loses its closing full stop. The sector note's last list item loses its `and` (`"…, and Energy"` gave the sector `and Energy`, which mapped to no zone), and a sector named with a trailing `Sector` maps to its zone. The vulnerability note reaches MISP whole (it was cut at 1,000 characters). The scheduled run's writer knows its task's end: no record starts, and no failing streak of the item push goes on, later than 10 minutes before it. The window applies to an advisory by its `initial_release_date`, also to one without a CVE.
 - 2026-11-07 — ATT&CK in MISP: the collector passes every description whole and MISPWriter writes it whole (up to 8,000 characters; it cut groups, techniques and tactics at 255 characters and malware and tools at 400 with "..." added mid-word, and a comment without a block at 500); every platform is a tag sent in ATT&CK's casing, on malware and tools too (the first 3 of a technique, lower-cased), and the sync reads the platform tags in ATT&CK's spelling whatever casing MISP holds them in; tools carry alias tags; groups, malware and tools carry their ATT&CK domains as `attack-domain:` tags and ATT&CK's own galaxy cluster tag beside the community one; a technique's zones are still read from its first 500 characters; MITRE's terms and notice for the copied text.

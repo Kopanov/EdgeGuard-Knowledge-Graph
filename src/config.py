@@ -1477,10 +1477,11 @@ EDGEGUARD_DEFAULT_TLP = os.getenv("EDGEGUARD_DEFAULT_TLP", "white").strip().lowe
 # ---------------------------------------------------------------------------
 # ``src/collectors/cisa_ics_collector.py`` — CSAF 2.0 advisories from the
 # public ``cisagov/CSAF`` GitHub repo, carrying CISA's own
-# "Critical infrastructure sectors" assertion per advisory. Flag-guarded
-# and OFF by default: the daily DAG task returns a skipped status (success,
-# 0 items) until an operator sets ``EDGEGUARD_ENABLE_CISA_ICS=true``.
-ENABLE_CISA_ICS = _env_bool("EDGEGUARD_ENABLE_CISA_ICS", "false")
+# "Critical infrastructure sectors" assertion per advisory. On by default;
+# off only when an operator sets ``EDGEGUARD_ENABLE_CISA_ICS=false``: then the
+# daily and baseline DAG tasks return a skipped status (success, 0 items)
+# without a request to CISA.
+ENABLE_CISA_ICS = _env_bool("EDGEGUARD_ENABLE_CISA_ICS", "true")
 
 # FIRST EPSS: a post-sync enrichment job in ``src/cve_feed_enrichment.py`` (the one source written
 # straight to Neo4j; see that module). Default on; a feed outage is logged and skipped. CISA's SSVC

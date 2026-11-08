@@ -1293,7 +1293,7 @@ It also reports, without judging, the sector links by type and label (`sector_li
 and by type, start label, sector and label (`sector_evidence_breakdown`), what CISA ICS adds per sector (`cisa_ics_contribution`: stated, by CISA
 alone, also inferred, and the CISA records whose advisory named no tracked sector) and the node sectors no
 feed gave and the nodes holding `global` next to a sector (`node_sectors_without_a_feed`). After the
-730-day baseline with `EDGEGUARD_ENABLE_CISA_ICS=true`, run it with `--require-cisa-ics`, and after a
+730-day baseline with CISA ICS on (the default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off), run it with `--require-cisa-ics`, and after a
 baseline that collected OTX with `--require-otx-industries` (a run that lost the pulses' industries on the
 way to the sync otherwise looks like a graph without OTX statements, which the OTX checks do not judge).
 
@@ -1679,10 +1679,11 @@ MISP logs every Event Report that `MISPWriter.push_reports` adds or edits with i
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — Acceptance: CISA ICS is on by default, so the script runs with `--require-cisa-ics` after every 730-day baseline that kept it on.
 - 2026-11-07 — New section "Rebuilding the CWE name list": the pinned MITRE CWE list the NVD and KEV collectors name CWE ids from, rebuilt only before a fresh baseline. CISA KEV revisions: a change to an entry's notes, CWE ids or forensic-triage flag is an edit too.
 - 2026-11-07 — MISP push stopped: the writer of the scheduled `collect_cisa_ics` also stops a failing streak 10 minutes before its task's end.
 - 2026-11-07 — New section "CISA ICS report records waiting on report_pending": the list, its signals and log lines, a list that cannot be saved, and how to recover.

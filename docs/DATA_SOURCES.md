@@ -1,6 +1,6 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Total Sources:** 15 (10 active + 2 placeholders + 2 flag-guarded, off by default + 1 post-sync enrichment feed, on by default) — canonical inventory; cross-check `src/collectors/`.
+**Total Sources:** 15 (11 active + 2 placeholders + 1 flag-guarded, off by default + 1 post-sync enrichment feed, on by default) — canonical inventory; cross-check `src/collectors/`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
 
@@ -22,11 +22,11 @@
 | 10 | SSL Blacklist | ~11,000 (10,964 on 2026-10-12), the whole list per run, ≤ 20,000 | ✅ Auto-tagged (keyword detector; Global in practice) | Malware SSL certs | ✅ Active |
 | 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
 | 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
-| 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) |
+| 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | ✅ Active (`EDGEGUARD_ENABLE_CISA_ICS`, default on; `false` turns it off) |
 | 14 | MalwareBazaar | ~830–1,000 samples per export (last 48 h; 1,027 on 2026-10-12, 762 with a family label; about 830 on 2026-10-24), ≤ 500 pushed per run; abuse.ch Auth-Key required | ✅ Auto-tagged (`detect_zones_from_text()` on the family label) | Malware sample hashes (sha256) with the family label → `INDICATES` edges to `Malware` nodes | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) |
 | 15 | FIRST EPSS | ~385,000 scores / day (only existing CVEs updated) | N/A | Exploit-prediction score and percentile per CVE; the one source written to Neo4j without MISP (§ 8b) | 🚩 Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, default on) |
 
-**Note:** Energy and Healthcare collectors are placeholders. Member-only ISAC feeds (EE-ISAC, Health-ISAC) are not planned and no membership is budgeted, and HC3, a public source of the US Department of Health and Human Services, is not collected. No DAG task calls the two placeholder modules. CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
+**Note:** Energy and Healthcare collectors are placeholders. Member-only ISAC feeds (EE-ISAC, Health-ISAC) are not planned and no membership is budgeted, and HC3, a public source of the US Department of Health and Human Services, is not collected. No DAG task calls the two placeholder modules. CISA ICS Advisories (row 13) is a real collector, on by default, that covers the ICS-CERT part of the energy/healthcare picture without any membership.
 
 **Measured on the hosted instance after the first 730-day baseline (13–14 October 2026), MISP attributes per source:** AlienVault OTX 149,270; NVD 139,862; URLhaus 34,003; SSL Blacklist 10,967; AbuseIPDB 10,000; Feodo Tracker 7,607; ThreatFox 7,398 (the API serves at most 7 days); MITRE ATT&CK 1,892; CISA KEV 547; 361,546 in total. VirusTotal, MalwareBazaar and CISA ICS were not part of that run. The Items column above gives per-run estimates.
 
@@ -131,7 +131,7 @@
 
 ---
 
-### 4b. CISA ICS Advisories (CSAF 2.0) — flag-guarded
+### 4b. CISA ICS Advisories (CSAF 2.0) — on by default
 **Items:** one `vulnerability` per CVE (the advisories that name one CVE are merged into one item); ~900 advisories on a 730-day baseline | **Zone:** source-asserted by CISA, not keyword-detected
 
 | Attribute | Value |
@@ -139,7 +139,7 @@
 | URL | `https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/` (`index.txt`, `changes.csv`, `<year>/<advisory>.json`) — per `src/collectors/cisa_ics_collector.py` |
 | Format | CSAF 2.0 JSON, one file per advisory (`ICSA-*`, `ICSMA-*`) |
 | Auth | None (public GitHub raw); TLP:WHITE |
-| Update | Daily (`edgeguard_daily` → `collect_cisa_ics`) and baseline tier 2, only when `EDGEGUARD_ENABLE_CISA_ICS=true` |
+| Update | Daily (`edgeguard_daily` → `collect_cisa_ics`) and baseline tier 2; skipped when `EDGEGUARD_ENABLE_CISA_ICS=false` |
 | Classification | ✅ Fixed table on the advisory's `"Critical infrastructure sectors"` note: `Energy → energy`, `Healthcare and Public Health → healthcare`, `Financial Services → finance`; other sectors contribute nothing; `global` only when no sector maps |
 
 **What we get:**
@@ -330,10 +330,11 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS Advisories is active by default (`EDGEGUARD_ENABLE_CISA_ICS` defaults to `true`; `false` turns it off): 11 active sources, 1 flag-guarded.
 - 2026-11-07 — NVD and CISA KEV: the whole description in MISP; NVD's analysis state, tagged references, CNA vendor / product pairs and CVSS scorers, KEV's notes, CWE ids and forensic-triage flag in `NVD_META` (the KEV source notes said they were not stored); CVSS scorers named by `scored_by`, NVD's Primary / Secondary label kept as given; § 9b, the pinned MITRE CWE list and its terms of use.
 - 2026-11-07 — CISA ICS: one report record per advisory in MISP.
 - 2026-11-07 — MITRE ATT&CK (§ 5): the terms of use and MITRE's notice for the ATT&CK text EdgeGuard copies.

@@ -17,7 +17,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │  │    → baseline_clean (wipe only for fresh_baseline) → baseline_start  │    │
 │  │    → tier1 cisa → mitre → otx → nvd  (SEQUENTIAL)                    │    │
 │  │    → tier2 [abuseipdb, threatfox, urlhaus, feodo, sslbl,             │    │
-│  │             cisa_ics*, malwarebazaar*]                               │    │
+│  │             cisa_ics, malwarebazaar*]                                │    │
 │  │             (collector pool: at most EDGEGUARD_COLLECTOR_POOL_SLOTS  │    │
 │  │              at once, default 4)                                     │    │
 │  │    → full_neo4j_sync → build_relationships                           │    │
@@ -42,7 +42,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  edgeguard_daily  (daily at 2 AM)                                    │    │
-│  │  misp_health → [mitre, cisa_ics*, abuseipdb, threatfox, urlhaus,     │    │
+│  │  misp_health → [mitre, cisa_ics, abuseipdb, threatfox, urlhaus,      │    │
 │  │                 feodo, sslblacklist, malwarebazaar*] → log_summary   │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
@@ -76,7 +76,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 | `edgeguard_pipeline` | Every 30 min | `check_containers` → `misp_health_check` → `high_frequency_collectors.collect_otx` → `log_summary` |
 | `edgeguard_medium_freq` | Every 4 hours | `misp_health_check` → `collect_cisa`, `collect_virustotal` → `log_summary` |
 | `edgeguard_low_freq` | Every 8 hours | `misp_health_check` → `collect_nvd` → `log_summary` |
-| `edgeguard_daily` | Daily 2 AM | `misp_health_check` → 8 collectors on the shared collector pool (no order among them; at most `EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4, run at once; `collect_cisa_ics` and `collect_malwarebazaar` skip while their flags are off) → `log_summary` |
+| `edgeguard_daily` | Daily 2 AM | `misp_health_check` → 8 collectors on the shared collector pool (no order among them; at most `EDGEGUARD_COLLECTOR_POOL_SLOTS`, default 4, run at once; `collect_cisa_ics` skips while `EDGEGUARD_ENABLE_CISA_ICS=false`, `collect_malwarebazaar` while `EDGEGUARD_ENABLE_MALWAREBAZAAR` is off, the default) → `log_summary` |
 | `edgeguard_neo4j_sync` | Every 72 hours (`timedelta(days=3)`) | `check_sync_needed` → `neo4j_health_check` → `run_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `check_neo4j_quality` |
 
 ### Execution Timeouts
@@ -512,10 +512,11 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — `cisa_ics` is no longer marked flag-guarded in the DAG diagram: it runs by default, and `EDGEGUARD_ENABLE_CISA_ICS=false` skips it.
 - 2026-11-06 — The pip line pins `apache-airflow[postgres]~=3.3.2` (`~=3.3` admitted 3.4).
 - 2026-11-06 — Campaign Node Builder: an indicator of a malware many actors share counts only through a link that a record reporting it cites (`EDGEGUARD_CAMPAIGN_SHARED_MALWARE_ACTORS`); a campaign is deleted when its actor has no campaign evidence left; `shared_malware_actors` and `shared_malware`.
 - 2026-11-02 — Incremental Collection Limit: for OTX the limit counts the pulses modified after the cursor, oldest first, and the overlap's re-reads are processed outside it (the text gave every other collector at most 200 items per run).

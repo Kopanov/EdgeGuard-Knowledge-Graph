@@ -18,7 +18,7 @@
 | VirusTotal | REST API | Scheduled (`vt_collector`) | IOCs / enrichment |
 | AbuseIPDB | REST API | Scheduled | IP reputation |
 | URLhaus, ThreatFox, Feodo, SSLBL | CSV/API | Scheduled | Feeds (see `global_feed_collector.py`, `finance_feed_collector.py`) |
-| CISA ICS advisories | CSAF 2.0 download | Daily (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`) | CVEs, sectors stated by CISA |
+| CISA ICS advisories | CSAF 2.0 download | Daily (on by default; `EDGEGUARD_ENABLE_CISA_ICS=false` turns it off) | CVEs, sectors stated by CISA |
 | MalwareBazaar | CSV export | Daily (flag-guarded, `EDGEGUARD_ENABLE_MALWAREBAZAAR`) | File hashes + malware family |
 | FIRST EPSS | CSV download | After each Neo4j sync and the baseline | EPSS scores on CVE nodes (written straight to Neo4j) |
 
@@ -280,7 +280,7 @@ The values each collector sets on its items (layer 1 below says which of them re
 | MalwareBazaar | 0.7 (with a signature) / 0.6 | `global_feed_collector.py`; flag-guarded |
 | Feodo Tracker | 0.7 (active) / 0.4 (historical) | `finance_feed_collector.py` |
 | SSL Blacklist | 0.6 | `finance_feed_collector.py` |
-| CISA ICS advisories | 0.9 | Government advisory (`cisa_ics_collector.py`); flag-guarded |
+| CISA ICS advisories | 0.9 | Government advisory (`cisa_ics_collector.py`); on by default |
 
 **Confidence Calculation:**
 
@@ -494,10 +494,11 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS advisories are collected by default (`EDGEGUARD_ENABLE_CISA_ICS=false` turns them off).
 - 2026-11-02 — `ATTRIBUTED_TO`: no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label.
 - 2026-10-19 — `USES_TECHNIQUE` (Indicator → Technique) is described as what it is: the OTX report the indicator came from lists the technique, not an observation that the indicator executed it.
 - 2026-10-18 — `INDICATES` also links an indicator to a CVE named in the same OTX pulse; the GraphRAG query pattern labels an indicator's CVEs by their evidence.

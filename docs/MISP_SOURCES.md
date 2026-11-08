@@ -34,7 +34,7 @@ Collectors create/update MISP events whose **`Event.info`** looks like **`EdgeGu
 
 ## Source catalog
 
-Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **10** active, **2** placeholders, **2** flag-guarded collectors that are off by default (CISA ICS Advisories and MalwareBazaar), and the FIRST EPSS post-sync enrichment, which writes to Neo4j without MISP). The table below is the same inventory in compact form.
+Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **11** active, **2** placeholders, **1** flag-guarded collector that is off by default (MalwareBazaar), and the FIRST EPSS post-sync enrichment, which writes to Neo4j without MISP). The table below is the same inventory in compact form.
 
 | Source | Type | Status | Pushes to MISP | Notes |
 |--------|------|--------|----------------|--------|
@@ -50,7 +50,7 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **10** a
 | SSL Blacklist | CSV | Active | Yes | |
 | Energy sector | — | Placeholder | No | Needs membership / feed |
 | Healthcare sector | — | Placeholder | No | Needs membership / feed |
-| CISA ICS Advisories | CSAF JSON (GitHub raw) | Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, off) | Yes | CVE ↔ sector as CISA states it |
+| CISA ICS Advisories | CSAF JSON (GitHub raw) | Active (`EDGEGUARD_ENABLE_CISA_ICS`, on; `false` turns it off) | Yes | CVE ↔ sector as CISA states it |
 | MalwareBazaar | CSV export | Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, off) | Yes | sha256 + family label; abuse.ch key |
 | FIRST EPSS | gzip CSV | Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, on) | No (writes to Neo4j) | Exploit-prediction score on existing CVE nodes |
 
@@ -72,7 +72,7 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **10** a
 | `AbuseIPDBCollector` | AbuseIPDB | Yes |
 | `ThreatFoxCollector`, `URLhausCollector` | abuse.ch | Yes |
 | `FeodoCollector`, `SSLBlacklistCollector` | Feodo / SSLBL CSV | Yes |
-| `CISAICSCollector` | CISA ICS Advisories (flag-guarded) | Yes |
+| `CISAICSCollector` | CISA ICS Advisories (on by default) | Yes |
 | `MalwareBazaarCollector` | MalwareBazaar (flag-guarded) | Yes |
 | `EnergyCollector`, `HealthcareCollector` | Placeholders | No |
 
@@ -94,7 +94,7 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**15** sources: **10** a
 
 ### Tier 3 — ISAC / membership feeds
 
-FS-ISAC, Health-ISAC, etc.: no collector; ingest via MISP or future connectors. CISA ICS advisories have the flag-guarded `cisa_ics` collector.
+FS-ISAC, Health-ISAC, etc.: no collector; ingest via MISP or future connectors. CISA ICS advisories have the `cisa_ics` collector, on by default.
 
 ### Tier 4 — Extra OSINT (ideas)
 
@@ -301,10 +301,11 @@ Usually **MITRE-specific** types/tags vs MISP policy. Read the full MISP error b
 
 ---
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — CISA ICS Advisories is active by default (`EDGEGUARD_ENABLE_CISA_ICS` defaults to `true`; `false` turns it off): 11 active sources, 1 flag-guarded.
 - 2026-11-07 — `NVD_META`: the source's whole description (the NVD and KEV collectors cut it at 1,000 and 500 characters); new keys `nvd_vuln_status`, `references`, `affected`, `cvss_scorers`, `cwe_names`, `cwe_names_version`, `cisa_notes`, `cisa_cwes` and `cisa_forensic_triage`; a byte budget of 32,768 with a shrink order (it had no bound); `vendor` and `product` whole (cut at 100 characters with `...`); `affected` keeps a package-only entry's package name as `product`.
 - 2026-11-07 — The CISA ICS collector writes a report record per advisory, after the CVE items (an item batch's answer carries every report of the event), also for an advisory without a CVE, and keeps the records whose push failed on `report_pending`. The ICS record: `revision` is the number of revision-history entries and `version` is `tracking.version` as given (`revision` had been `tracking.version` when it was a whole number, with the count in `revision_count`); a vulnerability entry carries its `cwes` (`id`, `name`), and its `summary` falls back to a `details` note that holds no score; the countries note is split at its commas and at `and`. The list caps are 500 remediations and 5,000 affected products per CVE and 2,000 products per advisory: the caps of 50 remediations and 500 affected products had cut ICSA-26-113-03 and ICSA-24-235-03, and the cap of 500 products cut none; a list a cap cuts is named in `list_cuts` and logged. A CISA ICS `NVD_META.description` holds the vulnerability's whole note.
 - 2026-11-07 — ATT&CK attributes: the comment holds ATT&CK's whole description (up to 8,000 characters; the writer cut it at 255 or 400 characters); every platform is a tag sent in ATT&CK's casing, which the sync reads in ATT&CK's spelling whatever casing MISP holds the tag in; groups, malware and tools carry `attack-domain:` tags, tools `alias:` tags, and groups, malware and tools ATT&CK's own galaxy cluster tag; the 4,000-character comment limit names the blocks it applies to.

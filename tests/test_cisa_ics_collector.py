@@ -587,8 +587,8 @@ def test_flag_off_returns_without_fetching(monkeypatch):
     c.misp_writer.push_items.assert_not_called()
 
 
-def test_flag_defaults_off_in_config():
-    """``EDGEGUARD_ENABLE_CISA_ICS`` unset → False (the collector is dormant by default)."""
+def test_flag_defaults_on_in_config():
+    """``EDGEGUARD_ENABLE_CISA_ICS`` unset → True (the collector runs by default)."""
     import importlib
 
     import config
@@ -597,12 +597,35 @@ def test_flag_defaults_off_in_config():
         os.environ.pop("EDGEGUARD_ENABLE_CISA_ICS", None)
         fresh = importlib.reload(config)
         try:
-            assert fresh.ENABLE_CISA_ICS is False
+            assert fresh.ENABLE_CISA_ICS is True
             assert fresh.CISA_ICS_MAX_ADVISORIES_PER_RUN == 1200
             assert fresh.CISA_ICS_MIN_EXPECTED_ADVISORIES == 50
             assert fresh.CISA_ICS_BASE_URL.endswith("/OT/white/")
         finally:
             importlib.reload(config)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("false", False), ("0", False), ("", False), ("true", True), ("1", True)]
+)
+def test_flag_set_by_the_operator_in_config(value, expected):
+    """Set by the operator, the flag is on only for 1/true/yes/on: false (or set but empty) turns it off."""
+    import importlib
+
+    import config
+
+    try:
+        with patch.dict(os.environ, {"EDGEGUARD_ENABLE_CISA_ICS": value}, clear=False):
+            assert importlib.reload(config).ENABLE_CISA_ICS is expected
+    finally:
+        importlib.reload(config)  # back to the environment the other tests run with
+
+
+def test_is_enabled_follows_the_default_without_the_config_attribute(monkeypatch):
+    import config
+
+    monkeypatch.delattr(config, "ENABLE_CISA_ICS")
+    assert mod.CISAICSCollector.is_enabled() is True
 
 
 def test_index_5xx_propagates_as_transient_even_when_pushing(monkeypatch):
@@ -791,7 +814,8 @@ def test_source_registry_entry_propagates():
     src = get_source("cisa_ics")
     assert src is not None and src.canonical_id == "cisa_ics"
     assert get_source("cisa-ics") is src and get_source("ics_advisories") is src
-    assert src.misp_tag == "source:CISA-ICS" and src.cli_default_enabled is False
+    # On by default and keyless: the CLI source listing marks it enabled.
+    assert src.misp_tag == "source:CISA-ICS" and src.cli_default_enabled is True
     assert MISPWriter.SOURCE_TAGS["cisa_ics"] == "source:CISA-ICS"
     assert SOURCES["cisa_ics"] == {"name": "CISA ICS Advisories", "type": "advisory", "reliability": 0.9}
     assert is_reliable_first_seen_source("cisa_ics")
