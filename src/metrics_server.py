@@ -918,8 +918,8 @@ def record_report_pending(source: str, pending: int, oldest_first_failure: float
 # 2026-11-08: counter series that start at 0. Prometheus' increase() and rate() do not count the value a series
 # already holds in its first sample, and the multi-process mode exports no ``_created`` sample that would mark where
 # a series began. A series created by its first run's increment therefore added nothing to increase(): after a first
-# deployment or an emptied PROMETHEUS_MULTIPROC_DIR, EdgeGuardNoIndicatorsCollected fired for about 26 hours for
-# every source that had collected. ``run_collector_with_metrics`` records a run under the zone its status names,
+# deployment or an emptied PROMETHEUS_MULTIPROC_DIR, EdgeGuardNoIndicatorsCollected fired for every source that had
+# collected, until that source's next run. ``run_collector_with_metrics`` records a run under the zone its status names,
 # and no collector's status names one, so every run is counted under ``global``.
 ZERO_START_ZONE = "global"
 ZERO_START_STATUS = "success"

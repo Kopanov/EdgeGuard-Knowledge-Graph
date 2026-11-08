@@ -525,9 +525,13 @@ series too (it calls `ensure_metrics_server()`). The `metrics` service does not:
 and a process that keeps running cannot put a series back once its file was removed with the directory's
 contents.
 
-One case is left: when the first collector task after the directory was emptied, or of a new deployment, ends
-within one scrape interval (30 s), its count is added before Prometheus has read the 0, and
-`EdgeGuardNoIndicatorsCollected` fires for that source until its next run adds to the series.
+The 0 counts only when Prometheus reads it before a run adds to the series. Two cases are left, and in both
+`EdgeGuardNoIndicatorsCollected` fires for the source until its next run adds to the series:
+
+- a collector task that adds its count within one scrape interval (30 s) of the first collector task after the
+  directory was emptied, or of a new deployment;
+- a Prometheus that starts with an empty database after sources have run (for example a monitoring stack started
+  later, or its data volume removed): its first sample of each series is the count.
 
 ### DAG run in progress
 
@@ -845,7 +849,7 @@ _Last updated: 2026-11-08_
 
 ## History
 
-- 2026-11-08 — Every collector task creates, before its collector runs, the `success` series of `edgeguard_indicators_collected_total` of every collector and the `edgeguard_report_pending_given_up_total` series of both report sources at 0 ([Counter series start at 0](#counter-series-start-at-0)). A series created by its first run's count added nothing to `increase()`: after a first deployment or an emptied multi-process directory, `EdgeGuardNoIndicatorsCollected` fired for about 26 hours for every source that had collected (8 sources after a 730-day baseline), and the given-up counter had no series until its first give-up.
+- 2026-11-08 — Every collector task creates, before its collector runs, the `success` series of `edgeguard_indicators_collected_total` of every collector and the `edgeguard_report_pending_given_up_total` series of both report sources at 0 ([Counter series start at 0](#counter-series-start-at-0)). A series created by its first run's count added nothing to `increase()`: after a first deployment or an emptied multi-process directory, `EdgeGuardNoIndicatorsCollected` fired for every source that had collected, until that source's next run (8 sources after a 730-day baseline), and the given-up counter had no series until its first give-up.
 - 2026-11-08 — The source-label table places the report_pending metrics (`edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds`, `edgeguard_report_pending_given_up_total`) with the metrics that carry the canonical source id.
 - 2026-11-07 — The CISA ICS collector writes report records and sets `edgeguard_report_pending_records`, `edgeguard_report_pending_oldest_failure_timestamp_seconds` and `edgeguard_report_pending_given_up_total` for `source="cisa_ics"`.
 - 2026-11-07 — The OTX collector sets the `report_pending` gauges of `alienvault_otx` on every run that pushes; `edgeguard_report_pending_given_up_total` also counts the records whose source record kept failing to be fetched for `EDGEGUARD_REPORT_PENDING_MAX_DAYS`.
