@@ -653,15 +653,17 @@ def test_a_fetch_error_keeps_the_pulse_without_counting_an_attempt(caplog, error
 
 @pytest.mark.parametrize(
     "field, value",
-    [("indicators", None), ("indicators", "an indicator, then null"), ("tags", None)],
-    ids=["indicators null", "an indicator null after a valid one", "tags null"],
+    [("indicators", None), ("indicators", "an indicator, then null"), ("cve_references", None)],
+    ids=["indicators null", "an indicator null after a valid one", "cve_references null"],
 )
 def test_an_answer_by_id_that_cannot_be_processed_keeps_the_pulse_and_the_run_goes_on(caplog, field, value):
     """The cursor at pulse 5 (the window: pulses 0-4, and 5-7 re-read) and pulse 12 on the list, which OTX answers
     by id with a field of another type than a subscribed pulse carries. Processing it raises; the pulse is set
     aside like a failed fetch (kept, no attempt, the error as ``last_reason``, a WARNING), with the items it
     yielded before the error, and the window is pushed and the cursor advances. The earlier revision ended the
-    run before its push, with the cursor and the list unchanged, on every run that fetched the pulse."""
+    run before its push, with the cursor and the list unchanged, on every run that fetched the pulse. A list the
+    pulse's report record keeps (``tags``, ``references``, ...) given as null is no such field since 2026-11-08: it
+    counts as empty, as in the record (``report_records.otx_pulse_list``)."""
     body = _recorded([12])[0]
     body[field] = [body["indicators"][0], None] if value == "an indicator, then null" else value
     otx = _Otx(_recorded(range(60)))

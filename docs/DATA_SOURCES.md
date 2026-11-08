@@ -46,12 +46,13 @@
 | Classification | ✅ Keyword-based on the whole pulse (name, tags, description, indicators), plus OTX's own `industries` |
 
 **What we get:**
-- IPs, domains, URLs, hashes
+- IPs, domains, URLs, hashes, as MISP stores them: a defanged value (`…/SENT_Kill[.]zip`) is refanged before the push by MISP's own rules, and a URL a pulse lists again with another case of its scheme or host is pushed once, in the first spelling ([COLLECTORS.md](COLLECTORS.md#what-it-does))
 - Malware family names
 - CVE references
 - Adversary names (no pulse descriptions on items: a pulse's description, which describes the report, is stored on no item, and the families and adversaries it names carry none; it is used for sector classification and kept in the pulse's report record)
-- One report record per pulse, as one MISP Event Report in the OTX day event, or in its `-reports` companion event once the day event holds more than `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (always on a baseline day): title, URL, full description, author, TLP, dates, revision, industries, targeted countries, tags, references, adversary, malware families, ATT&CK ids, CVE ids and the indicators (at most `EDGEGUARD_REPORT_MAX_INDICATORS`, 2,000, with the exact count); a record whose push fails waits on `report_pending` ([COLLECTORS.md § Report records](COLLECTORS.md#report-records)); the sync does not read the records yet
+- One report record per pulse, as one MISP Event Report in the OTX day event, or in its `-reports` companion event once the day event holds more than `EDGEGUARD_MISP_EVENT_SPLIT_ABOVE` attributes (always on a baseline day): title, URL, full description, author, TLP, dates, revision, industries, targeted countries, tags, references, adversary, malware families, ATT&CK ids, CVE ids and the indicators (exactly the type and value pairs pushed to MISP for the pulse; at most `EDGEGUARD_REPORT_MAX_INDICATORS`, 2,000, with the exact count); a record whose push fails waits on `report_pending` ([COLLECTORS.md § Report records](COLLECTORS.md#report-records)); the sync does not read the records yet
 - An amber, amber+strict or red pulse, or one without a known TLP, puts no copy of its name, tags, references or targeted countries on its indicators: that text stays in its report record (MISP distribution 0, this organisation only)
+- The pulse's lists (tags, references, ATT&CK ids, targeted countries, industries) reach its items as its report record holds them, without blank items (OTX answers some pulses' tags or references as `[""]`)
 
 **How classified:**
 - The whole pulse — name, tags, description, indicators — searched for keywords (hospital, scada, bank, etc.); the sectors found apply to every item of the pulse
@@ -339,6 +340,7 @@ _Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — OTX: a defanged indicator value is refanged before the push, as MISP stores it; the report record lists exactly the pairs pushed to MISP (a URL repeated with another case of its host was listed twice); the pulse's lists reach its items without blank items.
 - 2026-11-08 — CISA ICS Advisories is active by default (`EDGEGUARD_ENABLE_CISA_ICS` defaults to `true`; `false` turns it off): 11 active sources, 1 flag-guarded. OTX: one report record per pulse in MISP; the text of an amber, amber+strict or red pulse, or of one without a known TLP, stays off its indicators. MITRE ATT&CK (§ 5): whole descriptions, platforms, domains, aliases and ATT&CK's galaxy tags in MISP, and what the graph keeps of them. MalwareBazaar (§ 4c): the MISP keys of the sample's file facts (`file_md5`, `file_sha1`, `file_name`, `file_type`, which the sync does not read) and of the reporter and sample page; the MIME type is not stored. CISA ICS (§ 4b): the CVE description (advisory id and title, then the vulnerability's summary note) is whole in MISP; the graph holds at most 1,000 characters.
 - 2026-11-07 — NVD and CISA KEV: the whole description in MISP; NVD's analysis state, tagged references, CNA vendor / product pairs and CVSS scorers, KEV's notes, CWE ids and forensic-triage flag in `NVD_META` (the KEV source notes said they were not stored); CVSS scorers named by `scored_by`, NVD's Primary / Secondary label kept as given; § 9b, the pinned MITRE CWE list and its terms of use.
 - 2026-11-07 — CISA ICS: one report record per advisory in MISP.

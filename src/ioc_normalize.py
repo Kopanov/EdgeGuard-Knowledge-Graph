@@ -29,9 +29,12 @@ strict superset of it that converges to the same canonical form:
 * NFC-normalize + strip mirrors ``canonicalize_merge_key`` /
   ``canonicalize_field_value`` exactly.
 
-Refanging is READ-side only by design: the write side ingests
-machine-generated feeds that are not defanged, so there is nothing to
-mirror — refanging can only *add* matches, never diverge from a stored key.
+The refang here is a READ-side rule: it can only *add* matches, never
+diverge from a stored key. What the graph stores is refanged by MISP, which
+refangs a value of a network or e-mail type on save; the OTX collector, whose
+pulses can list a defanged value, sends such a value refanged by MISP's own
+rules (``collectors.misp_writer.refang_as_misp``), so MISP and the graph hold
+the value it sent.
 
 Do NOT import ``query_api`` / ``graphql_api`` / ``alert_processor`` here —
 those modules import this one (cycle guard).

@@ -67,6 +67,7 @@ from collectors.misp_writer import (
     MISPWriter,
     _resolve_vulnerability_cve_id_for_misp,
     pulse_copies_allowed,
+    refang_as_misp,
     sanitize_value,
     tlp_rank,
 )
@@ -929,22 +930,55 @@ def _misp_attribute_type(edgeguard_type: str, value: str) -> str:
     return MISPWriter.map_indicator_type(MISPWriter, edgeguard_type, value)  # type: ignore[arg-type]
 
 
+def _pulse_indicator_value(indicator_type: str, raw: Any) -> Any:
+    """The value of the item an OTX indicator of EdgeGuard type *indicator_type* gives: *raw* as given, or, when MISP
+    would refang it on save (``refang_as_misp`` for the MISP type the writer gives the item), *raw* trimmed and
+    refanged. A pulse can list a defanged value (``https://bashupload.com/uCiPm/SENT_Kill[.]zip``, 2026-11-08), which
+    MISP stores refanged: sent as given, the push could not confirm it and the report record named a value MISP does
+    not hold. Refanged here, the push sends the value MISP stores, the same-run fold (``_pulse_item_key``) and the
+    writer's checks against what MISP holds compare that value, and the record lists it (``_record_pairs``). A value
+    that is not a string is returned as given."""
+    if not isinstance(raw, str):
+        return raw
+    text = raw.strip()
+    refanged = refang_as_misp(_misp_attribute_type(indicator_type, text), text)
+    return refanged if refanged != text else raw
+
+
 def _record_pairs(pulse: Dict[str, Any], map_type: Any) -> List[List[str]]:
-    """The ``[MISP type, value]`` pairs of *pulse*'s record: its indicators as ``MISPWriter`` writes the items
-    ``_process_pulse`` makes of them (the collector's type mapping *map_type*, then the writer's on the value cut by
-    ``sanitize_value``; the non-file hash types are not collected) and its CVE references as ``vulnerability``. A
-    ``vulnerability`` value is upper-cased, as MISP stores it, so a CVE indicator and a CVE reference of one id give
-    one pair. Built from the pulse alone, so the window's copy and the answer by id give the same pairs."""
+    """The ``[MISP type, value]`` pairs of *pulse*'s record: the (type, value) pairs the push sends to MISP for the
+    items ``_process_pulse`` makes of its indicators, and its CVE references as ``vulnerability``. An indicator is
+    typed by the collector's type mapping *map_type* and valued by ``_pulse_indicator_value`` (a defanged value
+    refanged as MISP refangs it), then the writer's type mapping runs on the value ``sanitize_value`` leaves; the
+    non-file hash types are not collected. Indicators the collector's same-run fold makes one item
+    (``_pulse_item_key``: a URL that differs from an earlier one of the pulse only in the case of its scheme or host,
+    a value of a type MISP stores in one case, ...) give one pair, the first one's, the spelling the push sends; so
+    ``indicator_count`` counts them once. A ``vulnerability`` value is upper-cased, as MISP stores it, so a CVE
+    indicator and a CVE reference of one id give one pair. Built from the pulse alone, so the window's copy and the
+    answer by id give the same pairs; an indicator that a pulse read earlier in the same run listed in another
+    spelling is held by MISP in that pulse's spelling (the graph keys both alike)."""
     pairs: List[List[str]] = []
+    folded: Set[str] = set()
     indicators = pulse.get("indicators")
     for ind in indicators if isinstance(indicators, list) else []:
         if not isinstance(ind, dict) or ind.get("type") in _NON_FILE_HASH_TYPES:
             continue
         raw = ind.get("indicator")
-        value = sanitize_value(raw, max_length=1024) if isinstance(raw, str) else ""
+        if not isinstance(raw, str):
+            continue
+        indicator_type = map_type(ind.get("type"), raw)
+        item_value = _pulse_indicator_value(indicator_type, raw)
+        if not item_value:
+            continue
+        # The collector folds the items of one key into the first, whatever the writer then makes of it.
+        key = _pulse_item_key({"indicator_type": indicator_type, "value": item_value})
+        if key in folded:
+            continue
+        folded.add(key)
+        value = sanitize_value(item_value, max_length=1024)
         if not value:
             continue
-        misp_type = _misp_attribute_type(map_type(ind.get("type"), raw), value)
+        misp_type = _misp_attribute_type(indicator_type, value)
         pairs.append([misp_type, value.upper() if misp_type == "vulnerability" else value])
     references = pulse.get("cve_references")
     for cve in references if isinstance(references, list) else []:
@@ -1829,7 +1863,13 @@ class OTXCollector:
                 # PR-N6 hotfix #4 (audit 09, Maintainer #1): the industry map lives in
                 # ``config.OTX_INDUSTRY_ZONE_ALIASES`` beside ``VALID_ZONES`` / ``SECTOR_KEYWORDS``,
                 # read through ``config.otx_industry_zones`` (the collector and the sync read it alike).
-                otx_industries = pulse.get("industries", [])
+                # 2026-11-08: every list copied from the pulse (its industries here, its ATT&CK ids, targeted
+                # countries, tags and references below) is read as the pulse's report record reads it
+                # (``report_records.otx_pulse_list``): one-line items, without blank or whitespace-only ones (OTX
+                # answers some pulses' lists as ``[""]``), without repeats, in the pulse's order; a value that is not
+                # a list is empty. The copies on the items and the record therefore hold the same items. The family
+                # names and the adversary field have rules of their own below, which drop blank names too.
+                otx_industries = report_records.otx_pulse_list(pulse, "industries")
                 industry_zones = otx_industry_zones(otx_industries)
                 if industry_zones:
                     for mapped in industry_zones:
@@ -1840,12 +1880,10 @@ class OTXCollector:
                         sectors = [s for s in sectors if s != "global"]
 
                 # Pulse-level metadata (available on all items from this pulse)
-                pulse_attack_ids = [
-                    aid.get("id", aid) if isinstance(aid, dict) else str(aid) for aid in pulse.get("attack_ids", [])
-                ]
-                pulse_targeted_countries = pulse.get("targeted_countries", [])
-                pulse_tags = pulse.get("tags", [])
-                pulse_references = pulse.get("references", [])[:10]
+                pulse_attack_ids = report_records.otx_pulse_list(pulse, "attack_ids")
+                pulse_targeted_countries = report_records.otx_pulse_list(pulse, "targeted_countries")
+                pulse_tags = report_records.otx_pulse_list(pulse, "tags")
+                pulse_references = report_records.otx_pulse_list(pulse, "references")[:10]
                 pulse_author = pulse.get("author_name", "")
                 pulse_adversary = pulse.get("adversary", "")
                 pulse_tlp = _pulse_tlp(pulse)
@@ -1959,7 +1997,8 @@ class OTXCollector:
                         pulse_non_file_hashes += 1
                         continue
                     indicator_type = self.map_indicator_type(ind.get("type"), ind.get("indicator"))
-                    indicator_value = ind.get("indicator")
+                    # 2026-11-08: a defanged value refanged as MISP refangs it (``_pulse_indicator_value``).
+                    indicator_value = _pulse_indicator_value(indicator_type, ind.get("indicator"))
                     indicator_first_seen = ind.get("created") or pulse_created
                     indicator_last_seen = ind.get("modified") or pulse_modified
                     item: Dict[str, Any] = {

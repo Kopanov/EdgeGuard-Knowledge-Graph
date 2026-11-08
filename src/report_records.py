@@ -8,7 +8,8 @@ MISP → Neo4j sync reads it back (later work). This module is the shared, netwo
 * the record schema v1 and its normalisation (``build_record``, ``otx_pulse_record``): types, caps on list
   sizes and string lengths, characters MISP cannot store removed, lists de-duplicated and sorted, the
   indicator list capped at ``EDGEGUARD_REPORT_MAX_INDICATORS`` in (type, value) order with the exact
-  total kept in ``indicator_count``;
+  total kept in ``indicator_count``; the items of an OTX pulse's lists as the record keeps them, in the
+  pulse's order (``otx_pulse_list``), which the OTX collector copies onto the pulse's items;
 * the digest (``compute_digest``): SHA-256 of the canonical JSON of the normalised source facts. Derived
   judgements (zones, canonical actors, country codes) are not in the record; the sync derives them, so a
   change of the derivation rules never changes a digest or rewrites MISP;
@@ -37,7 +38,7 @@ import re
 import sys
 import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -301,12 +302,19 @@ def _url(value: Any, max_chars: int) -> Optional[str]:
     return text
 
 
+def _list_text(value: Any, max_chars: int) -> Optional[str]:
+    """One item of a list of texts as a record keeps it: its one-line text (``_line_text``), or None when that is
+    empty (a blank or whitespace-only string, a value that is not a string) or longer than *max_chars*."""
+    text = _line_text(value)
+    return text if text and len(text) <= max_chars else None
+
+
 def _texts(values: Any, max_items: int, max_chars: int) -> List[str]:
     """One-line texts, empty ones and those longer than *max_chars* left out, de-duplicated, sorted, the
     first *max_items*."""
     if not isinstance(values, (list, tuple, set, frozenset)):
         return []
-    kept = {text for text in (_line_text(v) for v in values) if text and len(text) <= max_chars}
+    kept = {text for text in (_list_text(v, max_chars) for v in values) if text}
     return sorted(kept)[:max_items]
 
 
@@ -651,6 +659,36 @@ def _otx_attack_id(entry: Any) -> str:
     return entry.strip() if isinstance(entry, str) else ""
 
 
+# The lists of an OTX pulse that its record keeps and the OTX collector copies onto the pulse's items.
+OTX_COPIED_LISTS = ("industries", "targeted_countries", "tags", "references", "attack_ids")
+_OTX_LIST_SPECS: Dict[str, Tuple[str, Dict[str, int]]] = {
+    name: (kind, opts) for name, kind, opts in _SOURCE_FIELDS[SOURCE_OTX] if name in OTX_COPIED_LISTS
+}
+
+
+def otx_pulse_list(pulse: Mapping[str, Any], field: str) -> List[str]:
+    """The items of the list *field* of an OTX pulse (``OTX_COPIED_LISTS``) as its record keeps them, in the
+    pulse's order: an ``attack_ids`` object by its ``id``, each item as one line (``_line_text``), an item that is
+    blank, whitespace only, not a string or over the field's length cap left out, a repeated item kept once. A
+    value that is not a list gives ``[]``, and so does OTX's ``[""]`` (a pulse without tags or references may
+    answer it). The record holds the same items sorted and cut at the field's item cap (``otx_pulse_record``); the
+    OTX collector copies them onto the pulse's items, so the copies and the record agree."""
+    if field not in _OTX_LIST_SPECS:
+        raise ValueError(f"{field!r} is not a copied OTX pulse list (known: {', '.join(OTX_COPIED_LISTS)})")
+    kind, opts = _OTX_LIST_SPECS[field]
+    values = _as_list(pulse.get(field))
+    if field == "attack_ids":
+        values = [_otx_attack_id(entry) for entry in values]
+    kept: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        item = _url(value, opts["max_chars"]) if kind == "urls" else _list_text(value, opts["max_chars"])
+        if item and item not in seen:
+            seen.add(item)
+            kept.append(item)
+    return kept
+
+
 def otx_pulse_record(
     pulse: Mapping[str, Any],
     indicators: Iterable[Sequence[str]],
@@ -688,13 +726,14 @@ def otx_pulse_record(
         "revision": pulse.get("revision"),
         "tlp": tlp,
         "author": author,
-        "industries": pulse.get("industries"),
-        "targeted_countries": pulse.get("targeted_countries"),
-        "tags": pulse.get("tags"),
-        "references": pulse.get("references"),
+        # The lists the collector copies onto the pulse's items, read as it reads them (``otx_pulse_list``).
+        "industries": otx_pulse_list(pulse, "industries"),
+        "targeted_countries": otx_pulse_list(pulse, "targeted_countries"),
+        "tags": otx_pulse_list(pulse, "tags"),
+        "references": otx_pulse_list(pulse, "references"),
         "adversary": pulse.get("adversary"),
         "malware_families": [_otx_family_name(e) for e in _as_list(pulse.get("malware_families"))],
-        "attack_ids": [_otx_attack_id(e) for e in _as_list(pulse.get("attack_ids"))],
+        "attack_ids": otx_pulse_list(pulse, "attack_ids"),
         "cve_ids": [p[1] for p in pairs if len(p) == 2 and p[0] == "vulnerability"],
         "indicators": pairs,
         "indicator_count": indicator_count,
