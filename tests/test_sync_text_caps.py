@@ -14,6 +14,10 @@ attribute where MISP holds it once no collector cuts it: ``NVD_META.description`
 ``MITRE_*`` block (or the whole comment without one) for an ATT&CK object; that replacement of the collector's and
 the writer's cut is constructed. Today's texts come from the real fixtures the CVE batch tests read
 (``test_cve_batch_writes.py``): they reach the graph unchanged.
+
+List markers and emphasis (2026-11-08): ``tests/fixtures/text_caps_markers_emphasis_2026_11_08.json`` holds seven
+attributes of the MISP ATT&CK event of the 730-day test instance as MISP answered them, read by the sync as they
+are, and the NVD API 2.0 record of CVE-2025-30652, written to MISP by the NVD collector and MISPWriter as above.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ from run_misp_to_neo4j import _METADATA_COMMENT_RE, MISPToNeo4jSync  # noqa: E40
 from text_caps import CVE_DESCRIPTION_CAP, ENTITY_DESCRIPTION_CAP, cap_text, strip_markup  # noqa: E402
 
 FIXTURE = json.loads((TESTS / "fixtures" / "text_caps_sources_2026_11_07.json").read_text())
+MARKERS = json.loads((TESTS / "fixtures" / "text_caps_markers_emphasis_2026_11_08.json").read_text())
 WRITER = MISPWriter.__new__(MISPWriter)
 NVD_EVENT = {"id": "501", "info": "EdgeGuard-nvd-2026-11-07", "Tag": []}
 MITRE_EVENT = {"id": "502", "info": "EdgeGuard-mitre_attck-2026-11-07", "Tag": []}
@@ -88,7 +93,7 @@ def _statements(server: FakeBolt, marker: str) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------------------------- CVE records
-NVD_RECORDS = FIXTURE["nvd"] + FIXTURE["nvd_kernel"]
+NVD_RECORDS = FIXTURE["nvd"] + FIXTURE["nvd_kernel"] + MARKERS["nvd"]
 
 
 def _nvd_description(cve_id: str) -> str:
@@ -338,6 +343,101 @@ class TestEntityDescription:
         assert CVE_DESCRIPTIONS.record("<code></code>", "nvd") is None
 
 
+# ---------------------------------------------------------------------------------------------- markers, emphasis
+MISP_MITRE_EVENT = MARKERS["mitre_event"]
+# T1213.002, T1195, T1685.006: cut inside a list; T1064: bold banner; T1677: <b> tags; T1003.007, T1027.017: code spans.
+MISP_ATTACK_IDS = tuple(a["value"].split(" ", 1)[0] for a in MARKERS["mitre_attributes"])
+
+
+def _misp_attack_attribute(ext_id: str) -> Dict[str, Any]:
+    (attribute,) = [a for a in MARKERS["mitre_attributes"] if a["value"].split(" ", 1)[0] == ext_id]
+    return copy.deepcopy(attribute)
+
+
+def _misp_attack_text(ext_id: str) -> str:
+    """ATT&CK's description, as MISPWriter wrote it after the comment's ``MITRE_TACTIC_PHASES`` line."""
+    return _misp_attack_attribute(ext_id)["comment"].split("\n", 1)[1]
+
+
+def _expected_entity(ext_id: str) -> str:
+    out = cap_text(_misp_attack_text(ext_id), ENTITY_DESCRIPTION_CAP, older_cut=True, emphasis=True)[0]
+    assert out and len(out) <= ENTITY_DESCRIPTION_CAP
+    assert not re.search(r"(?:\A|\n)[ \t]*[*+-]\Z", out), "no lone list marker at the end"
+    assert "**" not in out and not re.search(r"</?(?:b|strong|i|em)>", re.sub(r"`[^`]*`", "", out), re.I)
+    return out
+
+
+def _synced_misp_technique(ext_id: str) -> Dict[str, Any]:
+    item, _ = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+        _misp_attack_attribute(ext_id), MISP_MITRE_EVENT
+    )
+    assert item is not None and item["mitre_id"] == ext_id
+    assert item["description"] == _misp_attack_text(ext_id), "the sync reads MISP's whole text"
+    return item
+
+
+class TestListMarkersAndEmphasis:
+    """The recorded MISP attributes through the sync's paths: the node's description and the record on its
+    ``SOURCED_FROM`` edge hold no lone list marker at the end, no ``**`` and no inline HTML emphasis tag, and keep
+    the backtick code spans; the CVE description loses only the lone marker."""
+
+    @pytest.mark.parametrize("ext_id", MISP_ATTACK_IDS)
+    def test_the_sync_stores_the_technique_capped(self, bolt, ext_id):
+        server, client = bolt()
+        sync = MISPToNeo4jSync(neo4j_client=client)
+        assert sync._sync_to_neo4j_chunk([_synced_misp_technique(ext_id)]) == (1, 0)
+        (node,) = _statements(server, "MERGE (n:Technique {")
+        assert node["ranked_description"] == _expected_entity(ext_id)
+
+    @pytest.mark.parametrize("ext_id", MISP_ATTACK_IDS)
+    def test_the_single_write_stores_it_and_its_record_capped(self, bolt, ext_id):
+        server, client = bolt()
+        assert client.merge_technique(_synced_misp_technique(ext_id), source_id="mitre_attck") is True
+        (node,) = _statements(server, "MERGE (n:Technique {")
+        assert node["ranked_description"] == _expected_entity(ext_id)
+        (edge,) = [p for p in _statements(server, SINGLE_EDGE) if "raw_data" in p]
+        assert json.loads(edge["raw_data"])["description"] == _expected_entity(ext_id)
+
+    @pytest.mark.parametrize(
+        "ext_id,kept",
+        [
+            ("T1213.002", "\n* Physical / logical network diagrams\n* System architecture diagrams"),
+            ("T1195", "\n* Manipulation of software update/distribution mechanisms"),
+            ("T1685.006", "\n* `/var/log/utmp or /var/log/wtmp`: Login records"),
+            ("T1064", "This technique has been deprecated. Please use Command and Scripting Interpreter"),
+            ("T1677", "\n* In a Direct Pipeline Execution scenario, the threat actor"),
+            ("T1003.007", "`/proc/<PID>/maps`"),
+            ("T1027.017", "`<script>`"),
+        ],
+    )
+    def test_what_each_text_keeps(self, ext_id, kept):
+        assert kept in _expected_entity(ext_id)
+
+    def test_the_cve_paths_drop_the_lone_marker(self, bolt):
+        expected = cap_text(_nvd_description("CVE-2025-30652"), CVE_DESCRIPTION_CAP)[0]
+        assert expected.endswith("\n  *  from 23.4-EVO before 23.4R2-S4-EVO") and len(expected) == 992
+        server, client = bolt()
+        sync = MISPToNeo4jSync(neo4j_client=client)
+        assert sync._sync_to_neo4j_chunk([_synced_cve("CVE-2025-30652")]) == (1, 0)
+        (node,) = _statements(server, BATCH_CVE)
+        (row,) = node["rows"]
+        assert row["description"] == expected
+        (edge,) = [p for p in _statements(server, SINGLE_EDGE) if "rows" in p]
+        assert json.loads(edge["rows"][0]["raw_data"])["description"] == expected
+        server, client = bolt()
+        assert client.merge_cve(_synced_cve("CVE-2025-30652"), source_id="nvd") is True
+        (node,) = _statements(server, SINGLE_CVE)
+        assert node["ranked_description"] == expected
+
+    def test_a_cve_description_keeps_its_bold_and_tags(self):
+        """Negative: NVD's ``** REJECT **`` (real NVD texts of the CVE batch fixture) stays on a CVE."""
+        rejected = "Rejected reason: ** REJECT ** DO NOT USE THIS CANDIDATE NUMBER."
+        assert CVE_DESCRIPTIONS.record(rejected, "nvd").text == rejected
+        assert ENTITY_DESCRIPTIONS.record(rejected, "mitre_attck").text == (
+            "Rejected reason: REJECT DO NOT USE THIS CANDIDATE NUMBER."
+        )
+
+
 # ---------------------------------------------------------------------------------------------- today's texts
 def _todays_cve_items() -> List[Tuple[Dict[str, Any], str]]:
     """The sync's items of the real CVE attributes the CVE batch tests read (hosted MISP and NVD records)."""
@@ -375,8 +475,10 @@ class TestTodaysTexts:
 
     def test_the_rankings_caps(self):
         assert (CVE_DESCRIPTIONS.cap, ENTITY_DESCRIPTIONS.cap) == (1000, 500)
-        # Only an entity text is read as a copy an older writer cut inside ATT&CK's markup (``text_caps`` 1a).
+        # Only an entity text is read as a copy an older writer cut inside ATT&CK's markup (``text_caps`` 1a), and
+        # only an entity text loses ``**`` and the inline HTML emphasis tags (``text_caps`` 1b).
         assert (CVE_DESCRIPTIONS.older_cut, ENTITY_DESCRIPTIONS.older_cut) == (False, True)
+        assert (CVE_DESCRIPTIONS.emphasis, ENTITY_DESCRIPTIONS.emphasis) == (False, True)
         assert ENTITY_DESCRIPTIONS.record("Uses [PowerSp...", "mitre_attck").text == "Uses PowerSp"
         assert ENTITY_DESCRIPTIONS.capped("Uses [PowerSp...") == "Uses PowerSp"
         assert CVE_DESCRIPTIONS.record("walks rb_threads[c...", "nvd").text == "walks rb_threads[c..."

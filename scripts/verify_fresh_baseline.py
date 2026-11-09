@@ -1227,9 +1227,10 @@ def run_checks(
     #        (``malware_family``: ThreatFox, MalwareBazaar, Feodo Tracker) names Malware nodes has its INDICATES
     #        labelled ``malware_family`` to each of them. The labels are resolved as step 9 resolves them, by the
     #        same function (``family_resolution.resolve_feed_families``: the name or an alias, else the one node
-    #        whose name without separators is the label's). The labels that name no node, the ambiguous ones and
-    #        the placeholder ones are reported with their indicators, not judged. Informational while no label
-    #        names a node.
+    #        whose name without separators is the label's, or of several such nodes the one ATT&CK node when
+    #        every other is OTX-only, listed under ``attack_preferred``). The labels that name no node, the
+    #        ambiguous ones and the placeholder ones are reported with their indicators, not judged.
+    #        Informational while no label names a node.
     family_counts = {
         row["family"]: row.get("indicators")
         for row in _post(CYPHER_FEED_FAMILIES_READ)

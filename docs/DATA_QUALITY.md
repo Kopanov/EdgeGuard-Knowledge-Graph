@@ -62,7 +62,7 @@ RETURN z as zone, count(DISTINCT n) as count
 
 ### Relationship building with exact matching
 
-`build_relationships.py` matches names exactly, never with a substring test such as `CONTAINS`, because a substring match creates false positives (e.g. "APT" would match "AP"). The family step (Q9) decides once per run, in Python, which `Malware` nodes each feed family label names (`family_resolution.resolve_feed_families`): every node whose name or an alias equals the label, both stripped and lower-cased; only when none does, the one node whose name, without whitespace, hyphens, underscores and dots, equals the label without them (`SalatStealer` → `salat stealer`; a label several nodes match that way names none). The statement then finds each node by its name ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#feed-family-labels)):
+`build_relationships.py` matches names exactly, never with a substring test such as `CONTAINS`, because a substring match creates false positives (e.g. "APT" would match "AP"). The family step (Q9) decides once per run, in Python, which `Malware` nodes each feed family label names (`family_resolution.resolve_feed_families`): every node whose name or an alias equals the label, both stripped and lower-cased; only when none does, the one node whose name, without whitespace, hyphens, underscores and dots, equals the label without them (`SalatStealer` → `salat stealer`; of several nodes that match that way, the one with an ATT&CK software id when every other is OTX-only, else none). The statement then finds each node by its name ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#feed-family-labels)):
 
 ```cypher
 // Q9 (simplified): $family_targets maps each label, as stored, to the names of the nodes it names
@@ -124,10 +124,11 @@ At the end of a run, `build_relationships.py` reports the count and the average 
 
 ---
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-08_
 
 ## History
 
+- 2026-11-08 — The family step (Q9): of several nodes whose name matches a label without separators, the one ATT&CK node is named when every other is OTX-only (the text said such a label names none).
 - 2026-11-02 — Relationship building with exact matching: the family step (Q9) resolves the feed family labels once per run in Python, with the separator-free fallback on node names, and its statement finds each node by name (the text showed a Cypher comparison of name and aliases that the statement no longer makes).
 - 2026-11-02 — `exact` (Q2): no collector, sync path or merge writes `Malware.attributed_to`, so `build_relationships.py` step 2 runs no query and no link carries this label; the exact-match example is the family step's (Q9).
 - 2026-10-23 — The chunking reference points to CONFIGURATION.md, which holds the settings the README listed.

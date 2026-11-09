@@ -107,6 +107,44 @@ def test_an_ambiguous_label_is_logged_and_linked_to_none(monkeypatch, caplog):
     ]
 
 
+def _redline_malware():
+    """The 1 Nov rows of the ATT&CK node "redline stealer" (with the ``mitre_id`` the read returns since 2026-11-08,
+    constructed: S1240) and of its OTX-only twin "red line stealer"; "RedLineStealer" is the MalwareBazaar label
+    step 9 of the 8 Nov run reported as ambiguous."""
+    rows = {m["name"]: dict(m) for m in FIXTURE["malware"] if m["name"] in ("redline stealer", "red line stealer")}
+    rows["redline stealer"]["mitre_id"] = "S1240"
+    return list(rows.values())
+
+
+def test_a_label_of_an_attack_node_and_its_otx_only_twin_links_the_attack_node(monkeypatch, caplog):
+    families = [{"family": "RedLineStealer", "indicators": 1}]
+    with caplog.at_level(logging.INFO, logger="build_relationships"):
+        run = _steps(monkeypatch, _Client(families=families, malware=_redline_malware()))
+    assert run["steps"][STEP_9]["params"] == {"family_targets": {"RedLineStealer": ["redline stealer"]}}
+    step_9 = [r for r in caplog.records if "step 9: family" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in step_9] == [
+        (
+            logging.INFO,
+            "[LINK] step 9: family 'RedLineStealer' (1 indicators): without separators it is the name of 2 Malware "
+            "nodes; linked to the ATT&CK node redline stealer, not to the OTX-only red line stealer",
+        )
+    ]
+
+
+def test_the_same_label_without_the_attack_id_stays_ambiguous(monkeypatch, caplog):
+    """Negative: the rows as read before the read returned ``mitre_id`` keep the warning and link nothing."""
+    malware = [{k: v for k, v in m.items() if k != "mitre_id"} for m in _redline_malware()]
+    families = [{"family": "RedLineStealer", "indicators": 1}]
+    with caplog.at_level(logging.INFO, logger="build_relationships"):
+        run = _steps(monkeypatch, _Client(families=families, malware=malware))
+    assert run["steps"][STEP_9]["params"] == {"family_targets": {}}
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "step 9" in r.getMessage()]
+    assert warnings == [
+        "[LINK] step 9: family 'RedLineStealer' (1 indicators): without separators it is the name of 2 "
+        "Malware nodes (red line stealer, redline stealer); linked to none"
+    ]
+
+
 def test_the_inner_statement_finds_each_node_by_its_name():
     inner = assigned_query("_q9_inner")
     assert "UNWIND coalesce($family_targets[i.malware_family], []) AS mname MATCH (m:Malware {name: mname}) " in inner

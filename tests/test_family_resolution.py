@@ -182,3 +182,124 @@ def test_tool_named_malware_leaves_out_mitre_malware_and_tools_not_from_mitre():
     assert [p["malware"] for p in fr.tool_named_malware(malware, tools)] == ["async rat", "asyncrat"]
     tools = [dict(t, source=["alienvault_otx"]) if t["name"] == "AsyncRAT" else t for t in tools]
     assert fr.tool_named_malware(malware, tools) == []
+
+
+# --------------------------------------------------------------------------- an ATT&CK node and its OTX-only twins
+# 2026-11-08: on the 730-day graph of 8 Nov, the MalwareBazaar label "RedLineStealer" (the WARNING of step 9 of that
+# run) is without separators the name of the ATT&CK node "redline stealer" (S1240) and of the OTX-only node
+# "red line stealer". The rows are the 1 Nov graph's (the fixture) with the ``mitre_id`` the read returns since
+# 2026-11-08 (constructed: S1240 is the id ATT&CK gives RedLine Stealer, the node's alias "RedLine Stealer - S1240").
+REDLINE_LABEL = "RedLineStealer"
+
+
+def _attack_node(name: str, mitre_id: str) -> Dict[str, Any]:
+    return dict(_node(name), mitre_id=mitre_id)
+
+
+def _redline_nodes() -> List[Dict[str, Any]]:
+    attack = _attack_node("redline stealer", "S1240")
+    assert attack["source"] == ["mitre_attck", "alienvault_otx"] and "RedLine Stealer - S1240" in attack["aliases"]
+    twin = _node("red line stealer")
+    assert twin["source"] == ["alienvault_otx"] and "mitre_id" not in twin
+    # "redline" (OTX-only, 784 INDICATES on 8 Nov) is another name without separators: not a candidate.
+    return [attack, twin, {"name": "redline", "aliases": None, "source": ["alienvault_otx"]}]
+
+
+def test_the_malware_read_returns_the_attack_id_and_the_sources():
+    assert fr.CYPHER_MALWARE_NAMES_READ.endswith(
+        "RETURN m.name AS name, m.aliases AS aliases, m.source AS source, m.mitre_id AS mitre_id"
+    )
+
+
+def test_redlinestealer_takes_the_attack_node_over_its_otx_only_twin():
+    resolution = fr.resolve_feed_families([REDLINE_LABEL], _redline_nodes())
+    assert resolution.targets == {REDLINE_LABEL: ["redline stealer"]}
+    assert resolution.separator_free_matches == {REDLINE_LABEL: "redline stealer"}
+    assert resolution.attack_preferred == {REDLINE_LABEL: ["red line stealer"]}
+    assert resolution.ambiguous == {} and resolution.unresolved == []
+    summary = resolution.summary({REDLINE_LABEL: 1})
+    assert summary["attack_preferred"] == {
+        REDLINE_LABEL: {"indicators": 1, "node": "redline stealer", "passed_over": ["red line stealer"]}
+    }
+    assert (summary["claims"], summary["target_missing"]) == (1, 0)
+
+
+def test_the_exact_label_of_the_family_is_unchanged():
+    """ "RedLine Stealer" (10 indicators on 1 Nov) is the ATT&CK node's name and alias: rule 1, as before."""
+    resolution = fr.resolve_feed_families(["RedLine Stealer"], _redline_nodes())
+    assert resolution.targets == {"RedLine Stealer": ["redline stealer"]}
+    assert resolution.separator_free_matches == {} and resolution.attack_preferred == {}
+
+
+def test_without_the_attack_id_the_label_stays_ambiguous():
+    """The node's ATT&CK source alone does not count: the rows of before the read returned ``mitre_id``."""
+    nodes = [{k: v for k, v in n.items() if k != "mitre_id"} for n in _redline_nodes()]
+    resolution = fr.resolve_feed_families([REDLINE_LABEL], nodes)
+    assert resolution.targets == {} and resolution.attack_preferred == {}
+    assert resolution.ambiguous == {REDLINE_LABEL: ["red line stealer", "redline stealer"]}
+
+
+def test_one_attack_node_and_several_otx_only_twins():
+    # Constructed: a third spelling OTX created.
+    nodes = [*_redline_nodes(), {"name": "red-line stealer", "aliases": None, "source": ["alienvault_otx"]}]
+    resolution = fr.resolve_feed_families([REDLINE_LABEL], nodes)
+    assert resolution.targets == {REDLINE_LABEL: ["redline stealer"]}
+    assert resolution.attack_preferred == {REDLINE_LABEL: ["red line stealer", "red-line stealer"]}
+
+
+def test_two_attack_nodes_link_none():
+    """Two candidates that both carry an ATT&CK id: no node to prefer (constructed ids on the fixture's nodes)."""
+    nodes = [_attack_node("cobalt strike beacon", "S0154"), _attack_node("cobaltstrike beacon", "S9999")]
+    resolution = fr.resolve_feed_families(["CobaltStrike-Beacon"], nodes)
+    assert resolution.targets == {} and resolution.attack_preferred == {}
+    assert resolution.ambiguous == {"CobaltStrike-Beacon": ["cobalt strike beacon", "cobaltstrike beacon"]}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        ["coreideas"],
+        ["misp"],
+        ["alienvault_otx", "misp"],
+        ["alienvault_otx", "coreideas"],
+        ["mitre_attck"],
+        [],
+        None,
+        "misp",
+    ],
+    ids=["curated", "misp", "otx-and-misp", "otx-and-curated", "attack-without-id", "empty", "none", "scalar"],
+)
+def test_an_attack_node_and_a_node_that_is_not_otx_only_link_none(source):
+    """The other candidate carries no ATT&CK id but has another source than OTX alone (or none): it may be what
+    the feed means, so the label stays ambiguous."""
+    attack, twin, _ = _redline_nodes()
+    resolution = fr.resolve_feed_families([REDLINE_LABEL], [attack, dict(twin, source=source)])
+    assert resolution.targets == {} and resolution.attack_preferred == {}
+    assert resolution.ambiguous == {REDLINE_LABEL: ["red line stealer", "redline stealer"]}
+
+
+@pytest.mark.parametrize(
+    "row, software_id, otx_only",
+    [
+        ({"mitre_id": "S1240"}, "S1240", False),
+        ({"mitre_id": " s1240 "}, "S1240", False),
+        ({"mitre_id": "T1059"}, "", False),
+        ({"mitre_id": "S12400"}, "", False),
+        ({"mitre_id": None}, "", False),
+        ({"mitre_id": 1240}, "", False),
+        ({"source": ["alienvault_otx"]}, "", True),
+        ({"source": ["alienvault_otx", " "]}, "", True),
+        ({"source": "alienvault_otx"}, "", True),
+        ({"source": ["otx"]}, "", False),
+        ({"source": ["alienvault_otx", "mitre_attck"]}, "", False),
+    ],
+)
+def test_what_counts_as_an_attack_id_and_as_otx_only(row, software_id, otx_only):
+    assert fr.node_software_id(row) == software_id
+    assert fr.is_otx_only(row) is otx_only
+
+
+def test_the_730_day_labels_resolve_as_before_with_the_ids():
+    """Negative: on the 1 Nov graph no label was ambiguous, so the ATT&CK ids change no label's targets."""
+    nodes = [dict(n, mitre_id="S0001") if "mitre_attck" in (n.get("source") or []) else n for n in NODES]
+    assert fr.resolve_feed_families(list(LABELS), nodes) == fr.resolve_feed_families(list(LABELS), NODES)

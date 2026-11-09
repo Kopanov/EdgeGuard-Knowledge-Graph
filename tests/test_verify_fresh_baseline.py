@@ -3490,6 +3490,29 @@ class TestFeedFamilyIndicates:
         assert detail["separator_free_matches"]["SalatStealer"] == "salat stealer"
         assert list(detail["unresolved"].items())[:2] == [("IClickFix", 2296), ("php.shin_webshell", 140)]
 
+    def test_a_label_of_an_attack_node_and_its_otx_only_twin_is_judged_against_the_attack_node(self, vfb, monkeypatch):
+        """2026-11-08: the acceptance check resolves "RedLineStealer" as step 9 does, to the ATT&CK node "redline
+        stealer" (the 1 Nov rows with the ``mitre_id`` the read returns, constructed: S1240), and lists it."""
+        import graph_shape_checks as gsc
+
+        malware = [dict(m) for m in _FAMILY_FIXTURE["malware"]]
+        for m in malware:
+            if m["name"] == "redline stealer":
+                m["mitre_id"] = "S1240"
+        families = [*_FAMILY_FIXTURE["families"], {"family": "RedLineStealer", "indicators": 1}]
+        rep, seen = self._seen_run(
+            vfb,
+            monkeypatch,
+            {"i.malware_family AS family": families, "m.aliases AS aliases, m.source AS source": malware},
+        )
+        assert seen[gsc.FAMILY_INDICATES_COMPLETE_QUERY]["family_targets"]["RedLineStealer"] == ["redline stealer"]
+        detail = _check(rep, "family_indicates_complete")["detail"]
+        assert detail["attack_preferred"] == {
+            "RedLineStealer": {"indicators": 1, "node": "redline stealer", "passed_over": ["red line stealer"]}
+        }
+        assert detail["separator_free_matches"]["RedLineStealer"] == "redline stealer"
+        assert "RedLineStealer" not in detail["ambiguous"]
+
     def test_a_missing_link_fails(self, vfb, monkeypatch):
         """The 730-day graph as step 9 left it before 2026-11-02: the 695 indicators of the labels found without
         separators had no link."""

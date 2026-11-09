@@ -89,7 +89,8 @@ class DescriptionRanking:
     rank, highest first from the number of such sources down to 1; an unregistered source, or one
     registered with ``ranked_for_descriptions=False``, ranks 0. ``cap`` is the most characters a description
     of these labels holds in the graph (``text_caps.cap_text``; None: no cap); ``older_cut``: a text may be a
-    copy an older writer cut inside markup (``text_caps`` step 1a).
+    copy an older writer cut inside markup (``text_caps`` step 1a); ``emphasis``: markdown bold and the inline
+    HTML emphasis tags are markup too (``text_caps`` step 1b).
     """
 
     name: str
@@ -98,6 +99,7 @@ class DescriptionRanking:
     ranks: Dict[str, int] = field(init=False, repr=False, compare=False)
     cap: Optional[int] = None
     older_cut: bool = False
+    emphasis: bool = False
 
     def __post_init__(self) -> None:
         group_of = {sid: i for i, group in enumerate(self.groups) for sid in group}
@@ -133,7 +135,7 @@ class DescriptionRanking:
         """``text`` as the graph holds it: capped (``text_caps.cap_text``) when it is a string and the ranking has
         a cap; any other value as it is. For the copy of a record a writer stores beside the description
         (``SOURCED_FROM.raw_data``)."""
-        return capped(text, self.cap, self.older_cut) if self.cap is not None else text
+        return capped(text, self.cap, self.older_cut, self.emphasis) if self.cap is not None else text
 
     def record(self, text: object, source: Optional[str]) -> Optional[RankedDescription]:
         """The description a record of ``source`` gives, capped (``cap``), or None when it gives no text (none
@@ -142,7 +144,7 @@ class DescriptionRanking:
         if not isinstance(text, str) or not sid:
             return None
         if self.cap is not None:
-            text = cap_text(text, self.cap, self.older_cut)[0]
+            text = cap_text(text, self.cap, self.older_cut, self.emphasis)[0]
         if not text.strip():
             return None
         return RankedDescription(text=text, source=sid, rank=self.ranks.get(sid, 0))
@@ -230,7 +232,8 @@ class DescriptionRanking:
         )
 
 
-# CVE and Vulnerability: NVD, CISA KEV, CISA ICS, then every other source.
+# CVE and Vulnerability: NVD, CISA KEV, CISA ICS, then every other source. Their ``**`` and tags are text, not
+# markup (NVD's ``** REJECT **``, a ``/**/`` or a tag a flaw is named by), so ``emphasis`` stays off.
 CVE_DESCRIPTIONS = DescriptionRanking(
     name="cve",
     labels=("CVE", "Vulnerability"),
@@ -245,6 +248,7 @@ ENTITY_DESCRIPTIONS = DescriptionRanking(
     groups=(("mitre_attck",), curated_source_ids()),
     cap=ENTITY_DESCRIPTION_CAP,
     older_cut=True,
+    emphasis=True,
 )
 
 # The source a ResilMesh-native write (``Neo4jClient.merge_resilmesh_cve`` / ``merge_resilmesh_vulnerability``)
